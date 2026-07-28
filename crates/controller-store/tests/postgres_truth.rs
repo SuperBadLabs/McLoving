@@ -830,20 +830,28 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
         .await
         .expect("admit build");
     let payload = json!({"destination": "deploy/production", "release": "r1"});
-    assert!(
-        store
-            .checkpoint_effect(
-                organization_id,
-                admission.attempt_id,
-                0,
-                "deploy",
-                EffectClass::NonIdempotent,
-                EffectStatus::Prepared,
-                &payload,
-            )
-            .await
-            .expect("prepare effect")
+    let (first_prepare, concurrent_replay) = tokio::join!(
+        store.checkpoint_effect(
+            organization_id,
+            admission.attempt_id,
+            0,
+            "deploy",
+            EffectClass::NonIdempotent,
+            EffectStatus::Prepared,
+            &payload,
+        ),
+        store.checkpoint_effect(
+            organization_id,
+            admission.attempt_id,
+            0,
+            "deploy",
+            EffectClass::NonIdempotent,
+            EffectStatus::Prepared,
+            &payload,
+        ),
     );
+    assert!(first_prepare.expect("prepare effect"));
+    assert!(concurrent_replay.expect("concurrent prepared replay"));
     assert!(
         store
             .checkpoint_effect(
@@ -1400,10 +1408,117 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
     );
     assert_eq!(
         store
-            .objects_eligible_for_deletion(organization_id, 10)
+            .objects_globally_eligible_for_deletion(10)
             .await
             .expect("list expired content"),
         vec![digest]
+    );
+
+    let second_organization_id = Uuid::new_v4();
+    let second_project_id = Uuid::new_v4();
+    store
+        .create_project(
+            second_organization_id,
+            &format!("org-{second_organization_id}"),
+            second_project_id,
+            "shared-retention",
+        )
+        .await
+        .expect("create second tenant");
+    let second_admission = store
+        .admit_build(&NewBuild {
+            organization_id: second_organization_id,
+            project_id: second_project_id,
+            idempotency_key: "shared-digest".into(),
+            pipeline_digest: [53; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: Vec::new(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit second tenant build");
+    let second_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id: second_organization_id,
+            scheduler_id: "scheduler".into(),
+            agent_id: "agent".into(),
+            capabilities: Vec::new(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim second tenant build")
+        .expect("second tenant claim exists");
+    assert!(
+        store
+            .accept_offer(
+                second_organization_id,
+                second_admission.attempt_id,
+                second_claim.fence,
+                "agent",
+            )
+            .await
+            .expect("accept second tenant offer")
+    );
+    assert!(
+        store
+            .register_object(
+                second_organization_id,
+                second_admission.attempt_id,
+                second_claim.fence,
+                "agent",
+                ObjectKind::Artifact,
+                "shared-evidence.tar.zst",
+                digest,
+                4096,
+            )
+            .await
+            .expect("register shared digest")
+    );
+    assert!(
+        store
+            .objects_globally_eligible_for_deletion(10)
+            .await
+            .expect("missing second-tenant retention is fail-closed")
+            .is_empty()
+    );
+    assert!(
+        store
+            .retain_object_for(second_organization_id, digest, 0)
+            .await
+            .expect("expire second-tenant retention")
+    );
+    assert_eq!(
+        store
+            .objects_globally_eligible_for_deletion(10)
+            .await
+            .expect("all referencing tenants have expired retention"),
+        vec![digest]
+    );
+    assert!(
+        store
+            .acquire_legal_hold(
+                second_organization_id,
+                digest,
+                "shared-case",
+                "second-tenant preservation",
+            )
+            .await
+            .expect("acquire second-tenant hold")
+    );
+    assert!(
+        store
+            .objects_globally_eligible_for_deletion(10)
+            .await
+            .expect("one tenant hold blocks global deletion")
+            .is_empty()
+    );
+    assert!(
+        store
+            .release_legal_hold(second_organization_id, digest, "shared-case")
+            .await
+            .expect("release second-tenant hold")
     );
     assert!(
         store
@@ -1429,7 +1544,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
     );
     assert!(
         store
-            .objects_eligible_for_deletion(organization_id, 10)
+            .objects_globally_eligible_for_deletion(10)
             .await
             .expect("held content is not deletable")
             .is_empty()
@@ -1459,7 +1574,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
     );
     assert_eq!(
         store
-            .objects_eligible_for_deletion(organization_id, 10)
+            .objects_globally_eligible_for_deletion(10)
             .await
             .expect("released content is deletable"),
         vec![digest]
@@ -1478,7 +1593,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
     );
     assert!(
         store
-            .objects_eligible_for_deletion(organization_id, 10)
+            .objects_globally_eligible_for_deletion(10)
             .await
             .expect("retention extension is monotonic")
             .is_empty()
@@ -1566,6 +1681,7 @@ async fn backup_restore_canary_seed() {
         .await
         .expect("seal recovery point");
     assert_eq!(point.restore_epoch, 1);
+    assert!(!point.sealed_lsn.is_empty());
     assert!(!point.recovery_lsn.is_empty());
     let checkpoint_is_later = sqlx::query_scalar::<_, bool>("SELECT $1::pg_lsn > $2::pg_lsn")
         .bind(&point.recovery_lsn)
@@ -1582,7 +1698,15 @@ async fn backup_restore_canary_seed() {
     .fetch_one(store.pool())
     .await
     .expect("read finalized recovery checkpoint");
-    assert_eq!(stored_lsn, point.recovery_lsn);
+    assert_eq!(stored_lsn, point.sealed_lsn);
+    let advertised_boundary_includes_seal =
+        sqlx::query_scalar::<_, bool>("SELECT $1::pg_lsn > $2::pg_lsn")
+            .bind(&point.recovery_lsn)
+            .bind(&point.sealed_lsn)
+            .fetch_one(store.pool())
+            .await
+            .expect("compare advertised recovery boundary");
+    assert!(advertised_boundary_includes_seal);
 }
 
 #[tokio::test]
@@ -1613,7 +1737,7 @@ async fn backup_restore_canary_verify() {
         .expect("sealed recovery point exists");
     assert_eq!(activation.restore_epoch, 2);
     assert_eq!(activation.affected_attempts, 1);
-    assert!(!activation.recovery_lsn.is_empty());
+    assert!(!activation.sealed_lsn.is_empty());
     assert_eq!(store.current_restore_epoch().await.expect("read epoch"), 2);
     let snapshot = store
         .build_snapshot(organization_id, project_id, admission.0)
@@ -1663,6 +1787,20 @@ async fn backup_restore_canary_verify() {
             )
             .await
             .expect("old object publication is rejected")
+    );
+    assert!(
+        !store
+            .checkpoint_effect(
+                organization_id,
+                admission.1,
+                admission.2,
+                "stale-effect",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &json!({"stale": true}),
+            )
+            .await
+            .expect("old effect checkpoint is rejected")
     );
     let objects = store
         .build_objects(organization_id, project_id, admission.0)

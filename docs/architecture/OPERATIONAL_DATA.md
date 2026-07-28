@@ -39,9 +39,11 @@ as its event and outbox record. Pre-restore agents consequently cannot renew,
 publish logs or objects, or finalize work.
 
 A sealed recovery point binds a stable backup identifier to the current restore
-epoch and a PostgreSQL WAL position sampled only after the recovery-point row
-commits; a second locked transaction finalizes that durable boundary. Compact
-deployments use the executable logical dump/restore drill in
+epoch. After the recovery-point row commits, a first PostgreSQL WAL position is
+stored as its immutable seal. After that finalizing transaction commits, a
+second WAL position is advertised as the recovery boundary; backup tooling
+must retain through this later boundary so replay includes the sealed row.
+Compact deployments use the executable logical dump/restore drill in
 `scripts/test-backup-restore.sh`. HA deployments
 must pair the same recovery-point and restore-epoch protocol with physical base
 backups and continuous WAL archiving; a recovery-point record alone is not a
@@ -54,9 +56,10 @@ as orphaned and is not silently adopted or deleted.
 
 ## Retention and legal hold
 
-Content is fail-closed for deletion: an object becomes eligible only after a
-retention record exists, its deadline has expired, and no active legal hold
-references its digest. Retention deadlines can be extended but never shortened.
+Content is fail-closed for deletion: a globally deduplicated object becomes
+eligible only after every referencing tenant has an expired retention record
+and no tenant has an active legal hold on its digest. Retention deadlines can
+be extended but never shortened.
 Legal holds have stable keys and immutable reasons; release timestamps preserve
 their audit history, and a released hold cannot be silently reactivated.
 

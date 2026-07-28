@@ -217,6 +217,9 @@ pub struct StoredObject {
 pub struct RecoveryPoint {
     pub backup_id: String,
     pub restore_epoch: i64,
+    /// LSN persisted inside the sealed database row.
+    pub sealed_lsn: String,
+    /// Later WAL boundary that includes the transaction persisting `sealed_lsn`.
     pub recovery_lsn: String,
 }
 
@@ -225,7 +228,7 @@ pub struct RecoveryPoint {
 pub struct RestoreActivation {
     pub restore_epoch: i64,
     pub backup_id: String,
-    pub recovery_lsn: String,
+    pub sealed_lsn: String,
     pub affected_attempts: u64,
 }
 
@@ -862,18 +865,24 @@ impl Store {
             .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
         let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let attempt_exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (
-                 SELECT 1 FROM attempts
-                 WHERE organization_id = $1 AND id = $2 AND fence = $3
-             )",
+        acquire_restore_fence_shared(&mut tx).await?;
+        let attempt_exists = sqlx::query_scalar::<_, i64>(
+            "SELECT a.restore_epoch
+             FROM attempts AS a
+             CROSS JOIN controller_metadata AS m
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             FOR UPDATE OF a",
         )
         .bind(organization_id)
         .bind(attempt_id)
         .bind(fence)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        if !attempt_exists {
+        if attempt_exists.is_none() {
             tx.rollback().await?;
             return Ok(false);
         }
@@ -1285,11 +1294,12 @@ impl Store {
 
     /// Seals a stable backup identifier to the current PostgreSQL WAL position.
     ///
-    /// Repeating an existing identifier is idempotent and returns the original
-    /// checkpoint. The row is committed before its WAL checkpoint is sampled,
-    /// then finalized under the same global lock. Backup tooling must persist
-    /// this record with the database snapshot and, for HA PITR, retain WAL
-    /// through `recovery_lsn`.
+    /// Repeating an existing identifier returns a safe checkpoint at or after
+    /// the original. The row is committed before its seal LSN is sampled and
+    /// persisted; a later advertised recovery LSN is sampled only after that
+    /// finalizing transaction commits. Backup tooling must persist this record
+    /// with the database snapshot and, for HA PITR, retain WAL through the
+    /// returned `recovery_lsn`.
     pub async fn seal_recovery_point(&self, backup_id: &str) -> Result<RecoveryPoint, StoreError> {
         if backup_id.is_empty() || backup_id.len() > 256 {
             return Err(StoreError::InvalidRecoveryOperation(
@@ -1322,7 +1332,7 @@ impl Store {
                 .fetch_one(&mut *connection)
                 .await?;
         let mut tx = (&mut connection).begin().await?;
-        let (restore_epoch, recovery_lsn) = sqlx::query_as::<_, (i64, String)>(
+        let (restore_epoch, sealed_lsn) = sqlx::query_as::<_, (i64, String)>(
             "UPDATE recovery_points
              SET recovery_lsn = COALESCE(recovery_lsn, $2::pg_lsn)
              WHERE backup_id = $1
@@ -1333,9 +1343,14 @@ impl Store {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
+        let recovery_lsn =
+            sqlx::query_scalar::<_, String>("SELECT pg_current_wal_flush_lsn()::text")
+                .fetch_one(&mut *connection)
+                .await?;
         Ok(RecoveryPoint {
             backup_id: backup_id.to_owned(),
             restore_epoch,
+            sealed_lsn,
             recovery_lsn,
         })
     }
@@ -1468,7 +1483,7 @@ impl Store {
         Ok(Some(RestoreActivation {
             restore_epoch,
             backup_id: backup_id.to_owned(),
-            recovery_lsn,
+            sealed_lsn: recovery_lsn,
             affected_attempts: affected.len() as u64,
         }))
     }
@@ -1578,45 +1593,46 @@ impl Store {
         Ok(released.is_some())
     }
 
-    /// Lists expired retained content with no active legal hold.
+    /// Lists globally unreferenced-by-policy content for physical CAS deletion.
     ///
-    /// Absence of a retention record is deliberately fail-closed: content is
-    /// not eligible for deletion until policy has assigned a deadline.
-    pub async fn objects_eligible_for_deletion(
+    /// This privileged cross-tenant operation is deliberately not exposed
+    /// through a tenant transaction. Every organization referencing a digest
+    /// must have expired retention and no organization may have an active hold.
+    /// Absence of any retention record is fail-closed.
+    pub async fn objects_globally_eligible_for_deletion(
         &self,
-        organization_id: Uuid,
         limit: i64,
     ) -> Result<Vec<[u8; 32]>, StoreError> {
         if !(1..=10_000).contains(&limit) {
             return Ok(Vec::new());
         }
-        let mut tx = self.tenant_transaction(organization_id).await?;
         let rows = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT r.object_digest
-             FROM object_retention AS r
-             WHERE r.organization_id = $1
-               AND r.retain_until <= clock_timestamp()
-               AND EXISTS (
+            "SELECT DISTINCT candidate.object_digest
+             FROM attempt_objects AS candidate
+             WHERE NOT EXISTS (
                    SELECT 1
-                   FROM attempt_objects AS o
-                   WHERE o.organization_id = r.organization_id
-                     AND o.object_digest = r.object_digest
+                   FROM attempt_objects AS referenced
+                   LEFT JOIN object_retention AS r
+                     ON r.organization_id = referenced.organization_id
+                    AND r.object_digest = referenced.object_digest
+                   WHERE referenced.object_digest = candidate.object_digest
+                     AND (
+                         r.object_digest IS NULL
+                         OR r.retain_until > clock_timestamp()
+                     )
                )
                AND NOT EXISTS (
                    SELECT 1
                    FROM legal_holds AS h
-                   WHERE h.organization_id = r.organization_id
-                     AND h.object_digest = r.object_digest
+                   WHERE h.object_digest = candidate.object_digest
                      AND h.released_at IS NULL
                )
-             ORDER BY r.retain_until, r.object_digest
-             LIMIT $2",
+             ORDER BY candidate.object_digest
+             LIMIT $1",
         )
-        .bind(organization_id)
         .bind(limit)
-        .fetch_all(&mut *tx)
+        .fetch_all(&self.pool)
         .await?;
-        tx.commit().await?;
         rows.into_iter()
             .map(|digest| {
                 digest.try_into().map_err(|_| {
