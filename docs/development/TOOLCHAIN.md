@@ -40,4 +40,3 @@ Caches are optimization only and cannot establish correctness.
 
 The host-installed Rust 1.75 toolchain on HeMan is intentionally not used for
 the edition-2024 workspace.
-
