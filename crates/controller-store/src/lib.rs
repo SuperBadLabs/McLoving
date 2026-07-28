@@ -10,6 +10,8 @@ mod scheduler;
 
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 
+pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
+
 /// Schema installed by [`Store::migrate`].
 pub const CONTROLLER_SCHEMA_V1: &str = include_str!("../migrations/0001_controller_truth.sql");
 /// Tenant identity and row-level-security migration.
@@ -896,21 +898,23 @@ impl Store {
                 tx.rollback().await?;
                 return Ok(false);
             }
-            sqlx::query(
-                "UPDATE attempt_effects
-                 SET status = $5, updated_at = clock_timestamp()
-                 WHERE organization_id = $1
-                   AND attempt_id = $2
-                   AND fence = $3
-                   AND effect_key = $4",
-            )
-            .bind(organization_id)
-            .bind(attempt_id)
-            .bind(fence)
-            .bind(effect_key)
-            .bind(status.as_str())
-            .execute(&mut *tx)
-            .await?;
+            if existing_status != status.as_str() {
+                sqlx::query(
+                    "UPDATE attempt_effects
+                     SET status = $5, updated_at = clock_timestamp()
+                     WHERE organization_id = $1
+                       AND attempt_id = $2
+                       AND fence = $3
+                       AND effect_key = $4",
+                )
+                .bind(organization_id)
+                .bind(attempt_id)
+                .bind(fence)
+                .bind(effect_key)
+                .bind(status.as_str())
+                .execute(&mut *tx)
+                .await?;
+            }
         } else {
             if status != EffectStatus::Prepared {
                 tx.rollback().await?;
@@ -1289,7 +1293,7 @@ impl Store {
         }
         let mut tx = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(0x4d_63_4c_6f_76_72_65_63_i64)
+            .bind(RESTORE_FENCE_LOCK_KEY)
             .execute(&mut *tx)
             .await?;
         sqlx::query(
@@ -1339,7 +1343,7 @@ impl Store {
         }
         let mut tx = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(0x4d_63_4c_6f_76_72_65_63_i64)
+            .bind(RESTORE_FENCE_LOCK_KEY)
             .execute(&mut *tx)
             .await?;
         let current_epoch = sqlx::query_scalar::<_, i64>(

@@ -4,7 +4,7 @@ use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{Store, StoreError, append_event_and_outbox};
+use crate::{RESTORE_FENCE_LOCK_KEY, Store, StoreError, append_event_and_outbox};
 
 /// Inputs to one deterministic scheduler claim.
 #[derive(Clone, Debug)]
@@ -59,7 +59,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
-            .bind(0x4d_63_4c_6f_76_72_65_63_i64)
+            .bind(RESTORE_FENCE_LOCK_KEY)
             .execute(&mut *tx)
             .await?;
         let restore_epoch = sqlx::query_scalar::<_, i64>(

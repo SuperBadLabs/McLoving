@@ -779,6 +779,47 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             .await
             .expect("reject payload substitution")
     );
+    let updated_at_before: String = sqlx::query_scalar(
+        "SELECT updated_at::text
+         FROM attempt_effects
+         WHERE organization_id = $1
+           AND attempt_id = $2
+           AND fence = 0
+           AND effect_key = 'deploy'",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read effect timestamp before replay");
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                0,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Uncertain,
+                &payload,
+            )
+            .await
+            .expect("replay uncertain checkpoint")
+    );
+    let updated_at_after: String = sqlx::query_scalar(
+        "SELECT updated_at::text
+         FROM attempt_effects
+         WHERE organization_id = $1
+           AND attempt_id = $2
+           AND fence = 0
+           AND effect_key = 'deploy'",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read effect timestamp after replay");
+    assert_eq!(updated_at_after, updated_at_before);
     let uncertain = store
         .uncertain_effects(organization_id)
         .await
