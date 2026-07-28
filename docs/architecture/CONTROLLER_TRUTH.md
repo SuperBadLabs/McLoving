@@ -47,7 +47,9 @@ scopes. Scheduler control is service-only.
 
 Schema installation and organization/project bootstrap require a separately
 privileged connection. The runtime tenant role has read-only access to that
-metadata. Runtime request and scheduler transactions use tenant context.
+metadata and to identity, project-membership, and service-scope grants; grant
+mutation is also privileged. Runtime request and scheduler transactions use
+tenant context.
 
 ## Verification
 

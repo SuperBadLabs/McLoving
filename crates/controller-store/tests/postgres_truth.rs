@@ -111,6 +111,39 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
         .await
         .expect("bootstrap through privileged connection");
     let store = unprivileged_store(&admin).await;
+    let can_mutate_grants = sqlx::query_scalar::<_, bool>(
+        "SELECT
+           has_table_privilege('mcloving_tenant', 'identities', 'INSERT')
+           OR has_table_privilege(
+             'mcloving_tenant', 'project_memberships', 'INSERT'
+           )
+           OR has_table_privilege(
+             'mcloving_tenant', 'service_scopes', 'INSERT'
+           )",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("inspect authorization-table privileges");
+    assert!(!can_mutate_grants);
+    let mut escalation = store.pool().begin().await.expect("begin escalation test");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *escalation)
+        .await
+        .expect("bind tenant context for escalation test");
+    let self_grant = sqlx::query(
+        "INSERT INTO identities (id, organization_id, subject, kind)
+         VALUES ($1, $2, 'service:attacker', 'service')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(organization_id)
+    .execute(&mut *escalation)
+    .await;
+    assert!(self_grant.is_err());
+    escalation
+        .rollback()
+        .await
+        .expect("roll back escalation test");
     let forbidden_organization = Uuid::new_v4();
     assert!(
         store

@@ -42,12 +42,12 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 REVOKE CREATE ON SCHEMA public FROM mcloving_tenant;
 GRANT SELECT ON
     organizations,
-    projects
-TO mcloving_tenant;
-GRANT SELECT, INSERT, UPDATE, DELETE ON
+    projects,
     identities,
     project_memberships,
-    service_scopes,
+    service_scopes
+TO mcloving_tenant;
+GRANT SELECT, INSERT, UPDATE, DELETE ON
     builds,
     nodes,
     attempts,
