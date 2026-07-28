@@ -1,0 +1,12 @@
+[package]
+name = "mcloving-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+mcloving-domain = { version = "0.0.0", path = "../../crates/domain" }
+
+[lints]
+workspace = true
