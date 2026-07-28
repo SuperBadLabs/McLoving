@@ -158,19 +158,18 @@ impl Store {
         agent_id: &str,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let accepted = sqlx::query_as::<_, (Uuid, Uuid)>(
-            "UPDATE attempts AS a
-             SET status = 'accepted'
-             FROM nodes AS n
+        let accepted = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+            "SELECT n.id, n.build_id, a.status
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
                AND a.lease_owner = $4
                AND a.lease_expires_at > clock_timestamp()
-               AND a.status = 'offered'
-               AND n.id = a.node_id
-               AND n.organization_id = a.organization_id
-             RETURNING n.id, n.build_id",
+               AND a.status IN ('offered', 'accepted', 'running')
+             FOR UPDATE OF a, n",
         )
         .bind(attempt_id)
         .bind(organization_id)
@@ -178,10 +177,22 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((node_id, build_id)) = accepted else {
+        let Some((node_id, build_id, status)) = accepted else {
             tx.rollback().await?;
             return Ok(false);
         };
+        if status != "offered" {
+            tx.commit().await?;
+            return Ok(true);
+        }
+        sqlx::query(
+            "UPDATE attempts SET status = 'accepted'
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(attempt_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "UPDATE nodes SET status = 'running'
              WHERE id = $1 AND organization_id = $2",

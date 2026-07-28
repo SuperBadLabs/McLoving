@@ -1,8 +1,10 @@
 use std::time::Duration;
 
 use mcloving_controller_api::{ApiState, Client, ExplainResponse, router};
-use mcloving_controller_store::{ClaimRequest, Store, TerminalOutcome};
+use mcloving_controller_store::{ClaimRequest, NewBuild, NewLogChunk, Store, TerminalOutcome};
 use mcloving_execution_spine::{WorkerConfig, run_claim};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -147,4 +149,224 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
             .is_empty()
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn controller_restart_replay_is_logically_exactly_once() {
+    let Some(initial) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let pool = initial.pool().clone();
+    let restart = || Store::new(pool.clone());
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    initial
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "restart",
+        )
+        .await
+        .expect("create project");
+    let input = NewBuild {
+        organization_id,
+        project_id,
+        idempotency_key: "e2e-002".to_owned(),
+        pipeline_digest: [42; 32],
+        node_key: "execute".to_owned(),
+        required_capabilities: vec!["linux".to_owned()],
+        priority: 0,
+        execution_spec: json!({
+            "version": 1,
+            "steps": [{
+                "kind": "process",
+                "program": "/bin/true",
+                "args": [],
+                "env": {},
+                "timeout_seconds": 10
+            }]
+        }),
+    };
+    let admission = initial.admit_build(&input).await.expect("admit");
+    drop(initial);
+    let store = restart();
+    let replay = store.admit_build(&input).await.expect("replay admission");
+    assert!(!replay.created);
+    assert_eq!(replay.build_id, admission.build_id);
+
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "restart-scheduler".to_owned(),
+            agent_id: "restart-agent".to_owned(),
+            capabilities: vec!["linux".to_owned()],
+            lease_seconds: 60,
+            fairness_seed: 9,
+        })
+        .await
+        .expect("claim")
+        .expect("work exists");
+    drop(store);
+    let store = restart();
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "restart-scheduler".to_owned(),
+                agent_id: "restart-agent".to_owned(),
+                capabilities: vec!["linux".to_owned()],
+                lease_seconds: 60,
+                fairness_seed: 9,
+            })
+            .await
+            .expect("repeated claim")
+            .is_none()
+    );
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "restart-agent",
+            )
+            .await
+            .expect("accept")
+    );
+    drop(store);
+    let store = restart();
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "restart-agent",
+            )
+            .await
+            .expect("replay acceptance")
+    );
+    assert!(
+        store
+            .mark_attempt_running(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "restart-agent",
+            )
+            .await
+            .expect("running")
+    );
+    drop(store);
+    let store = restart();
+    assert!(
+        store
+            .mark_attempt_running(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "restart-agent",
+            )
+            .await
+            .expect("replay running")
+    );
+    let log = b"one durable line\n";
+    let chunk = NewLogChunk {
+        organization_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        agent_id: "restart-agent",
+        sequence: 0,
+        stream: "stdout",
+        content: log,
+    };
+    assert!(store.append_log(&chunk).await.expect("commit log"));
+    drop(store);
+    let store = restart();
+    assert!(store.append_log(&chunk).await.expect("replay log"));
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "restart-agent",
+                TerminalOutcome::Succeeded,
+                json!({"sha256": hex(&Sha256::digest(log))}),
+            )
+            .await
+            .expect("finalize")
+    );
+    drop(store);
+    let store = restart();
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "restart-agent",
+                TerminalOutcome::Succeeded,
+                json!({"sha256": hex(&Sha256::digest(log))}),
+            )
+            .await
+            .expect("terminal replay is rejected without duplication")
+    );
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "succeeded");
+    assert_eq!(
+        store
+            .build_logs(organization_id, project_id, admission.build_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let published = store.publish_outbox(organization_id, 100).await.unwrap();
+    assert_eq!(
+        published
+            .iter()
+            .filter(|event| event.topic == "build.admitted")
+            .count(),
+        1
+    );
+    assert_eq!(
+        published
+            .iter()
+            .filter(|event| event.topic == "attempt.accepted")
+            .count(),
+        1
+    );
+    assert_eq!(
+        published
+            .iter()
+            .filter(|event| event.topic == "attempt.running")
+            .count(),
+        1
+    );
+    assert_eq!(
+        published
+            .iter()
+            .filter(|event| event.topic == "attempt.terminal")
+            .count(),
+        1
+    );
+    drop(store);
+    assert!(
+        restart()
+            .publish_outbox(organization_id, 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

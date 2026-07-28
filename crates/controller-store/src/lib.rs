@@ -421,24 +421,23 @@ impl Store {
         .await?;
         tx.commit().await?;
         rows.into_iter()
-            .map(
-                |(attempt_id, fence, sequence, stream, content, digest)| {
-                    let digest: [u8; 32] = digest.try_into().map_err(|_| {
-                        StoreError::CorruptLogDigest {
+            .map(|(attempt_id, fence, sequence, stream, content, digest)| {
+                let digest: [u8; 32] =
+                    digest
+                        .try_into()
+                        .map_err(|_| StoreError::CorruptLogDigest {
                             attempt_id,
                             sequence,
-                        }
-                    })?;
-                    Ok(CommittedLog {
-                        attempt_id,
-                        fence,
-                        sequence,
-                        stream,
-                        content,
-                        digest,
-                    })
-                },
-            )
+                        })?;
+                Ok(CommittedLog {
+                    attempt_id,
+                    fence,
+                    sequence,
+                    stream,
+                    content,
+                    digest,
+                })
+            })
             .collect()
     }
 
@@ -530,21 +529,17 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
-            "UPDATE attempts AS a
-             SET status = CASE
-                   WHEN a.status = 'accepted' THEN 'running'
-                   ELSE a.status
-                 END
-             FROM nodes AS n
+            "SELECT n.id, n.build_id, a.status
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
              WHERE a.organization_id = $1
                AND a.id = $2
                AND a.fence = $3
                AND a.lease_owner = $4
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('accepted', 'running')
-               AND n.id = a.node_id
-               AND n.organization_id = a.organization_id
-             RETURNING n.id, n.build_id, a.status",
+             FOR UPDATE OF a, n",
         )
         .bind(organization_id)
         .bind(attempt_id)
@@ -556,6 +551,18 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         };
+        if status == "running" {
+            tx.commit().await?;
+            return Ok(true);
+        }
+        sqlx::query(
+            "UPDATE attempts SET status = 'running'
+             WHERE organization_id = $1 AND id = $2",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "UPDATE nodes SET status = 'running'
              WHERE organization_id = $1 AND id = $2 AND status IN ('offered', 'running')",
@@ -564,16 +571,14 @@ impl Store {
         .bind(node_id)
         .execute(&mut *tx)
         .await?;
-        if status == "running" {
-            append_event_and_outbox(
-                &mut tx,
-                organization_id,
-                build_id,
-                "attempt.running",
-                json!({"attempt_id": attempt_id, "node_id": node_id, "fence": fence}),
-            )
-            .await?;
-        }
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "attempt.running",
+            json!({"attempt_id": attempt_id, "node_id": node_id, "fence": fence}),
+        )
+        .await?;
         tx.commit().await?;
         Ok(true)
     }
