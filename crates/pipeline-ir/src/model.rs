@@ -179,7 +179,7 @@ pub fn compile_strict_yaml(
 fn compile_stages(node: SpannedValue) -> Result<Vec<Stage>, CompileError> {
     let span = node.span;
     let YamlValue::Sequence(nodes) = node.value else {
-        return Err(CompileError::schema("$.stages", "expected a sequence"));
+        return Err(CompileError::schema("$.stages", "expected a sequence").with_span(span));
     };
     if nodes.is_empty() {
         return Err(CompileError::schema(
@@ -218,11 +218,12 @@ fn compile_stages(node: SpannedValue) -> Result<Vec<Stage>, CompileError> {
 }
 
 fn compile_steps(node: SpannedValue, stage_path: &str) -> Result<Vec<Step>, CompileError> {
+    let span = node.span;
     let YamlValue::Sequence(nodes) = node.value else {
-        return Err(CompileError::schema(
-            format!("{stage_path}.steps"),
-            "expected a sequence",
-        ));
+        return Err(
+            CompileError::schema(format!("{stage_path}.steps"), "expected a sequence")
+                .with_span(span),
+        );
     };
     if nodes.is_empty() {
         return Err(CompileError::schema(

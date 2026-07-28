@@ -54,6 +54,18 @@ fn directive_spans_account_for_crlf_bytes() {
 }
 
 #[test]
+fn directives_after_a_utf8_bom_are_rejected_at_the_percent_sign() {
+    let error = parse_strict(
+        "\u{feff}%YAML 1.2\n---\nname: rejected\n",
+        ParseLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Directive);
+    assert_eq!(error.span.start.offset, 3);
+    assert_eq!(error.span.start.column, 1);
+}
+
+#[test]
 fn compiles_the_v1_process_contract() {
     let pipeline =
         compile_strict_yaml("fixture://valid", VALID_PIPELINE, ParseLimits::default()).unwrap();
@@ -61,6 +73,14 @@ fn compiles_the_v1_process_contract() {
     assert_eq!(pipeline.stages.len(), 1);
     assert_eq!(pipeline.stages[0].steps.len(), 1);
     assert_eq!(pipeline.provenance.source_id, "fixture://valid");
+}
+
+#[test]
+fn accepts_an_explicit_positive_sign_for_decimal_integers() {
+    let source = VALID_PIPELINE.replace("version: 1", "version: +1");
+    let pipeline =
+        compile_strict_yaml("fixture://positive", &source, ParseLimits::default()).unwrap();
+    assert_eq!(pipeline.name, "checkout");
 }
 
 #[test]
@@ -159,5 +179,18 @@ fn unknown_fields_fail_closed_at_every_schema_level() {
             "unexpected error: {error}"
         );
         assert!(error.span.is_some());
+    }
+}
+
+#[test]
+fn schema_type_errors_retain_the_offending_value_span() {
+    for source in [
+        "version: 1\nname: invalid\nstages: wrong\n",
+        "version: 1\nname: invalid\nstages:\n  - id: stage\n    name: Stage\n    steps: wrong\n",
+    ] {
+        let error =
+            compile_strict_yaml("fixture://type", source, ParseLimits::default()).unwrap_err();
+        let span = error.span.expect("type error must have a source span");
+        assert!(span.end.offset > span.start.offset);
     }
 }

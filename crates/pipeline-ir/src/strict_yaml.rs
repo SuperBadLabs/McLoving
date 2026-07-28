@@ -328,11 +328,14 @@ pub fn parse_strict(source: &str, limits: ParseLimits) -> Result<SpannedValue, A
             .unwrap_or(line)
             .strip_suffix('\r')
             .unwrap_or(line);
-        if content.starts_with('%') {
+        let bom_bytes =
+            usize::from(line_index == 0 && content.starts_with('\u{feff}')) * '\u{feff}'.len_utf8();
+        let directive_candidate = &content[bom_bytes..];
+        if directive_candidate.starts_with('%') {
             let location = SourceLocation {
-                offset: line_offset,
+                offset: line_offset + bom_bytes,
                 line: line_index + 1,
-                column: 1,
+                column: usize::from(bom_bytes > 0),
             };
             return Err(AdmissionError::new(
                 ErrorCode::Directive,
@@ -505,7 +508,10 @@ fn resolve_scalar(
 }
 
 fn is_decimal_integer(value: &str) -> bool {
-    let digits = value.strip_prefix('-').unwrap_or(value);
+    let digits = value
+        .strip_prefix('-')
+        .or_else(|| value.strip_prefix('+'))
+        .unwrap_or(value);
     if digits.is_empty() {
         return false;
     }
