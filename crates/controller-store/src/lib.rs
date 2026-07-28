@@ -18,6 +18,8 @@ pub const TENANT_SECURITY_V2: &str = include_str!("../migrations/0002_tenant_sec
 pub const PUBLIC_API_V3: &str = include_str!("../migrations/0003_public_api.sql");
 /// Immutable retry history and uncertain-effect reconciliation migration.
 pub const DURABLE_RETRY_V4: &str = include_str!("../migrations/0004_durable_retry.sql");
+/// Controller references to immutable object-store content.
+pub const OBJECT_REFERENCES_V5: &str = include_str!("../migrations/0005_object_references.sql");
 
 /// A build and its first executable node, admitted as one durable unit.
 #[derive(Clone, Debug)]
@@ -155,6 +157,54 @@ pub enum RetryDecision {
     Ineligible,
 }
 
+/// Durable object category.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectKind {
+    Log,
+    Artifact,
+    Result,
+}
+
+impl ObjectKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Log => "log",
+            Self::Artifact => "artifact",
+            Self::Result => "result",
+        }
+    }
+}
+
+/// Explicit controller view of object-store availability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectStatus {
+    Available,
+    Missing,
+    Corrupt,
+}
+
+impl ObjectStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Missing => "missing",
+            Self::Corrupt => "corrupt",
+        }
+    }
+}
+
+/// One controller-owned reference to immutable object content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredObject {
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub kind: ObjectKind,
+    pub name: String,
+    pub digest: [u8; 32],
+    pub bytes: i64,
+    pub status: ObjectStatus,
+}
+
 /// Terminal result accepted from a fenced attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalOutcome {
@@ -184,6 +234,8 @@ pub enum StoreError {
     CorruptLogDigest { attempt_id: Uuid, sequence: i64 },
     #[error("invalid durable effect payload: {0}")]
     InvalidEffectPayload(String),
+    #[error("invalid durable object record: {0}")]
+    InvalidObjectRecord(String),
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -220,6 +272,7 @@ impl Store {
         apply_migration(&mut tx, 2, TENANT_SECURITY_V2).await?;
         apply_migration(&mut tx, 3, PUBLIC_API_V3).await?;
         apply_migration(&mut tx, 4, DURABLE_RETRY_V4).await?;
+        apply_migration(&mut tx, 5, OBJECT_REFERENCES_V5).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -762,6 +815,7 @@ impl Store {
     ///
     /// The payload and idempotency class are immutable. Repeating a checkpoint
     /// is idempotent, while regressions or conflicting payloads are rejected.
+    #[allow(clippy::too_many_arguments)]
     pub async fn checkpoint_effect(
         &self,
         organization_id: Uuid,
@@ -957,9 +1011,10 @@ impl Store {
                 "max_attempts": max_attempts,
                 "reason": reason,
             });
-            let digest: [u8; 32] = Sha256::digest(serde_json::to_vec(&payload).map_err(
-                |error| StoreError::InvalidEffectPayload(error.to_string()),
-            )?)
+            let digest: [u8; 32] = Sha256::digest(
+                serde_json::to_vec(&payload)
+                    .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?,
+            )
             .into();
             sqlx::query(
                 "INSERT INTO dead_letters (
@@ -1038,6 +1093,142 @@ impl Store {
             ordinal: child_ordinal,
             created: true,
         })
+    }
+
+    /// Registers one immutable object only for the exact live fenced owner.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_object(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+        kind: ObjectKind,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+    ) -> Result<bool, StoreError> {
+        if name.is_empty() || name.len() > 512 || bytes < 0 {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let inserted = sqlx::query_scalar::<_, String>(
+            "INSERT INTO attempt_objects (
+                 organization_id, attempt_id, fence, kind, name,
+                 object_digest, bytes
+             )
+             SELECT $1, a.id, $3, $5, $6, $7, $8
+             FROM attempts AS a
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.lease_owner = $4
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+             ON CONFLICT (organization_id, attempt_id, fence, kind, name)
+             DO UPDATE SET checked_at = clock_timestamp()
+             WHERE attempt_objects.object_digest = EXCLUDED.object_digest
+               AND attempt_objects.bytes = EXCLUDED.bytes
+             RETURNING name",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(agent_id)
+        .bind(kind.as_str())
+        .bind(name)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(inserted.is_some())
+    }
+
+    /// Records a verified availability result without changing object identity.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_object_status(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        kind: ObjectKind,
+        name: &str,
+        digest: [u8; 32],
+        status: ObjectStatus,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let updated = sqlx::query_scalar::<_, String>(
+            "UPDATE attempt_objects
+             SET status = $7, checked_at = clock_timestamp()
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND kind = $4
+               AND name = $5
+               AND object_digest = $6
+             RETURNING name",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(kind.as_str())
+        .bind(name)
+        .bind(digest.as_slice())
+        .bind(status.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(updated.is_some())
+    }
+
+    /// Lists all object references for a build, including explicit gaps.
+    pub async fn build_objects(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+    ) -> Result<Vec<StoredObject>, StoreError> {
+        type ObjectRow = (Uuid, i64, String, String, Vec<u8>, i64, String);
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, ObjectRow>(
+            "SELECT o.attempt_id, o.fence, o.kind, o.name,
+                    o.object_digest, o.bytes, o.status
+             FROM attempt_objects AS o
+             JOIN attempts AS a
+               ON a.id = o.attempt_id AND a.organization_id = o.organization_id
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE o.organization_id = $1
+               AND b.project_id = $2
+               AND b.id = $3
+             ORDER BY a.ordinal, o.kind, o.name",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(|(attempt_id, fence, kind, name, digest, bytes, status)| {
+                Ok(StoredObject {
+                    attempt_id,
+                    fence,
+                    kind: parse_object_kind(&kind)?,
+                    name,
+                    digest: digest.try_into().map_err(|_| {
+                        StoreError::InvalidObjectRecord(
+                            "stored object digest is not 32 bytes".to_owned(),
+                        )
+                    })?,
+                    bytes,
+                    status: parse_object_status(&status)?,
+                })
+            })
+            .collect()
     }
 
     /// Accepts exactly one terminal publication for the current attempt fence.
@@ -1218,10 +1409,17 @@ async fn append_event_and_outbox(
 fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
     matches!(
         (current, requested),
-        ("prepared", EffectStatus::Prepared | EffectStatus::Applied | EffectStatus::Uncertain)
-            | ("applied", EffectStatus::Applied | EffectStatus::Confirmed | EffectStatus::Uncertain)
-            | ("confirmed", EffectStatus::Confirmed)
-            | ("uncertain", EffectStatus::Uncertain | EffectStatus::Confirmed)
+        (
+            "prepared",
+            EffectStatus::Prepared | EffectStatus::Applied | EffectStatus::Uncertain
+        ) | (
+            "applied",
+            EffectStatus::Applied | EffectStatus::Confirmed | EffectStatus::Uncertain
+        ) | ("confirmed", EffectStatus::Confirmed)
+            | (
+                "uncertain",
+                EffectStatus::Uncertain | EffectStatus::Confirmed
+            )
     )
 }
 
@@ -1244,6 +1442,28 @@ fn parse_effect_status(value: &str) -> Result<EffectStatus, StoreError> {
         "uncertain" => Ok(EffectStatus::Uncertain),
         other => Err(StoreError::InvalidEffectPayload(format!(
             "unknown effect status {other}"
+        ))),
+    }
+}
+
+fn parse_object_kind(value: &str) -> Result<ObjectKind, StoreError> {
+    match value {
+        "log" => Ok(ObjectKind::Log),
+        "artifact" => Ok(ObjectKind::Artifact),
+        "result" => Ok(ObjectKind::Result),
+        other => Err(StoreError::InvalidObjectRecord(format!(
+            "unknown object kind {other}"
+        ))),
+    }
+}
+
+fn parse_object_status(value: &str) -> Result<ObjectStatus, StoreError> {
+    match value {
+        "available" => Ok(ObjectStatus::Available),
+        "missing" => Ok(ObjectStatus::Missing),
+        "corrupt" => Ok(ObjectStatus::Corrupt),
+        other => Err(StoreError::InvalidObjectRecord(format!(
+            "unknown object status {other}"
         ))),
     }
 }

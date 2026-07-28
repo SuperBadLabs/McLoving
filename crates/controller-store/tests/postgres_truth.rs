@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use mcloving_controller_store::{
-    ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk, RetryDecision, Store,
-    TerminalOutcome, WaitReason,
+    ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk, ObjectKind, ObjectStatus,
+    RetryDecision, Store, TerminalOutcome, WaitReason,
 };
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -972,6 +972,137 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
     .await
     .expect("read dead letter");
     assert_eq!(dead_letters, 1);
+}
+
+#[tokio::test]
+async fn object_references_are_fenced_immutable_and_report_gaps() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "objects",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "object-reference".into(),
+            pipeline_digest: [25; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler".into(),
+            agent_id: "agent".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim")
+        .expect("claim exists");
+    assert!(
+        store
+            .accept_offer(organization_id, claim.attempt_id, claim.fence, "agent")
+            .await
+            .expect("accept")
+    );
+    let digest = [41; 32];
+    assert!(
+        store
+            .register_object(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "agent",
+                ObjectKind::Artifact,
+                "distribution.tar.zst",
+                digest,
+                1024,
+            )
+            .await
+            .expect("register object")
+    );
+    assert!(
+        !store
+            .register_object(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "agent",
+                ObjectKind::Artifact,
+                "distribution.tar.zst",
+                [42; 32],
+                1024,
+            )
+            .await
+            .expect("reject identity mutation")
+    );
+    assert!(
+        !store
+            .register_object(
+                organization_id,
+                claim.attempt_id,
+                claim.fence + 1,
+                "agent",
+                ObjectKind::Artifact,
+                "stale.tar.zst",
+                [43; 32],
+                1,
+            )
+            .await
+            .expect("reject stale fence")
+    );
+    assert!(
+        store
+            .set_object_status(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                ObjectKind::Artifact,
+                "distribution.tar.zst",
+                digest,
+                ObjectStatus::Missing,
+            )
+            .await
+            .expect("record missing object")
+    );
+    assert!(
+        !store
+            .set_object_status(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                ObjectKind::Artifact,
+                "distribution.tar.zst",
+                [99; 32],
+                ObjectStatus::Available,
+            )
+            .await
+            .expect("reject wrong digest")
+    );
+    let objects = store
+        .build_objects(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read object references");
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].digest, digest);
+    assert_eq!(objects[0].status, ObjectStatus::Missing);
 }
 
 #[tokio::test]

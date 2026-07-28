@@ -59,8 +59,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | Ticket | Status | Depends on | Objective |
 |---|---|---|---|
 | CTRL-003 | DONE | E2E-002 | Durable retry, timeout, post, cleanup, and uncertain-effect reconciliation |
-| OPS-001 | ACTIVE | E2E-001 | Staged object storage, immutable artifacts, checksummed log chunks, explicit gaps and quotas |
-| OPS-002 | PENDING | OPS-001 | Backup, PITR, restore epoch, object reconciliation, retention and legal-hold drills |
+| OPS-001 | DONE | E2E-001 | Staged object storage, immutable artifacts, checksummed log chunks, explicit gaps and quotas |
+| OPS-002 | ACTIVE | OPS-001 | Backup, PITR, restore epoch, object reconciliation, retention and legal-hold drills |
 | WIN-001 | PENDING | AGENT-003 | Signed Windows service agent, journal, enrollment, restart and reboot recovery |
 | WIN-002 | PENDING | WIN-001 | Direct process, cmd, PowerShell, Job Objects, ACL workspaces, descendant cleanup |
 | WIN-003 | PENDING | WIN-002, E2E-003 | Linux/Windows semantic parity and destructive recovery suite |

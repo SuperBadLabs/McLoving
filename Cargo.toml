@@ -10,6 +10,7 @@ members = [
   "crates/controller-store",
   "crates/domain",
   "crates/execution-spine",
+  "crates/object-store",
   "crates/pipeline-ir",
   "crates/state-machine",
 ]
