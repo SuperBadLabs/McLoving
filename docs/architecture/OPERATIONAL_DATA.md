@@ -10,17 +10,19 @@ with a create-only hard link. The durable object path is
 `objects/sha256/<prefix>/<digest>`. Existing content is accepted only when its
 digest and byte count match exactly; it is never overwritten.
 
-Artifacts are binary-preserving. Log redaction replaces exact configured
-secret byte sequences before hashing and commitment, so unredacted bytes never
-enter the durable namespace. The PostgreSQL controller records object kind,
-logical name, digest, byte count, attempt, and fence. Registration requires the
-exact live fenced owner, and an existing logical object cannot change identity.
+Artifacts are binary-preserving. Log redaction removes exact configured secret
+byte sequences to a fixed point before hashing and commitment, so a secret
+cannot survive inside a replacement marker or across a newly joined boundary.
+The PostgreSQL controller records object kind, logical name, digest, byte count,
+attempt, and fence. Registration requires the exact live fenced owner, and an
+existing logical object cannot change identity.
 
 ## Quotas and gaps
 
-Compact deployments enforce both per-object and total committed-byte quotas
-before staging. Quota exhaustion is explicit backpressure rather than silent
-truncation.
+Compact deployments enforce both per-object and total reserved-byte quotas.
+An exclusive filesystem lock serializes reservation and commitment across
+processes; outstanding staged objects consume quota before publication. Quota
+exhaustion is explicit backpressure rather than silent truncation.
 
 Reads verify both SHA-256 and byte count. Missing and corrupt objects are typed
 gaps. Reconciliation compares the PostgreSQL-declared set with committed

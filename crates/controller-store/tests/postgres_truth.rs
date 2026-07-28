@@ -784,9 +784,12 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
         .await
         .expect("list uncertain effects");
     assert_eq!(uncertain.len(), 1);
+    assert_eq!(uncertain[0].attempt_id, admission.attempt_id);
+    assert_eq!(uncertain[0].fence, 0);
     assert_eq!(uncertain[0].effect_key, "deploy");
     assert_eq!(uncertain[0].effect_class, EffectClass::NonIdempotent);
     assert_eq!(uncertain[0].status, EffectStatus::Uncertain);
+    assert_eq!(uncertain[0].payload, payload);
     assert!(
         store
             .checkpoint_effect(
@@ -940,6 +943,13 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
             .expect("exhaust retry"),
         RetryDecision::DeadLettered
     );
+    assert_eq!(
+        store
+            .schedule_retry(organization_id, second.attempt_id, 2, "persistent")
+            .await
+            .expect("replay exhausted retry"),
+        RetryDecision::DeadLettered
+    );
     let rows = sqlx::query_as::<_, (Uuid, i32, Option<Uuid>, String)>(
         "SELECT id, ordinal, retry_of, status
          FROM attempts
@@ -972,6 +982,23 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
     .await
     .expect("read dead letter");
     assert_eq!(dead_letters, 1);
+    let dead_letter_publications: (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM build_events
+            WHERE organization_id = $1
+              AND build_id = $2
+              AND kind = 'attempt.dead_lettered'),
+           (SELECT count(*) FROM outbox
+            WHERE organization_id = $1
+              AND aggregate_id = $2
+              AND topic = 'attempt.dead_lettered')",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count one dead-letter publication");
+    assert_eq!(dead_letter_publications, (1, 1));
 }
 
 #[tokio::test]

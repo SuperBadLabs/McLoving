@@ -81,6 +81,7 @@ pub struct FilesystemObjectStore {
     root: PathBuf,
     staging: PathBuf,
     objects: PathBuf,
+    quota_lock: PathBuf,
     quota: Quota,
 }
 
@@ -95,13 +96,22 @@ impl FilesystemObjectStore {
         }
         let staging = root.join("staging");
         let objects = root.join("objects").join("sha256");
+        let quota_lock = root.join(".quota.lock");
         fs::create_dir_all(&staging)?;
         fs::create_dir_all(&objects)?;
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&quota_lock)?
+            .sync_all()?;
         sync_directory(&root)?;
         Ok(Self {
             root,
             staging,
             objects,
+            quota_lock,
             quota,
         })
     }
@@ -133,8 +143,15 @@ impl FilesystemObjectStore {
         if bytes > self.quota.max_object_bytes {
             return Err(ObjectStoreError::ObjectQuotaExceeded);
         }
-        let used = committed_bytes(&self.objects)?;
-        if used.saturating_add(bytes) > self.quota.max_total_bytes {
+        let quota_lock = self.lock_quota()?;
+        let used = committed_bytes(&self.objects)?
+            .checked_add(staged_bytes(&self.staging)?)
+            .ok_or(ObjectStoreError::TotalQuotaExceeded)?;
+        if used
+            .checked_add(bytes)
+            .ok_or(ObjectStoreError::TotalQuotaExceeded)?
+            > self.quota.max_total_bytes
+        {
             return Err(ObjectStoreError::TotalQuotaExceeded);
         }
         let sequence = STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -149,6 +166,7 @@ impl FilesystemObjectStore {
         file.write_all(content)?;
         file.sync_all()?;
         sync_directory(&self.staging)?;
+        drop(quota_lock);
         Ok(StagedObject {
             path,
             reference: ObjectRef {
@@ -166,6 +184,13 @@ impl FilesystemObjectStore {
             .ok_or(ObjectStoreError::ForeignStagingPath)?;
         if parent != self.staging || !staged.path.is_file() {
             return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        let quota_lock = self.lock_quota()?;
+        let reserved = committed_bytes(&self.objects)?
+            .checked_add(staged_bytes(&self.staging)?)
+            .ok_or(ObjectStoreError::TotalQuotaExceeded)?;
+        if reserved > self.quota.max_total_bytes {
+            return Err(ObjectStoreError::TotalQuotaExceeded);
         }
         let reference = staged.reference;
         let path = self.object_path(&reference.sha256);
@@ -191,6 +216,7 @@ impl FilesystemObjectStore {
         if committed != reference {
             return Err(ObjectStoreError::ImmutableObjectConflict);
         }
+        drop(quota_lock);
         Ok(reference)
     }
 
@@ -269,6 +295,15 @@ impl FilesystemObjectStore {
         let digest = hex(digest);
         self.objects.join(&digest[..2]).join(digest)
     }
+
+    fn lock_quota(&self) -> Result<File, ObjectStoreError> {
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.quota_lock)?;
+        lock.lock()?;
+        Ok(lock)
+    }
 }
 
 fn validate_namespace(value: &str) -> Result<(), ObjectStoreError> {
@@ -284,15 +319,21 @@ fn validate_namespace(value: &str) -> Result<(), ObjectStoreError> {
 
 fn redact(content: &[u8], redactions: &[&[u8]]) -> Vec<u8> {
     let mut output = content.to_vec();
-    for secret in redactions.iter().filter(|secret| !secret.is_empty()) {
-        let mut cursor = 0;
-        while cursor + secret.len() <= output.len() {
-            if &output[cursor..cursor + secret.len()] == *secret {
-                output.splice(cursor..cursor + secret.len(), b"[REDACTED]".iter().copied());
-                cursor += b"[REDACTED]".len();
-            } else {
-                cursor += 1;
+    loop {
+        let mut changed = false;
+        for secret in redactions.iter().filter(|secret| !secret.is_empty()) {
+            let mut cursor = 0;
+            while cursor + secret.len() <= output.len() {
+                if &output[cursor..cursor + secret.len()] == *secret {
+                    output.drain(cursor..cursor + secret.len());
+                    changed = true;
+                } else {
+                    cursor += 1;
+                }
             }
+        }
+        if !changed {
+            break;
         }
     }
     output
@@ -331,6 +372,18 @@ fn committed_bytes(root: &Path) -> Result<u64, ObjectStoreError> {
                     .checked_add(entry.metadata()?.len())
                     .ok_or(ObjectStoreError::TotalQuotaExceeded)?;
             }
+        }
+    }
+    Ok(total)
+}
+
+fn staged_bytes(root: &Path) -> Result<u64, ObjectStoreError> {
+    let mut total = 0_u64;
+    for entry in directory_entries(root)? {
+        if entry.path().is_file() {
+            total = total
+                .checked_add(entry.metadata()?.len())
+                .ok_or(ObjectStoreError::TotalQuotaExceeded)?;
         }
     }
     Ok(total)
@@ -397,12 +450,23 @@ mod tests {
             .stage_log("tenant-a", b"token=secret-value\n", &[b"secret-value"])
             .unwrap();
         let reference = store.commit(staged).unwrap();
-        assert_eq!(
-            store.read_verified(&reference).unwrap(),
-            b"token=[REDACTED]\n"
-        );
-        let expected_digest: [u8; 32] = Sha256::digest(b"token=[REDACTED]\n").into();
+        assert_eq!(store.read_verified(&reference).unwrap(), b"token=\n");
+        let expected_digest: [u8; 32] = Sha256::digest(b"token=\n").into();
         assert_eq!(reference.sha256, expected_digest);
+
+        let staged = store
+            .stage_log(
+                "tenant-a",
+                b"marker=REDACTED boundary=seXcret\n",
+                &[b"REDACTED", b"X", b"secret"],
+            )
+            .unwrap();
+        let reference = store.commit(staged).unwrap();
+        let content = store.read_verified(&reference).unwrap();
+        assert_eq!(content, b"marker= boundary=\n");
+        for secret in [b"REDACTED".as_slice(), b"X", b"secret"] {
+            assert!(!content.windows(secret.len()).any(|window| window == secret));
+        }
     }
 
     #[test]
@@ -413,9 +477,12 @@ mod tests {
             store.stage_artifact("tenant-a", b"12345"),
             Err(ObjectStoreError::ObjectQuotaExceeded)
         ));
-        store
-            .commit(store.stage_artifact("tenant-a", b"1234").unwrap())
-            .unwrap();
+        let reserved = store.stage_artifact("tenant-a", b"1234").unwrap();
+        assert!(matches!(
+            store.stage_artifact("tenant-a", b"5678"),
+            Err(ObjectStoreError::TotalQuotaExceeded)
+        ));
+        store.commit(reserved).unwrap();
         assert!(matches!(
             store.stage_artifact("tenant-a", b"567"),
             Err(ObjectStoreError::TotalQuotaExceeded)

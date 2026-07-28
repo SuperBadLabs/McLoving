@@ -141,9 +141,12 @@ impl EffectStatus {
 /// One immutable-payload effect checkpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectCheckpoint {
+    pub attempt_id: Uuid,
+    pub fence: i64,
     pub effect_key: String,
     pub effect_class: EffectClass,
     pub status: EffectStatus,
+    pub payload: Value,
     pub payload_digest: [u8; 32],
 }
 
@@ -941,8 +944,10 @@ impl Store {
         organization_id: Uuid,
     ) -> Result<Vec<EffectCheckpoint>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let rows = sqlx::query_as::<_, (String, String, String, Vec<u8>)>(
-            "SELECT effect_key, effect_class, status, payload_digest
+        type EffectRow = (Uuid, i64, String, String, String, Value, Vec<u8>);
+        let rows = sqlx::query_as::<_, EffectRow>(
+            "SELECT attempt_id, fence, effect_key, effect_class, status,
+                    payload, payload_digest
              FROM attempt_effects
              WHERE organization_id = $1 AND status = 'uncertain'
              ORDER BY updated_at, attempt_id, effect_key",
@@ -952,18 +957,23 @@ impl Store {
         .await?;
         tx.commit().await?;
         rows.into_iter()
-            .map(|(effect_key, effect_class, status, digest)| {
-                Ok(EffectCheckpoint {
-                    effect_key,
-                    effect_class: parse_effect_class(&effect_class)?,
-                    status: parse_effect_status(&status)?,
-                    payload_digest: digest.try_into().map_err(|_| {
-                        StoreError::InvalidEffectPayload(
-                            "stored effect digest is not 32 bytes".to_owned(),
-                        )
-                    })?,
-                })
-            })
+            .map(
+                |(attempt_id, fence, effect_key, effect_class, status, payload, digest)| {
+                    Ok(EffectCheckpoint {
+                        attempt_id,
+                        fence,
+                        effect_key,
+                        effect_class: parse_effect_class(&effect_class)?,
+                        status: parse_effect_status(&status)?,
+                        payload,
+                        payload_digest: digest.try_into().map_err(|_| {
+                            StoreError::InvalidEffectPayload(
+                                "stored effect digest is not 32 bytes".to_owned(),
+                            )
+                        })?,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -1038,7 +1048,7 @@ impl Store {
                     .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?,
             )
             .into();
-            sqlx::query(
+            let inserted = sqlx::query(
                 "INSERT INTO dead_letters (
                      organization_id, attempt_id, reason, payload, payload_digest
                  )
@@ -1052,14 +1062,16 @@ impl Store {
             .bind(digest.as_slice())
             .execute(&mut *tx)
             .await?;
-            append_event_and_outbox(
-                &mut tx,
-                organization_id,
-                build_id,
-                "attempt.dead_lettered",
-                payload,
-            )
-            .await?;
+            if inserted.rows_affected() == 1 {
+                append_event_and_outbox(
+                    &mut tx,
+                    organization_id,
+                    build_id,
+                    "attempt.dead_lettered",
+                    payload,
+                )
+                .await?;
+            }
             tx.commit().await?;
             return Ok(RetryDecision::DeadLettered);
         }
