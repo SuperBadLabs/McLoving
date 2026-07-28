@@ -1,4 +1,390 @@
-//! Version identity for the future outbound agent protocol.
+//! Versioned outbound agent protocol, enrollment, and session fencing.
+//!
+//! The agent is a client only: it builds an HTTPS gRPC endpoint with an
+//! explicitly configured controller CA and client identity. Controller-side
+//! service stubs are generated for the controller crate, but this crate never
+//! opens a listener.
 
-/// Initial protocol generation reserved by the architecture.
+use std::collections::{BTreeSet, HashMap};
+
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+
+/// Generated Protobuf and gRPC contract.
+pub mod wire {
+    tonic::include_proto!("mcloving.agent.v1");
+}
+
 pub const PROTOCOL_MAJOR: u16 = 1;
+pub const PROTOCOL_MINOR: u16 = 0;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolRange {
+    pub major: u16,
+    pub minimum_minor: u16,
+    pub maximum_minor: u16,
+    pub features: BTreeSet<String>,
+}
+
+impl ProtocolRange {
+    #[must_use]
+    pub fn current(features: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            major: PROTOCOL_MAJOR,
+            minimum_minor: PROTOCOL_MINOR,
+            maximum_minor: PROTOCOL_MINOR,
+            features: features.into_iter().collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NegotiatedProtocol {
+    pub major: u16,
+    pub minor: u16,
+    pub features: BTreeSet<String>,
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum ProtocolError {
+    #[error("protocol major mismatch: local {local}, remote {remote}")]
+    MajorMismatch { local: u16, remote: u16 },
+    #[error(
+        "protocol minor ranges do not overlap: local {local_min}..={local_max}, remote {remote_min}..={remote_max}"
+    )]
+    MinorMismatch {
+        local_min: u16,
+        local_max: u16,
+        remote_min: u16,
+        remote_max: u16,
+    },
+    #[error("protocol minor range is invalid: {minimum}..={maximum}")]
+    InvalidRange { minimum: u16, maximum: u16 },
+}
+
+pub fn negotiate(
+    local: &ProtocolRange,
+    remote: &ProtocolRange,
+) -> Result<NegotiatedProtocol, ProtocolError> {
+    if local.minimum_minor > local.maximum_minor {
+        return Err(ProtocolError::InvalidRange {
+            minimum: local.minimum_minor,
+            maximum: local.maximum_minor,
+        });
+    }
+    if remote.minimum_minor > remote.maximum_minor {
+        return Err(ProtocolError::InvalidRange {
+            minimum: remote.minimum_minor,
+            maximum: remote.maximum_minor,
+        });
+    }
+    if local.major != remote.major {
+        return Err(ProtocolError::MajorMismatch {
+            local: local.major,
+            remote: remote.major,
+        });
+    }
+
+    let minimum = local.minimum_minor.max(remote.minimum_minor);
+    let maximum = local.maximum_minor.min(remote.maximum_minor);
+    if minimum > maximum {
+        return Err(ProtocolError::MinorMismatch {
+            local_min: local.minimum_minor,
+            local_max: local.maximum_minor,
+            remote_min: remote.minimum_minor,
+            remote_max: remote.maximum_minor,
+        });
+    }
+
+    Ok(NegotiatedProtocol {
+        major: local.major,
+        minor: maximum,
+        features: local
+            .features
+            .intersection(&remote.features)
+            .cloned()
+            .collect(),
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Enrollment {
+    pub agent_id: String,
+    pub trust_pool: String,
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum EnrollmentError {
+    #[error("enrollment token is unknown or already consumed")]
+    InvalidToken,
+    #[error("certificate signing request is empty")]
+    EmptyCertificateSigningRequest,
+}
+
+/// One-time bootstrap-token registry.
+///
+/// Only SHA-256 digests are retained. Successful consumption removes the
+/// digest before returning identity data, so a token cannot be replayed.
+#[derive(Debug, Default)]
+pub struct EnrollmentRegistry {
+    pending: HashMap<[u8; 32], Enrollment>,
+}
+
+impl EnrollmentRegistry {
+    pub fn register(&mut self, token: &[u8], enrollment: Enrollment) {
+        self.pending.insert(token_digest(token), enrollment);
+    }
+
+    pub fn consume(
+        &mut self,
+        token: &[u8],
+        certificate_signing_request_der: &[u8],
+    ) -> Result<Enrollment, EnrollmentError> {
+        if certificate_signing_request_der.is_empty() {
+            return Err(EnrollmentError::EmptyCertificateSigningRequest);
+        }
+        self.pending
+            .remove(&token_digest(token))
+            .ok_or(EnrollmentError::InvalidToken)
+    }
+}
+
+fn token_digest(token: &[u8]) -> [u8; 32] {
+    Sha256::digest(token).into()
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum FenceError {
+    #[error("session epoch {offered} is not newer than current epoch {current}")]
+    StaleOpen { offered: u64, current: u64 },
+    #[error("session epoch {offered} is stale; current epoch is {current}")]
+    StaleAuthority { offered: u64, current: u64 },
+    #[error("certificate epoch {offered} is stale; current epoch is {current}")]
+    StaleCertificate { offered: u64, current: u64 },
+}
+
+/// Monotonic controller-side authority for agent sessions and certificates.
+#[derive(Debug, Default)]
+pub struct AgentEpochs {
+    sessions: HashMap<String, u64>,
+    certificates: HashMap<String, u64>,
+}
+
+impl AgentEpochs {
+    pub fn open_session(&mut self, agent_id: &str, offered: u64) -> Result<(), FenceError> {
+        let current = self.sessions.get(agent_id).copied().unwrap_or(0);
+        if offered <= current {
+            return Err(FenceError::StaleOpen { offered, current });
+        }
+        self.sessions.insert(agent_id.to_owned(), offered);
+        Ok(())
+    }
+
+    pub fn authorize(&self, agent_id: &str, offered: u64) -> Result<(), FenceError> {
+        let current = self.sessions.get(agent_id).copied().unwrap_or(0);
+        if offered != current {
+            return Err(FenceError::StaleAuthority { offered, current });
+        }
+        Ok(())
+    }
+
+    pub fn rotate_certificate(
+        &mut self,
+        agent_id: &str,
+        current_certificate_epoch: u64,
+    ) -> Result<u64, FenceError> {
+        let current = self.certificates.get(agent_id).copied().unwrap_or(0);
+        if current_certificate_epoch != current {
+            return Err(FenceError::StaleCertificate {
+                offered: current_certificate_epoch,
+                current,
+            });
+        }
+        let next = current.saturating_add(1);
+        self.certificates.insert(agent_id.to_owned(), next);
+        Ok(next)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OutboundMtlsConfig {
+    pub controller_uri: String,
+    pub controller_dns_name: String,
+    pub controller_ca_pem: Vec<u8>,
+    pub agent_certificate_pem: Vec<u8>,
+    pub agent_private_key_pem: Vec<u8>,
+}
+
+#[derive(Debug, Error)]
+pub enum TransportError {
+    #[error("controller URI must use https")]
+    InsecureControllerUri,
+    #[error("controller DNS name must not be empty")]
+    EmptyControllerDnsName,
+    #[error("TLS material must not be empty")]
+    EmptyTlsMaterial,
+    #[error("invalid controller endpoint: {0}")]
+    InvalidEndpoint(#[from] tonic::transport::Error),
+}
+
+impl OutboundMtlsConfig {
+    /// Builds the only transport surface exposed to the agent: an outbound
+    /// mTLS endpoint. Calling `connect` on the returned value initiates the
+    /// connection from agent to controller.
+    pub fn endpoint(&self) -> Result<Endpoint, TransportError> {
+        if !self.controller_uri.starts_with("https://") {
+            return Err(TransportError::InsecureControllerUri);
+        }
+        if self.controller_dns_name.trim().is_empty() {
+            return Err(TransportError::EmptyControllerDnsName);
+        }
+        if self.controller_ca_pem.is_empty()
+            || self.agent_certificate_pem.is_empty()
+            || self.agent_private_key_pem.is_empty()
+        {
+            return Err(TransportError::EmptyTlsMaterial);
+        }
+
+        let tls = ClientTlsConfig::new()
+            .domain_name(self.controller_dns_name.clone())
+            .ca_certificate(Certificate::from_pem(self.controller_ca_pem.clone()))
+            .identity(Identity::from_pem(
+                self.agent_certificate_pem.clone(),
+                self.agent_private_key_pem.clone(),
+            ));
+
+        Ok(Endpoint::from_shared(self.controller_uri.clone())?.tls_config(tls)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn features(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn negotiation_chooses_highest_shared_minor_and_feature_intersection() {
+        let local = ProtocolRange {
+            major: 1,
+            minimum_minor: 2,
+            maximum_minor: 5,
+            features: features(&["journal-v1", "rotation-v1"]),
+        };
+        let remote = ProtocolRange {
+            major: 1,
+            minimum_minor: 3,
+            maximum_minor: 7,
+            features: features(&["rotation-v1", "future"]),
+        };
+
+        assert_eq!(
+            negotiate(&local, &remote),
+            Ok(NegotiatedProtocol {
+                major: 1,
+                minor: 5,
+                features: features(&["rotation-v1"]),
+            })
+        );
+    }
+
+    #[test]
+    fn negotiation_fails_closed_for_major_or_minor_mismatch() {
+        let current = ProtocolRange::current([]);
+        let other_major = ProtocolRange {
+            major: 2,
+            ..current.clone()
+        };
+        assert!(matches!(
+            negotiate(&current, &other_major),
+            Err(ProtocolError::MajorMismatch { .. })
+        ));
+
+        let future_minor = ProtocolRange {
+            major: 1,
+            minimum_minor: 1,
+            maximum_minor: 1,
+            features: BTreeSet::new(),
+        };
+        assert!(matches!(
+            negotiate(&current, &future_minor),
+            Err(ProtocolError::MinorMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn enrollment_token_is_one_time_and_csr_is_required() {
+        let mut registry = EnrollmentRegistry::default();
+        let enrollment = Enrollment {
+            agent_id: "agent-1".to_owned(),
+            trust_pool: "untrusted-linux".to_owned(),
+        };
+        registry.register(b"one-time-secret", enrollment.clone());
+
+        assert_eq!(
+            registry.consume(b"one-time-secret", b""),
+            Err(EnrollmentError::EmptyCertificateSigningRequest)
+        );
+        assert_eq!(registry.consume(b"one-time-secret", b"csr"), Ok(enrollment));
+        assert_eq!(
+            registry.consume(b"one-time-secret", b"csr"),
+            Err(EnrollmentError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn newer_session_fences_old_authority_and_rotation_is_monotonic() {
+        let mut epochs = AgentEpochs::default();
+        epochs.open_session("agent-1", 10).unwrap();
+        epochs.authorize("agent-1", 10).unwrap();
+        epochs.open_session("agent-1", 11).unwrap();
+
+        assert_eq!(
+            epochs.authorize("agent-1", 10),
+            Err(FenceError::StaleAuthority {
+                offered: 10,
+                current: 11,
+            })
+        );
+        assert_eq!(
+            epochs.open_session("agent-1", 11),
+            Err(FenceError::StaleOpen {
+                offered: 11,
+                current: 11,
+            })
+        );
+        assert_eq!(epochs.rotate_certificate("agent-1", 0), Ok(1));
+        assert_eq!(
+            epochs.rotate_certificate("agent-1", 0),
+            Err(FenceError::StaleCertificate {
+                offered: 0,
+                current: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn outbound_transport_refuses_plaintext_or_partial_identity() {
+        let mut config = OutboundMtlsConfig {
+            controller_uri: "http://controller.internal:8443".to_owned(),
+            controller_dns_name: "controller.internal".to_owned(),
+            controller_ca_pem: b"ca".to_vec(),
+            agent_certificate_pem: b"cert".to_vec(),
+            agent_private_key_pem: b"key".to_vec(),
+        };
+        assert!(matches!(
+            config.endpoint(),
+            Err(TransportError::InsecureControllerUri)
+        ));
+
+        config.controller_uri = "https://controller.internal:8443".to_owned();
+        config.agent_private_key_pem.clear();
+        assert!(matches!(
+            config.endpoint(),
+            Err(TransportError::EmptyTlsMaterial)
+        ));
+    }
+}

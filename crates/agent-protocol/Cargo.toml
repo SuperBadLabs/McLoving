@@ -5,5 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[dependencies]
+prost = "=0.14.4"
+sha2 = "=0.10.9"
+thiserror = "=2.0.17"
+tonic = { version = "=0.14.6", features = ["tls-ring", "transport"] }
+tonic-prost = "=0.14.6"
+
+[build-dependencies]
+prost-build = "=0.14.4"
+protoc-bin-vendored = "=3.2.0"
+tonic-prost-build = "=0.14.6"
+
 [lints]
 workspace = true
