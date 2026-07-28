@@ -25,6 +25,13 @@ monotonically through prepared, applied, and confirmed, or enters the explicit
 uncertain state. Uncertain work is listed for reconciliation and cannot regress
 to an unconfirmed applied state.
 
+Claims share-lock and record the controller restore epoch. Restore activation
+exclusively increments that epoch, invalidates every active lease, and commits
+`reconciliation_required` attempt, node, and build state with matching events
+and outbox messages. Pre-restore agents can no longer renew or publish. The old
+attempt and its epoch remain history; reconciliation may explicitly schedule a
+new retry rather than rewriting that history.
+
 Migrations use a database advisory lock and a version ledger, so concurrent
 controller startup installs each migration exactly once.
 
@@ -73,7 +80,9 @@ The real-PostgreSQL gate proves:
 - a tenant-prefixed scheduler claim-order index;
 - immutable, idempotent, bounded retry history and dead-letter exhaustion;
 - monotonic effect checkpoints, payload substitution rejection, and explicit
-  uncertain-effect reconciliation; and
+  uncertain-effect reconciliation;
+- monotonic retention, legal-hold precedence, logical backup/restore, and
+  restore-epoch rejection of pre-restore authority; and
 - forced-RLS read filtering and cross-tenant write rejection.
 
 Rust unit tests independently prove the authorization matrix and deny defaults.

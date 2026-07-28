@@ -58,6 +58,17 @@ impl Store {
             .bind(format!("mcloving.scheduler.{}", request.organization_id))
             .execute(&mut *tx)
             .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(0x4d_63_4c_6f_76_72_65_63_i64)
+            .execute(&mut *tx)
+            .await?;
+        let restore_epoch = sqlx::query_scalar::<_, i64>(
+            "SELECT restore_epoch
+             FROM controller_metadata
+             WHERE singleton",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
 
         let candidate = sqlx::query(
             "SELECT n.id AS node_id, n.build_id, a.id AS attempt_id
@@ -102,7 +113,8 @@ impl Store {
                  fence = fence + 1,
                  lease_owner = $3,
                  lease_expires_at =
-                   clock_timestamp() + make_interval(secs => $4)
+                   clock_timestamp() + make_interval(secs => $4),
+                 restore_epoch = $5
              WHERE id = $1 AND organization_id = $2
              RETURNING fence",
         )
@@ -110,6 +122,7 @@ impl Store {
         .bind(request.organization_id)
         .bind(&request.agent_id)
         .bind(f64::from(request.lease_seconds))
+        .bind(restore_epoch)
         .fetch_one(&mut *tx)
         .await?;
         sqlx::query(

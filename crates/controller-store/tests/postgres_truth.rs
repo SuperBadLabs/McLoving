@@ -1106,6 +1106,347 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
 }
 
 #[tokio::test]
+async fn retention_is_monotonic_and_legal_holds_block_deletion() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "retention",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "retained-object".into(),
+            pipeline_digest: [51; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: Vec::new(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler".into(),
+            agent_id: "agent".into(),
+            capabilities: Vec::new(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim")
+        .expect("claim exists");
+    assert!(
+        store
+            .accept_offer(organization_id, admission.attempt_id, claim.fence, "agent")
+            .await
+            .expect("accept")
+    );
+    let digest = [52; 32];
+    assert!(
+        store
+            .register_object(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "agent",
+                ObjectKind::Artifact,
+                "evidence.tar.zst",
+                digest,
+                4096,
+            )
+            .await
+            .expect("register retained object")
+    );
+    assert!(
+        store
+            .retain_object_for(organization_id, digest, 0)
+            .await
+            .expect("assign expired retention")
+    );
+    assert_eq!(
+        store
+            .objects_eligible_for_deletion(organization_id, 10)
+            .await
+            .expect("list expired content"),
+        vec![digest]
+    );
+    assert!(
+        store
+            .acquire_legal_hold(
+                organization_id,
+                digest,
+                "case-2026-07",
+                "regulatory preservation",
+            )
+            .await
+            .expect("acquire legal hold")
+    );
+    assert!(
+        store
+            .acquire_legal_hold(
+                organization_id,
+                digest,
+                "case-2026-07",
+                "regulatory preservation",
+            )
+            .await
+            .expect("repeat legal hold idempotently")
+    );
+    assert!(
+        store
+            .objects_eligible_for_deletion(organization_id, 10)
+            .await
+            .expect("held content is not deletable")
+            .is_empty()
+    );
+    assert!(
+        !store
+            .acquire_legal_hold(
+                organization_id,
+                digest,
+                "case-2026-07",
+                "silently changed reason",
+            )
+            .await
+            .expect("reject changed hold identity")
+    );
+    assert!(
+        store
+            .release_legal_hold(organization_id, digest, "case-2026-07")
+            .await
+            .expect("release legal hold")
+    );
+    assert!(
+        !store
+            .release_legal_hold(organization_id, digest, "case-2026-07")
+            .await
+            .expect("repeat release is idempotent")
+    );
+    assert_eq!(
+        store
+            .objects_eligible_for_deletion(organization_id, 10)
+            .await
+            .expect("released content is deletable"),
+        vec![digest]
+    );
+    assert!(
+        store
+            .retain_object_for(organization_id, digest, 3600)
+            .await
+            .expect("extend retention")
+    );
+    assert!(
+        store
+            .retain_object_for(organization_id, digest, 0)
+            .await
+            .expect("shortening attempt remains idempotent")
+    );
+    assert!(
+        store
+            .objects_eligible_for_deletion(organization_id, 10)
+            .await
+            .expect("retention extension is monotonic")
+            .is_empty()
+    );
+}
+
+fn recovery_canary_ids() -> (Uuid, Uuid) {
+    (
+        Uuid::from_u128(0x4d63_4c6f_7669_6e67_0000_0000_0000_0001),
+        Uuid::from_u128(0x4d63_4c6f_7669_6e67_0000_0000_0000_0002),
+    )
+}
+
+#[tokio::test]
+#[ignore = "run only by scripts/test-backup-restore.sh against an isolated source"]
+async fn backup_restore_canary_seed() {
+    let store = test_store().await.expect("isolated source database URL");
+    let (organization_id, project_id) = recovery_canary_ids();
+    store
+        .create_project(
+            organization_id,
+            "recovery-canary",
+            project_id,
+            "backup-source",
+        )
+        .await
+        .expect("create recovery canary");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "backup-restore-canary".into(),
+            pipeline_digest: [61; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 10,
+            execution_spec: json!({"command": "preserve-me"}),
+        })
+        .await
+        .expect("admit recovery canary");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "recovery-scheduler".into(),
+            agent_id: "pre-restore-agent".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim recovery canary")
+        .expect("claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "pre-restore-agent",
+            )
+            .await
+            .expect("accept recovery canary")
+    );
+    assert!(
+        store
+            .register_object(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "pre-restore-agent",
+                ObjectKind::Result,
+                "result.cbor",
+                [62; 32],
+                2048,
+            )
+            .await
+            .expect("register recovery object")
+    );
+    let point = store
+        .seal_recovery_point("compact-drill-001")
+        .await
+        .expect("seal recovery point");
+    assert_eq!(point.restore_epoch, 1);
+    assert!(!point.recovery_lsn.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "run only by scripts/test-backup-restore.sh against an isolated restore"]
+async fn backup_restore_canary_verify() {
+    let store = test_store().await.expect("isolated restore database URL");
+    let (organization_id, project_id) = recovery_canary_ids();
+    let admission = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+        "SELECT b.id, a.id, a.fence
+         FROM builds AS b
+         JOIN nodes AS n
+           ON n.build_id = b.id AND n.organization_id = b.organization_id
+         JOIN attempts AS a
+           ON a.node_id = n.id AND a.organization_id = n.organization_id
+         WHERE b.organization_id = $1
+           AND b.project_id = $2
+           AND b.idempotency_key = 'backup-restore-canary'",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("restored canary exists");
+    let activation = store
+        .activate_restore_epoch("compact-drill-001", "automated restore drill")
+        .await
+        .expect("activate restored truth")
+        .expect("sealed recovery point exists");
+    assert_eq!(activation.restore_epoch, 2);
+    assert_eq!(activation.affected_attempts, 1);
+    assert!(!activation.recovery_lsn.is_empty());
+    assert_eq!(store.current_restore_epoch().await.expect("read epoch"), 2);
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.0)
+        .await
+        .expect("read restored build")
+        .expect("restored build exists");
+    assert_eq!(snapshot.build_status, "reconciliation_required");
+    assert_eq!(snapshot.attempt_status, "reconciliation_required");
+    assert!(snapshot.lease_owner.is_none());
+    assert!(
+        store
+            .renew_attempt_lease(
+                organization_id,
+                admission.1,
+                admission.2,
+                "pre-restore-agent",
+                30,
+            )
+            .await
+            .expect("old renewal is rejected")
+            .is_none()
+    );
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                admission.1,
+                admission.2,
+                "pre-restore-agent",
+                TerminalOutcome::Succeeded,
+                json!({"stale": true}),
+            )
+            .await
+            .expect("old terminal publication is rejected")
+    );
+    assert!(
+        !store
+            .register_object(
+                organization_id,
+                admission.1,
+                admission.2,
+                "pre-restore-agent",
+                ObjectKind::Artifact,
+                "stale.tar",
+                [63; 32],
+                1,
+            )
+            .await
+            .expect("old object publication is rejected")
+    );
+    let objects = store
+        .build_objects(organization_id, project_id, admission.0)
+        .await
+        .expect("read restored object references");
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].digest, [62; 32]);
+    let publications: (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM build_events
+            WHERE organization_id = $1
+              AND build_id = $2
+              AND kind = 'attempt.restore_reconciliation_required'),
+           (SELECT count(*) FROM outbox
+            WHERE organization_id = $1
+              AND aggregate_id = $2
+              AND topic = 'attempt.restore_reconciliation_required')",
+    )
+    .bind(organization_id)
+    .bind(admission.0)
+    .fetch_one(store.pool())
+    .await
+    .expect("read restore publications");
+    assert_eq!(publications, (1, 1));
+}
+
+#[tokio::test]
 async fn claim_order_index_is_tenant_prefixed() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

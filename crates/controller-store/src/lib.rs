@@ -20,6 +20,8 @@ pub const PUBLIC_API_V3: &str = include_str!("../migrations/0003_public_api.sql"
 pub const DURABLE_RETRY_V4: &str = include_str!("../migrations/0004_durable_retry.sql");
 /// Controller references to immutable object-store content.
 pub const OBJECT_REFERENCES_V5: &str = include_str!("../migrations/0005_object_references.sql");
+/// Backup checkpoints, restore fencing, retention, and legal-hold migration.
+pub const RECOVERY_OPERATIONS_V6: &str = include_str!("../migrations/0006_recovery_operations.sql");
 
 /// A build and its first executable node, admitted as one durable unit.
 #[derive(Clone, Debug)]
@@ -205,6 +207,23 @@ pub struct StoredObject {
     pub status: ObjectStatus,
 }
 
+/// A sealed database checkpoint that can anchor backup and PITR operations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryPoint {
+    pub backup_id: String,
+    pub restore_epoch: i64,
+    pub recovery_lsn: String,
+}
+
+/// Result of activating restored controller truth.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoreActivation {
+    pub restore_epoch: i64,
+    pub backup_id: String,
+    pub recovery_lsn: String,
+    pub affected_attempts: u64,
+}
+
 /// Terminal result accepted from a fenced attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalOutcome {
@@ -236,6 +255,8 @@ pub enum StoreError {
     InvalidEffectPayload(String),
     #[error("invalid durable object record: {0}")]
     InvalidObjectRecord(String),
+    #[error("invalid recovery operation: {0}")]
+    InvalidRecoveryOperation(String),
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -273,6 +294,7 @@ impl Store {
         apply_migration(&mut tx, 3, PUBLIC_API_V3).await?;
         apply_migration(&mut tx, 4, DURABLE_RETRY_V4).await?;
         apply_migration(&mut tx, 5, OBJECT_REFERENCES_V5).await?;
+        apply_migration(&mut tx, 6, RECOVERY_OPERATIONS_V6).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1226,6 +1248,348 @@ impl Store {
                     })?,
                     bytes,
                     status: parse_object_status(&status)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Returns the global restore epoch used to fence pre-restore authority.
+    pub async fn current_restore_epoch(&self) -> Result<i64, StoreError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT restore_epoch
+             FROM controller_metadata
+             WHERE singleton",
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Seals a stable backup identifier to the current PostgreSQL WAL position.
+    ///
+    /// Repeating an existing identifier is idempotent and returns the original
+    /// checkpoint. Backup tooling must persist this record with the database
+    /// snapshot and, for HA PITR, retain WAL through `recovery_lsn`.
+    pub async fn seal_recovery_point(&self, backup_id: &str) -> Result<RecoveryPoint, StoreError> {
+        if backup_id.is_empty() || backup_id.len() > 256 {
+            return Err(StoreError::InvalidRecoveryOperation(
+                "backup id must contain between 1 and 256 bytes".to_owned(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(0x4d_63_4c_6f_76_72_65_63_i64)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO recovery_points (
+                 backup_id, restore_epoch, recovery_lsn
+             )
+             SELECT $1, restore_epoch, pg_current_wal_lsn()
+             FROM controller_metadata
+             WHERE singleton
+             ON CONFLICT (backup_id) DO NOTHING",
+        )
+        .bind(backup_id)
+        .execute(&mut *tx)
+        .await?;
+        let (restore_epoch, recovery_lsn) = sqlx::query_as::<_, (i64, String)>(
+            "SELECT restore_epoch, recovery_lsn::text
+             FROM recovery_points
+             WHERE backup_id = $1",
+        )
+        .bind(backup_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(RecoveryPoint {
+            backup_id: backup_id.to_owned(),
+            restore_epoch,
+            recovery_lsn,
+        })
+    }
+
+    /// Activates restored truth and atomically invalidates every old lease.
+    ///
+    /// This is a privileged, controller-wide recovery operation. Schedulers
+    /// share-lock the epoch row while claiming, so no offer can straddle the
+    /// activation transaction. Active attempts become explicit reconciliation
+    /// work; their previous fence, owner, and epoch remain immutable history.
+    pub async fn activate_restore_epoch(
+        &self,
+        backup_id: &str,
+        reason: &str,
+    ) -> Result<Option<RestoreActivation>, StoreError> {
+        if backup_id.is_empty() || backup_id.len() > 256 || reason.is_empty() || reason.len() > 1024
+        {
+            return Err(StoreError::InvalidRecoveryOperation(
+                "backup id and restore reason must be non-empty and bounded".to_owned(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(0x4d_63_4c_6f_76_72_65_63_i64)
+            .execute(&mut *tx)
+            .await?;
+        let current_epoch = sqlx::query_scalar::<_, i64>(
+            "SELECT restore_epoch
+             FROM controller_metadata
+             WHERE singleton
+             FOR UPDATE",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        let recovery_lsn = sqlx::query_scalar::<_, String>(
+            "SELECT recovery_lsn::text
+             FROM recovery_points
+             WHERE backup_id = $1",
+        )
+        .bind(backup_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(recovery_lsn) = recovery_lsn else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        let restore_epoch = current_epoch.checked_add(1).ok_or_else(|| {
+            StoreError::InvalidRecoveryOperation("restore epoch overflow".to_owned())
+        })?;
+        let affected = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, i64)>(
+            "SELECT a.id, a.organization_id, n.id, n.build_id, a.restore_epoch
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             WHERE a.status IN (
+                 'offered', 'accepted', 'running', 'finalizing', 'cancelling'
+             )
+             ORDER BY a.organization_id, a.id
+             FOR UPDATE OF a, n",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE controller_metadata
+             SET restore_epoch = $1, updated_at = clock_timestamp()
+             WHERE singleton",
+        )
+        .bind(restore_epoch)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO restore_epochs (
+                 restore_epoch, backup_id, recovery_lsn, reason
+             )
+             VALUES ($1, $2, $3::pg_lsn, $4)",
+        )
+        .bind(restore_epoch)
+        .bind(backup_id)
+        .bind(&recovery_lsn)
+        .bind(reason)
+        .execute(&mut *tx)
+        .await?;
+        for (attempt_id, organization_id, node_id, build_id, attempt_epoch) in &affected {
+            sqlx::query(
+                "UPDATE attempts
+                 SET status = 'reconciliation_required',
+                     lease_owner = NULL,
+                     lease_expires_at = NULL
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(attempt_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'reconciliation_required'
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(node_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE builds
+                 SET status = 'reconciliation_required', completed_at = NULL
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(build_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            append_event_and_outbox(
+                &mut tx,
+                *organization_id,
+                *build_id,
+                "attempt.restore_reconciliation_required",
+                json!({
+                    "attempt_id": attempt_id,
+                    "attempt_restore_epoch": attempt_epoch,
+                    "restore_epoch": restore_epoch,
+                    "backup_id": backup_id,
+                    "recovery_lsn": recovery_lsn,
+                }),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(Some(RestoreActivation {
+            restore_epoch,
+            backup_id: backup_id.to_owned(),
+            recovery_lsn,
+            affected_attempts: affected.len() as u64,
+        }))
+    }
+
+    /// Extends an object's deletion deadline without permitting shortening.
+    pub async fn retain_object_for(
+        &self,
+        organization_id: Uuid,
+        digest: [u8; 32],
+        retention_seconds: i64,
+    ) -> Result<bool, StoreError> {
+        if retention_seconds < 0 {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let retained = sqlx::query_scalar::<_, Vec<u8>>(
+            "INSERT INTO object_retention (
+                 organization_id, object_digest, retain_until
+             )
+             SELECT $1, $2,
+                    clock_timestamp() + make_interval(secs => $3::double precision)
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM attempt_objects
+                 WHERE organization_id = $1 AND object_digest = $2
+             )
+             ON CONFLICT (organization_id, object_digest)
+             DO UPDATE SET
+                 retain_until = GREATEST(
+                     object_retention.retain_until,
+                     EXCLUDED.retain_until
+                 ),
+                 updated_at = clock_timestamp()
+             RETURNING object_digest",
+        )
+        .bind(organization_id)
+        .bind(digest.as_slice())
+        .bind(retention_seconds as f64)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(retained.is_some())
+    }
+
+    /// Applies an immutable, named legal hold to committed object content.
+    pub async fn acquire_legal_hold(
+        &self,
+        organization_id: Uuid,
+        digest: [u8; 32],
+        hold_key: &str,
+        reason: &str,
+    ) -> Result<bool, StoreError> {
+        if hold_key.is_empty() || hold_key.len() > 256 || reason.is_empty() || reason.len() > 1024 {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let held = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO legal_holds (
+                 id, organization_id, object_digest, hold_key, reason
+             )
+             SELECT $1, $2, $3, $4, $5
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM attempt_objects
+                 WHERE organization_id = $2 AND object_digest = $3
+             )
+             ON CONFLICT (organization_id, object_digest, hold_key)
+             DO UPDATE SET reason = EXCLUDED.reason
+             WHERE legal_holds.reason = EXCLUDED.reason
+               AND legal_holds.released_at IS NULL
+             RETURNING id",
+        )
+        .bind(Uuid::new_v4())
+        .bind(organization_id)
+        .bind(digest.as_slice())
+        .bind(hold_key)
+        .bind(reason)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(held.is_some())
+    }
+
+    /// Releases one exact legal hold while preserving its audit record.
+    pub async fn release_legal_hold(
+        &self,
+        organization_id: Uuid,
+        digest: [u8; 32],
+        hold_key: &str,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let released = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE legal_holds
+             SET released_at = clock_timestamp()
+             WHERE organization_id = $1
+               AND object_digest = $2
+               AND hold_key = $3
+               AND released_at IS NULL
+             RETURNING id",
+        )
+        .bind(organization_id)
+        .bind(digest.as_slice())
+        .bind(hold_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(released.is_some())
+    }
+
+    /// Lists expired retained content with no active legal hold.
+    ///
+    /// Absence of a retention record is deliberately fail-closed: content is
+    /// not eligible for deletion until policy has assigned a deadline.
+    pub async fn objects_eligible_for_deletion(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<[u8; 32]>, StoreError> {
+        if !(1..=10_000).contains(&limit) {
+            return Ok(Vec::new());
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT r.object_digest
+             FROM object_retention AS r
+             WHERE r.organization_id = $1
+               AND r.retain_until <= clock_timestamp()
+               AND EXISTS (
+                   SELECT 1
+                   FROM attempt_objects AS o
+                   WHERE o.organization_id = r.organization_id
+                     AND o.object_digest = r.object_digest
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM legal_holds AS h
+                   WHERE h.organization_id = r.organization_id
+                     AND h.object_digest = r.object_digest
+                     AND h.released_at IS NULL
+               )
+             ORDER BY r.retain_until, r.object_digest
+             LIMIT $2",
+        )
+        .bind(organization_id)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(|digest| {
+                digest.try_into().map_err(|_| {
+                    StoreError::InvalidObjectRecord(
+                        "retained object digest is not 32 bytes".to_owned(),
+                    )
                 })
             })
             .collect()
