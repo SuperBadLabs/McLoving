@@ -4,61 +4,89 @@ Updated: 2026-07-28
 
 Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
+## Working rules
+
+- Select a coherent batch of three to six logically coupled tickets.
+- Use one `codex/` branch and pull request per batch.
+- Keep one coherent commit per ticket where practical.
+- Address every actionable Copilot review thread before merge.
+- Required checks, review threads, exact commit, and clean worktree must be
+  verified before protected-main merge.
+- After merge, select the next unblocked batch without waiting for ceremony.
+- Stop only for an owner-level decision, new authority, or genuine blocker.
+
+## Batch ledger
+
+| Batch | Tickets | Status | Outcome |
+|---|---|---|---|
+| W0-A | FOUND-001 | DONE | PR #1 established private repository and architecture baseline |
+| W0-B | ARCH-001, FOUND-002, SEC-001 | DONE | Finite formal model, reproducible HeMan gate, and owned threat model |
+| W0-C | IR-001, IR-002, ARCH-002 | PENDING | Strict YAML admission and canonical IR contract |
+| W1-A | CTRL-001, CTRL-002, SEC-002 | PENDING | PostgreSQL truth, outbox, scheduler, and tenant enforcement |
+| W1-B | AGENT-001, AGENT-002, AGENT-003 | PENDING | mTLS agent session, SQLite journal, Linux execution |
+| W1-C | UX-001, E2E-001, E2E-002, E2E-003 | PENDING | Truthful CLI-driven end-to-end spine and recovery |
+
 ## Wave 0 — Architecture and foundation
 
-| Ticket | Status | Objective | Acceptance |
+| Ticket | Status | Depends on | Objective and acceptance |
 |---|---|---|---|
-| FOUND-001 | DONE | Establish private greenfield repository | Monorepo skeleton, ADRs 1–15, board, threat model, CI policy, clean foundation commit and draft PR |
-| ARCH-001 | PENDING | Validate the attempt/lease formal model | TLC runs in CI; stale finish, fencing, and terminal monotonicity invariants proven for bounded model |
-| FOUND-002 | PENDING | Reproducible developer and CI toolchain | Pinned Rust/container toolchain, dependency cache policy, one-command HeMan validation |
-| SEC-001 | PENDING | Complete initial threat model | Actors, assets, abuse cases, mitigations, residual risks, and test ownership reviewed |
-| IR-001 | PENDING | Implement strict-YAML syntax gate | Restricted YAML rules, resource bounds, source spans, fuzz target, negative corpus |
-| IR-002 | PENDING | Define Pipeline IR v1 schema | Canonical encoding, digest, provenance, version compatibility, independent validation |
+| FOUND-001 | DONE | — | Private monorepo, ADRs 1–15, board, threat model skeleton, CI, clean protected merge |
+| ARCH-001 | DONE | FOUND-001 | Finite TLC model; lease type, stale publication rejection, fencing, terminal monotonicity, and completion stability checked in CI |
+| FOUND-002 | DONE | FOUND-001 | Digest-pinned Rust/gitleaks, checksummed tools, documented cache policy, one-command HeMan validation |
+| SEC-001 | DONE | FOUND-001 | Actors, assets, boundaries, assumptions, 24 owned threats, mitigations, residual risk, and verification map |
+| IR-001 | PENDING | ARCH-001, SEC-001 | Restricted YAML 1.2 parser, duplicate/alias/tag/directive rejection, limits, exact spans, fuzz and negative corpus |
+| IR-002 | PENDING | IR-001 | Pipeline IR v1 types, canonical serialization and digest, provenance, compatibility versioning, independent validator |
+| ARCH-002 | PENDING | IR-001, IR-002 | Property model for admission determinism, bounded graph expansion, and unknown-field fail-closed behavior |
 
 ## Wave 1 — Smallest truthful end-to-end slice
 
-| Ticket | Status | Objective |
-|---|---|---|
-| CTRL-001 | PENDING | PostgreSQL schema, migration runner, and transactional state/event/outbox commit |
-| CTRL-002 | PENDING | Single-node fenced scheduler and explainable queue decision |
-| AGENT-001 | PENDING | Outbound mTLS session and version negotiation |
-| AGENT-002 | PENDING | SQLite WAL acceptance journal and reconciliation report |
-| AGENT-003 | PENDING | Linux workspace, process group, durable logs, cancellation cleanup |
-| UX-001 | PENDING | CLI submit, inspect, logs, cancel, and explain |
-| E2E-001 | PENDING | One-stage strict-YAML pipeline through the complete real spine |
-| E2E-002 | PENDING | Controller restart without duplicate or lost execution |
-| E2E-003 | PENDING | Agent reconnect and descendant-process cancellation proof |
+| Ticket | Status | Depends on | Objective and acceptance |
+|---|---|---|---|
+| CTRL-001 | PENDING | IR-002 | PostgreSQL migrations and one transaction for build/node/attempt/event/outbox with real-DB race tests |
+| CTRL-002 | PENDING | CTRL-001 | Fenced single-node scheduler, indexed claims, capability filtering, fairness seed, explainable wait reason |
+| SEC-002 | PENDING | SEC-001, CTRL-001 | Organization/project identity, tenant-keyed schema, PostgreSQL RLS, centralized deny-by-default authorization |
+| AGENT-001 | PENDING | ARCH-001, CTRL-001 | Outbound mTLS, enrollment, certificate rotation, session epoch, protocol negotiation, stale-session fencing |
+| AGENT-002 | PENDING | AGENT-001 | SQLite WAL acceptance-before-ack, journal recovery, log/result spool metadata, reconciliation report |
+| AGENT-003 | PENDING | AGENT-002 | Linux workspace/process group, durable logs, timeout/cancel tree cleanup, no escaped descendants |
+| UX-001 | PENDING | CTRL-002 | Rust CLI submit/status/logs/cancel/explain through documented public API and idempotency keys |
+| E2E-001 | PENDING | IR-002, CTRL-002, AGENT-003, UX-001 | One-stage strict-YAML process through real PostgreSQL, outbox, scheduler, agent, logs, terminal result |
+| E2E-002 | PENDING | E2E-001 | Controller kill/restart at every durable transition without lost or duplicate logical execution |
+| E2E-003 | PENDING | E2E-001 | Agent disconnect/restart reconciliation and complete descendant-process cancellation proof |
 
 ## Wave 2 — Durability and platform parity
 
-`CTRL-003` retry/timeout/post, `OPS-001` object storage and artifacts,
-`WIN-001` Windows service agent, `WIN-002` PowerShell/cmd/direct execution,
-`WIN-003` Job Object cancellation and reboot reconciliation.
+| Ticket | Status | Depends on | Objective |
+|---|---|---|---|
+| CTRL-003 | PENDING | E2E-002 | Durable retry, timeout, post, cleanup, and uncertain-effect reconciliation |
+| OPS-001 | PENDING | E2E-001 | Staged object storage, immutable artifacts, checksummed log chunks, explicit gaps and quotas |
+| OPS-002 | PENDING | OPS-001 | Backup, PITR, restore epoch, object reconciliation, retention and legal-hold drills |
+| WIN-001 | PENDING | AGENT-003 | Signed Windows service agent, journal, enrollment, restart and reboot recovery |
+| WIN-002 | PENDING | WIN-001 | Direct process, cmd, PowerShell, Job Objects, ACL workspaces, descendant cleanup |
+| WIN-003 | PENDING | WIN-002, E2E-003 | Linux/Windows semantic parity and destructive recovery suite |
 
 ## Wave 3 — Native product surface
 
-Parallel and matrix execution, components, tenancy, credential grants, public
-API, complete CLI journeys, initial UI, tests, and artifact browsing.
+Parallel and matrix execution, components, parameters, expressions, credential
+grants, protected environments, full REST API, CLI journeys, initial static UI,
+test normalization, artifacts, and audit.
 
 ## Wave 4 — Jenkins migration
 
-Pinned compatibility worker, Declarative compiler, Scripted classifier, mapping
-catalog, shared-library inventory, differential traces, generated strict YAML,
-shadow, and canary.
+Pinned isolated compiler, exact target profiles, Declarative compilation,
+Scripted classification, mapping catalog, shared-library inventory,
+differential traces, generated strict YAML, shadow, canary, and cutover.
 
 ## Wave 5 — Extensions and operations
 
-SCM, secrets, notifications, provisioners, protected deployments, retention,
-backup, compact/HA packaging, upgrade, and rollback.
+SCM, secrets, notifications, provisioners, deployment connectors, compact and
+HA packaging, upgrades, rollback, retention, and disaster recovery.
 
 ## Wave 6 — Better-and-faster proof
 
 OSS/private corpus, Linux/Windows war hosts, Jenkins comparison, capacity
-envelope, soak, security review, disaster campaign, private alpha canary, and
-release-readiness assessment.
+envelope, multi-day soak, security review, disaster campaign, private alpha
+canary, and release-readiness assessment.
 
-## Board rule
+## Current next batch
 
-Finish the active ticket satisfactorily, preserve its evidence and coherent
-commit, then select the next logical unblocked ticket. Stop only for an
-owner-level decision or authorization.
+`W0-C`: `IR-001`, `IR-002`, and `ARCH-002`.
