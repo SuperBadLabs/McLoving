@@ -78,15 +78,15 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 |---|---|---|---|---|---|
 | TM-001 | Cross-tenant object ID is substituted in an API call | Tenant IDs in keys, centralized authz, PostgreSQL RLS | Generated authz matrix and negative integration tests | SEC | Privileged DB operator |
 | TM-002 | Fork pipeline requests protected credentials | Immutable trust class, grant policy, restricted pool | Fork/fork-to-trusted transition tests | SEC/AGENT | Malicious trusted maintainer |
-| TM-003 | Stale lease publishes a result after fencing | Epoch and lease token checked transactionally | TLC model, DB race tests, reconnect E2E | ARCH/CTRL | DB compromise |
+| TM-003 | Stale lease publishes a result after fencing | Epoch and lease token checked transactionally | TLC model, DB race tests, agent-session epoch unit tests, reconnect E2E | ARCH/CTRL | DB compromise |
 | TM-004 | Lost connection triggers duplicate deployment | Reconciliation and effect idempotency class | Partition and ambiguous-effect war test | CTRL/EXT | External API lacking reconciliation |
 | TM-005 | Controller restart loses accepted work | PostgreSQL transaction plus outbox | Kill-after-each-transition fault injection | CTRL | Correlated DB failure |
-| TM-006 | Agent restart loses process identity or result | Local SQLite WAL and durable spool | SIGKILL/reboot/reconnect tests | AGENT | Host disk corruption |
-| TM-007 | Workload escapes process-tree cancellation | Process groups/cgroups or Job Objects | Descendant escape and cleanup tests | AGENT/WIN | Kernel or container-runtime flaw |
+| TM-006 | Agent restart loses process identity or result | Local SQLite WAL, FULL synchronous commits, and durable spool metadata | Reopen/integrity tests now; SIGKILL/reboot/reconnect E2E next | AGENT | Host disk corruption |
+| TM-007 | Workload escapes process-tree cancellation | Linux process groups now; cgroups and Job Objects by deployment/platform ticket | Destructive timeout and cancellation descendant tests | AGENT/WIN | Kernel or container-runtime flaw |
 | TM-008 | Parser input consumes unbounded CPU or memory | Strict YAML subset, compiler sandbox, resource limits | Continuous fuzzing and timeout corpus | IR/COMPAT | Novel parser vulnerability |
 | TM-009 | Unknown step is reported successful | Typed IR and fail-closed mapping | Negative corpus and unknown-effect property tests | IR/COMPAT | Incorrect approved mapping |
 | TM-010 | Connector gains scheduler or DB authority | Out-of-process scoped identity and protocol | Permission-negative integration suite | EXT/SEC | Host administrator |
-| TM-011 | Agent impersonates a more privileged pool | Certificate identity plus measured capabilities and policy | Enrollment/revocation/pool-spoof tests | AGENT/SEC | CA compromise |
+| TM-011 | Agent impersonates a more privileged pool | One-time enrollment, mTLS identity, session/certificate epochs, measured capabilities and policy | Token replay, stale-session, rotation, revocation, and pool-spoof tests | AGENT/SEC | CA compromise |
 | TM-012 | Cache poisoning crosses trust boundary | Trust-classed immutable cache generations | Untrusted-write/trusted-read negative tests | OPS/SEC | Compromised trusted producer |
 | TM-013 | Secret appears in logs, traces, SQLite, or artifacts | Attempt-scoped grants, no persistence, redaction defense | Marker-secret scan across every sink | SEC/OPS | Transformed secret not recognized |
 | TM-014 | Artifact is substituted after successful build | Staged digest verification and immutable metadata | Tamper, partial-upload, and restore tests | OPS | Storage administrator |
@@ -96,7 +96,7 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 | TM-018 | Log/artifact volume exhausts controller or agent disk | Bounded spool and explicit backpressure | Disk-full and quota war tests | OPS/AGENT | Operator misconfiguration |
 | TM-019 | Approval is reused after pipeline or artifact changes | Approval binds build, IR, artifact, environment, action | Stale-approval negative tests | SEC/UX | Approver account compromise |
 | TM-020 | Compatibility worker executes untrusted Groovy with authority | No secrets/network/DB/agent access; isolated limits | Sandbox escape and authority-negative tests | COMPAT/SEC | JVM/container escape |
-| TM-021 | Malformed protocol message crashes controller or agent | Bounded Protobuf decoding and version checks | Protocol fuzzing and oversize tests | AGENT/CTRL | Runtime-library vulnerability |
+| TM-021 | Malformed protocol message crashes controller or agent | Protobuf contract and fail-closed major/minor negotiation; message bounds at transport integration | Version/range tests now; protocol fuzzing and oversize E2E next | AGENT/CTRL | Runtime-library vulnerability |
 | TM-022 | Audit history is silently altered | Append-only API, hash segments, external export | Mutation denial and export verification | SEC/OPS | DB and external sink collusion |
 | TM-023 | Unauthorized tool version enters validation or release | Versioned downloads, SHA-256 verification, OCI digests | Empty-cache validation and manifest check | FOUND/REL | Compromised upstream plus digest update |
 | TM-024 | UI or CLI hides uncertain or degraded state | Server-authoritative typed states and explicit gaps | User-journey and API contract tests | UX/CTRL | Client compromise |

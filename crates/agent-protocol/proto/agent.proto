@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package mcloving.agent.v1;
+
+service AgentControl {
+  rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
+  rpc RotateCertificate(RotateCertificateRequest) returns (RotateCertificateResponse);
+  rpc Reconcile(ReconciliationReport) returns (ReconciliationDirective);
+}
+
+message ProtocolOffer {
+  uint32 major = 1;
+  uint32 minimum_minor = 2;
+  uint32 maximum_minor = 3;
+  repeated string features = 4;
+}
+
+message OpenSessionRequest {
+  string agent_id = 1;
+  uint64 session_epoch = 2;
+  ProtocolOffer protocol = 3;
+  string trust_pool = 4;
+  repeated string capabilities = 5;
+}
+
+message OpenSessionResponse {
+  uint64 session_epoch = 1;
+  uint32 protocol_minor = 2;
+  repeated string features = 3;
+  int64 certificate_not_after_unix_ms = 4;
+}
+
+message RotateCertificateRequest {
+  string agent_id = 1;
+  uint64 session_epoch = 2;
+  uint64 certificate_epoch = 3;
+  bytes certificate_signing_request_der = 4;
+}
+
+message RotateCertificateResponse {
+  uint64 certificate_epoch = 1;
+  bytes leaf_certificate_pem = 2;
+  bytes certificate_chain_pem = 3;
+}
+
+message AttemptState {
+  string organization_id = 1;
+  string attempt_id = 2;
+  uint64 fence_token = 3;
+  string phase = 4;
+  bytes payload_digest = 5;
+}
+
+message ReconciliationReport {
+  string agent_id = 1;
+  uint64 session_epoch = 2;
+  repeated AttemptState attempts = 3;
+}
+
+message ReconciliationDirective {
+  uint64 session_epoch = 1;
+  repeated string retain_attempt_ids = 2;
+  repeated string cancel_attempt_ids = 3;
+}
