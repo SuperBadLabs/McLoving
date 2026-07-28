@@ -45,9 +45,9 @@ default, rejects tenant mismatch before role evaluation, applies a
 least-privilege human project-role matrix, and requires explicit service
 scopes. Scheduler control is service-only.
 
-Schema installation requires a separately privileged migration connection.
-Organization bootstrap and all runtime request and scheduler transactions use
-tenant context.
+Schema installation and organization/project bootstrap require a separately
+privileged connection. The runtime tenant role has read-only access to that
+metadata. Runtime request and scheduler transactions use tenant context.
 
 ## Verification
 

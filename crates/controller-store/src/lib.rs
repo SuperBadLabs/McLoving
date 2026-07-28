@@ -106,7 +106,7 @@ impl Store {
         project_id: Uuid,
         project_slug: &str,
     ) -> Result<(), StoreError> {
-        let mut tx = self.tenant_transaction(organization_id).await?;
+        let mut tx = self.pool.begin().await?;
         sqlx::query("INSERT INTO organizations (id, slug) VALUES ($1, $2)")
             .bind(organization_id)
             .bind(organization_slug)

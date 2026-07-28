@@ -86,7 +86,7 @@ async fn admission_is_atomic_and_idempotent() {
 }
 
 #[tokio::test]
-async fn unprivileged_runtime_role_bootstraps_and_admits_with_identity_sequences() {
+async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
     let Some(admin) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -99,10 +99,9 @@ async fn unprivileged_runtime_role_bootstraps_and_admits_with_identity_sequences
     .expect("inspect tenant schema privilege");
     assert!(!can_create);
 
-    let store = unprivileged_store(&admin).await;
     let organization_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
-    store
+    admin
         .create_project(
             organization_id,
             &format!("org-{organization_id}"),
@@ -110,7 +109,21 @@ async fn unprivileged_runtime_role_bootstraps_and_admits_with_identity_sequences
             "project",
         )
         .await
-        .expect("bootstrap through tenant-scoped transaction");
+        .expect("bootstrap through privileged connection");
+    let store = unprivileged_store(&admin).await;
+    let forbidden_organization = Uuid::new_v4();
+    assert!(
+        store
+            .create_project(
+                forbidden_organization,
+                &format!("org-{forbidden_organization}"),
+                Uuid::new_v4(),
+                "forbidden",
+            )
+            .await
+            .is_err(),
+        "runtime role must not bootstrap tenant metadata"
+    );
     let admission = store
         .admit_build(&NewBuild {
             organization_id,
