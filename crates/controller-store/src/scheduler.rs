@@ -147,6 +147,64 @@ impl Store {
         }))
     }
 
+    /// Accepts a live offer only from its fenced lease owner.
+    pub async fn accept_offer(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let accepted = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "UPDATE attempts AS a
+             SET status = 'accepted'
+             FROM nodes AS n
+             WHERE a.id = $1
+               AND a.organization_id = $2
+               AND a.fence = $3
+               AND a.lease_owner = $4
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status = 'offered'
+               AND n.id = a.node_id
+               AND n.organization_id = a.organization_id
+             RETURNING n.id, n.build_id",
+        )
+        .bind(attempt_id)
+        .bind(organization_id)
+        .bind(fence)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((node_id, build_id)) = accepted else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        sqlx::query(
+            "UPDATE nodes SET status = 'running'
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(node_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "attempt.accepted",
+            json!({
+                "attempt_id": attempt_id,
+                "node_id": node_id,
+                "agent_id": agent_id,
+                "fence": fence,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Requeues one expired offer without changing its fence.
     ///
     /// The following claim increments the fence, making the previous agent
@@ -215,6 +273,7 @@ impl Store {
         organization_id: Uuid,
         capabilities: &[String],
     ) -> Result<WaitReason, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
         let compatible = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1 FROM nodes
@@ -225,9 +284,10 @@ impl Store {
         )
         .bind(organization_id)
         .bind(capabilities)
-        .fetch_one(self.pool())
+        .fetch_one(&mut *tx)
         .await?;
         if compatible {
+            tx.commit().await?;
             return Ok(WaitReason::Ready);
         }
 
@@ -239,14 +299,16 @@ impl Store {
              LIMIT 1",
         )
         .bind(organization_id)
-        .fetch_optional(self.pool())
+        .fetch_optional(&mut *tx)
         .await?;
         let Some(required) = required else {
+            tx.commit().await?;
             return Ok(WaitReason::NoQueuedWork);
         };
         let required = required.into_iter().collect::<BTreeSet<_>>();
         let offered = capabilities.iter().cloned().collect::<BTreeSet<_>>();
         let missing = required.difference(&offered).cloned().collect();
+        tx.commit().await?;
         Ok(WaitReason::CapabilityMismatch { required, missing })
     }
 }

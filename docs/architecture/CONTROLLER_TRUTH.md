@@ -9,9 +9,10 @@ first attempt, durable event, and outbox message in one transaction. A
 project-scoped idempotency key returns the original identifiers and does not
 emit duplicate durable records.
 
-Terminal publication is accepted only for the current attempt fence and a
-nonterminal attempt. Attempt, node, build, event, and outbox mutations commit
-together. Concurrent or stale publishers receive a negative result.
+Terminal publication is accepted only for the current attempt fence, its exact
+lease owner, an accepted/running state, and an unexpired lease. Attempt, node,
+build, event, and outbox mutations commit together. Unleased, expired,
+concurrent, or stale publishers receive a negative result.
 
 Migrations use a database advisory lock and a version ledger, so concurrent
 controller startup installs each migration exactly once.
@@ -26,8 +27,9 @@ seed.
 
 Every offer increments the attempt fence. Expired offers return to the queue
 without changing the fence; the next offer increments it before work can be
-accepted. Wait diagnostics distinguish an empty queue from a concrete
-capability mismatch and report the missing capability set.
+accepted. Offer acceptance itself checks owner, fence, state, and expiry. Wait
+diagnostics run inside tenant context, distinguish an empty queue from a
+concrete capability mismatch, and report the missing capability set.
 
 ## Identity and tenant boundary
 

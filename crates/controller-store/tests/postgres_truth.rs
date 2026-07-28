@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use mcloving_controller_store::{ClaimRequest, NewBuild, Store, TerminalOutcome, WaitReason};
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
 
 async fn test_store() -> Option<Store> {
@@ -15,6 +15,24 @@ async fn test_store() -> Option<Store> {
     let store = Store::new(pool);
     store.migrate().await.expect("install controller schema");
     Some(store)
+}
+
+async fn unprivileged_store(admin: &Store) -> Store {
+    sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
+        .execute(admin.pool())
+        .await
+        .expect("enable test-only login for the unprivileged role");
+    let url = std::env::var("MCLOVING_TEST_DATABASE_URL").expect("database URL remains configured");
+    let options = url
+        .parse::<PgConnectOptions>()
+        .expect("parse PostgreSQL test URL")
+        .username("mcloving_tenant");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(options)
+        .await
+        .expect("connect as the unprivileged tenant role");
+    Store::new(pool)
 }
 
 #[tokio::test]
@@ -96,6 +114,42 @@ async fn concurrent_terminal_publication_has_one_winner() {
         })
         .await
         .expect("admit build");
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                admission.attempt_id,
+                0,
+                "unleased-agent",
+                TerminalOutcome::Succeeded,
+                json!({"publisher": "unleased"}),
+            )
+            .await
+            .expect("reject unleased publication")
+    );
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "agent-a".into(),
+            capabilities: Vec::new(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim work")
+        .expect("claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "agent-a",
+            )
+            .await
+            .expect("accept offer")
+    );
     let store = Arc::new(store);
 
     let contenders = (0..16).map(|index| {
@@ -105,7 +159,8 @@ async fn concurrent_terminal_publication_has_one_winner() {
                 .finalize_attempt(
                     organization_id,
                     admission.attempt_id,
-                    0,
+                    claim.fence,
+                    "agent-a",
                     TerminalOutcome::Succeeded,
                     json!({"publisher": index}),
                 )
@@ -189,8 +244,31 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
         .expect("one compatible claim");
     assert_eq!(claim.node_id, linux.node_id);
     assert_eq!(claim.fence, 1);
+    assert!(
+        !store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "wrong-agent",
+            )
+            .await
+            .expect("reject wrong lease owner")
+    );
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "linux-agent",
+            )
+            .await
+            .expect("accept exact lease owner")
+    );
 
-    let reason = store
+    let tenant_store = unprivileged_store(&store).await;
+    let reason = tenant_store
         .explain_wait(organization_id, &["linux".into()])
         .await
         .expect("explain queue");
@@ -279,6 +357,7 @@ async fn expired_offer_is_reclaimed_with_a_new_fence() {
                 organization_id,
                 first.attempt_id,
                 first.fence,
+                "agent-a",
                 TerminalOutcome::Succeeded,
                 json!({"agent": "stale"}),
             )

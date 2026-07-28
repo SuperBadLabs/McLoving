@@ -214,21 +214,24 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        agent_id: &str,
         outcome: TerminalOutcome,
         summary: Value,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         let row = sqlx::query_as::<_, (Uuid, Uuid)>(
             "UPDATE attempts AS a
-             SET status = $4,
-                 terminal_summary = $5,
+             SET status = $5,
+                 terminal_summary = $6,
                  completed_at = clock_timestamp(),
                  lease_expires_at = NULL
              FROM nodes AS n
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
-               AND a.status NOT IN ('succeeded', 'failed', 'aborted')
+               AND a.lease_owner = $4
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing')
                AND n.id = a.node_id
                AND n.organization_id = a.organization_id
              RETURNING n.id, n.build_id",
@@ -236,6 +239,7 @@ impl Store {
         .bind(attempt_id)
         .bind(organization_id)
         .bind(fence)
+        .bind(agent_id)
         .bind(outcome.as_str())
         .bind(&summary)
         .fetch_optional(&mut *tx)
