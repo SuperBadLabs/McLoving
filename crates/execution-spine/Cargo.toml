@@ -19,7 +19,10 @@ uuid = { version = "=1.18.1", features = ["serde", "v4"] }
 [dev-dependencies]
 axum = "=0.8.6"
 mcloving-controller-api = { version = "0.0.0", path = "../controller-api" }
-reqwest = { version = "=0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "=0.12.23", default-features = false, features = [
+  "json",
+  "rustls-tls-native-roots",
+] }
 sqlx = { version = "=0.8.6", default-features = false, features = [
   "runtime-tokio",
   "postgres",

@@ -87,6 +87,91 @@ async fn admission_is_atomic_and_idempotent() {
 }
 
 #[tokio::test]
+async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "cancel-before-claim".into(),
+            pipeline_digest: [8; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit queued build");
+
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("first cancellation")
+    );
+    assert!(
+        !store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("idempotent repeated cancellation")
+    );
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-a".into(),
+                agent_id: "agent-a".into(),
+                capabilities: vec!["linux".into()],
+                lease_seconds: 30,
+                fairness_seed: 1,
+            })
+            .await
+            .expect("claim query")
+            .is_none()
+    );
+
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read terminal snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "aborted");
+    assert_eq!(snapshot.attempt_status, "aborted");
+    assert!(snapshot.cancellation_requested);
+    assert_eq!(
+        snapshot.terminal_summary,
+        Some(json!({"reason": "cancelled_before_execution"}))
+    );
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM build_events
+            WHERE organization_id = $1 AND build_id = $2),
+           (SELECT count(*) FROM outbox
+            WHERE organization_id = $1 AND aggregate_id = $2)",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count admission and cancellation publications");
+    assert_eq!(counts, (2, 2));
+}
+
+#[tokio::test]
 async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
     let Some(admin) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

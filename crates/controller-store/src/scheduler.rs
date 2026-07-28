@@ -62,12 +62,17 @@ impl Store {
         let candidate = sqlx::query(
             "SELECT n.id AS node_id, n.build_id, a.id AS attempt_id
              FROM nodes AS n
+             JOIN builds AS b
+               ON b.id = n.build_id
+              AND b.organization_id = n.organization_id
              JOIN attempts AS a
                ON a.node_id = n.id
               AND a.organization_id = n.organization_id
               AND a.status = 'queued'
              WHERE n.organization_id = $1
                AND n.status = 'queued'
+               AND b.status = 'queued'
+               AND b.cancellation_requested_at IS NULL
                AND n.required_capabilities <@ $2::text[]
              ORDER BY
                n.priority DESC,
@@ -75,7 +80,7 @@ impl Store {
                hashtextextended(n.id::text, $3) ASC,
                n.id ASC
              LIMIT 1
-             FOR UPDATE OF n, a SKIP LOCKED",
+             FOR UPDATE OF b, n, a SKIP LOCKED",
         )
         .bind(request.organization_id)
         .bind(&request.capabilities)
@@ -265,6 +270,17 @@ impl Store {
              WHERE id = $1 AND organization_id = $2",
         )
         .bind(node_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE builds SET status = 'queued'
+             WHERE id = $1
+               AND organization_id = $2
+               AND status = 'running'
+               AND cancellation_requested_at IS NULL",
+        )
+        .bind(build_id)
         .bind(organization_id)
         .execute(&mut *tx)
         .await?;

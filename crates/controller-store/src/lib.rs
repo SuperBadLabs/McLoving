@@ -335,7 +335,11 @@ impl Store {
         ))
     }
 
-    /// Requests cancellation without pretending an agent has already stopped.
+    /// Requests cancellation exactly once.
+    ///
+    /// Queued work is aborted atomically because no agent owns it. Active work
+    /// moves to `cancelling` and remains non-terminal until the fenced agent
+    /// publishes its result.
     pub async fn request_cancellation(
         &self,
         organization_id: Uuid,
@@ -343,48 +347,112 @@ impl Store {
         build_id: Uuid,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let attempt = sqlx::query_as::<_, (Uuid, Uuid)>(
-            "UPDATE builds AS b
-             SET cancellation_requested_at =
-                   COALESCE(cancellation_requested_at, clock_timestamp())
-             FROM nodes AS n, attempts AS a
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
+        let attempt = sqlx::query_as::<_, (Uuid, Uuid, String, bool)>(
+            "SELECT a.id, n.id, b.status,
+                    b.cancellation_requested_at IS NOT NULL
+             FROM builds AS b
+             JOIN nodes AS n
+               ON n.build_id = b.id
+              AND n.organization_id = b.organization_id
+             JOIN attempts AS a
+               ON a.node_id = n.id
+              AND a.organization_id = n.organization_id
+              AND a.ordinal = 1
              WHERE b.organization_id = $1
                AND b.project_id = $2
                AND b.id = $3
                AND b.status IN ('queued', 'running')
-               AND n.build_id = b.id
-               AND n.organization_id = b.organization_id
-               AND a.node_id = n.id
-               AND a.organization_id = n.organization_id
-               AND a.ordinal = 1
-             RETURNING a.id, n.id",
+             FOR UPDATE OF b, n, a",
         )
         .bind(organization_id)
         .bind(project_id)
         .bind(build_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((attempt_id, node_id)) = attempt else {
+        let Some((attempt_id, node_id, build_status, already_requested)) = attempt else {
             tx.rollback().await?;
             return Ok(false);
         };
-        sqlx::query(
-            "UPDATE attempts
-             SET status = 'cancelling'
-             WHERE organization_id = $1
-               AND id = $2
-               AND status IN ('offered', 'accepted', 'running', 'finalizing')",
-        )
-        .bind(organization_id)
-        .bind(attempt_id)
-        .execute(&mut *tx)
-        .await?;
+        if already_requested {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        if build_status == "queued" {
+            sqlx::query(
+                "UPDATE attempts
+                 SET status = 'aborted',
+                     terminal_summary = $3,
+                     completed_at = clock_timestamp()
+                 WHERE organization_id = $1
+                   AND id = $2
+                   AND status = 'queued'",
+            )
+            .bind(organization_id)
+            .bind(attempt_id)
+            .bind(json!({"reason": "cancelled_before_execution"}))
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'aborted'
+                 WHERE organization_id = $1
+                   AND id = $2
+                   AND status = 'queued'",
+            )
+            .bind(organization_id)
+            .bind(node_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE builds
+                 SET status = 'aborted',
+                     cancellation_requested_at = clock_timestamp(),
+                     completed_at = clock_timestamp()
+                 WHERE organization_id = $1
+                   AND id = $2
+                   AND status = 'queued'",
+            )
+            .bind(organization_id)
+            .bind(build_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE builds
+                 SET cancellation_requested_at = clock_timestamp()
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(build_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE attempts
+                 SET status = 'cancelling'
+                 WHERE organization_id = $1
+                   AND id = $2
+                   AND status IN ('offered', 'accepted', 'running', 'finalizing')",
+            )
+            .bind(organization_id)
+            .bind(attempt_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         append_event_and_outbox(
             &mut tx,
             organization_id,
             build_id,
             "build.cancellation_requested",
-            json!({"attempt_id": attempt_id, "node_id": node_id}),
+            json!({
+                "attempt_id": attempt_id,
+                "node_id": node_id,
+                "terminal": build_status == "queued",
+            }),
         )
         .await?;
         tx.commit().await?;
