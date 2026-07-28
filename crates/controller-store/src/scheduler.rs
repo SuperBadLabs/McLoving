@@ -301,10 +301,11 @@ impl Store {
         Ok(cancellation_requested)
     }
 
-    /// Requeues one expired active lease without changing its fence.
+    /// Resolves one expired active lease without changing its fence.
     ///
-    /// The following claim increments the fence, making the previous agent
-    /// publication stale before new work is offered.
+    /// Safe work returns to the queue so the following claim increments the
+    /// fence. An unresolved non-idempotent effect is instead made uncertain
+    /// and routes the attempt through explicit reconciliation.
     pub async fn requeue_one_expired(&self, organization_id: Uuid) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -316,7 +317,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         let expired = sqlx::query(
-            "SELECT a.id AS attempt_id, n.id AS node_id, n.build_id
+            "SELECT a.id AS attempt_id, a.fence, n.id AS node_id, n.build_id
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id
@@ -336,42 +337,88 @@ impl Store {
             return Ok(false);
         };
         let attempt_id: Uuid = expired.try_get("attempt_id")?;
+        let fence: i64 = expired.try_get("fence")?;
         let node_id: Uuid = expired.try_get("node_id")?;
         let build_id: Uuid = expired.try_get("build_id")?;
+        let uncertain_effects = sqlx::query_scalar::<_, String>(
+            "UPDATE attempt_effects
+             SET status = 'uncertain', updated_at = clock_timestamp()
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_class = 'non_idempotent'
+               AND status IN ('prepared', 'applied')
+             RETURNING effect_key",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_all(&mut *tx)
+        .await?;
+        let requires_reconciliation = !uncertain_effects.is_empty();
+        let next_status = if requires_reconciliation {
+            "reconciliation_required"
+        } else {
+            "queued"
+        };
         sqlx::query(
             "UPDATE attempts
-             SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL
+             SET status = $3, lease_owner = NULL, lease_expires_at = NULL
              WHERE id = $1 AND organization_id = $2",
         )
         .bind(attempt_id)
         .bind(organization_id)
+        .bind(next_status)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE nodes SET status = 'queued'
+            "UPDATE nodes SET status = $3
              WHERE id = $1 AND organization_id = $2",
         )
         .bind(node_id)
         .bind(organization_id)
+        .bind(next_status)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "UPDATE builds SET status = 'queued'
-             WHERE id = $1
-               AND organization_id = $2
-               AND status = 'running'
-               AND cancellation_requested_at IS NULL",
-        )
-        .bind(build_id)
-        .bind(organization_id)
-        .execute(&mut *tx)
-        .await?;
+        if requires_reconciliation {
+            sqlx::query(
+                "UPDATE builds
+                 SET status = 'reconciliation_required', completed_at = NULL
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(build_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE builds SET status = 'queued'
+                 WHERE id = $1
+                   AND organization_id = $2
+                   AND status = 'running'
+                   AND cancellation_requested_at IS NULL",
+            )
+            .bind(build_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let event_kind = if requires_reconciliation {
+            "attempt.lease_expired_reconciliation_required"
+        } else {
+            "attempt.lease_expired"
+        };
         append_event_and_outbox(
             &mut tx,
             organization_id,
             build_id,
-            "attempt.lease_expired",
-            json!({"attempt_id": attempt_id, "node_id": node_id}),
+            event_kind,
+            json!({
+                "attempt_id": attempt_id,
+                "node_id": node_id,
+                "fence": fence,
+                "uncertain_effects": uncertain_effects.len(),
+            }),
         )
         .await?;
         tx.commit().await?;

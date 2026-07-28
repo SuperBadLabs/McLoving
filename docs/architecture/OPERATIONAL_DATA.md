@@ -48,6 +48,12 @@ epoch and attempt fence into one ordered local authority value (31 epoch bits,
 32 fence bits); values outside that explicit envelope are rejected before
 acceptance rather than aliased.
 
+Lease expiry is not permission to repeat a non-idempotent external effect. If
+the expiring fence has a prepared or applied non-idempotent checkpoint, that
+checkpoint becomes `uncertain` and the attempt hierarchy becomes
+`reconciliation_required` instead of queued. Effect-free and safely
+repeatable work retains the normal requeue-and-new-fence path.
+
 A restore activation takes the exclusive lock, increments the epoch, clears
 every active lease, and moves the affected attempt, node, and build to
 `reconciliation_required` in the same transaction as its event and outbox

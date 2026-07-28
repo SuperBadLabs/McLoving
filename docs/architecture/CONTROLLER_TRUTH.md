@@ -25,6 +25,10 @@ class and payload digest cannot change after preparation. State advances
 monotonically through prepared, applied, and confirmed, or enters the explicit
 uncertain state. Uncertain work is listed for reconciliation and cannot regress
 to an unconfirmed applied state.
+If a lease expires with a prepared or applied non-idempotent effect, the same
+transaction marks that effect uncertain and moves the attempt, node, and build
+to `reconciliation_required`. Such work is never returned to the runnable
+queue merely because its lease expired.
 
 Claims share-lock and record the controller restore epoch. Every agent
 authority operation presents `(attempt_id, fence, restore_epoch, agent_id)`,
@@ -87,7 +91,8 @@ The real-PostgreSQL gate proves:
 - atomic and idempotent admission;
 - one winner from 16 concurrent terminal publishers;
 - capability-filtered scheduling and stable wait diagnostics;
-- accepted-lease expiry, requeue, fence increment, and stale-result rejection;
+- accepted-lease expiry, safe requeue and fence increment, uncertain-effect
+  reconciliation routing, and stale-result rejection;
 - a tenant-prefixed scheduler claim-order index;
 - immutable, idempotent, bounded retry history and dead-letter exhaustion;
 - monotonic effect checkpoints, payload substitution rejection, and explicit

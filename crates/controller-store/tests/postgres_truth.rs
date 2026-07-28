@@ -696,6 +696,161 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
 }
 
 #[tokio::test]
+async fn expired_non_idempotent_effect_requires_reconciliation() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "effect-expiry",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "effect-expiry".into(),
+            pipeline_digest: [39; 32],
+            node_key: "deploy".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit effect work");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "agent-a".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim effect work")
+        .expect("claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-a",
+            )
+            .await
+            .expect("accept effect work")
+    );
+    let payload = json!({"destination": "production", "release": "r1"});
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-a",
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("prepare non-idempotent effect")
+    );
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire effect lease");
+    assert!(
+        store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("route expired effect")
+    );
+
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("load reconciled build")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "reconciliation_required");
+    assert_eq!(snapshot.attempt_status, "reconciliation_required");
+    assert!(snapshot.lease_owner.is_none());
+    let node_status = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM nodes
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(snapshot.node_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read reconciled node");
+    assert_eq!(node_status, "reconciliation_required");
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-b".into(),
+                agent_id: "agent-b".into(),
+                capabilities: vec!["linux".into()],
+                lease_seconds: 300,
+                fairness_seed: 2,
+            })
+            .await
+            .expect("check for runnable duplicate")
+            .is_none()
+    );
+    let uncertain = store
+        .uncertain_effects(organization_id)
+        .await
+        .expect("list uncertain effect");
+    assert_eq!(uncertain.len(), 1);
+    assert_eq!(uncertain[0].attempt_id, admission.attempt_id);
+    assert_eq!(uncertain[0].fence, claim.fence);
+    assert_eq!(uncertain[0].effect_key, "deploy");
+    assert_eq!(uncertain[0].effect_class, EffectClass::NonIdempotent);
+    assert_eq!(uncertain[0].status, EffectStatus::Uncertain);
+    assert_eq!(uncertain[0].payload, payload);
+    let event_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND kind = 'attempt.lease_expired_reconciliation_required'",
+    )
+    .bind(organization_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count reconciliation event");
+    let outbox_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM outbox
+         WHERE organization_id = $1
+           AND topic = 'attempt.lease_expired_reconciliation_required'",
+    )
+    .bind(organization_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count reconciliation outbox");
+    assert_eq!(event_count, 1);
+    assert_eq!(outbox_count, 1);
+}
+
+#[tokio::test]
 async fn build_logs_exclude_chunks_from_a_superseded_fence() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1792,26 +1947,6 @@ async fn backup_restore_canary_seed() {
             .await
             .expect("register recovery object")
     );
-    let recovery_effect = json!({
-        "destination": "deployment/production",
-        "release": "backup-canary"
-    });
-    assert!(
-        store
-            .checkpoint_effect(
-                organization_id,
-                admission.attempt_id,
-                claim.fence,
-                claim.restore_epoch,
-                "pre-restore-agent",
-                "deploy",
-                EffectClass::NonIdempotent,
-                EffectStatus::Prepared,
-                &recovery_effect,
-            )
-            .await
-            .expect("prepare recovery effect")
-    );
     sqlx::query(
         "UPDATE attempts
          SET lease_expires_at = clock_timestamp() - interval '1 second'
@@ -1853,6 +1988,26 @@ async fn backup_restore_canary_seed() {
             )
             .await
             .expect("accept reclaimed recovery canary")
+    );
+    let recovery_effect = json!({
+        "destination": "deployment/production",
+        "release": "backup-canary"
+    });
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                reclaimed.fence,
+                reclaimed.restore_epoch,
+                "post-reclaim-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &recovery_effect,
+            )
+            .await
+            .expect("prepare recovery effect")
     );
     store
         .admit_build(&NewBuild {
@@ -1975,7 +2130,7 @@ async fn backup_restore_canary_verify() {
         .expect("list restored uncertain effects");
     assert_eq!(uncertain.len(), 1);
     assert_eq!(uncertain[0].attempt_id, admission.1);
-    assert_eq!(uncertain[0].fence, admission.2 - 1);
+    assert_eq!(uncertain[0].fence, admission.2);
     assert_eq!(uncertain[0].effect_key, "deploy");
     assert_eq!(uncertain[0].status, EffectStatus::Uncertain);
     assert_eq!(uncertain[0].payload, recovery_effect);
