@@ -10,7 +10,7 @@ supported Jenkins behavior into a versioned Pipeline IR. PostgreSQL remains the
 controller source of truth.
 
 This repository is currently at its architecture-foundation milestone. The
-binary crates are compileable placeholders; no controller, scheduler, or agent
+binary crates are compilable placeholders; no controller, scheduler, or agent
 runtime is represented as implemented.
 
 See:

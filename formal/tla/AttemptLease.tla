@@ -51,6 +51,7 @@ Next ==
 
 TypeInvariant ==
     /\ phase \in {"ready", "offered", "running", "reconciliation", "terminal"}
+    /\ leaseAgent \in Agents \cup {"none"}
     /\ leaseEpoch \in Nat
     /\ terminal \in BOOLEAN
 
