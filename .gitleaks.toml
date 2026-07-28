@@ -1,0 +1,8 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated compiler output is not source or release input"
+paths = [
+  '''(^|/)target/''',
+]
