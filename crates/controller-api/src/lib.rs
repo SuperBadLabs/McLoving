@@ -134,11 +134,7 @@ impl ApiError {
     }
 
     fn configuration(message: impl Into<String>) -> Self {
-        Self::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "configuration",
-            message,
-        )
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "configuration", message)
     }
 }
 
@@ -183,15 +179,14 @@ async fn submit(
             "pipeline source must be UTF-8",
         )
     })?;
-    let pipeline = compile_strict_yaml("public-api", source, ParseLimits::default()).map_err(
-        |error| {
+    let pipeline =
+        compile_strict_yaml("public-api", source, ParseLimits::default()).map_err(|error| {
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "pipeline_rejected",
                 error.to_string(),
             )
-        },
-    )?;
+        })?;
     if pipeline.stages.len() != 1 {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -394,7 +389,9 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     }
     left.iter()
         .zip(right)
-        .fold(0_u8, |difference, (left, right)| difference | (left ^ right))
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
         == 0
 }
 
@@ -472,8 +469,11 @@ impl Client {
         project_id: Uuid,
         build_id: Uuid,
     ) -> Result<BuildResponse, ClientError> {
-        self.send(self.inner.get(self.build_url(organization_id, project_id, build_id)))
-            .await
+        self.send(
+            self.inner
+                .get(self.build_url(organization_id, project_id, build_id)),
+        )
+        .await
     }
 
     pub async fn logs(
@@ -482,10 +482,10 @@ impl Client {
         project_id: Uuid,
         build_id: Uuid,
     ) -> Result<Vec<LogResponse>, ClientError> {
-        self.send(
-            self.inner
-                .get(format!("{}/logs", self.build_url(organization_id, project_id, build_id))),
-        )
+        self.send(self.inner.get(format!(
+            "{}/logs",
+            self.build_url(organization_id, project_id, build_id)
+        )))
         .await
     }
 
@@ -495,10 +495,10 @@ impl Client {
         project_id: Uuid,
         build_id: Uuid,
     ) -> Result<CancellationResponse, ClientError> {
-        self.send(
-            self.inner
-                .post(format!("{}/cancel", self.build_url(organization_id, project_id, build_id))),
-        )
+        self.send(self.inner.post(format!(
+            "{}/cancel",
+            self.build_url(organization_id, project_id, build_id)
+        )))
         .await
     }
 
@@ -520,10 +520,7 @@ impl Client {
         &self,
         request: reqwest::RequestBuilder,
     ) -> Result<T, ClientError> {
-        let response = request
-            .bearer_auth(&self.bearer_token)
-            .send()
-            .await?;
+        let response = request.bearer_auth(&self.bearer_token).send().await?;
         let status = response.status();
         if !status.is_success() {
             return Err(ClientError::Response {
