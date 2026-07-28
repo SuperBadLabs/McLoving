@@ -117,6 +117,13 @@ pub enum JournalError {
     AcceptanceConflict,
     #[error("attempt does not exist or authority is stale")]
     StaleAuthority,
+    #[error("attempt transition from {from:?} to {to:?} is not allowed")]
+    InvalidTransition {
+        from: AttemptPhase,
+        to: AttemptPhase,
+    },
+    #[error("spool sequence conflicts with existing durable metadata")]
+    SpoolConflict,
     #[error("spool path must be a normalized relative path")]
     InvalidRelativePath,
     #[error("journal contains unknown attempt phase {0}")]
@@ -308,7 +315,39 @@ impl Journal {
         phase: AttemptPhase,
         process_group_id: Option<i32>,
     ) -> Result<(), JournalError> {
-        let changed = self.connection.execute(
+        let fence_token = to_sql_integer(fence_token)?;
+        let session_epoch = to_sql_integer(session_epoch)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = transaction
+            .query_row(
+                "
+                SELECT phase, process_group_id
+                FROM attempts
+                WHERE organization_id = ?1
+                  AND attempt_id = ?2
+                  AND fence_token = ?3
+                  AND session_epoch = ?4
+                ",
+                params![organization_id, attempt_id, fence_token, session_epoch],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i32>>(1)?)),
+            )
+            .optional()?
+            .ok_or(JournalError::StaleAuthority)?;
+        let current_phase = AttemptPhase::parse(&current.0)?;
+        if current_phase == phase && current.1 == process_group_id {
+            transaction.commit()?;
+            return Ok(());
+        }
+        if !valid_transition(current_phase, phase) {
+            return Err(JournalError::InvalidTransition {
+                from: current_phase,
+                to: phase,
+            });
+        }
+
+        transaction.execute(
             "
             UPDATE attempts
             SET phase = ?1, process_group_id = ?2, updated_at_unix_ms = ?3
@@ -323,74 +362,126 @@ impl Journal {
                 unix_time_ms()?,
                 organization_id,
                 attempt_id,
-                to_sql_integer(fence_token)?,
-                to_sql_integer(session_epoch)?,
+                fence_token,
+                session_epoch,
             ],
         )?;
-        if changed == 1 {
-            Ok(())
-        } else {
-            Err(JournalError::StaleAuthority)
-        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn record_log(
         &mut self,
         organization_id: &str,
         attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
         entry: &SpoolEntry,
     ) -> Result<(), JournalError> {
         validate_relative_path(&entry.relative_path)?;
-        self.connection.execute(
+        self.ensure_active_authority(organization_id, attempt_id, fence_token, session_epoch)?;
+        let relative_path = path_text(&entry.relative_path)?;
+        let sequence = to_sql_integer(entry.sequence)?;
+        let bytes = to_sql_integer(entry.bytes)?;
+        let changed = self.connection.execute(
             "
             INSERT INTO log_spool(
                 organization_id, attempt_id, sequence, relative_path, digest, bytes
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ON CONFLICT(organization_id, attempt_id, sequence) DO UPDATE SET
-                relative_path = excluded.relative_path,
-                digest = excluded.digest,
-                bytes = excluded.bytes
+            ON CONFLICT(organization_id, attempt_id, sequence) DO NOTHING
             ",
             params![
                 organization_id,
                 attempt_id,
-                to_sql_integer(entry.sequence)?,
-                path_text(&entry.relative_path)?,
+                sequence,
+                relative_path,
                 entry.digest.as_slice(),
-                to_sql_integer(entry.bytes)?,
+                bytes,
             ],
         )?;
-        Ok(())
+        if changed == 1 {
+            return Ok(());
+        }
+        let existing = self.connection.query_row(
+            "
+            SELECT relative_path, digest, bytes
+            FROM log_spool
+            WHERE organization_id = ?1 AND attempt_id = ?2 AND sequence = ?3
+            ",
+            params![organization_id, attempt_id, sequence],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        if existing.0 == relative_path
+            && existing.1.as_slice() == entry.digest
+            && existing.2 == bytes
+        {
+            Ok(())
+        } else {
+            Err(JournalError::SpoolConflict)
+        }
     }
 
     pub fn record_result(
         &mut self,
         organization_id: &str,
         attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
         entry: &SpoolEntry,
     ) -> Result<(), JournalError> {
         validate_relative_path(&entry.relative_path)?;
-        self.connection.execute(
+        self.ensure_active_authority(organization_id, attempt_id, fence_token, session_epoch)?;
+        let relative_path = path_text(&entry.relative_path)?;
+        let bytes = to_sql_integer(entry.bytes)?;
+        let changed = self.connection.execute(
             "
             INSERT INTO result_spool(
                 organization_id, attempt_id, relative_path, digest, bytes
             )
             VALUES (?1, ?2, ?3, ?4, ?5)
-            ON CONFLICT(organization_id, attempt_id) DO UPDATE SET
-                relative_path = excluded.relative_path,
-                digest = excluded.digest,
-                bytes = excluded.bytes
+            ON CONFLICT(organization_id, attempt_id) DO NOTHING
             ",
             params![
                 organization_id,
                 attempt_id,
-                path_text(&entry.relative_path)?,
+                relative_path,
                 entry.digest.as_slice(),
-                to_sql_integer(entry.bytes)?,
+                bytes,
             ],
         )?;
-        Ok(())
+        if changed == 1 {
+            return Ok(());
+        }
+        let existing = self.connection.query_row(
+            "
+            SELECT relative_path, digest, bytes
+            FROM result_spool
+            WHERE organization_id = ?1 AND attempt_id = ?2
+            ",
+            params![organization_id, attempt_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        if existing.0 == relative_path
+            && existing.1.as_slice() == entry.digest
+            && existing.2 == bytes
+        {
+            Ok(())
+        } else {
+            Err(JournalError::SpoolConflict)
+        }
     }
 
     pub fn reconcile(&self) -> Result<ReconciliationReport, JournalError> {
@@ -454,6 +545,40 @@ impl Journal {
         Ok(self
             .connection
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))?)
+    }
+
+    fn ensure_active_authority(
+        &self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
+    ) -> Result<(), JournalError> {
+        let phase = self
+            .connection
+            .query_row(
+                "
+                SELECT phase
+                FROM attempts
+                WHERE organization_id = ?1
+                  AND attempt_id = ?2
+                  AND fence_token = ?3
+                  AND session_epoch = ?4
+                ",
+                params![
+                    organization_id,
+                    attempt_id,
+                    to_sql_integer(fence_token)?,
+                    to_sql_integer(session_epoch)?,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(JournalError::StaleAuthority)?;
+        if AttemptPhase::parse(&phase)?.is_terminal() {
+            return Err(JournalError::StaleAuthority);
+        }
+        Ok(())
     }
 
     fn log_entries(
@@ -535,6 +660,36 @@ fn validate_relative_path(path: &Path) -> Result<(), JournalError> {
         return Err(JournalError::InvalidRelativePath);
     }
     Ok(())
+}
+
+fn valid_transition(from: AttemptPhase, to: AttemptPhase) -> bool {
+    matches!(
+        (from, to),
+        (
+            AttemptPhase::Accepted,
+            AttemptPhase::Running | AttemptPhase::Cancelling | AttemptPhase::ReconciliationRequired
+        ) | (
+            AttemptPhase::Running,
+            AttemptPhase::Finalizing
+                | AttemptPhase::Cancelling
+                | AttemptPhase::ReconciliationRequired
+        ) | (
+            AttemptPhase::Finalizing,
+            AttemptPhase::Succeeded
+                | AttemptPhase::Failed
+                | AttemptPhase::Cancelling
+                | AttemptPhase::ReconciliationRequired
+        ) | (
+            AttemptPhase::Cancelling,
+            AttemptPhase::Aborted | AttemptPhase::ReconciliationRequired
+        ) | (
+            AttemptPhase::ReconciliationRequired,
+            AttemptPhase::Running
+                | AttemptPhase::Finalizing
+                | AttemptPhase::Cancelling
+                | AttemptPhase::Aborted
+        )
+    )
 }
 
 fn path_text(path: &Path) -> Result<&str, JournalError> {
@@ -638,6 +793,8 @@ mod tests {
             .record_log(
                 "org-1",
                 "attempt-1",
+                9,
+                4,
                 &SpoolEntry {
                     sequence: 1,
                     relative_path: PathBuf::from("spool/stdout-0001.log"),
@@ -650,6 +807,8 @@ mod tests {
             .record_result(
                 "org-1",
                 "attempt-1",
+                9,
+                4,
                 &SpoolEntry {
                     sequence: 0,
                     relative_path: PathBuf::from("spool/result.pb"),
@@ -666,9 +825,56 @@ mod tests {
         assert!(report.attempts[0].result.is_some());
 
         journal
+            .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Finalizing, None)
+            .unwrap();
+        journal
             .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Succeeded, None)
             .unwrap();
         assert!(journal.reconcile().unwrap().attempts.is_empty());
+    }
+
+    #[test]
+    fn terminal_state_and_spool_metadata_are_immutable() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(directory.path().join("journal.sqlite3")).unwrap();
+        journal.accept(&acceptance()).unwrap();
+        journal
+            .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Running, Some(321))
+            .unwrap();
+        let entry = SpoolEntry {
+            sequence: 1,
+            relative_path: PathBuf::from("spool/stdout-0001.log"),
+            digest: [2; 32],
+            bytes: 42,
+        };
+        journal
+            .record_log("org-1", "attempt-1", 9, 4, &entry)
+            .unwrap();
+        journal
+            .record_log("org-1", "attempt-1", 9, 4, &entry)
+            .unwrap();
+
+        let mut conflict = entry;
+        conflict.digest = [3; 32];
+        assert!(matches!(
+            journal.record_log("org-1", "attempt-1", 9, 4, &conflict),
+            Err(JournalError::SpoolConflict)
+        ));
+
+        journal
+            .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Finalizing, None)
+            .unwrap();
+        journal
+            .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Succeeded, None)
+            .unwrap();
+        assert!(matches!(
+            journal.transition("org-1", "attempt-1", 9, 4, AttemptPhase::Running, Some(321)),
+            Err(JournalError::InvalidTransition { .. })
+        ));
+        assert!(matches!(
+            journal.record_log("org-1", "attempt-1", 9, 4, &conflict),
+            Err(JournalError::StaleAuthority)
+        ));
     }
 
     #[test]
