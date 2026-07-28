@@ -24,7 +24,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W0-C | IR-001, IR-002, ARCH-002 | DONE | Bounded strict YAML, canonical IR v1, and admission properties |
 | W1-A | CTRL-001, CTRL-002, SEC-002 | DONE | PostgreSQL truth, outbox, scheduler, and tenant enforcement |
 | W1-B | AGENT-001, AGENT-002, AGENT-003 | DONE | Outbound mTLS contract, fenced sessions, durable journal, Linux process-tree containment |
-| W1-C | UX-001, E2E-001, E2E-002, E2E-003 | ACTIVE | Truthful CLI-driven end-to-end spine and recovery |
+| W1-C | UX-001, E2E-001, E2E-002, E2E-003 | DONE | Truthful CLI-driven end-to-end spine and recovery |
+| W2-A | CTRL-003, OPS-001, OPS-002 | PENDING | Durable retry/result storage and recoverable operations |
 
 ## Wave 0 — Architecture and foundation
 
@@ -51,7 +52,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | UX-001 | DONE | CTRL-002 | Rust CLI submit/status/logs/cancel/explain through documented public API and idempotency keys |
 | E2E-001 | DONE | IR-002, CTRL-002, AGENT-003, UX-001 | One-stage strict-YAML process through real PostgreSQL, outbox, scheduler, agent, logs, terminal result |
 | E2E-002 | DONE | E2E-001 | Controller kill/restart at every durable transition without lost or duplicate logical execution |
-| E2E-003 | PENDING | E2E-001 | Agent disconnect/restart reconciliation and complete descendant-process cancellation proof |
+| E2E-003 | DONE | E2E-001 | Agent disconnect/restart reconciliation and complete descendant-process cancellation proof |
 
 ## Wave 2 — Durability and platform parity
 
@@ -89,4 +90,4 @@ canary, and release-readiness assessment.
 
 ## Current next batch
 
-`W1-C`: `E2E-003` is active; the first three tickets are complete.
+`W2-A`: `CTRL-003`, `OPS-001`, and `OPS-002`.

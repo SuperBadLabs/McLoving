@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal};
 use mcloving_controller_api::{ApiState, Client, ExplainResponse, router};
 use mcloving_controller_store::{ClaimRequest, NewBuild, NewLogChunk, Store, TerminalOutcome};
 use mcloving_execution_spine::{WorkerConfig, run_claim};
@@ -23,6 +24,18 @@ stages:
           env:
             MCLOVING_E2E: enabled
           timeout_seconds: 10
+"#;
+const CANCELLATION_PIPELINE: &str = r#"
+version: 1
+name: cancellation
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          program: /bin/sh
+          args: [-c, "sleep 30 & child=$!; printf '%s\n' \"$child\" > child.pid; wait"]
+          timeout_seconds: 60
 "#;
 
 async fn test_store() -> Option<Store> {
@@ -369,4 +382,163 @@ async fn controller_restart_replay_is_logically_exactly_once() {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[tokio::test]
+async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "agent-recovery",
+        )
+        .await
+        .expect("create project");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind API");
+    let address = listener.local_addr().expect("API address");
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            router(ApiState::new(store.clone(), TOKEN).expect("API state")),
+        )
+        .into_future(),
+    );
+    let client = Client::new(&format!("http://{address}"), TOKEN);
+    let admission = client
+        .submit(
+            organization_id,
+            project_id,
+            "e2e-003",
+            CANCELLATION_PIPELINE.to_owned(),
+        )
+        .await
+        .expect("submit");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-recovery".to_owned(),
+            agent_id: "agent-recovery".to_owned(),
+            capabilities: vec!["linux".to_owned()],
+            lease_seconds: 60,
+            fairness_seed: 3,
+        })
+        .await
+        .expect("claim")
+        .expect("work exists");
+    let execution = store
+        .attempt_execution(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            "agent-recovery",
+        )
+        .await
+        .expect("execution query")
+        .expect("execution exists");
+    let root = tempfile::tempdir().expect("workspace root");
+    let journal_path = root.path().join("agent.db");
+    let workspace = std::path::PathBuf::from(format!(
+        "{organization_id}/{}/{fence}",
+        claim.attempt_id,
+        fence = claim.fence
+    ));
+    let payload_digest: [u8; 32] =
+        Sha256::digest(serde_json::to_vec(&execution.execution_spec).unwrap()).into();
+    {
+        let mut journal = Journal::open(&journal_path).expect("open journal");
+        journal
+            .accept(&Acceptance {
+                organization_id: organization_id.to_string(),
+                attempt_id: claim.attempt_id.to_string(),
+                fence_token: u64::try_from(claim.fence).unwrap(),
+                session_epoch: 7,
+                payload_digest,
+                workspace: workspace.clone(),
+            })
+            .expect("durable acceptance before disconnect");
+    }
+    let recovered = Journal::open(&journal_path).expect("reopen after disconnect");
+    let report = recovered.reconcile().expect("reconcile journal");
+    assert_eq!(report.attempts.len(), 1);
+    assert_eq!(report.attempts[0].phase, AttemptPhase::Accepted);
+    drop(recovered);
+
+    let config = WorkerConfig {
+        agent_id: "agent-recovery".to_owned(),
+        session_epoch: 7,
+        workspace_root: root.path().to_owned(),
+        journal_path: journal_path.clone(),
+        cancellation_poll: Duration::from_millis(5),
+        termination_grace: Duration::from_millis(100),
+    };
+    let run_store = store.clone();
+    let run_claim_value = claim.clone();
+    let run = tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
+    let pid_path = root.path().join(&workspace).join("child.pid");
+    let child_pid = read_pid(&pid_path).await;
+    assert!(
+        client
+            .cancel(organization_id, project_id, admission.build_id)
+            .await
+            .expect("request cancellation")
+            .accepted
+    );
+    let receipt = run.await.expect("worker task").expect("worker result");
+    assert_eq!(receipt.outcome, TerminalOutcome::Aborted);
+    assert_process_gone(child_pid).await;
+    let status = client
+        .status(organization_id, project_id, admission.build_id)
+        .await
+        .expect("terminal status");
+    assert_eq!(status.status, "aborted");
+    assert!(status.cancellation_requested);
+    let journal = Journal::open(&journal_path).expect("final journal reopen");
+    assert!(
+        journal
+            .reconcile()
+            .expect("final reconcile")
+            .attempts
+            .is_empty()
+    );
+    assert_eq!(journal.integrity_check().expect("integrity"), "ok");
+    server.abort();
+}
+
+async fn read_pid(path: &std::path::Path) -> i32 {
+    for _ in 0..200 {
+        if let Ok(value) = tokio::fs::read_to_string(path).await
+            && let Ok(pid) = value.trim().parse()
+        {
+            return pid;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("descendant PID was not written");
+}
+
+async fn assert_process_gone(pid: i32) {
+    for _ in 0..200 {
+        match tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
+            Ok(status)
+                if status
+                    .rsplit_once(") ")
+                    .and_then(|(_, tail)| tail.chars().next())
+                    == Some('Z') =>
+            {
+                return;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Ok(_) => {}
+            Err(error) => panic!("unexpected process probe error: {error}"),
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("descendant process {pid} escaped cancellation");
 }
