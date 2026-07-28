@@ -42,6 +42,18 @@ fn spans_preserve_utf8_byte_offsets_and_scanner_columns() {
 }
 
 #[test]
+fn directive_spans_account_for_crlf_bytes() {
+    let error = parse_strict(
+        "\r\n%YAML 1.2\r\n---\r\nname: rejected\r\n",
+        ParseLimits::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Directive);
+    assert_eq!(error.span.start.offset, 2);
+    assert_eq!(error.span.start.line, 2);
+}
+
+#[test]
 fn compiles_the_v1_process_contract() {
     let pipeline =
         compile_strict_yaml("fixture://valid", VALID_PIPELINE, ParseLimits::default()).unwrap();

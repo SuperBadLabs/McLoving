@@ -321,15 +321,16 @@ pub fn parse_strict(source: &str, limits: ParseLimits) -> Result<SpannedValue, A
         .chain(std::iter::once(source.len()))
         .collect::<Vec<_>>();
 
-    for (line_index, line) in source.lines().enumerate() {
-        if line.starts_with('%') {
-            let offset = source
-                .lines()
-                .take(line_index)
-                .map(|previous| previous.len() + 1)
-                .sum();
+    let mut line_offset = 0_usize;
+    for (line_index, line) in source.split_inclusive('\n').enumerate() {
+        let content = line
+            .strip_suffix('\n')
+            .unwrap_or(line)
+            .strip_suffix('\r')
+            .unwrap_or(line);
+        if content.starts_with('%') {
             let location = SourceLocation {
-                offset,
+                offset: line_offset,
                 line: line_index + 1,
                 column: 1,
             };
@@ -339,6 +340,7 @@ pub fn parse_strict(source: &str, limits: ParseLimits) -> Result<SpannedValue, A
                 SourceSpan::at(location),
             ));
         }
+        line_offset = line_offset.saturating_add(line.len());
     }
 
     let mut events = Vec::new();

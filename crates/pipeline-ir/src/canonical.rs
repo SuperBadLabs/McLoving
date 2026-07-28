@@ -60,7 +60,8 @@ impl Writer {
     }
 
     fn u32(&mut self, value: usize) {
-        let value = u32::try_from(value).expect("IR collection length is validated");
+        debug_assert!(u32::try_from(value).is_ok());
+        let value = value as u32;
         self.bytes.extend_from_slice(&value.to_be_bytes());
     }
 
@@ -212,22 +213,24 @@ impl<'a> Reader<'a> {
     }
 
     fn u16(&mut self) -> Result<u16, CanonicalError> {
-        let bytes: [u8; 2] = self.take(2)?.try_into().expect("fixed length");
-        Ok(u16::from_be_bytes(bytes))
+        let bytes = self.take(2)?;
+        Ok(u16::from_be_bytes([bytes[0], bytes[1]]))
     }
 
     fn u32(&mut self) -> Result<u32, CanonicalError> {
-        let bytes: [u8; 4] = self.take(4)?.try_into().expect("fixed length");
-        Ok(u32::from_be_bytes(bytes))
+        let bytes = self.take(4)?;
+        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
     fn u64(&mut self) -> Result<u64, CanonicalError> {
-        let bytes: [u8; 8] = self.take(8)?.try_into().expect("fixed length");
-        Ok(u64::from_be_bytes(bytes))
+        let bytes = self.take(8)?;
+        Ok(u64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
     }
 
     fn count(&mut self, maximum: usize, description: &str) -> Result<usize, CanonicalError> {
-        let count = usize::try_from(self.u32()?).expect("u32 fits usize");
+        let count = self.u32()? as usize;
         if count > maximum {
             return Err(CanonicalError::new(
                 self.offset.saturating_sub(4),
