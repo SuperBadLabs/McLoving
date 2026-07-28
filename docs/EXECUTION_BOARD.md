@@ -23,8 +23,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W0-B | ARCH-001, FOUND-002, SEC-001 | DONE | Finite formal model, reproducible HeMan gate, and owned threat model |
 | W0-C | IR-001, IR-002, ARCH-002 | DONE | Bounded strict YAML, canonical IR v1, and admission properties |
 | W1-A | CTRL-001, CTRL-002, SEC-002 | DONE | PostgreSQL truth, outbox, scheduler, and tenant enforcement |
-| W1-B | AGENT-001, AGENT-002, AGENT-003 | PENDING | mTLS agent session, SQLite journal, Linux execution |
-| W1-C | UX-001, E2E-001, E2E-002, E2E-003 | PENDING | Truthful CLI-driven end-to-end spine and recovery |
+| W1-B | AGENT-001, AGENT-002, AGENT-003 | DONE | Outbound mTLS contract, fenced sessions, durable journal, Linux process-tree containment |
+| W1-C | UX-001, E2E-001, E2E-002, E2E-003 | ACTIVE | Truthful CLI-driven end-to-end spine and recovery |
 
 ## Wave 0 — Architecture and foundation
 
@@ -45,9 +45,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | CTRL-001 | DONE | IR-002 | PostgreSQL migrations and one transaction for build/node/attempt/event/outbox with real-DB race tests |
 | CTRL-002 | DONE | CTRL-001 | Fenced single-node scheduler, indexed claims, capability filtering, fairness seed, explainable wait reason |
 | SEC-002 | DONE | SEC-001, CTRL-001 | Organization/project identity, tenant-keyed schema, PostgreSQL RLS, centralized deny-by-default authorization |
-| AGENT-001 | PENDING | ARCH-001, CTRL-001 | Outbound mTLS, enrollment, certificate rotation, session epoch, protocol negotiation, stale-session fencing |
-| AGENT-002 | PENDING | AGENT-001 | SQLite WAL acceptance-before-ack, journal recovery, log/result spool metadata, reconciliation report |
-| AGENT-003 | PENDING | AGENT-002 | Linux workspace/process group, durable logs, timeout/cancel tree cleanup, no escaped descendants |
+| AGENT-001 | DONE | ARCH-001, CTRL-001 | Outbound mTLS, enrollment, certificate rotation, session epoch, protocol negotiation, stale-session fencing |
+| AGENT-002 | DONE | AGENT-001 | SQLite WAL acceptance-before-ack, journal recovery, log/result spool metadata, reconciliation report |
+| AGENT-003 | DONE | AGENT-002 | Linux workspace/process group, durable logs, timeout/cancel tree cleanup, no escaped descendants |
 | UX-001 | PENDING | CTRL-002 | Rust CLI submit/status/logs/cancel/explain through documented public API and idempotency keys |
 | E2E-001 | PENDING | IR-002, CTRL-002, AGENT-003, UX-001 | One-stage strict-YAML process through real PostgreSQL, outbox, scheduler, agent, logs, terminal result |
 | E2E-002 | PENDING | E2E-001 | Controller kill/restart at every durable transition without lost or duplicate logical execution |
@@ -89,4 +89,4 @@ canary, and release-readiness assessment.
 
 ## Current next batch
 
-`W1-B`: `AGENT-001`, `AGENT-002`, and `AGENT-003`.
+`W1-C`: `UX-001`, `E2E-001`, `E2E-002`, and `E2E-003`.

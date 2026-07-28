@@ -6,9 +6,19 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+nix = { version = "=0.31.3", features = ["process", "signal"] }
 rusqlite = { version = "=0.32.1", features = ["bundled"] }
 sha2 = "=0.10.9"
 thiserror = "=2.0.17"
+tokio = { version = "=1.47.1", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "process",
+  "rt-multi-thread",
+  "time",
+] }
+tokio-util = { version = "=0.7.19", features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"

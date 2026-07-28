@@ -10,6 +10,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
+#[cfg(unix)]
+pub mod executor;
+
 const SCHEMA_VERSION: i64 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
