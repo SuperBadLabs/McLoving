@@ -340,7 +340,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
 }
 
 #[tokio::test]
-async fn expired_offer_is_reclaimed_with_a_new_fence() {
+async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -380,6 +380,17 @@ async fn expired_offer_is_reclaimed_with_a_new_fence() {
         .await
         .expect("first claim")
         .expect("claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                admission.attempt_id,
+                first.fence,
+                "agent-a",
+            )
+            .await
+            .expect("accept first offer")
+    );
     sqlx::query(
         "UPDATE attempts SET lease_expires_at = clock_timestamp() - interval '1 second'
          WHERE id = $1",
@@ -392,7 +403,7 @@ async fn expired_offer_is_reclaimed_with_a_new_fence() {
         store
             .requeue_one_expired(organization_id)
             .await
-            .expect("requeue expired")
+            .expect("requeue expired accepted attempt")
     );
     let second = store
         .claim_next(&ClaimRequest {
@@ -420,6 +431,28 @@ async fn expired_offer_is_reclaimed_with_a_new_fence() {
             )
             .await
             .expect("reject stale terminal publication")
+    );
+}
+
+#[tokio::test]
+async fn claim_order_index_is_tenant_prefixed() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let definition = sqlx::query_scalar::<_, String>(
+        "SELECT pg_get_indexdef(indexrelid)
+         FROM pg_index
+         WHERE indexrelid = 'nodes_claim_order_idx'::regclass",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("inspect scheduler claim index");
+    assert!(
+        definition.contains(
+            "USING btree (organization_id, priority DESC, queued_at, id) WHERE (status = 'queued'::text)"
+        ),
+        "unexpected claim index: {definition}"
     );
 }
 

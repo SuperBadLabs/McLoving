@@ -205,7 +205,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Requeues one expired offer without changing its fence.
+    /// Requeues one expired active lease without changing its fence.
     ///
     /// The following claim increments the fence, making the previous agent
     /// publication stale before new work is offered.
@@ -222,7 +222,7 @@ impl Store {
                ON n.id = a.node_id
               AND n.organization_id = a.organization_id
              WHERE a.organization_id = $1
-               AND a.status = 'offered'
+               AND a.status IN ('offered', 'accepted', 'running', 'finalizing')
                AND a.lease_expires_at <= clock_timestamp()
              ORDER BY a.lease_expires_at, a.id
              LIMIT 1

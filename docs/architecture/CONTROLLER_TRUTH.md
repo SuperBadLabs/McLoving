@@ -45,9 +45,9 @@ default, rejects tenant mismatch before role evaluation, applies a
 least-privilege human project-role matrix, and requires explicit service
 scopes. Scheduler control is service-only.
 
-Schema installation and organization bootstrap require a separately
-privileged migration/bootstrap connection. Runtime request and scheduler
-transactions use tenant context.
+Schema installation requires a separately privileged migration connection.
+Organization bootstrap and all runtime request and scheduler transactions use
+tenant context.
 
 ## Verification
 
@@ -56,7 +56,8 @@ The real-PostgreSQL gate proves:
 - atomic and idempotent admission;
 - one winner from 16 concurrent terminal publishers;
 - capability-filtered scheduling and stable wait diagnostics;
-- expiry, requeue, fence increment, and stale-result rejection;
+- accepted-lease expiry, requeue, fence increment, and stale-result rejection;
+- a tenant-prefixed scheduler claim-order index;
 - forced-RLS read filtering and cross-tenant write rejection.
 
 Rust unit tests independently prove the authorization matrix and deny defaults.

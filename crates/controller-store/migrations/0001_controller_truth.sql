@@ -97,7 +97,7 @@ CREATE TABLE outbox (
 );
 
 CREATE INDEX nodes_claim_order_idx
-    ON nodes (priority DESC, queued_at, id)
+    ON nodes (organization_id, priority DESC, queued_at, id)
     WHERE status = 'queued';
 CREATE INDEX nodes_capabilities_idx
     ON nodes USING gin (required_capabilities)
