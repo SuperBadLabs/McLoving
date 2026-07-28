@@ -4,12 +4,15 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+pub mod authz;
 mod scheduler;
 
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 
 /// Schema installed by [`Store::migrate`].
 pub const CONTROLLER_SCHEMA_V1: &str = include_str!("../migrations/0001_controller_truth.sql");
+/// Tenant identity and row-level-security migration.
+pub const TENANT_SECURITY_V2: &str = include_str!("../migrations/0002_tenant_security.sql");
 
 /// A build and its first executable node, admitted as one durable unit.
 #[derive(Clone, Debug)]
@@ -89,21 +92,8 @@ impl Store {
         )
         .execute(&mut *tx)
         .await?;
-        let installed = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (
-                 SELECT 1 FROM mcloving_schema_migrations WHERE version = 1
-             )",
-        )
-        .fetch_one(&mut *tx)
-        .await?;
-        if !installed {
-            sqlx::raw_sql(CONTROLLER_SCHEMA_V1)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("INSERT INTO mcloving_schema_migrations (version) VALUES (1)")
-                .execute(&mut *tx)
-                .await?;
-        }
+        apply_migration(&mut tx, 1, CONTROLLER_SCHEMA_V1).await?;
+        apply_migration(&mut tx, 2, TENANT_SECURITY_V2).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -137,7 +127,7 @@ impl Store {
     /// Repeating the same project/idempotency-key returns the original durable
     /// identifiers without emitting a second event or outbox record.
     pub async fn admit_build(&self, input: &NewBuild) -> Result<BuildAdmission, StoreError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.tenant_transaction(input.organization_id).await?;
         let build_id = Uuid::new_v4();
         let inserted = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO builds (
@@ -227,7 +217,7 @@ impl Store {
         outcome: TerminalOutcome,
         summary: Value,
     ) -> Result<bool, StoreError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.tenant_transaction(organization_id).await?;
         let row = sqlx::query_as::<_, (Uuid, Uuid)>(
             "UPDATE attempts AS a
              SET status = $4,
@@ -291,6 +281,41 @@ impl Store {
         tx.commit().await?;
         Ok(true)
     }
+
+    pub(crate) async fn tenant_transaction(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+            .bind(organization_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        Ok(tx)
+    }
+}
+
+async fn apply_migration(
+    tx: &mut Transaction<'_, Postgres>,
+    version: i32,
+    sql: &str,
+) -> Result<(), sqlx::Error> {
+    let installed = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+             SELECT 1 FROM mcloving_schema_migrations WHERE version = $1
+         )",
+    )
+    .bind(version)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !installed {
+        sqlx::raw_sql(sql).execute(&mut **tx).await?;
+        sqlx::query("INSERT INTO mcloving_schema_migrations (version) VALUES ($1)")
+            .bind(version)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn existing_admission(

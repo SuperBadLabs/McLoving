@@ -52,7 +52,7 @@ impl Store {
         if request.lease_seconds <= 0 {
             return Ok(None);
         }
-        let mut tx = self.pool().begin().await?;
+        let mut tx = self.tenant_transaction(request.organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
             .bind(format!("mcloving.scheduler.{}", request.organization_id))
             .execute(&mut *tx)
@@ -152,7 +152,7 @@ impl Store {
     /// The following claim increments the fence, making the previous agent
     /// publication stale before new work is offered.
     pub async fn requeue_one_expired(&self, organization_id: Uuid) -> Result<bool, StoreError> {
-        let mut tx = self.pool().begin().await?;
+        let mut tx = self.tenant_transaction(organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
             .bind(format!("mcloving.scheduler.{organization_id}"))
             .execute(&mut *tx)

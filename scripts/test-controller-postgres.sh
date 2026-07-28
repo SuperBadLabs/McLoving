@@ -23,14 +23,18 @@ podman run --detach --rm \
   --name "${container_name}" \
   --publish "127.0.0.1:${port}:5432" \
   --env POSTGRES_USER=mcloving \
-  --env POSTGRES_PASSWORD=mcloving-test \
+  --env POSTGRES_HOST_AUTH_METHOD=trust \
   --env POSTGRES_DB=mcloving \
-  docker.io/library/postgres:17.6-alpine >/dev/null
+  "${MCLOVING_POSTGRES_IMAGE}" >/dev/null
 
 for _ in $(seq 1 60); do
   if podman exec "${container_name}" pg_isready \
     --username mcloving --dbname mcloving >/dev/null 2>&1; then
-    break
+    sleep 0.5
+    if podman exec "${container_name}" pg_isready \
+      --username mcloving --dbname mcloving >/dev/null 2>&1; then
+      break
+    fi
   fi
   sleep 0.25
 done
@@ -38,7 +42,7 @@ done
 podman exec "${container_name}" pg_isready \
   --username mcloving --dbname mcloving >/dev/null
 
-database_url="postgres://mcloving:mcloving-test@127.0.0.1:${port}/mcloving"
+database_url="postgres://mcloving@127.0.0.1:${port}/mcloving"
 podman run --rm \
   --network host \
   --env "MCLOVING_TEST_DATABASE_URL=${database_url}" \

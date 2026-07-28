@@ -286,3 +286,88 @@ async fn expired_offer_is_reclaimed_with_a_new_fence() {
             .expect("reject stale terminal publication")
     );
 }
+
+#[tokio::test]
+async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_a = Uuid::new_v4();
+    let project_a = Uuid::new_v4();
+    let organization_b = Uuid::new_v4();
+    let project_b = Uuid::new_v4();
+    store
+        .create_project(
+            organization_a,
+            &format!("org-{organization_a}"),
+            project_a,
+            "project",
+        )
+        .await
+        .expect("create tenant A");
+    store
+        .create_project(
+            organization_b,
+            &format!("org-{organization_b}"),
+            project_b,
+            "project",
+        )
+        .await
+        .expect("create tenant B");
+    for (organization_id, project_id, key) in [
+        (organization_a, project_a, "tenant-a"),
+        (organization_b, project_b, "tenant-b"),
+    ] {
+        store
+            .admit_build(&NewBuild {
+                organization_id,
+                project_id,
+                idempotency_key: key.into(),
+                pipeline_digest: [4; 32],
+                node_key: "stage".into(),
+                required_capabilities: Vec::new(),
+                priority: 0,
+            })
+            .await
+            .expect("admit tenant build");
+    }
+
+    let mut tenant = store.pool().begin().await.expect("begin tenant session");
+    sqlx::query("SET LOCAL ROLE mcloving_tenant")
+        .execute(&mut *tenant)
+        .await
+        .expect("assume unprivileged application role");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_a.to_string())
+        .execute(&mut *tenant)
+        .await
+        .expect("bind tenant context");
+    let visible = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM builds")
+        .fetch_one(&mut *tenant)
+        .await
+        .expect("read tenant-scoped builds");
+    assert_eq!(visible, 1);
+    let cross_tenant =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM builds WHERE organization_id = $1")
+            .bind(organization_b)
+            .fetch_one(&mut *tenant)
+            .await
+            .expect("cross-tenant read is filtered");
+    assert_eq!(cross_tenant, 0);
+    let substituted_write = sqlx::query(
+        "INSERT INTO builds (
+             id, organization_id, project_id, idempotency_key,
+             pipeline_digest, status, priority
+         )
+         VALUES ($1, $2, $3, 'substitution', $4, 'queued', 0)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(organization_b)
+    .bind(project_b)
+    .bind([5_u8; 32].as_slice())
+    .execute(&mut *tenant)
+    .await;
+    assert!(substituted_write.is_err());
+    tenant.rollback().await.expect("roll back tenant test");
+}

@@ -97,10 +97,11 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: postgres:17.6-alpine
+        image: >-
+          postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
         env:
           POSTGRES_USER: mcloving
-          POSTGRES_PASSWORD: mcloving-test
+          POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: mcloving
         ports:
           - 5432:5432
@@ -111,7 +112,7 @@ jobs:
           --health-retries 30
     env:
       MCLOVING_TEST_DATABASE_URL: >-
-        postgres://mcloving:mcloving-test@127.0.0.1:5432/mcloving
+        postgres://mcloving@127.0.0.1:5432/mcloving
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
