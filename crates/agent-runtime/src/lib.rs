@@ -1,0 +1,689 @@
+//! Durable local execution state for the McLoving agent.
+//!
+//! The journal stores authority and recovery metadata, never workload payloads
+//! or credentials. An acceptance acknowledgement can only be constructed after
+//! the SQLite transaction commits.
+
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use thiserror::Error;
+
+const SCHEMA_VERSION: i64 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttemptPhase {
+    Accepted,
+    Running,
+    Finalizing,
+    Succeeded,
+    Failed,
+    Cancelling,
+    Aborted,
+    ReconciliationRequired,
+}
+
+impl AttemptPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Running => "running",
+            Self::Finalizing => "finalizing",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelling => "cancelling",
+            Self::Aborted => "aborted",
+            Self::ReconciliationRequired => "reconciliation_required",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, JournalError> {
+        match value {
+            "accepted" => Ok(Self::Accepted),
+            "running" => Ok(Self::Running),
+            "finalizing" => Ok(Self::Finalizing),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "cancelling" => Ok(Self::Cancelling),
+            "aborted" => Ok(Self::Aborted),
+            "reconciliation_required" => Ok(Self::ReconciliationRequired),
+            other => Err(JournalError::UnknownPhase(other.to_owned())),
+        }
+    }
+
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Aborted)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Acceptance {
+    pub organization_id: String,
+    pub attempt_id: String,
+    pub fence_token: u64,
+    pub session_epoch: u64,
+    pub payload_digest: [u8; 32],
+    pub workspace: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptanceAck {
+    pub organization_id: String,
+    pub attempt_id: String,
+    pub fence_token: u64,
+    pub session_epoch: u64,
+    pub accepted_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SpoolEntry {
+    pub sequence: u64,
+    pub relative_path: PathBuf,
+    pub digest: [u8; 32],
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationAttempt {
+    pub organization_id: String,
+    pub attempt_id: String,
+    pub fence_token: u64,
+    pub session_epoch: u64,
+    pub payload_digest: [u8; 32],
+    pub phase: AttemptPhase,
+    pub workspace: PathBuf,
+    pub process_group_id: Option<i32>,
+    pub logs: Vec<SpoolEntry>,
+    pub result: Option<SpoolEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReconciliationReport {
+    pub attempts: Vec<ReconciliationAttempt>,
+}
+
+#[derive(Debug, Error)]
+pub enum JournalError {
+    #[error("SQLite journal error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("numeric authority value exceeds SQLite signed integer range")]
+    AuthorityOverflow,
+    #[error("journal acceptance conflicts with the existing durable attempt")]
+    AcceptanceConflict,
+    #[error("attempt does not exist or authority is stale")]
+    StaleAuthority,
+    #[error("spool path must be a normalized relative path")]
+    InvalidRelativePath,
+    #[error("journal contains unknown attempt phase {0}")]
+    UnknownPhase(String),
+    #[error("journal contains an invalid fixed-size digest")]
+    InvalidDigest,
+    #[error("system clock is before the Unix epoch")]
+    InvalidSystemClock,
+}
+
+pub struct Journal {
+    connection: Connection,
+}
+
+impl Journal {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
+        let connection = Connection::open(path)?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.execute_batch(
+            "
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = FULL;
+            PRAGMA foreign_keys = ON;
+            PRAGMA trusted_schema = OFF;
+
+            CREATE TABLE IF NOT EXISTS journal_metadata (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                schema_version INTEGER NOT NULL
+            ) STRICT;
+
+            INSERT INTO journal_metadata(singleton, schema_version)
+            VALUES (1, 1)
+            ON CONFLICT(singleton) DO NOTHING;
+
+            CREATE TABLE IF NOT EXISTS attempts (
+                organization_id TEXT NOT NULL,
+                attempt_id TEXT NOT NULL,
+                fence_token INTEGER NOT NULL CHECK (fence_token >= 0),
+                session_epoch INTEGER NOT NULL CHECK (session_epoch >= 0),
+                payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+                phase TEXT NOT NULL CHECK (phase IN (
+                    'accepted',
+                    'running',
+                    'finalizing',
+                    'succeeded',
+                    'failed',
+                    'cancelling',
+                    'aborted',
+                    'reconciliation_required'
+                )),
+                workspace TEXT NOT NULL,
+                process_group_id INTEGER,
+                accepted_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                PRIMARY KEY (organization_id, attempt_id)
+            ) STRICT;
+
+            CREATE TABLE IF NOT EXISTS log_spool (
+                organization_id TEXT NOT NULL,
+                attempt_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK (sequence >= 0),
+                relative_path TEXT NOT NULL,
+                digest BLOB NOT NULL CHECK (length(digest) = 32),
+                bytes INTEGER NOT NULL CHECK (bytes >= 0),
+                PRIMARY KEY (organization_id, attempt_id, sequence),
+                FOREIGN KEY (organization_id, attempt_id)
+                    REFERENCES attempts(organization_id, attempt_id)
+                    ON DELETE CASCADE
+            ) STRICT;
+
+            CREATE TABLE IF NOT EXISTS result_spool (
+                organization_id TEXT NOT NULL,
+                attempt_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                digest BLOB NOT NULL CHECK (length(digest) = 32),
+                bytes INTEGER NOT NULL CHECK (bytes >= 0),
+                PRIMARY KEY (organization_id, attempt_id),
+                FOREIGN KEY (organization_id, attempt_id)
+                    REFERENCES attempts(organization_id, attempt_id)
+                    ON DELETE CASCADE
+            ) STRICT;
+            ",
+        )?;
+
+        let schema_version: i64 = connection.query_row(
+            "SELECT schema_version FROM journal_metadata WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if schema_version != SCHEMA_VERSION {
+            return Err(JournalError::Sqlite(rusqlite::Error::InvalidQuery));
+        }
+
+        Ok(Self { connection })
+    }
+
+    pub fn accept(&mut self, acceptance: &Acceptance) -> Result<AcceptanceAck, JournalError> {
+        validate_relative_path(&acceptance.workspace)?;
+        let fence_token = to_sql_integer(acceptance.fence_token)?;
+        let session_epoch = to_sql_integer(acceptance.session_epoch)?;
+        let now = unix_time_ms()?;
+        let workspace = path_text(&acceptance.workspace)?;
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = transaction
+            .query_row(
+                "
+                SELECT fence_token, session_epoch, payload_digest, workspace,
+                       accepted_at_unix_ms
+                FROM attempts
+                WHERE organization_id = ?1 AND attempt_id = ?2
+                ",
+                params![acceptance.organization_id, acceptance.attempt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let accepted_at_unix_ms = if let Some((
+            existing_fence,
+            existing_session,
+            existing_digest,
+            existing_workspace,
+            accepted_at,
+        )) = existing
+        {
+            if existing_fence != fence_token
+                || existing_session != session_epoch
+                || existing_digest.as_slice() != acceptance.payload_digest
+                || existing_workspace != workspace
+            {
+                return Err(JournalError::AcceptanceConflict);
+            }
+            accepted_at
+        } else {
+            transaction.execute(
+                "
+                INSERT INTO attempts(
+                    organization_id,
+                    attempt_id,
+                    fence_token,
+                    session_epoch,
+                    payload_digest,
+                    phase,
+                    workspace,
+                    accepted_at_unix_ms,
+                    updated_at_unix_ms
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, 'accepted', ?6, ?7, ?7)
+                ",
+                params![
+                    acceptance.organization_id,
+                    acceptance.attempt_id,
+                    fence_token,
+                    session_epoch,
+                    acceptance.payload_digest.as_slice(),
+                    workspace,
+                    now,
+                ],
+            )?;
+            now
+        };
+
+        transaction.commit()?;
+        Ok(AcceptanceAck {
+            organization_id: acceptance.organization_id.clone(),
+            attempt_id: acceptance.attempt_id.clone(),
+            fence_token: acceptance.fence_token,
+            session_epoch: acceptance.session_epoch,
+            accepted_at_unix_ms,
+        })
+    }
+
+    pub fn transition(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
+        phase: AttemptPhase,
+        process_group_id: Option<i32>,
+    ) -> Result<(), JournalError> {
+        let changed = self.connection.execute(
+            "
+            UPDATE attempts
+            SET phase = ?1, process_group_id = ?2, updated_at_unix_ms = ?3
+            WHERE organization_id = ?4
+              AND attempt_id = ?5
+              AND fence_token = ?6
+              AND session_epoch = ?7
+            ",
+            params![
+                phase.as_str(),
+                process_group_id,
+                unix_time_ms()?,
+                organization_id,
+                attempt_id,
+                to_sql_integer(fence_token)?,
+                to_sql_integer(session_epoch)?,
+            ],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(JournalError::StaleAuthority)
+        }
+    }
+
+    pub fn record_log(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        entry: &SpoolEntry,
+    ) -> Result<(), JournalError> {
+        validate_relative_path(&entry.relative_path)?;
+        self.connection.execute(
+            "
+            INSERT INTO log_spool(
+                organization_id, attempt_id, sequence, relative_path, digest, bytes
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(organization_id, attempt_id, sequence) DO UPDATE SET
+                relative_path = excluded.relative_path,
+                digest = excluded.digest,
+                bytes = excluded.bytes
+            ",
+            params![
+                organization_id,
+                attempt_id,
+                to_sql_integer(entry.sequence)?,
+                path_text(&entry.relative_path)?,
+                entry.digest.as_slice(),
+                to_sql_integer(entry.bytes)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_result(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        entry: &SpoolEntry,
+    ) -> Result<(), JournalError> {
+        validate_relative_path(&entry.relative_path)?;
+        self.connection.execute(
+            "
+            INSERT INTO result_spool(
+                organization_id, attempt_id, relative_path, digest, bytes
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(organization_id, attempt_id) DO UPDATE SET
+                relative_path = excluded.relative_path,
+                digest = excluded.digest,
+                bytes = excluded.bytes
+            ",
+            params![
+                organization_id,
+                attempt_id,
+                path_text(&entry.relative_path)?,
+                entry.digest.as_slice(),
+                to_sql_integer(entry.bytes)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn reconcile(&self) -> Result<ReconciliationReport, JournalError> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT organization_id, attempt_id, fence_token, session_epoch,
+                   payload_digest, phase, workspace, process_group_id
+            FROM attempts
+            WHERE phase NOT IN ('succeeded', 'failed', 'aborted')
+            ORDER BY organization_id, attempt_id
+            ",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<i32>>(7)?,
+            ))
+        })?;
+
+        let mut attempts = Vec::new();
+        for row in rows {
+            let (
+                organization_id,
+                attempt_id,
+                fence_token,
+                session_epoch,
+                payload_digest,
+                phase,
+                workspace,
+                process_group_id,
+            ) = row?;
+            attempts.push(ReconciliationAttempt {
+                logs: self.log_entries(&organization_id, &attempt_id)?,
+                result: self.result_entry(&organization_id, &attempt_id)?,
+                organization_id,
+                attempt_id,
+                fence_token: from_sql_integer(fence_token)?,
+                session_epoch: from_sql_integer(session_epoch)?,
+                payload_digest: fixed_digest(payload_digest)?,
+                phase: AttemptPhase::parse(&phase)?,
+                workspace: PathBuf::from(workspace),
+                process_group_id,
+            });
+        }
+        Ok(ReconciliationReport { attempts })
+    }
+
+    pub fn journal_mode(&self) -> Result<String, JournalError> {
+        Ok(self
+            .connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))?)
+    }
+
+    pub fn integrity_check(&self) -> Result<String, JournalError> {
+        Ok(self
+            .connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))?)
+    }
+
+    fn log_entries(
+        &self,
+        organization_id: &str,
+        attempt_id: &str,
+    ) -> Result<Vec<SpoolEntry>, JournalError> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT sequence, relative_path, digest, bytes
+            FROM log_spool
+            WHERE organization_id = ?1 AND attempt_id = ?2
+            ORDER BY sequence
+            ",
+        )?;
+        let rows = statement.query_map(params![organization_id, attempt_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+
+        rows.map(|row| {
+            let (sequence, relative_path, digest, bytes) = row?;
+            Ok(SpoolEntry {
+                sequence: from_sql_integer(sequence)?,
+                relative_path: PathBuf::from(relative_path),
+                digest: fixed_digest(digest)?,
+                bytes: from_sql_integer(bytes)?,
+            })
+        })
+        .collect()
+    }
+
+    fn result_entry(
+        &self,
+        organization_id: &str,
+        attempt_id: &str,
+    ) -> Result<Option<SpoolEntry>, JournalError> {
+        let row = self
+            .connection
+            .query_row(
+                "
+                SELECT relative_path, digest, bytes
+                FROM result_spool
+                WHERE organization_id = ?1 AND attempt_id = ?2
+                ",
+                params![organization_id, attempt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        row.map(|(relative_path, digest, bytes)| {
+            Ok(SpoolEntry {
+                sequence: 0,
+                relative_path: PathBuf::from(relative_path),
+                digest: fixed_digest(digest)?,
+                bytes: from_sql_integer(bytes)?,
+            })
+        })
+        .transpose()
+    }
+}
+
+fn validate_relative_path(path: &Path) -> Result<(), JournalError> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(JournalError::InvalidRelativePath);
+    }
+    Ok(())
+}
+
+fn path_text(path: &Path) -> Result<&str, JournalError> {
+    path.to_str().ok_or(JournalError::InvalidRelativePath)
+}
+
+fn to_sql_integer(value: u64) -> Result<i64, JournalError> {
+    i64::try_from(value).map_err(|_| JournalError::AuthorityOverflow)
+}
+
+fn from_sql_integer(value: i64) -> Result<u64, JournalError> {
+    u64::try_from(value).map_err(|_| JournalError::AuthorityOverflow)
+}
+
+fn fixed_digest(value: Vec<u8>) -> Result<[u8; 32], JournalError> {
+    value.try_into().map_err(|_| JournalError::InvalidDigest)
+}
+
+fn unix_time_ms() -> Result<i64, JournalError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| JournalError::InvalidSystemClock)?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| JournalError::AuthorityOverflow)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn acceptance() -> Acceptance {
+        Acceptance {
+            organization_id: "org-1".to_owned(),
+            attempt_id: "attempt-1".to_owned(),
+            fence_token: 9,
+            session_epoch: 4,
+            payload_digest: [7; 32],
+            workspace: PathBuf::from("org-1/attempt-1"),
+        }
+    }
+
+    #[test]
+    fn acceptance_is_durable_idempotent_and_recoverable_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.sqlite3");
+        let expected = acceptance();
+
+        let first_ack = {
+            let mut journal = Journal::open(&path).unwrap();
+            assert_eq!(journal.journal_mode().unwrap(), "wal");
+            let first = journal.accept(&expected).unwrap();
+            let second = journal.accept(&expected).unwrap();
+            assert_eq!(first, second);
+            first
+        };
+
+        let reopened = Journal::open(&path).unwrap();
+        let report = reopened.reconcile().unwrap();
+        assert_eq!(report.attempts.len(), 1);
+        assert_eq!(report.attempts[0].attempt_id, first_ack.attempt_id);
+        assert_eq!(report.attempts[0].payload_digest, [7; 32]);
+        assert_eq!(reopened.integrity_check().unwrap(), "ok");
+    }
+
+    #[test]
+    fn conflicting_replay_and_stale_transition_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(directory.path().join("journal.sqlite3")).unwrap();
+        let accepted = acceptance();
+        journal.accept(&accepted).unwrap();
+
+        let mut conflict = accepted.clone();
+        conflict.payload_digest = [8; 32];
+        assert!(matches!(
+            journal.accept(&conflict),
+            Err(JournalError::AcceptanceConflict)
+        ));
+        assert!(matches!(
+            journal.transition(
+                "org-1",
+                "attempt-1",
+                accepted.fence_token + 1,
+                accepted.session_epoch,
+                AttemptPhase::Running,
+                Some(123),
+            ),
+            Err(JournalError::StaleAuthority)
+        ));
+    }
+
+    #[test]
+    fn reconciliation_includes_spool_metadata_and_excludes_terminal_attempts() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(directory.path().join("journal.sqlite3")).unwrap();
+        let accepted = acceptance();
+        journal.accept(&accepted).unwrap();
+        journal
+            .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Running, Some(321))
+            .unwrap();
+        journal
+            .record_log(
+                "org-1",
+                "attempt-1",
+                &SpoolEntry {
+                    sequence: 1,
+                    relative_path: PathBuf::from("spool/stdout-0001.log"),
+                    digest: [2; 32],
+                    bytes: 42,
+                },
+            )
+            .unwrap();
+        journal
+            .record_result(
+                "org-1",
+                "attempt-1",
+                &SpoolEntry {
+                    sequence: 0,
+                    relative_path: PathBuf::from("spool/result.pb"),
+                    digest: [3; 32],
+                    bytes: 17,
+                },
+            )
+            .unwrap();
+
+        let report = journal.reconcile().unwrap();
+        assert_eq!(report.attempts.len(), 1);
+        assert_eq!(report.attempts[0].process_group_id, Some(321));
+        assert_eq!(report.attempts[0].logs.len(), 1);
+        assert!(report.attempts[0].result.is_some());
+
+        journal
+            .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Succeeded, None)
+            .unwrap();
+        assert!(journal.reconcile().unwrap().attempts.is_empty());
+    }
+
+    #[test]
+    fn traversal_and_numeric_overflow_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(directory.path().join("journal.sqlite3")).unwrap();
+        let mut invalid = acceptance();
+        invalid.workspace = PathBuf::from("../escape");
+        assert!(matches!(
+            journal.accept(&invalid),
+            Err(JournalError::InvalidRelativePath)
+        ));
+
+        invalid.workspace = PathBuf::from("safe");
+        invalid.fence_token = u64::MAX;
+        assert!(matches!(
+            journal.accept(&invalid),
+            Err(JournalError::AuthorityOverflow)
+        ));
+    }
+}
