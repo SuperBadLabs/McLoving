@@ -1,6 +1,6 @@
 # Controller truth v1
 
-Status: implemented by batch W1-A.
+Status: implemented through batch W2-A.
 
 ## Transaction boundary
 
@@ -13,6 +13,17 @@ Terminal publication is accepted only for the current attempt fence, its exact
 lease owner, an accepted/running state, and an unexpired lease. Attempt, node,
 build, event, and outbox mutations commit together. Unleased, expired,
 concurrent, or stale publishers receive a negative result.
+
+Retries never rewrite an attempt. A failed or reconciliation-required attempt
+may create exactly one child attempt with an incremented ordinal and an
+immutable `retry_of` link. Replaying the retry decision returns that same
+child. Exhausted retry budgets enter a checksummed dead-letter ledger.
+
+External effects use a fenced, immutable-payload checkpoint ledger. Effect
+class and payload digest cannot change after preparation. State advances
+monotonically through prepared, applied, and confirmed, or enters the explicit
+uncertain state. Uncertain work is listed for reconciliation and cannot regress
+to an unconfirmed applied state.
 
 Migrations use a database advisory lock and a version ledger, so concurrent
 controller startup installs each migration exactly once.
@@ -60,6 +71,9 @@ The real-PostgreSQL gate proves:
 - capability-filtered scheduling and stable wait diagnostics;
 - accepted-lease expiry, requeue, fence increment, and stale-result rejection;
 - a tenant-prefixed scheduler claim-order index;
+- immutable, idempotent, bounded retry history and dead-letter exhaustion;
+- monotonic effect checkpoints, payload substitution rejection, and explicit
+  uncertain-effect reconciliation; and
 - forced-RLS read filtering and cross-tenant write rejection.
 
 Rust unit tests independently prove the authorization matrix and deny defaults.

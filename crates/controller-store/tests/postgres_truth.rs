@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use mcloving_controller_store::{
-    ClaimRequest, NewBuild, NewLogChunk, Store, TerminalOutcome, WaitReason,
+    ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk, RetryDecision, Store,
+    TerminalOutcome, WaitReason,
 };
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -689,6 +690,288 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].fence, second.fence);
     assert_eq!(logs[0].content, b"current\n");
+}
+
+#[tokio::test]
+async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "effects",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "effect-ledger".into(),
+            pipeline_digest: [23; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit build");
+    let payload = json!({"destination": "deploy/production", "release": "r1"});
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                0,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("prepare effect")
+    );
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                0,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Uncertain,
+                &payload,
+            )
+            .await
+            .expect("mark uncertain")
+    );
+    assert!(
+        !store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                0,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Applied,
+                &payload,
+            )
+            .await
+            .expect("reject regression")
+    );
+    assert!(
+        !store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                0,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Confirmed,
+                &json!({"destination": "deploy/production", "release": "r2"}),
+            )
+            .await
+            .expect("reject payload substitution")
+    );
+    let uncertain = store
+        .uncertain_effects(organization_id)
+        .await
+        .expect("list uncertain effects");
+    assert_eq!(uncertain.len(), 1);
+    assert_eq!(uncertain[0].effect_key, "deploy");
+    assert_eq!(uncertain[0].effect_class, EffectClass::NonIdempotent);
+    assert_eq!(uncertain[0].status, EffectStatus::Uncertain);
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                0,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Confirmed,
+                &payload,
+            )
+            .await
+            .expect("confirm reconciled effect")
+    );
+    assert!(
+        store
+            .uncertain_effects(organization_id)
+            .await
+            .expect("list after reconciliation")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn retry_history_is_immutable_idempotent_and_bounded() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "retry",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "bounded-retry".into(),
+            pipeline_digest: [24; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit build");
+    let first = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "agent-a".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim first")
+        .expect("first claim exists");
+    assert!(
+        store
+            .accept_offer(organization_id, first.attempt_id, first.fence, "agent-a")
+            .await
+            .expect("accept first")
+    );
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                "agent-a",
+                TerminalOutcome::Failed,
+                json!({"reason": "transient"}),
+            )
+            .await
+            .expect("fail first")
+    );
+    let scheduled = store
+        .schedule_retry(organization_id, first.attempt_id, 2, "transient")
+        .await
+        .expect("schedule retry");
+    let RetryDecision::Scheduled {
+        attempt_id: second_id,
+        ordinal: 2,
+        created: true,
+    } = scheduled
+    else {
+        panic!("expected new second attempt, got {scheduled:?}");
+    };
+    assert_eq!(
+        store
+            .schedule_retry(organization_id, first.attempt_id, 2, "transient")
+            .await
+            .expect("replay retry decision"),
+        RetryDecision::Scheduled {
+            attempt_id: second_id,
+            ordinal: 2,
+            created: false,
+        }
+    );
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read current snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.attempt_id, second_id);
+    assert_eq!(snapshot.attempt_status, "queued");
+    let second = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-b".into(),
+            agent_id: "agent-b".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim second")
+        .expect("second claim exists");
+    assert_eq!(second.attempt_id, second_id);
+    assert!(
+        store
+            .accept_offer(organization_id, second.attempt_id, second.fence, "agent-b")
+            .await
+            .expect("accept second")
+    );
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                second.attempt_id,
+                second.fence,
+                "agent-b",
+                TerminalOutcome::Failed,
+                json!({"reason": "persistent"}),
+            )
+            .await
+            .expect("fail second")
+    );
+    assert_eq!(
+        store
+            .schedule_retry(organization_id, second.attempt_id, 2, "persistent")
+            .await
+            .expect("exhaust retry"),
+        RetryDecision::DeadLettered
+    );
+    let rows = sqlx::query_as::<_, (Uuid, i32, Option<Uuid>, String)>(
+        "SELECT id, ordinal, retry_of, status
+         FROM attempts
+         WHERE organization_id = $1
+         ORDER BY ordinal",
+    )
+    .bind(organization_id)
+    .fetch_all(store.pool())
+    .await
+    .expect("read immutable attempt history");
+    assert_eq!(
+        rows,
+        vec![
+            (first.attempt_id, 1, None, "failed".to_owned()),
+            (
+                second.attempt_id,
+                2,
+                Some(first.attempt_id),
+                "failed".to_owned()
+            ),
+        ]
+    );
+    let dead_letters = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM dead_letters
+         WHERE organization_id = $1 AND attempt_id = $2",
+    )
+    .bind(organization_id)
+    .bind(second.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read dead letter");
+    assert_eq!(dead_letters, 1);
 }
 
 #[tokio::test]

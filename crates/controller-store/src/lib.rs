@@ -16,6 +16,8 @@ pub const CONTROLLER_SCHEMA_V1: &str = include_str!("../migrations/0001_controll
 pub const TENANT_SECURITY_V2: &str = include_str!("../migrations/0002_tenant_security.sql");
 /// Public API and committed log migration.
 pub const PUBLIC_API_V3: &str = include_str!("../migrations/0003_public_api.sql");
+/// Immutable retry history and uncertain-effect reconciliation migration.
+pub const DURABLE_RETRY_V4: &str = include_str!("../migrations/0004_durable_retry.sql");
 
 /// A build and its first executable node, admitted as one durable unit.
 #[derive(Clone, Debug)]
@@ -94,6 +96,65 @@ pub struct PublishedOutbox {
     pub payload: Value,
 }
 
+/// Idempotency classification for a durable external effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectClass {
+    Idempotent,
+    ExternallyIdempotent,
+    NonIdempotent,
+}
+
+impl EffectClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Idempotent => "idempotent",
+            Self::ExternallyIdempotent => "externally_idempotent",
+            Self::NonIdempotent => "non_idempotent",
+        }
+    }
+}
+
+/// Durable reconciliation state for one effect key and fencing epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectStatus {
+    Prepared,
+    Applied,
+    Confirmed,
+    Uncertain,
+}
+
+impl EffectStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Applied => "applied",
+            Self::Confirmed => "confirmed",
+            Self::Uncertain => "uncertain",
+        }
+    }
+}
+
+/// One immutable-payload effect checkpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectCheckpoint {
+    pub effect_key: String,
+    pub effect_class: EffectClass,
+    pub status: EffectStatus,
+    pub payload_digest: [u8; 32],
+}
+
+/// Result of a durable retry decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetryDecision {
+    Scheduled {
+        attempt_id: Uuid,
+        ordinal: i32,
+        created: bool,
+    },
+    DeadLettered,
+    Ineligible,
+}
+
 /// Terminal result accepted from a fenced attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalOutcome {
@@ -121,6 +182,8 @@ pub enum StoreError {
     IncompleteAdmission,
     #[error("attempt {attempt_id} log sequence {sequence} has a corrupt digest")]
     CorruptLogDigest { attempt_id: Uuid, sequence: i64 },
+    #[error("invalid durable effect payload: {0}")]
+    InvalidEffectPayload(String),
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -156,6 +219,7 @@ impl Store {
         apply_migration(&mut tx, 1, CONTROLLER_SCHEMA_V1).await?;
         apply_migration(&mut tx, 2, TENANT_SECURITY_V2).await?;
         apply_migration(&mut tx, 3, PUBLIC_API_V3).await?;
+        apply_migration(&mut tx, 4, DURABLE_RETRY_V4).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -300,7 +364,8 @@ impl Store {
              WHERE b.organization_id = $1
                AND b.project_id = $2
                AND b.id = $3
-               AND a.ordinal = 1",
+             ORDER BY a.ordinal DESC
+             LIMIT 1",
         )
         .bind(organization_id)
         .bind(project_id)
@@ -693,6 +758,288 @@ impl Store {
             .collect())
     }
 
+    /// Records a monotonic effect checkpoint for an exact fenced attempt.
+    ///
+    /// The payload and idempotency class are immutable. Repeating a checkpoint
+    /// is idempotent, while regressions or conflicting payloads are rejected.
+    pub async fn checkpoint_effect(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        effect_key: &str,
+        effect_class: EffectClass,
+        status: EffectStatus,
+        payload: &Value,
+    ) -> Result<bool, StoreError> {
+        if effect_key.is_empty() || effect_key.len() > 256 {
+            return Ok(false);
+        }
+        let payload_bytes = serde_json::to_vec(payload)
+            .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
+        let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let attempt_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM attempts
+                 WHERE organization_id = $1 AND id = $2 AND fence = $3
+             )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !attempt_exists {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let existing = sqlx::query_as::<_, (String, String, Vec<u8>)>(
+            "SELECT effect_class, status, payload_digest
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_key = $4
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(effect_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((existing_class, existing_status, existing_digest)) = existing {
+            let valid = existing_class == effect_class.as_str()
+                && existing_digest == payload_digest
+                && valid_effect_transition(&existing_status, status);
+            if !valid {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            sqlx::query(
+                "UPDATE attempt_effects
+                 SET status = $5, updated_at = clock_timestamp()
+                 WHERE organization_id = $1
+                   AND attempt_id = $2
+                   AND fence = $3
+                   AND effect_key = $4",
+            )
+            .bind(organization_id)
+            .bind(attempt_id)
+            .bind(fence)
+            .bind(effect_key)
+            .bind(status.as_str())
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            if status != EffectStatus::Prepared {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            sqlx::query(
+                "INSERT INTO attempt_effects (
+                     organization_id, attempt_id, fence, effect_key,
+                     effect_class, status, payload, payload_digest
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(organization_id)
+            .bind(attempt_id)
+            .bind(fence)
+            .bind(effect_key)
+            .bind(effect_class.as_str())
+            .bind(status.as_str())
+            .bind(payload)
+            .bind(payload_digest.as_slice())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Returns every effect that requires explicit operator reconciliation.
+    pub async fn uncertain_effects(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<EffectCheckpoint>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, (String, String, String, Vec<u8>)>(
+            "SELECT effect_key, effect_class, status, payload_digest
+             FROM attempt_effects
+             WHERE organization_id = $1 AND status = 'uncertain'
+             ORDER BY updated_at, attempt_id, effect_key",
+        )
+        .bind(organization_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(|(effect_key, effect_class, status, digest)| {
+                Ok(EffectCheckpoint {
+                    effect_key,
+                    effect_class: parse_effect_class(&effect_class)?,
+                    status: parse_effect_status(&status)?,
+                    payload_digest: digest.try_into().map_err(|_| {
+                        StoreError::InvalidEffectPayload(
+                            "stored effect digest is not 32 bytes".to_owned(),
+                        )
+                    })?,
+                })
+            })
+            .collect()
+    }
+
+    /// Creates one new immutable attempt or dead-letters an exhausted node.
+    ///
+    /// Only failed or reconciliation-required attempts are eligible. Repeating
+    /// the same decision returns the existing child attempt.
+    pub async fn schedule_retry(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        max_attempts: i32,
+        reason: &str,
+    ) -> Result<RetryDecision, StoreError> {
+        if max_attempts < 1 || reason.is_empty() {
+            return Ok(RetryDecision::Ineligible);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.retry.{attempt_id}"))
+            .execute(&mut *tx)
+            .await?;
+        let current = sqlx::query_as::<_, (Uuid, Uuid, i32, String, bool)>(
+            "SELECT n.id, n.build_id, a.ordinal, a.status,
+                    b.cancellation_requested_at IS NOT NULL
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE a.organization_id = $1 AND a.id = $2
+             FOR UPDATE OF a, n, b",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((node_id, build_id, ordinal, status, cancelled)) = current else {
+            tx.rollback().await?;
+            return Ok(RetryDecision::Ineligible);
+        };
+        if cancelled || !matches!(status.as_str(), "failed" | "reconciliation_required") {
+            tx.rollback().await?;
+            return Ok(RetryDecision::Ineligible);
+        }
+        if let Some((child_id, child_ordinal)) = sqlx::query_as::<_, (Uuid, i32)>(
+            "SELECT id, ordinal
+             FROM attempts
+             WHERE organization_id = $1 AND retry_of = $2",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(RetryDecision::Scheduled {
+                attempt_id: child_id,
+                ordinal: child_ordinal,
+                created: false,
+            });
+        }
+        if ordinal >= max_attempts {
+            let payload = json!({
+                "attempt_id": attempt_id,
+                "ordinal": ordinal,
+                "max_attempts": max_attempts,
+                "reason": reason,
+            });
+            let digest: [u8; 32] = Sha256::digest(serde_json::to_vec(&payload).map_err(
+                |error| StoreError::InvalidEffectPayload(error.to_string()),
+            )?)
+            .into();
+            sqlx::query(
+                "INSERT INTO dead_letters (
+                     organization_id, attempt_id, reason, payload, payload_digest
+                 )
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (organization_id, attempt_id) DO NOTHING",
+            )
+            .bind(organization_id)
+            .bind(attempt_id)
+            .bind(reason)
+            .bind(&payload)
+            .bind(digest.as_slice())
+            .execute(&mut *tx)
+            .await?;
+            append_event_and_outbox(
+                &mut tx,
+                organization_id,
+                build_id,
+                "attempt.dead_lettered",
+                payload,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(RetryDecision::DeadLettered);
+        }
+        let child_id = Uuid::new_v4();
+        let child_ordinal = ordinal + 1;
+        sqlx::query(
+            "INSERT INTO attempts (
+                 id, organization_id, node_id, ordinal, status, retry_of
+             )
+             VALUES ($1, $2, $3, $4, 'queued', $5)",
+        )
+        .bind(child_id)
+        .bind(organization_id)
+        .bind(node_id)
+        .bind(child_ordinal)
+        .bind(attempt_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE nodes
+             SET status = 'queued', queued_at = clock_timestamp()
+             WHERE organization_id = $1 AND id = $2",
+        )
+        .bind(organization_id)
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE builds
+             SET status = 'queued', completed_at = NULL
+             WHERE organization_id = $1 AND id = $2",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .execute(&mut *tx)
+        .await?;
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "attempt.retry_scheduled",
+            json!({
+                "attempt_id": child_id,
+                "retry_of": attempt_id,
+                "ordinal": child_ordinal,
+                "reason": reason,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(RetryDecision::Scheduled {
+            attempt_id: child_id,
+            ordinal: child_ordinal,
+            created: true,
+        })
+    }
+
     /// Accepts exactly one terminal publication for the current attempt fence.
     ///
     /// The attempt, node, build, event, and outbox mutation share a transaction.
@@ -866,4 +1213,37 @@ async fn append_event_and_outbox(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
+    matches!(
+        (current, requested),
+        ("prepared", EffectStatus::Prepared | EffectStatus::Applied | EffectStatus::Uncertain)
+            | ("applied", EffectStatus::Applied | EffectStatus::Confirmed | EffectStatus::Uncertain)
+            | ("confirmed", EffectStatus::Confirmed)
+            | ("uncertain", EffectStatus::Uncertain | EffectStatus::Confirmed)
+    )
+}
+
+fn parse_effect_class(value: &str) -> Result<EffectClass, StoreError> {
+    match value {
+        "idempotent" => Ok(EffectClass::Idempotent),
+        "externally_idempotent" => Ok(EffectClass::ExternallyIdempotent),
+        "non_idempotent" => Ok(EffectClass::NonIdempotent),
+        other => Err(StoreError::InvalidEffectPayload(format!(
+            "unknown effect class {other}"
+        ))),
+    }
+}
+
+fn parse_effect_status(value: &str) -> Result<EffectStatus, StoreError> {
+    match value {
+        "prepared" => Ok(EffectStatus::Prepared),
+        "applied" => Ok(EffectStatus::Applied),
+        "confirmed" => Ok(EffectStatus::Confirmed),
+        "uncertain" => Ok(EffectStatus::Uncertain),
+        other => Err(StoreError::InvalidEffectPayload(format!(
+            "unknown effect status {other}"
+        ))),
+    }
 }
