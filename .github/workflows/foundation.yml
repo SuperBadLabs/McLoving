@@ -62,7 +62,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify foundation records
         run: |
+          bash -n scripts/validate-foundation.sh
           test "$(find docs/adr -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' | wc -l)" -eq 15
           test -s docs/architecture/CHARTER.md
           test -s docs/threat-model/README.md
           test -s docs/EXECUTION_BOARD.md
+
+  formal:
+    name: Formal model
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download verified TLA+ tools
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar \
+            --output /tmp/tla2tools.jar
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  /tmp/tla2tools.jar" \
+            | sha256sum -c -
+      - name: Parse and check the attempt lease model
+        run: |
+          java -cp /tmp/tla2tools.jar tla2sany.SANY formal/tla/AttemptLease.tla
+          java -cp /tmp/tla2tools.jar tlc2.TLC \
+            -config formal/tla/AttemptLease.cfg \
+            -workers auto \
+            formal/tla/AttemptLease.tla

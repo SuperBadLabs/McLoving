@@ -20,3 +20,9 @@ See:
 - [Execution board](docs/EXECUTION_BOARD.md)
 - [Threat model](docs/threat-model/README.md)
 - [Contributing](CONTRIBUTING.md)
+
+On HeMan, run the complete pinned foundation gate with:
+
+```text
+./scripts/validate-foundation.sh
+```

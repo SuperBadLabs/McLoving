@@ -5,10 +5,7 @@ All changes land through a protected pull request.
 Before requesting review:
 
 ```text
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo deny check
+./scripts/validate-foundation.sh
 ```
 
 Every material change must update tests, documentation, the execution board,
