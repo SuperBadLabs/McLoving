@@ -115,6 +115,8 @@ pub enum JournalError {
     AuthorityOverflow,
     #[error("journal acceptance conflicts with the existing durable attempt")]
     AcceptanceConflict,
+    #[error("journal schema version mismatch: expected {expected}, found {found}")]
+    SchemaVersionMismatch { expected: i64, found: i64 },
     #[error("attempt does not exist or authority is stale")]
     StaleAuthority,
     #[error("attempt transition from {from:?} to {to:?} is not allowed")]
@@ -154,10 +156,6 @@ impl Journal {
                 schema_version INTEGER NOT NULL
             ) STRICT;
 
-            INSERT INTO journal_metadata(singleton, schema_version)
-            VALUES (1, 1)
-            ON CONFLICT(singleton) DO NOTHING;
-
             CREATE TABLE IF NOT EXISTS attempts (
                 organization_id TEXT NOT NULL,
                 attempt_id TEXT NOT NULL,
@@ -178,34 +176,44 @@ impl Journal {
                 process_group_id INTEGER,
                 accepted_at_unix_ms INTEGER NOT NULL,
                 updated_at_unix_ms INTEGER NOT NULL,
-                PRIMARY KEY (organization_id, attempt_id)
+                PRIMARY KEY (organization_id, attempt_id, fence_token)
             ) STRICT;
 
             CREATE TABLE IF NOT EXISTS log_spool (
                 organization_id TEXT NOT NULL,
                 attempt_id TEXT NOT NULL,
+                fence_token INTEGER NOT NULL CHECK (fence_token >= 0),
                 sequence INTEGER NOT NULL CHECK (sequence >= 0),
                 relative_path TEXT NOT NULL,
                 digest BLOB NOT NULL CHECK (length(digest) = 32),
                 bytes INTEGER NOT NULL CHECK (bytes >= 0),
-                PRIMARY KEY (organization_id, attempt_id, sequence),
-                FOREIGN KEY (organization_id, attempt_id)
-                    REFERENCES attempts(organization_id, attempt_id)
+                PRIMARY KEY (organization_id, attempt_id, fence_token, sequence),
+                FOREIGN KEY (organization_id, attempt_id, fence_token)
+                    REFERENCES attempts(organization_id, attempt_id, fence_token)
                     ON DELETE CASCADE
             ) STRICT;
 
             CREATE TABLE IF NOT EXISTS result_spool (
                 organization_id TEXT NOT NULL,
                 attempt_id TEXT NOT NULL,
+                fence_token INTEGER NOT NULL CHECK (fence_token >= 0),
                 relative_path TEXT NOT NULL,
                 digest BLOB NOT NULL CHECK (length(digest) = 32),
                 bytes INTEGER NOT NULL CHECK (bytes >= 0),
-                PRIMARY KEY (organization_id, attempt_id),
-                FOREIGN KEY (organization_id, attempt_id)
-                    REFERENCES attempts(organization_id, attempt_id)
+                PRIMARY KEY (organization_id, attempt_id, fence_token),
+                FOREIGN KEY (organization_id, attempt_id, fence_token)
+                    REFERENCES attempts(organization_id, attempt_id, fence_token)
                     ON DELETE CASCADE
             ) STRICT;
             ",
+        )?;
+        connection.execute(
+            "
+            INSERT INTO journal_metadata(singleton, schema_version)
+            VALUES (1, ?1)
+            ON CONFLICT(singleton) DO NOTHING
+            ",
+            [SCHEMA_VERSION],
         )?;
 
         let schema_version: i64 = connection.query_row(
@@ -214,7 +222,10 @@ impl Journal {
             |row| row.get(0),
         )?;
         if schema_version != SCHEMA_VERSION {
-            return Err(JournalError::Sqlite(rusqlite::Error::InvalidQuery));
+            return Err(JournalError::SchemaVersionMismatch {
+                expected: SCHEMA_VERSION,
+                found: schema_version,
+            });
         }
 
         Ok(Self { connection })
@@ -230,46 +241,82 @@ impl Journal {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let latest = transaction
+            .query_row(
+                "
+                SELECT fence_token, session_epoch
+                FROM attempts
+                WHERE organization_id = ?1 AND attempt_id = ?2
+                ORDER BY fence_token DESC
+                LIMIT 1
+                ",
+                params![acceptance.organization_id, acceptance.attempt_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        if latest.is_some_and(|(latest_fence, latest_session)| {
+            fence_token < latest_fence || session_epoch < latest_session
+        }) {
+            return Err(JournalError::AcceptanceConflict);
+        }
         let existing = transaction
             .query_row(
                 "
-                SELECT fence_token, session_epoch, payload_digest, workspace,
-                       accepted_at_unix_ms
+                SELECT session_epoch, payload_digest, workspace, accepted_at_unix_ms
                 FROM attempts
-                WHERE organization_id = ?1 AND attempt_id = ?2
+                WHERE organization_id = ?1
+                  AND attempt_id = ?2
+                  AND fence_token = ?3
                 ",
-                params![acceptance.organization_id, acceptance.attempt_id],
+                params![
+                    acceptance.organization_id,
+                    acceptance.attempt_id,
+                    fence_token
+                ],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Vec<u8>>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 },
             )
             .optional()?;
 
-        let accepted_at_unix_ms = if let Some((
-            existing_fence,
-            existing_session,
-            existing_digest,
-            existing_workspace,
-            accepted_at,
-        )) = existing
-        {
-            if existing_fence != fence_token
-                || existing_session != session_epoch
-                || existing_digest.as_slice() != acceptance.payload_digest
-                || existing_workspace != workspace
+        let accepted_at_unix_ms =
+            if let Some((existing_session, existing_digest, existing_workspace, accepted_at)) =
+                existing
             {
-                return Err(JournalError::AcceptanceConflict);
-            }
-            accepted_at
-        } else {
-            transaction.execute(
-                "
+                if existing_session != session_epoch
+                    || existing_digest.as_slice() != acceptance.payload_digest
+                    || existing_workspace != workspace
+                {
+                    return Err(JournalError::AcceptanceConflict);
+                }
+                accepted_at
+            } else {
+                if latest.is_some_and(|(latest_fence, _)| fence_token <= latest_fence) {
+                    return Err(JournalError::AcceptanceConflict);
+                }
+                transaction.execute(
+                    "
+                UPDATE attempts
+                SET phase = 'reconciliation_required', updated_at_unix_ms = ?1
+                WHERE organization_id = ?2
+                  AND attempt_id = ?3
+                  AND fence_token < ?4
+                  AND phase NOT IN ('succeeded', 'failed', 'aborted')
+                ",
+                    params![
+                        now,
+                        acceptance.organization_id,
+                        acceptance.attempt_id,
+                        fence_token
+                    ],
+                )?;
+                transaction.execute(
+                    "
                 INSERT INTO attempts(
                     organization_id,
                     attempt_id,
@@ -283,18 +330,18 @@ impl Journal {
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, 'accepted', ?6, ?7, ?7)
                 ",
-                params![
-                    acceptance.organization_id,
-                    acceptance.attempt_id,
-                    fence_token,
-                    session_epoch,
-                    acceptance.payload_digest.as_slice(),
-                    workspace,
-                    now,
-                ],
-            )?;
-            now
-        };
+                    params![
+                        acceptance.organization_id,
+                        acceptance.attempt_id,
+                        fence_token,
+                        session_epoch,
+                        acceptance.payload_digest.as_slice(),
+                        workspace,
+                        now,
+                    ],
+                )?;
+                now
+            };
 
         transaction.commit()?;
         Ok(AcceptanceAck {
@@ -386,14 +433,16 @@ impl Journal {
         let changed = self.connection.execute(
             "
             INSERT INTO log_spool(
-                organization_id, attempt_id, sequence, relative_path, digest, bytes
+                organization_id, attempt_id, fence_token, sequence,
+                relative_path, digest, bytes
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ON CONFLICT(organization_id, attempt_id, sequence) DO NOTHING
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(organization_id, attempt_id, fence_token, sequence) DO NOTHING
             ",
             params![
                 organization_id,
                 attempt_id,
+                to_sql_integer(fence_token)?,
                 sequence,
                 relative_path,
                 entry.digest.as_slice(),
@@ -407,9 +456,17 @@ impl Journal {
             "
             SELECT relative_path, digest, bytes
             FROM log_spool
-            WHERE organization_id = ?1 AND attempt_id = ?2 AND sequence = ?3
+            WHERE organization_id = ?1
+              AND attempt_id = ?2
+              AND fence_token = ?3
+              AND sequence = ?4
             ",
-            params![organization_id, attempt_id, sequence],
+            params![
+                organization_id,
+                attempt_id,
+                to_sql_integer(fence_token)?,
+                sequence
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -443,14 +500,15 @@ impl Journal {
         let changed = self.connection.execute(
             "
             INSERT INTO result_spool(
-                organization_id, attempt_id, relative_path, digest, bytes
+                organization_id, attempt_id, fence_token, relative_path, digest, bytes
             )
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            ON CONFLICT(organization_id, attempt_id) DO NOTHING
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(organization_id, attempt_id, fence_token) DO NOTHING
             ",
             params![
                 organization_id,
                 attempt_id,
+                to_sql_integer(fence_token)?,
                 relative_path,
                 entry.digest.as_slice(),
                 bytes,
@@ -463,9 +521,9 @@ impl Journal {
             "
             SELECT relative_path, digest, bytes
             FROM result_spool
-            WHERE organization_id = ?1 AND attempt_id = ?2
+            WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
             ",
-            params![organization_id, attempt_id],
+            params![organization_id, attempt_id, to_sql_integer(fence_token)?],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -491,7 +549,7 @@ impl Journal {
                    payload_digest, phase, workspace, process_group_id
             FROM attempts
             WHERE phase NOT IN ('succeeded', 'failed', 'aborted')
-            ORDER BY organization_id, attempt_id
+            ORDER BY organization_id, attempt_id, fence_token
             ",
         )?;
         let rows = statement.query_map([], |row| {
@@ -520,8 +578,8 @@ impl Journal {
                 process_group_id,
             ) = row?;
             attempts.push(ReconciliationAttempt {
-                logs: self.log_entries(&organization_id, &attempt_id)?,
-                result: self.result_entry(&organization_id, &attempt_id)?,
+                logs: self.log_entries(&organization_id, &attempt_id, fence_token)?,
+                result: self.result_entry(&organization_id, &attempt_id, fence_token)?,
                 organization_id,
                 attempt_id,
                 fence_token: from_sql_integer(fence_token)?,
@@ -585,23 +643,25 @@ impl Journal {
         &self,
         organization_id: &str,
         attempt_id: &str,
+        fence_token: i64,
     ) -> Result<Vec<SpoolEntry>, JournalError> {
         let mut statement = self.connection.prepare(
             "
             SELECT sequence, relative_path, digest, bytes
             FROM log_spool
-            WHERE organization_id = ?1 AND attempt_id = ?2
+            WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
             ORDER BY sequence
             ",
         )?;
-        let rows = statement.query_map(params![organization_id, attempt_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
+        let rows =
+            statement.query_map(params![organization_id, attempt_id, fence_token], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?;
 
         rows.map(|row| {
             let (sequence, relative_path, digest, bytes) = row?;
@@ -619,6 +679,7 @@ impl Journal {
         &self,
         organization_id: &str,
         attempt_id: &str,
+        fence_token: i64,
     ) -> Result<Option<SpoolEntry>, JournalError> {
         let row = self
             .connection
@@ -626,9 +687,9 @@ impl Journal {
                 "
                 SELECT relative_path, digest, bytes
                 FROM result_spool
-                WHERE organization_id = ?1 AND attempt_id = ?2
+                WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
                 ",
-                params![organization_id, attempt_id],
+                params![organization_id, attempt_id, fence_token],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -781,6 +842,36 @@ mod tests {
     }
 
     #[test]
+    fn newer_fence_is_durable_and_fences_the_previous_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(directory.path().join("journal.sqlite3")).unwrap();
+        let old = acceptance();
+        journal.accept(&old).unwrap();
+        journal
+            .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Running, Some(321))
+            .unwrap();
+
+        let mut newer = old.clone();
+        newer.fence_token = 10;
+        newer.workspace = PathBuf::from("org-1/attempt-1/fence-10");
+        assert_eq!(journal.accept(&newer).unwrap().fence_token, 10);
+
+        let report = journal.reconcile().unwrap();
+        assert_eq!(report.attempts.len(), 2);
+        assert_eq!(
+            report.attempts[0].phase,
+            AttemptPhase::ReconciliationRequired
+        );
+        assert_eq!(report.attempts[0].fence_token, 9);
+        assert_eq!(report.attempts[1].phase, AttemptPhase::Accepted);
+        assert_eq!(report.attempts[1].fence_token, 10);
+        assert!(matches!(
+            journal.accept(&old),
+            Err(JournalError::AcceptanceConflict)
+        ));
+    }
+
+    #[test]
     fn reconciliation_includes_spool_metadata_and_excludes_terminal_attempts() {
         let directory = tempfile::tempdir().unwrap();
         let mut journal = Journal::open(directory.path().join("journal.sqlite3")).unwrap();
@@ -893,6 +984,33 @@ mod tests {
         assert!(matches!(
             journal.accept(&invalid),
             Err(JournalError::AuthorityOverflow)
+        ));
+    }
+
+    #[test]
+    fn schema_mismatch_reports_expected_and_found_versions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE journal_metadata (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    schema_version INTEGER NOT NULL
+                ) STRICT;
+                INSERT INTO journal_metadata(singleton, schema_version) VALUES (1, 99);
+                ",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            Journal::open(&path),
+            Err(JournalError::SchemaVersionMismatch {
+                expected: SCHEMA_VERSION,
+                found: 99,
+            })
         ));
     }
 }

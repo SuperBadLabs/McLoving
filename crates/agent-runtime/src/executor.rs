@@ -49,7 +49,7 @@ pub struct ExecutionOutcome {
 pub enum ExecutionError {
     #[error("invalid workspace path: {0}")]
     InvalidWorkspace(#[from] JournalError),
-    #[error("workspace root must already exist and contain no symlink components")]
+    #[error("workspace root must resolve to an existing directory")]
     InvalidWorkspaceRoot,
     #[error("workspace already exists")]
     WorkspaceAlreadyExists,
@@ -159,6 +159,10 @@ fn create_workspace(root: &Path, relative: &Path) -> Result<PathBuf, ExecutionEr
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 std::fs::create_dir(&current)?;
+                let parent = current
+                    .parent()
+                    .ok_or(ExecutionError::InvalidWorkspaceRoot)?;
+                sync_directory(parent)?;
             }
             Err(error) => return Err(error.into()),
         }
