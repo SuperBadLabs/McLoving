@@ -39,8 +39,10 @@ as its event and outbox record. Pre-restore agents consequently cannot renew,
 publish logs or objects, or finalize work.
 
 A sealed recovery point binds a stable backup identifier to the current restore
-epoch and PostgreSQL WAL position. Compact deployments use the executable
-logical dump/restore drill in `scripts/test-backup-restore.sh`. HA deployments
+epoch and a PostgreSQL WAL position sampled only after the recovery-point row
+commits; a second locked transaction finalizes that durable boundary. Compact
+deployments use the executable logical dump/restore drill in
+`scripts/test-backup-restore.sh`. HA deployments
 must pair the same recovery-point and restore-epoch protocol with physical base
 backups and continuous WAL archiving; a recovery-point record alone is not a
 claim that WAL replay is configured.

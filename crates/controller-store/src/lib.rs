@@ -506,11 +506,12 @@ impl Store {
              JOIN attempts AS a
                ON a.node_id = n.id
               AND a.organization_id = n.organization_id
-              AND a.ordinal = 1
              WHERE b.organization_id = $1
                AND b.project_id = $2
                AND b.id = $3
                AND b.status IN ('queued', 'running')
+             ORDER BY a.ordinal DESC
+             LIMIT 1
              FOR UPDATE OF b, n, a",
         )
         .bind(organization_id)
@@ -1283,8 +1284,10 @@ impl Store {
     /// Seals a stable backup identifier to the current PostgreSQL WAL position.
     ///
     /// Repeating an existing identifier is idempotent and returns the original
-    /// checkpoint. Backup tooling must persist this record with the database
-    /// snapshot and, for HA PITR, retain WAL through `recovery_lsn`.
+    /// checkpoint. The row is committed before its WAL checkpoint is sampled,
+    /// then finalized under the same global lock. Backup tooling must persist
+    /// this record with the database snapshot and, for HA PITR, retain WAL
+    /// through `recovery_lsn`.
     pub async fn seal_recovery_point(&self, backup_id: &str) -> Result<RecoveryPoint, StoreError> {
         if backup_id.is_empty() || backup_id.len() > 256 {
             return Err(StoreError::InvalidRecoveryOperation(
@@ -1300,7 +1303,7 @@ impl Store {
             "INSERT INTO recovery_points (
                  backup_id, restore_epoch, recovery_lsn
              )
-             SELECT $1, restore_epoch, pg_current_wal_lsn()
+             SELECT $1, restore_epoch, NULL
              FROM controller_metadata
              WHERE singleton
              ON CONFLICT (backup_id) DO NOTHING",
@@ -1308,12 +1311,25 @@ impl Store {
         .bind(backup_id)
         .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
+
+        let durable_lsn =
+            sqlx::query_scalar::<_, String>("SELECT pg_current_wal_flush_lsn()::text")
+                .fetch_one(&self.pool)
+                .await?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(RESTORE_FENCE_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
         let (restore_epoch, recovery_lsn) = sqlx::query_as::<_, (i64, String)>(
-            "SELECT restore_epoch, recovery_lsn::text
-             FROM recovery_points
-             WHERE backup_id = $1",
+            "UPDATE recovery_points
+             SET recovery_lsn = COALESCE(recovery_lsn, $2::pg_lsn)
+             WHERE backup_id = $1
+             RETURNING restore_epoch, recovery_lsn::text",
         )
         .bind(backup_id)
+        .bind(durable_lsn)
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1357,7 +1373,8 @@ impl Store {
         let recovery_lsn = sqlx::query_scalar::<_, String>(
             "SELECT recovery_lsn::text
              FROM recovery_points
-             WHERE backup_id = $1",
+             WHERE backup_id = $1
+               AND recovery_lsn IS NOT NULL",
         )
         .bind(backup_id)
         .fetch_optional(&mut *tx)

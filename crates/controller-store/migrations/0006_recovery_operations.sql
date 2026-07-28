@@ -10,7 +10,7 @@ VALUES (true, 1);
 CREATE TABLE recovery_points (
     backup_id text PRIMARY KEY CHECK (length(backup_id) BETWEEN 1 AND 256),
     restore_epoch bigint NOT NULL CHECK (restore_epoch > 0),
-    recovery_lsn pg_lsn NOT NULL,
+    recovery_lsn pg_lsn,
     sealed_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 

@@ -175,6 +175,113 @@ async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
 }
 
 #[tokio::test]
+async fn cancellation_targets_the_latest_retry_attempt() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "retry-cancellation",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "cancel-current-retry".into(),
+            pipeline_digest: [9; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit build");
+    let first = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "agent-a".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim first")
+        .expect("first claim exists");
+    assert!(
+        store
+            .accept_offer(organization_id, first.attempt_id, first.fence, "agent-a")
+            .await
+            .expect("accept first")
+    );
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                "agent-a",
+                TerminalOutcome::Failed,
+                json!({"reason": "retry"}),
+            )
+            .await
+            .expect("fail first")
+    );
+    let RetryDecision::Scheduled {
+        attempt_id: second_id,
+        ordinal: 2,
+        created: true,
+    } = store
+        .schedule_retry(organization_id, first.attempt_id, 3, "retry")
+        .await
+        .expect("schedule retry")
+    else {
+        panic!("expected second attempt");
+    };
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("cancel retry")
+    );
+    let attempts = sqlx::query_as::<_, (Uuid, i32, String)>(
+        "SELECT id, ordinal, status
+         FROM attempts
+         WHERE organization_id = $1
+           AND node_id = $2
+         ORDER BY ordinal",
+    )
+    .bind(organization_id)
+    .bind(admission.node_id)
+    .fetch_all(store.pool())
+    .await
+    .expect("read attempts");
+    assert_eq!(
+        attempts,
+        vec![
+            (first.attempt_id, 1, "failed".to_owned()),
+            (second_id, 2, "aborted".to_owned()),
+        ]
+    );
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.attempt_id, second_id);
+    assert_eq!(snapshot.attempt_status, "aborted");
+    assert_eq!(snapshot.build_status, "aborted");
+}
+
+#[tokio::test]
 async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
     let Some(admin) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1402,12 +1509,32 @@ async fn backup_restore_canary_seed() {
             .await
             .expect("register recovery object")
     );
+    let lsn_before = sqlx::query_scalar::<_, String>("SELECT pg_current_wal_lsn()::text")
+        .fetch_one(store.pool())
+        .await
+        .expect("read WAL position before sealing");
     let point = store
         .seal_recovery_point("compact-drill-001")
         .await
         .expect("seal recovery point");
     assert_eq!(point.restore_epoch, 1);
     assert!(!point.recovery_lsn.is_empty());
+    let checkpoint_is_later = sqlx::query_scalar::<_, bool>("SELECT $1::pg_lsn > $2::pg_lsn")
+        .bind(&point.recovery_lsn)
+        .bind(lsn_before)
+        .fetch_one(store.pool())
+        .await
+        .expect("compare recovery checkpoint");
+    assert!(checkpoint_is_later);
+    let stored_lsn = sqlx::query_scalar::<_, String>(
+        "SELECT recovery_lsn::text
+         FROM recovery_points
+         WHERE backup_id = 'compact-drill-001'",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("read finalized recovery checkpoint");
+    assert_eq!(stored_lsn, point.recovery_lsn);
 }
 
 #[tokio::test]

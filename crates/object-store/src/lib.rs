@@ -196,6 +196,7 @@ impl FilesystemObjectStore {
         let path = self.object_path(&reference.sha256);
         let parent = path.parent().ok_or(ObjectStoreError::InvalidRoot)?;
         fs::create_dir_all(parent)?;
+        sync_directory(&self.objects)?;
         match fs::hard_link(&staged.path, &path) {
             Ok(()) => {
                 fs::remove_file(&staged.path)?;
