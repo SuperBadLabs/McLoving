@@ -953,6 +953,65 @@ impl Store {
         Ok(true)
     }
 
+    /// Confirms one restored uncertain effect without restoring execution authority.
+    ///
+    /// Restore activation leaves the historical attempt fenced and moves its
+    /// unresolved effect checkpoints to `uncertain`. Reconciliation may only
+    /// confirm an existing, payload-identical uncertain row; it cannot insert
+    /// a new effect or advance any other historical state.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn confirm_restored_uncertain_effect(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        effect_key: &str,
+        effect_class: EffectClass,
+        payload: &Value,
+    ) -> Result<bool, StoreError> {
+        if effect_key.is_empty() || effect_key.len() > 256 {
+            return Ok(false);
+        }
+        let payload_bytes = serde_json::to_vec(payload)
+            .map_err(|error| StoreError::InvalidEffectPayload(error.to_string()))?;
+        let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let reconciled = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE attempt_effects AS e
+             SET status = 'confirmed',
+                 updated_at = CASE
+                     WHEN e.status = 'uncertain' THEN clock_timestamp()
+                     ELSE e.updated_at
+                 END
+             FROM attempts AS a, controller_metadata AS m
+             WHERE e.organization_id = $1
+               AND e.attempt_id = $2
+               AND e.fence = $3
+               AND e.effect_key = $4
+               AND e.effect_class = $5
+               AND e.payload_digest = $6
+               AND e.status IN ('uncertain', 'confirmed')
+               AND a.organization_id = e.organization_id
+               AND a.id = e.attempt_id
+               AND a.fence = e.fence
+               AND a.status = 'reconciliation_required'
+               AND m.singleton
+               AND a.restore_epoch < m.restore_epoch
+             RETURNING e.attempt_id",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(effect_key)
+        .bind(effect_class.as_str())
+        .bind(payload_digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(reconciled.is_some())
+    }
+
     /// Returns every effect that requires explicit operator reconciliation.
     pub async fn uncertain_effects(
         &self,
@@ -1464,6 +1523,18 @@ impl Store {
             .bind(organization_id)
             .execute(&mut *tx)
             .await?;
+            let uncertain_effects = sqlx::query(
+                "UPDATE attempt_effects
+                 SET status = 'uncertain', updated_at = clock_timestamp()
+                 WHERE organization_id = $1
+                   AND attempt_id = $2
+                   AND status IN ('prepared', 'applied')",
+            )
+            .bind(organization_id)
+            .bind(attempt_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
             append_event_and_outbox(
                 &mut tx,
                 *organization_id,
@@ -1475,6 +1546,7 @@ impl Store {
                     "restore_epoch": restore_epoch,
                     "backup_id": backup_id,
                     "recovery_lsn": recovery_lsn,
+                    "uncertain_effects": uncertain_effects,
                 }),
             )
             .await?;
@@ -1658,6 +1730,7 @@ impl Store {
         summary: Value,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let row = sqlx::query_as::<_, (Uuid, Uuid)>(
             "UPDATE attempts AS a
              SET status = $5,
@@ -1671,6 +1744,11 @@ impl Store {
                AND a.lease_owner = $4
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND a.restore_epoch = (
+                   SELECT restore_epoch
+                   FROM controller_metadata
+                   WHERE singleton
+               )
                AND n.id = a.node_id
                AND n.organization_id = a.organization_id
              RETURNING n.id, n.build_id",

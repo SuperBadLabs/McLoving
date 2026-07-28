@@ -28,9 +28,13 @@ to an unconfirmed applied state.
 Claims share-lock and record the controller restore epoch. Restore activation
 exclusively increments that epoch, invalidates every active lease, and commits
 `reconciliation_required` attempt, node, and build state with matching events
-and outbox messages. Pre-restore agents can no longer renew or publish. The old
-attempt and its epoch remain history; reconciliation may explicitly schedule a
-new retry rather than rewriting that history.
+and outbox messages. Prepared or applied effect checkpoints on affected work
+become `uncertain` in that same transaction. Pre-restore agents can no longer
+renew or publish. A narrow reconciliation operation may only confirm an
+existing payload-identical uncertain effect; it cannot create new historical
+effects or restore execution authority. The old attempt and its epoch remain
+history; reconciliation may explicitly schedule a new retry rather than
+rewriting that history.
 
 Migrations use a database advisory lock and a version ledger, so concurrent
 controller startup installs each migration exactly once.

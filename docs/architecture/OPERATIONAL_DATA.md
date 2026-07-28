@@ -35,8 +35,11 @@ Every scheduler claim records the controller-wide restore epoch while holding a
 shared lock on that epoch. A restore activation takes the exclusive lock,
 increments the epoch, clears every active lease, and moves the affected
 attempt, node, and build to `reconciliation_required` in the same transaction
-as its event and outbox record. Pre-restore agents consequently cannot renew,
-publish logs or objects, or finalize work.
+as its event and outbox record. Prepared or applied external effects on those
+attempts become `uncertain` for explicit reconciliation. Pre-restore agents
+consequently cannot renew, checkpoint new effects, publish logs or objects, or
+finalize work. Reconciliation can only confirm an existing payload-identical
+uncertain effect and does not restore the historical attempt's authority.
 
 A sealed recovery point binds a stable backup identifier to the current restore
 epoch. After the recovery-point row commits, a first PostgreSQL WAL position is

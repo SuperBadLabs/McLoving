@@ -1672,6 +1672,24 @@ async fn backup_restore_canary_seed() {
             .await
             .expect("register recovery object")
     );
+    let recovery_effect = json!({
+        "destination": "deployment/production",
+        "release": "backup-canary"
+    });
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &recovery_effect,
+            )
+            .await
+            .expect("prepare recovery effect")
+    );
     let lsn_before = sqlx::query_scalar::<_, String>("SELECT pg_current_wal_lsn()::text")
         .fetch_one(store.pool())
         .await
@@ -1747,6 +1765,67 @@ async fn backup_restore_canary_verify() {
     assert_eq!(snapshot.build_status, "reconciliation_required");
     assert_eq!(snapshot.attempt_status, "reconciliation_required");
     assert!(snapshot.lease_owner.is_none());
+    let recovery_effect = json!({
+        "destination": "deployment/production",
+        "release": "backup-canary"
+    });
+    let uncertain = store
+        .uncertain_effects(organization_id)
+        .await
+        .expect("list restored uncertain effects");
+    assert_eq!(uncertain.len(), 1);
+    assert_eq!(uncertain[0].attempt_id, admission.1);
+    assert_eq!(uncertain[0].fence, admission.2);
+    assert_eq!(uncertain[0].effect_key, "deploy");
+    assert_eq!(uncertain[0].status, EffectStatus::Uncertain);
+    assert_eq!(uncertain[0].payload, recovery_effect);
+    assert!(
+        !store
+            .checkpoint_effect(
+                organization_id,
+                admission.1,
+                admission.2,
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Confirmed,
+                &recovery_effect,
+            )
+            .await
+            .expect("general checkpoint API preserves restore fence")
+    );
+    assert!(
+        store
+            .confirm_restored_uncertain_effect(
+                organization_id,
+                admission.1,
+                admission.2,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &recovery_effect,
+            )
+            .await
+            .expect("confirm restored uncertain effect")
+    );
+    assert!(
+        store
+            .confirm_restored_uncertain_effect(
+                organization_id,
+                admission.1,
+                admission.2,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &recovery_effect,
+            )
+            .await
+            .expect("replay restored effect confirmation")
+    );
+    assert!(
+        store
+            .uncertain_effects(organization_id)
+            .await
+            .expect("list after restored effect reconciliation")
+            .is_empty()
+    );
     assert!(
         store
             .renew_attempt_lease(
