@@ -9,11 +9,12 @@ after their SHA-256 values match `tools/versions.env`.
 - Rootless Podman.
 - Java for TLA+.
 - Clojure CLI for the compatibility-worker skeleton.
-- `curl`, `sha256sum`, and `tar`.
+- `curl`, `mktemp`, `sha256sum`, `tar`, and `timeout`.
 
 The Rust compiler and gitleaks scanner execute from digest-pinned containers.
-Actionlint, cargo-deny, and TLA+ artifacts are cached only after checksum
-verification.
+Actionlint, cargo-deny, and TLA+ download artifacts are cached only after
+checksum verification. Executables are extracted fresh from the verified
+archives for every invocation and removed on exit.
 
 ## Cache policy
 

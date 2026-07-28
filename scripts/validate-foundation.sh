@@ -32,39 +32,39 @@ fetch_verified() {
   mv "${temporary}" "${destination}"
 }
 
-for command in curl java clojure podman sha256sum tar timeout; do
+for command in curl java clojure mktemp podman sha256sum tar timeout; do
   require_command "${command}"
 done
 
 actionlint_archive="${cache_base}/actionlint-${ACTIONLINT_VERSION}.tar.gz"
-actionlint_dir="${cache_base}/actionlint-${ACTIONLINT_VERSION}"
 fetch_verified \
   "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
   "${actionlint_archive}" \
   "${ACTIONLINT_SHA256}"
-if [[ ! -x "${actionlint_dir}/actionlint" ]]; then
-  mkdir -p "${actionlint_dir}"
-  tar -xzf "${actionlint_archive}" -C "${actionlint_dir}"
-fi
 
 cargo_deny_archive="${cache_base}/cargo-deny-${CARGO_DENY_VERSION}.tar.gz"
-cargo_deny_dir="${cache_base}/cargo-deny-${CARGO_DENY_VERSION}"
 fetch_verified \
   "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
   "${cargo_deny_archive}" \
   "${CARGO_DENY_SHA256}"
-if [[ ! -x "${cargo_deny_dir}/cargo-deny" ]]; then
-  mkdir -p "${cargo_deny_dir}"
-  tar -xzf "${cargo_deny_archive}" \
-    -C "${cargo_deny_dir}" \
-    --strip-components=1
-fi
 
 tlaplus_jar="${cache_base}/tla2tools-${TLAPLUS_VERSION}.jar"
 fetch_verified \
   "https://github.com/tlaplus/tlaplus/releases/download/v${TLAPLUS_VERSION}/tla2tools.jar" \
   "${tlaplus_jar}" \
   "${TLAPLUS_SHA256}"
+
+actionlint_dir="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-actionlint.XXXXXX")"
+cargo_deny_dir="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-cargo-deny.XXXXXX")"
+cleanup() {
+  rm -rf -- "${actionlint_dir}" "${cargo_deny_dir}"
+}
+trap cleanup EXIT
+
+tar -xzf "${actionlint_archive}" -C "${actionlint_dir}"
+tar -xzf "${cargo_deny_archive}" \
+  -C "${cargo_deny_dir}" \
+  --strip-components=1
 
 podman pull "${MCLOVING_RUST_IMAGE}" >/dev/null
 podman pull "${MCLOVING_GITLEAKS_IMAGE}" >/dev/null
@@ -75,9 +75,9 @@ podman run --rm \
   "${MCLOVING_RUST_IMAGE}" \
   bash -c \
   'cargo fmt --all -- --check &&
-   cargo clippy --workspace --all-targets -- -D warnings &&
-   cargo test --workspace &&
-   cargo metadata --locked --no-deps --format-version 1 >/tmp/metadata.json'
+   cargo metadata --locked --no-deps --format-version 1 >/tmp/metadata.json &&
+   cargo clippy --locked --workspace --all-targets -- -D warnings &&
+   cargo test --locked --workspace'
 
 podman run --rm \
   -v "${repo_root}:/work:Z" \
