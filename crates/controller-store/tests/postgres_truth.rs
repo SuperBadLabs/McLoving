@@ -1011,6 +1011,20 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
     );
     assert!(
         store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: first.attempt_id,
+                fence: first.fence,
+                agent_id: "agent-a",
+                sequence: 0,
+                stream: "stdout",
+                content: b"first attempt\n",
+            })
+            .await
+            .expect("append first-attempt log")
+    );
+    assert!(
+        store
             .finalize_attempt(
                 organization_id,
                 first.attempt_id,
@@ -1021,6 +1035,13 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
             )
             .await
             .expect("fail first")
+    );
+    assert_eq!(
+        store
+            .schedule_retry(organization_id, first.attempt_id, 2, &"x".repeat(1025))
+            .await
+            .expect("reject oversized retry reason"),
+        RetryDecision::Ineligible
     );
     let scheduled = store
         .schedule_retry(organization_id, first.attempt_id, 2, "transient")
@@ -1073,6 +1094,20 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
     );
     assert!(
         store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: second.attempt_id,
+                fence: second.fence,
+                agent_id: "agent-b",
+                sequence: 0,
+                stream: "stdout",
+                content: b"second attempt\n",
+            })
+            .await
+            .expect("append second-attempt log")
+    );
+    assert!(
+        store
             .finalize_attempt(
                 organization_id,
                 second.attempt_id,
@@ -1083,6 +1118,19 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
             )
             .await
             .expect("fail second")
+    );
+    let logs = store
+        .build_logs(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read retry logs");
+    assert_eq!(
+        logs.iter()
+            .map(|chunk| chunk.content.as_slice())
+            .collect::<Vec<_>>(),
+        vec![
+            b"first attempt\n".as_slice(),
+            b"second attempt\n".as_slice()
+        ]
     );
     assert_eq!(
         store

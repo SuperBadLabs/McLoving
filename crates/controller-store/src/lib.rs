@@ -627,7 +627,7 @@ impl Store {
                AND b.project_id = $2
                AND b.id = $3
                AND l.fence = a.fence
-             ORDER BY l.sequence, l.stream",
+             ORDER BY a.ordinal, l.sequence, l.stream, l.attempt_id",
         )
         .bind(organization_id)
         .bind(project_id)
@@ -660,6 +660,7 @@ impl Store {
     pub async fn append_log(&self, chunk: &NewLogChunk<'_>) -> Result<bool, StoreError> {
         let digest: [u8; 32] = Sha256::digest(chunk.content).into();
         let mut tx = self.tenant_transaction(chunk.organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let inserted = sqlx::query_scalar::<_, i64>(
             "INSERT INTO attempt_log_chunks (
                  organization_id, attempt_id, fence, sequence,
@@ -993,7 +994,7 @@ impl Store {
         max_attempts: i32,
         reason: &str,
     ) -> Result<RetryDecision, StoreError> {
-        if max_attempts < 1 || reason.is_empty() {
+        if max_attempts < 1 || reason.is_empty() || reason.len() > 1024 {
             return Ok(RetryDecision::Ineligible);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
@@ -1151,6 +1152,7 @@ impl Store {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let inserted = sqlx::query_scalar::<_, String>(
             "INSERT INTO attempt_objects (
                  organization_id, attempt_id, fence, kind, name,
@@ -1800,6 +1802,16 @@ async fn append_event_and_outbox(
     .bind(payload)
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+async fn acquire_restore_fence_shared(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+        .bind(RESTORE_FENCE_LOCK_KEY)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 

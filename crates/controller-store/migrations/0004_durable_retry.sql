@@ -26,7 +26,7 @@ CREATE TABLE attempt_effects (
 CREATE TABLE dead_letters (
     organization_id uuid NOT NULL,
     attempt_id uuid NOT NULL,
-    reason text NOT NULL,
+    reason text NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 1024),
     payload jsonb NOT NULL,
     payload_digest bytea NOT NULL CHECK (octet_length(payload_digest) = 32),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -38,7 +38,7 @@ CREATE TABLE dead_letters (
 CREATE INDEX attempt_effects_uncertain_idx
     ON attempt_effects (organization_id, updated_at, attempt_id)
     WHERE status = 'uncertain';
-CREATE INDEX attempts_retry_parent_idx
+CREATE UNIQUE INDEX attempts_retry_parent_idx
     ON attempts (organization_id, retry_of)
     WHERE retry_of IS NOT NULL;
 

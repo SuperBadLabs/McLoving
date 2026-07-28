@@ -42,7 +42,11 @@ start_postgres() {
   for _ in $(seq 1 60); do
     if "${engine}" exec "${name}" pg_isready \
       --username mcloving --dbname mcloving >/dev/null 2>&1; then
-      return
+      sleep 0.25
+      if "${engine}" exec "${name}" pg_isready \
+        --username mcloving --dbname mcloving >/dev/null 2>&1; then
+        return
+      fi
     fi
     sleep 0.25
   done

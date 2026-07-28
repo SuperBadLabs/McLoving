@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use sha2::{Digest, Sha256};
 
@@ -29,11 +30,40 @@ pub struct ObjectRef {
 pub struct StagedObject {
     path: PathBuf,
     reference: ObjectRef,
+    active: bool,
 }
 
 impl StagedObject {
     pub fn object_ref(&self) -> &ObjectRef {
         &self.reference
+    }
+
+    /// Releases one staging reservation without publishing it.
+    pub fn abort(mut self) -> Result<(), ObjectStoreError> {
+        self.discard()
+    }
+
+    fn discard(&mut self) -> Result<(), ObjectStoreError> {
+        if !self.active {
+            return Ok(());
+        }
+        fs::remove_file(&self.path)?;
+        if let Some(parent) = self.path.parent() {
+            sync_directory(parent)?;
+        }
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for StagedObject {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = fs::remove_file(&self.path);
+            if let Some(parent) = self.path.parent() {
+                let _ = sync_directory(parent);
+            }
+        }
     }
 }
 
@@ -69,6 +99,8 @@ pub enum ObjectStoreError {
     TotalQuotaExceeded,
     #[error("staged object does not belong to this store")]
     ForeignStagingPath,
+    #[error("staged object content no longer matches its declared digest")]
+    CorruptStagedObject,
     #[error("committed object changed after immutable publication")]
     ImmutableObjectConflict,
     #[error("I/O error: {0}")]
@@ -173,11 +205,12 @@ impl FilesystemObjectStore {
                 sha256: Sha256::digest(content).into(),
                 bytes,
             },
+            active: true,
         })
     }
 
     /// Atomically publishes a staged object under its content digest.
-    pub fn commit(&self, staged: StagedObject) -> Result<ObjectRef, ObjectStoreError> {
+    pub fn commit(&self, mut staged: StagedObject) -> Result<ObjectRef, ObjectStoreError> {
         let parent = staged
             .path
             .parent()
@@ -192,33 +225,70 @@ impl FilesystemObjectStore {
         if reserved > self.quota.max_total_bytes {
             return Err(ObjectStoreError::TotalQuotaExceeded);
         }
-        let reference = staged.reference;
+        let reference = staged.reference.clone();
+        if inspect(&staged.path)? != reference {
+            staged.discard()?;
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
         let path = self.object_path(&reference.sha256);
         let parent = path.parent().ok_or(ObjectStoreError::InvalidRoot)?;
         fs::create_dir_all(parent)?;
         sync_directory(&self.objects)?;
-        match fs::hard_link(&staged.path, &path) {
+        let created = match fs::hard_link(&staged.path, &path) {
             Ok(()) => {
-                fs::remove_file(&staged.path)?;
+                staged.discard()?;
                 sync_directory(parent)?;
-                sync_directory(&self.staging)?;
+                true
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 let existing = inspect(&path)?;
                 if existing != reference {
                     return Err(ObjectStoreError::ImmutableObjectConflict);
                 }
-                fs::remove_file(&staged.path)?;
-                sync_directory(&self.staging)?;
+                staged.discard()?;
+                false
             }
             Err(error) => return Err(error.into()),
-        }
+        };
         let committed = inspect(&path)?;
         if committed != reference {
+            if created {
+                fs::remove_file(&path)?;
+                sync_directory(parent)?;
+            }
             return Err(ObjectStoreError::ImmutableObjectConflict);
         }
         drop(quota_lock);
         Ok(reference)
+    }
+
+    /// Reclaims crash-abandoned staging reservations older than `minimum_age`.
+    ///
+    /// Operators must choose an age greater than the longest permitted
+    /// stage-to-commit interval so a live upload cannot be reaped.
+    pub fn reap_staged_older_than(&self, minimum_age: Duration) -> Result<usize, ObjectStoreError> {
+        let quota_lock = self.lock_quota()?;
+        let now = SystemTime::now();
+        let mut removed = 0;
+        for entry in directory_entries(&self.staging)? {
+            if !entry.path().is_file()
+                || entry.path().extension().and_then(|value| value.to_str()) != Some("staged")
+            {
+                continue;
+            }
+            let Ok(age) = now.duration_since(entry.metadata()?.modified()?) else {
+                continue;
+            };
+            if age >= minimum_age {
+                fs::remove_file(entry.path())?;
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            sync_directory(&self.staging)?;
+        }
+        drop(quota_lock);
+        Ok(removed)
     }
 
     /// Reads and verifies one object, returning an explicit gap on failure.
@@ -488,6 +558,40 @@ mod tests {
             store.stage_artifact("tenant-a", b"567"),
             Err(ObjectStoreError::TotalQuotaExceeded)
         ));
+    }
+
+    #[test]
+    fn abandoned_staging_reservations_are_released_or_reaped() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store(root.path(), 4, 4);
+        let abandoned = store.stage_artifact("tenant-a", b"1234").unwrap();
+        drop(abandoned);
+        assert!(store.stage_artifact("tenant-a", b"5678").is_ok());
+
+        fs::write(store.staging.join("crashed-1-1.staged"), b"xxxx").unwrap();
+        assert_eq!(store.reap_staged_older_than(Duration::ZERO).unwrap(), 1);
+        assert_eq!(staged_bytes(&store.staging).unwrap(), 0);
+    }
+
+    #[test]
+    fn corrupt_staged_content_cannot_poison_a_digest() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store(root.path(), 1024, 4096);
+        let staged = store.stage_artifact("tenant-a", b"original").unwrap();
+        let reference = staged.object_ref().clone();
+        fs::write(&staged.path, b"tampered").unwrap();
+        assert!(matches!(
+            store.commit(staged),
+            Err(ObjectStoreError::CorruptStagedObject)
+        ));
+        assert!(matches!(
+            store.read_verified(&reference),
+            Err(ObjectGap::Missing { .. })
+        ));
+
+        let valid = store.stage_artifact("tenant-a", b"original").unwrap();
+        assert_eq!(store.commit(valid).unwrap(), reference);
+        assert_eq!(store.read_verified(&reference).unwrap(), b"original");
     }
 
     #[test]
