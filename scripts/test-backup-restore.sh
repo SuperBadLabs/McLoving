@@ -11,18 +11,6 @@ target_name="mcloving-backup-target-${RANDOM}-${RANDOM}"
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/mcloving-backup-restore.XXXXXX")"
 dump_path="${work_dir}/controller.dump"
 
-free_port() {
-  python3 - <<'PY'
-import socket
-with socket.socket() as sock:
-    sock.bind(("127.0.0.1", 0))
-    print(sock.getsockname()[1])
-PY
-}
-
-source_port="$(free_port)"
-target_port="$(free_port)"
-
 cleanup() {
   "${engine}" rm --force "${source_name}" "${target_name}" >/dev/null 2>&1 || true
   rm -rf -- "${work_dir}"
@@ -31,10 +19,11 @@ trap cleanup EXIT
 
 start_postgres() {
   local name="$1"
-  local port="$2"
+  local mapping
+  local port
   "${engine}" run --detach --rm \
     --name "${name}" \
-    --publish "127.0.0.1:${port}:5432" \
+    --publish "127.0.0.1::5432" \
     --env POSTGRES_USER=mcloving \
     --env POSTGRES_HOST_AUTH_METHOD=trust \
     --env POSTGRES_DB=mcloving \
@@ -45,6 +34,16 @@ start_postgres() {
       sleep 0.25
       if "${engine}" exec "${name}" pg_isready \
         --username mcloving --dbname mcloving >/dev/null 2>&1; then
+        mapping="$("${engine}" port "${name}" 5432/tcp)"
+        port="${mapping##*:}"
+        case "${port}" in
+          '' | *[!0-9]*)
+            printf 'Container engine returned an invalid PostgreSQL port: %s\n' \
+              "${mapping}" >&2
+            exit 1
+            ;;
+        esac
+        printf '%s\n' "${port}"
         return
       fi
     fi
@@ -70,8 +69,8 @@ run_canary() {
       --ignored --exact --test-threads=1
 }
 
-start_postgres "${source_name}" "${source_port}"
-start_postgres "${target_name}" "${target_port}"
+source_port="$(start_postgres "${source_name}")"
+target_port="$(start_postgres "${target_name}")"
 run_canary "${source_port}" backup_restore_canary_seed
 
 "${engine}" exec "${source_name}" \
