@@ -53,7 +53,7 @@ impl Store {
             return Ok(None);
         }
         let mut tx = self.tenant_transaction(request.organization_id).await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.scheduler.{}", request.organization_id))
             .execute(&mut *tx)
             .await?;
@@ -211,7 +211,7 @@ impl Store {
     /// publication stale before new work is offered.
     pub async fn requeue_one_expired(&self, organization_id: Uuid) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.scheduler.{organization_id}"))
             .execute(&mut *tx)
             .await?;

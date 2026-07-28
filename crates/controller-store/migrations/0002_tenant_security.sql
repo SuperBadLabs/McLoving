@@ -38,6 +38,8 @@ END
 $$;
 
 GRANT USAGE ON SCHEMA public TO mcloving_tenant;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM mcloving_tenant;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
     organizations,
     projects,

@@ -85,6 +85,63 @@ async fn admission_is_atomic_and_idempotent() {
     assert_eq!(counts, (1, 1, 1, 1, 1));
 }
 
+#[tokio::test]
+async fn unprivileged_runtime_role_bootstraps_and_admits_with_identity_sequences() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let can_create = sqlx::query_scalar::<_, bool>(
+        "SELECT has_schema_privilege('mcloving_tenant', 'public', 'CREATE')",
+    )
+    .fetch_one(admin.pool())
+    .await
+    .expect("inspect tenant schema privilege");
+    assert!(!can_create);
+
+    let store = unprivileged_store(&admin).await;
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("bootstrap through tenant-scoped transaction");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "runtime-role".into(),
+            pipeline_digest: [8; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: Vec::new(),
+            priority: 0,
+        })
+        .await
+        .expect("admit through runtime role using identity sequences");
+    let mut tenant = store.pool().begin().await.expect("begin tenant read");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *tenant)
+        .await
+        .expect("bind tenant context");
+    let event_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM build_events
+         WHERE organization_id = $1 AND build_id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(&mut *tenant)
+    .await
+    .expect("read emitted event through forced RLS");
+    assert_eq!(event_count, 1);
+    tenant.commit().await.expect("commit tenant read");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_terminal_publication_has_one_winner() {
     let Some(store) = test_store().await else {

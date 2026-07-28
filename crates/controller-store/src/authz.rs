@@ -79,6 +79,9 @@ pub fn authorize(
     if principal.organization_id != resource_organization_id {
         return Err(AuthorizationDenied::TenantMismatch);
     }
+    if action != Action::SchedulerControl && resource_project_id.is_none() {
+        return Err(AuthorizationDenied::ProjectRequired);
+    }
 
     let allowed = match principal.kind {
         PrincipalKind::Service => service_allows(principal, action),
@@ -222,5 +225,34 @@ mod tests {
             .service_scopes
             .insert(ServiceScope::SchedulerControl);
         assert!(authorize(&principal, organization_id, None, Action::SchedulerControl).is_ok());
+    }
+
+    #[test]
+    fn project_scoped_service_actions_require_a_project() {
+        let organization_id = Uuid::new_v4();
+        let principal = Principal {
+            subject: "service:submitter".into(),
+            kind: PrincipalKind::Service,
+            organization_id,
+            project_roles: BTreeMap::new(),
+            service_scopes: [
+                ServiceScope::ProjectRead,
+                ServiceScope::BuildSubmit,
+                ServiceScope::BuildCancel,
+                ServiceScope::SecretUse,
+            ]
+            .into(),
+        };
+        for action in [
+            Action::ProjectRead,
+            Action::BuildSubmit,
+            Action::BuildCancel,
+            Action::SecretUse,
+        ] {
+            assert_eq!(
+                authorize(&principal, organization_id, None, action),
+                Err(AuthorizationDenied::ProjectRequired)
+            );
+        }
     }
 }
