@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 pub mod authz;
@@ -1296,11 +1296,13 @@ impl Store {
                 "backup id must contain between 1 and 256 bytes".to_owned(),
             ));
         }
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        let mut connection = self.pool.acquire().await?;
+        connection.close_on_drop();
+        sqlx::query("SELECT pg_advisory_lock($1)")
             .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
+            .execute(&mut *connection)
             .await?;
+        let mut tx = (&mut connection).begin().await?;
         sqlx::query(
             "INSERT INTO recovery_points (
                  backup_id, restore_epoch, recovery_lsn
@@ -1317,13 +1319,9 @@ impl Store {
 
         let durable_lsn =
             sqlx::query_scalar::<_, String>("SELECT pg_current_wal_flush_lsn()::text")
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *connection)
                 .await?;
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(RESTORE_FENCE_LOCK_KEY)
-            .execute(&mut *tx)
-            .await?;
+        let mut tx = (&mut connection).begin().await?;
         let (restore_epoch, recovery_lsn) = sqlx::query_as::<_, (i64, String)>(
             "UPDATE recovery_points
              SET recovery_lsn = COALESCE(recovery_lsn, $2::pg_lsn)
