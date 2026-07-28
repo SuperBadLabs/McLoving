@@ -8,11 +8,17 @@ The filesystem backend stages bytes outside the immutable namespace, fsyncs
 the staged file, computes SHA-256 after any required log redaction, and commits
 with a create-only hard link. The durable object path is
 `objects/sha256/<prefix>/<digest>`. Existing content is accepted only when its
-digest and byte count match exactly; it is never overwritten.
+digest and byte count match exactly; it is never overwritten. The destination
+directory is synced before the staged link is removed, so a crash cannot erase
+both names. Failed staging writes are removed and the staging directory is
+synced before the failure is returned.
 
 Artifacts are binary-preserving. Log redaction removes exact configured secret
 byte sequences to a fixed point before hashing and commitment, so a secret
 cannot survive inside a replacement marker or across a newly joined boundary.
+Raw log input is bounded by the per-object quota before redaction. A redaction
+request is rejected above 256 nonempty patterns, 64 KiB of aggregate secret
+bytes, or 64 MiB of worst-case comparison work.
 The PostgreSQL controller records object kind, logical name, digest, byte count,
 attempt, and fence. Registration requires the exact live owner, fence, and
 restore epoch, and an existing logical object cannot change identity.

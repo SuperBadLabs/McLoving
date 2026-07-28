@@ -10,6 +10,9 @@ use std::time::{Duration, SystemTime};
 use sha2::{Digest, Sha256};
 
 static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const MAX_REDACTION_PATTERNS: usize = 256;
+const MAX_REDACTION_BYTES: usize = 64 * 1024;
+const MAX_REDACTION_WORK: usize = 64 * 1024 * 1024;
 
 /// Storage quota enforced before bytes enter the durable object namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +98,8 @@ pub enum ObjectStoreError {
     InvalidNamespace,
     #[error("object exceeds the per-object quota")]
     ObjectQuotaExceeded,
+    #[error("log redaction set exceeds the bounded work budget")]
+    RedactionWorkExceeded,
     #[error("object store exceeds the total-byte quota")]
     TotalQuotaExceeded,
     #[error("staged object does not belong to this store")]
@@ -169,6 +174,7 @@ impl FilesystemObjectStore {
         if input_bytes > self.quota.max_object_bytes {
             return Err(ObjectStoreError::ObjectQuotaExceeded);
         }
+        validate_redaction_work(content.len(), redactions)?;
         let redacted = redact(content, redactions);
         self.stage(namespace, &redacted)
     }
@@ -192,18 +198,27 @@ impl FilesystemObjectStore {
             return Err(ObjectStoreError::TotalQuotaExceeded);
         }
         let (path, mut file) = create_staging_file(&self.staging, namespace, &STAGE_SEQUENCE)?;
-        file.write_all(content)?;
-        file.sync_all()?;
-        sync_directory(&self.staging)?;
-        drop(quota_lock);
-        Ok(StagedObject {
+        let mut staged = StagedObject {
             path,
             reference: ObjectRef {
                 sha256: Sha256::digest(content).into(),
                 bytes,
             },
             active: true,
-        })
+        };
+        let write_result = (|| -> Result<(), ObjectStoreError> {
+            file.write_all(content)?;
+            file.sync_all()?;
+            sync_directory(&self.staging)?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            drop(file);
+            staged.discard()?;
+            return Err(error);
+        }
+        drop(quota_lock);
+        Ok(staged)
     }
 
     /// Atomically publishes a staged object under its content digest.
@@ -233,8 +248,14 @@ impl FilesystemObjectStore {
         sync_directory(&self.objects)?;
         let created = match fs::hard_link(&staged.path, &path) {
             Ok(()) => {
+                if let Err(error) = sync_directory(parent) {
+                    // The destination link is not yet proven durable. Leave the
+                    // already-synced staging link for recovery instead of
+                    // letting Drop remove the only durable name.
+                    staged.active = false;
+                    return Err(error);
+                }
                 staged.discard()?;
-                sync_directory(parent)?;
                 true
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -410,6 +431,34 @@ fn redact(content: &[u8], redactions: &[&[u8]]) -> Vec<u8> {
     output
 }
 
+fn validate_redaction_work(
+    content_bytes: usize,
+    redactions: &[&[u8]],
+) -> Result<(), ObjectStoreError> {
+    let nonempty = redactions
+        .iter()
+        .copied()
+        .filter(|secret| !secret.is_empty())
+        .collect::<Vec<_>>();
+    if nonempty.len() > MAX_REDACTION_PATTERNS {
+        return Err(ObjectStoreError::RedactionWorkExceeded);
+    }
+    let total_secret_bytes = nonempty
+        .iter()
+        .try_fold(0_usize, |total, secret| total.checked_add(secret.len()));
+    let Some(total_secret_bytes) = total_secret_bytes else {
+        return Err(ObjectStoreError::RedactionWorkExceeded);
+    };
+    if total_secret_bytes > MAX_REDACTION_BYTES
+        || content_bytes
+            .checked_mul(total_secret_bytes)
+            .is_none_or(|work| work > MAX_REDACTION_WORK)
+    {
+        return Err(ObjectStoreError::RedactionWorkExceeded);
+    }
+    Ok(())
+}
+
 fn create_staging_file(
     staging: &Path,
     namespace: &str,
@@ -571,6 +620,17 @@ mod tests {
         assert!(matches!(
             store.stage_log("tenant-a", b"xxxxx", &[b"x"]),
             Err(ObjectStoreError::ObjectQuotaExceeded)
+        ));
+    }
+
+    #[test]
+    fn log_redaction_rejects_unbounded_pattern_work() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store(root.path(), 1024, 4096);
+        let redactions = vec![b"x".as_slice(); MAX_REDACTION_PATTERNS + 1];
+        assert!(matches!(
+            store.stage_log("tenant-a", b"bounded", &redactions),
+            Err(ObjectStoreError::RedactionWorkExceeded)
         ));
     }
 
