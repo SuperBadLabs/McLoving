@@ -21,7 +21,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 |---|---|---|---|
 | W0-A | FOUND-001 | DONE | PR #1 established private repository and architecture baseline |
 | W0-B | ARCH-001, FOUND-002, SEC-001 | DONE | Finite formal model, reproducible HeMan gate, and owned threat model |
-| W0-C | IR-001, IR-002, ARCH-002 | PENDING | Strict YAML admission and canonical IR contract |
+| W0-C | IR-001, IR-002, ARCH-002 | DONE | Bounded strict YAML, canonical IR v1, and admission properties |
 | W1-A | CTRL-001, CTRL-002, SEC-002 | PENDING | PostgreSQL truth, outbox, scheduler, and tenant enforcement |
 | W1-B | AGENT-001, AGENT-002, AGENT-003 | PENDING | mTLS agent session, SQLite journal, Linux execution |
 | W1-C | UX-001, E2E-001, E2E-002, E2E-003 | PENDING | Truthful CLI-driven end-to-end spine and recovery |
@@ -34,9 +34,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | ARCH-001 | DONE | FOUND-001 | Finite TLC model; lease type, stale publication rejection, fencing, terminal monotonicity, and completion stability checked in CI |
 | FOUND-002 | DONE | FOUND-001 | Digest-pinned Rust/gitleaks, checksummed tools, documented cache policy, one-command HeMan validation |
 | SEC-001 | DONE | FOUND-001 | Actors, assets, boundaries, assumptions, 24 owned threats, mitigations, residual risk, and verification map |
-| IR-001 | PENDING | ARCH-001, SEC-001 | Restricted YAML 1.2 parser, duplicate/alias/tag/directive rejection, limits, exact spans, fuzz and negative corpus |
-| IR-002 | PENDING | IR-001 | Pipeline IR v1 types, canonical serialization and digest, provenance, compatibility versioning, independent validator |
-| ARCH-002 | PENDING | IR-001, IR-002 | Property model for admission determinism, bounded graph expansion, and unknown-field fail-closed behavior |
+| IR-001 | DONE | ARCH-001, SEC-001 | Restricted YAML 1.2 parser; stable errors; duplicate/alias/anchor/tag/directive rejection; byte-exact UTF-8 spans; six resource limits; arbitrary-input and seven-fixture negative gates |
+| IR-002 | DONE | IR-001 | Pipeline/process IR v1; source/compiler provenance; structural validator; deterministic binary encoding and SHA-256; golden digest; explicit compatibility; independent byte validator |
+| ARCH-002 | DONE | IR-001, IR-002 | Property gates prove deterministic admission, bounded sequence expansion, arbitrary-input panic freedom, and unknown-field fail-closed behavior at every schema level |
 
 ## Wave 1 — Smallest truthful end-to-end slice
 
@@ -89,4 +89,4 @@ canary, and release-readiness assessment.
 
 ## Current next batch
 
-`W0-C`: `IR-001`, `IR-002`, and `ARCH-002`.
+`W1-A`: `CTRL-001`, `CTRL-002`, and `SEC-002`.
