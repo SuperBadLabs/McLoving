@@ -178,18 +178,36 @@ async fn terminate_group(
 ) -> Result<std::process::ExitStatus, ExecutionError> {
     signal_group(process_group_id, Signal::SIGTERM)?;
     let deadline = Instant::now() + grace;
-    tokio::select! {
-        status = child.wait() => Ok(status?),
+    let leader_status = tokio::select! {
+        status = child.wait() => Some(status?),
         () = sleep_until(deadline) => {
             signal_group(process_group_id, Signal::SIGKILL)?;
-            Ok(child.wait().await?)
+            None
         }
+    };
+
+    if let Some(status) = leader_status {
+        if process_group_exists(process_group_id)? {
+            sleep_until(deadline).await;
+            signal_group(process_group_id, Signal::SIGKILL)?;
+        }
+        Ok(status)
+    } else {
+        Ok(child.wait().await?)
     }
 }
 
 fn signal_group(process_group_id: i32, signal: Signal) -> Result<(), ExecutionError> {
     match killpg(Pid::from_raw(process_group_id), signal) {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn process_group_exists(process_group_id: i32) -> Result<bool, ExecutionError> {
+    match killpg(Pid::from_raw(process_group_id), None) {
+        Ok(()) | Err(Errno::EPERM) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
         Err(error) => Err(error.into()),
     }
 }
@@ -295,6 +313,22 @@ mod tests {
         }
     }
 
+    fn resistant_request(root: &Path, workspace: &str) -> ExecutionRequest {
+        ExecutionRequest {
+            workspace_root: root.to_owned(),
+            workspace: PathBuf::from(workspace),
+            program: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                OsString::from("-c"),
+                OsString::from(
+                    "trap 'exit 0' TERM; sh -c 'trap \"\" TERM; printf \"%s\\n\" \"$$\" > resistant.pid; exec sleep 30' & wait",
+                ),
+            ],
+            timeout: Duration::from_secs(30),
+            termination_grace: Duration::from_millis(100),
+        }
+    }
+
     #[tokio::test]
     async fn timeout_kills_descendants_and_returns_durable_logs() {
         let root = tempfile::tempdir().unwrap();
@@ -322,6 +356,23 @@ mod tests {
 
         let execution = tokio::spawn(async move { execute(&request, task_cancellation).await });
         let pid = descendant_pid(&child_pid_path).await;
+        cancellation.cancel();
+        let outcome = execution.await.unwrap().unwrap();
+
+        assert_eq!(outcome.termination, Termination::Cancelled);
+        assert_process_gone(pid).await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_escalates_when_leader_exits_but_descendant_ignores_term() {
+        let root = tempfile::tempdir().unwrap();
+        let request = resistant_request(root.path(), "org/resistant");
+        let descendant_path = root.path().join("org/resistant/resistant.pid");
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+
+        let execution = tokio::spawn(async move { execute(&request, task_cancellation).await });
+        let pid = descendant_pid(&descendant_path).await;
         cancellation.cancel();
         let outcome = execution.await.unwrap().unwrap();
 
