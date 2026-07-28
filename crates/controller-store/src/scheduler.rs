@@ -21,6 +21,7 @@ pub struct ClaimRequest {
 /// A fenced offer created by the scheduler.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimedAttempt {
+    pub organization_id: Uuid,
     pub build_id: Uuid,
     pub node_id: Uuid,
     pub attempt_id: Uuid,
@@ -139,6 +140,7 @@ impl Store {
         tx.commit().await?;
 
         Ok(Some(ClaimedAttempt {
+            organization_id: request.organization_id,
             build_id,
             node_id,
             attempt_id,

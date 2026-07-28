@@ -1257,6 +1257,26 @@ name = "mcloving-domain"
 version = "0.0.0"
 
 [[package]]
+name = "mcloving-execution-spine"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "mcloving-agent-runtime",
+ "mcloving-controller-api",
+ "mcloving-controller-store",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "mcloving-pipeline-ir"
 version = "0.0.0"
 dependencies = [

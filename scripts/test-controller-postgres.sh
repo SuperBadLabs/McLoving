@@ -49,4 +49,6 @@ podman run --rm \
   --volume "${repo_root}:/work:Z" \
   --workdir /work \
   "${MCLOVING_RUST_IMAGE}" \
-  cargo test --locked -p mcloving-controller-store --test postgres_truth
+  bash -c \
+  'cargo test --locked -p mcloving-controller-store --test postgres_truth &&
+   cargo test --locked -p mcloving-execution-spine --test real_spine'

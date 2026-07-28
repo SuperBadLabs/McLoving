@@ -49,7 +49,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | AGENT-002 | DONE | AGENT-001 | SQLite WAL acceptance-before-ack, journal recovery, log/result spool metadata, reconciliation report |
 | AGENT-003 | DONE | AGENT-002 | Linux workspace/process group, durable logs, timeout/cancel tree cleanup, no escaped descendants |
 | UX-001 | DONE | CTRL-002 | Rust CLI submit/status/logs/cancel/explain through documented public API and idempotency keys |
-| E2E-001 | PENDING | IR-002, CTRL-002, AGENT-003, UX-001 | One-stage strict-YAML process through real PostgreSQL, outbox, scheduler, agent, logs, terminal result |
+| E2E-001 | DONE | IR-002, CTRL-002, AGENT-003, UX-001 | One-stage strict-YAML process through real PostgreSQL, outbox, scheduler, agent, logs, terminal result |
 | E2E-002 | PENDING | E2E-001 | Controller kill/restart at every durable transition without lost or duplicate logical execution |
 | E2E-003 | PENDING | E2E-001 | Agent disconnect/restart reconciliation and complete descendant-process cancellation proof |
 
@@ -89,4 +89,4 @@ canary, and release-readiness assessment.
 
 ## Current next batch
 
-`W1-C`: `E2E-001` is active; `UX-001` is complete.
+`W1-C`: `E2E-002` is active; `UX-001` and `E2E-001` are complete.

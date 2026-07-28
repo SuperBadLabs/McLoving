@@ -9,6 +9,7 @@ members = [
   "crates/controller-api",
   "crates/controller-store",
   "crates/domain",
+  "crates/execution-spine",
   "crates/pipeline-ir",
   "crates/state-machine",
 ]

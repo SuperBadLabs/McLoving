@@ -76,6 +76,24 @@ pub struct NewLogChunk<'a> {
     pub content: &'a [u8],
 }
 
+/// Exact execution payload authorized by a live fenced offer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptExecution {
+    pub build_id: Uuid,
+    pub project_id: Uuid,
+    pub execution_spec: Value,
+    pub cancellation_requested: bool,
+}
+
+/// One transactionally published outbox record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublishedOutbox {
+    pub id: i64,
+    pub topic: String,
+    pub aggregate_id: Uuid,
+    pub payload: Value,
+}
+
 /// Terminal result accepted from a fenced attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalOutcome {
@@ -403,23 +421,24 @@ impl Store {
         .await?;
         tx.commit().await?;
         rows.into_iter()
-            .map(|(attempt_id, fence, sequence, stream, content, digest)| {
-                let digest: [u8; 32] =
-                    digest
-                        .try_into()
-                        .map_err(|_| StoreError::CorruptLogDigest {
+            .map(
+                |(attempt_id, fence, sequence, stream, content, digest)| {
+                    let digest: [u8; 32] = digest.try_into().map_err(|_| {
+                        StoreError::CorruptLogDigest {
                             attempt_id,
                             sequence,
-                        })?;
-                Ok(CommittedLog {
-                    attempt_id,
-                    fence,
-                    sequence,
-                    stream,
-                    content,
-                    digest,
-                })
-            })
+                        }
+                    })?;
+                    Ok(CommittedLog {
+                        attempt_id,
+                        fence,
+                        sequence,
+                        stream,
+                        content,
+                        digest,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -460,6 +479,146 @@ impl Store {
         Ok(inserted.is_some())
     }
 
+    /// Loads execution only for the exact current fenced lease owner.
+    pub async fn attempt_execution(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+    ) -> Result<Option<AttemptExecution>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query_as::<_, (Uuid, Uuid, Value, bool)>(
+            "SELECT b.id, b.project_id, n.execution_spec,
+                    b.cancellation_requested_at IS NOT NULL
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.lease_owner = $4
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('offered', 'accepted', 'running', 'finalizing', 'cancelling')",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(row.map(
+            |(build_id, project_id, execution_spec, cancellation_requested)| AttemptExecution {
+                build_id,
+                project_id,
+                execution_spec,
+                cancellation_requested,
+            },
+        ))
+    }
+
+    /// Idempotently records that an accepted attempt began running.
+    pub async fn mark_attempt_running(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+            "UPDATE attempts AS a
+             SET status = CASE
+                   WHEN a.status = 'accepted' THEN 'running'
+                   ELSE a.status
+                 END
+             FROM nodes AS n
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.lease_owner = $4
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running')
+               AND n.id = a.node_id
+               AND n.organization_id = a.organization_id
+             RETURNING n.id, n.build_id, a.status",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((node_id, build_id, status)) = row else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        sqlx::query(
+            "UPDATE nodes SET status = 'running'
+             WHERE organization_id = $1 AND id = $2 AND status IN ('offered', 'running')",
+        )
+        .bind(organization_id)
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await?;
+        if status == "running" {
+            append_event_and_outbox(
+                &mut tx,
+                organization_id,
+                build_id,
+                "attempt.running",
+                json!({"attempt_id": attempt_id, "node_id": node_id, "fence": fence}),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Publishes a bounded outbox batch exactly once.
+    pub async fn publish_outbox(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<PublishedOutbox>, StoreError> {
+        if !(1..=1_000).contains(&limit) {
+            return Ok(Vec::new());
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, (i64, String, Uuid, Value)>(
+            "WITH selected AS (
+                 SELECT id
+                 FROM outbox
+                 WHERE organization_id = $1 AND published_at IS NULL
+                 ORDER BY id
+                 LIMIT $2
+                 FOR UPDATE SKIP LOCKED
+             )
+             UPDATE outbox AS o
+             SET published_at = clock_timestamp()
+             FROM selected
+             WHERE o.id = selected.id
+             RETURNING o.id, o.topic, o.aggregate_id, o.payload",
+        )
+        .bind(organization_id)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, topic, aggregate_id, payload)| PublishedOutbox {
+                id,
+                topic,
+                aggregate_id,
+                payload,
+            })
+            .collect())
+    }
+
     /// Accepts exactly one terminal publication for the current attempt fence.
     ///
     /// The attempt, node, build, event, and outbox mutation share a transaction.
@@ -486,7 +645,7 @@ impl Store {
                AND a.fence = $3
                AND a.lease_owner = $4
                AND a.lease_expires_at > clock_timestamp()
-               AND a.status IN ('accepted', 'running', 'finalizing')
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
                AND n.id = a.node_id
                AND n.organization_id = a.organization_id
              RETURNING n.id, n.build_id",
