@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use mcloving_controller_store::{NewBuild, Store, TerminalOutcome};
+use mcloving_controller_store::{ClaimRequest, NewBuild, Store, TerminalOutcome, WaitReason};
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -131,4 +131,158 @@ async fn concurrent_terminal_publication_has_one_winner() {
     .await
     .expect("count terminal records");
     assert_eq!(terminal_records, (1, 1));
+}
+
+#[tokio::test]
+async fn scheduler_filters_capabilities_and_explains_the_wait() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    let windows = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "windows".into(),
+            pipeline_digest: [1; 32],
+            node_key: "windows-stage".into(),
+            required_capabilities: vec!["windows".into(), "powershell".into()],
+            priority: 100,
+        })
+        .await
+        .expect("admit Windows work");
+    let linux = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "linux".into(),
+            pipeline_digest: [2; 32],
+            node_key: "linux-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 10,
+        })
+        .await
+        .expect("admit Linux work");
+
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "linux-agent".into(),
+            capabilities: vec!["linux".into(), "podman".into()],
+            lease_seconds: 30,
+            fairness_seed: 17,
+        })
+        .await
+        .expect("claim compatible work")
+        .expect("one compatible claim");
+    assert_eq!(claim.node_id, linux.node_id);
+    assert_eq!(claim.fence, 1);
+
+    let reason = store
+        .explain_wait(organization_id, &["linux".into()])
+        .await
+        .expect("explain queue");
+    assert_eq!(
+        reason,
+        WaitReason::CapabilityMismatch {
+            required: ["powershell".into(), "windows".into()].into(),
+            missing: ["powershell".into(), "windows".into()].into(),
+        }
+    );
+    assert_ne!(claim.node_id, windows.node_id);
+}
+
+#[tokio::test]
+async fn expired_offer_is_reclaimed_with_a_new_fence() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "reclaim".into(),
+            pipeline_digest: [3; 32],
+            node_key: "stage".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+        })
+        .await
+        .expect("admit work");
+    let first = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "agent-a".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 1,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("first claim")
+        .expect("claim exists");
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE id = $1",
+    )
+    .bind(admission.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire lease under test");
+    assert!(
+        store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("requeue expired")
+    );
+    let second = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-b".into(),
+            agent_id: "agent-b".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("second claim")
+        .expect("claim exists");
+    assert_eq!(first.attempt_id, second.attempt_id);
+    assert_eq!(first.fence + 1, second.fence);
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                TerminalOutcome::Succeeded,
+                json!({"agent": "stale"}),
+            )
+            .await
+            .expect("reject stale terminal publication")
+    );
 }

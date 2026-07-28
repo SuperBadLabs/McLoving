@@ -4,6 +4,10 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+mod scheduler;
+
+pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
+
 /// Schema installed by [`Store::migrate`].
 pub const CONTROLLER_SCHEMA_V1: &str = include_str!("../migrations/0001_controller_truth.sql");
 
