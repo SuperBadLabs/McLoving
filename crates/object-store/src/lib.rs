@@ -271,17 +271,26 @@ impl FilesystemObjectStore {
         let now = SystemTime::now();
         let mut removed = 0;
         for entry in directory_entries(&self.staging)? {
-            if !entry.path().is_file()
-                || entry.path().extension().and_then(|value| value.to_str()) != Some("staged")
-            {
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("staged") {
                 continue;
             }
-            let Ok(age) = now.duration_since(entry.metadata()?.modified()?) else {
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let Ok(age) = now.duration_since(metadata.modified()?) else {
                 continue;
             };
             if age >= minimum_age {
-                fs::remove_file(entry.path())?;
-                removed += 1;
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => removed += 1,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
         if removed > 0 {
@@ -451,9 +460,14 @@ fn committed_bytes(root: &Path) -> Result<u64, ObjectStoreError> {
 fn staged_bytes(root: &Path) -> Result<u64, ObjectStoreError> {
     let mut total = 0_u64;
     for entry in directory_entries(root)? {
-        if entry.path().is_file() {
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.is_file() {
             total = total
-                .checked_add(entry.metadata()?.len())
+                .checked_add(metadata.len())
                 .ok_or(ObjectStoreError::TotalQuotaExceeded)?;
         }
     }

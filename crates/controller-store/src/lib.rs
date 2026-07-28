@@ -1065,6 +1065,7 @@ impl Store {
             return Ok(RetryDecision::Ineligible);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.retry.{attempt_id}"))
             .execute(&mut *tx)
@@ -1152,9 +1153,12 @@ impl Store {
         let child_ordinal = ordinal + 1;
         sqlx::query(
             "INSERT INTO attempts (
-                 id, organization_id, node_id, ordinal, status, retry_of
+                 id, organization_id, node_id, ordinal, status, retry_of,
+                 restore_epoch
              )
-             VALUES ($1, $2, $3, $4, 'queued', $5)",
+             SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch
+             FROM controller_metadata
+             WHERE singleton",
         )
         .bind(child_id)
         .bind(organization_id)

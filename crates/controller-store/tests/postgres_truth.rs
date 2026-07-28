@@ -1867,6 +1867,34 @@ async fn backup_restore_canary_verify() {
             .expect("list after restored effect reconciliation")
             .is_empty()
     );
+    let restored_retry = store
+        .schedule_retry(
+            organization_id,
+            admission.1,
+            3,
+            "restore reconciliation complete",
+        )
+        .await
+        .expect("schedule post-restore retry");
+    let RetryDecision::Scheduled {
+        attempt_id: retry_id,
+        created: true,
+        ..
+    } = restored_retry
+    else {
+        panic!("expected a post-restore retry, got {restored_retry:?}");
+    };
+    let retry_epoch = sqlx::query_scalar::<_, i64>(
+        "SELECT restore_epoch
+         FROM attempts
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(retry_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read post-restore retry epoch");
+    assert_eq!(retry_epoch, activation.restore_epoch);
     assert!(
         store
             .renew_attempt_lease(
