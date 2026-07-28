@@ -1690,6 +1690,47 @@ async fn backup_restore_canary_seed() {
             .await
             .expect("prepare recovery effect")
     );
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire first recovery fence");
+    assert!(
+        store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("requeue first recovery fence")
+    );
+    let reclaimed = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "recovery-scheduler".into(),
+            agent_id: "post-reclaim-agent".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 300,
+            fairness_seed: 2,
+        })
+        .await
+        .expect("reclaim recovery canary")
+        .expect("reclaimed claim exists");
+    assert_eq!(reclaimed.attempt_id, admission.attempt_id);
+    assert_eq!(reclaimed.fence, claim.fence + 1);
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                admission.attempt_id,
+                reclaimed.fence,
+                "post-reclaim-agent",
+            )
+            .await
+            .expect("accept reclaimed recovery canary")
+    );
     let lsn_before = sqlx::query_scalar::<_, String>("SELECT pg_current_wal_lsn()::text")
         .fetch_one(store.pool())
         .await
@@ -1775,7 +1816,7 @@ async fn backup_restore_canary_verify() {
         .expect("list restored uncertain effects");
     assert_eq!(uncertain.len(), 1);
     assert_eq!(uncertain[0].attempt_id, admission.1);
-    assert_eq!(uncertain[0].fence, admission.2);
+    assert_eq!(uncertain[0].fence, admission.2 - 1);
     assert_eq!(uncertain[0].effect_key, "deploy");
     assert_eq!(uncertain[0].status, EffectStatus::Uncertain);
     assert_eq!(uncertain[0].payload, recovery_effect);
@@ -1784,7 +1825,7 @@ async fn backup_restore_canary_verify() {
             .checkpoint_effect(
                 organization_id,
                 admission.1,
-                admission.2,
+                uncertain[0].fence,
                 "deploy",
                 EffectClass::NonIdempotent,
                 EffectStatus::Confirmed,
@@ -1798,7 +1839,7 @@ async fn backup_restore_canary_verify() {
             .confirm_restored_uncertain_effect(
                 organization_id,
                 admission.1,
-                admission.2,
+                uncertain[0].fence,
                 "deploy",
                 EffectClass::NonIdempotent,
                 &recovery_effect,
@@ -1811,7 +1852,7 @@ async fn backup_restore_canary_verify() {
             .confirm_restored_uncertain_effect(
                 organization_id,
                 admission.1,
-                admission.2,
+                uncertain[0].fence,
                 "deploy",
                 EffectClass::NonIdempotent,
                 &recovery_effect,
@@ -1832,7 +1873,7 @@ async fn backup_restore_canary_verify() {
                 organization_id,
                 admission.1,
                 admission.2,
-                "pre-restore-agent",
+                "post-reclaim-agent",
                 30,
             )
             .await
@@ -1845,7 +1886,7 @@ async fn backup_restore_canary_verify() {
                 organization_id,
                 admission.1,
                 admission.2,
-                "pre-restore-agent",
+                "post-reclaim-agent",
                 TerminalOutcome::Succeeded,
                 json!({"stale": true}),
             )
@@ -1858,7 +1899,7 @@ async fn backup_restore_canary_verify() {
                 organization_id,
                 admission.1,
                 admission.2,
-                "pre-restore-agent",
+                "post-reclaim-agent",
                 ObjectKind::Artifact,
                 "stale.tar",
                 [63; 32],

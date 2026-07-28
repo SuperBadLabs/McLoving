@@ -994,7 +994,6 @@ impl Store {
                AND e.status IN ('uncertain', 'confirmed')
                AND a.organization_id = e.organization_id
                AND a.id = e.attempt_id
-               AND a.fence = e.fence
                AND a.status = 'reconciliation_required'
                AND m.singleton
                AND a.restore_epoch < m.restore_epoch
