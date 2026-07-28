@@ -14,8 +14,8 @@ Artifacts are binary-preserving. Log redaction removes exact configured secret
 byte sequences to a fixed point before hashing and commitment, so a secret
 cannot survive inside a replacement marker or across a newly joined boundary.
 The PostgreSQL controller records object kind, logical name, digest, byte count,
-attempt, and fence. Registration requires the exact live fenced owner, and an
-existing logical object cannot change identity.
+attempt, and fence. Registration requires the exact live owner, fence, and
+restore epoch, and an existing logical object cannot change identity.
 
 ## Quotas and gaps
 
@@ -32,14 +32,27 @@ status is durable controller truth and does not rewrite the expected digest.
 ## Recovery authority
 
 Every scheduler claim records the controller-wide restore epoch while holding a
-shared lock on that epoch. A restore activation takes the exclusive lock,
-increments the epoch, clears every active lease, and moves the affected
-attempt, node, and build to `reconciliation_required` in the same transaction
-as its event and outbox record. Prepared or applied external effects on those
-attempts become `uncertain` for explicit reconciliation. Pre-restore agents
-consequently cannot renew, checkpoint new effects, publish logs or objects, or
-finalize work. Reconciliation can only confirm an existing payload-identical
-uncertain effect and does not restore the historical attempt's authority.
+shared lock on that epoch. Every subsequent agent read or write must present
+that epoch together with the attempt, fence, and agent identity while holding
+the same shared lock. The attempt epoch must still equal current controller
+metadata, so a restored queued attempt may safely reuse a numeric fence without
+accepting authority from the discarded timeline. Worker workspace paths also
+include the restore epoch. The compact agent journal packs the positive restore
+epoch and attempt fence into one ordered local authority value (31 epoch bits,
+32 fence bits); values outside that explicit envelope are rejected before
+acceptance rather than aliased.
+
+A restore activation takes the exclusive lock, increments the epoch, clears
+every active lease, and moves the affected attempt, node, and build to
+`reconciliation_required` in the same transaction as its event and outbox
+record. Replaying activation for the same backup returns the original epoch and
+affected count without another increment. Once an epoch advances, a different
+unused recovery point sealed in the prior epoch is stale and is rejected.
+Prepared or applied external effects on affected attempts become `uncertain`
+for explicit reconciliation. Pre-restore agents consequently cannot renew,
+checkpoint new effects, publish logs or objects, or finalize work.
+Reconciliation can only confirm an existing payload-identical uncertain effect
+and does not restore the historical attempt's authority.
 
 A sealed recovery point binds a stable backup identifier to the current restore
 epoch. After the recovery-point row commits, a first PostgreSQL WAL position is

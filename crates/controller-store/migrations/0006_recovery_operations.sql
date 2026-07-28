@@ -16,9 +16,10 @@ CREATE TABLE recovery_points (
 
 CREATE TABLE restore_epochs (
     restore_epoch bigint PRIMARY KEY CHECK (restore_epoch > 1),
-    backup_id text NOT NULL REFERENCES recovery_points(backup_id),
+    backup_id text NOT NULL UNIQUE REFERENCES recovery_points(backup_id),
     recovery_lsn pg_lsn NOT NULL,
     reason text NOT NULL CHECK (length(reason) BETWEEN 1 AND 1024),
+    affected_attempts bigint NOT NULL CHECK (affected_attempts >= 0),
     activated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 

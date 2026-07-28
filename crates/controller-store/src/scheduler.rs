@@ -26,6 +26,7 @@ pub struct ClaimedAttempt {
     pub node_id: Uuid,
     pub attempt_id: Uuid,
     pub fence: i64,
+    pub restore_epoch: i64,
     pub agent_id: String,
 }
 
@@ -152,6 +153,7 @@ impl Store {
                 "agent_id": request.agent_id,
                 "scheduler_id": request.scheduler_id,
                 "fence": fence,
+                "restore_epoch": restore_epoch,
             }),
         )
         .await?;
@@ -163,6 +165,7 @@ impl Store {
             node_id,
             attempt_id,
             fence,
+            restore_epoch,
             agent_id: request.agent_id.clone(),
         }))
     }
@@ -173,9 +176,14 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
         agent_id: &str,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(RESTORE_FENCE_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
         let accepted = sqlx::query_as::<_, (Uuid, Uuid, String)>(
             "SELECT n.id, n.build_id, a.status
              FROM attempts AS a
@@ -184,7 +192,11 @@ impl Store {
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4
+               AND a.restore_epoch = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('offered', 'accepted', 'running', 'cancelling')
              FOR UPDATE OF a, n",
@@ -192,6 +204,7 @@ impl Store {
         .bind(attempt_id)
         .bind(organization_id)
         .bind(fence)
+        .bind(restore_epoch)
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -229,6 +242,7 @@ impl Store {
                 "node_id": node_id,
                 "agent_id": agent_id,
                 "fence": fence,
+                "restore_epoch": restore_epoch,
             }),
         )
         .await?;
@@ -242,6 +256,7 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
         agent_id: &str,
         lease_seconds: i32,
     ) -> Result<Option<bool>, StoreError> {
@@ -249,15 +264,23 @@ impl Store {
             return Ok(None);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(RESTORE_FENCE_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
         let cancellation_requested = sqlx::query_scalar::<_, bool>(
             "UPDATE attempts AS a
              SET lease_expires_at =
-                   clock_timestamp() + make_interval(secs => $5)
+                   clock_timestamp() + make_interval(secs => $6)
              FROM nodes AS n, builds AS b
              WHERE a.organization_id = $1
                AND a.id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4
+               AND a.restore_epoch = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
                AND n.id = a.node_id
@@ -269,6 +292,7 @@ impl Store {
         .bind(organization_id)
         .bind(attempt_id)
         .bind(fence)
+        .bind(restore_epoch)
         .bind(agent_id)
         .bind(f64::from(lease_seconds))
         .fetch_optional(&mut *tx)
@@ -285,6 +309,10 @@ impl Store {
         let mut tx = self.tenant_transaction(organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(RESTORE_FENCE_LOCK_KEY)
             .execute(&mut *tx)
             .await?;
         let expired = sqlx::query(

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use mcloving_controller_store::{
     ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk, ObjectKind, ObjectStatus,
-    RetryDecision, Store, TerminalOutcome, WaitReason,
+    RetryDecision, Store, StoreError, TerminalOutcome, WaitReason,
 };
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -218,7 +218,13 @@ async fn cancellation_targets_the_latest_retry_attempt() {
         .expect("first claim exists");
     assert!(
         store
-            .accept_offer(organization_id, first.attempt_id, first.fence, "agent-a")
+            .accept_offer(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                first.restore_epoch,
+                "agent-a",
+            )
             .await
             .expect("accept first")
     );
@@ -228,6 +234,7 @@ async fn cancellation_targets_the_latest_retry_attempt() {
                 organization_id,
                 first.attempt_id,
                 first.fence,
+                first.restore_epoch,
                 "agent-a",
                 TerminalOutcome::Failed,
                 json!({"reason": "retry"}),
@@ -421,6 +428,7 @@ async fn concurrent_terminal_publication_has_one_winner() {
                 organization_id,
                 admission.attempt_id,
                 0,
+                store.current_restore_epoch().await.expect("restore epoch"),
                 "unleased-agent",
                 TerminalOutcome::Succeeded,
                 json!({"publisher": "unleased"}),
@@ -446,6 +454,7 @@ async fn concurrent_terminal_publication_has_one_winner() {
                 organization_id,
                 admission.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "agent-a",
             )
             .await
@@ -461,6 +470,7 @@ async fn concurrent_terminal_publication_has_one_winner() {
                     organization_id,
                     admission.attempt_id,
                     claim.fence,
+                    claim.restore_epoch,
                     "agent-a",
                     TerminalOutcome::Succeeded,
                     json!({"publisher": index}),
@@ -553,6 +563,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "wrong-agent",
             )
             .await
@@ -564,6 +575,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "linux-agent",
             )
             .await
@@ -633,6 +645,7 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
                 organization_id,
                 admission.attempt_id,
                 first.fence,
+                first.restore_epoch,
                 "agent-a",
             )
             .await
@@ -672,6 +685,7 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
                 organization_id,
                 first.attempt_id,
                 first.fence,
+                first.restore_epoch,
                 "agent-a",
                 TerminalOutcome::Succeeded,
                 json!({"agent": "stale"}),
@@ -725,7 +739,13 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
         .expect("first claim exists");
     assert!(
         store
-            .accept_offer(organization_id, first.attempt_id, first.fence, "agent-a",)
+            .accept_offer(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                first.restore_epoch,
+                "agent-a",
+            )
             .await
             .expect("accept first")
     );
@@ -735,6 +755,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
                 organization_id,
                 attempt_id: first.attempt_id,
                 fence: first.fence,
+                restore_epoch: first.restore_epoch,
                 agent_id: "agent-a",
                 sequence: 0,
                 stream: "stdout",
@@ -772,7 +793,13 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
     assert_eq!(second.fence, first.fence + 1);
     assert!(
         store
-            .accept_offer(organization_id, second.attempt_id, second.fence, "agent-b",)
+            .accept_offer(
+                organization_id,
+                second.attempt_id,
+                second.fence,
+                second.restore_epoch,
+                "agent-b",
+            )
             .await
             .expect("accept second")
     );
@@ -782,6 +809,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
                 organization_id,
                 attempt_id: second.attempt_id,
                 fence: second.fence,
+                restore_epoch: second.restore_epoch,
                 agent_id: "agent-b",
                 sequence: 0,
                 stream: "stdout",
@@ -829,12 +857,54 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
         })
         .await
         .expect("admit build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "effect-scheduler".into(),
+            agent_id: "effect-agent".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim effect work")
+        .expect("effect work exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+            )
+            .await
+            .expect("accept effect work")
+    );
     let payload = json!({"destination": "deploy/production", "release": "r1"});
+    assert!(
+        !store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "wrong-agent",
+                "deploy",
+                EffectClass::NonIdempotent,
+                EffectStatus::Prepared,
+                &payload,
+            )
+            .await
+            .expect("reject effect from non-owner")
+    );
     let (first_prepare, concurrent_replay) = tokio::join!(
         store.checkpoint_effect(
             organization_id,
             admission.attempt_id,
-            0,
+            claim.fence,
+            claim.restore_epoch,
+            "effect-agent",
             "deploy",
             EffectClass::NonIdempotent,
             EffectStatus::Prepared,
@@ -843,7 +913,9 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
         store.checkpoint_effect(
             organization_id,
             admission.attempt_id,
-            0,
+            claim.fence,
+            claim.restore_epoch,
+            "effect-agent",
             "deploy",
             EffectClass::NonIdempotent,
             EffectStatus::Prepared,
@@ -857,7 +929,9 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             .checkpoint_effect(
                 organization_id,
                 admission.attempt_id,
-                0,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
                 "deploy",
                 EffectClass::NonIdempotent,
                 EffectStatus::Uncertain,
@@ -871,7 +945,9 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             .checkpoint_effect(
                 organization_id,
                 admission.attempt_id,
-                0,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
                 "deploy",
                 EffectClass::NonIdempotent,
                 EffectStatus::Applied,
@@ -885,7 +961,9 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             .checkpoint_effect(
                 organization_id,
                 admission.attempt_id,
-                0,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
                 "deploy",
                 EffectClass::NonIdempotent,
                 EffectStatus::Confirmed,
@@ -899,11 +977,12 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
          FROM attempt_effects
          WHERE organization_id = $1
            AND attempt_id = $2
-           AND fence = 0
+           AND fence = $3
            AND effect_key = 'deploy'",
     )
     .bind(organization_id)
     .bind(admission.attempt_id)
+    .bind(claim.fence)
     .fetch_one(store.pool())
     .await
     .expect("read effect timestamp before replay");
@@ -912,7 +991,9 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             .checkpoint_effect(
                 organization_id,
                 admission.attempt_id,
-                0,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
                 "deploy",
                 EffectClass::NonIdempotent,
                 EffectStatus::Uncertain,
@@ -926,11 +1007,12 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
          FROM attempt_effects
          WHERE organization_id = $1
            AND attempt_id = $2
-           AND fence = 0
+           AND fence = $3
            AND effect_key = 'deploy'",
     )
     .bind(organization_id)
     .bind(admission.attempt_id)
+    .bind(claim.fence)
     .fetch_one(store.pool())
     .await
     .expect("read effect timestamp after replay");
@@ -941,7 +1023,7 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
         .expect("list uncertain effects");
     assert_eq!(uncertain.len(), 1);
     assert_eq!(uncertain[0].attempt_id, admission.attempt_id);
-    assert_eq!(uncertain[0].fence, 0);
+    assert_eq!(uncertain[0].fence, claim.fence);
     assert_eq!(uncertain[0].effect_key, "deploy");
     assert_eq!(uncertain[0].effect_class, EffectClass::NonIdempotent);
     assert_eq!(uncertain[0].status, EffectStatus::Uncertain);
@@ -951,7 +1033,9 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             .checkpoint_effect(
                 organization_id,
                 admission.attempt_id,
-                0,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
                 "deploy",
                 EffectClass::NonIdempotent,
                 EffectStatus::Confirmed,
@@ -1013,7 +1097,13 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
         .expect("first claim exists");
     assert!(
         store
-            .accept_offer(organization_id, first.attempt_id, first.fence, "agent-a")
+            .accept_offer(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                first.restore_epoch,
+                "agent-a",
+            )
             .await
             .expect("accept first")
     );
@@ -1023,6 +1113,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
                 organization_id,
                 attempt_id: first.attempt_id,
                 fence: first.fence,
+                restore_epoch: first.restore_epoch,
                 agent_id: "agent-a",
                 sequence: 0,
                 stream: "stdout",
@@ -1037,6 +1128,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
                 organization_id,
                 first.attempt_id,
                 first.fence,
+                first.restore_epoch,
                 "agent-a",
                 TerminalOutcome::Failed,
                 json!({"reason": "transient"}),
@@ -1096,7 +1188,13 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
     assert_eq!(second.attempt_id, second_id);
     assert!(
         store
-            .accept_offer(organization_id, second.attempt_id, second.fence, "agent-b")
+            .accept_offer(
+                organization_id,
+                second.attempt_id,
+                second.fence,
+                second.restore_epoch,
+                "agent-b",
+            )
             .await
             .expect("accept second")
     );
@@ -1106,6 +1204,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
                 organization_id,
                 attempt_id: second.attempt_id,
                 fence: second.fence,
+                restore_epoch: second.restore_epoch,
                 agent_id: "agent-b",
                 sequence: 0,
                 stream: "stdout",
@@ -1120,6 +1219,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
                 organization_id,
                 second.attempt_id,
                 second.fence,
+                second.restore_epoch,
                 "agent-b",
                 TerminalOutcome::Failed,
                 json!({"reason": "persistent"}),
@@ -1249,7 +1349,13 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
         .expect("claim exists");
     assert!(
         store
-            .accept_offer(organization_id, claim.attempt_id, claim.fence, "agent")
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent",
+            )
             .await
             .expect("accept")
     );
@@ -1260,6 +1366,7 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "agent",
                 ObjectKind::Artifact,
                 "distribution.tar.zst",
@@ -1275,6 +1382,7 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "agent",
                 ObjectKind::Artifact,
                 "distribution.tar.zst",
@@ -1290,6 +1398,7 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence + 1,
+                claim.restore_epoch,
                 "agent",
                 ObjectKind::Artifact,
                 "stale.tar.zst",
@@ -1380,7 +1489,13 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
         .expect("claim exists");
     assert!(
         store
-            .accept_offer(organization_id, admission.attempt_id, claim.fence, "agent")
+            .accept_offer(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent",
+            )
             .await
             .expect("accept")
     );
@@ -1391,6 +1506,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
                 organization_id,
                 admission.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "agent",
                 ObjectKind::Artifact,
                 "evidence.tar.zst",
@@ -1456,6 +1572,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
                 second_organization_id,
                 second_admission.attempt_id,
                 second_claim.fence,
+                second_claim.restore_epoch,
                 "agent",
             )
             .await
@@ -1467,6 +1584,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
                 second_organization_id,
                 second_admission.attempt_id,
                 second_claim.fence,
+                second_claim.restore_epoch,
                 "agent",
                 ObjectKind::Artifact,
                 "shared-evidence.tar.zst",
@@ -1652,6 +1770,7 @@ async fn backup_restore_canary_seed() {
                 organization_id,
                 admission.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "pre-restore-agent",
             )
             .await
@@ -1663,6 +1782,7 @@ async fn backup_restore_canary_seed() {
                 organization_id,
                 admission.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "pre-restore-agent",
                 ObjectKind::Result,
                 "result.cbor",
@@ -1682,6 +1802,8 @@ async fn backup_restore_canary_seed() {
                 organization_id,
                 admission.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
+                "pre-restore-agent",
                 "deploy",
                 EffectClass::NonIdempotent,
                 EffectStatus::Prepared,
@@ -1726,11 +1848,25 @@ async fn backup_restore_canary_seed() {
                 organization_id,
                 admission.attempt_id,
                 reclaimed.fence,
+                reclaimed.restore_epoch,
                 "post-reclaim-agent",
             )
             .await
             .expect("accept reclaimed recovery canary")
     );
+    store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "queued-rewind-canary".into(),
+            pipeline_digest: [64; 32],
+            node_key: "queued-stage".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 100,
+            execution_spec: json!({"command": "claim-after-restore"}),
+        })
+        .await
+        .expect("admit queued rewind canary");
     let lsn_before = sqlx::query_scalar::<_, String>("SELECT pg_current_wal_lsn()::text")
         .fetch_one(store.pool())
         .await
@@ -1766,6 +1902,10 @@ async fn backup_restore_canary_seed() {
             .await
             .expect("compare advertised recovery boundary");
     assert!(advertised_boundary_includes_seal);
+    store
+        .seal_recovery_point("compact-drill-stale")
+        .await
+        .expect("seal unused recovery point in the original epoch");
 }
 
 #[tokio::test]
@@ -1773,8 +1913,8 @@ async fn backup_restore_canary_seed() {
 async fn backup_restore_canary_verify() {
     let store = test_store().await.expect("isolated restore database URL");
     let (organization_id, project_id) = recovery_canary_ids();
-    let admission = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
-        "SELECT b.id, a.id, a.fence
+    let admission = sqlx::query_as::<_, (Uuid, Uuid, i64, i64)>(
+        "SELECT b.id, a.id, a.fence, a.restore_epoch
          FROM builds AS b
          JOIN nodes AS n
            ON n.build_id = b.id AND n.organization_id = b.organization_id
@@ -1798,6 +1938,25 @@ async fn backup_restore_canary_verify() {
     assert_eq!(activation.affected_attempts, 1);
     assert!(!activation.sealed_lsn.is_empty());
     assert_eq!(store.current_restore_epoch().await.expect("read epoch"), 2);
+    let replayed_activation = store
+        .activate_restore_epoch("compact-drill-001", "replayed restore response")
+        .await
+        .expect("replay activation")
+        .expect("activation remains queryable");
+    assert_eq!(replayed_activation, activation);
+    assert_eq!(
+        store
+            .current_restore_epoch()
+            .await
+            .expect("epoch after replay"),
+        activation.restore_epoch
+    );
+    assert!(matches!(
+        store
+            .activate_restore_epoch("compact-drill-stale", "reject stale recovery point")
+            .await,
+        Err(StoreError::InvalidRecoveryOperation(_))
+    ));
     let snapshot = store
         .build_snapshot(organization_id, project_id, admission.0)
         .await
@@ -1826,6 +1985,8 @@ async fn backup_restore_canary_verify() {
                 organization_id,
                 admission.1,
                 uncertain[0].fence,
+                activation.restore_epoch,
+                "post-reclaim-agent",
                 "deploy",
                 EffectClass::NonIdempotent,
                 EffectStatus::Confirmed,
@@ -1867,6 +2028,44 @@ async fn backup_restore_canary_verify() {
             .expect("list after restored effect reconciliation")
             .is_empty()
     );
+    let rewind_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "post-restore-scheduler".into(),
+            agent_id: "reused-agent".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 300,
+            fairness_seed: 3,
+        })
+        .await
+        .expect("claim restored queued work")
+        .expect("queued rewind canary exists");
+    assert_eq!(rewind_claim.fence, 1);
+    assert_eq!(rewind_claim.restore_epoch, activation.restore_epoch);
+    assert!(
+        !store
+            .accept_offer(
+                organization_id,
+                rewind_claim.attempt_id,
+                rewind_claim.fence,
+                admission.3,
+                "reused-agent",
+            )
+            .await
+            .expect("reject stale same-fence authority")
+    );
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                rewind_claim.attempt_id,
+                rewind_claim.fence,
+                rewind_claim.restore_epoch,
+                "reused-agent",
+            )
+            .await
+            .expect("accept current restore-epoch authority")
+    );
     let restored_retry = store
         .schedule_retry(
             organization_id,
@@ -1901,6 +2100,7 @@ async fn backup_restore_canary_verify() {
                 organization_id,
                 admission.1,
                 admission.2,
+                admission.3,
                 "post-reclaim-agent",
                 30,
             )
@@ -1914,6 +2114,7 @@ async fn backup_restore_canary_verify() {
                 organization_id,
                 admission.1,
                 admission.2,
+                admission.3,
                 "post-reclaim-agent",
                 TerminalOutcome::Succeeded,
                 json!({"stale": true}),
@@ -1927,6 +2128,7 @@ async fn backup_restore_canary_verify() {
                 organization_id,
                 admission.1,
                 admission.2,
+                admission.3,
                 "post-reclaim-agent",
                 ObjectKind::Artifact,
                 "stale.tar",
@@ -1942,6 +2144,8 @@ async fn backup_restore_canary_verify() {
                 organization_id,
                 admission.1,
                 admission.2,
+                admission.3,
+                "post-reclaim-agent",
                 "stale-effect",
                 EffectClass::NonIdempotent,
                 EffectStatus::Prepared,

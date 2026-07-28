@@ -78,6 +78,7 @@ pub struct NewLogChunk<'a> {
     pub organization_id: Uuid,
     pub attempt_id: Uuid,
     pub fence: i64,
+    pub restore_epoch: i64,
     pub agent_id: &'a str,
     pub sequence: i64,
     pub stream: &'a str,
@@ -669,12 +670,16 @@ impl Store {
                  organization_id, attempt_id, fence, sequence,
                  stream, content, digest
              )
-             SELECT $1, a.id, $3, $5, $6, $7, $8
+             SELECT $1, a.id, $3, $6, $7, $8, $9
              FROM attempts AS a
              WHERE a.organization_id = $1
                AND a.id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4
+               AND a.restore_epoch = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
              ON CONFLICT (organization_id, attempt_id, fence, sequence)
@@ -686,6 +691,7 @@ impl Store {
         .bind(chunk.organization_id)
         .bind(chunk.attempt_id)
         .bind(chunk.fence)
+        .bind(chunk.restore_epoch)
         .bind(chunk.agent_id)
         .bind(chunk.sequence)
         .bind(chunk.stream)
@@ -703,9 +709,11 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
         agent_id: &str,
     ) -> Result<Option<AttemptExecution>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let row = sqlx::query_as::<_, (Uuid, Uuid, Value, bool)>(
             "SELECT b.id, b.project_id, n.execution_spec,
                     b.cancellation_requested_at IS NOT NULL
@@ -717,13 +725,18 @@ impl Store {
              WHERE a.organization_id = $1
                AND a.id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4
+               AND a.restore_epoch = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('offered', 'accepted', 'running', 'finalizing', 'cancelling')",
         )
         .bind(organization_id)
         .bind(attempt_id)
         .bind(fence)
+        .bind(restore_epoch)
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -744,9 +757,11 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
         agent_id: &str,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
         let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
             "SELECT n.id, n.build_id, a.status
              FROM attempts AS a
@@ -755,7 +770,11 @@ impl Store {
              WHERE a.organization_id = $1
                AND a.id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4
+               AND a.restore_epoch = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('accepted', 'running')
              FOR UPDATE OF a, n",
@@ -763,6 +782,7 @@ impl Store {
         .bind(organization_id)
         .bind(attempt_id)
         .bind(fence)
+        .bind(restore_epoch)
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -795,7 +815,12 @@ impl Store {
             organization_id,
             build_id,
             "attempt.running",
-            json!({"attempt_id": attempt_id, "node_id": node_id, "fence": fence}),
+            json!({
+                "attempt_id": attempt_id,
+                "node_id": node_id,
+                "fence": fence,
+                "restore_epoch": restore_epoch,
+            }),
         )
         .await?;
         tx.commit().await?;
@@ -853,6 +878,8 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
         effect_key: &str,
         effect_class: EffectClass,
         status: EffectStatus,
@@ -873,6 +900,10 @@ impl Store {
              WHERE a.organization_id = $1
                AND a.id = $2
                AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
                AND m.singleton
                AND a.restore_epoch = m.restore_epoch
              FOR UPDATE OF a",
@@ -880,6 +911,8 @@ impl Store {
         .bind(organization_id)
         .bind(attempt_id)
         .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
         if attempt_exists.is_none() {
@@ -1213,6 +1246,7 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
         agent_id: &str,
         kind: ObjectKind,
         name: &str,
@@ -1229,12 +1263,16 @@ impl Store {
                  organization_id, attempt_id, fence, kind, name,
                  object_digest, bytes
              )
-             SELECT $1, a.id, $3, $5, $6, $7, $8
+             SELECT $1, a.id, $3, $6, $7, $8, $9
              FROM attempts AS a
              WHERE a.organization_id = $1
                AND a.id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4
+               AND a.restore_epoch = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
              ON CONFLICT (organization_id, attempt_id, fence, kind, name)
@@ -1246,6 +1284,7 @@ impl Store {
         .bind(organization_id)
         .bind(attempt_id)
         .bind(fence)
+        .bind(restore_epoch)
         .bind(agent_id)
         .bind(kind.as_str())
         .bind(name)
@@ -1447,8 +1486,29 @@ impl Store {
         )
         .fetch_one(&mut *tx)
         .await?;
-        let recovery_lsn = sqlx::query_scalar::<_, String>(
-            "SELECT recovery_lsn::text
+        let existing = sqlx::query_as::<_, (i64, String, i64)>(
+            "SELECT restore_epoch, recovery_lsn::text, affected_attempts
+             FROM restore_epochs
+             WHERE backup_id = $1",
+        )
+        .bind(backup_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((restore_epoch, recovery_lsn, affected_attempts)) = existing {
+            tx.commit().await?;
+            return Ok(Some(RestoreActivation {
+                restore_epoch,
+                backup_id: backup_id.to_owned(),
+                sealed_lsn: recovery_lsn,
+                affected_attempts: u64::try_from(affected_attempts).map_err(|_| {
+                    StoreError::InvalidRecoveryOperation(
+                        "stored affected-attempt count is invalid".to_owned(),
+                    )
+                })?,
+            }));
+        }
+        let recovery_point = sqlx::query_as::<_, (i64, String)>(
+            "SELECT restore_epoch, recovery_lsn::text
              FROM recovery_points
              WHERE backup_id = $1
                AND recovery_lsn IS NOT NULL",
@@ -1456,10 +1516,16 @@ impl Store {
         .bind(backup_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(recovery_lsn) = recovery_lsn else {
+        let Some((point_epoch, recovery_lsn)) = recovery_point else {
             tx.rollback().await?;
             return Ok(None);
         };
+        if point_epoch != current_epoch {
+            tx.rollback().await?;
+            return Err(StoreError::InvalidRecoveryOperation(format!(
+                "recovery point belongs to restore epoch {point_epoch}, current epoch is {current_epoch}"
+            )));
+        }
         let restore_epoch = current_epoch.checked_add(1).ok_or_else(|| {
             StoreError::InvalidRecoveryOperation("restore epoch overflow".to_owned())
         })?;
@@ -1486,14 +1552,17 @@ impl Store {
         .await?;
         sqlx::query(
             "INSERT INTO restore_epochs (
-                 restore_epoch, backup_id, recovery_lsn, reason
+                 restore_epoch, backup_id, recovery_lsn, reason, affected_attempts
              )
-             VALUES ($1, $2, $3::pg_lsn, $4)",
+             VALUES ($1, $2, $3::pg_lsn, $4, $5)",
         )
         .bind(restore_epoch)
         .bind(backup_id)
         .bind(&recovery_lsn)
         .bind(reason)
+        .bind(i64::try_from(affected.len()).map_err(|_| {
+            StoreError::InvalidRecoveryOperation("affected-attempt count overflow".to_owned())
+        })?)
         .execute(&mut *tx)
         .await?;
         for (attempt_id, organization_id, node_id, build_id, attempt_epoch) in &affected {
@@ -1723,11 +1792,13 @@ impl Store {
     ///
     /// The attempt, node, build, event, and outbox mutation share a transaction.
     /// A stale or losing concurrent publisher observes `false`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn finalize_attempt(
         &self,
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
         agent_id: &str,
         outcome: TerminalOutcome,
         summary: Value,
@@ -1736,15 +1807,16 @@ impl Store {
         acquire_restore_fence_shared(&mut tx).await?;
         let row = sqlx::query_as::<_, (Uuid, Uuid)>(
             "UPDATE attempts AS a
-             SET status = $5,
-                 terminal_summary = $6,
+             SET status = $6,
+                 terminal_summary = $7,
                  completed_at = clock_timestamp(),
                  lease_expires_at = NULL
              FROM nodes AS n
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
                AND a.restore_epoch = (
@@ -1759,6 +1831,7 @@ impl Store {
         .bind(attempt_id)
         .bind(organization_id)
         .bind(fence)
+        .bind(restore_epoch)
         .bind(agent_id)
         .bind(outcome.as_str())
         .bind(&summary)
@@ -1798,6 +1871,7 @@ impl Store {
             json!({
                 "attempt_id": attempt_id,
                 "fence": fence,
+                "restore_epoch": restore_epoch,
                 "outcome": outcome.as_str(),
             }),
         )
