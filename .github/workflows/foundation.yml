@@ -89,5 +89,33 @@ jobs:
           java -cp /tmp/tla2tools.jar tla2sany.SANY formal/tla/AttemptLease.tla
           java -cp /tmp/tla2tools.jar tlc2.TLC \
             -config formal/tla/AttemptLease.cfg \
-            -workers auto \
-            formal/tla/AttemptLease.tla
+          -workers auto \
+          formal/tla/AttemptLease.tla
+
+  controller-postgres:
+    name: Controller PostgreSQL
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_USER: mcloving
+          POSTGRES_PASSWORD: mcloving-test
+          POSTGRES_DB: mcloving
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username mcloving --dbname mcloving"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      MCLOVING_TEST_DATABASE_URL: >-
+        postgres://mcloving:mcloving-test@127.0.0.1:5432/mcloving
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Run real-PostgreSQL transaction and race tests
+        run: cargo +1.97.1 test --locked -p mcloving-controller-store --test postgres_truth
