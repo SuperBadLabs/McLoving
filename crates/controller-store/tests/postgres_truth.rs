@@ -60,6 +60,7 @@ async fn admission_is_atomic_and_idempotent() {
         node_key: "stage-1".into(),
         required_capabilities: vec!["linux".into()],
         priority: 10,
+        execution_spec: json!({}),
     };
 
     let first = store.admit_build(&input).await.expect("first admission");
@@ -166,6 +167,7 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
             priority: 0,
+            execution_spec: json!({}),
         })
         .await
         .expect("admit through runtime role using identity sequences");
@@ -214,6 +216,7 @@ async fn concurrent_terminal_publication_has_one_winner() {
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
             priority: 0,
+            execution_spec: json!({}),
         })
         .await
         .expect("admit build");
@@ -317,6 +320,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
             node_key: "windows-stage".into(),
             required_capabilities: vec!["windows".into(), "powershell".into()],
             priority: 100,
+            execution_spec: json!({}),
         })
         .await
         .expect("admit Windows work");
@@ -329,6 +333,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
             node_key: "linux-stage".into(),
             required_capabilities: vec!["linux".into()],
             priority: 10,
+            execution_spec: json!({}),
         })
         .await
         .expect("admit Linux work");
@@ -411,6 +416,7 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
             node_key: "stage".into(),
             required_capabilities: vec!["linux".into()],
             priority: 0,
+            execution_spec: json!({}),
         })
         .await
         .expect("admit work");
@@ -543,6 +549,7 @@ async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
                 node_key: "stage".into(),
                 required_capabilities: Vec::new(),
                 priority: 0,
+                execution_spec: json!({}),
             })
             .await
             .expect("admit tenant build");

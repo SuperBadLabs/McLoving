@@ -6,6 +6,7 @@ members = [
   "bins/controller",
   "crates/agent-protocol",
   "crates/agent-runtime",
+  "crates/controller-api",
   "crates/controller-store",
   "crates/domain",
   "crates/pipeline-ir",

@@ -1,6 +1,7 @@
 //! PostgreSQL-backed controller truth and transaction boundaries.
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
@@ -13,6 +14,8 @@ pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 pub const CONTROLLER_SCHEMA_V1: &str = include_str!("../migrations/0001_controller_truth.sql");
 /// Tenant identity and row-level-security migration.
 pub const TENANT_SECURITY_V2: &str = include_str!("../migrations/0002_tenant_security.sql");
+/// Public API and committed log migration.
+pub const PUBLIC_API_V3: &str = include_str!("../migrations/0003_public_api.sql");
 
 /// A build and its first executable node, admitted as one durable unit.
 #[derive(Clone, Debug)]
@@ -24,6 +27,7 @@ pub struct NewBuild {
     pub node_key: String,
     pub required_capabilities: Vec<String>,
     pub priority: i32,
+    pub execution_spec: Value,
 }
 
 /// Stable identifiers returned after admission.
@@ -33,6 +37,43 @@ pub struct BuildAdmission {
     pub node_id: Uuid,
     pub attempt_id: Uuid,
     pub created: bool,
+}
+
+/// Public read model for one build and its initial attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BuildSnapshot {
+    pub build_id: Uuid,
+    pub node_id: Uuid,
+    pub attempt_id: Uuid,
+    pub build_status: String,
+    pub attempt_status: String,
+    pub fence: i64,
+    pub lease_owner: Option<String>,
+    pub cancellation_requested: bool,
+    pub terminal_summary: Option<Value>,
+    pub execution_spec: Value,
+}
+
+/// One checksummed, controller-committed log chunk.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedLog {
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub sequence: i64,
+    pub stream: String,
+    pub content: Vec<u8>,
+    pub digest: [u8; 32],
+}
+
+/// Fenced log publication from one agent attempt.
+pub struct NewLogChunk<'a> {
+    pub organization_id: Uuid,
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub agent_id: &'a str,
+    pub sequence: i64,
+    pub stream: &'a str,
+    pub content: &'a [u8],
 }
 
 /// Terminal result accepted from a fenced attempt.
@@ -60,6 +101,8 @@ pub enum StoreError {
     Database(#[from] sqlx::Error),
     #[error("idempotent build exists without its initial node or attempt")]
     IncompleteAdmission,
+    #[error("attempt {attempt_id} log sequence {sequence} has a corrupt digest")]
+    CorruptLogDigest { attempt_id: Uuid, sequence: i64 },
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -94,6 +137,7 @@ impl Store {
         .await?;
         apply_migration(&mut tx, 1, CONTROLLER_SCHEMA_V1).await?;
         apply_migration(&mut tx, 2, TENANT_SECURITY_V2).await?;
+        apply_migration(&mut tx, 3, PUBLIC_API_V3).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -160,9 +204,9 @@ impl Store {
         sqlx::query(
             "INSERT INTO nodes (
                  id, organization_id, build_id, node_key, status,
-                 required_capabilities, priority
+                 required_capabilities, priority, execution_spec
              )
-             VALUES ($1, $2, $3, $4, 'queued', $5, $6)",
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7)",
         )
         .bind(node_id)
         .bind(input.organization_id)
@@ -170,6 +214,7 @@ impl Store {
         .bind(&input.node_key)
         .bind(&input.required_capabilities)
         .bind(input.priority)
+        .bind(&input.execution_spec)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -203,6 +248,216 @@ impl Store {
             attempt_id,
             created: true,
         })
+    }
+
+    /// Returns the tenant-scoped public build view.
+    pub async fn build_snapshot(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+    ) -> Result<Option<BuildSnapshot>, StoreError> {
+        type SnapshotRow = (
+            Uuid,
+            Uuid,
+            Uuid,
+            String,
+            String,
+            i64,
+            Option<String>,
+            bool,
+            Option<Value>,
+            Value,
+        );
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query_as::<_, SnapshotRow>(
+            "SELECT b.id, n.id, a.id, b.status, a.status, a.fence,
+                    a.lease_owner, b.cancellation_requested_at IS NOT NULL,
+                    a.terminal_summary, n.execution_spec
+             FROM builds AS b
+             JOIN nodes AS n
+               ON n.build_id = b.id AND n.organization_id = b.organization_id
+             JOIN attempts AS a
+               ON a.node_id = n.id AND a.organization_id = n.organization_id
+             WHERE b.organization_id = $1
+               AND b.project_id = $2
+               AND b.id = $3
+               AND a.ordinal = 1",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(row.map(
+            |(
+                build_id,
+                node_id,
+                attempt_id,
+                build_status,
+                attempt_status,
+                fence,
+                lease_owner,
+                cancellation_requested,
+                terminal_summary,
+                execution_spec,
+            )| BuildSnapshot {
+                build_id,
+                node_id,
+                attempt_id,
+                build_status,
+                attempt_status,
+                fence,
+                lease_owner,
+                cancellation_requested,
+                terminal_summary,
+                execution_spec,
+            },
+        ))
+    }
+
+    /// Requests cancellation without pretending an agent has already stopped.
+    pub async fn request_cancellation(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let attempt = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "UPDATE builds AS b
+             SET cancellation_requested_at =
+                   COALESCE(cancellation_requested_at, clock_timestamp())
+             FROM nodes AS n, attempts AS a
+             WHERE b.organization_id = $1
+               AND b.project_id = $2
+               AND b.id = $3
+               AND b.status IN ('queued', 'running')
+               AND n.build_id = b.id
+               AND n.organization_id = b.organization_id
+               AND a.node_id = n.id
+               AND a.organization_id = n.organization_id
+               AND a.ordinal = 1
+             RETURNING a.id, n.id",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((attempt_id, node_id)) = attempt else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        sqlx::query(
+            "UPDATE attempts
+             SET status = 'cancelling'
+             WHERE organization_id = $1
+               AND id = $2
+               AND status IN ('offered', 'accepted', 'running', 'finalizing')",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .execute(&mut *tx)
+        .await?;
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "build.cancellation_requested",
+            json!({"attempt_id": attempt_id, "node_id": node_id}),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Reads committed log chunks in deterministic sequence order.
+    pub async fn build_logs(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+    ) -> Result<Vec<CommittedLog>, StoreError> {
+        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>);
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, LogRow>(
+            "SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest
+             FROM attempt_log_chunks AS l
+             JOIN attempts AS a
+               ON a.id = l.attempt_id AND a.organization_id = l.organization_id
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE l.organization_id = $1
+               AND b.project_id = $2
+               AND b.id = $3
+             ORDER BY l.sequence, l.stream",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(|(attempt_id, fence, sequence, stream, content, digest)| {
+                let digest: [u8; 32] =
+                    digest
+                        .try_into()
+                        .map_err(|_| StoreError::CorruptLogDigest {
+                            attempt_id,
+                            sequence,
+                        })?;
+                Ok(CommittedLog {
+                    attempt_id,
+                    fence,
+                    sequence,
+                    stream,
+                    content,
+                    digest,
+                })
+            })
+            .collect()
+    }
+
+    /// Commits a log chunk only for the exact live fenced attempt.
+    pub async fn append_log(&self, chunk: &NewLogChunk<'_>) -> Result<bool, StoreError> {
+        let digest: [u8; 32] = Sha256::digest(chunk.content).into();
+        let mut tx = self.tenant_transaction(chunk.organization_id).await?;
+        let inserted = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO attempt_log_chunks (
+                 organization_id, attempt_id, fence, sequence,
+                 stream, content, digest
+             )
+             SELECT $1, a.id, $3, $5, $6, $7, $8
+             FROM attempts AS a
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.lease_owner = $4
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+             ON CONFLICT (organization_id, attempt_id, fence, sequence)
+             DO UPDATE SET content = EXCLUDED.content
+             WHERE attempt_log_chunks.stream = EXCLUDED.stream
+               AND attempt_log_chunks.digest = EXCLUDED.digest
+             RETURNING sequence",
+        )
+        .bind(chunk.organization_id)
+        .bind(chunk.attempt_id)
+        .bind(chunk.fence)
+        .bind(chunk.agent_id)
+        .bind(chunk.sequence)
+        .bind(chunk.stream)
+        .bind(chunk.content)
+        .bind(digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(inserted.is_some())
     }
 
     /// Accepts exactly one terminal publication for the current attempt fence.
