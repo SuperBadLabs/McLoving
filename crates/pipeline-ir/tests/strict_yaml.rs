@@ -111,6 +111,10 @@ fn rejects_negative_corpus_with_stable_codes() {
             include_str!("fixtures/invalid/empty-value.yaml"),
             ErrorCode::EmptyScalar,
         ),
+        (
+            include_str!("fixtures/invalid/complex-key.yaml"),
+            ErrorCode::ComplexKey,
+        ),
     ];
 
     for (source, expected) in cases {
@@ -160,6 +164,31 @@ fn enforces_all_collection_and_scalar_limits() {
     )
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::ScalarLimit);
+
+    let error = parse_strict(
+        "values: [one, two, three]\n",
+        ParseLimits {
+            max_nodes: 3,
+            ..ParseLimits::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NodeLimit);
+}
+
+#[test]
+fn percent_at_the_start_of_block_scalar_content_is_not_a_directive() {
+    let parsed = parse_strict("|\n  %not-a-directive\n", ParseLimits::default()).unwrap();
+    assert_eq!(
+        parsed.value,
+        YamlValue::String("%not-a-directive\n".to_owned())
+    );
+
+    let parsed = parse_strict("\"first\n%second\"\n", ParseLimits::default()).unwrap();
+    let YamlValue::String(value) = parsed.value else {
+        panic!("expected string");
+    };
+    assert!(value.contains("%second"));
 }
 
 #[test]

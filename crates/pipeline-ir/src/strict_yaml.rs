@@ -343,11 +343,17 @@ pub fn parse_strict(source: &str, limits: ParseLimits) -> Result<SpannedValue, A
                 SourceSpan::at(location),
             ));
         }
+        let trimmed = directive_candidate.trim_start();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            break;
+        }
         line_offset = line_offset.saturating_add(line.len());
     }
 
     let mut events = Vec::new();
     let mut documents = 0_usize;
+    let mut parsed_nodes = 0_usize;
+    let mut collection_depth = 0_usize;
     for parsed in Parser::new_from_str(source) {
         let (event, parser_span) = parsed.map_err(|error| {
             let marker = error.marker();
@@ -385,6 +391,19 @@ pub fn parse_strict(source: &str, limits: ParseLimits) -> Result<SpannedValue, A
             }
             Event::Scalar(value, style, anchor, tag) => {
                 reject_anchor_or_tag(anchor, tag.as_deref(), span)?;
+                enforce_stream_node_limit(
+                    &mut parsed_nodes,
+                    collection_depth.saturating_add(1),
+                    limits,
+                    span,
+                )?;
+                if value.len() > limits.max_scalar_bytes {
+                    return Err(AdmissionError::new(
+                        ErrorCode::ScalarLimit,
+                        format!("scalar length exceeds {} bytes", limits.max_scalar_bytes),
+                        span,
+                    ));
+                }
                 events.push(SpannedEvent {
                     event: OwnedEvent::Scalar(value.into_owned(), style),
                     span,
@@ -392,26 +411,36 @@ pub fn parse_strict(source: &str, limits: ParseLimits) -> Result<SpannedValue, A
             }
             Event::SequenceStart(anchor, tag) => {
                 reject_anchor_or_tag(anchor, tag.as_deref(), span)?;
+                collection_depth = collection_depth.saturating_add(1);
+                enforce_stream_node_limit(&mut parsed_nodes, collection_depth, limits, span)?;
                 events.push(SpannedEvent {
                     event: OwnedEvent::SequenceStart,
                     span,
                 });
             }
-            Event::SequenceEnd => events.push(SpannedEvent {
-                event: OwnedEvent::SequenceEnd,
-                span,
-            }),
+            Event::SequenceEnd => {
+                collection_depth = collection_depth.saturating_sub(1);
+                events.push(SpannedEvent {
+                    event: OwnedEvent::SequenceEnd,
+                    span,
+                });
+            }
             Event::MappingStart(anchor, tag) => {
                 reject_anchor_or_tag(anchor, tag.as_deref(), span)?;
+                collection_depth = collection_depth.saturating_add(1);
+                enforce_stream_node_limit(&mut parsed_nodes, collection_depth, limits, span)?;
                 events.push(SpannedEvent {
                     event: OwnedEvent::MappingStart,
                     span,
                 });
             }
-            Event::MappingEnd => events.push(SpannedEvent {
-                event: OwnedEvent::MappingEnd,
-                span,
-            }),
+            Event::MappingEnd => {
+                collection_depth = collection_depth.saturating_sub(1);
+                events.push(SpannedEvent {
+                    event: OwnedEvent::MappingEnd,
+                    span,
+                });
+            }
         }
     }
 
@@ -437,6 +466,30 @@ pub fn parse_strict(source: &str, limits: ParseLimits) -> Result<SpannedValue, A
         ));
     }
     Ok(root)
+}
+
+fn enforce_stream_node_limit(
+    parsed_nodes: &mut usize,
+    depth: usize,
+    limits: ParseLimits,
+    span: SourceSpan,
+) -> Result<(), AdmissionError> {
+    *parsed_nodes = (*parsed_nodes).saturating_add(1);
+    if *parsed_nodes > limits.max_nodes {
+        return Err(AdmissionError::new(
+            ErrorCode::NodeLimit,
+            format!("node count exceeds {}", limits.max_nodes),
+            span,
+        ));
+    }
+    if depth > limits.max_depth {
+        return Err(AdmissionError::new(
+            ErrorCode::DepthLimit,
+            format!("nesting depth exceeds {}", limits.max_depth),
+            span,
+        ));
+    }
+    Ok(())
 }
 
 fn byte_offset(character_byte_offsets: &[usize], character_index: usize) -> usize {

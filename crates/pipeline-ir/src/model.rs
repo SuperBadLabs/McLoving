@@ -348,14 +348,13 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                 ));
             }
             for (key, value) in &process.env {
-                validate_string_length(
-                    &format!("{path}.steps[{step_index}].process.env key"),
-                    key,
-                )?;
-                validate_string_length(
-                    &format!("{path}.steps[{step_index}].process.env.{key}"),
-                    value,
-                )?;
+                if key.len() > MAX_IR_STRING_BYTES {
+                    return Err(IrValidationError::new(
+                        format!("{path}.steps[{step_index}].process.env"),
+                        format!("environment key {key:?} exceeds {MAX_IR_STRING_BYTES} bytes"),
+                    ));
+                }
+                validate_string_length(&format!("{path}.steps[{step_index}].process.env"), value)?;
             }
         }
     }

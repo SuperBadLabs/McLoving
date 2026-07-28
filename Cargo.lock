@@ -182,7 +182,6 @@ dependencies = [
  "proptest",
  "saphyr-parser",
  "sha2",
- "thiserror",
 ]
 
 [[package]]
