@@ -164,6 +164,11 @@ impl FilesystemObjectStore {
         content: &[u8],
         redactions: &[&[u8]],
     ) -> Result<StagedObject, ObjectStoreError> {
+        let input_bytes =
+            u64::try_from(content.len()).map_err(|_| ObjectStoreError::ObjectQuotaExceeded)?;
+        if input_bytes > self.quota.max_object_bytes {
+            return Err(ObjectStoreError::ObjectQuotaExceeded);
+        }
         let redacted = redact(content, redactions);
         self.stage(namespace, &redacted)
     }
@@ -186,15 +191,7 @@ impl FilesystemObjectStore {
         {
             return Err(ObjectStoreError::TotalQuotaExceeded);
         }
-        let sequence = STAGE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = self.staging.join(format!(
-            "{namespace}-{}-{sequence}.staged",
-            std::process::id()
-        ));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)?;
+        let (path, mut file) = create_staging_file(&self.staging, namespace, &STAGE_SEQUENCE)?;
         file.write_all(content)?;
         file.sync_all()?;
         sync_directory(&self.staging)?;
@@ -398,25 +395,38 @@ fn validate_namespace(value: &str) -> Result<(), ObjectStoreError> {
 }
 
 fn redact(content: &[u8], redactions: &[&[u8]]) -> Vec<u8> {
-    let mut output = content.to_vec();
-    loop {
-        let mut changed = false;
-        for secret in redactions.iter().filter(|secret| !secret.is_empty()) {
-            let mut cursor = 0;
-            while cursor + secret.len() <= output.len() {
-                if &output[cursor..cursor + secret.len()] == *secret {
-                    output.drain(cursor..cursor + secret.len());
-                    changed = true;
-                } else {
-                    cursor += 1;
-                }
-            }
-        }
-        if !changed {
-            break;
+    let secrets = redactions
+        .iter()
+        .copied()
+        .filter(|secret| !secret.is_empty())
+        .collect::<Vec<_>>();
+    let mut output = Vec::with_capacity(content.len());
+    for byte in content {
+        output.push(*byte);
+        if let Some(secret) = secrets.iter().find(|secret| output.ends_with(secret)) {
+            output.truncate(output.len() - secret.len());
         }
     }
     output
+}
+
+fn create_staging_file(
+    staging: &Path,
+    namespace: &str,
+    sequence: &AtomicU64,
+) -> Result<(PathBuf, File), ObjectStoreError> {
+    loop {
+        let sequence = sequence.fetch_add(1, Ordering::Relaxed);
+        let path = staging.join(format!(
+            "{namespace}-{}-{sequence}.staged",
+            std::process::id()
+        ));
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 fn inspect(path: &Path) -> Result<ObjectRef, ObjectStoreError> {
@@ -552,6 +562,37 @@ mod tests {
         for secret in [b"REDACTED".as_slice(), b"X", b"secret"] {
             assert!(!content.windows(secret.len()).any(|window| window == secret));
         }
+    }
+
+    #[test]
+    fn log_redaction_is_bounded_by_the_input_quota() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store(root.path(), 4, 4096);
+        assert!(matches!(
+            store.stage_log("tenant-a", b"xxxxx", &[b"x"]),
+            Err(ObjectStoreError::ObjectQuotaExceeded)
+        ));
+    }
+
+    #[test]
+    fn abandoned_staging_name_collisions_are_skipped() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        let sequence = AtomicU64::new(7);
+        for value in [7, 8] {
+            fs::write(
+                staging.join(format!("tenant-a-{}-{value}.staged", std::process::id())),
+                b"abandoned",
+            )
+            .unwrap();
+        }
+
+        let (path, _file) = create_staging_file(&staging, "tenant-a", &sequence).unwrap();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(format!("tenant-a-{}-9.staged", std::process::id()).as_str())
+        );
     }
 
     #[test]
