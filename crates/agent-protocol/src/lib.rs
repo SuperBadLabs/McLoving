@@ -61,6 +61,30 @@ pub enum ProtocolError {
     },
     #[error("protocol minor range is invalid: {minimum}..={maximum}")]
     InvalidRange { minimum: u16, maximum: u16 },
+    #[error("protocol field {field} exceeds the supported 16-bit range")]
+    FieldOverflow { field: &'static str },
+}
+
+impl TryFrom<&wire::ProtocolOffer> for ProtocolRange {
+    type Error = ProtocolError;
+
+    fn try_from(value: &wire::ProtocolOffer) -> Result<Self, Self::Error> {
+        Ok(Self {
+            major: u16::try_from(value.major)
+                .map_err(|_| ProtocolError::FieldOverflow { field: "major" })?,
+            minimum_minor: u16::try_from(value.minimum_minor).map_err(|_| {
+                ProtocolError::FieldOverflow {
+                    field: "minimum_minor",
+                }
+            })?,
+            maximum_minor: u16::try_from(value.maximum_minor).map_err(|_| {
+                ProtocolError::FieldOverflow {
+                    field: "maximum_minor",
+                }
+            })?,
+            features: value.features.iter().cloned().collect(),
+        })
+    }
 }
 
 pub fn negotiate(
@@ -118,6 +142,10 @@ pub struct Enrollment {
 pub enum EnrollmentError {
     #[error("enrollment token is unknown or already consumed")]
     InvalidToken,
+    #[error("enrollment token must not be empty")]
+    EmptyToken,
+    #[error("enrollment token digest is already registered")]
+    DuplicateToken,
     #[error("certificate signing request is empty")]
     EmptyCertificateSigningRequest,
 }
@@ -132,8 +160,20 @@ pub struct EnrollmentRegistry {
 }
 
 impl EnrollmentRegistry {
-    pub fn register(&mut self, token: &[u8], enrollment: Enrollment) {
-        self.pending.insert(token_digest(token), enrollment);
+    pub fn register(
+        &mut self,
+        token: &[u8],
+        enrollment: Enrollment,
+    ) -> Result<(), EnrollmentError> {
+        if token.is_empty() {
+            return Err(EnrollmentError::EmptyToken);
+        }
+        let digest = token_digest(token);
+        if self.pending.contains_key(&digest) {
+            return Err(EnrollmentError::DuplicateToken);
+        }
+        self.pending.insert(digest, enrollment);
+        Ok(())
     }
 
     pub fn consume(
@@ -162,6 +202,8 @@ pub enum FenceError {
     StaleAuthority { offered: u64, current: u64 },
     #[error("certificate epoch {offered} is stale; current epoch is {current}")]
     StaleCertificate { offered: u64, current: u64 },
+    #[error("certificate epoch is exhausted")]
+    CertificateEpochExhausted,
 }
 
 /// Monotonic controller-side authority for agent sessions and certificates.
@@ -201,7 +243,9 @@ impl AgentEpochs {
                 current,
             });
         }
-        let next = current.saturating_add(1);
+        let next = current
+            .checked_add(1)
+            .ok_or(FenceError::CertificateEpochExhausted)?;
         self.certificates.insert(agent_id.to_owned(), next);
         Ok(next)
     }
@@ -322,7 +366,9 @@ mod tests {
             agent_id: "agent-1".to_owned(),
             trust_pool: "untrusted-linux".to_owned(),
         };
-        registry.register(b"one-time-secret", enrollment.clone());
+        registry
+            .register(b"one-time-secret", enrollment.clone())
+            .unwrap();
 
         assert_eq!(
             registry.consume(b"one-time-secret", b""),
@@ -332,6 +378,38 @@ mod tests {
         assert_eq!(
             registry.consume(b"one-time-secret", b"csr"),
             Err(EnrollmentError::InvalidToken)
+        );
+    }
+
+    #[test]
+    fn wire_protocol_fields_fail_closed_before_narrowing() {
+        let offer = wire::ProtocolOffer {
+            major: u32::from(u16::MAX) + 1,
+            minimum_minor: 0,
+            maximum_minor: 0,
+            features: Vec::new(),
+        };
+        assert_eq!(
+            ProtocolRange::try_from(&offer),
+            Err(ProtocolError::FieldOverflow { field: "major" })
+        );
+    }
+
+    #[test]
+    fn enrollment_rejects_empty_or_duplicate_bootstrap_tokens() {
+        let mut registry = EnrollmentRegistry::default();
+        let enrollment = Enrollment {
+            agent_id: "agent-1".to_owned(),
+            trust_pool: "untrusted-linux".to_owned(),
+        };
+        assert_eq!(
+            registry.register(b"", enrollment.clone()),
+            Err(EnrollmentError::EmptyToken)
+        );
+        registry.register(b"token", enrollment.clone()).unwrap();
+        assert_eq!(
+            registry.register(b"token", enrollment),
+            Err(EnrollmentError::DuplicateToken)
         );
     }
 
