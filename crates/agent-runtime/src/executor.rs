@@ -59,6 +59,8 @@ pub enum ExecutionError {
     SymlinkWorkspaceComponent,
     #[error("process did not expose a valid process ID")]
     MissingProcessId,
+    #[error("process spawn could not be recorded durably: {0}")]
+    SpawnHook(String),
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
     #[error("signal error: {0}")]
@@ -74,6 +76,19 @@ pub async fn execute(
     request: &ExecutionRequest,
     cancellation: CancellationToken,
 ) -> Result<ExecutionOutcome, ExecutionError> {
+    execute_with_spawn_hook(request, cancellation, |_| Ok(())).await
+}
+
+/// Executes one process and durably exposes its process-group identity before
+/// waiting for any terminal outcome.
+pub async fn execute_with_spawn_hook<F>(
+    request: &ExecutionRequest,
+    cancellation: CancellationToken,
+    on_spawn: F,
+) -> Result<ExecutionOutcome, ExecutionError>
+where
+    F: FnOnce(i32) -> Result<(), ExecutionError>,
+{
     validate_relative_path(&request.workspace)?;
     let workspace = create_workspace(&request.workspace_root, &request.workspace)?;
     let spool = workspace.join("spool");
@@ -102,6 +117,10 @@ pub async fn execute(
     let mut child = command.spawn()?;
     let process_group_id = i32::try_from(child.id().ok_or(ExecutionError::MissingProcessId)?)
         .map_err(|_| ExecutionError::MissingProcessId)?;
+    if let Err(error) = on_spawn(process_group_id) {
+        terminate_group(&mut child, process_group_id, request.termination_grace).await?;
+        return Err(error);
+    }
 
     let deadline = Instant::now() + request.timeout;
     let termination = tokio::select! {

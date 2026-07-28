@@ -173,7 +173,7 @@ impl Store {
                AND a.fence = $3
                AND a.lease_owner = $4
                AND a.lease_expires_at > clock_timestamp()
-               AND a.status IN ('offered', 'accepted', 'running')
+               AND a.status IN ('offered', 'accepted', 'running', 'cancelling')
              FOR UPDATE OF a, n",
         )
         .bind(attempt_id)
@@ -221,6 +221,47 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(true)
+    }
+
+    /// Renews one exact live lease and returns its cancellation state.
+    pub async fn renew_attempt_lease(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+        lease_seconds: i32,
+    ) -> Result<Option<bool>, StoreError> {
+        if lease_seconds <= 0 {
+            return Ok(None);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let cancellation_requested = sqlx::query_scalar::<_, bool>(
+            "UPDATE attempts AS a
+             SET lease_expires_at =
+                   clock_timestamp() + make_interval(secs => $5)
+             FROM nodes AS n, builds AS b
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.lease_owner = $4
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND n.id = a.node_id
+               AND n.organization_id = a.organization_id
+               AND b.id = n.build_id
+               AND b.organization_id = n.organization_id
+             RETURNING b.cancellation_requested_at IS NOT NULL",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(agent_id)
+        .bind(f64::from(lease_seconds))
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(cancellation_requested)
     }
 
     /// Requeues one expired active lease without changing its fence.

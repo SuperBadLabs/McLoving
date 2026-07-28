@@ -19,7 +19,17 @@ The versioned routes are:
 - `POST /api/v1/organizations/{organization}/projects/{project}/builds/{build}/cancel`
 - `GET /api/v1/organizations/{organization}/scheduler/explain?capability=linux`
 
-Cancellation is a durable request, not a claim that execution has stopped.
-Status reports both build and attempt state plus the cancellation flag. Logs
-are controller-committed, SHA-256-bound chunks ordered by sequence. Errors
-have stable `code` and `message` fields.
+Cancellation is a durable request. Queued work becomes terminal immediately;
+owned work becomes `cancelling` until the fenced agent proves process-tree
+termination. Status reports both build and attempt state plus the cancellation
+flag. Logs are controller-committed, SHA-256-bound chunks ordered by sequence.
+Errors have stable `code` and `message` fields.
+
+The Wave 1 deployable profile runs one embedded Linux worker for exactly one
+configured organization. It requires separate
+`MCLOVING_MIGRATION_DATABASE_URL` and `MCLOVING_DATABASE_URL` credentials; the
+migration pool is closed before the API and worker start, and the runtime role
+must be the RLS-constrained `mcloving_tenant`. Worker identity, organization,
+capabilities, lease/poll intervals, session epoch, workspace root, and SQLite
+journal path are explicit required environment settings. A remote agent
+transport and multi-organization scheduler remain later work.

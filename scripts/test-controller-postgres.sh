@@ -51,4 +51,5 @@ podman run --rm \
   "${MCLOVING_RUST_IMAGE}" \
   bash -c \
   'cargo test --locked -p mcloving-controller-store --test postgres_truth &&
-   cargo test --locked -p mcloving-execution-spine --test real_spine'
+   cargo test --locked -p mcloving-execution-spine --test real_spine &&
+   cargo test --locked -p mcloving-controller --test deployable_runtime'

@@ -119,6 +119,7 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
             workspace_root: root.path().to_owned(),
             journal_path: root.path().join("agent.db"),
             cancellation_poll: Duration::from_millis(10),
+            lease_seconds: 60,
             termination_grace: Duration::from_millis(100),
         },
     )
@@ -476,6 +477,7 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
         workspace_root: root.path().to_owned(),
         journal_path: journal_path.clone(),
         cancellation_poll: Duration::from_millis(5),
+        lease_seconds: 60,
         termination_grace: Duration::from_millis(100),
     };
     let run_store = store.clone();
@@ -483,6 +485,16 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
     let run = tokio::spawn(async move { run_claim(&run_store, &run_claim_value, &config).await });
     let pid_path = root.path().join(&workspace).join("child.pid");
     let child_pid = read_pid(&pid_path).await;
+    let live_journal = Journal::open(&journal_path).expect("inspect live journal");
+    let live_report = live_journal.reconcile().expect("reconcile live process");
+    assert_eq!(live_report.attempts.len(), 1);
+    assert_eq!(live_report.attempts[0].phase, AttemptPhase::Running);
+    assert!(
+        live_report.attempts[0]
+            .process_group_id
+            .is_some_and(|process_group_id| process_group_id > 0)
+    );
+    drop(live_journal);
     assert!(
         client
             .cancel(organization_id, project_id, admission.build_id)
@@ -509,6 +521,252 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
     );
     assert_eq!(journal.integrity_check().expect("integrity"), "ok");
     server.abort();
+}
+
+#[tokio::test]
+async fn cancellation_between_offer_and_acceptance_finishes_without_spawning() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "pre-accept-cancel",
+        )
+        .await
+        .expect("create project");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "pre-accept-cancel".into(),
+            pipeline_digest: [21; 32],
+            node_key: "execute".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: serde_json::from_str(
+                r#"{"version":1,"steps":[{"kind":"process","program":"/bin/sh","args":["-c","touch should-not-exist"],"env":{},"timeout_seconds":10}]}"#,
+            )
+            .unwrap(),
+        })
+        .await
+        .expect("admit build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-pre-cancel".into(),
+            agent_id: "agent-pre-cancel".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim")
+        .expect("claim exists");
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("cancel offered work")
+    );
+    let root = tempfile::tempdir().expect("worker root");
+    let receipt = run_claim(
+        &store,
+        &claim,
+        &WorkerConfig {
+            agent_id: "agent-pre-cancel".into(),
+            session_epoch: 1,
+            workspace_root: root.path().to_owned(),
+            journal_path: root.path().join("agent.db"),
+            cancellation_poll: Duration::from_millis(10),
+            lease_seconds: 30,
+            termination_grace: Duration::from_millis(100),
+        },
+    )
+    .await
+    .expect("finish cancellation");
+    assert_eq!(receipt.outcome, TerminalOutcome::Aborted);
+    assert!(
+        !root
+            .path()
+            .join(format!(
+                "{organization_id}/{}/{}/should-not-exist",
+                claim.attempt_id, claim.fence
+            ))
+            .exists()
+    );
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "aborted");
+    assert_eq!(snapshot.attempt_status, "aborted");
+}
+
+#[tokio::test]
+async fn lease_is_renewed_while_a_long_process_runs() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        json!({
+            "version": 1,
+            "steps": [{
+                "kind": "process",
+                "program": "/bin/sh",
+                "args": ["-c", "sleep 2; printf 'renewed\\n'"],
+                "env": {},
+                "timeout_seconds": 10
+            }]
+        }),
+        "lease-renewal",
+        1,
+    )
+    .await;
+    let root = tempfile::tempdir().expect("worker root");
+    let receipt = run_claim(
+        &store,
+        &claim,
+        &WorkerConfig {
+            agent_id: "agent-regression".into(),
+            session_epoch: 1,
+            workspace_root: root.path().to_owned(),
+            journal_path: root.path().join("agent.db"),
+            cancellation_poll: Duration::from_millis(100),
+            lease_seconds: 1,
+            termination_grace: Duration::from_millis(100),
+        },
+    )
+    .await
+    .expect("lease-renewed execution");
+    assert_eq!(receipt.outcome, TerminalOutcome::Succeeded);
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "succeeded");
+}
+
+#[tokio::test]
+async fn process_spawn_failure_is_published_as_terminal_failure() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let (organization_id, project_id, admission, claim) = admitted_claim(
+        &store,
+        json!({
+            "version": 1,
+            "steps": [{
+                "kind": "process",
+                "program": "/definitely/not/a/mcloving-program",
+                "args": [],
+                "env": {},
+                "timeout_seconds": 10
+            }]
+        }),
+        "missing-program",
+        30,
+    )
+    .await;
+    let root = tempfile::tempdir().expect("worker root");
+    let journal_path = root.path().join("agent.db");
+    let receipt = run_claim(
+        &store,
+        &claim,
+        &WorkerConfig {
+            agent_id: "agent-regression".into(),
+            session_epoch: 1,
+            workspace_root: root.path().to_owned(),
+            journal_path: journal_path.clone(),
+            cancellation_poll: Duration::from_millis(10),
+            lease_seconds: 30,
+            termination_grace: Duration::from_millis(100),
+        },
+    )
+    .await
+    .expect("spawn failure becomes a result");
+    assert_eq!(receipt.outcome, TerminalOutcome::Failed);
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "failed");
+    assert_eq!(snapshot.attempt_status, "failed");
+    assert!(
+        snapshot
+            .terminal_summary
+            .and_then(|summary| summary["reason"].as_str().map(str::to_owned))
+            .is_some_and(|reason| reason.starts_with("process_spawn_failed:"))
+    );
+    assert!(
+        Journal::open(journal_path)
+            .expect("reopen journal")
+            .reconcile()
+            .expect("reconcile")
+            .attempts
+            .is_empty()
+    );
+}
+
+async fn admitted_claim(
+    store: &Store,
+    execution_spec: serde_json::Value,
+    idempotency_key: &str,
+    lease_seconds: i32,
+) -> (
+    Uuid,
+    Uuid,
+    mcloving_controller_store::BuildAdmission,
+    mcloving_controller_store::ClaimedAttempt,
+) {
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            idempotency_key,
+        )
+        .await
+        .expect("create project");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: idempotency_key.into(),
+            pipeline_digest: Sha256::digest(idempotency_key).into(),
+            node_key: "execute".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec,
+        })
+        .await
+        .expect("admit build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-regression".into(),
+            agent_id: "agent-regression".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim")
+        .expect("claim exists");
+    (organization_id, project_id, admission, claim)
 }
 
 async fn read_pid(path: &std::path::Path) -> i32 {

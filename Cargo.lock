@@ -1235,8 +1235,11 @@ dependencies = [
  "axum",
  "mcloving-controller-api",
  "mcloving-controller-store",
+ "mcloving-execution-spine",
  "sqlx",
+ "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -4,7 +4,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use mcloving_agent_runtime::executor::{ExecutionError, ExecutionRequest, Termination, execute};
+use mcloving_agent_runtime::executor::{
+    ExecutionError, ExecutionRequest, Termination, execute_with_spawn_hook,
+};
 use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal, JournalError, SpoolEntry};
 use mcloving_controller_store::{ClaimedAttempt, NewLogChunk, Store, StoreError, TerminalOutcome};
 use serde::Deserialize;
@@ -21,6 +23,7 @@ pub struct WorkerConfig {
     pub workspace_root: PathBuf,
     pub journal_path: PathBuf,
     pub cancellation_poll: Duration,
+    pub lease_seconds: i32,
     pub termination_grace: Duration,
 }
 
@@ -51,6 +54,8 @@ pub enum SpineError {
     UnsupportedSpec,
     #[error("fence cannot be represented by the agent journal")]
     FenceOverflow,
+    #[error("lease duration must be positive and exceed the cancellation poll interval")]
+    InvalidLeaseConfiguration,
     #[error("result I/O failed: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -77,6 +82,11 @@ pub async fn run_claim(
     claim: &ClaimedAttempt,
     config: &WorkerConfig,
 ) -> Result<RunReceipt, SpineError> {
+    let lease_seconds =
+        u64::try_from(config.lease_seconds).map_err(|_| SpineError::InvalidLeaseConfiguration)?;
+    if lease_seconds == 0 || config.cancellation_poll >= Duration::from_secs(lease_seconds) {
+        return Err(SpineError::InvalidLeaseConfiguration);
+    }
     let execution = store
         .attempt_execution(
             claim.organization_id,
@@ -117,14 +127,29 @@ pub async fn run_claim(
     {
         return Err(SpineError::StaleAuthority);
     }
-    journal.transition(
-        &organization,
-        &attempt,
-        fence,
-        config.session_epoch,
-        AttemptPhase::Running,
-        None,
-    )?;
+    let accepted_execution = store
+        .attempt_execution(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            &config.agent_id,
+        )
+        .await?
+        .ok_or(SpineError::StaleAuthority)?;
+    if accepted_execution.cancellation_requested {
+        return finalize_without_process(
+            store,
+            claim,
+            config,
+            &mut journal,
+            &organization,
+            &attempt,
+            fence,
+            TerminalOutcome::Aborted,
+            "cancelled_before_process_spawn",
+        )
+        .await;
+    }
     if !store
         .mark_attempt_running(
             claim.organization_id,
@@ -134,6 +159,29 @@ pub async fn run_claim(
         )
         .await?
     {
+        if store
+            .attempt_execution(
+                claim.organization_id,
+                claim.attempt_id,
+                claim.fence,
+                &config.agent_id,
+            )
+            .await?
+            .is_some_and(|current| current.cancellation_requested)
+        {
+            return finalize_without_process(
+                store,
+                claim,
+                config,
+                &mut journal,
+                &organization,
+                &attempt,
+                fence,
+                TerminalOutcome::Aborted,
+                "cancelled_before_process_spawn",
+            )
+            .await;
+        }
         return Err(SpineError::StaleAuthority);
     }
 
@@ -146,6 +194,7 @@ pub async fn run_claim(
         claim.clone(),
         config.agent_id.clone(),
         config.cancellation_poll,
+        config.lease_seconds,
         cancellation.clone(),
     ));
     let request = ExecutionRequest {
@@ -161,9 +210,38 @@ pub async fn run_claim(
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
-    let outcome = execute(&request, cancellation.clone()).await?;
+    let outcome = execute_with_spawn_hook(&request, cancellation.clone(), |process_group_id| {
+        journal
+            .transition(
+                &organization,
+                &attempt,
+                fence,
+                config.session_epoch,
+                AttemptPhase::Running,
+                Some(process_group_id),
+            )
+            .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
+    })
+    .await;
     cancellation.cancel();
     poll.await.ok();
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return finalize_without_process(
+                store,
+                claim,
+                config,
+                &mut journal,
+                &organization,
+                &attempt,
+                fence,
+                TerminalOutcome::Failed,
+                &format!("process_spawn_failed: {error}"),
+            )
+            .await;
+        }
+    };
 
     journal.record_log(
         &organization,
@@ -260,24 +338,87 @@ async fn cancellation_poller(
     claim: ClaimedAttempt,
     agent_id: String,
     interval: Duration,
+    lease_seconds: i32,
     cancellation: CancellationToken,
 ) {
     while !cancellation.is_cancelled() {
         tokio::time::sleep(interval).await;
         match store
-            .attempt_execution(
+            .renew_attempt_lease(
                 claim.organization_id,
                 claim.attempt_id,
                 claim.fence,
                 &agent_id,
+                lease_seconds,
             )
             .await
         {
-            Ok(Some(execution)) if execution.cancellation_requested => cancellation.cancel(),
+            Ok(Some(true)) => cancellation.cancel(),
             Ok(Some(_)) => {}
             Ok(None) | Err(_) => cancellation.cancel(),
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finalize_without_process(
+    store: &Store,
+    claim: &ClaimedAttempt,
+    config: &WorkerConfig,
+    journal: &mut Journal,
+    organization: &str,
+    attempt: &str,
+    fence: u64,
+    terminal: TerminalOutcome,
+    reason: &str,
+) -> Result<RunReceipt, SpineError> {
+    let preparing = if terminal == TerminalOutcome::Aborted {
+        AttemptPhase::Cancelling
+    } else {
+        AttemptPhase::Finalizing
+    };
+    journal.transition(
+        organization,
+        attempt,
+        fence,
+        config.session_epoch,
+        preparing,
+        None,
+    )?;
+    if !store
+        .finalize_attempt(
+            claim.organization_id,
+            claim.attempt_id,
+            claim.fence,
+            &config.agent_id,
+            terminal,
+            json!({"reason": reason}),
+        )
+        .await?
+    {
+        return Err(SpineError::StaleAuthority);
+    }
+    journal.transition(
+        organization,
+        attempt,
+        fence,
+        config.session_epoch,
+        match terminal {
+            TerminalOutcome::Succeeded => AttemptPhase::Succeeded,
+            TerminalOutcome::Failed => AttemptPhase::Failed,
+            TerminalOutcome::Aborted => AttemptPhase::Aborted,
+        },
+        None,
+    )?;
+    Ok(RunReceipt {
+        build_id: claim.build_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        outcome: terminal,
+        exit_code: None,
+        stdout_sha256: [0; 32],
+        stderr_sha256: [0; 32],
+    })
 }
 
 async fn commit_log(
