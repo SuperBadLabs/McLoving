@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use mcloving_controller_store::{ClaimRequest, NewBuild, Store, TerminalOutcome, WaitReason};
+use mcloving_controller_store::{
+    ClaimRequest, NewBuild, NewLogChunk, Store, TerminalOutcome, WaitReason,
+};
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
@@ -569,6 +571,124 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
             .await
             .expect("reject stale terminal publication")
     );
+}
+
+#[tokio::test]
+async fn build_logs_exclude_chunks_from_a_superseded_fence() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "logs",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "fenced-logs".into(),
+            pipeline_digest: [19; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit build");
+    let first = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "agent-a".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("first claim")
+        .expect("first claim exists");
+    assert!(
+        store
+            .accept_offer(organization_id, first.attempt_id, first.fence, "agent-a",)
+            .await
+            .expect("accept first")
+    );
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: first.attempt_id,
+                fence: first.fence,
+                agent_id: "agent-a",
+                sequence: 0,
+                stream: "stdout",
+                content: b"superseded\n",
+            })
+            .await
+            .expect("append first-fence log")
+    );
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE id = $1",
+    )
+    .bind(first.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire first fence");
+    assert!(
+        store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("requeue first fence")
+    );
+    let second = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-b".into(),
+            agent_id: "agent-b".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("second claim")
+        .expect("second claim exists");
+    assert_eq!(second.fence, first.fence + 1);
+    assert!(
+        store
+            .accept_offer(organization_id, second.attempt_id, second.fence, "agent-b",)
+            .await
+            .expect("accept second")
+    );
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: second.attempt_id,
+                fence: second.fence,
+                agent_id: "agent-b",
+                sequence: 0,
+                stream: "stdout",
+                content: b"current\n",
+            })
+            .await
+            .expect("append current-fence log")
+    );
+    let logs = store
+        .build_logs(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read build logs");
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].fence, second.fence);
+    assert_eq!(logs[0].content, b"current\n");
 }
 
 #[tokio::test]

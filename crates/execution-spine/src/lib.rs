@@ -52,7 +52,7 @@ pub enum SpineError {
     StaleAuthority,
     #[error("execution specification must contain exactly one process step")]
     UnsupportedSpec,
-    #[error("fence cannot be represented by the agent journal")]
+    #[error("numeric value cannot be represented by the durable protocol")]
     FenceOverflow,
     #[error("lease duration must be positive and exceed the cancellation poll interval")]
     InvalidLeaseConfiguration,

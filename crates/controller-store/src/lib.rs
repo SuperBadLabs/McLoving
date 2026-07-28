@@ -480,6 +480,7 @@ impl Store {
              WHERE l.organization_id = $1
                AND b.project_id = $2
                AND b.id = $3
+               AND l.fence = a.fence
              ORDER BY l.sequence, l.stream",
         )
         .bind(organization_id)

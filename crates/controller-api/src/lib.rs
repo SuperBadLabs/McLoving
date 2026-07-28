@@ -371,16 +371,24 @@ async fn explain(
 }
 
 fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
-    let supplied = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+    let supplied = bearer_token(headers)
         .map(|token| Sha256::digest(token.as_bytes()))
         .ok_or_else(unauthorized)?;
     if !constant_time_eq(supplied.as_slice(), &state.token_digest) {
         return Err(unauthorized());
     }
     Ok(())
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get("authorization")?.to_str().ok()?;
+    let mut fields = value.split_ascii_whitespace();
+    let scheme = fields.next()?;
+    let token = fields.next()?;
+    if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() || fields.next().is_some() {
+        return None;
+    }
+    Some(token)
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -408,10 +416,11 @@ fn not_found() -> ApiError {
 }
 
 fn internal(error: impl std::fmt::Display) -> ApiError {
+    eprintln!("public API request failed internally: {error}");
     ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal",
-        error.to_string(),
+        "internal server error",
     )
 }
 
@@ -548,6 +557,20 @@ mod tests {
         assert!(constant_time_eq(&[1, 2, 3], &[1, 2, 3]));
         assert!(!constant_time_eq(&[1, 2, 3], &[1, 2, 4]));
         assert!(!constant_time_eq(&[1, 2], &[1, 2, 0]));
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_but_grammar_is_strict() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "bearer exact-token".parse().unwrap());
+        assert_eq!(bearer_token(&headers), Some("exact-token"));
+        headers.insert(
+            "authorization",
+            "BEARER exact-token trailing".parse().unwrap(),
+        );
+        assert_eq!(bearer_token(&headers), None);
+        headers.insert("authorization", "Basic exact-token".parse().unwrap());
+        assert_eq!(bearer_token(&headers), None);
     }
 
     #[test]
