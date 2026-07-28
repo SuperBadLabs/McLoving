@@ -1,5 +1,6 @@
 //! Unix process-group execution with bounded workspaces and durable logs.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -25,6 +26,7 @@ pub struct ExecutionRequest {
     pub workspace: PathBuf,
     pub program: PathBuf,
     pub arguments: Vec<OsString>,
+    pub environment: BTreeMap<OsString, OsString>,
     pub timeout: Duration,
     pub termination_grace: Duration,
 }
@@ -57,6 +59,8 @@ pub enum ExecutionError {
     SymlinkWorkspaceComponent,
     #[error("process did not expose a valid process ID")]
     MissingProcessId,
+    #[error("process spawn could not be recorded durably: {0}")]
+    SpawnHook(String),
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
     #[error("signal error: {0}")]
@@ -72,6 +76,19 @@ pub async fn execute(
     request: &ExecutionRequest,
     cancellation: CancellationToken,
 ) -> Result<ExecutionOutcome, ExecutionError> {
+    execute_with_spawn_hook(request, cancellation, |_| Ok(())).await
+}
+
+/// Executes one process and durably exposes its process-group identity before
+/// waiting for any terminal outcome.
+pub async fn execute_with_spawn_hook<F>(
+    request: &ExecutionRequest,
+    cancellation: CancellationToken,
+    on_spawn: F,
+) -> Result<ExecutionOutcome, ExecutionError>
+where
+    F: FnOnce(i32) -> Result<(), ExecutionError>,
+{
     validate_relative_path(&request.workspace)?;
     let workspace = create_workspace(&request.workspace_root, &request.workspace)?;
     let spool = workspace.join("spool");
@@ -91,6 +108,7 @@ pub async fn execute(
     let mut command = Command::new(&request.program);
     command
         .args(&request.arguments)
+        .envs(&request.environment)
         .current_dir(&workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
@@ -99,6 +117,10 @@ pub async fn execute(
     let mut child = command.spawn()?;
     let process_group_id = i32::try_from(child.id().ok_or(ExecutionError::MissingProcessId)?)
         .map_err(|_| ExecutionError::MissingProcessId)?;
+    if let Err(error) = on_spawn(process_group_id) {
+        terminate_group(&mut child, process_group_id, request.termination_grace).await?;
+        return Err(error);
+    }
 
     let deadline = Instant::now() + request.timeout;
     let termination = tokio::select! {
@@ -312,6 +334,7 @@ mod tests {
                 OsString::from("-c"),
                 OsString::from("sleep 30 & child=$!; printf '%s\\n' \"$child\" > child.pid; wait"),
             ],
+            environment: BTreeMap::new(),
             timeout,
             termination_grace: Duration::from_millis(100),
         }
@@ -328,6 +351,7 @@ mod tests {
                     "trap 'exit 0' TERM; sh -c 'trap \"\" TERM; printf \"%s\\n\" \"$$\" > resistant.pid; exec sleep 30' & wait",
                 ),
             ],
+            environment: BTreeMap::new(),
             timeout: Duration::from_secs(30),
             termination_grace: Duration::from_millis(100),
         }
@@ -392,6 +416,7 @@ mod tests {
             workspace: PathBuf::from("org/success"),
             program: PathBuf::from("/bin/sh"),
             arguments: vec![OsString::from("-c"), OsString::from("printf mcloving")],
+            environment: BTreeMap::new(),
             timeout: Duration::from_secs(5),
             termination_grace: Duration::from_millis(100),
         };
@@ -413,6 +438,7 @@ mod tests {
             workspace: PathBuf::from("existing"),
             program: PathBuf::from("/bin/true"),
             arguments: Vec::new(),
+            environment: BTreeMap::new(),
             timeout: Duration::from_secs(1),
             termination_grace: Duration::from_millis(10),
         };

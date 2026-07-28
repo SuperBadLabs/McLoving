@@ -21,6 +21,7 @@ pub struct ClaimRequest {
 /// A fenced offer created by the scheduler.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimedAttempt {
+    pub organization_id: Uuid,
     pub build_id: Uuid,
     pub node_id: Uuid,
     pub attempt_id: Uuid,
@@ -61,12 +62,17 @@ impl Store {
         let candidate = sqlx::query(
             "SELECT n.id AS node_id, n.build_id, a.id AS attempt_id
              FROM nodes AS n
+             JOIN builds AS b
+               ON b.id = n.build_id
+              AND b.organization_id = n.organization_id
              JOIN attempts AS a
                ON a.node_id = n.id
               AND a.organization_id = n.organization_id
               AND a.status = 'queued'
              WHERE n.organization_id = $1
                AND n.status = 'queued'
+               AND b.status = 'queued'
+               AND b.cancellation_requested_at IS NULL
                AND n.required_capabilities <@ $2::text[]
              ORDER BY
                n.priority DESC,
@@ -74,7 +80,7 @@ impl Store {
                hashtextextended(n.id::text, $3) ASC,
                n.id ASC
              LIMIT 1
-             FOR UPDATE OF n, a SKIP LOCKED",
+             FOR UPDATE OF b, n, a SKIP LOCKED",
         )
         .bind(request.organization_id)
         .bind(&request.capabilities)
@@ -139,6 +145,7 @@ impl Store {
         tx.commit().await?;
 
         Ok(Some(ClaimedAttempt {
+            organization_id: request.organization_id,
             build_id,
             node_id,
             attempt_id,
@@ -156,19 +163,18 @@ impl Store {
         agent_id: &str,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let accepted = sqlx::query_as::<_, (Uuid, Uuid)>(
-            "UPDATE attempts AS a
-             SET status = 'accepted'
-             FROM nodes AS n
+        let accepted = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+            "SELECT n.id, n.build_id, a.status
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
                AND a.lease_owner = $4
                AND a.lease_expires_at > clock_timestamp()
-               AND a.status = 'offered'
-               AND n.id = a.node_id
-               AND n.organization_id = a.organization_id
-             RETURNING n.id, n.build_id",
+               AND a.status IN ('offered', 'accepted', 'running', 'cancelling')
+             FOR UPDATE OF a, n",
         )
         .bind(attempt_id)
         .bind(organization_id)
@@ -176,10 +182,22 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((node_id, build_id)) = accepted else {
+        let Some((node_id, build_id, status)) = accepted else {
             tx.rollback().await?;
             return Ok(false);
         };
+        if status != "offered" {
+            tx.commit().await?;
+            return Ok(true);
+        }
+        sqlx::query(
+            "UPDATE attempts SET status = 'accepted'
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(attempt_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "UPDATE nodes SET status = 'running'
              WHERE id = $1 AND organization_id = $2",
@@ -203,6 +221,47 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(true)
+    }
+
+    /// Renews one exact live lease and returns its cancellation state.
+    pub async fn renew_attempt_lease(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+        lease_seconds: i32,
+    ) -> Result<Option<bool>, StoreError> {
+        if lease_seconds <= 0 {
+            return Ok(None);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let cancellation_requested = sqlx::query_scalar::<_, bool>(
+            "UPDATE attempts AS a
+             SET lease_expires_at =
+                   clock_timestamp() + make_interval(secs => $5)
+             FROM nodes AS n, builds AS b
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.lease_owner = $4
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+               AND n.id = a.node_id
+               AND n.organization_id = a.organization_id
+               AND b.id = n.build_id
+               AND b.organization_id = n.organization_id
+             RETURNING b.cancellation_requested_at IS NOT NULL",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(agent_id)
+        .bind(f64::from(lease_seconds))
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(cancellation_requested)
     }
 
     /// Requeues one expired active lease without changing its fence.
@@ -252,6 +311,17 @@ impl Store {
              WHERE id = $1 AND organization_id = $2",
         )
         .bind(node_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE builds SET status = 'queued'
+             WHERE id = $1
+               AND organization_id = $2
+               AND status = 'running'
+               AND cancellation_requested_at IS NULL",
+        )
+        .bind(build_id)
         .bind(organization_id)
         .execute(&mut *tx)
         .await?;

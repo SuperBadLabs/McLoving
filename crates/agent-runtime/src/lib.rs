@@ -728,7 +728,10 @@ fn valid_transition(from: AttemptPhase, to: AttemptPhase) -> bool {
         (from, to),
         (
             AttemptPhase::Accepted,
-            AttemptPhase::Running | AttemptPhase::Cancelling | AttemptPhase::ReconciliationRequired
+            AttemptPhase::Running
+                | AttemptPhase::Finalizing
+                | AttemptPhase::Cancelling
+                | AttemptPhase::ReconciliationRequired
         ) | (
             AttemptPhase::Running,
             AttemptPhase::Finalizing

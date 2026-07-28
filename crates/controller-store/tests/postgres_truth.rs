@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use mcloving_controller_store::{ClaimRequest, NewBuild, Store, TerminalOutcome, WaitReason};
+use mcloving_controller_store::{
+    ClaimRequest, NewBuild, NewLogChunk, Store, TerminalOutcome, WaitReason,
+};
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
@@ -60,6 +62,7 @@ async fn admission_is_atomic_and_idempotent() {
         node_key: "stage-1".into(),
         required_capabilities: vec!["linux".into()],
         priority: 10,
+        execution_spec: json!({}),
     };
 
     let first = store.admit_build(&input).await.expect("first admission");
@@ -83,6 +86,91 @@ async fn admission_is_atomic_and_idempotent() {
     .await
     .expect("count durable records");
     assert_eq!(counts, (1, 1, 1, 1, 1));
+}
+
+#[tokio::test]
+async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "cancel-before-claim".into(),
+            pipeline_digest: [8; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit queued build");
+
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("first cancellation")
+    );
+    assert!(
+        !store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("idempotent repeated cancellation")
+    );
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-a".into(),
+                agent_id: "agent-a".into(),
+                capabilities: vec!["linux".into()],
+                lease_seconds: 30,
+                fairness_seed: 1,
+            })
+            .await
+            .expect("claim query")
+            .is_none()
+    );
+
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read terminal snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "aborted");
+    assert_eq!(snapshot.attempt_status, "aborted");
+    assert!(snapshot.cancellation_requested);
+    assert_eq!(
+        snapshot.terminal_summary,
+        Some(json!({"reason": "cancelled_before_execution"}))
+    );
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM build_events
+            WHERE organization_id = $1 AND build_id = $2),
+           (SELECT count(*) FROM outbox
+            WHERE organization_id = $1 AND aggregate_id = $2)",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count admission and cancellation publications");
+    assert_eq!(counts, (2, 2));
 }
 
 #[tokio::test]
@@ -166,6 +254,7 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
             priority: 0,
+            execution_spec: json!({}),
         })
         .await
         .expect("admit through runtime role using identity sequences");
@@ -214,6 +303,7 @@ async fn concurrent_terminal_publication_has_one_winner() {
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
             priority: 0,
+            execution_spec: json!({}),
         })
         .await
         .expect("admit build");
@@ -317,6 +407,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
             node_key: "windows-stage".into(),
             required_capabilities: vec!["windows".into(), "powershell".into()],
             priority: 100,
+            execution_spec: json!({}),
         })
         .await
         .expect("admit Windows work");
@@ -329,6 +420,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
             node_key: "linux-stage".into(),
             required_capabilities: vec!["linux".into()],
             priority: 10,
+            execution_spec: json!({}),
         })
         .await
         .expect("admit Linux work");
@@ -411,6 +503,7 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
             node_key: "stage".into(),
             required_capabilities: vec!["linux".into()],
             priority: 0,
+            execution_spec: json!({}),
         })
         .await
         .expect("admit work");
@@ -481,6 +574,124 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
 }
 
 #[tokio::test]
+async fn build_logs_exclude_chunks_from_a_superseded_fence() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "logs",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "fenced-logs".into(),
+            pipeline_digest: [19; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit build");
+    let first = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "agent-a".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("first claim")
+        .expect("first claim exists");
+    assert!(
+        store
+            .accept_offer(organization_id, first.attempt_id, first.fence, "agent-a",)
+            .await
+            .expect("accept first")
+    );
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: first.attempt_id,
+                fence: first.fence,
+                agent_id: "agent-a",
+                sequence: 0,
+                stream: "stdout",
+                content: b"superseded\n",
+            })
+            .await
+            .expect("append first-fence log")
+    );
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE id = $1",
+    )
+    .bind(first.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire first fence");
+    assert!(
+        store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("requeue first fence")
+    );
+    let second = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-b".into(),
+            agent_id: "agent-b".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("second claim")
+        .expect("second claim exists");
+    assert_eq!(second.fence, first.fence + 1);
+    assert!(
+        store
+            .accept_offer(organization_id, second.attempt_id, second.fence, "agent-b",)
+            .await
+            .expect("accept second")
+    );
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: second.attempt_id,
+                fence: second.fence,
+                agent_id: "agent-b",
+                sequence: 0,
+                stream: "stdout",
+                content: b"current\n",
+            })
+            .await
+            .expect("append current-fence log")
+    );
+    let logs = store
+        .build_logs(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read build logs");
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].fence, second.fence);
+    assert_eq!(logs[0].content, b"current\n");
+}
+
+#[tokio::test]
 async fn claim_order_index_is_tenant_prefixed() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -543,6 +754,7 @@ async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
                 node_key: "stage".into(),
                 required_capabilities: Vec::new(),
                 priority: 0,
+                execution_spec: json!({}),
             })
             .await
             .expect("admit tenant build");
