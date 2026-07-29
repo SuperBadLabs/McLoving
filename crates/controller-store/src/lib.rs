@@ -990,8 +990,10 @@ impl Store {
     ///
     /// Restore activation and lease expiry leave the attempt fenced and move
     /// unresolved effect checkpoints to `uncertain`. Reconciliation may only
-    /// confirm an existing, payload-identical uncertain row on the attempt's
-    /// current fence after its lease has been cleared.
+    /// confirm an existing, payload-identical uncertain row after its lease
+    /// has been cleared. Same-epoch lease expiry is restricted to the
+    /// attempt's current fence; restore reconciliation may also confirm an
+    /// historical fence that was made uncertain by the restore sweep.
     #[allow(clippy::too_many_arguments)]
     pub async fn confirm_uncertain_effect(
         &self,
@@ -1027,12 +1029,18 @@ impl Store {
                AND e.status IN ('uncertain', 'confirmed')
                AND a.organization_id = e.organization_id
                AND a.id = e.attempt_id
-               AND a.fence = e.fence
                AND a.status = 'reconciliation_required'
                AND a.lease_owner IS NULL
                AND a.lease_expires_at IS NULL
                AND m.singleton
                AND a.restore_epoch <= m.restore_epoch
+               AND (
+                   (a.restore_epoch = m.restore_epoch AND e.fence = a.fence)
+                   OR (
+                       a.restore_epoch < m.restore_epoch
+                       AND e.fence <= a.fence
+                   )
+               )
              RETURNING e.attempt_id",
         )
         .bind(organization_id)
@@ -1050,8 +1058,9 @@ impl Store {
     /// Terminates one fully resolved reconciliation without granting a lease.
     ///
     /// An explicit operator decision may close the attempt only after every
-    /// uncertain effect on its current fence has been confirmed. The attempt,
-    /// node, build, event, and outbox update share the retry decision lock.
+    /// uncertain effect across every historical fence has been confirmed. The
+    /// attempt, node, build, event, and outbox update share the retry decision
+    /// lock.
     #[allow(clippy::too_many_arguments)]
     pub async fn finalize_reconciled_attempt(
         &self,
@@ -1090,7 +1099,6 @@ impl Store {
                    FROM attempt_effects AS e
                    WHERE e.organization_id = a.organization_id
                      AND e.attempt_id = a.id
-                     AND e.fence = a.fence
                      AND e.status = 'uncertain'
                )
              RETURNING n.id, n.build_id, a.restore_epoch",

@@ -2180,6 +2180,23 @@ async fn backup_restore_canary_seed() {
             .await
             .expect("register recovery object")
     );
+    let historical_effect = json!({"cache_key": "backup-canary"});
+    assert!(
+        store
+            .checkpoint_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "pre-restore-agent",
+                "publish-cache",
+                EffectClass::ExternallyIdempotent,
+                EffectStatus::Prepared,
+                &historical_effect,
+            )
+            .await
+            .expect("prepare effect on historical fence")
+    );
     sqlx::query(
         "UPDATE attempts
          SET lease_expires_at = clock_timestamp() - interval '1 second'
@@ -2357,22 +2374,34 @@ async fn backup_restore_canary_verify() {
         "destination": "deployment/production",
         "release": "backup-canary"
     });
+    let historical_effect = json!({"cache_key": "backup-canary"});
     let uncertain = store
         .uncertain_effects(organization_id)
         .await
         .expect("list restored uncertain effects");
-    assert_eq!(uncertain.len(), 1);
-    assert_eq!(uncertain[0].attempt_id, admission.1);
-    assert_eq!(uncertain[0].fence, admission.2);
-    assert_eq!(uncertain[0].effect_key, "deploy");
-    assert_eq!(uncertain[0].status, EffectStatus::Uncertain);
-    assert_eq!(uncertain[0].payload, recovery_effect);
+    assert_eq!(uncertain.len(), 2);
+    let restored_current = uncertain
+        .iter()
+        .find(|effect| effect.effect_key == "deploy")
+        .expect("current-fence restored effect exists");
+    assert_eq!(restored_current.attempt_id, admission.1);
+    assert_eq!(restored_current.fence, admission.2);
+    assert_eq!(restored_current.status, EffectStatus::Uncertain);
+    assert_eq!(restored_current.payload, recovery_effect);
+    let restored_historical = uncertain
+        .iter()
+        .find(|effect| effect.effect_key == "publish-cache")
+        .expect("historical-fence restored effect exists");
+    assert_eq!(restored_historical.attempt_id, admission.1);
+    assert_eq!(restored_historical.fence, admission.2 - 1);
+    assert_eq!(restored_historical.status, EffectStatus::Uncertain);
+    assert_eq!(restored_historical.payload, historical_effect);
     assert!(
         !store
             .checkpoint_effect(
                 organization_id,
                 admission.1,
-                uncertain[0].fence,
+                restored_current.fence,
                 activation.restore_epoch,
                 "post-reclaim-agent",
                 "deploy",
@@ -2388,7 +2417,7 @@ async fn backup_restore_canary_verify() {
             .confirm_uncertain_effect(
                 organization_id,
                 admission.1,
-                uncertain[0].fence,
+                restored_current.fence,
                 "deploy",
                 EffectClass::NonIdempotent,
                 &recovery_effect,
@@ -2401,13 +2430,39 @@ async fn backup_restore_canary_verify() {
             .confirm_uncertain_effect(
                 organization_id,
                 admission.1,
-                uncertain[0].fence,
+                restored_current.fence,
                 "deploy",
                 EffectClass::NonIdempotent,
                 &recovery_effect,
             )
             .await
             .expect("replay restored effect confirmation")
+    );
+    assert!(
+        !store
+            .finalize_reconciled_attempt(
+                organization_id,
+                admission.1,
+                admission.2,
+                "restore-operator",
+                TerminalOutcome::Succeeded,
+                json!({"resolution": "current effect verified only"}),
+            )
+            .await
+            .expect("historical uncertainty blocks terminal reconciliation")
+    );
+    assert!(
+        store
+            .confirm_uncertain_effect(
+                organization_id,
+                admission.1,
+                restored_historical.fence,
+                "publish-cache",
+                EffectClass::ExternallyIdempotent,
+                &historical_effect,
+            )
+            .await
+            .expect("confirm restored historical-fence effect")
     );
     assert!(
         store

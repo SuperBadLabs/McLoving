@@ -67,7 +67,10 @@ Prepared or applied external effects on affected attempts become `uncertain`
 for explicit reconciliation. Pre-restore agents consequently cannot renew,
 checkpoint new effects, publish logs or objects, or finalize work.
 Reconciliation can only confirm an existing payload-identical uncertain effect
-and does not restore the historical attempt's authority.
+and does not restore the historical attempt's authority. A restore may sweep
+prepared or applied checkpoints from earlier attempt fences; those exact
+historical rows remain confirmable, and terminal reconciliation is prohibited
+while any fence still contains an uncertain checkpoint.
 
 A sealed recovery point binds a stable backup identifier to the current restore
 epoch. After the recovery-point row commits, a first PostgreSQL WAL position is
