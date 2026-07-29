@@ -129,10 +129,11 @@ Start-Sleep -Seconds 300
   }
 
   @'
+$childPidPath = Join-Path $PSScriptRoot "child.pid"
 $child = Start-Process powershell.exe -PassThru -ArgumentList @(
   "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 300"
 )
-$child.Id | Set-Content -Encoding ascii child.pid
+$child.Id | Set-Content -LiteralPath $childPidPath -Encoding ascii
 Wait-Process -Id $child.Id
 '@ | Set-Content -Encoding utf8NoBOM $treeScript
 
@@ -140,7 +141,7 @@ Wait-Process -Id $child.Id
   New-Service -Name $crashService -BinaryPathName $crashPath `
     -StartupType Manual | Out-Null
   Start-Service $crashService
-  $childPidPath = Join-Path $workspace "service-smoke\crash-recovery\child.pid"
+  $childPidPath = Join-Path $root "child.pid"
   Wait-Until { Test-Path $childPidPath } "descendant process creation"
   $childPid = [int](Get-Content $childPidPath)
   $servicePid = [int](Get-CimInstance Win32_Service -Filter "Name='$crashService'").ProcessId
