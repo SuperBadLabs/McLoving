@@ -52,6 +52,14 @@ cancelled records.
   symlink or reparse-point components are rejected.
 - Standard output and error are written directly to files, fsynced, and hashed
   before the outcome is returned.
+- On POSIX systems, every new directory entry is followed by a parent-directory
+  fsync. Win32 exposes directory handles for metadata operations but does not
+  provide a least-privilege equivalent of POSIX directory fsync:
+  `FlushFileBuffers` requires `GENERIC_WRITE`, which ordinary directory handles
+  do not receive. Windows therefore flushes each payload file and the
+  authoritative SQLite transaction, validates every directory boundary, and
+  leaves directory-entry power-loss survival to the persistent-host reboot
+  gate. This limitation is explicit rather than silently promoted to parity.
 
 ### Linux
 
@@ -83,5 +91,5 @@ The hosted Windows CI campaign proves native compilation, service
 install/start/stop/uninstall, journal reopen, Job Object descendant cleanup,
 hard service-process termination, and no duplicate accepted execution after
 restart. A signed package on a persistent Windows host still must prove
-machine-reboot reconciliation and cross-host controller/network interruption
-before full Windows parity is closed.
+machine-reboot reconciliation, payload-directory survival, and cross-host
+controller/network interruption before full Windows parity is closed.

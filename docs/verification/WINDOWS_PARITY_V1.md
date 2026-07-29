@@ -16,7 +16,7 @@ cross-compilation. Every row needs exact-package evidence on both platforms.
 | Service lifecycle | Deployment-specific | SCM install/start/stop/uninstall | Two clean starts with monotonic journal epoch |
 | Machine reboot | Persistent Linux war host | Persistent Windows war host | Journal reconciliation without duplicate execution |
 | Stale authority | Fence and restore epoch | Same durable protocol | Stale session/fence rejected |
-| Output/result | fsync then SHA-256 | Flush then SHA-256 | Matching content digest for equivalent fixture |
+| Output/result | File and parent-directory fsync, then SHA-256 | File flush and SQLite FULL commit, then SHA-256; no inferred directory-fsync guarantee | Matching content digest now; directory-entry survival in persistent reboot gate |
 
 ## Gates
 
@@ -28,5 +28,7 @@ SQLite journal, and uninstalls the service.
 The persistent-host reboot row is intentionally separate. A hosted CI VM
 cannot supply honest across-reboot evidence. `WIN-003` remains open until an
 owner-authorized persistent Windows war host runs that row with the exact
-signed package.
-
+signed package. That row must also prove that accepted workspace and spool
+directory entries survive abrupt power loss: Win32 `FlushFileBuffers` requires
+a `GENERIC_WRITE` file handle and is not a least-privilege POSIX-style
+directory-fsync primitive.

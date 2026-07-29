@@ -179,15 +179,22 @@ fn sync_directory(path: &Path) -> Result<(), io::Error> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::OpenOptionsExt;
-
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(path)?
-            .sync_all()
+        // FlushFileBuffers requires a GENERIC_WRITE handle, but Win32 does not
+        // grant that access for directory handles opened by an unprivileged
+        // service. Directory handles are therefore not a Windows equivalent
+        // of POSIX directory fsync. Keep this check explicit: every durable
+        // payload file is flushed above, SQLite remains the authoritative
+        // journal, and directory-entry power-loss survival is a separate
+        // persistent-host reboot gate rather than an inferred guarantee.
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.is_dir() && !is_link_or_reparse_point(&metadata) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "directory durability boundary is not a plain directory",
+            ))
+        }
     }
 }
 
