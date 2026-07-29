@@ -28,7 +28,6 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
 };
-use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
@@ -444,14 +443,13 @@ fn environment_block(
     overrides: &BTreeMap<OsString, OsString>,
     current_directory: &Path,
 ) -> Result<Vec<u16>, JobError> {
-    let mut entries = system_environment()?;
+    let mut entries = standard_workload_environment();
     if let Some((normalized, key, value)) = drive_current_directory(current_directory) {
         entries.insert(normalized, (key, value));
     }
-    // Machine-only environment blocks can point TEMP/TMP at a service-owned
-    // directory that the workload token cannot use. Keep those paths isolated
-    // to the already-created per-attempt workspace instead of inheriting the
-    // service account's user-profile paths.
+    // Even allowlisted parent TEMP/TMP values are service-owned ambient state.
+    // Keep temporary paths isolated to the already-created per-attempt
+    // workspace.
     for key in ["TEMP", "TMP"] {
         entries.insert(
             key.to_owned(),
@@ -490,19 +488,31 @@ fn environment_block(
     Ok(block)
 }
 
-fn system_environment() -> Result<BTreeMap<String, (OsString, OsString)>, JobError> {
-    const BASELINE: [&str; 25] = [
+fn standard_workload_environment() -> BTreeMap<String, (OsString, OsString)> {
+    // The workload currently runs under the agent service token, so hiding
+    // identity strings is not a security boundary: the child can query that
+    // token directly. Use a fixed allowlist of ordinary Windows runtime and
+    // user-profile variables needed by native shells, while excluding CI
+    // controls, credentials, and every arbitrary process-local value.
+    const BASELINE: [&str; 36] = [
         "ALLUSERSPROFILE",
+        "APPDATA",
         "COMMONPROGRAMFILES",
         "COMMONPROGRAMFILES(X86)",
         "COMMONPROGRAMW6432",
+        "COMPUTERNAME",
         "COMSPEC",
         "DRIVERDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
+        "LOGONSERVER",
         "NUMBER_OF_PROCESSORS",
         "OS",
         "PATH",
         "PATHEXT",
         "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_ARCHITEW6432",
         "PROCESSOR_IDENTIFIER",
         "PROCESSOR_LEVEL",
         "PROCESSOR_REVISION",
@@ -516,62 +526,20 @@ fn system_environment() -> Result<BTreeMap<String, (OsString, OsString)>, JobErr
         "SYSTEMROOT",
         "TEMP",
         "TMP",
+        "USERDOMAIN",
+        "USERDOMAIN_ROAMINGPROFILE",
+        "USERNAME",
+        "USERPROFILE",
         "WINDIR",
     ];
-    let mut raw = null_mut();
-    // SAFETY: raw points to writable pointer storage. A null token with
-    // inherit=false is the documented system-only environment block, so no
-    // caller identity, CI secret, or other process-local value is copied.
-    if unsafe { CreateEnvironmentBlock(&raw mut raw, null_mut(), 0) } == 0 {
-        return Err(JobError::last("CreateEnvironmentBlock(system-only)"));
-    }
-    let environment = EnvironmentBlock(raw);
     let mut entries = BTreeMap::new();
-    let mut cursor = environment.0.cast::<u16>();
-    loop {
-        // SAFETY: CreateEnvironmentBlock returns a sequence of terminated
-        // UTF-16 strings followed by an empty string. cursor is advanced only
-        // across those strings.
-        if unsafe { *cursor } == 0 {
-            break;
-        }
-        let mut units = 0;
-        // SAFETY: the API contract guarantees a terminator for every entry.
-        while unsafe { *cursor.add(units) } != 0 {
-            units += 1;
-        }
-        // SAFETY: the scan above established that this many initialized UTF-16
-        // units precede the entry terminator.
-        let entry = unsafe { std::slice::from_raw_parts(cursor, units) };
-        let separator = entry
-            .iter()
-            .enumerate()
-            .skip(usize::from(entry.first() == Some(&u16::from(b'='))))
-            .find_map(|(index, unit)| (*unit == u16::from(b'=')).then_some(index))
-            .ok_or_else(|| JobError::invalid("system environment entry has no separator"))?;
-        let key = OsString::from_wide(&entry[..separator]);
-        let value = OsString::from_wide(&entry[separator + 1..]);
+    for (key, value) in std::env::vars_os() {
         let normalized = normalized_environment_key(&key);
         if BASELINE.contains(&normalized.as_str()) {
             entries.insert(normalized, (key, value));
         }
-        // SAFETY: units counts the current entry and one more unit skips its
-        // terminator to the next entry or final empty string.
-        cursor = unsafe { cursor.add(units + 1) };
     }
-    Ok(entries)
-}
-
-struct EnvironmentBlock(*mut core::ffi::c_void);
-
-impl Drop for EnvironmentBlock {
-    fn drop(&mut self) {
-        // SAFETY: the pointer is the exact successful CreateEnvironmentBlock
-        // result and is released exactly once by this owner.
-        unsafe {
-            DestroyEnvironmentBlock(self.0);
-        }
-    }
+    entries
 }
 
 fn drive_current_directory(current_directory: &Path) -> Option<(String, OsString, OsString)> {
@@ -721,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn workload_environment_excludes_parent_identity_and_accepts_explicit_values() {
+    fn workload_environment_excludes_ci_values_and_accepts_explicit_values() {
         assert!(std::env::var_os("USERNAME").is_some());
         let block = environment_block(
             &BTreeMap::from([(OsString::from("EXPLICIT_VALUE"), OsString::from("allowed"))]),
@@ -729,7 +697,9 @@ mod tests {
         )
         .unwrap();
         let text = String::from_utf16_lossy(&block).replace('\0', "\n");
-        assert!(!text.to_uppercase().contains("USERNAME="));
+        assert!(text.to_uppercase().contains("USERNAME="));
+        assert!(!text.to_uppercase().contains("GITHUB_ACTIONS="));
+        assert!(!text.to_uppercase().contains("GITHUB_TOKEN="));
         assert!(text.contains("EXPLICIT_VALUE=allowed"));
         assert!(text.contains("=D:=D:\\agent\\work"));
         assert!(text.contains("TEMP=D:\\agent\\work"));

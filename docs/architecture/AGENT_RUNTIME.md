@@ -132,14 +132,17 @@ authority.
   symlinks, reparse escapes, and non-directory parents before creation. A
   workload cannot predict, pre-create, or replace the authoritative result
   path.
-- Workloads never inherit the agent service environment. Unix starts from a
-  fixed `PATH`/locale baseline; Windows copies only the operating-system
-  process baseline required for process creation and synthesizes the exact
-  per-drive current-directory entry required when a custom Unicode environment
-  block is passed to `CreateProcessW`. The execution specification then
-  supplies explicit overrides, so controller URLs, journal paths, credential
-  locations, and unrelated service identity are not disclosed through
-  inherited variables.
+- Workloads never inherit the agent service environment wholesale. Unix starts
+  from a fixed `PATH`/locale baseline. Windows copies a fixed allowlist of
+  standard operating-system and user-profile variables required by native
+  shells, redirects `TEMP`/`TMP` into the attempt workspace, and synthesizes
+  the exact per-drive current-directory entry required when a custom Unicode
+  environment block is passed to `CreateProcessW`. Standard identity strings
+  are not treated as a security boundary because the workload runs under the
+  same service token and can query it directly. The execution specification
+  then supplies explicit overrides; controller URLs, journal paths,
+  credentials, CI controls, and arbitrary process-local variables remain
+  excluded.
 - Execution timeouts are validated before process creation and must be between
   one second and seven days. Unbounded `u64` durations never reach platform
   deadline arithmetic.
