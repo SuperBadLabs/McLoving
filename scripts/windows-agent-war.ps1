@@ -73,6 +73,13 @@ function Write-CrashDiagnostics {
           "process: pid=$($process.ProcessId) ppid=$($process.ParentProcessId) " +
           "name=$($process.Name) command=$($process.CommandLine)"
         )
+        Get-CimInstance Win32_Thread -Filter "ProcessHandle='$($process.ProcessId)'" `
+          -ErrorAction SilentlyContinue | ForEach-Object {
+            Write-Output (
+              "thread: pid=$($process.ProcessId) tid=$($_.Handle) " +
+              "state=$($_.ThreadState) wait_reason=$($_.ThreadWaitReason)"
+            )
+          }
       }
     }
   }

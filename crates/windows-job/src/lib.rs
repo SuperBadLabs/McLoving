@@ -233,6 +233,13 @@ impl JobProcess {
         if previous == u32::MAX {
             return Err(JobError::last("ResumeThread"));
         }
+        if previous != 1 {
+            return Err(JobError::invalid(if previous == 0 {
+                "initial workload thread was already running"
+            } else {
+                "initial workload thread had multiple suspend holds"
+            }));
+        }
         Ok(())
     }
 
