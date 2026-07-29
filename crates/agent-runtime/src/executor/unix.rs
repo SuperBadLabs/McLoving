@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -51,6 +51,12 @@ where
     let workspace = create_workspace(&request.workspace_root, &request.workspace)?;
     let spool = workspace.join("spool");
     tokio::fs::create_dir(&spool).await?;
+    // Keep handles to every agent-owned directory before untrusted code starts.
+    // A workload runs as the agent OS user and can revoke pathname traversal;
+    // retained handles let the agent restore the minimum owner access only
+    // after containment has been proven empty.
+    let directory_controls =
+        retain_workspace_directory_chain(&request.workspace_root, &request.workspace, &spool)?;
 
     let stdout_path = spool.join("stdout.log");
     let stderr_path = spool.join("stderr.log");
@@ -165,6 +171,9 @@ where
     if termination.0 == Termination::OutputLimitExceeded || exceeded {
         truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     }
+    for directory in &directory_controls {
+        restore_agent_permissions(directory, 0o700)?;
+    }
     restore_agent_spool_permissions(&stdout_control)?;
     restore_agent_spool_permissions(&stderr_control)?;
     stdout_control.sync_all()?;
@@ -185,10 +194,35 @@ where
 }
 
 fn restore_agent_spool_permissions(file: &File) -> Result<(), std::io::Error> {
+    restore_agent_permissions(file, 0o600)
+}
+
+fn restore_agent_permissions(file: &File, required_mode: u32) -> Result<(), std::io::Error> {
     let metadata = file.metadata()?;
     let mut permissions = metadata.permissions();
-    permissions.set_mode(permissions.mode() | 0o600);
+    permissions.set_mode(permissions.mode() | required_mode);
     file.set_permissions(permissions)
+}
+
+fn retain_workspace_directory_chain(
+    workspace_root: &Path,
+    workspace: &Path,
+    spool: &Path,
+) -> Result<Vec<File>, std::io::Error> {
+    let mut controls = vec![File::open(workspace_root)?];
+    let mut current = workspace_root.to_owned();
+    for component in workspace.components() {
+        let Component::Normal(component) = component else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "workspace directory chain must be normalized and relative",
+            ));
+        };
+        current.push(component);
+        controls.push(File::open(&current)?);
+    }
+    controls.push(File::open(spool)?);
+    Ok(controls)
 }
 
 fn output_limit_exceeded(
@@ -707,7 +741,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workload_cannot_revoke_agent_read_access_to_log_spools() {
+    async fn workload_cannot_revoke_agent_access_to_log_spools() {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_root: root.path().to_owned(),
@@ -716,7 +750,9 @@ mod tests {
             program: PathBuf::from("/bin/sh"),
             arguments: vec![
                 OsString::from("-c"),
-                OsString::from("printf retained; chmod 000 spool/stdout.log spool/stderr.log"),
+                OsString::from(
+                    "printf retained; chmod 000 spool/stdout.log spool/stderr.log spool .",
+                ),
             ],
             environment: BTreeMap::new(),
             output_limit_bytes: None,
