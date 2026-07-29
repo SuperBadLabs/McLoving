@@ -65,8 +65,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | OPS-002 | DONE | OPS-001 | Backup, PITR checkpoint contract, restore epoch, object reconciliation, retention and legal-hold drills |
 | AGENT-004 | DONE | AGENT-002, CTRL-002 | Production tenant-bound mTLS poll/claim, journal-before-ack acceptance, fenced start/lease/cancellation, native execution, one-MiB log chunks, and explicit terminal publication; real PostgreSQL shipped-controller/shipped-agent gate proves remote stdout/stderr and success |
 | AGENT-005 | DONE | AGENT-004, OPS-001 | Reconnect retains exact finalizing authority, verifies every spool digest/size, deterministically replays log/result evidence, and accepts only exact terminal replay; a forced post-commit agent crash converges after restart with one terminal event |
-| AGENT-006 | ACTIVE | AGENT-003 | Persist a non-reusable Unix process/containment birth identity and return distinct retain, retire-stale, cancel-completed, and reconciliation-required decisions; never signal a recycled PGID |
-| WIN-004 | PENDING | AGENT-003 | Remove the suspended-child pre-assignment crash window by creating every workload atomically in its kill-on-close Job Object; prove forced service death at each creation boundary leaves no process |
+| AGENT-006 | DONE | AGENT-003 | SQLite journal v2 migrates legacy rows fail-closed and persists Linux boot ID plus `/proc` birth ticks; cancellation revalidates identity before TERM and KILL, never signals a recycled PGID, and returns distinct completed, already-exited, retire-stale, and reconciliation-required outcomes with idempotent controller truth |
+| WIN-004 | ACTIVE | AGENT-003 | Remove the suspended-child pre-assignment crash window by creating every workload atomically in its kill-on-close Job Object; prove forced service death at each creation boundary leaves no process |
 | WIN-001 | ACTIVE | AGENT-003, AGENT-004, AGENT-005 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove hosted Windows install/start/stop/uninstall, monotonic session epochs, process restart, and journal reconciliation |
 | WIN-002 | ACTIVE | WIN-001, WIN-004 | Add explicit direct-process, `cmd.exe`, and PowerShell execution modes; isolate each attempt in a race-free Job Object and ACL-owned workspace; prove timeout/cancel/service-crash kills every descendant and preserves durable stdout/stderr/result evidence |
 | WIN-003 | ACTIVE | WIN-002, E2E-003 | Maintain one versioned Linux/Windows semantic-parity matrix and run destructive hosted-Windows proof; then close with a signed package on a persistent Windows host through controller/network interruption and machine reboot, requiring matching terminal outcomes, logs, artifacts, cancellation, stale-authority rejection, and zero escaped descendants |
@@ -103,9 +103,11 @@ gates above.
 
 `W2-C` is active on `codex/wave2-agent-completion`. `AGENT-004` and
 `AGENT-005` are complete with real PostgreSQL, mutual-TLS, shipped-binary, and
-forced response-loss/restart gates. `AGENT-006` is active: add restart-safe
-Unix containment identity and explicit reconciliation outcomes. Then remove
-the Windows pre-assignment crash window (`WIN-004`).
+forced response-loss/restart gates. `AGENT-006` is complete: Linux work stores
+a non-reusable boot/process-birth identity, legacy rows remain fail-closed,
+recycled PGIDs are never signalled, and exact controller outcomes are durable
+and replay-safe. `WIN-004` is active to remove the Windows pre-assignment crash
+window.
 
 After `W2-C`, the Windows tickets still require the full controller-driven
 hosted campaign. `WIN-003` additionally requires a signed package on a

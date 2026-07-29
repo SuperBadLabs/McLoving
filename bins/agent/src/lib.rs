@@ -91,15 +91,13 @@ pub enum AgentError {
     Stopped,
     #[error("journal path cannot be represented in the wire protocol")]
     NonUtf8Path,
-    #[error(
-        "recovered Unix process {0} has no durable non-reusable identity; refusing to signal it"
-    )]
-    UnverifiableRecoveredProcess(u32),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecoveredCancellation {
-    Completed,
+    Terminated,
+    AlreadyExited,
+    RetireStale,
     ReconciliationRequired,
 }
 
@@ -371,7 +369,9 @@ async fn send_reconciliation(
         let mut journal = Journal::open(&config.journal_path)?;
         for attempt in &report.attempts {
             if cancellation_targets(&cancelled, attempt) {
-                let outcome = cancel_recovered_attempt(&mut journal, attempt).await?;
+                let outcome =
+                    cancel_recovered_attempt(&mut journal, attempt, config.termination_grace)
+                        .await?;
                 let request = CancellationCompletion {
                     agent_id: config.agent_id.clone(),
                     session_epoch,
@@ -379,7 +379,13 @@ async fn send_reconciliation(
                     attempt_id: attempt.attempt_id.clone(),
                     fence_token: attempt.fence_token,
                     outcome: match outcome {
-                        RecoveredCancellation::Completed => CancellationOutcome::Terminated as i32,
+                        RecoveredCancellation::Terminated => CancellationOutcome::Terminated as i32,
+                        RecoveredCancellation::AlreadyExited => {
+                            CancellationOutcome::AlreadyExited as i32
+                        }
+                        RecoveredCancellation::RetireStale => {
+                            CancellationOutcome::IdentityMismatch as i32
+                        }
                         RecoveredCancellation::ReconciliationRequired => {
                             CancellationOutcome::ReconciliationRequired as i32
                         }
@@ -421,6 +427,7 @@ async fn send_reconciliation(
 async fn cancel_recovered_attempt(
     journal: &mut Journal,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+    termination_grace: Duration,
 ) -> Result<RecoveredCancellation, AgentError> {
     if attempt.phase == AttemptPhase::ReconciliationRequired {
         return Ok(RecoveredCancellation::ReconciliationRequired);
@@ -433,9 +440,14 @@ async fn cancel_recovered_attempt(
         AttemptPhase::Cancelling,
         attempt.process_id,
     )?;
-    match terminate_recovered_process(attempt.process_id).await {
-        Ok(()) => Ok(RecoveredCancellation::Completed),
-        Err(AgentError::UnverifiableRecoveredProcess(_)) => {
+    match terminate_recovered_process(
+        attempt.process_id,
+        attempt.process_birth_identity.as_deref(),
+        termination_grace,
+    )
+    .await?
+    {
+        RecoveredCancellation::ReconciliationRequired => {
             journal.transition(
                 &attempt.organization_id,
                 &attempt.attempt_id,
@@ -446,7 +458,7 @@ async fn cancel_recovered_attempt(
             )?;
             Ok(RecoveredCancellation::ReconciliationRequired)
         }
-        Err(error) => Err(error),
+        outcome => Ok(outcome),
     }
 }
 
@@ -462,23 +474,110 @@ fn cancellation_targets(
 }
 
 #[cfg(unix)]
-async fn terminate_recovered_process(process_id: Option<u32>) -> Result<(), AgentError> {
+async fn terminate_recovered_process(
+    process_id: Option<u32>,
+    process_birth_identity: Option<&str>,
+    termination_grace: Duration,
+) -> Result<RecoveredCancellation, AgentError> {
     let Some(process_id) = process_id else {
-        return Ok(());
+        return Ok(RecoveredCancellation::AlreadyExited);
     };
-    // A numeric PID/PGID can be recycled after the original service exits.
-    // Until the journal stores a non-reusable process birth identity or an
-    // independently durable containment handle, signaling here could kill an
-    // unrelated process group. Fail closed and leave the attempt visible for
-    // explicit reconciliation.
-    Err(AgentError::UnverifiableRecoveredProcess(process_id))
+    let Some(expected_identity) = process_birth_identity else {
+        return Ok(RecoveredCancellation::ReconciliationRequired);
+    };
+    match process_birth_identity_for(process_id)? {
+        None => return Ok(RecoveredCancellation::AlreadyExited),
+        Some(current) if current != expected_identity => {
+            return Ok(RecoveredCancellation::RetireStale);
+        }
+        Some(_) => {}
+    }
+
+    use nix::errno::Errno;
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+    let process_group =
+        Pid::from_raw(i32::try_from(process_id).map_err(|_| {
+            AgentError::Io(std::io::Error::other("process ID exceeds Unix PID range"))
+        })?);
+    match killpg(process_group, Signal::SIGTERM) {
+        Ok(()) => {}
+        Err(Errno::ESRCH) => return Ok(RecoveredCancellation::AlreadyExited),
+        Err(error) => return Err(AgentError::Io(std::io::Error::other(error))),
+    }
+
+    let deadline = std::time::Instant::now() + termination_grace;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        match process_birth_identity_for(process_id)? {
+            None => return Ok(RecoveredCancellation::Terminated),
+            Some(current) if current != expected_identity => {
+                return Ok(RecoveredCancellation::RetireStale);
+            }
+            Some(_) => {}
+        }
+    }
+
+    // Re-read the non-reusable identity immediately before escalation. This is
+    // the decisive recycled-PID guard: a mismatched process group is never
+    // signalled, even if the original group disappeared during the grace
+    // window.
+    match process_birth_identity_for(process_id)? {
+        None => return Ok(RecoveredCancellation::Terminated),
+        Some(current) if current != expected_identity => {
+            return Ok(RecoveredCancellation::RetireStale);
+        }
+        Some(_) => {}
+    }
+    match killpg(process_group, Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(RecoveredCancellation::Terminated),
+        Err(error) => Err(AgentError::Io(std::io::Error::other(error))),
+    }
 }
 
 #[cfg(windows)]
-async fn terminate_recovered_process(_process_id: Option<u32>) -> Result<(), AgentError> {
+async fn terminate_recovered_process(
+    _process_id: Option<u32>,
+    _process_birth_identity: Option<&str>,
+    _termination_grace: Duration,
+) -> Result<RecoveredCancellation, AgentError> {
     // The previous service process owned the kill-on-close Job Object. SCM
     // restart cannot occur until that process and its complete Job have died.
-    Ok(())
+    Ok(RecoveredCancellation::Terminated)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn process_birth_identity_for(process_id: u32) -> Result<Option<String>, AgentError> {
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let stat = match std::fs::read_to_string(format!("/proc/{process_id}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let (_, fields) = stat.rsplit_once(") ").ok_or_else(|| {
+        AgentError::Io(std::io::Error::other(
+            "Linux process stat has no command terminator",
+        ))
+    })?;
+    let start_ticks = fields.split_whitespace().nth(19).ok_or_else(|| {
+        AgentError::Io(std::io::Error::other(
+            "Linux process stat has no birth tick",
+        ))
+    })?;
+    Ok(Some(format!(
+        "linux-proc-v1:{}:{start_ticks}",
+        boot_id.trim()
+    )))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) fn process_birth_identity_for(_process_id: u32) -> Result<Option<String>, AgentError> {
+    Ok(None)
+}
+
+#[cfg(windows)]
+pub(crate) fn process_birth_identity_for(_process_id: u32) -> Result<Option<String>, AgentError> {
+    Ok(None)
 }
 
 fn wire_report(
@@ -500,6 +599,7 @@ fn wire_report(
                     phase: attempt.phase.wire_name().to_owned(),
                     payload_digest: attempt.payload_digest.to_vec(),
                     process_id: attempt.process_id,
+                    process_birth_identity: attempt.process_birth_identity.clone(),
                     workspace: wire_path(&attempt.workspace)?,
                     logs: attempt
                         .logs
@@ -706,7 +806,7 @@ mod tests {
         assert_eq!(health.2, 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn recovered_unix_process_group_without_birth_identity_is_not_signalled() {
         let mut command = tokio::process::Command::new("/bin/sh");
@@ -714,16 +814,65 @@ mod tests {
         let mut child = command.spawn().unwrap();
         let process_id = child.id().unwrap();
 
-        assert!(matches!(
-            terminate_recovered_process(Some(process_id)).await,
-            Err(AgentError::UnverifiableRecoveredProcess(id)) if id == process_id
-        ));
+        assert_eq!(
+            terminate_recovered_process(Some(process_id), None, Duration::from_millis(25))
+                .await
+                .unwrap(),
+            RecoveredCancellation::ReconciliationRequired
+        );
         assert!(child.try_wait().unwrap().is_none());
         child.kill().await.unwrap();
         child.wait().await.unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn recovered_unix_process_group_with_mismatched_birth_identity_is_retired_not_signalled()
+    {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 30"]).process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_id = child.id().unwrap();
+        let identity = process_birth_identity_for(process_id).unwrap().unwrap();
+
+        assert_eq!(
+            terminate_recovered_process(
+                Some(process_id),
+                Some(&format!("{identity}-recycled")),
+                Duration::from_millis(25),
+            )
+            .await
+            .unwrap(),
+            RecoveredCancellation::RetireStale
+        );
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn recovered_unix_process_group_with_matching_birth_identity_is_terminated() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 30"]).process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_id = child.id().unwrap();
+        let identity = process_birth_identity_for(process_id).unwrap().unwrap();
+
+        assert_eq!(
+            terminate_recovered_process(
+                Some(process_id),
+                Some(&identity),
+                Duration::from_millis(25),
+            )
+            .await
+            .unwrap(),
+            RecoveredCancellation::Terminated
+        );
+        child.wait().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn unverifiable_recovered_cancellation_is_retained_without_session_failure() {
         use mcloving_agent_runtime::Acceptance;
@@ -757,7 +906,7 @@ mod tests {
         let attempt = journal.reconcile().unwrap().attempts.remove(0);
 
         assert_eq!(
-            cancel_recovered_attempt(&mut journal, &attempt)
+            cancel_recovered_attempt(&mut journal, &attempt, Duration::from_millis(25))
                 .await
                 .unwrap(),
             RecoveredCancellation::ReconciliationRequired
@@ -785,6 +934,7 @@ mod tests {
                 phase: AttemptPhase::Running,
                 workspace: PathBuf::from("org/attempt"),
                 process_id: Some(42),
+                process_birth_identity: Some("linux-proc-v1:boot:42".to_owned()),
                 logs: vec![mcloving_agent_runtime::SpoolEntry {
                     sequence: 7,
                     relative_path: PathBuf::from("spool/stdout.log"),
@@ -802,6 +952,10 @@ mod tests {
         let wire = wire_report(&config, 4, &report).unwrap();
         let attempt = &wire.attempts[0];
         assert_eq!(attempt.process_id, Some(42));
+        assert_eq!(
+            attempt.process_birth_identity.as_deref(),
+            Some("linux-proc-v1:boot:42")
+        );
         assert_eq!(attempt.workspace, "org/attempt");
         assert_eq!(attempt.logs[0].sequence, 7);
         assert_eq!(attempt.logs[0].digest, vec![8; 32]);
@@ -821,6 +975,7 @@ mod tests {
             phase: AttemptPhase::Running,
             workspace: PathBuf::from("org/attempt"),
             process_id: None,
+            process_birth_identity: None,
             logs: Vec::new(),
             result: None,
         };

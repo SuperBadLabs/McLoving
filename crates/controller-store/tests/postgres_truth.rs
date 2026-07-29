@@ -475,6 +475,90 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     .await
     .expect("count retained cancellation events");
     assert_eq!(retained_events, 1);
+
+    let recycled = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "agent-cancellation-recycled-pid".into(),
+            pipeline_digest: [0xAE; 32],
+            node_key: "stage-recycled".into(),
+            required_capabilities: vec!["windows".into()],
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit recycled PID cancellation build");
+    let recycled_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "windows-1".into(),
+            capabilities: vec!["windows".into()],
+            lease_seconds: 30,
+            fairness_seed: 3,
+        })
+        .await
+        .expect("claim recycled PID cancellation")
+        .expect("recycled PID cancellation claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                recycled_claim.attempt_id,
+                recycled_claim.fence,
+                recycled_claim.restore_epoch,
+                "windows-1",
+            )
+            .await
+            .expect("accept recycled PID cancellation offer")
+    );
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, recycled.build_id)
+            .await
+            .expect("request recycled PID cancellation")
+    );
+    for label in ["retire recycled PID", "replay recycled PID retirement"] {
+        assert_eq!(
+            store
+                .complete_agent_cancellation(AgentCancellationCompletion {
+                    organization_id,
+                    attempt_id: recycled_claim.attempt_id,
+                    fence: recycled_claim.fence,
+                    restore_epoch: recycled_claim.restore_epoch,
+                    agent_id: "windows-1",
+                    session_epoch: 1,
+                    outcome: AgentCancellationOutcome::IdentityMismatch,
+                })
+                .await
+                .expect(label),
+            AgentCancellationDisposition::RetireStale
+        );
+    }
+    let recycled_snapshot = store
+        .build_snapshot(organization_id, project_id, recycled.build_id)
+        .await
+        .expect("read recycled PID cancellation")
+        .expect("recycled PID build exists");
+    assert_eq!(recycled_snapshot.build_status, "aborted");
+    assert_eq!(
+        recycled_snapshot.terminal_summary,
+        Some(json!({"reason": "agent_process_identity_mismatch"}))
+    );
+    let recycled_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.cancellation_stale_process'",
+    )
+    .bind(organization_id)
+    .bind(recycled.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count recycled PID cancellation events");
+    assert_eq!(recycled_events, 1);
 }
 
 #[tokio::test]

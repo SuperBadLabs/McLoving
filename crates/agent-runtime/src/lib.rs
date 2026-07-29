@@ -12,7 +12,8 @@ use thiserror::Error;
 
 pub mod executor;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+const MAX_PROCESS_BIRTH_IDENTITY_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttemptPhase {
@@ -106,8 +107,19 @@ pub struct ReconciliationAttempt {
     /// The schema column retains its Wave 1 `process_group_id` name for
     /// compatibility, but this value is the process ID on every platform.
     pub process_id: Option<u32>,
+    /// Non-reusable identity captured when the Unix containment leader starts.
+    ///
+    /// Windows relies on its kill-on-close Job Object and leaves this unset.
+    /// A legacy Unix row without this value must never be signalled.
+    pub process_birth_identity: Option<String>,
     pub logs: Vec<SpoolEntry>,
     pub result: Option<SpoolEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessIdentity<'a> {
+    pub process_id: u32,
+    pub birth_identity: &'a str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,6 +152,8 @@ pub enum JournalError {
     UnknownPhase(String),
     #[error("journal contains an invalid fixed-size digest")]
     InvalidDigest,
+    #[error("process birth identity must be non-empty, bounded, and paired with a process ID")]
+    InvalidProcessIdentity,
     #[error("system clock is before the Unix epoch")]
     InvalidSystemClock,
 }
@@ -187,6 +201,7 @@ impl Journal {
                 )),
                 workspace TEXT NOT NULL,
                 process_group_id INTEGER,
+                process_birth_identity TEXT,
                 accepted_at_unix_ms INTEGER NOT NULL,
                 updated_at_unix_ms INTEGER NOT NULL,
                 PRIMARY KEY (organization_id, attempt_id, fence_token)
@@ -242,11 +257,26 @@ impl Journal {
             [],
             |row| row.get(0),
         )?;
-        if schema_version != SCHEMA_VERSION {
-            return Err(JournalError::SchemaVersionMismatch {
-                expected: SCHEMA_VERSION,
-                found: schema_version,
-            });
+        match schema_version {
+            SCHEMA_VERSION => {}
+            1 => {
+                let transaction = connection.unchecked_transaction()?;
+                transaction.execute(
+                    "ALTER TABLE attempts ADD COLUMN process_birth_identity TEXT",
+                    [],
+                )?;
+                transaction.execute(
+                    "UPDATE journal_metadata SET schema_version = ?1 WHERE singleton = 1",
+                    [SCHEMA_VERSION],
+                )?;
+                transaction.commit()?;
+            }
+            found => {
+                return Err(JournalError::SchemaVersionMismatch {
+                    expected: SCHEMA_VERSION,
+                    found,
+                });
+            }
         }
 
         Ok(Self { connection })
@@ -408,6 +438,49 @@ impl Journal {
         phase: AttemptPhase,
         process_id: Option<u32>,
     ) -> Result<(), JournalError> {
+        self.transition_inner(
+            organization_id,
+            attempt_id,
+            fence_token,
+            session_epoch,
+            phase,
+            (process_id, None),
+        )
+    }
+
+    /// Transitions an attempt while durably binding a process ID to its
+    /// non-reusable birth identity. Subsequent ordinary transitions preserve
+    /// that identity.
+    pub fn transition_with_process_identity(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
+        phase: AttemptPhase,
+        process: ProcessIdentity<'_>,
+    ) -> Result<(), JournalError> {
+        validate_process_birth_identity(Some(process.process_id), Some(process.birth_identity))?;
+        self.transition_inner(
+            organization_id,
+            attempt_id,
+            fence_token,
+            session_epoch,
+            phase,
+            (Some(process.process_id), Some(process.birth_identity)),
+        )
+    }
+
+    fn transition_inner(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
+        phase: AttemptPhase,
+        process: (Option<u32>, Option<&str>),
+    ) -> Result<(), JournalError> {
+        let (process_id, process_birth_identity) = process;
         let fence_token = to_sql_integer(fence_token)?;
         let session_epoch = to_sql_integer(session_epoch)?;
         let transaction = self
@@ -416,7 +489,7 @@ impl Journal {
         let current = transaction
             .query_row(
                 "
-                SELECT phase, process_group_id
+                SELECT phase, process_group_id, process_birth_identity
                 FROM attempts
                 WHERE organization_id = ?1
                   AND attempt_id = ?2
@@ -424,7 +497,13 @@ impl Journal {
                   AND session_epoch = ?4
                 ",
                 params![organization_id, attempt_id, fence_token, session_epoch],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or(JournalError::StaleAuthority)?;
@@ -432,7 +511,19 @@ impl Journal {
         let process_id = process_id
             .map(|value| to_sql_integer(u64::from(value)))
             .transpose()?;
-        if current_phase == phase && current.1 == process_id {
+        let process_birth_identity = process_birth_identity.map(str::to_owned).or_else(|| {
+            (current.1 == process_id && process_id.is_some())
+                .then(|| current.2.clone())
+                .flatten()
+        });
+        validate_process_birth_identity(
+            process_id
+                .map(|value| u32::try_from(value).map_err(|_| JournalError::AuthorityOverflow))
+                .transpose()?,
+            process_birth_identity.as_deref(),
+        )?;
+        if current_phase == phase && current.1 == process_id && current.2 == process_birth_identity
+        {
             transaction.commit()?;
             return Ok(());
         }
@@ -446,15 +537,19 @@ impl Journal {
         transaction.execute(
             "
             UPDATE attempts
-            SET phase = ?1, process_group_id = ?2, updated_at_unix_ms = ?3
-            WHERE organization_id = ?4
-              AND attempt_id = ?5
-              AND fence_token = ?6
-              AND session_epoch = ?7
+            SET phase = ?1,
+                process_group_id = ?2,
+                process_birth_identity = ?3,
+                updated_at_unix_ms = ?4
+            WHERE organization_id = ?5
+              AND attempt_id = ?6
+              AND fence_token = ?7
+              AND session_epoch = ?8
             ",
             params![
                 phase.as_str(),
                 process_id,
+                process_birth_identity,
                 unix_time_ms()?,
                 organization_id,
                 attempt_id,
@@ -595,7 +690,8 @@ impl Journal {
         let mut statement = self.connection.prepare(
             "
             SELECT organization_id, attempt_id, fence_token, session_epoch,
-                   payload_digest, phase, workspace, process_group_id
+                   payload_digest, phase, workspace, process_group_id,
+                   process_birth_identity
             FROM attempts
             WHERE phase NOT IN ('succeeded', 'failed', 'aborted')
             ORDER BY organization_id, attempt_id, fence_token
@@ -611,6 +707,7 @@ impl Journal {
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })?;
 
@@ -625,6 +722,7 @@ impl Journal {
                 phase,
                 workspace,
                 process_id,
+                process_birth_identity,
             ) = row?;
             attempts.push(ReconciliationAttempt {
                 logs: self.log_entries(&organization_id, &attempt_id, fence_token)?,
@@ -639,6 +737,7 @@ impl Journal {
                 process_id: process_id
                     .map(|value| u32::try_from(value).map_err(|_| JournalError::AuthorityOverflow))
                     .transpose()?,
+                process_birth_identity,
             });
         }
         Ok(ReconciliationReport { attempts })
@@ -770,6 +869,20 @@ fn validate_relative_path(path: &Path) -> Result<(), JournalError> {
             .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(JournalError::InvalidRelativePath);
+    }
+    Ok(())
+}
+
+fn validate_process_birth_identity(
+    process_id: Option<u32>,
+    process_birth_identity: Option<&str>,
+) -> Result<(), JournalError> {
+    if let Some(identity) = process_birth_identity
+        && (process_id.is_none()
+            || identity.is_empty()
+            || identity.len() > MAX_PROCESS_BIRTH_IDENTITY_BYTES)
+    {
+        return Err(JournalError::InvalidProcessIdentity);
     }
     Ok(())
 }
@@ -945,7 +1058,17 @@ mod tests {
         let accepted = acceptance();
         journal.accept(&accepted).unwrap();
         journal
-            .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Running, Some(321))
+            .transition_with_process_identity(
+                "org-1",
+                "attempt-1",
+                9,
+                4,
+                AttemptPhase::Running,
+                ProcessIdentity {
+                    process_id: 321,
+                    birth_identity: "linux-proc-v1:boot:123",
+                },
+            )
             .unwrap();
         journal
             .record_log(
@@ -979,14 +1102,38 @@ mod tests {
         let report = journal.reconcile().unwrap();
         assert_eq!(report.attempts.len(), 1);
         assert_eq!(report.attempts[0].process_id, Some(321));
+        assert_eq!(
+            report.attempts[0].process_birth_identity.as_deref(),
+            Some("linux-proc-v1:boot:123")
+        );
         assert_eq!(report.attempts[0].logs.len(), 1);
         assert!(report.attempts[0].result.is_some());
 
         journal
-            .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Finalizing, None)
+            .transition(
+                "org-1",
+                "attempt-1",
+                9,
+                4,
+                AttemptPhase::Finalizing,
+                Some(321),
+            )
             .unwrap();
+        assert_eq!(
+            journal.reconcile().unwrap().attempts[0]
+                .process_birth_identity
+                .as_deref(),
+            Some("linux-proc-v1:boot:123")
+        );
         journal
-            .transition("org-1", "attempt-1", 9, 4, AttemptPhase::Succeeded, None)
+            .transition(
+                "org-1",
+                "attempt-1",
+                9,
+                4,
+                AttemptPhase::Succeeded,
+                Some(321),
+            )
             .unwrap();
         assert!(journal.reconcile().unwrap().attempts.is_empty());
     }
@@ -1079,5 +1226,62 @@ mod tests {
                 found: 99,
             })
         ));
+    }
+
+    #[test]
+    fn version_one_journal_migrates_and_preserves_legacy_fail_closed_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE journal_metadata (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    schema_version INTEGER NOT NULL
+                ) STRICT;
+                INSERT INTO journal_metadata(singleton, schema_version) VALUES (1, 1);
+                CREATE TABLE attempts (
+                    organization_id TEXT NOT NULL,
+                    attempt_id TEXT NOT NULL,
+                    fence_token INTEGER NOT NULL CHECK (fence_token >= 0),
+                    session_epoch INTEGER NOT NULL CHECK (session_epoch >= 0),
+                    payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+                    phase TEXT NOT NULL,
+                    workspace TEXT NOT NULL,
+                    process_group_id INTEGER,
+                    accepted_at_unix_ms INTEGER NOT NULL,
+                    updated_at_unix_ms INTEGER NOT NULL,
+                    PRIMARY KEY (organization_id, attempt_id, fence_token)
+                ) STRICT;
+                INSERT INTO attempts(
+                    organization_id, attempt_id, fence_token, session_epoch,
+                    payload_digest, phase, workspace, process_group_id,
+                    accepted_at_unix_ms, updated_at_unix_ms
+                ) VALUES (
+                    'org-1', 'legacy', 1, 1, zeroblob(32), 'running',
+                    'org-1/legacy', 4321, 1, 1
+                );
+                ",
+            )
+            .unwrap();
+        drop(connection);
+
+        let journal = Journal::open(&path).unwrap();
+        let report = journal.reconcile().unwrap();
+        assert_eq!(report.attempts.len(), 1);
+        assert_eq!(report.attempts[0].process_id, Some(4321));
+        assert_eq!(report.attempts[0].process_birth_identity, None);
+        assert_eq!(
+            journal
+                .connection
+                .query_row(
+                    "SELECT schema_version FROM journal_metadata WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            SCHEMA_VERSION
+        );
     }
 }

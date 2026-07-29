@@ -60,6 +60,7 @@ message AttemptState {
   string workspace = 7;
   repeated SpoolEntry logs = 8;
   optional SpoolEntry result = 9;
+  optional string process_birth_identity = 10;
 }
 
 message SpoolEntry {
@@ -100,6 +101,8 @@ enum CancellationOutcome {
   CANCELLATION_OUTCOME_UNSPECIFIED = 0;
   CANCELLATION_OUTCOME_TERMINATED = 1;
   CANCELLATION_OUTCOME_RECONCILIATION_REQUIRED = 2;
+  CANCELLATION_OUTCOME_ALREADY_EXITED = 3;
+  CANCELLATION_OUTCOME_IDENTITY_MISMATCH = 4;
 }
 
 message CancellationReceipt {

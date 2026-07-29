@@ -13,7 +13,7 @@ use mcloving_agent_protocol::wire::{
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, execute_with_spawn_hook,
 };
-use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal, SpoolEntry};
+use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal, ProcessIdentity, SpoolEntry};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use uuid::Uuid;
 
-use crate::{AgentConfig, AgentError};
+use crate::{AgentConfig, AgentError, process_birth_identity_for};
 
 const MAX_LOG_CHUNK_BYTES: usize = 1_048_576;
 
@@ -316,16 +316,30 @@ async fn run_assignment(
     };
     let execution =
         execute_with_spawn_hook(&request, execution_cancellation.clone(), |process_id| {
-            journal
-                .transition(
+            let process_birth_identity = process_birth_identity_for(process_id)
+                .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
+            match process_birth_identity {
+                Some(identity) => journal.transition_with_process_identity(
+                    &organization,
+                    &attempt,
+                    fence,
+                    session_epoch,
+                    AttemptPhase::Running,
+                    ProcessIdentity {
+                        process_id,
+                        birth_identity: &identity,
+                    },
+                ),
+                None => journal.transition(
                     &organization,
                     &attempt,
                     fence,
                     session_epoch,
                     AttemptPhase::Running,
                     Some(process_id),
-                )
-                .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
+                ),
+            }
+            .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
         })
         .await;
     execution_cancellation.cancel();

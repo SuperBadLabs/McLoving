@@ -309,6 +309,8 @@ impl AgentControl for ControllerAgentService {
             .map_err(|_| Status::invalid_argument("attempt_id must be a UUID"))?;
         let outcome = match CancellationOutcome::try_from(request.outcome) {
             Ok(CancellationOutcome::Terminated) => AgentCancellationOutcome::Terminated,
+            Ok(CancellationOutcome::AlreadyExited) => AgentCancellationOutcome::AlreadyExited,
+            Ok(CancellationOutcome::IdentityMismatch) => AgentCancellationOutcome::IdentityMismatch,
             Ok(CancellationOutcome::ReconciliationRequired) => {
                 AgentCancellationOutcome::ReconciliationRequired
             }

@@ -43,6 +43,8 @@ pub enum AgentCancellationDisposition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentCancellationOutcome {
     Terminated,
+    AlreadyExited,
+    IdentityMismatch,
     ReconciliationRequired,
 }
 
@@ -595,8 +597,8 @@ impl Store {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         }
-        let authority = sqlx::query_as::<_, (Uuid, Uuid, String)>(
-            "SELECT n.id, n.build_id, a.status
+        let authority = sqlx::query_as::<_, (Uuid, Uuid, String, Option<Value>)>(
+            "SELECT n.id, n.build_id, a.status, a.terminal_summary
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id
@@ -625,13 +627,24 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((node_id, build_id, status)) = authority else {
+        let Some((node_id, build_id, status, terminal_summary)) = authority else {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         };
         if status == "aborted" {
             tx.commit().await?;
-            return Ok(AgentCancellationDisposition::Completed);
+            return Ok(
+                if terminal_summary
+                    .as_ref()
+                    .and_then(|value| value.get("reason"))
+                    .and_then(Value::as_str)
+                    == Some("agent_process_identity_mismatch")
+                {
+                    AgentCancellationDisposition::RetireStale
+                } else {
+                    AgentCancellationDisposition::Completed
+                },
+            );
         }
         if status == "reconciliation_required" {
             tx.commit().await?;
@@ -691,6 +704,8 @@ impl Store {
                     "agent_id": agent_id,
                     "process_termination": match outcome {
                         AgentCancellationOutcome::Terminated => "terminated",
+                        AgentCancellationOutcome::AlreadyExited => "already_exited",
+                        AgentCancellationOutcome::IdentityMismatch => "identity_mismatch",
                         AgentCancellationOutcome::ReconciliationRequired => "unverifiable",
                     },
                     "uncertain_effects": uncertain_effects,
@@ -701,6 +716,26 @@ impl Store {
             return Ok(AgentCancellationDisposition::ReconciliationRequired);
         }
 
+        let (terminal_reason, event_kind, disposition) = match outcome {
+            AgentCancellationOutcome::Terminated => (
+                "agent_confirmed_cancellation",
+                "attempt.cancellation_completed",
+                AgentCancellationDisposition::Completed,
+            ),
+            AgentCancellationOutcome::AlreadyExited => (
+                "agent_process_already_exited",
+                "attempt.cancellation_completed",
+                AgentCancellationDisposition::Completed,
+            ),
+            AgentCancellationOutcome::IdentityMismatch => (
+                "agent_process_identity_mismatch",
+                "attempt.cancellation_stale_process",
+                AgentCancellationDisposition::RetireStale,
+            ),
+            AgentCancellationOutcome::ReconciliationRequired => {
+                unreachable!("reconciliation-required outcome returned above")
+            }
+        };
         sqlx::query(
             "UPDATE attempts
              SET status = 'aborted',
@@ -711,7 +746,7 @@ impl Store {
         )
         .bind(attempt_id)
         .bind(organization_id)
-        .bind(json!({"reason": "agent_confirmed_cancellation"}))
+        .bind(json!({"reason": terminal_reason}))
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -736,16 +771,22 @@ impl Store {
             &mut tx,
             organization_id,
             build_id,
-            "attempt.cancellation_completed",
+            event_kind,
             json!({
                 "attempt_id": attempt_id,
                 "fence": fence,
                 "agent_id": agent_id,
+                "process_termination": match outcome {
+                    AgentCancellationOutcome::Terminated => "terminated",
+                    AgentCancellationOutcome::AlreadyExited => "already_exited",
+                    AgentCancellationOutcome::IdentityMismatch => "identity_mismatch",
+                    AgentCancellationOutcome::ReconciliationRequired => "unverifiable",
+                },
             }),
         )
         .await?;
         tx.commit().await?;
-        Ok(AgentCancellationDisposition::Completed)
+        Ok(disposition)
     }
 
     /// Creates an organization/project pair for bootstrap and tests.

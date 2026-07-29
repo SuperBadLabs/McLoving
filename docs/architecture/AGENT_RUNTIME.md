@@ -113,9 +113,12 @@ from running before containment, but a hard service crash between
 child outside the Job. `WIN-004` replaces that two-step sequence with atomic
 Job membership and is required before `WIN-002` closes.
 
-The outbound production service currently opens authenticated sessions and
-reconciles durable journal state; scheduled work is still executed by the
-controller-local embedded worker. `AGENT-004` owns production remote work
-delivery and completion, and `AGENT-005` owns recovery of checksummed
-`finalizing` evidence. Until those tickets close, the Windows service is a
-runtime/containment foundation rather than a deployable scheduler worker.
+The outbound production service polls and executes tenant-bound fenced work
+over mutual TLS. Acceptance is journaled before acknowledgement, log and result
+spools are checksummed, and finalization replay is exact and idempotent after a
+post-controller-commit crash. On Linux, journal schema v2 binds the process
+group leader to the machine boot ID and `/proc` start ticks; restart
+reconciliation revalidates that non-reusable identity before both TERM and
+KILL, and a missing, mismatched, or legacy identity has an explicit
+fail-closed outcome. Windows production parity still depends on `WIN-004`
+atomic Job membership and the hosted persistent-machine gates.
