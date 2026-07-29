@@ -10,7 +10,7 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
 #[cfg(target_os = "linux")]
 use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
-use nix::unistd::Pid;
+use nix::unistd::{Pid, pipe};
 use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
 use tokio::time::{Instant, sleep, sleep_until};
@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 use crate::SpoolEntry;
 
 use super::{
-    Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, Termination,
-    create_workspace, sync_directory,
+    Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, OutputCapture,
+    Termination, create_workspace, sync_directory, validate_redactions, write_redacted_output,
 };
 
 /// Executes one process in a new process group.
@@ -45,9 +45,33 @@ pub async fn execute_with_spawn_hook<F>(
 where
     F: FnOnce(u32) -> Result<(), ExecutionError>,
 {
+    execute_with_spawn_hook_and_redactions(request, cancellation, &[], on_spawn).await
+}
+
+/// Executes one process while keeping credential-bearing output in bounded
+/// memory until exact secret values have been removed.
+pub async fn execute_with_spawn_hook_and_redactions<F>(
+    request: &ExecutionRequest,
+    cancellation: CancellationToken,
+    redactions: &[Vec<u8>],
+    on_spawn: F,
+) -> Result<ExecutionOutcome, ExecutionError>
+where
+    F: FnOnce(u32) -> Result<(), ExecutionError>,
+{
     if request.mode != ExecutionMode::Direct {
         return Err(ExecutionError::UnsupportedMode(request.mode));
     }
+    validate_redactions(redactions)?;
+    let capture_limit = if redactions.is_empty() {
+        None
+    } else {
+        Some(
+            request
+                .output_limit_bytes
+                .ok_or(ExecutionError::UnboundedCredentialOutput)?,
+        )
+    };
     let workspace_root_control = open_workspace_root(&request.workspace_root)?;
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
@@ -76,8 +100,20 @@ where
     // The workload may rename or unlink its visible spool paths. Retain
     // independent handles to the exact files created by the executor so quota,
     // truncation, durability, and digest decisions cannot be redirected.
-    let stdout_control = stdout.try_clone()?;
-    let stderr_control = stderr.try_clone()?;
+    let mut stdout_control = stdout.try_clone()?;
+    let mut stderr_control = stderr.try_clone()?;
+    let (stdout_destination, stdout_reader) = if capture_limit.is_some() {
+        let (reader, writer) = pipe()?;
+        (Stdio::from(File::from(writer)), Some(File::from(reader)))
+    } else {
+        (Stdio::from(stdout), None)
+    };
+    let (stderr_destination, stderr_reader) = if capture_limit.is_some() {
+        let (reader, writer) = pipe()?;
+        (Stdio::from(File::from(writer)), Some(File::from(reader)))
+    } else {
+        (Stdio::from(stderr), None)
+    };
     // Pin the configured root itself, not merely a canonical path derived from
     // it. A sibling workload running as the same OS account may rename it.
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
@@ -94,10 +130,18 @@ where
         .envs(&request.environment)
         .current_dir(&workspace)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stdout(stdout_destination)
+        .stderr(stderr_destination)
         .process_group(0);
     let mut child = command.spawn()?;
+    drop(command);
+    let mut capture = match (stdout_reader, stderr_reader, capture_limit) {
+        (Some(stdout), Some(stderr), Some(limit)) => {
+            Some(OutputCapture::start(stdout, stderr, limit))
+        }
+        (None, None, None) => None,
+        _ => unreachable!("capture configuration is internally consistent"),
+    };
     let process_id = child.id().ok_or(ExecutionError::MissingProcessId)?;
     let process_group_id =
         i32::try_from(process_id).map_err(|_| ExecutionError::MissingProcessId)?;
@@ -143,7 +187,8 @@ where
             .await?;
             (Termination::TimedOut, status)
         }
-        result = wait_for_output_limit(
+        result = wait_for_output_limit_mode(
+            capture.as_ref(),
             &stdout_control,
             &stderr_control,
             request.output_limit_bytes,
@@ -169,12 +214,16 @@ where
         }
     };
 
-    let exceeded =
-        output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)?;
+    let exceeded = capture.as_ref().is_some_and(OutputCapture::was_exceeded)
+        || output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     if termination.0 == Termination::Exited && exceeded {
         termination.0 = Termination::OutputLimitExceeded;
     }
-    if termination.0 == Termination::OutputLimitExceeded || exceeded {
+    if let Some(capture) = capture.take() {
+        let (captured_stdout, captured_stderr) = capture.finish().await?;
+        write_redacted_output(&mut stdout_control, &captured_stdout, redactions)?;
+        write_redacted_output(&mut stderr_control, &captured_stderr, redactions)?;
+    } else if termination.0 == Termination::OutputLimitExceeded || exceeded {
         truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     }
     for directory in &directory_controls {
@@ -198,6 +247,20 @@ where
         stdout: spool_entry(&request.workspace, "spool/stdout.log", 0, &stdout_control).await?,
         stderr: spool_entry(&request.workspace, "spool/stderr.log", 1, &stderr_control).await?,
     })
+}
+
+async fn wait_for_output_limit_mode(
+    capture: Option<&OutputCapture>,
+    stdout: &File,
+    stderr: &File,
+    limit: Option<u64>,
+) -> Result<(), std::io::Error> {
+    if let Some(capture) = capture {
+        capture.limit_exceeded().await;
+        Ok(())
+    } else {
+        wait_for_output_limit(stdout, stderr, limit).await
+    }
 }
 
 fn restore_agent_spool_permissions(file: &File) -> Result<(), std::io::Error> {
@@ -704,6 +767,39 @@ mod tests {
             timeout: Duration::from_secs(30),
             termination_grace: Duration::from_millis(100),
         }
+    }
+
+    #[tokio::test]
+    async fn credential_output_is_redacted_before_any_spool_write() {
+        let root = tempfile::tempdir().unwrap();
+        let mut request = request(root.path(), "credential-redaction", Duration::from_secs(5));
+        request.arguments = vec![
+            OsString::from("-c"),
+            OsString::from("printf 'before marker-secret after'; printf 'err marker-secret' >&2"),
+        ];
+        request.output_limit_bytes = Some(65_536);
+
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &request,
+            CancellationToken::new(),
+            &[b"marker-secret".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path))
+            .await
+            .unwrap();
+        let stderr = fs::read(root.path().join(&outcome.stderr.relative_path))
+            .await
+            .unwrap();
+        assert_eq!(stdout, b"before  after");
+        assert_eq!(stderr, b"err ");
+        let stdout_digest: [u8; 32] = Sha256::digest(&stdout).into();
+        let stderr_digest: [u8; 32] = Sha256::digest(&stderr).into();
+        assert_eq!(outcome.stdout.digest, stdout_digest);
+        assert_eq!(outcome.stderr.digest, stderr_digest);
     }
 
     #[tokio::test]

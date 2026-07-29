@@ -1,6 +1,6 @@
 //! PostgreSQL-backed controller truth and transaction boundaries.
 
-use aho_corasick::AhoCorasick;
+use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Acquire, PgPool, Postgres, Transaction};
@@ -1500,11 +1500,14 @@ impl Store {
         let content = if redactions.is_empty() {
             chunk.content.to_vec()
         } else {
-            let matcher = AhoCorasick::new(&redactions).map_err(|error| {
-                StoreError::InvalidSecurityOperation(format!(
-                    "credential redaction set is invalid: {error}"
-                ))
-            })?;
+            let matcher = AhoCorasickBuilder::new()
+                .match_kind(MatchKind::LeftmostLongest)
+                .build(&redactions)
+                .map_err(|error| {
+                    StoreError::InvalidSecurityOperation(format!(
+                        "credential redaction set is invalid: {error}"
+                    ))
+                })?;
             matcher.replace_all_bytes(chunk.content, &vec![Vec::<u8>::new(); redactions.len()])
         };
         let digest: [u8; 32] = Sha256::digest(&content).into();

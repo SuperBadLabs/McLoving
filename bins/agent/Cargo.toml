@@ -6,7 +6,6 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-aho-corasick = "=1.1.4"
 mcloving-agent-protocol = { version = "0.0.0", path = "../../crates/agent-protocol" }
 mcloving-agent-runtime = { version = "0.0.0", path = "../../crates/agent-runtime" }
 mcloving-domain = { version = "0.0.0", path = "../../crates/domain" }

@@ -2,11 +2,18 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fs::File;
 use std::io;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::{JournalError, SpoolEntry, validate_relative_path};
@@ -22,14 +29,14 @@ use unix::{
     open_workspace_root as platform_open_workspace_root,
 };
 #[cfg(unix)]
-pub use unix::{execute, execute_with_spawn_hook};
+pub use unix::{execute, execute_with_spawn_hook, execute_with_spawn_hook_and_redactions};
 #[cfg(windows)]
 use windows::{
     ensure_original_workspace_root as platform_ensure_original_workspace_root,
     open_workspace_root as platform_open_workspace_root,
 };
 #[cfg(windows)]
-pub use windows::{execute, execute_with_spawn_hook};
+pub use windows::{execute, execute_with_spawn_hook, execute_with_spawn_hook_and_redactions};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ExecutionMode {
@@ -105,9 +112,135 @@ pub enum ExecutionError {
     WindowsJob(String),
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    #[error("credential-bearing execution requires a bounded output quota")]
+    UnboundedCredentialOutput,
+    #[error("output capture task failed: {0}")]
+    OutputCapture(String),
     #[cfg(unix)]
     #[error("signal error: {0}")]
     Signal(#[from] nix::errno::Errno),
+}
+
+struct OutputCapture {
+    stdout: Option<JoinHandle<Result<Vec<u8>, io::Error>>>,
+    stderr: Option<JoinHandle<Result<Vec<u8>, io::Error>>>,
+    limit_exceeded: CancellationToken,
+}
+
+impl OutputCapture {
+    fn start(stdout: File, stderr: File, limit: u64) -> Self {
+        let total = Arc::new(AtomicU64::new(0));
+        let limit_exceeded = CancellationToken::new();
+        Self {
+            stdout: Some(tokio::spawn(capture_pipe(
+                stdout,
+                limit,
+                Arc::clone(&total),
+                limit_exceeded.clone(),
+            ))),
+            stderr: Some(tokio::spawn(capture_pipe(
+                stderr,
+                limit,
+                total,
+                limit_exceeded.clone(),
+            ))),
+            limit_exceeded,
+        }
+    }
+
+    async fn limit_exceeded(&self) {
+        self.limit_exceeded.cancelled().await;
+    }
+
+    fn was_exceeded(&self) -> bool {
+        self.limit_exceeded.is_cancelled()
+    }
+
+    async fn finish(mut self) -> Result<(Vec<u8>, Vec<u8>), ExecutionError> {
+        let stdout = self
+            .stdout
+            .take()
+            .expect("stdout capture handle exists")
+            .await
+            .map_err(|error| ExecutionError::OutputCapture(error.to_string()))??;
+        let stderr = self
+            .stderr
+            .take()
+            .expect("stderr capture handle exists")
+            .await
+            .map_err(|error| ExecutionError::OutputCapture(error.to_string()))??;
+        Ok((stdout, stderr))
+    }
+}
+
+impl Drop for OutputCapture {
+    fn drop(&mut self) {
+        if let Some(handle) = self.stdout.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.stderr.take() {
+            handle.abort();
+        }
+    }
+}
+
+async fn capture_pipe(
+    reader: File,
+    limit: u64,
+    total: Arc<AtomicU64>,
+    limit_exceeded: CancellationToken,
+) -> Result<Vec<u8>, io::Error> {
+    let mut reader = tokio::fs::File::from_std(reader);
+    let capacity = usize::try_from(limit.min(1024 * 1024)).unwrap_or(1024 * 1024);
+    let mut captured = Vec::with_capacity(capacity);
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes = reader.read(&mut buffer).await?;
+        if bytes == 0 {
+            return Ok(captured);
+        }
+        let bytes = u64::try_from(bytes).expect("read buffer size fits u64");
+        let previous = total
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                Some(value.saturating_add(bytes))
+            })
+            .unwrap_or_else(|value| value);
+        let retained = bytes.min(limit.saturating_sub(previous));
+        captured.extend_from_slice(
+            &buffer[..usize::try_from(retained).expect("retained bytes fit usize")],
+        );
+        if previous.saturating_add(bytes) > limit {
+            limit_exceeded.cancel();
+        }
+    }
+}
+
+fn write_redacted_output(
+    file: &mut File,
+    captured: &[u8],
+    redactions: &[Vec<u8>],
+) -> Result<(), ExecutionError> {
+    let matcher = redaction_matcher(redactions)?;
+    let replacements = vec![Vec::<u8>::new(); redactions.len()];
+    let redacted = matcher.replace_all_bytes(captured, &replacements);
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&redacted)?;
+    Ok(())
+}
+
+fn validate_redactions(redactions: &[Vec<u8>]) -> Result<(), ExecutionError> {
+    if redactions.is_empty() {
+        return Ok(());
+    }
+    redaction_matcher(redactions).map(|_| ())
+}
+
+fn redaction_matcher(redactions: &[Vec<u8>]) -> Result<AhoCorasick, ExecutionError> {
+    AhoCorasickBuilder::new()
+        .match_kind(MatchKind::LeftmostLongest)
+        .build(redactions)
+        .map_err(|error| ExecutionError::OutputCapture(error.to_string()))
 }
 
 /// Pins the configured workspace root so path-based maintenance can fail

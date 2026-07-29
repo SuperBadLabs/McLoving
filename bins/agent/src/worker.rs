@@ -8,7 +8,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use aho_corasick::AhoCorasick;
 use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
@@ -17,8 +16,8 @@ use mcloving_agent_protocol::wire::{
     WorkPoll,
 };
 use mcloving_agent_runtime::executor::{
-    ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, Termination,
-    WorkspaceRootGuard, execute_with_spawn_hook, is_link_or_reparse_point, sync_directory,
+    ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
+    execute_with_spawn_hook_and_redactions, is_link_or_reparse_point, sync_directory,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Finalization, Journal, ProcessIdentity, SpoolEntry,
@@ -608,8 +607,11 @@ async fn run_assignment(
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
-    let execution =
-        execute_with_spawn_hook(&request, execution_cancellation.clone(), |process_id| {
+    let execution = execute_with_spawn_hook_and_redactions(
+        &request,
+        execution_cancellation.clone(),
+        &execution_environment.redactions,
+        |process_id| {
             let process_birth_identity = process_birth_identity_for(process_id)
                 .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
             match process_birth_identity {
@@ -634,10 +636,11 @@ async fn run_assignment(
                 ),
             }
             .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
-        })
-        .await;
+        },
+    )
+    .await;
     let completion_result: Result<(), AgentError> = async {
-        let mut outcome = match execution {
+        let outcome = match execution {
             Ok(outcome) => outcome,
             Err(error) => {
                 if let Some(process_id) = unverified_containment_process_id(&error) {
@@ -685,12 +688,6 @@ async fn run_assignment(
                 .await;
             }
         };
-        redact_execution_logs(
-            &config.workspace_root,
-            &mut outcome,
-            &execution_environment.redactions,
-        )
-        .await?;
         validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()])?;
         let terminal = match outcome.termination {
             Termination::Cancelled => WorkOutcome::Aborted,
@@ -862,56 +859,6 @@ fn valid_environment_name(value: &str) -> bool {
     matches!(bytes.next(), Some(byte) if byte.is_ascii_alphabetic() || byte == b'_')
         && value.len() <= 128
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-}
-
-async fn redact_execution_logs(
-    workspace_root: &Path,
-    outcome: &mut ExecutionOutcome,
-    secrets: &[Vec<u8>],
-) -> Result<(), AgentError> {
-    if secrets.is_empty() {
-        return Ok(());
-    }
-    let matcher = AhoCorasick::new(secrets).map_err(|error| {
-        AgentError::InvalidAssignment(format!("credential redaction set is invalid: {error}"))
-    })?;
-    outcome.stdout =
-        redact_spool_entry(workspace_root, &outcome.stdout, &matcher, secrets.len()).await?;
-    outcome.stderr =
-        redact_spool_entry(workspace_root, &outcome.stderr, &matcher, secrets.len()).await?;
-    Ok(())
-}
-
-async fn redact_spool_entry(
-    workspace_root: &Path,
-    entry: &SpoolEntry,
-    matcher: &AhoCorasick,
-    pattern_count: usize,
-) -> Result<SpoolEntry, AgentError> {
-    let path = workspace_root.join(&entry.relative_path);
-    verify_spool_file(&path, entry, "credential-bearing log").await?;
-    let content = fs::read(&path).await?;
-    let replacements = vec![Vec::<u8>::new(); pattern_count];
-    let redacted = matcher.replace_all_bytes(&content, &replacements);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(&path)
-        .await?;
-    file.write_all(&redacted).await?;
-    file.sync_all().await?;
-    sync_directory(
-        path.parent()
-            .ok_or_else(|| AgentError::InvalidAssignment("log has no parent".to_owned()))?,
-    )?;
-    Ok(SpoolEntry {
-        sequence: entry.sequence,
-        relative_path: entry.relative_path.clone(),
-        digest: Sha256::digest(&redacted).into(),
-        bytes: u64::try_from(redacted.len()).map_err(|_| {
-            AgentError::InvalidAssignment("redacted log exceeds platform bounds".to_owned())
-        })?,
-    })
 }
 
 fn unverified_containment_process_id(error: &ExecutionError) -> Option<u32> {
@@ -2003,31 +1950,6 @@ mod tests {
             )
             .is_err()
         );
-    }
-
-    #[tokio::test]
-    async fn credential_values_are_removed_before_log_spools_are_persisted() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("stdout.log");
-        let content = b"before marker-secret after marker-secret";
-        fs::write(&path, content).await.unwrap();
-        let entry = SpoolEntry {
-            sequence: 0,
-            relative_path: PathBuf::from("stdout.log"),
-            digest: Sha256::digest(content).into(),
-            bytes: u64::try_from(content.len()).unwrap(),
-        };
-        let patterns = vec![b"marker-secret".to_vec()];
-        let matcher = AhoCorasick::new(&patterns).unwrap();
-
-        let redacted = redact_spool_entry(directory.path(), &entry, &matcher, patterns.len())
-            .await
-            .unwrap();
-
-        assert_eq!(fs::read(&path).await.unwrap(), b"before  after ");
-        verify_spool_file(&path, &redacted, "redacted log")
-            .await
-            .unwrap();
     }
 
     #[test]

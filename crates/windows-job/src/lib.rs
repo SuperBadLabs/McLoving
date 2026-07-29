@@ -15,7 +15,7 @@ use std::fmt;
 use std::fs::File;
 use std::mem::{size_of, size_of_val, zeroed};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::io::AsRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::os::windows::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::ExitStatus;
@@ -25,7 +25,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, WAIT_FAILED,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
-use windows_sys::Win32::Security::{TOKEN_DUPLICATE, TOKEN_QUERY};
+use windows_sys::Win32::Security::{SECURITY_ATTRIBUTES, TOKEN_DUPLICATE, TOKEN_QUERY};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
 };
@@ -36,6 +36,7 @@ use windows_sys::Win32::System::JobObjects::{
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject,
 };
+use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
@@ -106,6 +107,32 @@ pub fn file_identity(file: &File) -> Result<FileIdentity, JobError> {
         file_index: (u64::from(information.nFileIndexHigh) << 32)
             | u64::from(information.nFileIndexLow),
     })
+}
+
+/// Creates a non-inheritable anonymous pipe owned by safe `File` handles.
+///
+/// `JobProcess::spawn_suspended` duplicates only the supplied writer into its
+/// audited handle list, so the workload never inherits the reader.
+pub fn anonymous_pipe() -> Result<(File, File), JobError> {
+    let mut reader: HANDLE = null_mut();
+    let mut writer: HANDLE = null_mut();
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
+            .expect("SECURITY_ATTRIBUTES size fits u32"),
+        lpSecurityDescriptor: null_mut(),
+        bInheritHandle: 0,
+    };
+    // SAFETY: reader and writer point to writable HANDLE storage, attributes
+    // names a live SECURITY_ATTRIBUTES value, and a zero size requests the
+    // system default pipe buffer.
+    if unsafe { CreatePipe(&raw mut reader, &raw mut writer, &attributes, 0) } == 0 {
+        return Err(JobError::last("CreatePipe"));
+    }
+    // SAFETY: successful CreatePipe returns two uniquely owned, valid handles.
+    let reader = unsafe { File::from_raw_handle(reader.cast()) };
+    // SAFETY: successful CreatePipe returns two uniquely owned, valid handles.
+    let writer = unsafe { File::from_raw_handle(writer.cast()) };
+    Ok((reader, writer))
 }
 
 /// Complete creation specification for one atomically contained child.
