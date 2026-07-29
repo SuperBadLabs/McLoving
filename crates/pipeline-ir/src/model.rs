@@ -3,15 +3,21 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 
-use crate::IR_V1;
 use crate::canonical::encode_pipeline;
+use crate::expression::{
+    EvaluatedValue, Expression, ExpressionError, ExpressionLimits, ParameterValue,
+    evaluate_expression, parse_expression, validate_expression,
+};
 use crate::strict_yaml::{
     AdmissionError, MappingEntry, ParseLimits, SourceSpan, SpannedValue, YamlValue, parse_strict,
 };
+use crate::{IR_V1, IR_V1_1};
 
 pub(crate) const MAX_IR_STRING_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_STAGES: usize = 128;
 pub(crate) const MAX_STEPS: usize = 4_096;
+pub(crate) const MAX_PARAMETERS: usize = 128;
+pub(crate) const MAX_EXPRESSION_BINDINGS: usize = 8_192;
 
 /// Pipeline IR compatibility identity.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -61,9 +67,55 @@ pub struct Provenance {
 pub struct PipelineIr {
     pub schema: SchemaVersion,
     pub name: String,
+    pub parameters: BTreeMap<String, ParameterDefinition>,
+    pub parameter_values: BTreeMap<String, ParameterValue>,
+    pub expressions: Vec<ExpressionBinding>,
     pub stages: Vec<Stage>,
     pub provenance: Provenance,
     pub source_span: SourceSpan,
+}
+
+/// The exact type of a native pipeline parameter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParameterType {
+    Bool,
+    Integer,
+    String,
+}
+
+impl ParameterType {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Bool => "boolean",
+            Self::Integer => "integer",
+            Self::String => "string",
+        }
+    }
+
+    fn accepts(self, value: &ParameterValue) -> bool {
+        matches!(
+            (self, value),
+            (Self::Bool, ParameterValue::Bool(_))
+                | (Self::Integer, ParameterValue::Integer(_))
+                | (Self::String, ParameterValue::String(_))
+        )
+    }
+}
+
+/// A typed parameter declaration. Secret parameters may not have defaults and
+/// are never persisted in `parameter_values`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParameterDefinition {
+    pub parameter_type: ParameterType,
+    pub default: Option<ParameterValue>,
+    pub secret: bool,
+}
+
+/// The canonical expression that produced one concrete IR field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpressionBinding {
+    pub path: String,
+    pub expression: Expression,
 }
 
 /// A sequential stage in Pipeline IR v1.
@@ -143,6 +195,16 @@ pub fn compile_strict_yaml(
     source: &str,
     limits: ParseLimits,
 ) -> Result<PipelineIr, CompileError> {
+    compile_strict_yaml_with_parameters(source_id, source, limits, BTreeMap::new())
+}
+
+/// Compile strict YAML with explicit typed parameter inputs.
+pub fn compile_strict_yaml_with_parameters(
+    source_id: &str,
+    source: &str,
+    limits: ParseLimits,
+    inputs: BTreeMap<String, ParameterValue>,
+) -> Result<PipelineIr, CompileError> {
     let root = parse_strict(source, limits)?;
     let root_span = root.span;
     let mut root = MappingView::new(root, "$")?;
@@ -154,13 +216,26 @@ pub fn compile_strict_yaml(
         ));
     }
     let name = root.required_string("name")?;
+    let parameters_node = root.take("parameters");
     let stages_node = root.required("stages")?;
     root.finish()?;
 
-    let stages = compile_stages(stages_node)?;
+    let parameters = compile_parameter_definitions(parameters_node)?;
+    let (parameter_values, evaluation_context) = bind_parameter_values(&parameters, inputs)?;
+    let mut expressions = Vec::new();
+    let stages = compile_stages(stages_node, &evaluation_context, &mut expressions)?;
+    expressions.sort_by(|left, right| left.path.cmp(&right.path));
+    let schema = if parameters.is_empty() && expressions.is_empty() {
+        IR_V1
+    } else {
+        IR_V1_1
+    };
     let pipeline = PipelineIr {
-        schema: IR_V1,
+        schema,
         name,
+        parameters,
+        parameter_values,
+        expressions,
         stages,
         provenance: Provenance {
             source_id: source_id.to_owned(),
@@ -176,7 +251,203 @@ pub fn compile_strict_yaml(
     Ok(pipeline)
 }
 
-fn compile_stages(node: SpannedValue) -> Result<Vec<Stage>, CompileError> {
+/// Rebind a previously admitted parameterized pipeline without reparsing its
+/// source. The stored expression ASTs are evaluated again against only the
+/// explicit typed invocation inputs and every materialized field is replaced
+/// before the resulting IR is validated.
+pub fn instantiate_pipeline(
+    template: &PipelineIr,
+    inputs: BTreeMap<String, ParameterValue>,
+) -> Result<PipelineIr, CompileError> {
+    validate_pipeline(template)?;
+    let (parameter_values, context) = bind_parameter_values(&template.parameters, inputs)?;
+    let mut resolved = BTreeMap::new();
+    for binding in &template.expressions {
+        let value = evaluate_expression(&binding.expression, &context, ExpressionLimits::default())
+            .map_err(|error| CompileError::expression(&binding.path, error))?;
+        if value.secret {
+            return Err(CompileError::schema(
+                &binding.path,
+                "secret-tainted expression values cannot be materialized into Pipeline IR",
+            ));
+        }
+        let ParameterValue::String(value) = value.value else {
+            return Err(CompileError::schema(
+                &binding.path,
+                "process fields require an expression that evaluates to string",
+            ));
+        };
+        resolved.insert(binding.path.clone(), value);
+    }
+
+    let mut pipeline = template.clone();
+    pipeline.parameter_values = parameter_values;
+    for (stage_index, stage) in pipeline.stages.iter_mut().enumerate() {
+        for (step_index, step) in stage.steps.iter_mut().enumerate() {
+            let Step::Process(process) = step;
+            let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
+            if let Some(value) = resolved.remove(&format!("{base}.program")) {
+                process.program = value;
+            }
+            for (argument_index, argument) in process.args.iter_mut().enumerate() {
+                if let Some(value) = resolved.remove(&format!("{base}.args[{argument_index}]")) {
+                    *argument = value;
+                }
+            }
+            for (name, value) in &mut process.env {
+                if let Some(resolved_value) = resolved.remove(&format!("{base}.env.{name}")) {
+                    *value = resolved_value;
+                }
+            }
+        }
+    }
+    if let Some(path) = resolved.keys().next() {
+        return Err(CompileError::schema(
+            path,
+            "expression binding does not identify a materializable process field",
+        ));
+    }
+    validate_pipeline(&pipeline)?;
+    Ok(pipeline)
+}
+
+fn compile_parameter_definitions(
+    node: Option<SpannedValue>,
+) -> Result<BTreeMap<String, ParameterDefinition>, CompileError> {
+    let Some(node) = node else {
+        return Ok(BTreeMap::new());
+    };
+    let span = node.span;
+    let YamlValue::Mapping(entries) = node.value else {
+        return Err(CompileError::schema("$.parameters", "expected a mapping").with_span(span));
+    };
+    if entries.len() > MAX_PARAMETERS {
+        return Err(CompileError::schema(
+            "$.parameters",
+            format!("at most {MAX_PARAMETERS} parameters are accepted"),
+        )
+        .with_span(span));
+    }
+    entries
+        .into_iter()
+        .map(|entry| {
+            let name = entry.key;
+            validate_identifier(&format!("$.parameters.{name}"), &name)?;
+            let path = format!("$.parameters.{name}");
+            if name.contains('.') {
+                return Err(CompileError::schema(
+                    &path,
+                    "parameter names must not contain dot",
+                ));
+            }
+            let mut definition = MappingView::new(entry.value, &path)?;
+            let parameter_type = match definition.required_string("type")?.as_str() {
+                "boolean" => ParameterType::Bool,
+                "integer" => ParameterType::Integer,
+                "string" => ParameterType::String,
+                _ => {
+                    return Err(CompileError::schema(
+                        format!("{path}.type"),
+                        "expected exactly boolean, integer, or string",
+                    ));
+                }
+            };
+            let secret = definition.optional_bool("secret")?.unwrap_or(false);
+            let default = definition
+                .take("default")
+                .map(|value| compile_parameter_value(value, &format!("{path}.default")))
+                .transpose()?;
+            definition.finish()?;
+            if secret && default.is_some() {
+                return Err(CompileError::schema(
+                    format!("{path}.default"),
+                    "secret parameters must not declare persisted defaults",
+                ));
+            }
+            if default
+                .as_ref()
+                .is_some_and(|value| !parameter_type.accepts(value))
+            {
+                return Err(CompileError::schema(
+                    format!("{path}.default"),
+                    format!("expected a {} default", parameter_type.name()),
+                ));
+            }
+            Ok((
+                name,
+                ParameterDefinition {
+                    parameter_type,
+                    default,
+                    secret,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn compile_parameter_value(node: SpannedValue, path: &str) -> Result<ParameterValue, CompileError> {
+    match node.value {
+        YamlValue::Bool(value) => Ok(ParameterValue::Bool(value)),
+        YamlValue::Integer(value) => Ok(ParameterValue::Integer(value)),
+        YamlValue::String(value) => Ok(ParameterValue::String(value)),
+        _ => Err(
+            CompileError::schema(path, "expected a scalar parameter value").with_span(node.span),
+        ),
+    }
+}
+
+type BoundParameterValues = (
+    BTreeMap<String, ParameterValue>,
+    BTreeMap<String, EvaluatedValue>,
+);
+
+fn bind_parameter_values(
+    definitions: &BTreeMap<String, ParameterDefinition>,
+    mut inputs: BTreeMap<String, ParameterValue>,
+) -> Result<BoundParameterValues, CompileError> {
+    if let Some(name) = inputs.keys().find(|name| !definitions.contains_key(*name)) {
+        return Err(CompileError::schema(
+            format!("$.parameter_values.{name}"),
+            "input does not have a parameter definition",
+        ));
+    }
+    let mut public_values = BTreeMap::new();
+    let mut context = BTreeMap::new();
+    for (name, definition) in definitions {
+        let value = inputs
+            .remove(name)
+            .or_else(|| definition.default.clone())
+            .ok_or_else(|| {
+                CompileError::schema(
+                    format!("$.parameter_values.{name}"),
+                    "required parameter input is missing",
+                )
+            })?;
+        if !definition.parameter_type.accepts(&value) {
+            return Err(CompileError::schema(
+                format!("$.parameter_values.{name}"),
+                format!("expected a {} value", definition.parameter_type.name()),
+            ));
+        }
+        if !definition.secret {
+            public_values.insert(name.clone(), value.clone());
+        }
+        context.insert(
+            name.clone(),
+            EvaluatedValue {
+                value,
+                secret: definition.secret,
+            },
+        );
+    }
+    Ok((public_values, context))
+}
+
+fn compile_stages(
+    node: SpannedValue,
+    parameters: &BTreeMap<String, EvaluatedValue>,
+    expressions: &mut Vec<ExpressionBinding>,
+) -> Result<Vec<Stage>, CompileError> {
     let span = node.span;
     let YamlValue::Sequence(nodes) = node.value else {
         return Err(CompileError::schema("$.stages", "expected a sequence").with_span(span));
@@ -205,7 +476,7 @@ fn compile_stages(node: SpannedValue) -> Result<Vec<Stage>, CompileError> {
             let name = stage.required_string("name")?;
             let steps_node = stage.required("steps")?;
             stage.finish()?;
-            let steps = compile_steps(steps_node, &path)?;
+            let steps = compile_steps(steps_node, &path, parameters, expressions)?;
             Ok(Stage {
                 id,
                 name,
@@ -217,7 +488,12 @@ fn compile_stages(node: SpannedValue) -> Result<Vec<Stage>, CompileError> {
         .map_err(|error| error.with_span_if_missing(span))
 }
 
-fn compile_steps(node: SpannedValue, stage_path: &str) -> Result<Vec<Step>, CompileError> {
+fn compile_steps(
+    node: SpannedValue,
+    stage_path: &str,
+    parameters: &BTreeMap<String, EvaluatedValue>,
+    expressions: &mut Vec<ExpressionBinding>,
+) -> Result<Vec<Step>, CompileError> {
     let span = node.span;
     let YamlValue::Sequence(nodes) = node.value else {
         return Err(
@@ -240,7 +516,7 @@ fn compile_steps(node: SpannedValue, stage_path: &str) -> Result<Vec<Step>, Comp
             let mut step = MappingView::new(node, &path)?;
             let process = step.required("process")?;
             step.finish()?;
-            compile_process(process, &path, step_span).map(Step::Process)
+            compile_process(process, &path, step_span, parameters, expressions).map(Step::Process)
         })
         .collect()
 }
@@ -249,14 +525,24 @@ fn compile_process(
     node: SpannedValue,
     step_path: &str,
     source_span: SourceSpan,
+    parameters: &BTreeMap<String, EvaluatedValue>,
+    expressions: &mut Vec<ExpressionBinding>,
 ) -> Result<ProcessStep, CompileError> {
     let path = format!("{step_path}.process");
     let mut process = MappingView::new(node, &path)?;
-    let program = process.required_string("program")?;
+    let program_node = process.required("program")?;
+    let program = compile_resolved_string(
+        program_node,
+        &format!("{path}.program"),
+        parameters,
+        expressions,
+    )?;
     let args = process
-        .optional_string_sequence("args")?
+        .optional_resolved_string_sequence("args", parameters, expressions)?
         .unwrap_or_default();
-    let env = process.optional_string_mapping("env")?.unwrap_or_default();
+    let env = process
+        .optional_resolved_string_mapping("env", parameters, expressions)?
+        .unwrap_or_default();
     let timeout_seconds = process.optional_u64("timeout_seconds")?;
     process.finish()?;
     Ok(ProcessStep {
@@ -268,16 +554,72 @@ fn compile_process(
     })
 }
 
+fn compile_resolved_string(
+    node: SpannedValue,
+    path: &str,
+    parameters: &BTreeMap<String, EvaluatedValue>,
+    expressions: &mut Vec<ExpressionBinding>,
+) -> Result<String, CompileError> {
+    let span = node.span;
+    if let YamlValue::String(value) = node.value {
+        return Ok(value);
+    }
+    let mut expression_view = MappingView::new(node, path)?;
+    let source = expression_view.required_string("expression")?;
+    expression_view.finish()?;
+    let expression = parse_expression(&source, ExpressionLimits::default())
+        .map_err(|error| CompileError::expression(path, error).with_span(span))?;
+    let result = evaluate_expression(&expression, parameters, ExpressionLimits::default())
+        .map_err(|error| CompileError::expression(path, error).with_span(span))?;
+    if result.secret {
+        return Err(CompileError::schema(
+            path,
+            "secret-tainted expression values cannot be materialized into Pipeline IR",
+        )
+        .with_span(span));
+    }
+    let ParameterValue::String(value) = result.value else {
+        return Err(CompileError::schema(
+            path,
+            "process fields require an expression that evaluates to string",
+        )
+        .with_span(span));
+    };
+    if expressions.len() >= MAX_EXPRESSION_BINDINGS {
+        return Err(CompileError::schema(
+            path,
+            format!("at most {MAX_EXPRESSION_BINDINGS} expression bindings are accepted"),
+        )
+        .with_span(span));
+    }
+    expressions.push(ExpressionBinding {
+        path: path.to_owned(),
+        expression,
+    });
+    Ok(value)
+}
+
 /// Validate a Pipeline IR object without consulting its YAML source.
 pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError> {
-    if pipeline.schema != IR_V1 {
+    if !matches!(pipeline.schema, IR_V1 | IR_V1_1) {
         return Err(IrValidationError::new(
             "$.schema",
-            "only Pipeline IR v1.0 is accepted",
+            "only Pipeline IR v1.0 and v1.1 are accepted",
+        ));
+    }
+    if pipeline.schema == IR_V1
+        && (!pipeline.parameters.is_empty()
+            || !pipeline.parameter_values.is_empty()
+            || !pipeline.expressions.is_empty())
+    {
+        return Err(IrValidationError::new(
+            "$.schema",
+            "Pipeline IR v1.0 cannot contain parameter or expression fields",
         ));
     }
     validate_identifier("$.name", &pipeline.name)?;
     validate_string_length("$.name", &pipeline.name)?;
+    validate_parameters_and_expressions(pipeline)?;
     if pipeline.stages.is_empty() || pipeline.stages.len() > MAX_STAGES {
         return Err(IrValidationError::new(
             "$.stages",
@@ -357,6 +699,216 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
                 validate_string_length(&format!("{path}.steps[{step_index}].process.env"), value)?;
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_parameters_and_expressions(pipeline: &PipelineIr) -> Result<(), IrValidationError> {
+    if pipeline.parameters.len() > MAX_PARAMETERS {
+        return Err(IrValidationError::new(
+            "$.parameters",
+            format!("parameter count exceeds {MAX_PARAMETERS}"),
+        ));
+    }
+    for (name, definition) in &pipeline.parameters {
+        let path = format!("$.parameters.{name}");
+        validate_string_length(&path, name)?;
+        validate_identifier(&path, name)?;
+        if name.contains('.') {
+            return Err(IrValidationError::new(
+                &path,
+                "parameter names must not contain dot",
+            ));
+        }
+        if definition.secret && definition.default.is_some() {
+            return Err(IrValidationError::new(
+                format!("{path}.default"),
+                "secret parameters must not declare persisted defaults",
+            ));
+        }
+        if definition
+            .default
+            .as_ref()
+            .is_some_and(|value| !definition.parameter_type.accepts(value))
+        {
+            return Err(IrValidationError::new(
+                format!("{path}.default"),
+                format!("expected a {} default", definition.parameter_type.name()),
+            ));
+        }
+        if let Some(value) = &definition.default {
+            validate_parameter_value_length(&format!("{path}.default"), value)?;
+        }
+        if definition.secret {
+            if pipeline.parameter_values.contains_key(name) {
+                return Err(IrValidationError::new(
+                    format!("$.parameter_values.{name}"),
+                    "secret parameter values must not be persisted in Pipeline IR",
+                ));
+            }
+        } else {
+            let value = pipeline.parameter_values.get(name).ok_or_else(|| {
+                IrValidationError::new(
+                    format!("$.parameter_values.{name}"),
+                    "public parameter value is missing",
+                )
+            })?;
+            if !definition.parameter_type.accepts(value) {
+                return Err(IrValidationError::new(
+                    format!("$.parameter_values.{name}"),
+                    format!("expected a {} value", definition.parameter_type.name()),
+                ));
+            }
+            validate_parameter_value_length(&format!("$.parameter_values.{name}"), value)?;
+        }
+    }
+    if let Some(name) = pipeline
+        .parameter_values
+        .keys()
+        .find(|name| !pipeline.parameters.contains_key(*name))
+    {
+        return Err(IrValidationError::new(
+            format!("$.parameter_values.{name}"),
+            "value does not have a parameter definition",
+        ));
+    }
+    if pipeline.expressions.len() > MAX_EXPRESSION_BINDINGS {
+        return Err(IrValidationError::new(
+            "$.expressions",
+            format!("expression binding count exceeds {MAX_EXPRESSION_BINDINGS}"),
+        ));
+    }
+    let expression_context = pipeline
+        .parameter_values
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                EvaluatedValue {
+                    value: value.clone(),
+                    secret: false,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let materialized_fields = expression_materialized_fields(pipeline);
+    let mut previous_path: Option<&str> = None;
+    for (index, binding) in pipeline.expressions.iter().enumerate() {
+        let path = format!("$.expressions[{index}]");
+        validate_string_length(&format!("{path}.path"), &binding.path)?;
+        if binding.path.is_empty() {
+            return Err(IrValidationError::new(
+                format!("{path}.path"),
+                "expression binding path must not be empty",
+            ));
+        }
+        if previous_path.is_some_and(|previous| previous >= binding.path.as_str()) {
+            return Err(IrValidationError::new(
+                format!("{path}.path"),
+                "expression binding paths must be unique and sorted",
+            ));
+        }
+        previous_path = Some(&binding.path);
+        validate_expression(&binding.expression, ExpressionLimits::default()).map_err(|error| {
+            IrValidationError::new(format!("{path}.expression"), error.to_string())
+        })?;
+        validate_expression_parameters(&binding.expression, &pipeline.parameters, &path)?;
+        let Some(materialized) = materialized_fields.get(&binding.path) else {
+            return Err(IrValidationError::new(
+                format!("{path}.path"),
+                "expression binding does not identify a materializable process field",
+            ));
+        };
+        let evaluated = evaluate_expression(
+            &binding.expression,
+            &expression_context,
+            ExpressionLimits::default(),
+        )
+        .map_err(|error| IrValidationError::new(format!("{path}.expression"), error.to_string()))?;
+        let ParameterValue::String(evaluated) = evaluated.value else {
+            return Err(IrValidationError::new(
+                format!("{path}.expression"),
+                "expression binding must evaluate to a string",
+            ));
+        };
+        if evaluated != *materialized {
+            return Err(IrValidationError::new(
+                format!("{path}.expression"),
+                "expression result does not match the materialized process field",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn expression_materialized_fields(pipeline: &PipelineIr) -> BTreeMap<String, &str> {
+    let mut fields = BTreeMap::new();
+    for (stage_index, stage) in pipeline.stages.iter().enumerate() {
+        for (step_index, step) in stage.steps.iter().enumerate() {
+            let Step::Process(process) = step;
+            let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
+            fields.insert(format!("{base}.program"), process.program.as_str());
+            for (argument_index, argument) in process.args.iter().enumerate() {
+                fields.insert(format!("{base}.args[{argument_index}]"), argument.as_str());
+            }
+            for (name, value) in &process.env {
+                fields.insert(format!("{base}.env.{name}"), value.as_str());
+            }
+        }
+    }
+    fields
+}
+
+fn validate_expression_parameters(
+    expression: &Expression,
+    parameters: &BTreeMap<String, ParameterDefinition>,
+    path: &str,
+) -> Result<(), IrValidationError> {
+    match expression {
+        Expression::Parameter(name) => {
+            let Some(definition) = parameters.get(name) else {
+                return Err(IrValidationError::new(
+                    path,
+                    format!("expression references undefined parameter {name:?}"),
+                ));
+            };
+            if definition.secret {
+                return Err(IrValidationError::new(
+                    path,
+                    format!(
+                        "expression binding cannot materialize secret-tainted parameter {name:?}"
+                    ),
+                ));
+            }
+        }
+        Expression::Literal(_) => {}
+        Expression::Not(value) => validate_expression_parameters(value, parameters, path)?,
+        Expression::Equal(left, right)
+        | Expression::NotEqual(left, right)
+        | Expression::And(left, right)
+        | Expression::Or(left, right)
+        | Expression::Add(left, right) => {
+            validate_expression_parameters(left, parameters, path)?;
+            validate_expression_parameters(right, parameters, path)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_parameter_value_length(
+    path: &str,
+    value: &ParameterValue,
+) -> Result<(), IrValidationError> {
+    if let ParameterValue::String(value) = value
+        && value.len() > ExpressionLimits::default().max_string_bytes
+    {
+        return Err(IrValidationError::new(
+            path,
+            format!(
+                "parameter string exceeds {} bytes",
+                ExpressionLimits::default().max_string_bytes
+            ),
+        ));
     }
     Ok(())
 }
@@ -457,7 +1009,27 @@ impl MappingView {
         })
     }
 
-    fn optional_string_sequence(&mut self, key: &str) -> Result<Option<Vec<String>>, CompileError> {
+    fn optional_bool(&mut self, key: &str) -> Result<Option<bool>, CompileError> {
+        let Some(node) = self.take(key) else {
+            return Ok(None);
+        };
+        let span = node.span;
+        let YamlValue::Bool(value) = node.value else {
+            return Err(CompileError::schema(
+                format!("{}.{}", self.path, key),
+                "expected a boolean",
+            )
+            .with_span(span));
+        };
+        Ok(Some(value))
+    }
+
+    fn optional_resolved_string_sequence(
+        &mut self,
+        key: &str,
+        parameters: &BTreeMap<String, EvaluatedValue>,
+        expressions: &mut Vec<ExpressionBinding>,
+    ) -> Result<Option<Vec<String>>, CompileError> {
         let Some(node) = self.take(key) else {
             return Ok(None);
         };
@@ -473,23 +1045,22 @@ impl MappingView {
             .into_iter()
             .enumerate()
             .map(|(index, value)| {
-                let value_span = value.span;
-                let YamlValue::String(value) = value.value else {
-                    return Err(CompileError::schema(
-                        format!("{}.{}[{index}]", self.path, key),
-                        "expected a string",
-                    )
-                    .with_span(value_span));
-                };
-                Ok(value)
+                compile_resolved_string(
+                    value,
+                    &format!("{}.{}[{index}]", self.path, key),
+                    parameters,
+                    expressions,
+                )
             })
             .collect::<Result<Vec<_>, _>>()
             .map(Some)
     }
 
-    fn optional_string_mapping(
+    fn optional_resolved_string_mapping(
         &mut self,
         key: &str,
+        parameters: &BTreeMap<String, EvaluatedValue>,
+        expressions: &mut Vec<ExpressionBinding>,
     ) -> Result<Option<BTreeMap<String, String>>, CompileError> {
         let Some(node) = self.take(key) else {
             return Ok(None);
@@ -505,14 +1076,12 @@ impl MappingView {
         entries
             .into_iter()
             .map(|entry| {
-                let value_span = entry.value.span;
-                let YamlValue::String(value) = entry.value.value else {
-                    return Err(CompileError::schema(
-                        format!("{}.{}.{}", self.path, key, entry.key),
-                        "expected a string",
-                    )
-                    .with_span(value_span));
-                };
+                let value = compile_resolved_string(
+                    entry.value,
+                    &format!("{}.{}.{}", self.path, key, entry.key),
+                    parameters,
+                    expressions,
+                )?;
                 Ok((entry.key, value))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()
@@ -552,6 +1121,7 @@ pub struct CompileError {
 pub enum CompileErrorCategory {
     Admission,
     Schema,
+    Expression,
     IrValidation,
 }
 
@@ -561,6 +1131,15 @@ impl CompileError {
             category: CompileErrorCategory::Schema,
             path: Some(path.into()),
             message: message.into(),
+            span: None,
+        }
+    }
+
+    fn expression(path: impl Into<String>, error: ExpressionError) -> Self {
+        Self {
+            category: CompileErrorCategory::Expression,
+            path: Some(path.into()),
+            message: error.to_string(),
             span: None,
         }
     }

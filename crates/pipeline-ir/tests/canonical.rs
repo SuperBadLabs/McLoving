@@ -82,10 +82,68 @@ fn independent_validator_rejects_mutation_truncation_and_trailing_data() {
 }
 
 #[test]
+fn independent_validator_rejects_invalid_parameter_identifiers() {
+    let pipeline = compile_strict_yaml(
+        "fixture://parameter",
+        r#"
+version: 1
+name: canonical-parameter
+parameters:
+  foo:
+    type: string
+    default: value
+stages:
+  - id: test
+    name: Test
+    steps:
+      - process:
+          program: "true"
+"#,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    let mut bytes = pipeline.canonical_bytes().unwrap();
+    let offset = bytes
+        .windows(3)
+        .position(|window| window == b"foo")
+        .expect("parameter name is present in canonical bytes");
+    bytes[offset + 1] = b'.';
+
+    let error = validate_canonical_bytes(&bytes).unwrap_err();
+    assert!(error.to_string().contains("invalid parameter identifier"));
+}
+
+#[test]
 fn programmatic_ir_must_validate_before_canonicalization() {
     let mut pipeline =
         compile_strict_yaml("fixture://a", PIPELINE_A, ParseLimits::default()).unwrap();
     pipeline.name = "x".repeat(16 * 1024 + 1);
+    assert!(pipeline.canonical_bytes().is_err());
+    assert!(pipeline.semantic_digest().is_err());
+
+    let mut pipeline = compile_strict_yaml(
+        "fixture://parameter",
+        r#"
+version: 1
+name: canonical-parameter
+parameters:
+  foo:
+    type: string
+    default: value
+stages:
+  - id: test
+    name: Test
+    steps:
+      - process:
+          program: "true"
+"#,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    let definition = pipeline.parameters.remove("foo").unwrap();
+    pipeline
+        .parameters
+        .insert("x".repeat(16 * 1024 + 1), definition);
     assert!(pipeline.canonical_bytes().is_err());
     assert!(pipeline.semantic_digest().is_err());
 }

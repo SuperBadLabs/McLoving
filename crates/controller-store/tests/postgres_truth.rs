@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk,
-    ObjectKind, ObjectStatus, ReconciliationTrustPoolAuthorization, RetryDecision, Store,
-    StoreError, TerminalOutcome, WaitReason,
+    AgentReconciliationDisposition, ClaimRequest, DagDependency, DagNodeKind, DependencyCondition,
+    EffectClass, EffectStatus, NewBuild, NewDagBuild, NewDagNode, NewLogChunk, ObjectKind,
+    ObjectStatus, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
+    TerminalOutcome, WaitReason,
 };
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -20,6 +21,71 @@ async fn test_store() -> Option<Store> {
     let store = Store::new(pool);
     store.migrate().await.expect("install controller schema");
     Some(store)
+}
+
+fn dag_node(
+    node_key: &str,
+    kind: DagNodeKind,
+    dependencies: Vec<DagDependency>,
+    platform: &str,
+    capability: &str,
+) -> NewDagNode {
+    NewDagNode {
+        node_key: node_key.to_owned(),
+        kind,
+        dependencies,
+        required_capabilities: vec![capability.to_owned()],
+        required_platform: platform.to_owned(),
+        required_trust_pool: "trusted".to_owned(),
+        priority: 0,
+        execution_spec: json!({"program": "true", "node": node_key}),
+        fail_fast: false,
+        max_attempts: 1,
+    }
+}
+
+fn dag_claim(
+    organization_id: Uuid,
+    agent_id: &str,
+    platform: &str,
+    capability: &str,
+) -> ClaimRequest {
+    ClaimRequest {
+        organization_id,
+        scheduler_id: format!("scheduler-{agent_id}"),
+        agent_id: agent_id.to_owned(),
+        capabilities: vec![format!("platform:{platform}"), capability.to_owned()],
+        trust_pool: "trusted".to_owned(),
+        lease_seconds: 30,
+        fairness_seed: 0,
+    }
+}
+
+async fn run_dag_claim(store: &Store, claim: &mcloving_controller_store::ClaimedAttempt) {
+    assert!(
+        store
+            .accept_offer(
+                claim.organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("accept DAG offer")
+    );
+    assert!(
+        store
+            .mark_attempt_running(
+                claim.organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("mark DAG attempt running")
+    );
 }
 
 async fn unprivileged_store(admin: &Store) -> Store {
@@ -4627,4 +4693,1049 @@ async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
     .await;
     assert!(substituted_write.is_err());
     tenant.rollback().await.expect("roll back tenant test");
+}
+
+#[tokio::test]
+async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag",
+        )
+        .await
+        .expect("create DAG project");
+    let mut linux = dag_node("linux", DagNodeKind::Work, vec![], "linux", "build");
+    linux.max_attempts = 2;
+    let windows = dag_node("windows", DagNodeKind::Work, vec![], "windows", "build");
+    let join = dag_node(
+        "join",
+        DagNodeKind::Join,
+        vec![
+            DagDependency {
+                node_key: "linux".to_owned(),
+                condition: DependencyCondition::Succeeded,
+            },
+            DagDependency {
+                node_key: "windows".to_owned(),
+                condition: DependencyCondition::Succeeded,
+            },
+        ],
+        "linux",
+        "join",
+    );
+    let post = dag_node(
+        "post",
+        DagNodeKind::Post,
+        vec![DagDependency {
+            node_key: "join".to_owned(),
+            condition: DependencyCondition::Completed,
+        }],
+        "linux",
+        "post",
+    );
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "parallel-retry-join-post".to_owned(),
+            pipeline_digest: [0xd4; 32],
+            priority: 0,
+            nodes: vec![linux, windows, join, post],
+        })
+        .await
+        .expect("admit DAG");
+    assert!(admission.created);
+    let replay = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "parallel-retry-join-post".to_owned(),
+            pipeline_digest: [0xd4; 32],
+            priority: 0,
+            nodes: vec![
+                {
+                    let mut node = dag_node("linux", DagNodeKind::Work, vec![], "linux", "build");
+                    node.max_attempts = 2;
+                    node
+                },
+                dag_node("windows", DagNodeKind::Work, vec![], "windows", "build"),
+                dag_node(
+                    "join",
+                    DagNodeKind::Join,
+                    vec![
+                        DagDependency {
+                            node_key: "linux".to_owned(),
+                            condition: DependencyCondition::Succeeded,
+                        },
+                        DagDependency {
+                            node_key: "windows".to_owned(),
+                            condition: DependencyCondition::Succeeded,
+                        },
+                    ],
+                    "linux",
+                    "join",
+                ),
+                dag_node(
+                    "post",
+                    DagNodeKind::Post,
+                    vec![DagDependency {
+                        node_key: "join".to_owned(),
+                        condition: DependencyCondition::Completed,
+                    }],
+                    "linux",
+                    "post",
+                ),
+            ],
+        })
+        .await
+        .expect("replay exact DAG admission");
+    assert!(!replay.created);
+    assert_eq!(replay.build_id, admission.build_id);
+    let mut changed_linux = dag_node("linux", DagNodeKind::Work, vec![], "linux", "build");
+    changed_linux.max_attempts = 2;
+    changed_linux.execution_spec = json!({"program": "false", "node": "linux"});
+    let changed_replay = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "parallel-retry-join-post".to_owned(),
+            pipeline_digest: [0xd4; 32],
+            priority: 0,
+            nodes: vec![
+                changed_linux,
+                dag_node("windows", DagNodeKind::Work, vec![], "windows", "build"),
+                dag_node(
+                    "join",
+                    DagNodeKind::Join,
+                    vec![
+                        DagDependency {
+                            node_key: "linux".to_owned(),
+                            condition: DependencyCondition::Succeeded,
+                        },
+                        DagDependency {
+                            node_key: "windows".to_owned(),
+                            condition: DependencyCondition::Succeeded,
+                        },
+                    ],
+                    "linux",
+                    "join",
+                ),
+                dag_node(
+                    "post",
+                    DagNodeKind::Post,
+                    vec![DagDependency {
+                        node_key: "join".to_owned(),
+                        condition: DependencyCondition::Completed,
+                    }],
+                    "linux",
+                    "post",
+                ),
+            ],
+        })
+        .await;
+    assert!(matches!(changed_replay, Err(StoreError::InvalidDag(_))));
+
+    let linux_store = store.clone();
+    let windows_store = store.clone();
+    let linux_request = dag_claim(organization_id, "agent-linux", "linux", "build");
+    let windows_request = dag_claim(organization_id, "agent-windows", "windows", "build");
+    let (linux_claim, windows_claim) = tokio::join!(
+        linux_store.claim_next(&linux_request),
+        windows_store.claim_next(&windows_request)
+    );
+    let linux_claim = linux_claim
+        .expect("claim Linux root")
+        .expect("Linux root ready");
+    let windows_claim = windows_claim
+        .expect("claim Windows root")
+        .expect("Windows root ready");
+    assert_ne!(linux_claim.node_id, windows_claim.node_id);
+    run_dag_claim(&store, &linux_claim).await;
+    run_dag_claim(&store, &windows_claim).await;
+
+    let linux_terminal = store.finalize_attempt(
+        organization_id,
+        linux_claim.attempt_id,
+        linux_claim.fence,
+        linux_claim.restore_epoch,
+        &linux_claim.agent_id,
+        TerminalOutcome::Failed,
+        json!({"try": 1}),
+    );
+    let windows_terminal = store.finalize_attempt(
+        organization_id,
+        windows_claim.attempt_id,
+        windows_claim.fence,
+        windows_claim.restore_epoch,
+        &windows_claim.agent_id,
+        TerminalOutcome::Succeeded,
+        json!({"try": 1}),
+    );
+    let (linux_terminal, windows_terminal) = tokio::join!(linux_terminal, windows_terminal);
+    assert!(linux_terminal.expect("terminalize first Linux attempt"));
+    assert!(windows_terminal.expect("terminalize Windows attempt"));
+
+    let retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-linux-retry",
+            "linux",
+            "build",
+        ))
+        .await
+        .expect("claim Linux retry")
+        .expect("retry is ready");
+    assert_eq!(retry.node_id, linux_claim.node_id);
+    assert_ne!(retry.attempt_id, linux_claim.attempt_id);
+    run_dag_claim(&store, &retry).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                retry.attempt_id,
+                retry.fence,
+                retry.restore_epoch,
+                &retry.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"try": 2}),
+            )
+            .await
+            .expect("terminalize Linux retry")
+    );
+
+    let restarted = Store::new(store.pool().clone());
+    let join_claim = restarted
+        .claim_next(&dag_claim(organization_id, "agent-join", "linux", "join"))
+        .await
+        .expect("claim join after controller restart")
+        .expect("join becomes ready exactly once");
+    assert_eq!(join_claim.node_id, admission.nodes["join"].node_id);
+    run_dag_claim(&restarted, &join_claim).await;
+    let join_summary = json!({"join": "failed"});
+    assert!(
+        restarted
+            .finalize_attempt(
+                organization_id,
+                join_claim.attempt_id,
+                join_claim.fence,
+                join_claim.restore_epoch,
+                &join_claim.agent_id,
+                TerminalOutcome::Failed,
+                join_summary.clone(),
+            )
+            .await
+            .expect("terminalize join")
+    );
+    assert!(
+        restarted
+            .finalize_attempt(
+                organization_id,
+                join_claim.attempt_id,
+                join_claim.fence,
+                join_claim.restore_epoch,
+                &join_claim.agent_id,
+                TerminalOutcome::Failed,
+                join_summary,
+            )
+            .await
+            .expect("replay identical terminal outcome")
+    );
+    assert!(
+        !restarted
+            .finalize_attempt(
+                organization_id,
+                join_claim.attempt_id,
+                join_claim.fence,
+                join_claim.restore_epoch,
+                &join_claim.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"join": "conflicting"}),
+            )
+            .await
+            .expect("reject conflicting terminal outcome")
+    );
+
+    let post_claim = restarted
+        .claim_next(&dag_claim(organization_id, "agent-post", "linux", "post"))
+        .await
+        .expect("claim completion-only post")
+        .expect("post runs after failed join");
+    assert_eq!(post_claim.node_id, admission.nodes["post"].node_id);
+    run_dag_claim(&restarted, &post_claim).await;
+    assert!(
+        restarted
+            .finalize_attempt(
+                organization_id,
+                post_claim.attempt_id,
+                post_claim.fence,
+                post_claim.restore_epoch,
+                &post_claim.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"post": "complete"}),
+            )
+            .await
+            .expect("terminalize post")
+    );
+
+    let build_status: String = sqlx::query_scalar("SELECT status FROM builds WHERE id = $1")
+        .bind(admission.build_id)
+        .fetch_one(restarted.pool())
+        .await
+        .expect("read DAG build outcome");
+    assert_eq!(build_status, "failed");
+    let outcomes = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT node_key, logical_outcome
+         FROM nodes
+         WHERE build_id = $1
+         ORDER BY node_key",
+    )
+    .bind(admission.build_id)
+    .fetch_all(restarted.pool())
+    .await
+    .expect("read one logical outcome per node");
+    assert_eq!(
+        outcomes,
+        vec![
+            ("join".to_owned(), Some("failed".to_owned())),
+            ("linux".to_owned(), Some("succeeded".to_owned())),
+            ("post".to_owned(), Some("succeeded".to_owned())),
+            ("windows".to_owned(), Some("succeeded".to_owned())),
+        ]
+    );
+    let linux_attempts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM attempts WHERE node_id = $1")
+            .bind(linux_claim.node_id)
+            .fetch_one(restarted.pool())
+            .await
+            .expect("count bounded retry history");
+    assert_eq!(linux_attempts, 2);
+}
+
+#[tokio::test]
+async fn dag_retry_refuses_confirmed_non_idempotent_effects() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-non-idempotent",
+        )
+        .await
+        .expect("create DAG project");
+    let mut deploy = dag_node("deploy", DagNodeKind::Work, vec![], "linux", "deploy");
+    deploy.max_attempts = 2;
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "dag-non-idempotent".to_owned(),
+            pipeline_digest: [0xe4; 32],
+            priority: 0,
+            nodes: vec![deploy],
+        })
+        .await
+        .expect("admit DAG");
+    let claim = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-deploy",
+            "linux",
+            "deploy",
+        ))
+        .await
+        .expect("claim deploy")
+        .expect("deploy ready");
+    run_dag_claim(&store, &claim).await;
+    let payload = json!({"release": "r1"});
+    for status in [
+        EffectStatus::Prepared,
+        EffectStatus::Applied,
+        EffectStatus::Confirmed,
+    ] {
+        assert!(
+            store
+                .checkpoint_effect(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &claim.agent_id,
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    status,
+                    &payload,
+                )
+                .await
+                .expect("checkpoint non-idempotent effect")
+        );
+    }
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                TerminalOutcome::Failed,
+                json!({"failure": "after confirmed effect"}),
+            )
+            .await
+            .expect("terminalize deploy")
+    );
+
+    let attempts = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM attempts WHERE node_id = $1")
+        .bind(claim.node_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("count DAG attempts");
+    assert_eq!(attempts, 1);
+    let outcome =
+        sqlx::query_scalar::<_, Option<String>>("SELECT logical_outcome FROM nodes WHERE id = $1")
+            .bind(admission.nodes["deploy"].node_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("read deploy outcome");
+    assert_eq!(outcome.as_deref(), Some("failed"));
+    assert!(
+        store
+            .claim_next(&dag_claim(
+                organization_id,
+                "agent-retry",
+                "linux",
+                "deploy",
+            ))
+            .await
+            .expect("check retry absence")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn dag_reconciliation_required_pauses_other_ready_work() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-reconciliation",
+        )
+        .await
+        .expect("create DAG reconciliation project");
+    let mut uncertain = dag_node("uncertain", DagNodeKind::Work, vec![], "linux", "build");
+    uncertain.priority = 20;
+    uncertain.max_attempts = 2;
+    let mut peer = dag_node("peer", DagNodeKind::Work, vec![], "linux", "build");
+    peer.priority = 10;
+    let mut after = dag_node("after", DagNodeKind::Work, vec![], "linux", "build");
+    after.priority = 0;
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "reconciliation-pauses-dag".to_owned(),
+            pipeline_digest: [0xd5; 32],
+            priority: 0,
+            nodes: vec![uncertain, peer, after],
+        })
+        .await
+        .expect("admit reconciliation DAG");
+
+    let first = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-uncertain",
+            "linux",
+            "build",
+        ))
+        .await
+        .expect("claim uncertain node")
+        .expect("uncertain node ready");
+    let second = store
+        .claim_next(&dag_claim(organization_id, "agent-peer", "linux", "build"))
+        .await
+        .expect("claim peer node")
+        .expect("peer node ready");
+    run_dag_claim(&store, &first).await;
+    run_dag_claim(&store, &second).await;
+    assert_eq!(first.node_id, admission.nodes["uncertain"].node_id);
+    assert_eq!(second.node_id, admission.nodes["peer"].node_id);
+
+    sqlx::query(
+        "UPDATE attempts
+         SET status = 'reconciliation_required',
+             lease_owner = NULL,
+             lease_expires_at = NULL
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(first.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("mark attempt reconciliation required");
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'reconciliation_required'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(first.node_id)
+    .execute(store.pool())
+    .await
+    .expect("mark node reconciliation required");
+    sqlx::query(
+        "UPDATE builds
+         SET status = 'reconciliation_required'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .execute(store.pool())
+    .await
+    .expect("pause build for reconciliation");
+
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                second.attempt_id,
+                second.fence,
+                second.restore_epoch,
+                &second.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"peer": "complete"}),
+            )
+            .await
+            .expect("terminalize peer while reconciliation is pending")
+    );
+
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM builds WHERE organization_id = $1 AND id = $2")
+            .bind(organization_id)
+            .bind(admission.build_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("read paused build");
+    assert_eq!(status, "reconciliation_required");
+    assert!(
+        store
+            .claim_next(&dag_claim(organization_id, "agent-after", "linux", "build",))
+            .await
+            .expect("poll paused DAG")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .explain_wait(organization_id, &["linux".to_owned()], "build")
+            .await
+            .expect("explain paused DAG"),
+        WaitReason::NoQueuedWork
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                "operator-retry",
+                TerminalOutcome::Failed,
+                json!({"resolution": "safe to retry"}),
+            )
+            .await
+            .expect("schedule retry after reconciliation")
+    );
+    let retry = store
+        .claim_next(&dag_claim(organization_id, "agent-retry", "linux", "build"))
+        .await
+        .expect("claim reconciliation retry")
+        .expect("reconciliation retry is not stranded");
+    assert_eq!(retry.node_id, first.node_id);
+    assert_ne!(retry.attempt_id, first.attempt_id);
+}
+
+#[tokio::test]
+async fn dag_fail_fast_cancels_active_skips_queued_and_still_runs_post() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "fail-fast",
+        )
+        .await
+        .expect("create fail-fast project");
+    let mut fast = dag_node("fast", DagNodeKind::Work, vec![], "linux", "fast");
+    fast.fail_fast = true;
+    let slow = dag_node("slow", DagNodeKind::Work, vec![], "linux", "slow");
+    let queued = dag_node("queued", DagNodeKind::Work, vec![], "linux", "queued");
+    let post = dag_node(
+        "post",
+        DagNodeKind::Post,
+        vec![
+            DagDependency {
+                node_key: "fast".to_owned(),
+                condition: DependencyCondition::Completed,
+            },
+            DagDependency {
+                node_key: "slow".to_owned(),
+                condition: DependencyCondition::Completed,
+            },
+            DagDependency {
+                node_key: "queued".to_owned(),
+                condition: DependencyCondition::Completed,
+            },
+        ],
+        "linux",
+        "post",
+    );
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "fail-fast".to_owned(),
+            pipeline_digest: [0xf4; 32],
+            priority: 0,
+            nodes: vec![fast, slow, queued, post],
+        })
+        .await
+        .expect("admit fail-fast DAG");
+    let fast_claim = store
+        .claim_next(&dag_claim(organization_id, "agent-fast", "linux", "fast"))
+        .await
+        .expect("claim fail-fast node")
+        .expect("fail-fast node ready");
+    let slow_claim = store
+        .claim_next(&dag_claim(organization_id, "agent-slow", "linux", "slow"))
+        .await
+        .expect("claim slow peer")
+        .expect("slow peer ready");
+    run_dag_claim(&store, &fast_claim).await;
+    run_dag_claim(&store, &slow_claim).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                fast_claim.attempt_id,
+                fast_claim.fence,
+                fast_claim.restore_epoch,
+                &fast_claim.agent_id,
+                TerminalOutcome::Failed,
+                json!({"failure": "fail-fast"}),
+            )
+            .await
+            .expect("terminalize fail-fast node")
+    );
+    assert_eq!(
+        store
+            .renew_attempt_lease(
+                organization_id,
+                slow_claim.attempt_id,
+                slow_claim.fence,
+                slow_claim.restore_epoch,
+                &slow_claim.agent_id,
+                30,
+            )
+            .await
+            .expect("poll peer cancellation"),
+        Some(true)
+    );
+    let queued_status: (String, Option<String>) =
+        sqlx::query_as("SELECT status, logical_outcome FROM nodes WHERE id = $1")
+            .bind(admission.nodes["queued"].node_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("read skipped queued peer");
+    assert_eq!(
+        queued_status,
+        ("skipped".to_owned(), Some("skipped".to_owned()))
+    );
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE id = $1",
+    )
+    .bind(slow_claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("simulate fail-fast peer crash");
+    let restarted = Store::new(store.pool().clone());
+    assert!(
+        restarted
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("recover expired fail-fast cancellation")
+    );
+    let slow_outcome: (String, Option<String>) =
+        sqlx::query_as("SELECT status, logical_outcome FROM nodes WHERE id = $1")
+            .bind(slow_claim.node_id)
+            .fetch_one(restarted.pool())
+            .await
+            .expect("read crash-recovered peer");
+    assert_eq!(
+        slow_outcome,
+        ("aborted".to_owned(), Some("aborted".to_owned()))
+    );
+    let post_claim = restarted
+        .claim_next(&dag_claim(organization_id, "agent-post", "linux", "post"))
+        .await
+        .expect("claim fail-fast post")
+        .expect("post waits for all completion dependencies");
+    run_dag_claim(&restarted, &post_claim).await;
+    assert!(
+        restarted
+            .finalize_attempt(
+                organization_id,
+                post_claim.attempt_id,
+                post_claim.fence,
+                post_claim.restore_epoch,
+                &post_claim.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"post": "ran"}),
+            )
+            .await
+            .expect("finish fail-fast post")
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM builds WHERE id = $1")
+        .bind(admission.build_id)
+        .fetch_one(restarted.pool())
+        .await
+        .expect("read fail-fast build");
+    assert_eq!(status, "failed");
+}
+
+#[tokio::test]
+async fn dag_fail_fast_cooperative_cancellation_and_retry_race_converge() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "fail-fast-cooperative",
+        )
+        .await
+        .expect("create cooperative fail-fast project");
+    assert!(
+        store
+            .open_agent_session("agent-cooperative", "trusted", 1, 0, &[], &[])
+            .await
+            .expect("open cooperative agent session")
+    );
+
+    let mut fast = dag_node("fast", DagNodeKind::Work, vec![], "linux", "fast");
+    fast.fail_fast = true;
+    fast.priority = 30;
+    let mut cooperative = dag_node(
+        "cooperative",
+        DagNodeKind::Work,
+        vec![],
+        "linux",
+        "cooperative",
+    );
+    cooperative.priority = 20;
+    let mut retry_race = dag_node(
+        "retry-race",
+        DagNodeKind::Work,
+        vec![],
+        "linux",
+        "retry-race",
+    );
+    retry_race.priority = 10;
+    retry_race.max_attempts = 2;
+    let post = dag_node(
+        "post",
+        DagNodeKind::Post,
+        vec![
+            DagDependency {
+                node_key: "fast".to_owned(),
+                condition: DependencyCondition::Completed,
+            },
+            DagDependency {
+                node_key: "cooperative".to_owned(),
+                condition: DependencyCondition::Completed,
+            },
+            DagDependency {
+                node_key: "retry-race".to_owned(),
+                condition: DependencyCondition::Completed,
+            },
+        ],
+        "linux",
+        "post",
+    );
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "fail-fast-cooperative".to_owned(),
+            pipeline_digest: [0xf5; 32],
+            priority: 0,
+            nodes: vec![fast, cooperative, retry_race, post],
+        })
+        .await
+        .expect("admit cooperative fail-fast DAG");
+
+    let fast_claim = store
+        .claim_next(&dag_claim(organization_id, "agent-fast", "linux", "fast"))
+        .await
+        .expect("claim fail-fast node")
+        .expect("fail-fast node ready");
+    let cooperative_claim = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-cooperative",
+            "linux",
+            "cooperative",
+        ))
+        .await
+        .expect("claim cooperative peer")
+        .expect("cooperative peer ready");
+    let race_claim = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-race",
+            "linux",
+            "retry-race",
+        ))
+        .await
+        .expect("claim retry-race peer")
+        .expect("retry-race peer ready");
+    run_dag_claim(&store, &fast_claim).await;
+    run_dag_claim(&store, &cooperative_claim).await;
+    run_dag_claim(&store, &race_claim).await;
+
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                fast_claim.attempt_id,
+                fast_claim.fence,
+                fast_claim.restore_epoch,
+                &fast_claim.agent_id,
+                TerminalOutcome::Failed,
+                json!({"failure": "fail-fast"}),
+            )
+            .await
+            .expect("terminalize fail-fast node")
+    );
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                race_claim.attempt_id,
+                race_claim.fence,
+                race_claim.restore_epoch,
+                &race_claim.agent_id,
+                TerminalOutcome::Failed,
+                json!({"failure": "raced cancellation"}),
+            )
+            .await
+            .expect("terminalize retry race")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM attempts WHERE node_id = $1")
+            .bind(race_claim.node_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("count retry-race attempts"),
+        1
+    );
+
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                organization_id,
+                attempt_id: cooperative_claim.attempt_id,
+                fence: cooperative_claim.fence,
+                restore_epoch: cooperative_claim.restore_epoch,
+                agent_id: &cooperative_claim.agent_id,
+                session_epoch: 1,
+                outcome: AgentCancellationOutcome::Terminated,
+            })
+            .await
+            .expect("complete cooperative DAG cancellation"),
+        AgentCancellationDisposition::Completed
+    );
+    let cooperative_outcome: (String, Option<String>) =
+        sqlx::query_as("SELECT status, logical_outcome FROM nodes WHERE id = $1")
+            .bind(cooperative_claim.node_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("read cooperative node outcome");
+    assert_eq!(
+        cooperative_outcome,
+        ("aborted".to_owned(), Some("aborted".to_owned()))
+    );
+
+    let post_claim = store
+        .claim_next(&dag_claim(organization_id, "agent-post", "linux", "post"))
+        .await
+        .expect("claim cooperative fail-fast post")
+        .expect("post remains schedulable");
+    run_dag_claim(&store, &post_claim).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                post_claim.attempt_id,
+                post_claim.fence,
+                post_claim.restore_epoch,
+                &post_claim.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"post": "ran"}),
+            )
+            .await
+            .expect("finish cooperative fail-fast post")
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM builds WHERE id = $1")
+        .bind(admission.build_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("read cooperative fail-fast build");
+    assert_eq!(status, "failed");
+}
+
+#[tokio::test]
+async fn dag_owner_cancellation_is_durable_idempotent_and_monotonic() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "cancel-dag",
+        )
+        .await
+        .expect("create cancellation project");
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "cancel-dag".to_owned(),
+            pipeline_digest: [0xca; 32],
+            priority: 0,
+            nodes: vec![
+                dag_node("active", DagNodeKind::Work, vec![], "linux", "active"),
+                dag_node("queued", DagNodeKind::Work, vec![], "linux", "queued"),
+            ],
+        })
+        .await
+        .expect("admit cancellation DAG");
+    let active = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-active",
+            "linux",
+            "active",
+        ))
+        .await
+        .expect("claim active cancellation node")
+        .expect("active node ready");
+    run_dag_claim(&store, &active).await;
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("request DAG cancellation")
+    );
+    assert!(
+        !store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("repeat DAG cancellation")
+    );
+    assert_eq!(
+        store
+            .renew_attempt_lease(
+                organization_id,
+                active.attempt_id,
+                active.fence,
+                active.restore_epoch,
+                &active.agent_id,
+                30,
+            )
+            .await
+            .expect("poll owner cancellation"),
+        Some(true)
+    );
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                active.attempt_id,
+                active.fence,
+                active.restore_epoch,
+                &active.agent_id,
+                TerminalOutcome::Aborted,
+                json!({"termination": "cancelled"}),
+            )
+            .await
+            .expect("terminalize cancelled active node")
+    );
+    let rows = sqlx::query_as::<_, (String, String, Option<String>)>(
+        "SELECT node_key, status, logical_outcome
+         FROM nodes
+         WHERE build_id = $1
+         ORDER BY node_key",
+    )
+    .bind(admission.build_id)
+    .fetch_all(store.pool())
+    .await
+    .expect("read cancelled DAG nodes");
+    assert_eq!(
+        rows,
+        vec![
+            (
+                "active".to_owned(),
+                "aborted".to_owned(),
+                Some("aborted".to_owned())
+            ),
+            (
+                "queued".to_owned(),
+                "aborted".to_owned(),
+                Some("aborted".to_owned())
+            ),
+        ]
+    );
+    let build_status: String = sqlx::query_scalar("SELECT status FROM builds WHERE id = $1")
+        .bind(admission.build_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("read cancelled build");
+    assert_eq!(build_status, "aborted");
 }
