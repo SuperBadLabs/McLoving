@@ -132,14 +132,16 @@ pub(super) async fn poll_and_run_one(
 ) -> Result<(), AgentError> {
     let offer = tokio::select! {
         () = stop.cancelled() => return Ok(()),
-        response = client.poll_work(WorkPoll {
-            agent_id: config.agent_id.clone(),
-            session_epoch,
-            organization_id: config.organization_id.clone(),
-            lease_seconds: config.lease_seconds,
-        }) => response?,
-    }
-    .into_inner();
+        response = poll_rpc(
+            Duration::from_secs(u64::from(config.lease_seconds)),
+            client.poll_work(WorkPoll {
+                agent_id: config.agent_id.clone(),
+                session_epoch,
+                organization_id: config.organization_id.clone(),
+                lease_seconds: config.lease_seconds,
+            }),
+        ) => response?,
+    };
     ensure_session(offer.session_epoch, session_epoch)?;
     let Some(assignment) = offer.assignment else {
         return Ok(());
@@ -820,6 +822,17 @@ async fn lease_deadline_rpc<T>(
     tokio::time::timeout_at(deadline, operation)
         .await
         .map_err(|_| AgentError::LeaseRenewalTimeout)?
+        .map(tonic::Response::into_inner)
+        .map_err(AgentError::from)
+}
+
+async fn poll_rpc<T>(
+    lease_window: Duration,
+    operation: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+) -> Result<T, AgentError> {
+    tokio::time::timeout(lease_rpc_budget(lease_window), operation)
+        .await
+        .map_err(|_| AgentError::PollTimeout)?
         .map(tonic::Response::into_inner)
         .map_err(AgentError::from)
 }
@@ -1629,6 +1642,16 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(AgentError::LeaseRenewalTimeout)));
+    }
+
+    #[tokio::test]
+    async fn idle_work_poll_is_bounded() {
+        let result = poll_rpc::<()>(
+            Duration::from_millis(1),
+            std::future::pending::<Result<tonic::Response<()>, tonic::Status>>(),
+        )
+        .await;
+        assert!(matches!(result, Err(AgentError::PollTimeout)));
     }
 
     #[test]

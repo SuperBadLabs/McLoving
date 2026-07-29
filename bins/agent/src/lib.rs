@@ -93,6 +93,8 @@ pub enum AgentError {
     ProbeTimeout,
     #[error("lease renewal RPC exceeded its safe deadline")]
     LeaseRenewalTimeout,
+    #[error("work poll RPC exceeded its bounded deadline")]
+    PollTimeout,
     #[error("agent service was stopped")]
     Stopped,
     #[error("journal path cannot be represented in the wire protocol")]
