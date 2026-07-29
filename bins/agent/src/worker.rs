@@ -2017,13 +2017,10 @@ mod tests {
 
     #[cfg(windows)]
     fn create_windows_junction(junction: &Path, target: &Path) {
-        let command = format!(
-            "mklink /J \"{}\" \"{}\"",
-            junction.display(),
-            target.display()
-        );
         let status = std::process::Command::new("cmd.exe")
-            .args(["/D", "/S", "/C", &command])
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(junction)
+            .arg(target)
             .status()
             .unwrap();
         assert!(
