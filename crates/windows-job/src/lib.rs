@@ -19,8 +19,9 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
@@ -134,6 +135,29 @@ impl Job {
             Err(JobError::last("TerminateJobObject"))
         } else {
             Ok(())
+        }
+    }
+
+    /// Returns the number of processes that remain members of the job.
+    pub fn active_processes(&self) -> Result<u32, JobError> {
+        // SAFETY: zero is the documented initial state for this POD structure.
+        let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+        // SAFETY: handle is live and the information class, pointer, and size
+        // all describe JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.
+        let queried = unsafe {
+            QueryInformationJobObject(
+                self.handle,
+                JobObjectBasicAccountingInformation,
+                (&raw mut accounting).cast(),
+                u32::try_from(size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>())
+                    .expect("Win32 structure size fits u32"),
+                std::ptr::null_mut(),
+            )
+        };
+        if queried == 0 {
+            Err(JobError::last("QueryInformationJobObject"))
+        } else {
+            Ok(accounting.ActiveProcesses)
         }
     }
 }

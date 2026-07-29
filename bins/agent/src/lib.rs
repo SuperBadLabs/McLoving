@@ -132,13 +132,13 @@ pub async fn run_until_stopped(
 pub async fn probe_once(config: &AgentConfig) -> Result<SessionReceipt, AgentError> {
     let stop = CancellationToken::new();
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
-    send_reconciliation(config, &mut client, receipt.session_epoch).await?;
+    send_reconciliation(config, &mut client, receipt.session_epoch, stop).await?;
     Ok(receipt)
 }
 
 async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<(), AgentError> {
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
-    send_reconciliation(config, &mut client, receipt.session_epoch).await?;
+    send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
     let mut tick = interval(RECONCILIATION_INTERVAL);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     tick.tick().await;
@@ -146,7 +146,12 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
             _ = tick.tick() => {
-                send_reconciliation(config, &mut client, receipt.session_epoch).await?;
+                send_reconciliation(
+                    config,
+                    &mut client,
+                    receipt.session_epoch,
+                    stop.clone(),
+                ).await?;
             }
         }
     }
@@ -171,24 +176,26 @@ async fn open_session(
         result = endpoint.connect() => result?,
     };
     let mut client = AgentControlClient::new(channel);
-    let response = client
-        .open_session(OpenSessionRequest {
-            agent_id: config.agent_id.clone(),
-            session_epoch,
-            protocol: Some(ProtocolOffer {
-                major: u32::from(PROTOCOL_MAJOR),
-                minimum_minor: u32::from(PROTOCOL_MINOR),
-                maximum_minor: u32::from(PROTOCOL_MINOR),
-                features: vec!["journal-v1".to_owned(), platform_feature().to_owned()],
-            }),
-            trust_pool: config.trust_pool.clone(),
-            capabilities: vec![
-                std::env::consts::OS.to_owned(),
-                std::env::consts::ARCH.to_owned(),
-            ],
-        })
-        .await?
-        .into_inner();
+    let request = OpenSessionRequest {
+        agent_id: config.agent_id.clone(),
+        session_epoch,
+        protocol: Some(ProtocolOffer {
+            major: u32::from(PROTOCOL_MAJOR),
+            minimum_minor: u32::from(PROTOCOL_MINOR),
+            maximum_minor: u32::from(PROTOCOL_MINOR),
+            features: vec!["journal-v1".to_owned(), platform_feature().to_owned()],
+        }),
+        trust_pool: config.trust_pool.clone(),
+        capabilities: vec![
+            std::env::consts::OS.to_owned(),
+            std::env::consts::ARCH.to_owned(),
+        ],
+    };
+    let response = tokio::select! {
+        () = stop.cancelled() => return Err(AgentError::Stopped),
+        response = client.open_session(request) => response?,
+    }
+    .into_inner();
     if response.session_epoch != session_epoch {
         return Err(AgentError::StaleSession);
     }
@@ -208,12 +215,15 @@ async fn send_reconciliation(
     config: &AgentConfig,
     client: &mut AgentControlClient<tonic::transport::Channel>,
     session_epoch: u64,
+    stop: CancellationToken,
 ) -> Result<(), AgentError> {
     let report = Journal::open(&config.journal_path)?.reconcile()?;
-    let directive = client
-        .reconcile(wire_report(config, session_epoch, &report)?)
-        .await?
-        .into_inner();
+    let request = wire_report(config, session_epoch, &report)?;
+    let directive = tokio::select! {
+        () = stop.cancelled() => return Err(AgentError::Stopped),
+        response = client.reconcile(request) => response?,
+    }
+    .into_inner();
     if directive.session_epoch != session_epoch {
         return Err(AgentError::StaleSession);
     }

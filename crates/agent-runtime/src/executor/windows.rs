@@ -100,8 +100,12 @@ where
         }
     };
 
-    // Dropping the job after the leader exits is an intentional final sweep:
-    // any descendant that outlived the leader is killed before logs finalize.
+    // A leader may exit while descendants still hold inherited spool handles.
+    // Terminate the complete job and observe zero active processes before
+    // syncing or hashing either log.
+    job.terminate(TERMINATED_EXIT_CODE)
+        .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
+    wait_for_empty_job(&job).await?;
     drop(job);
     sync_file(&stdout_path).await?;
     sync_file(&stderr_path).await?;
@@ -159,6 +163,24 @@ async fn terminate_job(job: &Job, child: &mut Child) -> Result<ExitStatus, Execu
             return Err(ExecutionError::WindowsJob(
                 "terminated process did not become waitable within five seconds".to_owned(),
             ));
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn wait_for_empty_job(job: &Job) -> Result<(), ExecutionError> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let active = job
+            .active_processes()
+            .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
+        if active == 0 {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(ExecutionError::WindowsJob(format!(
+                "terminated Job Object still contains {active} process(es)"
+            )));
         }
         sleep(Duration::from_millis(10)).await;
     }
