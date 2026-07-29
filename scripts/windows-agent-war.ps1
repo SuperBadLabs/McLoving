@@ -50,6 +50,35 @@ function Write-CrashDiagnostics {
   catch {
     Write-Output "sc-query-error: $($_.Exception.Message)"
   }
+  try {
+    $service = Get-CimInstance Win32_Service -Filter "Name='$Name'"
+    $processes = @(Get-CimInstance Win32_Process)
+    $processIds = [System.Collections.Generic.HashSet[uint32]]::new()
+    [void]$processIds.Add([uint32]$service.ProcessId)
+    for ($depth = 0; $depth -lt 16; $depth++) {
+      $added = $false
+      foreach ($process in $processes) {
+        if ($processIds.Contains([uint32]$process.ParentProcessId) -and
+            $processIds.Add([uint32]$process.ProcessId)) {
+          $added = $true
+        }
+      }
+      if (-not $added) {
+        break
+      }
+    }
+    foreach ($process in $processes) {
+      if ($processIds.Contains([uint32]$process.ProcessId)) {
+        Write-Output (
+          "process: pid=$($process.ProcessId) ppid=$($process.ParentProcessId) " +
+          "name=$($process.Name) command=$($process.CommandLine)"
+        )
+      }
+    }
+  }
+  catch {
+    Write-Output "process-tree-error: $($_.Exception.Message)"
+  }
   if (Test-Path $Journal) {
     try {
       & $Agent journal-check $Journal 2>&1 |
@@ -179,6 +208,7 @@ Start-Sleep -Seconds 300
 
   @'
 $childPidPath = Join-Path $PSScriptRoot "child.pid"
+$PID | Set-Content -LiteralPath (Join-Path $PSScriptRoot "parent.pid") -Encoding ascii
 $child = Start-Process powershell.exe -PassThru -ArgumentList @(
   "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 300"
 )
