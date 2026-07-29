@@ -95,7 +95,9 @@ eligible only after every referencing tenant has an expired retention record
 and no tenant has an active legal hold on its digest. Retention deadlines can
 be extended but never shortened.
 Legal holds have stable keys and immutable reasons; release timestamps preserve
-their audit history, and a released hold cannot be silently reactivated.
+their audit history, and a released hold cannot be silently reactivated. A
+database trigger enforces the immutable identity, reason, creation time, and
+one-way release transition even when a writer bypasses the Rust API.
 Eligibility inspection is diagnostic only. Physical deletion requires a
 durable tokenized claim under a digest-scoped transaction lock. While claimed,
 new references, retention extensions, and legal holds lose to that same lock.

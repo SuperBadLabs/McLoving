@@ -85,6 +85,37 @@ CREATE INDEX legal_holds_active_idx
     ON legal_holds (organization_id, object_digest, hold_key)
     WHERE released_at IS NULL;
 
+CREATE FUNCTION mcloving_enforce_legal_hold_immutability()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.organization_id IS DISTINCT FROM OLD.organization_id
+       OR NEW.object_digest IS DISTINCT FROM OLD.object_digest
+       OR NEW.hold_key IS DISTINCT FROM OLD.hold_key
+       OR NEW.reason IS DISTINCT FROM OLD.reason
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR (
+           OLD.released_at IS NOT NULL
+           AND NEW.released_at IS DISTINCT FROM OLD.released_at
+       )
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving legal hold identity is immutable';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_enforce_legal_hold_immutability() FROM PUBLIC;
+
+CREATE TRIGGER legal_holds_immutability
+BEFORE UPDATE ON legal_holds
+FOR EACH ROW EXECUTE FUNCTION mcloving_enforce_legal_hold_immutability();
+
 CREATE TABLE object_deletion_claims (
     object_digest bytea PRIMARY KEY CHECK (octet_length(object_digest) = 32),
     claim_token uuid NOT NULL UNIQUE,

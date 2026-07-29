@@ -2414,6 +2414,30 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .await
             .expect("repeat release is idempotent")
     );
+    let changed_reason = sqlx::query(
+        "UPDATE legal_holds
+         SET reason = 'rewritten audit history'
+         WHERE organization_id = $1
+           AND object_digest = $2
+           AND hold_key = 'case-2026-07'",
+    )
+    .bind(organization_id)
+    .bind(digest.as_slice())
+    .execute(store.pool())
+    .await;
+    assert!(changed_reason.is_err());
+    let reactivated_hold = sqlx::query(
+        "UPDATE legal_holds
+         SET released_at = NULL
+         WHERE organization_id = $1
+           AND object_digest = $2
+           AND hold_key = 'case-2026-07'",
+    )
+    .bind(organization_id)
+    .bind(digest.as_slice())
+    .execute(store.pool())
+    .await;
+    assert!(reactivated_hold.is_err());
     assert_eq!(
         store
             .objects_globally_eligible_for_deletion(10)
