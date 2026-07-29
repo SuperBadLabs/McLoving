@@ -2262,7 +2262,9 @@ impl Store {
     /// Accepts exactly one terminal publication for the current attempt fence.
     ///
     /// The attempt, node, build, event, and outbox mutation share a transaction.
-    /// A stale or losing concurrent publisher observes `false`.
+    /// A stale or losing concurrent publisher observes `false`. If the current
+    /// fence has an uncertain effect, normal terminal publication is rejected
+    /// and the attempt is atomically routed to explicit reconciliation.
     #[allow(clippy::too_many_arguments)]
     pub async fn finalize_attempt(
         &self,
@@ -2276,13 +2278,12 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
-        let row = sqlx::query_as::<_, (Uuid, Uuid)>(
-            "UPDATE attempts AS a
-             SET status = $6,
-                 terminal_summary = $7,
-                 completed_at = clock_timestamp(),
-                 lease_expires_at = NULL
-             FROM nodes AS n
+        let authority = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "SELECT n.id, n.build_id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id
+              AND n.organization_id = a.organization_id
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
@@ -2295,25 +2296,98 @@ impl Store {
                    FROM controller_metadata
                    WHERE singleton
                )
-               AND n.id = a.node_id
-               AND n.organization_id = a.organization_id
-             RETURNING n.id, n.build_id",
+             FOR UPDATE OF a, n",
         )
         .bind(attempt_id)
         .bind(organization_id)
         .bind(fence)
         .bind(restore_epoch)
         .bind(agent_id)
-        .bind(outcome.as_str())
-        .bind(&summary)
         .fetch_optional(&mut *tx)
         .await?;
 
-        let Some((node_id, build_id)) = row else {
+        let Some((node_id, build_id)) = authority else {
             tx.rollback().await?;
             return Ok(false);
         };
 
+        let uncertain_effects = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND status = 'uncertain'",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        if uncertain_effects > 0 {
+            sqlx::query(
+                "UPDATE attempts
+                 SET status = 'reconciliation_required',
+                     lease_owner = NULL,
+                     lease_expires_at = NULL
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(attempt_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'reconciliation_required'
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(node_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE builds
+                 SET status = 'reconciliation_required', completed_at = NULL
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(build_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            append_event_and_outbox(
+                &mut tx,
+                organization_id,
+                build_id,
+                "attempt.terminal_reconciliation_required",
+                json!({
+                    "attempt_id": attempt_id,
+                    "node_id": node_id,
+                    "fence": fence,
+                    "restore_epoch": restore_epoch,
+                    "agent_id": agent_id,
+                    "attempted_outcome": outcome.as_str(),
+                    "uncertain_effects": uncertain_effects,
+                }),
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "UPDATE attempts
+             SET status = $3,
+                 terminal_summary = $4,
+                 completed_at = clock_timestamp(),
+                 lease_expires_at = NULL
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(attempt_id)
+        .bind(organization_id)
+        .bind(outcome.as_str())
+        .bind(&summary)
+        .execute(&mut *tx)
+        .await?;
         sqlx::query(
             "UPDATE nodes
              SET status = $3

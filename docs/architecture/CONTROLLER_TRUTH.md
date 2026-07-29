@@ -13,7 +13,11 @@ Terminal publication is accepted only for the current attempt fence and
 restore epoch, its exact lease owner, an accepted/running state, and an
 unexpired lease. Attempt, node, build, event, and outbox mutations commit
 together. Unleased, expired, concurrent, or stale publishers receive a
-negative result.
+negative result. If the current fence contains an uncertain effect, ordinary
+terminal publication instead atomically clears the lease, moves the attempt,
+node, and build to `reconciliation_required`, and emits its durable audit
+event/outbox record. Only the explicit reconciliation path may then confirm
+the exact effect and close the attempt.
 
 Retries never rewrite an attempt. A failed or reconciliation-required attempt
 may create exactly one child attempt with an incremented ordinal and an
@@ -103,7 +107,8 @@ tenant context.
 The real-PostgreSQL gate proves:
 
 - atomic and idempotent admission;
-- one winner from 16 concurrent terminal publishers;
+- one winner from 16 concurrent terminal publishers, with uncertain effects
+  routed to explicit reconciliation rather than terminalized;
 - capability-filtered scheduling and stable wait diagnostics;
 - accepted-lease expiry, safe requeue and fence increment, uncertain-effect
   reconciliation routing, and stale-result rejection;

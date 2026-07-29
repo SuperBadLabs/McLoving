@@ -1753,7 +1753,65 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
     assert_eq!(uncertain[0].status, EffectStatus::Uncertain);
     assert_eq!(uncertain[0].payload, payload);
     assert!(
-        store
+        !store
+            .finalize_attempt(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "effect-agent",
+                TerminalOutcome::Succeeded,
+                json!({"result": "must reconcile"}),
+            )
+            .await
+            .expect("reject ordinary terminal publication with uncertain effect")
+    );
+    let routed_status: (String, Option<String>, String, String) = sqlx::query_as(
+        "SELECT a.status, a.lease_owner, n.status, b.status
+         FROM attempts AS a
+         JOIN nodes AS n
+           ON n.organization_id = a.organization_id
+          AND n.id = a.node_id
+         JOIN builds AS b
+           ON b.organization_id = n.organization_id
+          AND b.id = n.build_id
+         WHERE a.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read reconciliation route");
+    assert_eq!(
+        routed_status,
+        (
+            "reconciliation_required".into(),
+            None,
+            "reconciliation_required".into(),
+            "reconciliation_required".into(),
+        )
+    );
+    let route_publications: (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*)
+            FROM build_events
+            WHERE organization_id = $1
+              AND build_id = $2
+              AND kind = 'attempt.terminal_reconciliation_required'),
+           (SELECT count(*)
+            FROM outbox
+            WHERE organization_id = $1
+              AND aggregate_id = $2
+              AND topic = 'attempt.terminal_reconciliation_required')",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count reconciliation route publications");
+    assert_eq!(route_publications, (1, 1));
+    assert!(
+        !store
             .checkpoint_effect(
                 organization_id,
                 admission.attempt_id,
@@ -1766,7 +1824,20 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
                 &payload,
             )
             .await
-            .expect("confirm reconciled effect")
+            .expect("ordinary checkpoint authority stays fenced")
+    );
+    assert!(
+        store
+            .confirm_uncertain_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("confirm uncertain effect through reconciliation")
     );
     assert!(
         store
@@ -1774,6 +1845,19 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             .await
             .expect("list after reconciliation")
             .is_empty()
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "effect-operator",
+                TerminalOutcome::Succeeded,
+                json!({"result": "reconciled"}),
+            )
+            .await
+            .expect("publish reconciled terminal outcome")
     );
 }
 
