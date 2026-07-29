@@ -448,6 +448,19 @@ fn environment_block(
     if let Some((normalized, key, value)) = drive_current_directory(current_directory) {
         entries.insert(normalized, (key, value));
     }
+    // Machine-only environment blocks can point TEMP/TMP at a service-owned
+    // directory that the workload token cannot use. Keep those paths isolated
+    // to the already-created per-attempt workspace instead of inheriting the
+    // service account's user-profile paths.
+    for key in ["TEMP", "TMP"] {
+        entries.insert(
+            key.to_owned(),
+            (
+                OsString::from(key),
+                current_directory.as_os_str().to_owned(),
+            ),
+        );
+    }
     for (key, value) in overrides {
         if key.is_empty()
             || key
@@ -719,5 +732,7 @@ mod tests {
         assert!(!text.to_uppercase().contains("USERNAME="));
         assert!(text.contains("EXPLICIT_VALUE=allowed"));
         assert!(text.contains("=D:=D:\\agent\\work"));
+        assert!(text.contains("TEMP=D:\\agent\\work"));
+        assert!(text.contains("TMP=D:\\agent\\work"));
     }
 }
