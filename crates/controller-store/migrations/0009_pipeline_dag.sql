@@ -26,6 +26,10 @@ ALTER TABLE nodes
         CHECK (logical_outcome IN ('succeeded', 'failed', 'aborted', 'skipped')),
     ADD COLUMN cancellation_requested_at timestamptz;
 
+ALTER TABLE nodes
+    ADD CONSTRAINT nodes_dag_identity_unique
+    UNIQUE (id, organization_id, build_id);
+
 CREATE TABLE node_dependencies (
     organization_id uuid NOT NULL,
     build_id uuid NOT NULL,
@@ -36,10 +40,10 @@ CREATE TABLE node_dependencies (
     CHECK (parent_node_id <> child_node_id),
     FOREIGN KEY (build_id, organization_id)
         REFERENCES builds(id, organization_id),
-    FOREIGN KEY (parent_node_id, organization_id)
-        REFERENCES nodes(id, organization_id),
-    FOREIGN KEY (child_node_id, organization_id)
-        REFERENCES nodes(id, organization_id)
+    FOREIGN KEY (parent_node_id, organization_id, build_id)
+        REFERENCES nodes(id, organization_id, build_id),
+    FOREIGN KEY (child_node_id, organization_id, build_id)
+        REFERENCES nodes(id, organization_id, build_id)
 );
 
 CREATE INDEX node_dependencies_child_idx

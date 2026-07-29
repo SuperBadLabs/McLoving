@@ -12,6 +12,7 @@ mod scheduler;
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
     DagNodeKind, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode, compile_matrix,
+    validate_dag_contract,
 };
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 

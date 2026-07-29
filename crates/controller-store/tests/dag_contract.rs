@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use mcloving_controller_store::{
     DagContractErrorCode, DagDependency, DagNodeKind, DependencyCondition, NewDagBuild, NewDagNode,
-    compile_matrix,
+    compile_matrix, validate_dag_contract,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -50,6 +50,38 @@ fn matrix_order_is_presentation_independent_and_bounded() {
             "test[arch=x64,os=windows]",
         ]
     );
+
+    let matrix_node = NewDagNode {
+        node_key: first[0].node_key.clone(),
+        kind: DagNodeKind::Work,
+        dependencies: Vec::new(),
+        required_capabilities: vec!["shell".to_owned()],
+        required_platform: "linux".to_owned(),
+        required_trust_pool: "trusted".to_owned(),
+        priority: 0,
+        execution_spec: json!({"program": "true"}),
+        fail_fast: false,
+        max_attempts: 1,
+    };
+    assert!(
+        validate_dag_contract(&NewDagBuild {
+            organization_id: Uuid::nil(),
+            project_id: Uuid::nil(),
+            idempotency_key: "matrix-contract".to_owned(),
+            pipeline_digest: [1; 32],
+            priority: 1,
+            nodes: vec![matrix_node],
+        })
+        .is_ok()
+    );
+
+    let oversized_value = "x".repeat(250);
+    let oversized = compile_matrix(
+        "test",
+        &BTreeMap::from([("axis".to_owned(), vec![oversized_value])]),
+    )
+    .unwrap_err();
+    assert_eq!(oversized.code, DagContractErrorCode::InvalidText);
 
     let too_large = compile_matrix(
         "test",
@@ -112,4 +144,43 @@ fn dag_public_types_preserve_explicit_semantics() {
         build.nodes[0].dependencies[0].condition,
         DependencyCondition::Completed
     );
+}
+
+#[test]
+fn capabilities_are_canonical_and_bounded() {
+    let node = |required_capabilities: Vec<String>| NewDagNode {
+        node_key: "work".to_owned(),
+        kind: DagNodeKind::Work,
+        dependencies: Vec::new(),
+        required_capabilities,
+        required_platform: "linux".to_owned(),
+        required_trust_pool: "trusted".to_owned(),
+        priority: 0,
+        execution_spec: json!({"program": "true"}),
+        fail_fast: false,
+        max_attempts: 1,
+    };
+    let build = |node| NewDagBuild {
+        organization_id: Uuid::nil(),
+        project_id: Uuid::nil(),
+        idempotency_key: "capability-contract".to_owned(),
+        pipeline_digest: [1; 32],
+        priority: 1,
+        nodes: vec![node],
+    };
+
+    let duplicate =
+        validate_dag_contract(&build(node(vec!["shell".to_owned(), "shell".to_owned()])))
+            .unwrap_err();
+    assert_eq!(duplicate.code, DagContractErrorCode::DuplicateCapability);
+
+    let too_many = validate_dag_contract(&build(node(
+        (0..65).map(|value| format!("capability-{value}")).collect(),
+    )))
+    .unwrap_err();
+    assert_eq!(too_many.code, DagContractErrorCode::CapabilityLimit);
+
+    let invalid =
+        validate_dag_contract(&build(node(vec!["bad capability".to_owned()]))).unwrap_err();
+    assert_eq!(invalid.code, DagContractErrorCode::InvalidText);
 }

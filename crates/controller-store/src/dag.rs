@@ -14,6 +14,7 @@ const MAX_MATRIX_VALUES_PER_AXIS: usize = 32;
 const MAX_MATRIX_CELLS: usize = 256;
 const MAX_DAG_TEXT_BYTES: usize = 256;
 const MAX_EXECUTION_SPEC_BYTES: usize = 256 * 1024;
+const MAX_DAG_CAPABILITIES: usize = 64;
 
 /// Condition under which one dependency is satisfied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,7 +169,7 @@ pub fn compile_matrix(
         }
         products = next;
     }
-    Ok(products
+    products
         .into_iter()
         .map(|values| {
             let dimensions = values
@@ -176,19 +177,18 @@ pub fn compile_matrix(
                 .map(|(axis, value)| format!("{axis}={value}"))
                 .collect::<Vec<_>>()
                 .join(",");
-            MatrixCell {
-                node_key: format!("{node_prefix}[{dimensions}]"),
-                values,
-            }
+            let node_key = format!("{node_prefix}[{dimensions}]");
+            validate_node_key("$.node_key", &node_key)?;
+            Ok(MatrixCell { node_key, values })
         })
-        .collect())
+        .collect::<Result<Vec<_>, DagContractError>>()
 }
 
 impl Store {
     /// Atomically admits an entire validated DAG, all first attempts,
     /// dependency edges, one event, and one outbox record.
     pub async fn admit_dag(&self, input: &NewDagBuild) -> Result<DagAdmission, StoreError> {
-        validate_dag(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
+        validate_dag_contract(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         let build_id = Uuid::new_v4();
         let inserted = sqlx::query_scalar::<_, Uuid>(
@@ -821,7 +821,8 @@ async fn existing_dag_admission(
     })
 }
 
-fn validate_dag(input: &NewDagBuild) -> Result<(), DagContractError> {
+/// Validates the complete bounded DAG contract without requiring a database.
+pub fn validate_dag_contract(input: &NewDagBuild) -> Result<(), DagContractError> {
     validate_text("$.idempotency_key", &input.idempotency_key)?;
     if input.nodes.is_empty() || input.nodes.len() > MAX_DAG_NODES {
         return Err(DagContractError::new(
@@ -832,7 +833,7 @@ fn validate_dag(input: &NewDagBuild) -> Result<(), DagContractError> {
     }
     let mut keys = BTreeSet::new();
     for node in &input.nodes {
-        validate_text("$.nodes.node_key", &node.node_key)?;
+        validate_node_key("$.nodes.node_key", &node.node_key)?;
         if !keys.insert(node.node_key.clone()) {
             return Err(DagContractError::new(
                 DagContractErrorCode::DuplicateNode,
@@ -853,6 +854,27 @@ fn validate_dag(input: &NewDagBuild) -> Result<(), DagContractError> {
             &format!("$.nodes.{}.required_trust_pool", node.node_key),
             &node.required_trust_pool,
         )?;
+        if node.required_capabilities.len() > MAX_DAG_CAPABILITIES {
+            return Err(DagContractError::new(
+                DagContractErrorCode::CapabilityLimit,
+                format!("$.nodes.{}.required_capabilities", node.node_key),
+                format!("capability count exceeds {MAX_DAG_CAPABILITIES}"),
+            ));
+        }
+        let mut capabilities = BTreeSet::new();
+        for capability in &node.required_capabilities {
+            validate_text(
+                &format!("$.nodes.{}.required_capabilities", node.node_key),
+                capability,
+            )?;
+            if !capabilities.insert(capability) {
+                return Err(DagContractError::new(
+                    DagContractErrorCode::DuplicateCapability,
+                    format!("$.nodes.{}.required_capabilities", node.node_key),
+                    "capabilities must be unique",
+                ));
+            }
+        }
         if !(1..=16).contains(&node.max_attempts) {
             return Err(DagContractError::new(
                 DagContractErrorCode::RetryLimit,
@@ -979,6 +1001,23 @@ fn validate_text(path: &str, value: &str) -> Result<(), DagContractError> {
     Ok(())
 }
 
+fn validate_node_key(path: &str, value: &str) -> Result<(), DagContractError> {
+    if value.is_empty()
+        || value.len() > MAX_DAG_TEXT_BYTES
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'.' | b'_' | b'-' | b'[' | b']' | b'=' | b',')
+        })
+    {
+        return Err(DagContractError::new(
+            DagContractErrorCode::InvalidText,
+            path,
+            "must be a bounded canonical DAG node key",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DagContractErrorCode {
     InvalidText,
@@ -995,6 +1034,8 @@ pub enum DagContractErrorCode {
     RetryLimit,
     InvalidNodeKind,
     PlatformMismatch,
+    CapabilityLimit,
+    DuplicateCapability,
     ExecutionSpecLimit,
 }
 
