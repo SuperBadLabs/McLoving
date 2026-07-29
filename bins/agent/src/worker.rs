@@ -155,6 +155,7 @@ pub(super) async fn recover_finalizations(
             authority.clone(),
             config.lease_seconds,
             recovery_renewal_interval(config.lease_renewal_interval),
+            Duration::from_secs(RECOVERED_FINALIZATION_LEASE_SECONDS),
             authority_lost,
             lease_stop.clone(),
         ));
@@ -402,13 +403,16 @@ async fn run_assignment(
             .into_inner(),
         session_epoch,
     )?;
-    let lease = client
-        .renew_work_lease(WorkLeaseRenewal {
+    let lease = tokio::time::timeout(
+        lease_rpc_budget(Duration::from_secs(u64::from(config.lease_seconds))),
+        client.renew_work_lease(WorkLeaseRenewal {
             authority: Some(assignment.authority.clone()),
             lease_seconds: config.lease_seconds,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await
+    .map_err(|_| AgentError::LeaseRenewalTimeout)??
+    .into_inner();
     ensure_session(lease.session_epoch, session_epoch)?;
     if !lease.accepted {
         return Err(AgentError::StaleAuthority);
@@ -422,6 +426,7 @@ async fn run_assignment(
             assignment.authority.clone(),
             config.lease_seconds,
             config.lease_renewal_interval,
+            Duration::from_secs(u64::from(config.lease_seconds)),
             execution_cancellation,
             lease_stop.clone(),
         ));
@@ -460,6 +465,7 @@ async fn run_assignment(
         assignment.authority.clone(),
         config.lease_seconds,
         config.lease_renewal_interval,
+        Duration::from_secs(u64::from(config.lease_seconds)),
         execution_cancellation.clone(),
         lease_stop.clone(),
     ));
@@ -627,30 +633,45 @@ async fn renew_lease(
     authority: WorkAuthority,
     lease_seconds: u32,
     renewal_interval: Duration,
+    initial_lease_window: Duration,
     execution_cancellation: CancellationToken,
     lease_stop: CancellationToken,
 ) -> Result<(), AgentError> {
+    let mut lease_started_at = tokio::time::Instant::now();
+    let mut lease_window = initial_lease_window;
     loop {
         tokio::select! {
             () = lease_stop.cancelled() => return Ok(()),
             () = tokio::time::sleep(renewal_interval) => {}
         }
-        let receipt = match client
-            .renew_work_lease(WorkLeaseRenewal {
-                authority: Some(authority.clone()),
-                lease_seconds,
-            })
-            .await
-        {
-            Ok(response) => response.into_inner(),
-            Err(error) => {
+        let deadline = lease_started_at + lease_rpc_budget(lease_window);
+        let renewal = tokio::select! {
+            () = lease_stop.cancelled() => return Ok(()),
+            result = tokio::time::timeout_at(
+                deadline,
+                client.renew_work_lease(WorkLeaseRenewal {
+                    authority: Some(authority.clone()),
+                    lease_seconds,
+                }),
+            ) => result,
+        };
+        let receipt = match renewal {
+            Err(_) => {
+                execution_cancellation.cancel();
+                return Err(AgentError::LeaseRenewalTimeout);
+            }
+            Ok(Ok(response)) => response.into_inner(),
+            Ok(Err(error)) => {
                 execution_cancellation.cancel();
                 return Err(error.into());
             }
         };
-        if let Err(error) = ensure_session(receipt.session_epoch, authority.session_epoch) {
-            execution_cancellation.cancel();
-            return Err(error);
+        match ensure_session(receipt.session_epoch, authority.session_epoch) {
+            Ok(()) => {}
+            Err(error) => {
+                execution_cancellation.cancel();
+                return Err(error);
+            }
         }
         if !receipt.accepted {
             execution_cancellation.cancel();
@@ -659,7 +680,13 @@ async fn renew_lease(
         if receipt.cancellation_requested {
             execution_cancellation.cancel();
         }
+        lease_started_at = tokio::time::Instant::now();
+        lease_window = Duration::from_secs(u64::from(lease_seconds));
     }
+}
+
+fn lease_rpc_budget(lease_window: Duration) -> Duration {
+    lease_window.saturating_sub(Duration::from_secs(1))
 }
 
 async fn publish_spool(
@@ -1146,6 +1173,15 @@ mod tests {
             validate_assignment(&config(), 4, assignment(zero_timeout)),
             Err(AgentError::InvalidAssignment(_))
         ));
+    }
+
+    #[test]
+    fn lease_rpc_budget_expires_before_the_controller_lease() {
+        assert_eq!(
+            lease_rpc_budget(Duration::from_secs(30)),
+            Duration::from_secs(29)
+        );
+        assert_eq!(lease_rpc_budget(Duration::from_millis(500)), Duration::ZERO);
     }
 
     #[test]

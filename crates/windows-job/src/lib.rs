@@ -25,6 +25,9 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, WAIT_FAILED,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+};
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
@@ -46,6 +49,12 @@ const ERROR_INVALID_PARAMETER: u32 = 87;
 pub struct JobError {
     operation: &'static str,
     code: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
 }
 
 impl JobError {
@@ -75,6 +84,26 @@ impl fmt::Display for JobError {
 }
 
 impl std::error::Error for JobError {}
+
+/// Returns the stable volume/file-index identity of an open file handle.
+///
+/// Keeping this Win32 query in the audited FFI capsule lets safe callers
+/// detect workload rename-and-replace attacks without reopening mutable paths.
+pub fn file_identity(file: &File) -> Result<FileIdentity, JobError> {
+    // SAFETY: zero is the documented initial state for this POD structure.
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
+    let handle: HANDLE = file.as_raw_handle().cast();
+    // SAFETY: handle comes from a live File and information points to writable
+    // storage of the exact structure required by GetFileInformationByHandle.
+    if unsafe { GetFileInformationByHandle(handle, &raw mut information) } == 0 {
+        return Err(JobError::last("GetFileInformationByHandle"));
+    }
+    Ok(FileIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
+}
 
 /// Complete creation specification for one atomically contained child.
 pub struct SpawnSpec<'a> {

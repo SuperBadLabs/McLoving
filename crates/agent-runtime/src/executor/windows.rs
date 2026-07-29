@@ -1,21 +1,26 @@
 //! Windows execution using race-free kill-on-close Job Objects.
 
 use std::ffi::OsString;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 #[cfg(test)]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(test)]
 use std::process::Command;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use mcloving_windows_job::{JobProcess, SpawnSpec};
+use mcloving_windows_job::{JobProcess, SpawnSpec, file_identity};
+use sha2::{Digest, Sha256};
 use tokio::time::{Instant, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
 
+use crate::SpoolEntry;
+
 use super::{
     Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, Termination,
-    create_workspace, output_limit_exceeded, spool_entry, sync_directory, sync_file,
-    truncate_output_to_limit,
+    create_workspace, sync_directory,
 };
 
 const TERMINATED_EXIT_CODE: u32 = 0xC000_013A;
@@ -44,12 +49,16 @@ where
     let stdin = std::fs::OpenOptions::new().read(true).open("NUL")?;
     let stdout = std::fs::OpenOptions::new()
         .create_new(true)
+        .read(true)
         .write(true)
         .open(&stdout_path)?;
     let stderr = std::fs::OpenOptions::new()
         .create_new(true)
+        .read(true)
         .write(true)
         .open(&stderr_path)?;
+    let stdout_control = stdout.try_clone()?;
+    let stderr_control = stderr.try_clone()?;
 
     let command = windows_command(request)?;
     let mut child = JobProcess::spawn_suspended(&SpawnSpec {
@@ -81,7 +90,7 @@ where
         {
             break (Termination::Exited, status);
         }
-        if output_limit_exceeded(&stdout_path, &stderr_path, request.output_limit_bytes).await? {
+        if output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)? {
             break (
                 Termination::OutputLimitExceeded,
                 terminate_job(&child).await?,
@@ -112,14 +121,16 @@ where
         .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
     wait_for_empty_job(&child).await?;
     drop(child);
-    if output_limit_exceeded(&stdout_path, &stderr_path, request.output_limit_bytes).await? {
+    if output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)? {
         termination = Termination::OutputLimitExceeded;
     }
     if termination == Termination::OutputLimitExceeded {
-        truncate_output_to_limit(&stdout_path, &stderr_path, request.output_limit_bytes).await?;
+        truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     }
-    sync_file(&stdout_path).await?;
-    sync_file(&stderr_path).await?;
+    stdout_control.sync_all()?;
+    stderr_control.sync_all()?;
+    ensure_original_spool_path(&stdout_control, &stdout_path)?;
+    ensure_original_spool_path(&stderr_control, &stderr_path)?;
     sync_directory(&spool)?;
     sync_directory(&workspace)?;
 
@@ -128,9 +139,92 @@ where
         exit_code: status.code(),
         process_id,
         containment: Containment::WindowsJobObject,
-        stdout: spool_entry(&request.workspace, "spool/stdout.log", 0, &stdout_path).await?,
-        stderr: spool_entry(&request.workspace, "spool/stderr.log", 1, &stderr_path).await?,
+        stdout: spool_entry(&request.workspace, "spool/stdout.log", 0, &stdout_control).await?,
+        stderr: spool_entry(&request.workspace, "spool/stderr.log", 1, &stderr_control).await?,
     })
+}
+
+fn output_limit_exceeded(
+    stdout: &File,
+    stderr: &File,
+    limit: Option<u64>,
+) -> Result<bool, std::io::Error> {
+    let Some(limit) = limit else {
+        return Ok(false);
+    };
+    Ok(stdout
+        .metadata()?
+        .len()
+        .saturating_add(stderr.metadata()?.len())
+        > limit)
+}
+
+fn truncate_output_to_limit(
+    stdout: &File,
+    stderr: &File,
+    limit: Option<u64>,
+) -> Result<(), std::io::Error> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    let stdout_bytes = stdout.metadata()?.len();
+    let stderr_bytes = stderr.metadata()?.len();
+    let retained_stdout = stdout_bytes.min(limit);
+    let retained_stderr = stderr_bytes.min(limit - retained_stdout);
+    stdout.set_len(retained_stdout)?;
+    stderr.set_len(retained_stderr)
+}
+
+fn ensure_original_spool_path(file: &File, path: &Path) -> Result<(), ExecutionError> {
+    let named = std::fs::File::open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ExecutionError::ReplacedSpoolPath
+        } else {
+            error.into()
+        }
+    })?;
+    let opened_identity =
+        file_identity(file).map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
+    let named_identity =
+        file_identity(&named).map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
+    if opened_identity == named_identity {
+        Ok(())
+    } else {
+        Err(ExecutionError::ReplacedSpoolPath)
+    }
+}
+
+async fn spool_entry(
+    workspace: &Path,
+    suffix: &str,
+    sequence: u64,
+    file: &File,
+) -> Result<SpoolEntry, ExecutionError> {
+    let bytes = file.metadata()?.len();
+    let mut file = file.try_clone()?;
+    let digest = tokio::task::spawn_blocking(move || digest_file(&mut file))
+        .await
+        .map_err(|error| std::io::Error::other(format!("spool digest task failed: {error}")))??;
+    Ok(SpoolEntry {
+        sequence,
+        relative_path: workspace.join(suffix),
+        digest,
+        bytes,
+    })
+}
+
+fn digest_file(file: &mut File) -> Result<[u8; 32], std::io::Error> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().into())
 }
 
 struct WindowsCommand {
@@ -365,6 +459,62 @@ mod tests {
                 .unwrap()
                 .contains("ps-ok")
         );
+    }
+
+    #[tokio::test]
+    async fn renamed_spool_cannot_evade_the_output_quota() {
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("rename-spool.ps1");
+        fs::write(
+            &script,
+            r#"
+param([string]$PidPath)
+$PID | Set-Content -LiteralPath $PidPath -Encoding ascii
+Move-Item -LiteralPath "spool\stdout.log" -Destination "spool\renamed.log" -ErrorAction Stop
+New-Item -Path "spool\stdout.log" -ItemType File -ErrorAction Stop | Out-Null
+while ($true) { [Console]::Out.Write("0123456789abcdef") }
+"#,
+        )
+        .unwrap();
+        let pid_path = root.path().join("rename-spool.pid");
+        let mut request = request(
+            root.path(),
+            "renamed-log",
+            ExecutionMode::PowerShell,
+            script,
+            vec![pid_path.as_os_str().to_owned()],
+        );
+        request.output_limit_bytes = Some(4_096);
+        request.timeout = Duration::from_secs(30);
+
+        assert!(matches!(
+            execute(&request, CancellationToken::new()).await,
+            Err(ExecutionError::ReplacedSpoolPath)
+        ));
+        assert!(
+            fs::metadata(root.path().join("renamed-log/spool/renamed.log"))
+                .unwrap()
+                .len()
+                <= 4_096
+        );
+        let process_id = fs::read_to_string(pid_path)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        let status = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "if (Get-Process -Id {process_id} -ErrorAction SilentlyContinue) {{ exit 1 }}"
+                ),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success(), "workload {process_id} escaped its Job");
     }
 
     #[tokio::test]

@@ -6,11 +6,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-#[cfg(windows)]
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-#[cfg(windows)]
-use tokio::{fs, io::AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::{JournalError, SpoolEntry, validate_relative_path};
@@ -81,7 +77,6 @@ pub enum ExecutionError {
     WorkspaceAlreadyExists,
     #[error("workspace contains a symlink or reparse-point component")]
     SymlinkWorkspaceComponent,
-    #[cfg(unix)]
     #[error("executor-owned spool path no longer names its original file")]
     ReplacedSpoolPath,
     #[error("process did not expose a valid process ID")]
@@ -172,19 +167,6 @@ fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
     }
 }
 
-#[cfg(windows)]
-async fn sync_file(path: &Path) -> Result<(), io::Error> {
-    // FlushFileBuffers requires GENERIC_WRITE even when no further bytes
-    // will be appended. Reopen the completed spool file with write access
-    // so sync_all maps to the documented Win32 durability primitive.
-    fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .await?
-        .sync_all()
-        .await
-}
-
 /// Flushes the directory durability boundary used by executor-owned spools.
 ///
 /// Callers that create additional replay-critical files must flush their
@@ -213,76 +195,4 @@ pub fn sync_directory(path: &Path) -> Result<(), io::Error> {
             ))
         }
     }
-}
-
-#[cfg(windows)]
-async fn spool_entry(
-    workspace: &Path,
-    suffix: &str,
-    sequence: u64,
-    path: &Path,
-) -> Result<SpoolEntry, ExecutionError> {
-    let metadata = fs::metadata(path).await?;
-    Ok(SpoolEntry {
-        sequence,
-        relative_path: workspace.join(suffix),
-        digest: digest_file(path).await?,
-        bytes: metadata.len(),
-    })
-}
-
-#[cfg(windows)]
-async fn digest_file(path: &Path) -> Result<[u8; 32], io::Error> {
-    let mut file = fs::File::open(path).await?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(digest.finalize().into())
-}
-
-#[cfg(windows)]
-async fn output_limit_exceeded(
-    stdout: &Path,
-    stderr: &Path,
-    limit: Option<u64>,
-) -> Result<bool, io::Error> {
-    let Some(limit) = limit else {
-        return Ok(false);
-    };
-    let stdout_bytes = fs::metadata(stdout).await?.len();
-    let stderr_bytes = fs::metadata(stderr).await?.len();
-    Ok(stdout_bytes.saturating_add(stderr_bytes) > limit)
-}
-
-#[cfg(windows)]
-async fn truncate_output_to_limit(
-    stdout: &Path,
-    stderr: &Path,
-    limit: Option<u64>,
-) -> Result<(), io::Error> {
-    let Some(limit) = limit else {
-        return Ok(());
-    };
-    let stdout_bytes = fs::metadata(stdout).await?.len();
-    let stderr_bytes = fs::metadata(stderr).await?.len();
-    let retained_stdout = stdout_bytes.min(limit);
-    let retained_stderr = stderr_bytes.min(limit - retained_stdout);
-    fs::OpenOptions::new()
-        .write(true)
-        .open(stdout)
-        .await?
-        .set_len(retained_stdout)
-        .await?;
-    fs::OpenOptions::new()
-        .write(true)
-        .open(stderr)
-        .await?
-        .set_len(retained_stderr)
-        .await
 }
