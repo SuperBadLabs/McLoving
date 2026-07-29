@@ -53,7 +53,10 @@ CREATE TABLE node_trust_pool_migration_map (
     organization_id uuid NOT NULL,
     node_id uuid NOT NULL,
     required_trust_pool text NOT NULL
-        CHECK (btrim(required_trust_pool) <> ''),
+        CHECK (
+            required_trust_pool <> ''
+            AND btrim(required_trust_pool) = required_trust_pool
+        ),
     PRIMARY KEY (organization_id, node_id),
     FOREIGN KEY (node_id, organization_id)
         REFERENCES nodes(id, organization_id)

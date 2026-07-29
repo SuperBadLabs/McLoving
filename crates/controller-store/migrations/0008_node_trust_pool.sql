@@ -6,7 +6,10 @@ CREATE TABLE IF NOT EXISTS node_trust_pool_migration_map (
     organization_id uuid NOT NULL,
     node_id uuid NOT NULL,
     required_trust_pool text NOT NULL
-        CHECK (btrim(required_trust_pool) <> ''),
+        CHECK (
+            required_trust_pool <> ''
+            AND btrim(required_trust_pool) = required_trust_pool
+        ),
     PRIMARY KEY (organization_id, node_id),
     FOREIGN KEY (node_id, organization_id)
         REFERENCES nodes(id, organization_id)
@@ -38,7 +41,10 @@ $$;
 ALTER TABLE nodes
     ALTER COLUMN required_trust_pool SET NOT NULL,
     ADD CONSTRAINT nodes_required_trust_pool_nonempty
-        CHECK (btrim(required_trust_pool) <> '');
+        CHECK (
+            required_trust_pool <> ''
+            AND btrim(required_trust_pool) = required_trust_pool
+        );
 
 CREATE INDEX nodes_trust_pool_claim_idx
     ON nodes (organization_id, required_trust_pool, priority DESC, queued_at, id)
