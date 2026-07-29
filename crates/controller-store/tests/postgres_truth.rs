@@ -3,8 +3,8 @@ use std::sync::Arc;
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, DagDependency, DagNodeKind, DependencyCondition,
-    EffectClass, EffectStatus, NewBuild, NewCredentialGrant, NewDagBuild, NewDagNode,
-    NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus,
+    EffectClass, EffectStatus, NewAuditEvent, NewBuild, NewCredentialGrant, NewDagBuild,
+    NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus,
     ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
     WaitReason,
 };
@@ -6127,4 +6127,181 @@ async fn dag_owner_cancellation_is_durable_idempotent_and_monotonic() {
         .await
         .expect("read cancelled build");
     assert_eq!(build_status, "aborted");
+}
+
+#[tokio::test]
+async fn tenant_audit_is_hash_chained_exportable_immutable_and_retained() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "audited",
+        )
+        .await
+        .expect("create audited project");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "audit-build".to_owned(),
+            pipeline_digest: [0x71; 32],
+            node_key: "build".to_owned(),
+            required_capabilities: vec![],
+            required_trust_pool: "default".to_owned(),
+            priority: 0,
+            execution_spec: json!({"program": "true"}),
+        })
+        .await
+        .expect("admit an automatically audited build");
+    for (category, action, subject) in [
+        ("identity", "identity.bound", "identity:operator"),
+        ("authentication", "session.opened", "session:one"),
+        ("credential_grant", "credential.issued", "attempt:one"),
+        ("approval", "environment.approved", "environment:production"),
+        ("artifact", "artifact.committed", "artifact:report"),
+        ("admin", "retention.changed", "tenant:self"),
+    ] {
+        store
+            .append_audit_event(&NewAuditEvent {
+                organization_id,
+                category,
+                actor_subject: "oidc:operator",
+                action,
+                subject,
+                payload: json!({"build_id": admission.build_id}),
+            })
+            .await
+            .expect("append explicit audit category");
+    }
+
+    let export = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify the complete tenant chain");
+    assert!(export.events.len() >= 7);
+    let categories = export
+        .events
+        .iter()
+        .map(|event| event.category.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for category in [
+        "scheduling",
+        "identity",
+        "authentication",
+        "credential_grant",
+        "approval",
+        "artifact",
+        "admin",
+    ] {
+        assert!(categories.contains(category), "missing {category} audit");
+    }
+
+    assert_eq!(
+        store
+            .extend_audit_retention(organization_id, 10_000)
+            .await
+            .expect("extend audit retention")
+            .retain_until_unix_ms,
+        10_000
+    );
+    assert_eq!(
+        store
+            .extend_audit_retention(organization_id, 1)
+            .await
+            .expect("refuse to shorten audit retention")
+            .retain_until_unix_ms,
+        10_000
+    );
+    assert!(
+        store
+            .set_audit_legal_hold(organization_id, true)
+            .await
+            .expect("place audit legal hold")
+            .legal_hold
+    );
+    assert!(
+        !store
+            .set_audit_legal_hold(organization_id, false)
+            .await
+            .expect("explicitly release audit legal hold")
+            .legal_hold
+    );
+    let retained = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("export retained chain");
+    assert_eq!(
+        retained
+            .retention
+            .expect("retention policy")
+            .retain_until_unix_ms,
+        10_000
+    );
+
+    let mutation = sqlx::query(
+        "UPDATE audit_events
+         SET payload = '{\"rewritten\":true}'::jsonb
+         WHERE organization_id = $1 AND sequence = 1",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await;
+    assert!(mutation.is_err(), "audit payload mutation must be denied");
+    let deletion = sqlx::query(
+        "DELETE FROM audit_events
+         WHERE organization_id = $1 AND sequence = 1",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await;
+    assert!(deletion.is_err(), "audit event deletion must be denied");
+
+    sqlx::query(
+        "UPDATE audit_chain_heads
+         SET next_sequence = next_sequence + 1
+         WHERE organization_id = $1",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await
+    .expect("inject a sequence gap");
+    assert!(matches!(
+        store.verify_audit_chain(organization_id).await,
+        Err(StoreError::CorruptAuditChain { .. })
+    ));
+    sqlx::query(
+        "UPDATE audit_chain_heads
+         SET next_sequence = next_sequence - 1,
+             last_hash = decode(repeat('ff', 32), 'hex')
+         WHERE organization_id = $1",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await
+    .expect("inject a head-hash substitution");
+    assert!(matches!(
+        store.verify_audit_chain(organization_id).await,
+        Err(StoreError::CorruptAuditChain { .. })
+    ));
+    sqlx::query(
+        "UPDATE audit_chain_heads
+         SET last_hash = $2
+         WHERE organization_id = $1",
+    )
+    .bind(organization_id)
+    .bind(retained.head_hash.as_slice())
+    .execute(store.pool())
+    .await
+    .expect("restore the verified head");
+    store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("chain recovers after restoring the known head");
 }

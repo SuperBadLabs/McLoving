@@ -6,11 +6,15 @@ use sha2::{Digest, Sha256};
 use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+mod audit;
 pub mod authz;
 mod dag;
 mod scheduler;
 mod security;
 
+pub use audit::{
+    AuditEvent, AuditExport, AuditRetentionPolicy, NewAuditEvent, verify_audit_export,
+};
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
     DagNodeKind, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode, compile_matrix,
@@ -44,6 +48,8 @@ pub const PIPELINE_DAG_V9: &str = include_str!("../migrations/0009_pipeline_dag.
 /// Attempt-scoped credentials and protected-environment approvals.
 pub const ATTEMPT_CREDENTIALS_V10: &str =
     include_str!("../migrations/0010_attempt_credentials.sql");
+/// Tenant-scoped, hash-chained append-only audit truth.
+pub const TENANT_AUDIT_V11: &str = include_str!("../migrations/0011_tenant_audit.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -342,6 +348,13 @@ pub enum StoreError {
     InvalidDag(String),
     #[error("invalid security operation: {0}")]
     InvalidSecurityOperation(String),
+    #[error("invalid audit operation: {0}")]
+    InvalidAuditOperation(String),
+    #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
+    CorruptAuditChain {
+        organization_id: Uuid,
+        sequence: i64,
+    },
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -384,6 +397,7 @@ impl Store {
         apply_migration(&mut tx, 8, NODE_TRUST_POOL_V8).await?;
         apply_migration(&mut tx, 9, PIPELINE_DAG_V9).await?;
         apply_migration(&mut tx, 10, ATTEMPT_CREDENTIALS_V10).await?;
+        apply_migration(&mut tx, 11, TENANT_AUDIT_V11).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -3620,7 +3634,7 @@ async fn append_event_and_outbox(
     build_id: Uuid,
     kind: &str,
     payload: Value,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), StoreError> {
     sqlx::query(
         "INSERT INTO build_events (organization_id, build_id, kind, payload)
          VALUES ($1, $2, $3, $4)",
@@ -3638,10 +3652,32 @@ async fn append_event_and_outbox(
     .bind(organization_id)
     .bind(kind)
     .bind(build_id)
-    .bind(payload)
+    .bind(&payload)
     .execute(&mut **tx)
     .await?;
+    audit::append_audit_record(
+        tx,
+        organization_id,
+        audit_category_for_event(kind),
+        "system:controller",
+        kind,
+        &format!("build:{build_id}"),
+        payload,
+    )
+    .await?;
     Ok(())
+}
+
+fn audit_category_for_event(kind: &str) -> &'static str {
+    if kind.contains("credential") {
+        "credential_grant"
+    } else if kind.contains("approval") {
+        "approval"
+    } else if kind.contains("artifact") || kind.contains("object") {
+        "artifact"
+    } else {
+        "scheduling"
+    }
 }
 
 async fn terminalize_dead_lettered_reconciliation(
