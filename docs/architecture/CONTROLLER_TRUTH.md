@@ -1,6 +1,6 @@
 # Controller truth v1
 
-Status: implemented by batch W1-A.
+Status: implemented through batch W2-A.
 
 ## Transaction boundary
 
@@ -9,10 +9,61 @@ first attempt, durable event, and outbox message in one transaction. A
 project-scoped idempotency key returns the original identifiers and does not
 emit duplicate durable records.
 
-Terminal publication is accepted only for the current attempt fence, its exact
-lease owner, an accepted/running state, and an unexpired lease. Attempt, node,
-build, event, and outbox mutations commit together. Unleased, expired,
-concurrent, or stale publishers receive a negative result.
+Terminal publication is accepted only for the current attempt fence and
+restore epoch, its exact lease owner, an accepted/running state, and an
+unexpired lease. Attempt, node, build, event, and outbox mutations commit
+together. Unleased, expired, concurrent, or stale publishers receive a
+negative result. If the current fence contains an uncertain effect, ordinary
+terminal publication instead atomically clears the lease, moves the attempt,
+node, and build to `reconciliation_required`, and emits its durable audit
+event/outbox record. Only the explicit reconciliation path may then confirm
+the exact effect and close the attempt.
+
+Retries never rewrite an attempt. A failed or reconciliation-required attempt
+may create exactly one child attempt with an incremented ordinal and an
+immutable `retry_of` link. Replaying the retry decision returns that same
+child. Scheduling that child and terminally closing the parent reconciliation
+are mutually exclusive decisions under the same advisory lock. Exhausted retry
+budgets enter a checksummed dead-letter ledger, and that dead-letter decision
+is likewise mutually exclusive with terminal reconciliation. Replaying the
+decision cannot replace the dead letter with a larger retry budget.
+Dead-lettering reconciliation work terminally fails its attempt hierarchy in
+the same transaction instead of stranding non-runnable reconciliation state.
+
+External effects use a fenced, immutable-payload checkpoint ledger. Effect
+class and payload digest cannot change after preparation. State advances
+monotonically through prepared, applied, and confirmed, or enters the explicit
+uncertain state. Uncertain work is listed for reconciliation and cannot regress
+to an unconfirmed applied state.
+If a lease expires with any non-idempotent effect checkpoint, the same
+transaction moves the attempt, node, and build to `reconciliation_required`.
+Prepared and applied effects become uncertain; confirmed effects retain their
+stronger evidence. Such work is never returned to the runnable queue or made
+retry-eligible. A fenced operator may confirm an exact uncertain payload and
+then explicitly terminate the reconciled attempt, with event and outbox audit.
+An exact replay of a committed terminal reconciliation returns success without
+emitting another event; a conflicting actor, outcome, fence, or summary is
+rejected.
+
+Claims share-lock and record the controller restore epoch. Every agent
+authority operation presents `(attempt_id, fence, restore_epoch, agent_id)`,
+shares the restore lock, and requires the attempt epoch to equal current
+controller metadata. This prevents a database rewind from reviving an
+otherwise identical owner/fence pair. Restore activation exclusively
+increments the epoch, invalidates every active lease, and commits
+`reconciliation_required` attempt, node, and build state with matching events
+and outbox messages. Activation of one sealed backup is single-use and
+idempotently returns its first result; unused recovery points from an older
+epoch are rejected. Prepared or applied effect checkpoints on affected work
+become `uncertain` in that same transaction. Pre-restore agents can no longer
+renew or publish. A narrow reconciliation operation may only confirm an
+existing payload-identical uncertain effect; it cannot create new historical
+effects or restore execution authority. Same-epoch lease reconciliation is
+restricted to the current fence. Restore reconciliation may confirm an exact
+historical fence swept to uncertain, and terminal reconciliation is blocked
+until no uncertain checkpoint remains on any fence. The old attempt and its
+epoch remain history; reconciliation may explicitly schedule a new retry
+rather than rewriting that history.
 
 Migrations use a database advisory lock and a version ledger, so concurrent
 controller startup installs each migration exactly once.
@@ -56,10 +107,21 @@ tenant context.
 The real-PostgreSQL gate proves:
 
 - atomic and idempotent admission;
-- one winner from 16 concurrent terminal publishers;
+- one winner from 16 concurrent terminal publishers, with uncertain effects
+  routed to explicit reconciliation rather than terminalized;
 - capability-filtered scheduling and stable wait diagnostics;
-- accepted-lease expiry, requeue, fence increment, and stale-result rejection;
+- accepted-lease expiry, safe requeue and fence increment, uncertain-effect
+  reconciliation routing, and stale-result rejection;
 - a tenant-prefixed scheduler claim-order index;
+- immutable, idempotent, bounded retry history and dead-letter exhaustion;
+- mutually exclusive retry/dead-letter-versus-terminal reconciliation
+  decisions;
+- monotonic effect checkpoints, payload substitution rejection, and explicit
+  uncertain-effect reconciliation;
+- monotonic retention, legal-hold precedence, durable serialized deletion
+  claims, logical backup/restore,
+  idempotent single-use activation, same-fence restore-epoch collision
+  rejection, and stale recovery-point rejection; and
 - forced-RLS read filtering and cross-tenant write rejection.
 
 Rust unit tests independently prove the authorization matrix and deny defaults.

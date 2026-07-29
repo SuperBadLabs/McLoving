@@ -4,7 +4,7 @@ use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{Store, StoreError, append_event_and_outbox};
+use crate::{RESTORE_FENCE_LOCK_KEY, Store, StoreError, append_event_and_outbox};
 
 /// Inputs to one deterministic scheduler claim.
 #[derive(Clone, Debug)]
@@ -26,6 +26,7 @@ pub struct ClaimedAttempt {
     pub node_id: Uuid,
     pub attempt_id: Uuid,
     pub fence: i64,
+    pub restore_epoch: i64,
     pub agent_id: String,
 }
 
@@ -58,6 +59,17 @@ impl Store {
             .bind(format!("mcloving.scheduler.{}", request.organization_id))
             .execute(&mut *tx)
             .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(RESTORE_FENCE_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
+        let restore_epoch = sqlx::query_scalar::<_, i64>(
+            "SELECT restore_epoch
+             FROM controller_metadata
+             WHERE singleton",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
 
         let candidate = sqlx::query(
             "SELECT n.id AS node_id, n.build_id, a.id AS attempt_id
@@ -102,7 +114,8 @@ impl Store {
                  fence = fence + 1,
                  lease_owner = $3,
                  lease_expires_at =
-                   clock_timestamp() + make_interval(secs => $4)
+                   clock_timestamp() + make_interval(secs => $4),
+                 restore_epoch = $5
              WHERE id = $1 AND organization_id = $2
              RETURNING fence",
         )
@@ -110,6 +123,7 @@ impl Store {
         .bind(request.organization_id)
         .bind(&request.agent_id)
         .bind(f64::from(request.lease_seconds))
+        .bind(restore_epoch)
         .fetch_one(&mut *tx)
         .await?;
         sqlx::query(
@@ -139,6 +153,7 @@ impl Store {
                 "agent_id": request.agent_id,
                 "scheduler_id": request.scheduler_id,
                 "fence": fence,
+                "restore_epoch": restore_epoch,
             }),
         )
         .await?;
@@ -150,6 +165,7 @@ impl Store {
             node_id,
             attempt_id,
             fence,
+            restore_epoch,
             agent_id: request.agent_id.clone(),
         }))
     }
@@ -160,9 +176,14 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
         agent_id: &str,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(RESTORE_FENCE_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
         let accepted = sqlx::query_as::<_, (Uuid, Uuid, String)>(
             "SELECT n.id, n.build_id, a.status
              FROM attempts AS a
@@ -171,7 +192,11 @@ impl Store {
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4
+               AND a.restore_epoch = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('offered', 'accepted', 'running', 'cancelling')
              FOR UPDATE OF a, n",
@@ -179,6 +204,7 @@ impl Store {
         .bind(attempt_id)
         .bind(organization_id)
         .bind(fence)
+        .bind(restore_epoch)
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -216,6 +242,7 @@ impl Store {
                 "node_id": node_id,
                 "agent_id": agent_id,
                 "fence": fence,
+                "restore_epoch": restore_epoch,
             }),
         )
         .await?;
@@ -229,6 +256,7 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
         agent_id: &str,
         lease_seconds: i32,
     ) -> Result<Option<bool>, StoreError> {
@@ -236,15 +264,23 @@ impl Store {
             return Ok(None);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(RESTORE_FENCE_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
         let cancellation_requested = sqlx::query_scalar::<_, bool>(
             "UPDATE attempts AS a
              SET lease_expires_at =
-                   clock_timestamp() + make_interval(secs => $5)
+                   clock_timestamp() + make_interval(secs => $6)
              FROM nodes AS n, builds AS b
              WHERE a.organization_id = $1
                AND a.id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4
+               AND a.restore_epoch = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
                AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
                AND n.id = a.node_id
@@ -256,6 +292,7 @@ impl Store {
         .bind(organization_id)
         .bind(attempt_id)
         .bind(fence)
+        .bind(restore_epoch)
         .bind(agent_id)
         .bind(f64::from(lease_seconds))
         .fetch_optional(&mut *tx)
@@ -264,18 +301,23 @@ impl Store {
         Ok(cancellation_requested)
     }
 
-    /// Requeues one expired active lease without changing its fence.
+    /// Resolves one expired active lease without changing its fence.
     ///
-    /// The following claim increments the fence, making the previous agent
-    /// publication stale before new work is offered.
+    /// Safe work returns to the queue so the following claim increments the
+    /// fence. An unresolved non-idempotent effect is instead made uncertain
+    /// and routes the attempt through explicit reconciliation.
     pub async fn requeue_one_expired(&self, organization_id: Uuid) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.scheduler.{organization_id}"))
             .execute(&mut *tx)
             .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
+            .bind(RESTORE_FENCE_LOCK_KEY)
+            .execute(&mut *tx)
+            .await?;
         let expired = sqlx::query(
-            "SELECT a.id AS attempt_id, n.id AS node_id, n.build_id
+            "SELECT a.id AS attempt_id, a.fence, n.id AS node_id, n.build_id
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id
@@ -295,42 +337,109 @@ impl Store {
             return Ok(false);
         };
         let attempt_id: Uuid = expired.try_get("attempt_id")?;
+        let fence: i64 = expired.try_get("fence")?;
         let node_id: Uuid = expired.try_get("node_id")?;
         let build_id: Uuid = expired.try_get("build_id")?;
+        let protected_effects = sqlx::query_as::<_, (String, String)>(
+            "SELECT effect_key, status
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_class = 'non_idempotent'
+               AND status IN ('prepared', 'applied', 'confirmed', 'uncertain')
+             ORDER BY effect_key
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_all(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE attempt_effects
+             SET status = 'uncertain', updated_at = clock_timestamp()
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_class = 'non_idempotent'
+               AND status IN ('prepared', 'applied')",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .execute(&mut *tx)
+        .await?;
+        let requires_reconciliation = !protected_effects.is_empty();
+        let uncertain_effects = protected_effects
+            .iter()
+            .filter(|(_, status)| status != "confirmed")
+            .count();
+        let confirmed_effects = protected_effects.len() - uncertain_effects;
+        let next_status = if requires_reconciliation {
+            "reconciliation_required"
+        } else {
+            "queued"
+        };
         sqlx::query(
             "UPDATE attempts
-             SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL
+             SET status = $3, lease_owner = NULL, lease_expires_at = NULL
              WHERE id = $1 AND organization_id = $2",
         )
         .bind(attempt_id)
         .bind(organization_id)
+        .bind(next_status)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE nodes SET status = 'queued'
+            "UPDATE nodes SET status = $3
              WHERE id = $1 AND organization_id = $2",
         )
         .bind(node_id)
         .bind(organization_id)
+        .bind(next_status)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "UPDATE builds SET status = 'queued'
-             WHERE id = $1
-               AND organization_id = $2
-               AND status = 'running'
-               AND cancellation_requested_at IS NULL",
-        )
-        .bind(build_id)
-        .bind(organization_id)
-        .execute(&mut *tx)
-        .await?;
+        if requires_reconciliation {
+            sqlx::query(
+                "UPDATE builds
+                 SET status = 'reconciliation_required', completed_at = NULL
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(build_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE builds SET status = 'queued'
+                 WHERE id = $1
+                   AND organization_id = $2
+                   AND status = 'running'
+                   AND cancellation_requested_at IS NULL",
+            )
+            .bind(build_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        let event_kind = if requires_reconciliation {
+            "attempt.lease_expired_reconciliation_required"
+        } else {
+            "attempt.lease_expired"
+        };
         append_event_and_outbox(
             &mut tx,
             organization_id,
             build_id,
-            "attempt.lease_expired",
-            json!({"attempt_id": attempt_id, "node_id": node_id}),
+            event_kind,
+            json!({
+                "attempt_id": attempt_id,
+                "node_id": node_id,
+                "fence": fence,
+                "uncertain_effects": uncertain_effects,
+                "confirmed_effects": confirmed_effects,
+            }),
         )
         .await?;
         tx.commit().await?;

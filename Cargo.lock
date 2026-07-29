@@ -1296,6 +1296,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-object-store"
+version = "0.0.0"
+dependencies = [
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "mcloving-pipeline-ir"
 version = "0.0.0"
 dependencies = [

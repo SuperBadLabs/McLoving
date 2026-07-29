@@ -25,7 +25,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W1-A | CTRL-001, CTRL-002, SEC-002 | DONE | PostgreSQL truth, outbox, scheduler, and tenant enforcement |
 | W1-B | AGENT-001, AGENT-002, AGENT-003 | DONE | Outbound mTLS contract, fenced sessions, durable journal, Linux process-tree containment |
 | W1-C | UX-001, E2E-001, E2E-002, E2E-003 | DONE | Truthful CLI-driven end-to-end spine and recovery |
-| W2-A | CTRL-003, OPS-001, OPS-002 | PENDING | Durable retry/result storage and recoverable operations |
+| W2-A | CTRL-003, OPS-001, OPS-002 | ACTIVE | Implementation and all local gates complete; protected merge pending |
+| W2-B | WIN-001, WIN-002, WIN-003 | PENDING | Windows agent, containment, and cross-platform parity |
 
 ## Wave 0 — Architecture and foundation
 
@@ -58,9 +59,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
 | Ticket | Status | Depends on | Objective |
 |---|---|---|---|
-| CTRL-003 | PENDING | E2E-002 | Durable retry, timeout, post, cleanup, and uncertain-effect reconciliation |
-| OPS-001 | PENDING | E2E-001 | Staged object storage, immutable artifacts, checksummed log chunks, explicit gaps and quotas |
-| OPS-002 | PENDING | OPS-001 | Backup, PITR, restore epoch, object reconciliation, retention and legal-hold drills |
+| CTRL-003 | DONE | E2E-002 | Durable retry, timeout, post, cleanup, and uncertain-effect reconciliation |
+| OPS-001 | DONE | E2E-001 | Staged object storage, immutable artifacts, checksummed log chunks, explicit gaps and quotas |
+| OPS-002 | DONE | OPS-001 | Backup, PITR checkpoint contract, restore epoch, object reconciliation, retention and legal-hold drills |
 | WIN-001 | PENDING | AGENT-003 | Signed Windows service agent, journal, enrollment, restart and reboot recovery |
 | WIN-002 | PENDING | WIN-001 | Direct process, cmd, PowerShell, Job Objects, ACL workspaces, descendant cleanup |
 | WIN-003 | PENDING | WIN-002, E2E-003 | Linux/Windows semantic parity and destructive recovery suite |
@@ -90,4 +91,5 @@ canary, and release-readiness assessment.
 
 ## Current next batch
 
-`W2-A`: `CTRL-003`, `OPS-001`, and `OPS-002`.
+`W2-A` is merge-active with all three tickets and local gates complete.
+After its protected merge, start `W2-B`: `WIN-001`, `WIN-002`, and `WIN-003`.

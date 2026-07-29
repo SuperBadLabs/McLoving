@@ -244,6 +244,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "restart-agent",
             )
             .await
@@ -257,6 +258,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "restart-agent",
             )
             .await
@@ -268,6 +270,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "restart-agent",
             )
             .await
@@ -281,6 +284,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "restart-agent",
             )
             .await
@@ -291,6 +295,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
         organization_id,
         attempt_id: claim.attempt_id,
         fence: claim.fence,
+        restore_epoch: claim.restore_epoch,
         agent_id: "restart-agent",
         sequence: 0,
         stream: "stdout",
@@ -306,6 +311,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "restart-agent",
                 TerminalOutcome::Succeeded,
                 json!({"sha256": hex(&Sha256::digest(log))}),
@@ -321,6 +327,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "restart-agent",
                 TerminalOutcome::Succeeded,
                 json!({"sha256": hex(&Sha256::digest(log))}),
@@ -381,6 +388,37 @@ async fn controller_restart_replay_is_logically_exactly_once() {
     );
 }
 
+#[test]
+fn restore_epoch_fences_same_numeric_attempt_in_the_agent_journal() {
+    let root = tempfile::tempdir().expect("journal root");
+    let mut journal = Journal::open(root.path().join("agent.db")).expect("open journal");
+    let authority = |restore_epoch: u64, fence: u64| (restore_epoch << 32) | fence;
+    let old = Acceptance {
+        organization_id: "restore-org".into(),
+        attempt_id: "rewound-attempt".into(),
+        fence_token: authority(1, 1),
+        session_epoch: 7,
+        payload_digest: [71; 32],
+        workspace: "restore-org/rewound-attempt/1-1".into(),
+    };
+    journal.accept(&old).expect("accept discarded timeline");
+    let current = Acceptance {
+        fence_token: authority(2, 1),
+        workspace: "restore-org/rewound-attempt/2-1".into(),
+        ..old.clone()
+    };
+    journal.accept(&current).expect("accept current epoch");
+    let report = journal.reconcile().expect("reconcile epochs");
+    assert_eq!(report.attempts.len(), 2);
+    assert_eq!(
+        report.attempts[0].phase,
+        AttemptPhase::ReconciliationRequired
+    );
+    assert_eq!(report.attempts[0].fence_token, authority(1, 1));
+    assert_eq!(report.attempts[1].phase, AttemptPhase::Accepted);
+    assert_eq!(report.attempts[1].fence_token, authority(2, 1));
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -438,6 +476,7 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
             organization_id,
             claim.attempt_id,
             claim.fence,
+            claim.restore_epoch,
             "agent-recovery",
         )
         .await
@@ -446,8 +485,9 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
     let root = tempfile::tempdir().expect("workspace root");
     let journal_path = root.path().join("agent.db");
     let workspace = std::path::PathBuf::from(format!(
-        "{organization_id}/{}/{fence}",
+        "{organization_id}/{}/{}-{fence}",
         claim.attempt_id,
+        claim.restore_epoch,
         fence = claim.fence
     ));
     let payload_digest: [u8; 32] =
@@ -458,7 +498,8 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
             .accept(&Acceptance {
                 organization_id: organization_id.to_string(),
                 attempt_id: claim.attempt_id.to_string(),
-                fence_token: u64::try_from(claim.fence).unwrap(),
+                fence_token: (u64::try_from(claim.restore_epoch).unwrap() << 32)
+                    | u64::try_from(claim.fence).unwrap(),
                 session_epoch: 7,
                 payload_digest,
                 workspace: workspace.clone(),
@@ -595,8 +636,8 @@ async fn cancellation_between_offer_and_acceptance_finishes_without_spawning() {
         !root
             .path()
             .join(format!(
-                "{organization_id}/{}/{}/should-not-exist",
-                claim.attempt_id, claim.fence
+                "{organization_id}/{}/{}-{}/should-not-exist",
+                claim.attempt_id, claim.restore_epoch, claim.fence
             ))
             .exists()
     );

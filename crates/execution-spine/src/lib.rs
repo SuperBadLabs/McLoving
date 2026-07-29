@@ -77,6 +77,14 @@ struct ProcessSpec {
     timeout_seconds: Option<u64>,
 }
 
+fn journal_authority_token(restore_epoch: i64, fence: i64) -> Result<u64, SpineError> {
+    let restore_epoch = u32::try_from(restore_epoch).map_err(|_| SpineError::FenceOverflow)?;
+    let fence = u32::try_from(fence).map_err(|_| SpineError::FenceOverflow)?;
+    let token = (u64::from(restore_epoch) << 32) | u64::from(fence);
+    i64::try_from(token).map_err(|_| SpineError::FenceOverflow)?;
+    Ok(token)
+}
+
 pub async fn run_claim(
     store: &Store,
     claim: &ClaimedAttempt,
@@ -92,6 +100,7 @@ pub async fn run_claim(
             claim.organization_id,
             claim.attempt_id,
             claim.fence,
+            claim.restore_epoch,
             &config.agent_id,
         )
         .await?
@@ -103,15 +112,20 @@ pub async fn run_claim(
         return Err(SpineError::UnsupportedSpec);
     }
     let process = &spec.steps[0];
-    let fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
+    let database_fence = u64::try_from(claim.fence).map_err(|_| SpineError::FenceOverflow)?;
+    let journal_fence = journal_authority_token(claim.restore_epoch, claim.fence)?;
     let organization = claim.organization_id.to_string();
     let attempt = claim.attempt_id.to_string();
-    let workspace = PathBuf::from(format!("{organization}/{attempt}/{fence}"));
+    let workspace = PathBuf::from(format!(
+        "{organization}/{attempt}/{}-{fence}",
+        claim.restore_epoch,
+        fence = database_fence,
+    ));
     let mut journal = Journal::open(&config.journal_path)?;
     journal.accept(&Acceptance {
         organization_id: organization.clone(),
         attempt_id: attempt.clone(),
-        fence_token: fence,
+        fence_token: journal_fence,
         session_epoch: config.session_epoch,
         payload_digest,
         workspace: workspace.clone(),
@@ -121,6 +135,7 @@ pub async fn run_claim(
             claim.organization_id,
             claim.attempt_id,
             claim.fence,
+            claim.restore_epoch,
             &config.agent_id,
         )
         .await?
@@ -132,6 +147,7 @@ pub async fn run_claim(
             claim.organization_id,
             claim.attempt_id,
             claim.fence,
+            claim.restore_epoch,
             &config.agent_id,
         )
         .await?
@@ -144,7 +160,7 @@ pub async fn run_claim(
             &mut journal,
             &organization,
             &attempt,
-            fence,
+            journal_fence,
             TerminalOutcome::Aborted,
             "cancelled_before_process_spawn",
         )
@@ -155,6 +171,7 @@ pub async fn run_claim(
             claim.organization_id,
             claim.attempt_id,
             claim.fence,
+            claim.restore_epoch,
             &config.agent_id,
         )
         .await?
@@ -164,6 +181,7 @@ pub async fn run_claim(
                 claim.organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 &config.agent_id,
             )
             .await?
@@ -176,7 +194,7 @@ pub async fn run_claim(
                 &mut journal,
                 &organization,
                 &attempt,
-                fence,
+                journal_fence,
                 TerminalOutcome::Aborted,
                 "cancelled_before_process_spawn",
             )
@@ -215,7 +233,7 @@ pub async fn run_claim(
             .transition(
                 &organization,
                 &attempt,
-                fence,
+                journal_fence,
                 config.session_epoch,
                 AttemptPhase::Running,
                 Some(process_group_id),
@@ -235,7 +253,7 @@ pub async fn run_claim(
                 &mut journal,
                 &organization,
                 &attempt,
-                fence,
+                journal_fence,
                 TerminalOutcome::Failed,
                 &format!("process_spawn_failed: {error}"),
             )
@@ -246,14 +264,14 @@ pub async fn run_claim(
     journal.record_log(
         &organization,
         &attempt,
-        fence,
+        journal_fence,
         config.session_epoch,
         &outcome.stdout,
     )?;
     journal.record_log(
         &organization,
         &attempt,
-        fence,
+        journal_fence,
         config.session_epoch,
         &outcome.stderr,
     )?;
@@ -274,7 +292,7 @@ pub async fn run_claim(
     journal.transition(
         &organization,
         &attempt,
-        fence,
+        journal_fence,
         config.session_epoch,
         transition,
         Some(outcome.process_group_id),
@@ -289,7 +307,7 @@ pub async fn run_claim(
     journal.record_result(
         &organization,
         &attempt,
-        fence,
+        journal_fence,
         config.session_epoch,
         &result,
     )?;
@@ -298,6 +316,7 @@ pub async fn run_claim(
             claim.organization_id,
             claim.attempt_id,
             claim.fence,
+            claim.restore_epoch,
             &config.agent_id,
             terminal,
             json!({
@@ -313,7 +332,7 @@ pub async fn run_claim(
     journal.transition(
         &organization,
         &attempt,
-        fence,
+        journal_fence,
         config.session_epoch,
         match terminal {
             TerminalOutcome::Succeeded => AttemptPhase::Succeeded,
@@ -348,6 +367,7 @@ async fn cancellation_poller(
                 claim.organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 &agent_id,
                 lease_seconds,
             )
@@ -390,6 +410,7 @@ async fn finalize_without_process(
             claim.organization_id,
             claim.attempt_id,
             claim.fence,
+            claim.restore_epoch,
             &config.agent_id,
             terminal,
             json!({"reason": reason}),
@@ -434,6 +455,7 @@ async fn commit_log(
             organization_id: claim.organization_id,
             attempt_id: claim.attempt_id,
             fence: claim.fence,
+            restore_epoch: claim.restore_epoch,
             agent_id: &config.agent_id,
             sequence: i64::try_from(entry.sequence).map_err(|_| SpineError::FenceOverflow)?,
             stream,
