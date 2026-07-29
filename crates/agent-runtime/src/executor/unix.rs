@@ -1,7 +1,7 @@
 //! Unix process-group execution.
 
 use std::fs::File;
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -165,6 +165,8 @@ where
     if termination.0 == Termination::OutputLimitExceeded || exceeded {
         truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     }
+    restore_agent_spool_permissions(&stdout_control)?;
+    restore_agent_spool_permissions(&stderr_control)?;
     stdout_control.sync_all()?;
     stderr_control.sync_all()?;
     ensure_original_spool_path(&stdout_control, &stdout_path)?;
@@ -180,6 +182,13 @@ where
         stdout: spool_entry(&request.workspace, "spool/stdout.log", 0, &stdout_control).await?,
         stderr: spool_entry(&request.workspace, "spool/stderr.log", 1, &stderr_control).await?,
     })
+}
+
+fn restore_agent_spool_permissions(file: &File) -> Result<(), std::io::Error> {
+    let metadata = file.metadata()?;
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o600);
+    file.set_permissions(permissions)
 }
 
 fn output_limit_exceeded(
@@ -695,6 +704,33 @@ mod tests {
         assert_eq!(outcome.stdout.bytes, 8);
         let expected_digest: [u8; 32] = Sha256::digest(b"mcloving").into();
         assert_eq!(outcome.stdout.digest, expected_digest);
+    }
+
+    #[tokio::test]
+    async fn workload_cannot_revoke_agent_read_access_to_log_spools() {
+        let root = tempfile::tempdir().unwrap();
+        let request = ExecutionRequest {
+            workspace_root: root.path().to_owned(),
+            workspace: PathBuf::from("org/revoked-spool-mode"),
+            mode: ExecutionMode::Direct,
+            program: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                OsString::from("-c"),
+                OsString::from("printf retained; chmod 000 spool/stdout.log spool/stderr.log"),
+            ],
+            environment: BTreeMap::new(),
+            output_limit_bytes: None,
+            timeout: Duration::from_secs(5),
+            termination_grace: Duration::from_millis(100),
+        };
+
+        let outcome = execute(&request, CancellationToken::new()).await.unwrap();
+        assert_eq!(
+            fs::read(root.path().join(outcome.stdout.relative_path))
+                .await
+                .unwrap(),
+            b"retained"
+        );
     }
 
     #[tokio::test]

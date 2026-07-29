@@ -4,8 +4,6 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::future::Future;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
@@ -171,6 +169,21 @@ pub(super) async fn recover_finalizations(
             attempt_id: attempt.attempt_id.clone(),
             fence_token: attempt.fence_token,
         };
+        let lease_started_at = tokio::time::Instant::now();
+        let lease_window = Duration::from_secs(RECOVERED_FINALIZATION_LEASE_SECONDS);
+        let lease = lease_deadline_rpc(
+            lease_started_at + lease_rpc_budget(lease_window),
+            client.renew_work_lease(WorkLeaseRenewal {
+                authority: Some(authority.clone()),
+                lease_seconds: u32::try_from(RECOVERED_FINALIZATION_LEASE_SECONDS)
+                    .expect("recovery lease fits the wire type"),
+            }),
+        )
+        .await?;
+        ensure_session(lease.session_epoch, session_epoch)?;
+        if !lease.accepted {
+            return Err(AgentError::StaleAuthority);
+        }
         let lease_stop = CancellationToken::new();
         let authority_lost = CancellationToken::new();
         let execution_cancellation = CancellationToken::new();
@@ -180,8 +193,8 @@ pub(super) async fn recover_finalizations(
             LeaseRenewalControl {
                 lease_seconds: config.lease_seconds,
                 renewal_interval: recovery_renewal_interval(config.lease_renewal_interval),
-                lease_started_at: tokio::time::Instant::now(),
-                lease_window: Duration::from_secs(RECOVERED_FINALIZATION_LEASE_SECONDS),
+                lease_started_at,
+                lease_window,
                 execution_cancellation,
                 authority_lost: authority_lost.clone(),
                 stop: lease_stop.clone(),
@@ -547,15 +560,8 @@ async fn run_assignment(
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
-    // The executor can fail after process creation while proving containment
-    // empty. Retain the exact PID as soon as the hook is invoked so every such
-    // error remains recoverable instead of being misreported as a processless
-    // spawn failure.
-    let spawned_process_id = Arc::new(AtomicU32::new(0));
-    let observed_process_id = Arc::clone(&spawned_process_id);
     let execution =
         execute_with_spawn_hook(&request, execution_cancellation.clone(), |process_id| {
-            observed_process_id.store(process_id, Ordering::Release);
             let process_birth_identity = process_birth_identity_for(process_id)
                 .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
             match process_birth_identity {
@@ -586,7 +592,7 @@ async fn run_assignment(
         let outcome = match execution {
             Ok(outcome) => outcome,
             Err(error) => {
-                if let Some(process_id) = post_spawn_process_id(&error, &spawned_process_id) {
+                if let Some(process_id) = unverified_containment_process_id(&error) {
                     journal.transition(
                         &organization,
                         &attempt,
@@ -705,6 +711,7 @@ async fn run_assignment(
             session_epoch,
             &[outcome.stdout.clone(), outcome.stderr.clone()],
             Some(&result),
+            &assignment.workspace,
         )
         .await?;
         Ok(())
@@ -718,13 +725,10 @@ async fn run_assignment(
     lease_result
 }
 
-fn post_spawn_process_id(error: &ExecutionError, observed: &AtomicU32) -> Option<u32> {
+fn unverified_containment_process_id(error: &ExecutionError) -> Option<u32> {
     match error {
         ExecutionError::ContainmentUnverified { process_id, .. } => Some(*process_id),
-        _ => {
-            let process_id = observed.load(Ordering::Acquire);
-            (process_id != 0).then_some(process_id)
-        }
+        _ => None,
     }
 }
 
@@ -961,10 +965,12 @@ async fn reclaim_attempt_spools(
         attempt.session_epoch,
         &attempt.logs,
         attempt.result.as_ref(),
+        &attempt.workspace,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn reclaim_spool_entries(
     config: &AgentConfig,
     organization_id: &str,
@@ -973,10 +979,12 @@ async fn reclaim_spool_entries(
     session_epoch: u64,
     logs: &[SpoolEntry],
     result: Option<&SpoolEntry>,
+    workspace: &Path,
 ) -> Result<(), AgentError> {
     for entry in logs.iter().chain(result) {
         remove_spool_file(&config.workspace_root, entry).await?;
     }
+    remove_attempt_workspace(&config.workspace_root, workspace).await?;
     Journal::open(&config.journal_path)?.retire_terminal_spools(
         organization_id,
         attempt_id,
@@ -984,6 +992,50 @@ async fn reclaim_spool_entries(
         session_epoch,
     )?;
     Ok(())
+}
+
+async fn remove_attempt_workspace(
+    workspace_root: &Path,
+    workspace: &Path,
+) -> Result<(), AgentError> {
+    if workspace.as_os_str().is_empty()
+        || workspace.is_absolute()
+        || workspace
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(AgentError::InvalidAssignment(
+            "terminal workspace must be normalized and relative".to_owned(),
+        ));
+    }
+    let path = workspace_root.join(workspace);
+    let mut current = workspace_root.to_owned();
+    for component in workspace.components() {
+        let Component::Normal(component) = component else {
+            unreachable!("terminal workspace was validated above");
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(AgentError::InvalidAssignment(
+                    "terminal workspace contains a non-directory or symlink".to_owned(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match fs::remove_dir_all(&path).await {
+        Ok(()) => {
+            if let Some(parent) = path.parent() {
+                sync_directory(parent)?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    prune_empty_spool_directories(workspace_root, path.parent()).await
 }
 
 async fn remove_spool_file(workspace_root: &Path, entry: &SpoolEntry) -> Result<(), AgentError> {
@@ -1378,6 +1430,7 @@ async fn finalize_without_process(
         session_epoch,
         &[],
         Some(&result),
+        workspace,
     )
     .await?;
     Ok(())
@@ -1492,30 +1545,24 @@ mod tests {
     }
 
     #[test]
-    fn every_observed_post_spawn_error_retains_reconciliation_identity() {
-        let observed = AtomicU32::new(41);
+    fn only_unverified_containment_retains_reconciliation_identity() {
         assert_eq!(
-            post_spawn_process_id(
-                &ExecutionError::WindowsJob("job drain failed".to_owned()),
-                &observed,
-            ),
-            Some(41)
+            unverified_containment_process_id(&ExecutionError::WindowsJob(
+                "job drain failed".to_owned()
+            )),
+            None
         );
         assert_eq!(
-            post_spawn_process_id(
-                &ExecutionError::ContainmentUnverified {
-                    process_id: 43,
-                    reason: "group still exists".to_owned(),
-                },
-                &AtomicU32::new(0),
-            ),
+            unverified_containment_process_id(&ExecutionError::ContainmentUnverified {
+                process_id: 43,
+                reason: "group still exists".to_owned(),
+            }),
             Some(43)
         );
         assert_eq!(
-            post_spawn_process_id(
-                &ExecutionError::WindowsJob("pre-spawn failure".to_owned()),
-                &AtomicU32::new(0),
-            ),
+            unverified_containment_process_id(&ExecutionError::WindowsJob(
+                "pre-spawn failure".to_owned()
+            )),
             None
         );
     }
@@ -1871,6 +1918,16 @@ mod tests {
             .unwrap();
         fs::write(&stdout_path, b"stdout").await.unwrap();
         fs::write(&stderr_path, b"stderr").await.unwrap();
+        let build_output = config
+            .workspace_root
+            .join(&workspace)
+            .join("build/output.bin");
+        fs::create_dir_all(build_output.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&build_output, b"ordinary-workspace-output")
+            .await
+            .unwrap();
         let logs = [
             SpoolEntry {
                 sequence: 0,
@@ -1939,6 +1996,7 @@ mod tests {
         assert!(!stdout_path.exists());
         assert!(!stderr_path.exists());
         assert!(!result_path.exists());
+        assert!(!config.workspace_root.join(&workspace).exists());
         assert!(
             Journal::open(&config.journal_path)
                 .unwrap()

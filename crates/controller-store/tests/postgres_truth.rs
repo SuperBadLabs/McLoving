@@ -1497,6 +1497,32 @@ async fn scheduler_requires_the_nodes_designated_trust_pool() {
         .expect("claim from matching pool")
         .expect("matching pool receives work");
     assert_eq!(claim.node_id, build.node_id);
+    assert!(
+        store
+            .authorize_attempt_trust_pool(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "release",
+            )
+            .await
+            .expect("authorize matching attempt pool")
+    );
+    assert!(
+        !store
+            .authorize_attempt_trust_pool(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "untrusted",
+            )
+            .await
+            .expect("reject mismatched attempt pool")
+    );
 }
 
 #[tokio::test]

@@ -419,6 +419,51 @@ impl Store {
         .await?)
     }
 
+    /// Binds a fenced attempt authority to the trust pool durably required by
+    /// its node. Re-enrollment may advance an agent session, but it must never
+    /// let a certificate in a different pool inherit prior fenced authority.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn authorize_attempt_trust_pool(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        trust_pool: &str,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let authorized = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM attempts AS a
+                 JOIN nodes AS n
+                   ON n.id = a.node_id
+                  AND n.organization_id = a.organization_id
+                 CROSS JOIN controller_metadata AS m
+                 WHERE a.organization_id = $1
+                   AND a.id = $2
+                   AND a.fence = $3
+                   AND a.restore_epoch = $4
+                   AND a.lease_owner = $5
+                   AND n.required_trust_pool = $6
+                   AND m.singleton
+                   AND a.restore_epoch = m.restore_epoch
+             )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .bind(trust_pool)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(authorized)
+    }
+
     /// Returns only the capabilities durably bound to the exact current session.
     pub async fn agent_session_capabilities(
         &self,
