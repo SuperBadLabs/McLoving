@@ -24,6 +24,39 @@ pub const DURABLE_RETRY_V4: &str = include_str!("../migrations/0004_durable_retr
 pub const OBJECT_REFERENCES_V5: &str = include_str!("../migrations/0005_object_references.sql");
 /// Backup checkpoints, restore fencing, retention, and legal-hold migration.
 pub const RECOVERY_OPERATIONS_V6: &str = include_str!("../migrations/0006_recovery_operations.sql");
+/// Durable, active-active-safe agent session authority.
+pub const AGENT_SESSIONS_V7: &str = include_str!("../migrations/0007_agent_sessions.sql");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentReconciliationDisposition {
+    Retain,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentCancellationDisposition {
+    Completed,
+    RetireStale,
+    ReconciliationRequired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentCancellationOutcome {
+    Terminated,
+    ReconciliationRequired,
+}
+
+/// Fenced controller authority and the observed result of one cancellation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentCancellationCompletion<'a> {
+    pub organization_id: Uuid,
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub restore_epoch: i64,
+    pub agent_id: &'a str,
+    pub session_epoch: u64,
+    pub outcome: AgentCancellationOutcome,
+}
 
 /// A build and its first executable node, admitted as one durable unit.
 #[derive(Clone, Debug)]
@@ -273,6 +306,8 @@ pub enum StoreError {
     InvalidObjectRecord(String),
     #[error("invalid recovery operation: {0}")]
     InvalidRecoveryOperation(String),
+    #[error("invalid agent session authority")]
+    InvalidAgentSession,
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -311,8 +346,307 @@ impl Store {
         apply_migration(&mut tx, 4, DURABLE_RETRY_V4).await?;
         apply_migration(&mut tx, 5, OBJECT_REFERENCES_V5).await?;
         apply_migration(&mut tx, 6, RECOVERY_OPERATIONS_V6).await?;
+        apply_migration(&mut tx, 7, AGENT_SESSIONS_V7).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Atomically advances one agent session epoch across controller replicas.
+    pub async fn open_agent_session(
+        &self,
+        agent_id: &str,
+        trust_pool: &str,
+        session_epoch: u64,
+        protocol_minor: u16,
+        features: &[String],
+        capabilities: &[String],
+    ) -> Result<bool, StoreError> {
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        let row = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO agent_sessions(
+                 agent_id, trust_pool, session_epoch, protocol_minor,
+                 features, capabilities
+             )
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (agent_id) DO UPDATE
+             SET trust_pool = EXCLUDED.trust_pool,
+                 session_epoch = EXCLUDED.session_epoch,
+                 protocol_minor = EXCLUDED.protocol_minor,
+                 features = EXCLUDED.features,
+                 capabilities = EXCLUDED.capabilities,
+                 updated_at = clock_timestamp()
+             WHERE agent_sessions.session_epoch < EXCLUDED.session_epoch
+             RETURNING session_epoch",
+        )
+        .bind(agent_id)
+        .bind(trust_pool)
+        .bind(session_epoch)
+        .bind(i32::from(protocol_minor))
+        .bind(features)
+        .bind(capabilities)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    pub async fn authorize_agent_session(
+        &self,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM agent_sessions
+                 WHERE agent_id = $1 AND session_epoch = $2
+             )",
+        )
+        .bind(agent_id)
+        .bind(session_epoch)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Resolves a recovered attempt against current durable controller truth.
+    pub async fn agent_reconciliation_disposition(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+    ) -> Result<AgentReconciliationDisposition, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query_as::<_, (bool, bool)>(
+            "SELECT
+                 a.fence = $3
+                 AND a.restore_epoch = $4
+                 AND a.lease_owner = $5
+                 AND a.restore_epoch = (
+                     SELECT restore_epoch FROM controller_metadata WHERE singleton
+                 )
+                 AND a.status IN (
+                     'offered', 'accepted', 'running', 'finalizing', 'cancelling',
+                     'reconciliation_required'
+                 ) AS current_authority,
+                 a.status <> 'reconciliation_required'
+                 AND (
+                     b.cancellation_requested_at IS NOT NULL
+                     OR a.status = 'cancelling'
+                 )
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE a.organization_id = $1 AND a.id = $2",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(match row {
+            Some((true, false)) => AgentReconciliationDisposition::Retain,
+            _ => AgentReconciliationDisposition::Cancel,
+        })
+    }
+
+    /// Atomically acknowledges a fenced agent's cancellation outcome.
+    ///
+    /// A reconnect may arrive after its lease deadline, so cancellation
+    /// completion is authorized by the current restore epoch, exact fence, and
+    /// exact lease owner rather than by an unexpired lease. Response-loss
+    /// replay of an already-applied outcome succeeds without emitting a second
+    /// event. Unverifiable process termination and uncertain external effects
+    /// fail closed into explicit reconciliation instead of being mislabeled
+    /// aborted.
+    pub async fn complete_agent_cancellation(
+        &self,
+        completion: AgentCancellationCompletion<'_>,
+    ) -> Result<AgentCancellationDisposition, StoreError> {
+        let AgentCancellationCompletion {
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            session_epoch,
+            outcome,
+        } = completion;
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        let current_session = sqlx::query_scalar::<_, i64>(
+            "SELECT session_epoch
+             FROM agent_sessions
+             WHERE agent_id = $1
+             FOR UPDATE",
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if current_session != Some(session_epoch) {
+            tx.rollback().await?;
+            return Ok(AgentCancellationDisposition::RetireStale);
+        }
+        let authority = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+            "SELECT n.id, n.build_id, a.status
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id
+              AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id
+              AND b.organization_id = n.organization_id
+             WHERE a.id = $1
+               AND a.organization_id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND a.restore_epoch = (
+                   SELECT restore_epoch
+                   FROM controller_metadata
+                   WHERE singleton
+               )
+               AND a.status IN ('cancelling', 'aborted', 'reconciliation_required')
+               AND b.cancellation_requested_at IS NOT NULL
+             FOR UPDATE OF a, n, b",
+        )
+        .bind(attempt_id)
+        .bind(organization_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((node_id, build_id, status)) = authority else {
+            tx.rollback().await?;
+            return Ok(AgentCancellationDisposition::RetireStale);
+        };
+        if status == "aborted" {
+            tx.commit().await?;
+            return Ok(AgentCancellationDisposition::Completed);
+        }
+        if status == "reconciliation_required" {
+            tx.commit().await?;
+            return Ok(AgentCancellationDisposition::ReconciliationRequired);
+        }
+
+        let uncertain_effects = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND status = 'uncertain'",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        if outcome == AgentCancellationOutcome::ReconciliationRequired || uncertain_effects > 0 {
+            sqlx::query(
+                "UPDATE attempts
+                 SET status = 'reconciliation_required',
+                     lease_expires_at = NULL
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(attempt_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'reconciliation_required'
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(node_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE builds
+                 SET status = 'reconciliation_required', completed_at = NULL
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(build_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            append_event_and_outbox(
+                &mut tx,
+                organization_id,
+                build_id,
+                "attempt.cancellation_reconciliation_required",
+                json!({
+                    "attempt_id": attempt_id,
+                    "fence": fence,
+                    "agent_id": agent_id,
+                    "process_termination": match outcome {
+                        AgentCancellationOutcome::Terminated => "terminated",
+                        AgentCancellationOutcome::ReconciliationRequired => "unverifiable",
+                    },
+                    "uncertain_effects": uncertain_effects,
+                }),
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(AgentCancellationDisposition::ReconciliationRequired);
+        }
+
+        sqlx::query(
+            "UPDATE attempts
+             SET status = 'aborted',
+                 terminal_summary = $3,
+                 completed_at = clock_timestamp(),
+                 lease_expires_at = NULL
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(attempt_id)
+        .bind(organization_id)
+        .bind(json!({"reason": "agent_confirmed_cancellation"}))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE nodes
+             SET status = 'aborted'
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(node_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE builds
+             SET status = 'aborted', completed_at = clock_timestamp()
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(build_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "attempt.cancellation_completed",
+            json!({
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "agent_id": agent_id,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(AgentCancellationDisposition::Completed)
     }
 
     /// Creates an organization/project pair for bootstrap and tests.
@@ -997,10 +1331,13 @@ impl Store {
     ///
     /// Restore activation and lease expiry leave the attempt fenced and move
     /// unresolved effect checkpoints to `uncertain`. Reconciliation may only
-    /// confirm an existing, payload-identical uncertain row after its lease
-    /// has been cleared. Same-epoch lease expiry is restricted to the
-    /// attempt's current fence; restore reconciliation may also confirm an
-    /// historical fence that was made uncertain by the restore sweep.
+    /// confirm an existing, payload-identical uncertain row after executable
+    /// lease authority has been cleared. `lease_owner` may remain as durable
+    /// attribution for agent reconciliation; the null expiry and
+    /// `reconciliation_required` status prevent lease renewal or execution.
+    /// Same-epoch lease expiry is restricted to the attempt's current fence;
+    /// restore reconciliation may also confirm an historical fence that was
+    /// made uncertain by the restore sweep.
     #[allow(clippy::too_many_arguments)]
     pub async fn confirm_uncertain_effect(
         &self,
@@ -1037,7 +1374,6 @@ impl Store {
                AND a.organization_id = e.organization_id
                AND a.id = e.attempt_id
                AND a.status = 'reconciliation_required'
-               AND a.lease_owner IS NULL
                AND a.lease_expires_at IS NULL
                AND m.singleton
                AND a.restore_epoch <= m.restore_epoch
@@ -1122,7 +1458,6 @@ impl Store {
                AND a.id = $2
                AND a.fence = $3
                AND a.status = 'reconciliation_required'
-               AND a.lease_owner IS NULL
                AND a.lease_expires_at IS NULL
                AND NOT EXISTS (
                    SELECT 1

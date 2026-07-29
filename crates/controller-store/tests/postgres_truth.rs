@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use mcloving_controller_store::{
-    ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk, ObjectKind, ObjectStatus,
-    RetryDecision, Store, StoreError, TerminalOutcome, WaitReason,
+    AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
+    AgentReconciliationDisposition, ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk,
+    ObjectKind, ObjectStatus, RetryDecision, Store, StoreError, TerminalOutcome, WaitReason,
 };
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -57,6 +58,47 @@ async fn unprivileged_store(admin: &Store) -> Store {
         .await
         .expect("connect as the unprivileged tenant role");
     Store::new(pool)
+}
+
+#[tokio::test]
+async fn agent_session_epoch_is_durable_and_monotonic() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let store = unprivileged_store(&admin).await;
+    let agent_id = format!("windows-{}", Uuid::new_v4());
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                5,
+                0,
+                &["journal-v1".to_owned()],
+                &["windows".to_owned()],
+            )
+            .await
+            .expect("open first durable session")
+    );
+    assert!(
+        !store
+            .open_agent_session(&agent_id, "trusted", 5, 0, &[], &[])
+            .await
+            .expect("reject repeated session epoch")
+    );
+    assert!(
+        store
+            .authorize_agent_session(&agent_id, 5)
+            .await
+            .expect("authorize exact epoch")
+    );
+    assert!(
+        !store
+            .authorize_agent_session(&agent_id, 4)
+            .await
+            .expect("reject stale epoch")
+    );
 }
 
 #[tokio::test]
@@ -193,6 +235,430 @@ async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
     .await
     .expect("count admission and cancellation publications");
     assert_eq!(counts, (2, 2));
+}
+
+#[tokio::test]
+async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "agent-cancellation",
+        )
+        .await
+        .expect("create tenant");
+    assert!(
+        store
+            .open_agent_session(
+                "windows-1",
+                "trusted-windows",
+                1,
+                0,
+                &["journal-v1".to_owned(), "windows-job-object-v1".to_owned()],
+                &["windows".to_owned()],
+            )
+            .await
+            .expect("open agent session")
+    );
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "agent-cancellation-complete".into(),
+            pipeline_digest: [0xAC; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["windows".into()],
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit active build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "windows-1".into(),
+            capabilities: vec!["windows".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim query")
+        .expect("claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "windows-1",
+            )
+            .await
+            .expect("accept offer")
+    );
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("request active cancellation")
+    );
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire lease to model reconnect after deadline");
+
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                organization_id,
+                attempt_id: claim.attempt_id,
+                fence: claim.fence + 1,
+                restore_epoch: claim.restore_epoch,
+                agent_id: "windows-1",
+                session_epoch: 1,
+                outcome: AgentCancellationOutcome::Terminated,
+            })
+            .await
+            .expect("reject stale fence"),
+        AgentCancellationDisposition::RetireStale
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                organization_id,
+                attempt_id: claim.attempt_id,
+                fence: claim.fence,
+                restore_epoch: claim.restore_epoch,
+                agent_id: "windows-1",
+                session_epoch: 1,
+                outcome: AgentCancellationOutcome::Terminated,
+            })
+            .await
+            .expect("complete fenced cancellation"),
+        AgentCancellationDisposition::Completed
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                organization_id,
+                attempt_id: claim.attempt_id,
+                fence: claim.fence,
+                restore_epoch: claim.restore_epoch,
+                agent_id: "windows-1",
+                session_epoch: 1,
+                outcome: AgentCancellationOutcome::Terminated,
+            })
+            .await
+            .expect("replay completion"),
+        AgentCancellationDisposition::Completed
+    );
+
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read terminal snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "aborted");
+    assert_eq!(snapshot.attempt_status, "aborted");
+    assert_eq!(
+        snapshot.terminal_summary,
+        Some(json!({"reason": "agent_confirmed_cancellation"}))
+    );
+    let completions = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.cancellation_completed'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count cancellation completion events");
+    assert_eq!(completions, 1);
+
+    let retained = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "agent-cancellation-unverifiable".into(),
+            pipeline_digest: [0xAD; 32],
+            node_key: "stage-unverifiable".into(),
+            required_capabilities: vec!["windows".into()],
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit unverifiable cancellation build");
+    let retained_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "windows-1".into(),
+            capabilities: vec!["windows".into()],
+            lease_seconds: 30,
+            fairness_seed: 2,
+        })
+        .await
+        .expect("claim unverifiable cancellation")
+        .expect("unverifiable cancellation claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                retained_claim.attempt_id,
+                retained_claim.fence,
+                retained_claim.restore_epoch,
+                "windows-1",
+            )
+            .await
+            .expect("accept unverifiable cancellation offer")
+    );
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, retained.build_id)
+            .await
+            .expect("request unverifiable cancellation")
+    );
+    for label in [
+        "retain unverifiable cancellation",
+        "replay retained outcome",
+    ] {
+        assert_eq!(
+            store
+                .complete_agent_cancellation(AgentCancellationCompletion {
+                    organization_id,
+                    attempt_id: retained_claim.attempt_id,
+                    fence: retained_claim.fence,
+                    restore_epoch: retained_claim.restore_epoch,
+                    agent_id: "windows-1",
+                    session_epoch: 1,
+                    outcome: AgentCancellationOutcome::ReconciliationRequired,
+                })
+                .await
+                .expect(label),
+            AgentCancellationDisposition::ReconciliationRequired
+        );
+    }
+    let retained_snapshot = store
+        .build_snapshot(organization_id, project_id, retained.build_id)
+        .await
+        .expect("read retained cancellation")
+        .expect("retained build exists");
+    assert_eq!(retained_snapshot.build_status, "reconciliation_required");
+    assert_eq!(retained_snapshot.attempt_status, "reconciliation_required");
+    let retained_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.cancellation_reconciliation_required'",
+    )
+    .bind(organization_id)
+    .bind(retained.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count retained cancellation events");
+    assert_eq!(retained_events, 1);
+}
+
+#[tokio::test]
+async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "agent-cancellation-reconciliation",
+        )
+        .await
+        .expect("create tenant");
+    assert!(
+        store
+            .open_agent_session(
+                "windows-reconciliation-1",
+                "trusted-windows",
+                1,
+                0,
+                &["journal-v1".to_owned(), "windows-job-object-v1".to_owned()],
+                &["windows".to_owned()],
+            )
+            .await
+            .expect("open agent session")
+    );
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "agent-cancellation-reconciliation".into(),
+            pipeline_digest: [0xCE; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["windows".into()],
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit active build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "windows-reconciliation-1".into(),
+            capabilities: vec!["windows".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim query")
+        .expect("claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "windows-reconciliation-1",
+            )
+            .await
+            .expect("accept offer")
+    );
+    let effect_payload = json!({"destination": "production"});
+    for (status, label) in [
+        (EffectStatus::Prepared, "prepare effect"),
+        (EffectStatus::Uncertain, "mark effect uncertain"),
+    ] {
+        assert!(
+            store
+                .checkpoint_effect(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "windows-reconciliation-1",
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    status,
+                    &effect_payload,
+                )
+                .await
+                .expect(label)
+        );
+    }
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("request active cancellation")
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                organization_id,
+                attempt_id: claim.attempt_id,
+                fence: claim.fence,
+                restore_epoch: claim.restore_epoch,
+                agent_id: "windows-reconciliation-1",
+                session_epoch: 1,
+                outcome: AgentCancellationOutcome::Terminated,
+            })
+            .await
+            .expect("route uncertain cancellation to reconciliation"),
+        AgentCancellationDisposition::ReconciliationRequired
+    );
+    assert_eq!(
+        store
+            .agent_reconciliation_disposition(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "windows-reconciliation-1",
+            )
+            .await
+            .expect("reconcile current uncertain cancellation"),
+        AgentReconciliationDisposition::Retain
+    );
+
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read reconciliation snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "reconciliation_required");
+    assert_eq!(snapshot.attempt_status, "reconciliation_required");
+    let reconciliation_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.cancellation_reconciliation_required'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count cancellation reconciliation events");
+    assert_eq!(reconciliation_events, 1);
+
+    assert!(
+        store
+            .confirm_uncertain_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &effect_payload,
+            )
+            .await
+            .expect("confirm cancellation effect through operator reconciliation")
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "operator-1",
+                TerminalOutcome::Aborted,
+                json!({"reason": "cancelled_after_effect_reconciliation"}),
+            )
+            .await
+            .expect("terminalize cancellation after operator reconciliation")
+    );
+    let terminal = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read terminal reconciliation snapshot")
+        .expect("build exists");
+    assert_eq!(terminal.build_status, "aborted");
+    assert_eq!(terminal.attempt_status, "aborted");
+    assert_eq!(
+        terminal.terminal_summary,
+        Some(json!({"reason": "cancelled_after_effect_reconciliation"}))
+    );
 }
 
 #[tokio::test]

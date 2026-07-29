@@ -78,11 +78,11 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 |---|---|---|---|---|---|
 | TM-001 | Cross-tenant object ID is substituted in an API call | Tenant IDs in keys, centralized authz, PostgreSQL RLS | Generated authz matrix and negative integration tests | SEC | Privileged DB operator |
 | TM-002 | Fork pipeline requests protected credentials | Immutable trust class, grant policy, restricted pool | Fork/fork-to-trusted transition tests | SEC/AGENT | Malicious trusted maintainer |
-| TM-003 | Stale lease publishes a result after fencing | Epoch and lease token checked transactionally | TLC model, DB race tests, agent-session epoch unit tests, reconnect E2E | ARCH/CTRL | DB compromise |
+| TM-003 | Stale lease or certificate holder publishes as another agent after fencing | Epoch and lease token checked transactionally; agent session epochs advanced in PostgreSQL across replicas; exact leaf-certificate digest binds agent ID and trust pool on every agent RPC | TLC model, DB race tests, durable agent-session epoch tests, binding parser tests, reconnect E2E | ARCH/CTRL | CA or binding-file compromise |
 | TM-004 | Lost connection triggers duplicate deployment | Reconciliation and effect idempotency class | Partition and ambiguous-effect war test | CTRL/EXT | External API lacking reconciliation |
 | TM-005 | Controller restart loses accepted work | PostgreSQL transaction plus outbox | Kill-after-each-transition fault injection | CTRL | Correlated DB failure |
-| TM-006 | Agent restart loses process identity or result | Local SQLite WAL, FULL synchronous commits, and durable spool metadata | Reopen/integrity tests now; SIGKILL/reboot/reconnect E2E next | AGENT | Host disk corruption |
-| TM-007 | Workload escapes process-tree cancellation | Linux process groups now; cgroups and Job Objects by deployment/platform ticket | Destructive timeout and cancellation descendant tests | AGENT/WIN | Kernel or container-runtime flaw |
+| TM-006 | Agent restart loses process identity or result | Local SQLite WAL, FULL synchronous commits, durable session epochs, and durable spool metadata | `AGENT-005` must recover finalizing evidence; `AGENT-006` must add non-reusable Unix process identity; persistent-host machine reboot follows | AGENT | Host disk corruption; result recovery is not yet closed |
+| TM-007 | Workload escapes process-tree cancellation | Linux process groups; suspended-child assignment to kill-on-close Windows Job Objects; VM boundary for hostile tenants | Destructive in-process Linux/Windows timeout and cancellation pass; `WIN-004` must close the Windows pre-assignment service-crash window | AGENT/WIN | Kernel, Job Object, container-runtime flaw, and current pre-assignment crash window |
 | TM-008 | Parser input consumes unbounded CPU or memory | Strict YAML subset, compiler sandbox, resource limits | Continuous fuzzing and timeout corpus | IR/COMPAT | Novel parser vulnerability |
 | TM-009 | Unknown step is reported successful | Typed IR and fail-closed mapping | Negative corpus and unknown-effect property tests | IR/COMPAT | Incorrect approved mapping |
 | TM-010 | Connector gains scheduler or DB authority | Out-of-process scoped identity and protocol | Permission-negative integration suite | EXT/SEC | Host administrator |
@@ -123,7 +123,7 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 | Secret grants and protected environments | SEC-003 |
 | Connector identity and external ambiguity | EXT-001 |
 | Artifact integrity, retention, and restore | OPS-001 / OPS-002 |
-| Windows containment | WIN-001 / WIN-002 |
+| Windows service, journal, and Job Object containment | WIN-001 / WIN-002 |
 | Supply-chain release evidence | REL-001 |
 
 ## Residual-risk policy

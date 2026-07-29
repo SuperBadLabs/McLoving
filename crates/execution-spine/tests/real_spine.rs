@@ -532,8 +532,8 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
     assert_eq!(live_report.attempts[0].phase, AttemptPhase::Running);
     assert!(
         live_report.attempts[0]
-            .process_group_id
-            .is_some_and(|process_group_id| process_group_id > 0)
+            .process_id
+            .is_some_and(|process_id| process_id > 0)
     );
     drop(live_journal);
     assert!(

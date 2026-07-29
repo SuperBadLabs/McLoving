@@ -6,6 +6,7 @@ service AgentControl {
   rpc OpenSession(OpenSessionRequest) returns (OpenSessionResponse);
   rpc RotateCertificate(RotateCertificateRequest) returns (RotateCertificateResponse);
   rpc Reconcile(ReconciliationReport) returns (ReconciliationDirective);
+  rpc CompleteCancellation(CancellationCompletion) returns (CancellationReceipt);
 }
 
 message ProtocolOffer {
@@ -49,6 +50,17 @@ message AttemptState {
   uint64 fence_token = 3;
   string phase = 4;
   bytes payload_digest = 5;
+  optional uint32 process_id = 6;
+  string workspace = 7;
+  repeated SpoolEntry logs = 8;
+  optional SpoolEntry result = 9;
+}
+
+message SpoolEntry {
+  string relative_path = 1;
+  bytes digest = 2;
+  uint64 bytes = 3;
+  uint64 sequence = 4;
 }
 
 message ReconciliationReport {
@@ -59,6 +71,39 @@ message ReconciliationReport {
 
 message ReconciliationDirective {
   uint64 session_epoch = 1;
-  repeated string retain_attempt_ids = 2;
-  repeated string cancel_attempt_ids = 3;
+  repeated AttemptAuthority retain_attempts = 2;
+  repeated AttemptAuthority cancel_attempts = 3;
+}
+
+message AttemptAuthority {
+  string organization_id = 1;
+  string attempt_id = 2;
+  uint64 fence_token = 3;
+}
+
+message CancellationCompletion {
+  string agent_id = 1;
+  uint64 session_epoch = 2;
+  string organization_id = 3;
+  string attempt_id = 4;
+  uint64 fence_token = 5;
+  CancellationOutcome outcome = 6;
+}
+
+enum CancellationOutcome {
+  CANCELLATION_OUTCOME_UNSPECIFIED = 0;
+  CANCELLATION_OUTCOME_TERMINATED = 1;
+  CANCELLATION_OUTCOME_RECONCILIATION_REQUIRED = 2;
+}
+
+message CancellationReceipt {
+  uint64 session_epoch = 1;
+  CancellationDisposition disposition = 2;
+}
+
+enum CancellationDisposition {
+  CANCELLATION_DISPOSITION_UNSPECIFIED = 0;
+  CANCELLATION_DISPOSITION_COMPLETED = 1;
+  CANCELLATION_DISPOSITION_RETIRE_STALE = 2;
+  CANCELLATION_DISPOSITION_RECONCILIATION_REQUIRED = 3;
 }

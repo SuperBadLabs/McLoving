@@ -1,71 +1,19 @@
-//! Unix process-group execution with bounded workspaces and durable logs.
+//! Unix process-group execution.
 
-use std::collections::BTreeMap;
-use std::ffi::OsString;
-use std::io;
-use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
-use sha2::{Digest, Sha256};
-use thiserror::Error;
-use tokio::fs;
-use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 
-use crate::{JournalError, SpoolEntry, validate_relative_path};
-
-#[derive(Clone, Debug)]
-pub struct ExecutionRequest {
-    pub workspace_root: PathBuf,
-    pub workspace: PathBuf,
-    pub program: PathBuf,
-    pub arguments: Vec<OsString>,
-    pub environment: BTreeMap<OsString, OsString>,
-    pub timeout: Duration,
-    pub termination_grace: Duration,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Termination {
-    Exited,
-    TimedOut,
-    Cancelled,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExecutionOutcome {
-    pub termination: Termination,
-    pub exit_code: Option<i32>,
-    pub process_group_id: i32,
-    pub stdout: SpoolEntry,
-    pub stderr: SpoolEntry,
-}
-
-#[derive(Debug, Error)]
-pub enum ExecutionError {
-    #[error("invalid workspace path: {0}")]
-    InvalidWorkspace(#[from] JournalError),
-    #[error("workspace root must resolve to an existing directory")]
-    InvalidWorkspaceRoot,
-    #[error("workspace already exists")]
-    WorkspaceAlreadyExists,
-    #[error("workspace contains a symlink component")]
-    SymlinkWorkspaceComponent,
-    #[error("process did not expose a valid process ID")]
-    MissingProcessId,
-    #[error("process spawn could not be recorded durably: {0}")]
-    SpawnHook(String),
-    #[error("I/O error: {0}")]
-    Io(#[from] io::Error),
-    #[error("signal error: {0}")]
-    Signal(#[from] Errno),
-}
+use super::{
+    Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, Termination,
+    create_workspace, spool_entry, sync_directory, sync_file,
+};
 
 /// Executes one process in a new process group.
 ///
@@ -87,12 +35,14 @@ pub async fn execute_with_spawn_hook<F>(
     on_spawn: F,
 ) -> Result<ExecutionOutcome, ExecutionError>
 where
-    F: FnOnce(i32) -> Result<(), ExecutionError>,
+    F: FnOnce(u32) -> Result<(), ExecutionError>,
 {
-    validate_relative_path(&request.workspace)?;
+    if request.mode != ExecutionMode::Direct {
+        return Err(ExecutionError::UnsupportedMode(request.mode));
+    }
     let workspace = create_workspace(&request.workspace_root, &request.workspace)?;
     let spool = workspace.join("spool");
-    fs::create_dir(&spool).await?;
+    tokio::fs::create_dir(&spool).await?;
 
     let stdout_path = spool.join("stdout.log");
     let stderr_path = spool.join("stderr.log");
@@ -115,9 +65,10 @@ where
         .stderr(Stdio::from(stderr))
         .process_group(0);
     let mut child = command.spawn()?;
-    let process_group_id = i32::try_from(child.id().ok_or(ExecutionError::MissingProcessId)?)
-        .map_err(|_| ExecutionError::MissingProcessId)?;
-    if let Err(error) = on_spawn(process_group_id) {
+    let process_id = child.id().ok_or(ExecutionError::MissingProcessId)?;
+    let process_group_id =
+        i32::try_from(process_id).map_err(|_| ExecutionError::MissingProcessId)?;
+    if let Err(error) = on_spawn(process_id) {
         terminate_group(&mut child, process_group_id, request.termination_grace).await?;
         return Err(error);
     }
@@ -145,56 +96,11 @@ where
     Ok(ExecutionOutcome {
         termination: termination.0,
         exit_code: termination.1.code(),
-        process_group_id,
+        process_id,
+        containment: Containment::UnixProcessGroup,
         stdout: spool_entry(&request.workspace, "spool/stdout.log", 0, &stdout_path).await?,
         stderr: spool_entry(&request.workspace, "spool/stderr.log", 1, &stderr_path).await?,
     })
-}
-
-fn create_workspace(root: &Path, relative: &Path) -> Result<PathBuf, ExecutionError> {
-    let root = root
-        .canonicalize()
-        .map_err(|_| ExecutionError::InvalidWorkspaceRoot)?;
-    if !root.is_dir() {
-        return Err(ExecutionError::InvalidWorkspaceRoot);
-    }
-
-    let mut current = root.clone();
-    let components: Vec<_> = relative.components().collect();
-    for (index, component) in components.iter().enumerate() {
-        let Component::Normal(name) = component else {
-            return Err(ExecutionError::InvalidWorkspace(
-                JournalError::InvalidRelativePath,
-            ));
-        };
-        current.push(name);
-        match std::fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(ExecutionError::SymlinkWorkspaceComponent);
-            }
-            Ok(_) if index + 1 == components.len() => {
-                return Err(ExecutionError::WorkspaceAlreadyExists);
-            }
-            Ok(metadata) if !metadata.is_dir() => {
-                return Err(ExecutionError::InvalidWorkspaceRoot);
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                std::fs::create_dir(&current)?;
-                let parent = current
-                    .parent()
-                    .ok_or(ExecutionError::InvalidWorkspaceRoot)?;
-                sync_directory(parent)?;
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
-
-    let canonical = current.canonicalize()?;
-    if !canonical.starts_with(&root) {
-        return Err(ExecutionError::SymlinkWorkspaceComponent);
-    }
-    Ok(canonical)
 }
 
 async fn terminate_group(
@@ -238,52 +144,17 @@ fn process_group_exists(process_group_id: i32) -> Result<bool, ExecutionError> {
     }
 }
 
-async fn sync_file(path: &Path) -> Result<(), io::Error> {
-    fs::OpenOptions::new()
-        .read(true)
-        .open(path)
-        .await?
-        .sync_all()
-        .await
-}
-
-fn sync_directory(path: &Path) -> Result<(), io::Error> {
-    std::fs::File::open(path)?.sync_all()
-}
-
-async fn spool_entry(
-    workspace: &Path,
-    suffix: &str,
-    sequence: u64,
-    path: &Path,
-) -> Result<SpoolEntry, ExecutionError> {
-    let metadata = fs::metadata(path).await?;
-    Ok(SpoolEntry {
-        sequence,
-        relative_path: workspace.join(suffix),
-        digest: digest_file(path).await?,
-        bytes: metadata.len(),
-    })
-}
-
-async fn digest_file(path: &Path) -> Result<[u8; 32], io::Error> {
-    let mut file = fs::File::open(path).await?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(digest.finalize().into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
     use nix::sys::signal::kill;
+    use sha2::{Digest, Sha256};
+    use tokio::fs;
 
     async fn descendant_pid(path: &Path) -> i32 {
         for _ in 0..100 {
@@ -329,6 +200,7 @@ mod tests {
         ExecutionRequest {
             workspace_root: root.to_owned(),
             workspace: PathBuf::from(workspace),
+            mode: ExecutionMode::Direct,
             program: PathBuf::from("/bin/sh"),
             arguments: vec![
                 OsString::from("-c"),
@@ -344,6 +216,7 @@ mod tests {
         ExecutionRequest {
             workspace_root: root.to_owned(),
             workspace: PathBuf::from(workspace),
+            mode: ExecutionMode::Direct,
             program: PathBuf::from("/bin/sh"),
             arguments: vec![
                 OsString::from("-c"),
@@ -414,6 +287,7 @@ mod tests {
         let request = ExecutionRequest {
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("org/success"),
+            mode: ExecutionMode::Direct,
             program: PathBuf::from("/bin/sh"),
             arguments: vec![OsString::from("-c"), OsString::from("printf mcloving")],
             environment: BTreeMap::new(),
@@ -436,6 +310,7 @@ mod tests {
         let existing = ExecutionRequest {
             workspace_root: root.path().to_owned(),
             workspace: PathBuf::from("existing"),
+            mode: ExecutionMode::Direct,
             program: PathBuf::from("/bin/true"),
             arguments: Vec::new(),
             environment: BTreeMap::new(),

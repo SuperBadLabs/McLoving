@@ -6,7 +6,28 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+mcloving-agent-protocol = { version = "0.0.0", path = "../../crates/agent-protocol" }
+mcloving-agent-runtime = { version = "0.0.0", path = "../../crates/agent-runtime" }
 mcloving-domain = { version = "0.0.0", path = "../../crates/domain" }
+thiserror = "=2.0.17"
+tokio = { version = "=1.47.1", features = [
+  "fs",
+  "macros",
+  "rt-multi-thread",
+  "signal",
+  "time",
+] }
+tokio-util = { version = "=0.7.19", features = ["rt"] }
+tonic = { version = "=0.14.6", features = ["tls-ring", "transport"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-services = "=0.26.1"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", features = ["signal"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
 
 [lints]
 workspace = true

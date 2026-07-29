@@ -25,8 +25,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W1-A | CTRL-001, CTRL-002, SEC-002 | DONE | PostgreSQL truth, outbox, scheduler, and tenant enforcement |
 | W1-B | AGENT-001, AGENT-002, AGENT-003 | DONE | Outbound mTLS contract, fenced sessions, durable journal, Linux process-tree containment |
 | W1-C | UX-001, E2E-001, E2E-002, E2E-003 | DONE | Truthful CLI-driven end-to-end spine and recovery |
-| W2-A | CTRL-003, OPS-001, OPS-002 | ACTIVE | Implementation and all local gates complete; protected merge pending |
-| W2-B | WIN-001, WIN-002, WIN-003 | PENDING | Windows agent, containment, and cross-platform parity |
+| W2-A | CTRL-003, OPS-001, OPS-002 | DONE | PR #7 merged recoverable execution, staged object truth, restore fencing, retention, and legal holds |
+| W2-B | WIN-001, WIN-002, WIN-003 | ACTIVE | PR #8 provides the Windows service/runtime foundation and hosted destructive fixture; production work delivery, restart recovery, atomic Job assignment, and persistent-host parity remain explicit gates |
+| W2-C | AGENT-004, AGENT-005, AGENT-006, WIN-004 | PENDING | Next batch: production remote work protocol, finalization recovery, non-reusable containment identity, and atomic Windows Job membership |
 
 ## Wave 0 — Architecture and foundation
 
@@ -62,9 +63,13 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | CTRL-003 | DONE | E2E-002 | Durable retry, timeout, post, cleanup, and uncertain-effect reconciliation |
 | OPS-001 | DONE | E2E-001 | Staged object storage, immutable artifacts, checksummed log chunks, explicit gaps and quotas |
 | OPS-002 | DONE | OPS-001 | Backup, PITR checkpoint contract, restore epoch, object reconciliation, retention and legal-hold drills |
-| WIN-001 | PENDING | AGENT-003 | Signed Windows service agent, journal, enrollment, restart and reboot recovery |
-| WIN-002 | PENDING | WIN-001 | Direct process, cmd, PowerShell, Job Objects, ACL workspaces, descendant cleanup |
-| WIN-003 | PENDING | WIN-002, E2E-003 | Linux/Windows semantic parity and destructive recovery suite |
+| AGENT-004 | PENDING | AGENT-002, CTRL-002 | Add the production controller-to-agent claim/accept/lease/work-delivery and bounded log/result-completion path so the outbound service executes scheduled work rather than only reconciling |
+| AGENT-005 | PENDING | AGENT-004, OPS-001 | Recover `finalizing` attempts from checksummed spool evidence, ingest their logs/results through the controller transaction boundary, and prove response-loss idempotency without duplicate effects |
+| AGENT-006 | PENDING | AGENT-003 | Persist a non-reusable Unix process/containment birth identity and return distinct retain, retire-stale, cancel-completed, and reconciliation-required decisions; never signal a recycled PGID |
+| WIN-004 | PENDING | AGENT-003 | Remove the suspended-child pre-assignment crash window by creating every workload atomically in its kill-on-close Job Object; prove forced service death at each creation boundary leaves no process |
+| WIN-001 | ACTIVE | AGENT-003, AGENT-004, AGENT-005 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove hosted Windows install/start/stop/uninstall, monotonic session epochs, process restart, and journal reconciliation |
+| WIN-002 | ACTIVE | WIN-001, WIN-004 | Add explicit direct-process, `cmd.exe`, and PowerShell execution modes; isolate each attempt in a race-free Job Object and ACL-owned workspace; prove timeout/cancel/service-crash kills every descendant and preserves durable stdout/stderr/result evidence |
+| WIN-003 | ACTIVE | WIN-002, E2E-003 | Maintain one versioned Linux/Windows semantic-parity matrix and run destructive hosted-Windows proof; then close with a signed package on a persistent Windows host through controller/network interruption and machine reboot, requiring matching terminal outcomes, logs, artifacts, cancellation, stale-authority rejection, and zero escaped descendants |
 
 ## Wave 3 — Native product surface
 
@@ -91,5 +96,17 @@ canary, and release-readiness assessment.
 
 ## Current next batch
 
-`W2-A` is merge-active with all three tickets and local gates complete.
-After its protected merge, start `W2-B`: `WIN-001`, `WIN-002`, and `WIN-003`.
+`W2-B` is active on `codex/wave2-windows-agent`: `WIN-001`, `WIN-002`,
+and `WIN-003`. PR #8 is a foundation checkpoint, not a production-agent
+closure: it must clear pinned Linux gates plus the hosted Windows service,
+executor, ACL, Job Object, journal, and destructive fixture, while leaving all
+three tickets open. Review proved that production remote work delivery,
+checksummed finalization recovery, restart-safe Unix containment identity, and
+atomic-at-creation Windows Job membership are still required. Those four
+release gates are the next coherent batch `W2-C`.
+
+After `W2-C`, the Windows tickets still require the full controller-driven
+hosted campaign. `WIN-003` additionally requires a signed package on a
+persistent Windows host through controller/network interruption and machine
+reboot. Cross-compilation, a test-only service fixture, or hosted CI alone
+cannot waive either boundary.

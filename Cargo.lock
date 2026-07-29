@@ -1184,7 +1184,16 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 name = "mcloving-agent"
 version = "0.0.0"
 dependencies = [
+ "mcloving-agent-protocol",
+ "mcloving-agent-runtime",
  "mcloving-domain",
+ "nix",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "windows-services",
 ]
 
 [[package]]
@@ -1205,6 +1214,7 @@ dependencies = [
 name = "mcloving-agent-runtime"
 version = "0.0.0"
 dependencies = [
+ "mcloving-windows-job",
  "nix",
  "rusqlite",
  "sha2",
@@ -1233,12 +1243,15 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "mcloving-agent-protocol",
  "mcloving-controller-api",
  "mcloving-controller-store",
  "mcloving-execution-spine",
+ "sha2",
  "sqlx",
  "tempfile",
  "tokio",
+ "tonic",
  "uuid",
 ]
 
@@ -1316,6 +1329,13 @@ dependencies = [
 [[package]]
 name = "mcloving-state-machine"
 version = "0.0.0"
+
+[[package]]
+name = "mcloving-windows-job"
+version = "0.0.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "md-5"
@@ -3140,6 +3160,15 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-services"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffa4f5d8d05f500769005f4fa875e9b50059c8c6c84cc5dc810848d895f8ba9"
+dependencies = [
+ "windows-link",
+]
 
 [[package]]
 name = "windows-sys"

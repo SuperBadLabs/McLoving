@@ -13,6 +13,7 @@ members = [
   "crates/object-store",
   "crates/pipeline-ir",
   "crates/state-machine",
+  "crates/windows-job",
 ]
 
 [workspace.package]

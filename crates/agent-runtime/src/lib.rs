@@ -10,7 +10,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
-#[cfg(unix)]
 pub mod executor;
 
 const SCHEMA_VERSION: i64 = 1;
@@ -59,6 +58,11 @@ impl AttemptPhase {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Succeeded | Self::Failed | Self::Aborted)
     }
+
+    #[must_use]
+    pub fn wire_name(self) -> &'static str {
+        self.as_str()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,7 +101,11 @@ pub struct ReconciliationAttempt {
     pub payload_digest: [u8; 32],
     pub phase: AttemptPhase,
     pub workspace: PathBuf,
-    pub process_group_id: Option<i32>,
+    /// Durable identity of the containment leader.
+    ///
+    /// The schema column retains its Wave 1 `process_group_id` name for
+    /// compatibility, but this value is the process ID on every platform.
+    pub process_id: Option<u32>,
     pub logs: Vec<SpoolEntry>,
     pub result: Option<SpoolEntry>,
 }
@@ -154,6 +162,11 @@ impl Journal {
             CREATE TABLE IF NOT EXISTS journal_metadata (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 schema_version INTEGER NOT NULL
+            ) STRICT;
+
+            CREATE TABLE IF NOT EXISTS agent_metadata (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                last_session_epoch INTEGER NOT NULL CHECK (last_session_epoch >= 0)
             ) STRICT;
 
             CREATE TABLE IF NOT EXISTS attempts (
@@ -215,6 +228,14 @@ impl Journal {
             ",
             [SCHEMA_VERSION],
         )?;
+        connection.execute(
+            "
+            INSERT INTO agent_metadata(singleton, last_session_epoch)
+            VALUES (1, 0)
+            ON CONFLICT(singleton) DO NOTHING
+            ",
+            [],
+        )?;
 
         let schema_version: i64 = connection.query_row(
             "SELECT schema_version FROM journal_metadata WHERE singleton = 1",
@@ -229,6 +250,31 @@ impl Journal {
         }
 
         Ok(Self { connection })
+    }
+
+    /// Atomically reserves a session epoch newer than every epoch this journal
+    /// has previously used. The committed value survives service and machine
+    /// restarts, so reconnects cannot accidentally reuse fenced authority.
+    pub fn reserve_session_epoch(&mut self, minimum: u64) -> Result<u64, JournalError> {
+        let minimum = to_sql_integer(minimum)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: i64 = transaction.query_row(
+            "SELECT last_session_epoch FROM agent_metadata WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let next = current
+            .checked_add(1)
+            .ok_or(JournalError::AuthorityOverflow)?
+            .max(minimum);
+        transaction.execute(
+            "UPDATE agent_metadata SET last_session_epoch = ?1 WHERE singleton = 1",
+            [next],
+        )?;
+        transaction.commit()?;
+        from_sql_integer(next)
     }
 
     pub fn accept(&mut self, acceptance: &Acceptance) -> Result<AcceptanceAck, JournalError> {
@@ -360,7 +406,7 @@ impl Journal {
         fence_token: u64,
         session_epoch: u64,
         phase: AttemptPhase,
-        process_group_id: Option<i32>,
+        process_id: Option<u32>,
     ) -> Result<(), JournalError> {
         let fence_token = to_sql_integer(fence_token)?;
         let session_epoch = to_sql_integer(session_epoch)?;
@@ -378,12 +424,15 @@ impl Journal {
                   AND session_epoch = ?4
                 ",
                 params![organization_id, attempt_id, fence_token, session_epoch],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i32>>(1)?)),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
             )
             .optional()?
             .ok_or(JournalError::StaleAuthority)?;
         let current_phase = AttemptPhase::parse(&current.0)?;
-        if current_phase == phase && current.1 == process_group_id {
+        let process_id = process_id
+            .map(|value| to_sql_integer(u64::from(value)))
+            .transpose()?;
+        if current_phase == phase && current.1 == process_id {
             transaction.commit()?;
             return Ok(());
         }
@@ -405,7 +454,7 @@ impl Journal {
             ",
             params![
                 phase.as_str(),
-                process_group_id,
+                process_id,
                 unix_time_ms()?,
                 organization_id,
                 attempt_id,
@@ -561,7 +610,7 @@ impl Journal {
                 row.get::<_, Vec<u8>>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
-                row.get::<_, Option<i32>>(7)?,
+                row.get::<_, Option<i64>>(7)?,
             ))
         })?;
 
@@ -575,7 +624,7 @@ impl Journal {
                 payload_digest,
                 phase,
                 workspace,
-                process_group_id,
+                process_id,
             ) = row?;
             attempts.push(ReconciliationAttempt {
                 logs: self.log_entries(&organization_id, &attempt_id, fence_token)?,
@@ -587,7 +636,9 @@ impl Journal {
                 payload_digest: fixed_digest(payload_digest)?,
                 phase: AttemptPhase::parse(&phase)?,
                 workspace: PathBuf::from(workspace),
-                process_group_id,
+                process_id: process_id
+                    .map(|value| u32::try_from(value).map_err(|_| JournalError::AuthorityOverflow))
+                    .transpose()?,
             });
         }
         Ok(ReconciliationReport { attempts })
@@ -796,6 +847,19 @@ mod tests {
     }
 
     #[test]
+    fn session_epoch_reservation_is_monotonic_across_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.db");
+        let mut journal = Journal::open(&path).unwrap();
+        assert_eq!(journal.reserve_session_epoch(0).unwrap(), 1);
+        assert_eq!(journal.reserve_session_epoch(7).unwrap(), 7);
+        drop(journal);
+
+        let mut reopened = Journal::open(&path).unwrap();
+        assert_eq!(reopened.reserve_session_epoch(2).unwrap(), 8);
+    }
+
+    #[test]
     fn acceptance_is_durable_idempotent_and_recoverable_after_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("journal.sqlite3");
@@ -914,7 +978,7 @@ mod tests {
 
         let report = journal.reconcile().unwrap();
         assert_eq!(report.attempts.len(), 1);
-        assert_eq!(report.attempts[0].process_group_id, Some(321));
+        assert_eq!(report.attempts[0].process_id, Some(321));
         assert_eq!(report.attempts[0].logs.len(), 1);
         assert!(report.attempts[0].result.is_some());
 
