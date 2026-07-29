@@ -1,6 +1,6 @@
 # Agent runtime contract
 
-Status: implemented Wave 1-B baseline
+Status: implemented through Wave 2-C
 
 ## Authority and transport
 
@@ -11,6 +11,9 @@ Status: implemented Wave 1-B baseline
   consumed once.
 - Protocol major versions must match. Minor ranges must overlap, and only the
   highest common minor plus intersected features are admitted.
+- Production work polling requires the negotiated `work-delivery-v1` feature;
+  an older peer fails compatibility negotiation before either side relies on
+  the work-delivery RPC set.
 - Session and certificate epochs increase monotonically. Only the exact current
   session may act; reconnecting with a newer epoch fences the previous session.
 
@@ -40,9 +43,12 @@ Idempotent replay must match organization, attempt, fence, session, payload
 digest, and workspace exactly. Any mismatch fails closed. Workload payloads and
 credentials are not stored in the journal.
 
-On restart, reconciliation reports every non-terminal attempt plus its
-platform process identity and checksummed log/result spool metadata. Terminal
-attempts remain durable history but are excluded from active reconciliation.
+Before any log or result publication, one immediate SQLite transaction records
+the terminal phase, original work-versus-cancellation completion protocol, and
+complete checksummed log/result descriptors. On restart, reconciliation reports
+every non-terminal attempt plus its platform process identity and that durable
+spool metadata. Terminal attempts remain durable history but are excluded from
+active reconciliation.
 The controller compares each report with current PostgreSQL lease, fence,
 restore epoch, owner, and cancellation state. Rejected attempts are returned
 as cancellation directives. Before terminalizing a cancelled record, a
@@ -60,7 +66,9 @@ the local record reconcilable and the controller completion is idempotent.
 - Existing destinations, absolute paths, traversal, non-directory parents, and
   symlink or reparse-point components are rejected.
 - Standard output and error are written directly to files, fsynced, and hashed
-  before the outcome is returned.
+  before the outcome is returned. Replay verifies each descriptor in a bounded
+  first pass and publishes one-MiB chunks in a second streaming pass. A single
+  attempt may retain at most 64 MiB of logs and a 64 KiB result.
 - On POSIX systems, every new directory entry is followed by a parent-directory
   fsync. Win32 exposes directory handles for metadata operations but does not
   provide a least-privilege equivalent of POSIX directory fsync:
@@ -85,9 +93,10 @@ the local record reconcilable and the controller completion is idempotent.
 - `cmd.exe /S /C` receives one outer-quoted command string so script paths and
   arguments containing spaces remain intact. Shell metacharacters with
   expansion semantics are rejected rather than interpolated.
-- A child is created suspended, durably recorded, assigned to an anonymous
-  kill-on-close Job Object, and only then resumed. This removes the
-  spawn-before-containment race.
+- A child is created suspended with an anonymous kill-on-close Job Object in
+  its `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so Job membership is atomic with
+  `CreateProcessW`. Only the intended standard handles are inherited. The
+  process identity is durably recorded before the child is resumed.
 - Timeout, cancellation, and service loss terminate the entire Job Object.
 - The Win32 `unsafe` boundary is isolated in the `mcloving-windows-job` crate;
   the rest of the runtime remains safe Rust.
@@ -106,19 +115,21 @@ restart. A signed package on a persistent Windows host still must prove
 machine-reboot reconciliation, payload-directory survival, and cross-host
 controller/network interruption before full Windows parity is closed.
 
-The current executor creates the workload suspended and assigns it to a
-kill-on-close Job before resuming it. This prevents untrusted workload code
-from running before containment, but a hard service crash between
-`CreateProcess` and `AssignProcessToJobObject` can leave an inert suspended
-child outside the Job. `WIN-004` replaces that two-step sequence with atomic
-Job membership and is required before `WIN-002` closes.
+The executor creates the workload suspended with atomic Job membership in the
+Win32 creation attribute list. Native forced-crash tests cover every
+pre-resume boundary plus a live descendant and prove kill-on-close cleanup
+without an uncontained-child window. Bare program names are resolved through
+the effective `PATH` before the explicit application path is passed to
+`CreateProcessW`; the workspace is never searched implicitly.
 
 The outbound production service polls and executes tenant-bound fenced work
-over mutual TLS. Acceptance is journaled before acknowledgement, log and result
-spools are checksummed, and finalization replay is exact and idempotent after a
+over mutual TLS. Acceptance is journaled before acknowledgement; renewal
+failure cancels local execution before authority can be reused. Finalization
+authority and complete spool evidence are committed atomically before bounded
+streaming upload, and replay is exact and idempotent after response loss or a
 post-controller-commit crash. On Linux, journal schema v2 binds the process
 group leader to the machine boot ID and `/proc` start ticks; restart
 reconciliation revalidates that non-reusable identity before both TERM and
-KILL, and a missing, mismatched, or legacy identity has an explicit
-fail-closed outcome. Windows production parity still depends on `WIN-004`
-atomic Job membership and the hosted persistent-machine gates.
+KILL. A missing leader is not proof that the process group is empty and remains
+reconciliation-required until containment is verified. Full Windows parity
+still depends on the hosted persistent-machine gates.

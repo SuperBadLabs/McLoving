@@ -1,6 +1,6 @@
 # McLoving execution board
 
-Updated: 2026-07-28
+Updated: 2026-07-29
 
 Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
@@ -27,7 +27,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W1-C | UX-001, E2E-001, E2E-002, E2E-003 | DONE | Truthful CLI-driven end-to-end spine and recovery |
 | W2-A | CTRL-003, OPS-001, OPS-002 | DONE | PR #7 merged recoverable execution, staged object truth, restore fencing, retention, and legal holds |
 | W2-B | WIN-001, WIN-002, WIN-003 | DONE | PR #8 merged the Windows service/runtime foundation and hosted destructive fixture; the three product tickets remain active until their production work, recovery, atomic Job, and persistent-host gates close |
-| W2-C | AGENT-004, AGENT-005, AGENT-006, WIN-004 | ACTIVE | Production remote work protocol, finalization recovery, non-reusable containment identity, and atomic Windows Job membership |
+| W2-C | AGENT-004, AGENT-005, AGENT-006, WIN-004 | DONE | PR #9 closes production remote work, atomic/replay-safe finalization, non-reusable Linux containment identity, and atomic Windows Job membership |
 
 ## Wave 0 — Architecture and foundation
 
@@ -63,10 +63,10 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | CTRL-003 | DONE | E2E-002 | Durable retry, timeout, post, cleanup, and uncertain-effect reconciliation |
 | OPS-001 | DONE | E2E-001 | Staged object storage, immutable artifacts, checksummed log chunks, explicit gaps and quotas |
 | OPS-002 | DONE | OPS-001 | Backup, PITR checkpoint contract, restore epoch, object reconciliation, retention and legal-hold drills |
-| AGENT-004 | DONE | AGENT-002, CTRL-002 | Production tenant-bound mTLS poll/claim, journal-before-ack acceptance, fenced start/lease/cancellation, native execution, one-MiB log chunks, and explicit terminal publication; real PostgreSQL shipped-controller/shipped-agent gate proves remote stdout/stderr and success |
-| AGENT-005 | DONE | AGENT-004, OPS-001 | Reconnect retains exact finalizing authority, verifies every spool digest/size, deterministically replays log/result evidence, and accepts only exact terminal replay; a forced post-commit agent crash converges after restart with one terminal event |
-| AGENT-006 | DONE | AGENT-003 | SQLite journal v2 migrates legacy rows fail-closed and persists Linux boot ID plus `/proc` birth ticks; cancellation revalidates identity before TERM and KILL, never signals a recycled PGID, and returns distinct completed, already-exited, retire-stale, and reconciliation-required outcomes with idempotent controller truth |
-| WIN-004 | ACTIVE | AGENT-003 | Remove the suspended-child pre-assignment crash window by creating every workload atomically in its kill-on-close Job Object; prove forced service death at each creation boundary leaves no process |
+| AGENT-004 | DONE | AGENT-002, CTRL-002 | Production tenant-bound mTLS poll/claim, journal-before-ack acceptance, negotiated `work-delivery-v1`, fenced start/lease/cancellation, lease-loss execution cancellation, native execution, bounded streamed log publication, and explicit terminal publication; real PostgreSQL shipped-controller/shipped-agent gates prove remote stdout/stderr and success |
+| AGENT-005 | DONE | AGENT-004, OPS-001 | One immediate SQLite transaction persists the terminal phase plus complete log/result descriptors before upload; reconnect retains exact authority, verifies every spool digest/size, deterministically replays the original work or cancellation protocol, and accepts only exact terminal replay; forced response-loss and agent-crash gates converge to one terminal event |
+| AGENT-006 | DONE | AGENT-003 | SQLite journal v2 migrates legacy rows fail-closed and persists Linux boot ID plus `/proc` birth ticks; cancellation revalidates identity before TERM and KILL, never signals a recycled PGID, never treats a missing group leader as proof of an empty group, and returns distinct completed, already-exited, retire-stale, and reconciliation-required outcomes with idempotent controller truth |
+| WIN-004 | DONE | AGENT-003 | Win32 creates every workload suspended with atomic kill-on-close Job membership through `PROC_THREAD_ATTRIBUTE_JOB_LIST`, records durable process identity before resume, and uses a restricted inherited-handle list; native forced-crash gates at every creation boundary and after descendant spawn leave no escaped process |
 | WIN-001 | ACTIVE | AGENT-003, AGENT-004, AGENT-005 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove hosted Windows install/start/stop/uninstall, monotonic session epochs, process restart, and journal reconciliation |
 | WIN-002 | ACTIVE | WIN-001, WIN-004 | Add explicit direct-process, `cmd.exe`, and PowerShell execution modes; isolate each attempt in a race-free Job Object and ACL-owned workspace; prove timeout/cancel/service-crash kills every descendant and preserves durable stdout/stderr/result evidence |
 | WIN-003 | ACTIVE | WIN-002, E2E-003 | Maintain one versioned Linux/Windows semantic-parity matrix and run destructive hosted-Windows proof; then close with a signed package on a persistent Windows host through controller/network interruption and machine reboot, requiring matching terminal outcomes, logs, artifacts, cancellation, stale-authority rejection, and zero escaped descendants |
@@ -101,13 +101,15 @@ completed foundation batch, not closure of `WIN-001`, `WIN-002`, or `WIN-003`;
 those tickets remain active for the explicit production and persistent-host
 gates above.
 
-`W2-C` is active on `codex/wave2-agent-completion`. `AGENT-004` and
-`AGENT-005` are complete with real PostgreSQL, mutual-TLS, shipped-binary, and
-forced response-loss/restart gates. `AGENT-006` is complete: Linux work stores
-a non-reusable boot/process-birth identity, legacy rows remain fail-closed,
-recycled PGIDs are never signalled, and exact controller outcomes are durable
-and replay-safe. `WIN-004` is active to remove the Windows pre-assignment crash
-window.
+`W2-C` is complete on `codex/wave2-agent-completion`. Production agents
+negotiate `work-delivery-v1`, cancel execution on lease-renewal loss, commit
+terminal replay authority and complete spool descriptors atomically before
+upload, enforce bounded streamed log/result publication, and recover through
+the original work or cancellation protocol. Linux reconciliation binds work to
+non-reusable boot/process-birth identity and fails closed when the leader is
+missing but descendants may remain. Windows process creation now assigns the
+kill-on-close Job atomically before any workload code can execute; native
+crash-boundary gates prove no escaped process.
 
 After `W2-C`, the Windows tickets still require the full controller-driven
 hosted campaign. `WIN-003` additionally requires a signed package on a
