@@ -11,6 +11,7 @@ pub mod authz;
 mod dag;
 mod scheduler;
 mod security;
+mod test_results;
 
 pub use audit::{
     AuditEvent, AuditExport, AuditRetentionPolicy, NewAuditEvent, verify_audit_export,
@@ -22,6 +23,12 @@ pub use dag::{
 };
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 pub use security::{CredentialDelivery, NewCredentialGrant, NewEnvironmentApproval};
+pub use test_results::{
+    DEFAULT_MAX_JUNIT_BYTES, DEFAULT_MAX_JUNIT_CASES, DEFAULT_MAX_JUNIT_SUITES, JunitLimits,
+    NormalizedTestCase, NormalizedTestReport, NormalizedTestSuite,
+    TEST_RESULT_RAW_RETENTION_SECONDS, TEST_RESULT_SCHEMA_VERSION, TestAggregate, TestCaseHistory,
+    TestCaseObservation, TestOutcome, TestReportSource, TestResultError, parse_junit,
+};
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
 const MAX_ATTEMPT_LOG_BYTES: i64 = 64 * 1_048_576;
@@ -52,6 +59,8 @@ pub const ATTEMPT_CREDENTIALS_V10: &str =
 pub const TENANT_AUDIT_V11: &str = include_str!("../migrations/0011_tenant_audit.sql");
 /// Product-facing immutable artifact metadata.
 pub const ARTIFACT_METADATA_V12: &str = include_str!("../migrations/0012_artifact_metadata.sql");
+/// Immutable, bounded, normalized test-result evidence.
+pub const NORMALIZED_TEST_RESULTS_V13: &str = include_str!("../migrations/0013_test_results.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -366,6 +375,8 @@ pub enum StoreError {
     InvalidSecurityOperation(String),
     #[error("invalid audit operation: {0}")]
     InvalidAuditOperation(String),
+    #[error("invalid normalized test result: {0}")]
+    InvalidTestResult(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -415,6 +426,7 @@ impl Store {
         apply_migration(&mut tx, 10, ATTEMPT_CREDENTIALS_V10).await?;
         apply_migration(&mut tx, 11, TENANT_AUDIT_V11).await?;
         apply_migration(&mut tx, 12, ARTIFACT_METADATA_V12).await?;
+        apply_migration(&mut tx, 13, NORMALIZED_TEST_RESULTS_V13).await?;
         tx.commit().await?;
         Ok(())
     }

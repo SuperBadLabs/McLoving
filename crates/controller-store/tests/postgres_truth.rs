@@ -3,12 +3,13 @@ use std::sync::Arc;
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, DagDependency, DagNodeKind, DependencyCondition,
-    EffectClass, EffectStatus, NewAuditEvent, NewBuild, NewCredentialGrant, NewDagBuild,
-    NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus,
+    EffectClass, EffectStatus, JunitLimits, NewAuditEvent, NewBuild, NewCredentialGrant,
+    NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus,
     ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
-    WaitReason,
+    TestOutcome, TestReportSource, WaitReason, parse_junit,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
 
@@ -6473,4 +6474,178 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
             && event.action == "artifact.committed"
             && event.payload["attempt_id"] == claim.attempt_id.to_string()
     }));
+}
+
+#[tokio::test]
+async fn junit_evidence_is_bounded_immutable_and_preserves_flaky_history() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "test-truth",
+        )
+        .await
+        .expect("create test-truth project");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "test-truth-build".to_owned(),
+            pipeline_digest: [0x91; 32],
+            node_key: "test".to_owned(),
+            required_capabilities: vec!["linux".to_owned()],
+            required_trust_pool: "trusted".to_owned(),
+            priority: 0,
+            execution_spec: json!({"program": "true"}),
+        })
+        .await
+        .expect("admit test-truth build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "test-truth-scheduler".to_owned(),
+            agent_id: "test-truth-agent".to_owned(),
+            capabilities: vec!["linux".to_owned()],
+            trust_pool: "trusted".to_owned(),
+            lease_seconds: 60,
+            fairness_seed: 0,
+        })
+        .await
+        .expect("claim test-truth work")
+        .expect("test-truth work is ready");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "test-truth-agent",
+            )
+            .await
+            .expect("accept test-truth work")
+    );
+
+    let failed_xml = br#"<testsuite name="unit"><testcase classname="core" name="sometimes" time="0.2"><failure message="first"/></testcase><testcase classname="core" name="same"/><testcase classname="core" name="same"/></testsuite>"#;
+    let passed_xml = br#"<testsuite name="unit"><testcase classname="core" name="sometimes" time="0.1"/></testsuite>"#;
+    for (name, bytes) in [
+        ("reports/junit-1.xml", failed_xml.as_slice()),
+        ("reports/junit-2.xml", passed_xml.as_slice()),
+    ] {
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        assert!(
+            store
+                .register_artifact(
+                    organization_id,
+                    admission.build_id,
+                    admission.node_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "test-truth-agent",
+                    name,
+                    digest,
+                    i64::try_from(bytes.len()).expect("small report"),
+                    "application/junit+xml",
+                    86_400,
+                )
+                .await
+                .expect("register raw immutable JUnit artifact")
+        );
+        let report = parse_junit(
+            bytes,
+            TestReportSource {
+                organization_id,
+                project_id,
+                build_id: admission.build_id,
+                node_id: admission.node_id,
+                attempt_id: claim.attempt_id,
+                fence: claim.fence,
+                artifact_name: name.to_owned(),
+            },
+            JunitLimits::default(),
+        )
+        .expect("normalize bounded JUnit");
+        assert!(
+            store
+                .ingest_test_report(&report)
+                .await
+                .expect("ingest normalized test truth")
+        );
+        assert!(
+            !store
+                .ingest_test_report(&report)
+                .await
+                .expect("idempotent replay is explicit")
+        );
+        if name.ends_with("-1.xml") {
+            assert_eq!(report.suites[0].cases[1].duplicate_ordinal, 0);
+            assert_eq!(report.suites[0].cases[2].duplicate_ordinal, 1);
+        }
+    }
+
+    let history = store
+        .test_case_history(
+            organization_id,
+            project_id,
+            "unit",
+            "core",
+            "sometimes",
+            100,
+        )
+        .await
+        .expect("read append-only test history");
+    assert_eq!(history.observations.len(), 2);
+    assert_eq!(history.observations[0].outcome, TestOutcome::Failed);
+    assert_eq!(history.observations[1].outcome, TestOutcome::Passed);
+    assert!(history.flaky);
+    let raw_retention_extended: bool = sqlx::query_scalar(
+        "SELECT bool_and(retain_until >= clock_timestamp() + interval '29 days')
+         FROM object_retention
+         WHERE organization_id = $1
+           AND object_digest IN ($2, $3)",
+    )
+    .bind(organization_id)
+    .bind(Sha256::digest(failed_xml).as_slice())
+    .bind(Sha256::digest(passed_xml).as_slice())
+    .fetch_one(store.pool())
+    .await
+    .expect("read normalized-source retention");
+    assert!(raw_retention_extended);
+
+    let mutation_error = sqlx::query(
+        "UPDATE normalized_test_cases
+         SET outcome = 'passed'
+         WHERE organization_id = $1",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await
+    .expect_err("normalized test evidence is immutable");
+    assert_eq!(
+        mutation_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let audit = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify test-result audit");
+    assert_eq!(
+        audit
+            .events
+            .iter()
+            .filter(|event| event.action == "test_report.ingested")
+            .count(),
+        2
+    );
 }
