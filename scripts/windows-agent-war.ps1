@@ -36,6 +36,55 @@ function Remove-TestService {
   }
 }
 
+function Write-CrashDiagnostics {
+  param(
+    [string]$Name,
+    [string]$Root,
+    [string]$Journal,
+    [string]$Agent
+  )
+  Write-Output "windows-agent-war-diagnostics service=$Name root=$Root"
+  try {
+    & sc.exe queryex $Name 2>&1 | ForEach-Object { Write-Output "sc: $_" }
+  }
+  catch {
+    Write-Output "sc-query-error: $($_.Exception.Message)"
+  }
+  if (Test-Path $Journal) {
+    try {
+      & $Agent journal-check $Journal 2>&1 |
+        ForEach-Object { Write-Output "journal: $_" }
+    }
+    catch {
+      Write-Output "journal-check-error: $($_.Exception.Message)"
+    }
+  }
+  if (Test-Path $Root) {
+    Get-ChildItem -LiteralPath $Root -Recurse -Force -ErrorAction SilentlyContinue |
+      ForEach-Object { Write-Output "workspace: $($_.FullName)" }
+    Get-ChildItem -LiteralPath $Root -Recurse -File -Filter "*.log" `
+      -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Output "log-begin: $($_.FullName)"
+        Get-Content -LiteralPath $_.FullName -ErrorAction SilentlyContinue |
+          ForEach-Object { Write-Output "log: $_" }
+        Write-Output "log-end: $($_.FullName)"
+      }
+  }
+  try {
+    Get-WinEvent -FilterHashtable @{
+      LogName = "System"
+      ProviderName = "Service Control Manager"
+      StartTime = (Get-Date).AddMinutes(-5)
+    } -MaxEvents 12 -ErrorAction Stop |
+      Select-Object TimeCreated, Id, LevelDisplayName, Message |
+      Format-List | Out-String |
+      ForEach-Object { Write-Output "scm-event: $_" }
+  }
+  catch {
+    Write-Output "scm-event-error: $($_.Exception.Message)"
+  }
+}
+
 $AgentBinary = (Resolve-Path $AgentBinary).Path
 $root = Join-Path $env:RUNNER_TEMP "mcloving-windows-war"
 $journal = Join-Path $root "agent.db"
@@ -142,7 +191,13 @@ Wait-Process -Id $child.Id
     -StartupType Manual | Out-Null
   Start-Service $crashService
   $childPidPath = Join-Path $root "child.pid"
-  Wait-Until { Test-Path $childPidPath } "descendant process creation"
+  try {
+    Wait-Until { Test-Path $childPidPath } "descendant process creation"
+  }
+  catch {
+    Write-CrashDiagnostics $crashService $root $journal $AgentBinary
+    throw
+  }
   $childPid = [int](Get-Content $childPidPath)
   $servicePid = [int](Get-CimInstance Win32_Service -Filter "Name='$crashService'").ProcessId
   if ($servicePid -le 0 -or $childPid -le 0) {
