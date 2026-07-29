@@ -78,8 +78,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
 | Ticket | Status | Depends on | Objective and acceptance |
 |---|---|---|---|
-| IR-003 | ACTIVE | IR-002, ARCH-002 | Add typed pipeline parameters and a non-Turing-complete expression language with explicit contexts, stable diagnostics, canonical encoding, deterministic evaluation, secret-taint propagation, and independently enforced depth/node/string/operation limits; arbitrary-input and boundary properties must remain panic-free and bounded |
-| IR-004 | PENDING | IR-003 | Add versioned reusable components resolved by immutable digest; bind input/output types and provenance, reject cycles and floating references, cap expansion depth/count/bytes before scheduling, and prove presentation-independent canonical expansion plus component-substitution resistance |
+| IR-003 | DONE | IR-002, ARCH-002 | Add typed pipeline parameters and a non-Turing-complete expression language with explicit contexts, stable diagnostics, canonical encoding, deterministic evaluation, secret-taint propagation, and independently enforced depth/node/string/operation limits; arbitrary-input and boundary properties must remain panic-free and bounded |
+| IR-004 | ACTIVE | IR-003 | Add versioned reusable components resolved by immutable digest; bind input/output types and provenance, reject cycles and floating references, cap expansion depth/count/bytes before scheduling, and prove presentation-independent canonical expansion plus component-substitution resistance |
 | CTRL-004 | PENDING | IR-004, CTRL-003 | Compile matrix axes deterministically into a bounded DAG; persist dependency, fan-out, join, fail-fast, retry, post, and cancellation truth transactionally; schedule ready nodes fairly across exact platform/trust-pool constraints and prove parallel races, restart recovery, terminal monotonicity, and one logical outcome per node in real PostgreSQL |
 | SEC-003 | PENDING | SEC-002, CTRL-004 | Issue attempt-scoped credential grants and protected-environment approvals bound to organization, project, build, IR digest, environment, action, and expiry; deliver secrets only to the exact fenced attempt, redact every supported sink, reject stale/replayed approvals, and prove cross-tenant and cross-attempt denial |
 | AUDIT-001 | PENDING | SEC-003, OPS-002 | Persist an append-only tenant-keyed audit stream for identity, authorization, scheduling, grant, approval, artifact, and administrative actions; hash chained segments, externally verifiable export, retention/legal-hold integration, mutation denial, and gap/tamper detection are required |
@@ -134,6 +134,13 @@ Wave 3 is loaded as three dependency-ordered batches. `W3-A` is active on
 execution semantics that every later security, artifact, API, CLI, and UI
 surface consumes. `W3-B` owns product security and operational truth. `W3-C`
 exposes those completed contracts without creating a privileged product path.
+
+`IR-003` is complete. Pipeline IR v1.1 preserves v1.0 canonical bytes for
+legacy pipelines and adds typed public/secret parameters, explicit
+expression-backed string fields, deterministic checked evaluation, propagated
+secret taint, stable failures, independent parse/evaluation budgets, and an
+independent canonical-byte validator for the entire new representation.
+`IR-004` is the active ticket.
 
 The still-active `WIN-001`, `WIN-002`, and `WIN-003` persistent-host closure is
 tracked independently and remains a release gate for Windows parity; it does

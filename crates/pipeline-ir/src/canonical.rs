@@ -1,8 +1,13 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use sha2::{Digest, Sha256};
 
-use crate::model::{MAX_IR_STRING_BYTES, MAX_STAGES, MAX_STEPS, PipelineIr, SchemaVersion, Step};
+use crate::expression::{Expression, ExpressionLimits, ParameterValue};
+use crate::model::{
+    MAX_EXPRESSION_BINDINGS, MAX_IR_STRING_BYTES, MAX_PARAMETERS, MAX_STAGES, MAX_STEPS,
+    ParameterType, PipelineIr, SchemaVersion, Step,
+};
 
 const MAGIC: &[u8] = b"MCLOVING-IR\0";
 
@@ -12,6 +17,31 @@ pub(crate) fn encode_pipeline(pipeline: &PipelineIr) -> Vec<u8> {
     writer.u16(pipeline.schema.major);
     writer.u16(pipeline.schema.minor);
     writer.string(&pipeline.name);
+    if pipeline.schema.minor >= 1 {
+        writer.u32(pipeline.parameters.len());
+        for (name, definition) in &pipeline.parameters {
+            writer.string(name);
+            writer.parameter_type(definition.parameter_type);
+            writer.u8(u8::from(definition.secret));
+            match &definition.default {
+                Some(value) => {
+                    writer.u8(1);
+                    writer.parameter_value(value);
+                }
+                None => writer.u8(0),
+            }
+        }
+        writer.u32(pipeline.parameter_values.len());
+        for (name, value) in &pipeline.parameter_values {
+            writer.string(name);
+            writer.parameter_value(value);
+        }
+        writer.u32(pipeline.expressions.len());
+        for binding in &pipeline.expressions {
+            writer.string(&binding.path);
+            writer.expression(&binding.expression);
+        }
+    }
     writer.u32(pipeline.stages.len());
     for stage in &pipeline.stages {
         writer.string(&stage.id);
@@ -73,6 +103,59 @@ impl Writer {
         self.u32(value.len());
         self.bytes.extend_from_slice(value.as_bytes());
     }
+
+    fn parameter_type(&mut self, parameter_type: ParameterType) {
+        self.u8(match parameter_type {
+            ParameterType::Bool => 1,
+            ParameterType::Integer => 2,
+            ParameterType::String => 3,
+        });
+    }
+
+    fn parameter_value(&mut self, value: &ParameterValue) {
+        match value {
+            ParameterValue::Bool(value) => {
+                self.u8(1);
+                self.u8(u8::from(*value));
+            }
+            ParameterValue::Integer(value) => {
+                self.u8(2);
+                self.bytes.extend_from_slice(&value.to_be_bytes());
+            }
+            ParameterValue::String(value) => {
+                self.u8(3);
+                self.string(value);
+            }
+        }
+    }
+
+    fn expression(&mut self, expression: &Expression) {
+        match expression {
+            Expression::Literal(value) => {
+                self.u8(1);
+                self.parameter_value(value);
+            }
+            Expression::Parameter(name) => {
+                self.u8(2);
+                self.string(name);
+            }
+            Expression::Not(value) => {
+                self.u8(3);
+                self.expression(value);
+            }
+            Expression::Equal(left, right) => self.binary_expression(4, left, right),
+            Expression::NotEqual(left, right) => self.binary_expression(5, left, right),
+            Expression::And(left, right) => self.binary_expression(6, left, right),
+            Expression::Or(left, right) => self.binary_expression(7, left, right),
+            Expression::Add(left, right) => self.binary_expression(8, left, right),
+        }
+    }
+
+    fn binary_expression(&mut self, opcode: u8, left: &Expression, right: &Expression) {
+        self.u8(opcode);
+        self.expression(left);
+        self.expression(right);
+    }
 }
 
 /// Result of independently validating canonical Pipeline IR bytes.
@@ -80,6 +163,8 @@ impl Writer {
 pub struct CanonicalSummary {
     pub schema: SchemaVersion,
     pub pipeline_name: String,
+    pub parameters: usize,
+    pub expressions: usize,
     pub stages: usize,
     pub steps: usize,
     pub sha256: [u8; 32],
@@ -123,7 +208,118 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         major: reader.u16()?,
         minor: reader.u16()?,
     };
+    if schema.major != 1 || schema.minor > 1 {
+        return Err(CanonicalError::new(
+            reader.offset.saturating_sub(4),
+            "unsupported Pipeline IR schema",
+        ));
+    }
     let pipeline_name = reader.string()?;
+    let mut parameters = 0;
+    let mut expressions = 0;
+    if schema.minor >= 1 {
+        parameters = reader.count(MAX_PARAMETERS, "parameter")?;
+        let mut definitions = BTreeMap::new();
+        let mut previous_name: Option<String> = None;
+        for _ in 0..parameters {
+            let name = reader.canonical_string_after(&mut previous_name, "parameter")?;
+            let parameter_type = reader.parameter_type()?;
+            let secret = reader.bool_marker("secret")?;
+            let default = match reader.u8()? {
+                0 => None,
+                1 => Some(reader.parameter_value()?),
+                _ => {
+                    return Err(CanonicalError::new(
+                        reader.offset.saturating_sub(1),
+                        "invalid parameter default marker",
+                    ));
+                }
+            };
+            if secret && default.is_some() {
+                return Err(CanonicalError::new(
+                    reader.offset,
+                    "secret parameter contains a persisted default",
+                ));
+            }
+            if default
+                .as_ref()
+                .is_some_and(|value| value.parameter_type() != parameter_type)
+            {
+                return Err(CanonicalError::new(
+                    reader.offset,
+                    "parameter default type does not match its definition",
+                ));
+            }
+            definitions.insert(name, (parameter_type, secret));
+        }
+        let value_count = reader.count(MAX_PARAMETERS, "parameter value")?;
+        let mut previous_value: Option<String> = None;
+        let mut public_values = BTreeSet::new();
+        for _ in 0..value_count {
+            let name = reader.canonical_string_after(&mut previous_value, "parameter value")?;
+            let value = reader.parameter_value()?;
+            let Some((parameter_type, secret)) = definitions.get(&name) else {
+                return Err(CanonicalError::new(
+                    reader.offset,
+                    "parameter value has no definition",
+                ));
+            };
+            if *secret {
+                return Err(CanonicalError::new(
+                    reader.offset,
+                    "secret parameter value is persisted in canonical IR",
+                ));
+            }
+            if value.parameter_type() != *parameter_type {
+                return Err(CanonicalError::new(
+                    reader.offset,
+                    "parameter value type does not match its definition",
+                ));
+            }
+            public_values.insert(name);
+        }
+        for (name, (_, secret)) in &definitions {
+            if !secret && !public_values.contains(name) {
+                return Err(CanonicalError::new(
+                    reader.offset,
+                    "public parameter definition has no bound value",
+                ));
+            }
+        }
+        expressions = reader.count(MAX_EXPRESSION_BINDINGS, "expression binding")?;
+        let mut previous_path: Option<String> = None;
+        for _ in 0..expressions {
+            reader.canonical_string_after(&mut previous_path, "expression path")?;
+            let mut expression_nodes = 0;
+            let mut expression_operations = 0;
+            let mut references = BTreeSet::new();
+            reader.expression(
+                0,
+                &mut expression_nodes,
+                &mut expression_operations,
+                &mut references,
+            )?;
+            if references
+                .iter()
+                .any(|reference| !definitions.contains_key(reference))
+            {
+                return Err(CanonicalError::new(
+                    reader.offset,
+                    "expression references an undefined parameter",
+                ));
+            }
+            if references.iter().any(|reference| {
+                definitions
+                    .get(reference)
+                    .is_some_and(|(_, secret)| *secret)
+            }) {
+                return Err(CanonicalError::new(
+                    reader.offset,
+                    "expression materializes a secret-tainted parameter",
+                ));
+            }
+        }
+    }
     let stages = reader.count(MAX_STAGES, "stage")?;
     let mut steps = 0_usize;
     for _ in 0..stages {
@@ -185,6 +381,8 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
     Ok(CanonicalSummary {
         schema,
         pipeline_name,
+        parameters,
+        expressions,
         stages,
         steps,
         sha256: Sha256::digest(bytes).into(),
@@ -229,6 +427,13 @@ impl<'a> Reader<'a> {
         ]))
     }
 
+    fn i64(&mut self) -> Result<i64, CanonicalError> {
+        let bytes = self.take(8)?;
+        Ok(i64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
     fn count(&mut self, maximum: usize, description: &str) -> Result<usize, CanonicalError> {
         let count = self.u32()? as usize;
         if count > maximum {
@@ -246,5 +451,128 @@ impl<'a> Reader<'a> {
         std::str::from_utf8(self.take(length)?)
             .map(str::to_owned)
             .map_err(|_| CanonicalError::new(offset, "string is not UTF-8"))
+    }
+
+    fn canonical_string_after(
+        &mut self,
+        previous: &mut Option<String>,
+        description: &str,
+    ) -> Result<String, CanonicalError> {
+        let value = self.string()?;
+        if previous.as_ref().is_some_and(|previous| previous >= &value) {
+            return Err(CanonicalError::new(
+                self.offset,
+                format!("{description} names are not in canonical order"),
+            ));
+        }
+        *previous = Some(value.clone());
+        Ok(value)
+    }
+
+    fn bool_marker(&mut self, description: &str) -> Result<bool, CanonicalError> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(CanonicalError::new(
+                self.offset.saturating_sub(1),
+                format!("invalid {description} boolean marker"),
+            )),
+        }
+    }
+
+    fn parameter_type(&mut self) -> Result<ParameterType, CanonicalError> {
+        match self.u8()? {
+            1 => Ok(ParameterType::Bool),
+            2 => Ok(ParameterType::Integer),
+            3 => Ok(ParameterType::String),
+            _ => Err(CanonicalError::new(
+                self.offset.saturating_sub(1),
+                "unknown parameter type opcode",
+            )),
+        }
+    }
+
+    fn parameter_value(&mut self) -> Result<ParameterValue, CanonicalError> {
+        match self.u8()? {
+            1 => Ok(ParameterValue::Bool(self.bool_marker("parameter")?)),
+            2 => Ok(ParameterValue::Integer(self.i64()?)),
+            3 => {
+                let value = self.string()?;
+                if value.len() > ExpressionLimits::default().max_string_bytes {
+                    return Err(CanonicalError::new(
+                        self.offset,
+                        "parameter string exceeds expression limit",
+                    ));
+                }
+                Ok(ParameterValue::String(value))
+            }
+            _ => Err(CanonicalError::new(
+                self.offset.saturating_sub(1),
+                "unknown parameter value opcode",
+            )),
+        }
+    }
+
+    fn expression(
+        &mut self,
+        depth: usize,
+        nodes: &mut usize,
+        operations: &mut usize,
+        references: &mut BTreeSet<String>,
+    ) -> Result<(), CanonicalError> {
+        let limits = ExpressionLimits::default();
+        if depth > limits.max_depth {
+            return Err(CanonicalError::new(
+                self.offset,
+                "expression depth exceeds limit",
+            ));
+        }
+        *nodes = nodes.saturating_add(1);
+        if *nodes > limits.max_nodes {
+            return Err(CanonicalError::new(
+                self.offset,
+                "expression node count exceeds limit",
+            ));
+        }
+        match self.u8()? {
+            1 => {
+                self.parameter_value()?;
+            }
+            2 => {
+                references.insert(self.string()?);
+            }
+            3 => {
+                *operations = operations.saturating_add(1);
+                self.expression(depth + 1, nodes, operations, references)?;
+            }
+            4..=8 => {
+                *operations = operations.saturating_add(1);
+                self.expression(depth + 1, nodes, operations, references)?;
+                self.expression(depth + 1, nodes, operations, references)?;
+            }
+            _ => {
+                return Err(CanonicalError::new(
+                    self.offset.saturating_sub(1),
+                    "unknown expression opcode",
+                ));
+            }
+        }
+        if *operations > limits.max_operations {
+            return Err(CanonicalError::new(
+                self.offset,
+                "expression operation count exceeds limit",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ParameterValue {
+    fn parameter_type(&self) -> ParameterType {
+        match self {
+            Self::Bool(_) => ParameterType::Bool,
+            Self::Integer(_) => ParameterType::Integer,
+            Self::String(_) => ParameterType::String,
+        }
     }
 }
