@@ -7,6 +7,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod worker;
+
 use mcloving_agent_protocol::wire;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
@@ -16,10 +18,9 @@ use mcloving_agent_protocol::wire::{
 use mcloving_agent_protocol::{OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError};
 #[cfg(windows)]
 use mcloving_agent_runtime::Acceptance;
+use mcloving_agent_runtime::executor::ExecutionError;
 #[cfg(windows)]
-use mcloving_agent_runtime::executor::{
-    ExecutionError, ExecutionMode, ExecutionRequest, execute_with_spawn_hook,
-};
+use mcloving_agent_runtime::executor::{ExecutionMode, ExecutionRequest, execute_with_spawn_hook};
 use mcloving_agent_runtime::{AttemptPhase, Journal, JournalError, ReconciliationReport};
 #[cfg(windows)]
 use std::ffi::OsString;
@@ -35,13 +36,19 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct AgentConfig {
     pub agent_id: String,
     pub trust_pool: String,
+    pub organization_id: String,
     pub controller_uri: String,
     pub controller_dns_name: String,
     pub controller_ca_path: PathBuf,
     pub agent_certificate_path: PathBuf,
     pub agent_private_key_path: PathBuf,
     pub journal_path: PathBuf,
+    pub workspace_root: PathBuf,
     pub minimum_session_epoch: u64,
+    pub lease_seconds: u32,
+    pub poll_interval: Duration,
+    pub lease_renewal_interval: Duration,
+    pub termination_grace: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -50,6 +57,8 @@ pub enum AgentError {
     MissingConfig(&'static str),
     #[error("configuration MCLOVING_AGENT_MINIMUM_SESSION_EPOCH is invalid")]
     InvalidMinimumSessionEpoch,
+    #[error("configuration {0} is invalid")]
+    InvalidConfig(&'static str),
     #[error("agent journal failed: {0}")]
     Journal(#[from] JournalError),
     #[error("agent configuration or identity file I/O failed: {0}")]
@@ -62,6 +71,16 @@ pub enum AgentError {
     Rpc(#[from] tonic::Status),
     #[error("controller returned a stale session epoch")]
     StaleSession,
+    #[error("controller rejected the current fenced work authority")]
+    StaleAuthority,
+    #[error("controller returned an invalid work assignment: {0}")]
+    InvalidAssignment(String),
+    #[error("execution specification is invalid: {0}")]
+    InvalidSpec(#[from] serde_json::Error),
+    #[error("execution specification is unsupported")]
+    UnsupportedSpec,
+    #[error("agent execution failed: {0}")]
+    Execution(#[from] ExecutionError),
     #[error("controller selected an unsupported protocol minor")]
     UnsupportedProtocol,
     #[error("agent identity and journal are already active in another process")]
@@ -115,18 +134,59 @@ impl AgentConfig {
                         .parse()
                         .map_err(|_| AgentError::InvalidMinimumSessionEpoch)
                 })?;
+        let lease_seconds = parse_config::<u32>(values, "MCLOVING_AGENT_LEASE_SECONDS", 30)?;
+        if !(5..=300).contains(&lease_seconds) {
+            return Err(AgentError::InvalidConfig("MCLOVING_AGENT_LEASE_SECONDS"));
+        }
+        let poll_milliseconds =
+            parse_config::<u64>(values, "MCLOVING_AGENT_POLL_MILLISECONDS", 500)?;
+        let renewal_milliseconds =
+            parse_config::<u64>(values, "MCLOVING_AGENT_RENEW_MILLISECONDS", 5_000)?;
+        let termination_grace_milliseconds = parse_config::<u64>(
+            values,
+            "MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS",
+            2_000,
+        )?;
+        if poll_milliseconds == 0
+            || renewal_milliseconds == 0
+            || termination_grace_milliseconds == 0
+            || renewal_milliseconds >= u64::from(lease_seconds) * 1_000
+        {
+            return Err(AgentError::InvalidConfig(
+                "agent polling, renewal, or termination timing",
+            ));
+        }
         Ok(Self {
             agent_id: required("MCLOVING_AGENT_ID")?,
             trust_pool: required("MCLOVING_AGENT_TRUST_POOL")?,
+            organization_id: required("MCLOVING_AGENT_ORGANIZATION_ID")?,
             controller_uri: required("MCLOVING_CONTROLLER_URI")?,
             controller_dns_name: required("MCLOVING_CONTROLLER_DNS_NAME")?,
             controller_ca_path: PathBuf::from(required("MCLOVING_CONTROLLER_CA_PATH")?),
             agent_certificate_path: PathBuf::from(required("MCLOVING_AGENT_CERTIFICATE_PATH")?),
             agent_private_key_path: PathBuf::from(required("MCLOVING_AGENT_PRIVATE_KEY_PATH")?),
             journal_path: PathBuf::from(required("MCLOVING_AGENT_JOURNAL_PATH")?),
+            workspace_root: PathBuf::from(required("MCLOVING_AGENT_WORKSPACE_ROOT")?),
             minimum_session_epoch,
+            lease_seconds,
+            poll_interval: Duration::from_millis(poll_milliseconds),
+            lease_renewal_interval: Duration::from_millis(renewal_milliseconds),
+            termination_grace: Duration::from_millis(termination_grace_milliseconds),
         })
     }
+}
+
+fn parse_config<T>(
+    values: &BTreeMap<String, String>,
+    name: &'static str,
+    default: T,
+) -> Result<T, AgentError>
+where
+    T: std::str::FromStr,
+{
+    values.get(name).map_or(Ok(default), |value| {
+        value.parse().map_err(|_| AgentError::InvalidConfig(name))
+    })
 }
 
 pub async fn run_until_stopped(
@@ -196,14 +256,25 @@ fn instance_lock_path(journal_path: &Path) -> PathBuf {
 async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<(), AgentError> {
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
     send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
-    let mut tick = interval(RECONCILIATION_INTERVAL);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    tick.tick().await;
+    let mut reconciliation_tick = interval(RECONCILIATION_INTERVAL);
+    reconciliation_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    reconciliation_tick.tick().await;
+    let mut work_tick = interval(config.poll_interval);
+    work_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    work_tick.tick().await;
     loop {
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
-            _ = tick.tick() => {
+            _ = reconciliation_tick.tick() => {
                 send_reconciliation(
+                    config,
+                    &mut client,
+                    receipt.session_epoch,
+                    stop.clone(),
+                ).await?;
+            }
+            _ = work_tick.tick() => {
+                worker::poll_and_run_one(
                     config,
                     &mut client,
                     receipt.session_epoch,
@@ -560,12 +631,17 @@ mod tests {
         [
             ("MCLOVING_AGENT_ID", "windows-1"),
             ("MCLOVING_AGENT_TRUST_POOL", "trusted-build"),
+            (
+                "MCLOVING_AGENT_ORGANIZATION_ID",
+                "00000000-0000-0000-0000-000000000123",
+            ),
             ("MCLOVING_CONTROLLER_URI", "https://controller.internal"),
             ("MCLOVING_CONTROLLER_DNS_NAME", "controller.internal"),
             ("MCLOVING_CONTROLLER_CA_PATH", "ca.pem"),
             ("MCLOVING_AGENT_CERTIFICATE_PATH", "agent.pem"),
             ("MCLOVING_AGENT_PRIVATE_KEY_PATH", "agent-key.pem"),
             ("MCLOVING_AGENT_JOURNAL_PATH", "agent.db"),
+            ("MCLOVING_AGENT_WORKSPACE_ROOT", "workspace"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))

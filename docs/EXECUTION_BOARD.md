@@ -63,8 +63,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | CTRL-003 | DONE | E2E-002 | Durable retry, timeout, post, cleanup, and uncertain-effect reconciliation |
 | OPS-001 | DONE | E2E-001 | Staged object storage, immutable artifacts, checksummed log chunks, explicit gaps and quotas |
 | OPS-002 | DONE | OPS-001 | Backup, PITR checkpoint contract, restore epoch, object reconciliation, retention and legal-hold drills |
-| AGENT-004 | PENDING | AGENT-002, CTRL-002 | Add the production controller-to-agent claim/accept/lease/work-delivery and bounded log/result-completion path so the outbound service executes scheduled work rather than only reconciling |
-| AGENT-005 | PENDING | AGENT-004, OPS-001 | Recover `finalizing` attempts from checksummed spool evidence, ingest their logs/results through the controller transaction boundary, and prove response-loss idempotency without duplicate effects |
+| AGENT-004 | DONE | AGENT-002, CTRL-002 | Production tenant-bound mTLS poll/claim, journal-before-ack acceptance, fenced start/lease/cancellation, native execution, one-MiB log chunks, and explicit terminal publication; real PostgreSQL shipped-controller/shipped-agent gate proves remote stdout/stderr and success |
+| AGENT-005 | ACTIVE | AGENT-004, OPS-001 | Recover `finalizing` attempts from checksummed spool evidence, ingest their logs/results through the controller transaction boundary, and prove response-loss idempotency without duplicate effects |
 | AGENT-006 | PENDING | AGENT-003 | Persist a non-reusable Unix process/containment birth identity and return distinct retain, retire-stale, cancel-completed, and reconciliation-required decisions; never signal a recycled PGID |
 | WIN-004 | PENDING | AGENT-003 | Remove the suspended-child pre-assignment crash window by creating every workload atomically in its kill-on-close Job Object; prove forced service death at each creation boundary leaves no process |
 | WIN-001 | ACTIVE | AGENT-003, AGENT-004, AGENT-005 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove hosted Windows install/start/stop/uninstall, monotonic session epochs, process restart, and journal reconciliation |
@@ -101,11 +101,11 @@ completed foundation batch, not closure of `WIN-001`, `WIN-002`, or `WIN-003`;
 those tickets remain active for the explicit production and persistent-host
 gates above.
 
-`W2-C` is active on `codex/wave2-agent-completion`: `AGENT-004`,
-`AGENT-005`, `AGENT-006`, and `WIN-004`. Implement production remote
-claim/accept/lease/work delivery first, then recover checksummed finalization,
-add restart-safe Unix containment identity, and remove the Windows
-pre-assignment crash window.
+`W2-C` is active on `codex/wave2-agent-completion`. `AGENT-004` is complete
+with a real PostgreSQL and mutual-TLS shipped-binary gate. `AGENT-005` is the
+active ticket: recover and idempotently replay checksummed finalization
+evidence. Then add restart-safe Unix containment identity (`AGENT-006`) and
+remove the Windows pre-assignment crash window (`WIN-004`).
 
 After `W2-C`, the Windows tickets still require the full controller-driven
 hosted campaign. `WIN-003` additionally requires a signed package on a
