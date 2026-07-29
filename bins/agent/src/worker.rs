@@ -1058,10 +1058,17 @@ async fn remove_terminal_relative_path(
             Ok(metadata) if !is_leaf && metadata.is_dir() && !metadata.file_type().is_symlink() => {
             }
             Ok(_) if !is_leaf => {
-                // An ancestor was replaced. Do not traverse or delete through
-                // it. Containment is already empty, so retiring the terminal
-                // metadata is safer than wedging every future session.
-                return Ok(());
+                // An ancestor was replaced. Remove only the replacement entry;
+                // remove_file never follows a symlink target. Leaving it behind
+                // would permanently obstruct every later workspace in the same
+                // organization after the terminal journal row is retired.
+                fs::remove_file(&current).await?;
+                sync_directory(
+                    current
+                        .parent()
+                        .expect("a normalized relative path has a parent"),
+                )?;
+                break;
             }
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
                 fs::remove_dir_all(&current).await?;
@@ -2081,6 +2088,55 @@ mod tests {
             b"must-survive"
         );
         assert!(displaced_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replaced_terminal_workspace_ancestor_is_removed_without_following() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace_root = directory.path().join("workspace");
+        let workspace = PathBuf::from("organization/attempt/7");
+        let workspace_path = workspace_root.join(&workspace);
+        let organization_path = workspace_root.join("organization");
+        let displaced_path = workspace_root.join("displaced-organization");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(&workspace_path).await.unwrap();
+        fs::create_dir_all(&outside).await.unwrap();
+        fs::write(outside.join("sentinel"), b"must-survive")
+            .await
+            .unwrap();
+        fs::rename(&organization_path, &displaced_path)
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(&outside, &organization_path).unwrap();
+
+        remove_attempt_workspace(&workspace_root, &workspace)
+            .await
+            .unwrap();
+
+        assert!(fs::symlink_metadata(&organization_path).await.is_err());
+        assert_eq!(
+            fs::read(outside.join("sentinel")).await.unwrap(),
+            b"must-survive"
+        );
+        assert!(displaced_path.join("attempt/7").exists());
+
+        // The organization namespace is reusable after the obstructing
+        // symlink is removed, and a regular-file replacement is retired by the
+        // same no-follow path.
+        fs::create_dir_all(&workspace_path).await.unwrap();
+        fs::remove_dir_all(&organization_path).await.unwrap();
+        fs::write(&organization_path, b"replacement").await.unwrap();
+        remove_attempt_workspace(&workspace_root, &workspace)
+            .await
+            .unwrap();
+        assert!(fs::symlink_metadata(&organization_path).await.is_err());
+        fs::create_dir_all(&workspace_path).await.unwrap();
+        assert!(workspace_path.is_dir());
+        assert_eq!(
+            fs::read(outside.join("sentinel")).await.unwrap(),
+            b"must-survive"
+        );
     }
 
     #[tokio::test]
