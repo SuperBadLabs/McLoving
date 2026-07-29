@@ -922,6 +922,26 @@ pub(super) async fn persist_recovered_cancellation(
     Ok(())
 }
 
+pub(super) async fn recovered_cancellation_requires_persistence(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<bool, AgentError> {
+    let Some(result_entry) = &attempt.result else {
+        return Ok(true);
+    };
+    let content = verified_spool_content(&config.workspace_root, result_entry, "result").await?;
+    let result: PersistedResult = serde_json::from_slice(&content)?;
+    match result.completion_protocol.as_str() {
+        // A stale-fence cancellation retires this local authority; it must not
+        // replace the immutable evidence of the work that already completed.
+        WORK_COMPLETION_PROTOCOL => Ok(false),
+        CANCELLATION_COMPLETION_PROTOCOL => Ok(true),
+        _ => Err(AgentError::InvalidAssignment(
+            "durable result has an unknown completion protocol".to_owned(),
+        )),
+    }
+}
+
 async fn finalize_without_process(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
@@ -1238,6 +1258,47 @@ mod tests {
             .await,
             Err(AgentError::InvalidAssignment(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn recovered_cancellation_preserves_an_existing_work_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = PathBuf::from("org/stale-finalization");
+        let result = write_result(
+            directory.path(),
+            &workspace,
+            DurableResult {
+                outcome: WorkOutcome::Succeeded,
+                exit_code: Some(0),
+                termination: "exited",
+                reason: None,
+                completion_protocol: WORK_COMPLETION_PROTOCOL,
+                cancellation_outcome: None,
+            },
+        )
+        .await
+        .unwrap();
+        let mut config = config();
+        config.workspace_root = directory.path().to_owned();
+        let attempt = mcloving_agent_runtime::ReconciliationAttempt {
+            organization_id: "org".to_owned(),
+            attempt_id: "stale-finalization".to_owned(),
+            fence_token: 7,
+            session_epoch: 3,
+            payload_digest: [0x5a; 32],
+            phase: AttemptPhase::Finalizing,
+            workspace,
+            process_id: None,
+            process_birth_identity: None,
+            logs: Vec::new(),
+            result: Some(result),
+        };
+
+        assert!(
+            !recovered_cancellation_requires_persistence(&config, &attempt)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

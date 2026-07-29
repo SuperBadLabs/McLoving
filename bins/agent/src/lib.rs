@@ -426,7 +426,9 @@ async fn send_reconciliation(
                         CancellationOutcome::ReconciliationRequired as i32
                     }
                 };
-                if outcome != RecoveredCancellation::ReconciliationRequired {
+                if outcome != RecoveredCancellation::ReconciliationRequired
+                    && worker::recovered_cancellation_requires_persistence(config, attempt).await?
+                {
                     worker::persist_recovered_cancellation(
                         config,
                         &mut journal,

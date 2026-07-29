@@ -92,7 +92,11 @@ where
             &stderr_path,
             request.output_limit_bytes,
         ) => {
-            result?;
+            if let Err(error) = result {
+                terminate_group(&mut child, process_group_id, request.termination_grace).await?;
+                terminate_remaining_group(process_group_id, request.termination_grace).await?;
+                return Err(error.into());
+            }
             let status =
                 terminate_group(&mut child, process_group_id, request.termination_grace).await?;
             (Termination::OutputLimitExceeded, status)
@@ -412,6 +416,35 @@ mod tests {
         let outcome = execute(&request, CancellationToken::new()).await.unwrap();
         assert_eq!(outcome.termination, Termination::OutputLimitExceeded);
         assert!(outcome.stdout.bytes + outcome.stderr.bytes <= 4_096);
+    }
+
+    #[tokio::test]
+    async fn quota_monitor_error_still_terminates_the_process_group() {
+        let root = tempfile::tempdir().unwrap();
+        let request = ExecutionRequest {
+            workspace_root: root.path().to_owned(),
+            workspace: PathBuf::from("org/unlinked-log"),
+            mode: ExecutionMode::Direct,
+            program: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                OsString::from("-c"),
+                OsString::from(
+                    "printf '%s\\n' \"$$\" > child.pid; rm spool/stdout.log; exec sleep 30",
+                ),
+            ],
+            environment: BTreeMap::new(),
+            output_limit_bytes: Some(4_096),
+            timeout: Duration::from_secs(30),
+            termination_grace: Duration::from_millis(50),
+        };
+        let child_pid_path = root.path().join("org/unlinked-log/child.pid");
+
+        assert!(matches!(
+            execute(&request, CancellationToken::new()).await,
+            Err(ExecutionError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
+        let pid = descendant_pid(&child_pid_path).await;
+        assert_process_gone(pid).await;
     }
 
     #[tokio::test]
