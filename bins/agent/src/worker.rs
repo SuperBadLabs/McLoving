@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
     CancellationCompletion, CancellationDisposition, CancellationOutcome, WorkAssignment,
@@ -153,18 +154,15 @@ pub(super) async fn recover_finalizations(
             client.clone(),
             authority.clone(),
             config.lease_seconds,
-            config.lease_renewal_interval,
+            recovery_renewal_interval(config.lease_renewal_interval),
             authority_lost,
             lease_stop.clone(),
         ));
         let replay_result =
             replay_finalization(config, client, session_epoch, &attempt, authority).await;
         lease_stop.cancel();
-        let lease_result = lease_task.await.map_err(|error| {
-            AgentError::InvalidAssignment(format!("lease task failed: {error}"))
-        })?;
+        let lease_result = lease_task.await;
         let terminal = replay_result?;
-        lease_result?;
         Journal::open(&config.journal_path)?.transition(
             &attempt.organization_id,
             &attempt.attempt_id,
@@ -173,8 +171,20 @@ pub(super) async fn recover_finalizations(
             terminal,
             attempt.process_id,
         )?;
+        // The controller's terminal acknowledgement is authoritative even
+        // when a concurrent renewal observes that the terminal lease is no
+        // longer renewable. Never strand an acknowledged replay locally.
+        lease_result.map_err(|error| {
+            AgentError::InvalidAssignment(format!("lease task failed: {error}"))
+        })??;
     }
     Ok(())
+}
+
+fn recovery_renewal_interval(configured: Duration) -> Duration {
+    configured.min(Duration::from_secs(
+        RECOVERED_FINALIZATION_LEASE_SECONDS / 2,
+    ))
 }
 
 async fn replay_finalization(
@@ -1142,6 +1152,18 @@ mod tests {
             validate_log_spool_quota(&[entry(0, MAX_TOTAL_LOG_SPOOL_BYTES), entry(1, 1)]),
             Err(AgentError::InvalidAssignment(_))
         ));
+    }
+
+    #[test]
+    fn recovered_finalization_renews_before_its_fixed_deadline() {
+        assert_eq!(
+            recovery_renewal_interval(Duration::from_secs(60)),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            recovery_renewal_interval(Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
     }
 
     #[tokio::test]

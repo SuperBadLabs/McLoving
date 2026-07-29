@@ -13,7 +13,9 @@ use mcloving_agent_protocol::wire::{
     WorkAuthority, WorkCompletion, WorkLeaseReceipt, WorkLeaseRenewal, WorkLogChunk, WorkOffer,
     WorkOutcome, WorkPoll, WorkReceipt,
 };
-use mcloving_agent_protocol::{ProtocolRange, WORK_DELIVERY_FEATURE, negotiate};
+use mcloving_agent_protocol::{
+    ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS, WORK_DELIVERY_FEATURE, negotiate,
+};
 use mcloving_controller_api::{ApiState, router};
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
@@ -27,8 +29,6 @@ use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
-
-const RECOVERED_FINALIZATION_LEASE_SECONDS: i32 = 30;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -213,7 +213,8 @@ impl AgentControl for ControllerAgentService {
                         restore_epoch,
                         &request.agent_id,
                         &attempt.phase,
-                        RECOVERED_FINALIZATION_LEASE_SECONDS,
+                        i32::try_from(RECOVERED_FINALIZATION_LEASE_SECONDS)
+                            .expect("recovery lease fits the store wire type"),
                     )
                     .await
                     .map_err(internal_store_error)?
