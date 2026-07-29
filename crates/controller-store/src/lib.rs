@@ -413,7 +413,11 @@ impl Store {
                      'offered', 'accepted', 'running', 'finalizing', 'cancelling',
                      'reconciliation_required'
                  ) AS current_authority,
-                 b.cancellation_requested_at IS NOT NULL OR a.status = 'cancelling'
+                 a.status <> 'reconciliation_required'
+                 AND (
+                     b.cancellation_requested_at IS NOT NULL
+                     OR a.status = 'cancelling'
+                 )
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id AND n.organization_id = a.organization_id

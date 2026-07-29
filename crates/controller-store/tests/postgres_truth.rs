@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use mcloving_controller_store::{
-    AgentCancellationDisposition, ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk,
-    ObjectKind, ObjectStatus, RetryDecision, Store, StoreError, TerminalOutcome, WaitReason,
+    AgentCancellationDisposition, AgentReconciliationDisposition, ClaimRequest, EffectClass,
+    EffectStatus, NewBuild, NewLogChunk, ObjectKind, ObjectStatus, RetryDecision, Store,
+    StoreError, TerminalOutcome, WaitReason,
 };
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -387,6 +388,151 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     .await
     .expect("count cancellation completion events");
     assert_eq!(completions, 1);
+}
+
+#[tokio::test]
+async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "agent-cancellation-reconciliation",
+        )
+        .await
+        .expect("create tenant");
+    assert!(
+        store
+            .open_agent_session(
+                "windows-reconciliation-1",
+                "trusted-windows",
+                1,
+                0,
+                &["journal-v1".to_owned(), "windows-job-object-v1".to_owned()],
+                &["windows".to_owned()],
+            )
+            .await
+            .expect("open agent session")
+    );
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "agent-cancellation-reconciliation".into(),
+            pipeline_digest: [0xCE; 32],
+            node_key: "stage-1".into(),
+            required_capabilities: vec!["windows".into()],
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit active build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "windows-reconciliation-1".into(),
+            capabilities: vec!["windows".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim query")
+        .expect("claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "windows-reconciliation-1",
+            )
+            .await
+            .expect("accept offer")
+    );
+    let effect_payload = json!({"destination": "production"});
+    for (status, label) in [
+        (EffectStatus::Prepared, "prepare effect"),
+        (EffectStatus::Uncertain, "mark effect uncertain"),
+    ] {
+        assert!(
+            store
+                .checkpoint_effect(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "windows-reconciliation-1",
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    status,
+                    &effect_payload,
+                )
+                .await
+                .expect(label)
+        );
+    }
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, admission.build_id)
+            .await
+            .expect("request active cancellation")
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "windows-reconciliation-1",
+                1,
+            )
+            .await
+            .expect("route uncertain cancellation to reconciliation"),
+        AgentCancellationDisposition::ReconciliationRequired
+    );
+    assert_eq!(
+        store
+            .agent_reconciliation_disposition(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "windows-reconciliation-1",
+            )
+            .await
+            .expect("reconcile current uncertain cancellation"),
+        AgentReconciliationDisposition::Retain
+    );
+
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read reconciliation snapshot")
+        .expect("build exists");
+    assert_eq!(snapshot.build_status, "reconciliation_required");
+    assert_eq!(snapshot.attempt_status, "reconciliation_required");
+    let reconciliation_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.cancellation_reconciliation_required'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count cancellation reconciliation events");
+    assert_eq!(reconciliation_events, 1);
 }
 
 #[tokio::test]
