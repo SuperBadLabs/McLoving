@@ -30,6 +30,7 @@ use crate::{AgentConfig, AgentError, process_birth_identity_for};
 const MAX_LOG_CHUNK_BYTES: usize = 1_048_576;
 const MAX_TOTAL_LOG_SPOOL_BYTES: u64 = 64 * 1_048_576;
 const MAX_RESULT_SPOOL_BYTES: u64 = 65_536;
+const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
 const WORK_COMPLETION_PROTOCOL: &str = "work";
 const CANCELLATION_COMPLETION_PROTOCOL: &str = "cancellation";
 
@@ -326,6 +327,14 @@ fn validate_assignment(
     let spec: ExecutionSpec = serde_json::from_slice(&assignment.execution_spec_json)?;
     if spec.version != 1 || spec.steps.len() != 1 || spec.steps[0].kind != "process" {
         return Err(AgentError::UnsupportedSpec);
+    }
+    if !matches!(
+        spec.steps[0].timeout_seconds,
+        None | Some(1..=MAX_EXECUTION_TIMEOUT_SECONDS)
+    ) {
+        return Err(AgentError::InvalidAssignment(format!(
+            "process timeout must be between 1 and {MAX_EXECUTION_TIMEOUT_SECONDS} seconds"
+        )));
     }
     let workspace = PathBuf::from(format!(
         "{}/{}/{}",
@@ -1054,6 +1063,18 @@ mod tests {
         let mut wrong_digest = assignment(spec);
         wrong_digest.payload_digest = vec![0; 32];
         assert!(validate_assignment(&config(), 4, wrong_digest).is_err());
+
+        let unbounded_timeout = br#"{"version":1,"steps":[{"kind":"process","program":"true","timeout_seconds":18446744073709551615}]}"#;
+        assert!(matches!(
+            validate_assignment(&config(), 4, assignment(unbounded_timeout)),
+            Err(AgentError::InvalidAssignment(_))
+        ));
+        let zero_timeout =
+            br#"{"version":1,"steps":[{"kind":"process","program":"true","timeout_seconds":0}]}"#;
+        assert!(matches!(
+            validate_assignment(&config(), 4, assignment(zero_timeout)),
+            Err(AgentError::InvalidAssignment(_))
+        ));
     }
 
     #[test]

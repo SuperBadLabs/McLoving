@@ -93,6 +93,9 @@ initial bounded recovery lease.
   before the outcome is returned. Replay verifies each descriptor in a bounded
   first pass and publishes one-MiB chunks in a second streaming pass. A single
   attempt may retain at most 64 MiB of logs and a 64 KiB result.
+- Execution timeouts are validated before process creation and must be between
+  one second and seven days. Unbounded `u64` durations never reach platform
+  deadline arithmetic.
 - On POSIX systems, every new directory entry is followed by a parent-directory
   fsync. Win32 exposes directory handles for metadata operations but does not
   provide a least-privilege equivalent of POSIX directory fsync:

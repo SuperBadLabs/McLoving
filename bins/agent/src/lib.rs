@@ -596,9 +596,25 @@ async fn terminate_recovered_process(
         Some(_) => {}
     }
     match killpg(process_group, Signal::SIGKILL) {
-        Ok(()) | Err(Errno::ESRCH) => Ok(RecoveredCancellation::Terminated),
-        Err(error) => Err(AgentError::Io(std::io::Error::other(error))),
+        Ok(()) => {}
+        Err(Errno::ESRCH) => return Ok(RecoveredCancellation::Terminated),
+        Err(error) => return Err(AgentError::Io(std::io::Error::other(error))),
     }
+    let deadline = std::time::Instant::now() + termination_grace;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        match process_birth_identity_for(process_id)? {
+            None if !unix_process_group_exists(process_group)? => {
+                return Ok(RecoveredCancellation::Terminated);
+            }
+            None => {}
+            Some(current) if current != expected_identity => {
+                return Ok(RecoveredCancellation::RetireStale);
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(RecoveredCancellation::ReconciliationRequired)
 }
 
 #[cfg(unix)]
@@ -1061,6 +1077,7 @@ mod tests {
         let mut child = command.spawn().unwrap();
         let process_id = child.id().unwrap();
         let identity = process_birth_identity_for(process_id).unwrap().unwrap();
+        let waiter = tokio::spawn(async move { child.wait().await.unwrap() });
 
         assert_eq!(
             terminate_recovered_process(
@@ -1072,7 +1089,7 @@ mod tests {
             .unwrap(),
             RecoveredCancellation::Terminated
         );
-        child.wait().await.unwrap();
+        waiter.await.unwrap();
     }
 
     #[cfg(target_os = "linux")]
