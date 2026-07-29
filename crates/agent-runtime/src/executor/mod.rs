@@ -264,6 +264,7 @@ async fn output_limit_exceeded(
     Ok(stdout_bytes.saturating_add(stderr_bytes) > limit)
 }
 
+#[cfg(unix)]
 async fn wait_for_output_limit(
     stdout: &Path,
     stderr: &Path,
