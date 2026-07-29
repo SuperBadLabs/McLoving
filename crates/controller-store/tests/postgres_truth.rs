@@ -676,6 +676,41 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             .await
             .expect("accept interrupted work")
     );
+    assert!(
+        store
+            .mark_attempt_running_in_session(
+                organization_id,
+                recovered_claim.attempt_id,
+                recovered_claim.fence,
+                recovered_claim.restore_epoch,
+                "windows-1",
+                1,
+            )
+            .await
+            .expect("start interrupted work")
+    );
+    assert!(
+        store
+            .recover_agent_finalization_in_session(
+                organization_id,
+                recovered_claim.attempt_id,
+                recovered_claim.fence,
+                recovered_claim.restore_epoch,
+                "windows-1",
+                1,
+                "cancelling",
+                30,
+            )
+            .await
+            .expect("retain interrupted cancellation replay")
+    );
+    let replay_snapshot = store
+        .build_snapshot(organization_id, project_id, recovered.build_id)
+        .await
+        .expect("read interrupted cancellation replay")
+        .expect("interrupted cancellation replay exists");
+    assert_eq!(replay_snapshot.build_status, "running");
+    assert_eq!(replay_snapshot.attempt_status, "cancelling");
     assert_eq!(
         store
             .complete_agent_cancellation(AgentCancellationCompletion {

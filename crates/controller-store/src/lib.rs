@@ -907,7 +907,12 @@ impl Store {
             return Ok(AgentCancellationDisposition::ReconciliationRequired);
         }
 
-        let recovery = !owner_cancelled && matches!(status.as_str(), "accepted" | "running");
+        // Reconciliation promotes a locally cancelling interrupted execution
+        // from accepted/running to cancelling before its durable cancellation
+        // result is replayed. With no owner cancellation request, that status
+        // is still recovery-originated and must converge to a terminal result.
+        let recovery =
+            !owner_cancelled && matches!(status.as_str(), "accepted" | "running" | "cancelling");
         if !owner_cancelled && !recovery {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
