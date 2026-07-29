@@ -648,21 +648,24 @@ fn group_has_members_other_than(
             }
             Err(error) => return Err(error.into()),
         };
-        let Some((_, suffix)) = stat.rsplit_once(") ") else {
+        let Some((state, group)) = proc_stat_state_and_group(&stat) else {
             continue;
         };
-        let Some(group) = suffix
-            .split_ascii_whitespace()
-            .nth(2)
-            .and_then(|value| value.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        if group == process_group_id {
+        if group == process_group_id && state != b'Z' {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn proc_stat_state_and_group(stat: &str) -> Option<(u8, i32)> {
+    let (_, suffix) = stat.rsplit_once(") ")?;
+    let mut fields = suffix.split_ascii_whitespace();
+    let state = *fields.next()?.as_bytes().first()?;
+    let _parent_process_id = fields.next()?;
+    let process_group_id = fields.next()?.parse().ok()?;
+    Some((state, process_group_id))
 }
 
 fn signal_group(process_group_id: i32, signal: Signal) -> Result<(), ExecutionError> {
@@ -692,6 +695,19 @@ mod tests {
     use nix::sys::signal::kill;
     use sha2::{Digest, Sha256};
     use tokio::fs;
+
+    #[test]
+    fn proc_stat_distinguishes_live_and_zombie_group_members() {
+        assert_eq!(
+            proc_stat_state_and_group("42 (worker (nested)) S 1 42 42 0"),
+            Some((b'S', 42))
+        );
+        assert_eq!(
+            proc_stat_state_and_group("43 (worker) Z 1 42 42 0"),
+            Some((b'Z', 42))
+        );
+        assert_eq!(proc_stat_state_and_group("malformed"), None);
+    }
 
     async fn descendant_pid(path: &Path) -> i32 {
         for _ in 0..100 {
