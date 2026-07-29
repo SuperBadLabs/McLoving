@@ -356,6 +356,8 @@ async fn wait_for_empty_job(job: &JobProcess) -> Result<(), ExecutionError> {
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use super::*;
 
@@ -468,40 +470,43 @@ mod tests {
         fs::write(
             &script,
             r#"
-param([string]$PidPath)
-$PID | Set-Content -LiteralPath $PidPath -Encoding ascii
-Move-Item -LiteralPath "spool\stdout.log" -Destination "spool\renamed.log" -ErrorAction Stop
-New-Item -Path "spool\stdout.log" -ItemType File -ErrorAction Stop | Out-Null
 while ($true) { [Console]::Out.Write("0123456789abcdef") }
 "#,
         )
         .unwrap();
-        let pid_path = root.path().join("rename-spool.pid");
         let mut request = request(
             root.path(),
             "renamed-log",
             ExecutionMode::PowerShell,
             script,
-            vec![pid_path.as_os_str().to_owned()],
+            Vec::new(),
         );
         request.output_limit_bytes = Some(4_096);
         request.timeout = Duration::from_secs(30);
 
-        assert!(matches!(
-            execute(&request, CancellationToken::new()).await,
-            Err(ExecutionError::ReplacedSpoolPath)
-        ));
+        let process_id = Arc::new(AtomicU32::new(0));
+        let recorded_process_id = Arc::clone(&process_id);
+        let public_path = root.path().join("renamed-log/spool/stdout.log");
+        let renamed_path = root.path().join("renamed-log/spool/renamed.log");
+        let result = execute_with_spawn_hook(&request, CancellationToken::new(), move |spawned| {
+            recorded_process_id.store(spawned, Ordering::SeqCst);
+            fs::rename(&public_path, &renamed_path)?;
+            File::create(public_path)?;
+            Ok(())
+        })
+        .await;
+        assert!(
+            matches!(result, Err(ExecutionError::ReplacedSpoolPath)),
+            "unexpected execution result: {result:?}"
+        );
         assert!(
             fs::metadata(root.path().join("renamed-log/spool/renamed.log"))
                 .unwrap()
                 .len()
                 <= 4_096
         );
-        let process_id = fs::read_to_string(pid_path)
-            .unwrap()
-            .trim()
-            .parse::<u32>()
-            .unwrap();
+        let process_id = process_id.load(Ordering::SeqCst);
+        assert_ne!(process_id, 0, "spawn hook did not record the workload PID");
         let status = Command::new("powershell.exe")
             .args([
                 "-NoLogo",
