@@ -26,6 +26,8 @@ enum Command {
         pipeline: PathBuf,
         #[arg(long)]
         idempotency_key: String,
+        #[arg(long, default_value = "trusted-linux")]
+        trust_pool: String,
     },
     Status {
         build: Uuid,
@@ -52,6 +54,7 @@ async fn main() -> Result<()> {
         Command::Submit {
             pipeline,
             idempotency_key,
+            trust_pool,
         } => {
             let project = required_project(arguments.project)?;
             let source = tokio::fs::read_to_string(&pipeline)
@@ -59,7 +62,13 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("read {}", pipeline.display()))?;
             print_json(
                 &client
-                    .submit(arguments.organization, project, &idempotency_key, source)
+                    .submit_in_pool(
+                        arguments.organization,
+                        project,
+                        &idempotency_key,
+                        &trust_pool,
+                        source,
+                    )
                     .await?,
             )?;
         }

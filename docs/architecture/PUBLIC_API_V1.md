@@ -9,7 +9,11 @@ bytes; OIDC and scoped service-identity issuance remain later product surface.
 
 Pipeline submission sends strict YAML as `application/yaml` and requires an
 `Idempotency-Key` header. The key is scoped to the project and returns the
-original durable build on replay. Wave 1 accepts exactly one stage.
+original durable build on replay. The optional `McLoving-Trust-Pool` header
+selects the exact certificate-bound agent pool required by the admitted node;
+it must be non-empty and have no surrounding whitespace. Its default is
+`trusted-linux`. The CLI exposes the same choice as `submit --trust-pool`.
+Wave 1 accepts exactly one stage.
 
 The versioned routes are:
 

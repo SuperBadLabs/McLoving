@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
+pub const TRUST_POOL_HEADER: &str = "mcloving-trust-pool";
+const DEFAULT_TRUST_POOL: &str = "trusted-linux";
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -165,6 +167,7 @@ async fn submit(
     source: Bytes,
 ) -> Result<(StatusCode, Json<AdmissionResponse>), ApiError> {
     authorize(&state, &headers)?;
+    let required_trust_pool = submission_trust_pool(&headers)?;
     let idempotency_key = headers
         .get(IDEMPOTENCY_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -223,7 +226,7 @@ async fn submit(
             pipeline_digest: digest,
             node_key: stage.id.clone(),
             required_capabilities: vec!["linux".to_owned()],
-            required_trust_pool: "trusted-linux".to_owned(),
+            required_trust_pool,
             priority: 0,
             execution_spec,
         })
@@ -244,6 +247,25 @@ async fn submit(
             pipeline_digest: hex(&digest),
         }),
     ))
+}
+
+fn submission_trust_pool(headers: &HeaderMap) -> Result<String, ApiError> {
+    let value = match headers.get(TRUST_POOL_HEADER) {
+        Some(value) => value.to_str().map_err(|_| invalid_trust_pool())?,
+        None => DEFAULT_TRUST_POOL,
+    };
+    if value.is_empty() || value.trim() != value {
+        return Err(invalid_trust_pool());
+    }
+    Ok(value.to_owned())
+}
+
+fn invalid_trust_pool() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "invalid_trust_pool",
+        "trust pool must be non-empty and contain no surrounding whitespace",
+    )
 }
 
 fn execution_spec(steps: &[Step]) -> Value {
@@ -343,7 +365,7 @@ struct ExplainQuery {
 }
 
 fn default_trust_pool() -> String {
-    "trusted-linux".to_owned()
+    DEFAULT_TRUST_POOL.to_owned()
 }
 
 async fn explain(
@@ -486,6 +508,24 @@ impl Client {
         idempotency_key: &str,
         source: String,
     ) -> Result<AdmissionResponse, ClientError> {
+        self.submit_in_pool(
+            organization_id,
+            project_id,
+            idempotency_key,
+            DEFAULT_TRUST_POOL,
+            source,
+        )
+        .await
+    }
+
+    pub async fn submit_in_pool(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        idempotency_key: &str,
+        trust_pool: &str,
+        source: String,
+    ) -> Result<AdmissionResponse, ClientError> {
         self.send(
             self.inner
                 .post(format!(
@@ -493,6 +533,7 @@ impl Client {
                     self.base_url
                 ))
                 .header(IDEMPOTENCY_HEADER, idempotency_key)
+                .header(TRUST_POOL_HEADER, trust_pool)
                 .header("content-type", "application/yaml")
                 .body(source),
         )
@@ -543,7 +584,7 @@ impl Client {
         organization_id: Uuid,
         capabilities: &[String],
     ) -> Result<ExplainResponse, ClientError> {
-        self.explain_in_pool(organization_id, capabilities, "trusted-linux")
+        self.explain_in_pool(organization_id, capabilities, DEFAULT_TRUST_POOL)
             .await
     }
 
@@ -632,5 +673,23 @@ mod tests {
         let response = explain_error(StoreError::InvalidTrustPool);
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
         assert_eq!(response.code, "invalid_trust_pool");
+    }
+
+    #[test]
+    fn submission_trust_pool_is_explicit_and_canonical() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            submission_trust_pool(&headers).expect("default trust pool"),
+            DEFAULT_TRUST_POOL
+        );
+        headers.insert(TRUST_POOL_HEADER, "trusted-build".parse().unwrap());
+        assert_eq!(
+            submission_trust_pool(&headers).expect("explicit trust pool"),
+            "trusted-build"
+        );
+        headers.insert(TRUST_POOL_HEADER, " trusted-build ".parse().unwrap());
+        let error = submission_trust_pool(&headers).expect_err("reject padded trust pool");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_trust_pool");
     }
 }
