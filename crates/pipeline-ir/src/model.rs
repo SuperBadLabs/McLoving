@@ -712,6 +712,7 @@ fn validate_parameters_and_expressions(pipeline: &PipelineIr) -> Result<(), IrVa
     }
     for (name, definition) in &pipeline.parameters {
         let path = format!("$.parameters.{name}");
+        validate_string_length(&path, name)?;
         validate_identifier(&path, name)?;
         if name.contains('.') {
             return Err(IrValidationError::new(

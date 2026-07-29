@@ -7,8 +7,8 @@ use sha2::{Digest, Sha256};
 use crate::IR_V1;
 use crate::expression::ParameterValue;
 use crate::model::{
-    CompilerIdentity, ParameterType, PipelineIr, Provenance, Stage, instantiate_pipeline,
-    validate_pipeline,
+    CompilerIdentity, MAX_IR_STRING_BYTES, MAX_PARAMETERS, ParameterType, PipelineIr, Provenance,
+    Stage, instantiate_pipeline, validate_pipeline,
 };
 use crate::strict_yaml::SourceSpan;
 
@@ -16,6 +16,7 @@ const COMPONENT_MAGIC: &[u8] = b"MCLOVING-COMPONENT\0";
 const EXPANSION_MAGIC: &[u8] = b"MCLOVING-EXPANSION\0";
 const MAX_COMPONENT_OUTPUTS: usize = 128;
 const MAX_COMPONENT_DEPENDENCIES: usize = 128;
+const MAX_EXPANDED_COMPONENTS: usize = 128;
 
 /// The first reusable-component contract.
 pub const COMPONENT_V1: ComponentVersion = ComponentVersion { major: 1, minor: 0 };
@@ -306,6 +307,7 @@ impl ExpandedPipeline {
                 error.message,
             )
         })?;
+        self.validate_receipts()?;
         let pipeline = self.pipeline.canonical_bytes().map_err(|error| {
             ComponentError::new(
                 ComponentErrorCode::InvalidDefinition,
@@ -333,9 +335,146 @@ impl ExpandedPipeline {
         Ok(writer.finish())
     }
 
+    fn validate_receipts(&self) -> Result<(), ComponentError> {
+        if self.components.is_empty() {
+            return Err(ComponentError::new(
+                ComponentErrorCode::InvalidDefinition,
+                "$.components",
+                "expanded component ledger must contain its root receipt",
+            ));
+        }
+        if self.components.len() > MAX_EXPANDED_COMPONENTS {
+            return Err(ComponentError::new(
+                ComponentErrorCode::ComponentLimit,
+                "$.components",
+                format!("expanded component receipt count exceeds {MAX_EXPANDED_COMPONENTS}"),
+            ));
+        }
+
+        let root = &self.components[0];
+        if root.path != "$" {
+            return Err(ComponentError::new(
+                ComponentErrorCode::InvalidDefinition,
+                "$.components[0].path",
+                "the first expanded component receipt must be the root path $",
+            ));
+        }
+        if root.digest != self.root {
+            return Err(ComponentError::new(
+                ComponentErrorCode::DigestMismatch,
+                "$.components[0].digest",
+                "the root receipt digest must match the expanded pipeline root digest",
+            ));
+        }
+
+        let mut seen_paths = BTreeSet::new();
+        for (index, receipt) in self.components.iter().enumerate() {
+            let path = format!("$.components[{index}]");
+            validate_receipt_path(&format!("{path}.path"), &receipt.path)?;
+            if !seen_paths.insert(receipt.path.as_str()) {
+                return Err(ComponentError::new(
+                    ComponentErrorCode::InvalidDefinition,
+                    format!("{path}.path"),
+                    "expanded component receipt paths must be unique",
+                ));
+            }
+            if index > 0 {
+                let parent = receipt_parent(&receipt.path).expect("validated non-root path");
+                if !seen_paths.contains(parent) {
+                    return Err(ComponentError::new(
+                        ComponentErrorCode::InvalidDefinition,
+                        format!("{path}.path"),
+                        "a component receipt must follow its parent receipt",
+                    ));
+                }
+            }
+            if receipt.version != COMPONENT_V1 {
+                return Err(ComponentError::new(
+                    ComponentErrorCode::UnsupportedVersion,
+                    format!("{path}.version"),
+                    "expanded component receipts must use component v1.0",
+                ));
+            }
+            if receipt.inputs.len() > MAX_PARAMETERS {
+                return Err(ComponentError::new(
+                    ComponentErrorCode::InvalidDefinition,
+                    format!("{path}.inputs"),
+                    format!("component input count exceeds {MAX_PARAMETERS}"),
+                ));
+            }
+            for (name, value) in &receipt.inputs {
+                validate_identifier(&format!("{path}.inputs.{name}"), name)?;
+                if name.contains('.') {
+                    return Err(ComponentError::new(
+                        ComponentErrorCode::InvalidDefinition,
+                        format!("{path}.inputs.{name}"),
+                        "component input names must not contain dot",
+                    ));
+                }
+                if let ParameterValue::String(value) = value
+                    && value.len() > MAX_IR_STRING_BYTES
+                {
+                    return Err(ComponentError::new(
+                        ComponentErrorCode::InvalidDefinition,
+                        format!("{path}.inputs.{name}"),
+                        format!("component input string exceeds {MAX_IR_STRING_BYTES} bytes"),
+                    ));
+                }
+            }
+            if receipt.outputs.len() > MAX_COMPONENT_OUTPUTS {
+                return Err(ComponentError::new(
+                    ComponentErrorCode::OutputLimit,
+                    format!("{path}.outputs"),
+                    format!("component output count exceeds {MAX_COMPONENT_OUTPUTS}"),
+                ));
+            }
+            for name in receipt.outputs.keys() {
+                validate_identifier(&format!("{path}.outputs.{name}"), name)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn semantic_digest(&self) -> Result<[u8; 32], ComponentError> {
         Ok(Sha256::digest(self.canonical_bytes()?).into())
     }
+}
+
+fn validate_receipt_path(path: &str, value: &str) -> Result<(), ComponentError> {
+    if value.len() > MAX_IR_STRING_BYTES {
+        return Err(ComponentError::new(
+            ComponentErrorCode::InvalidDefinition,
+            path,
+            format!("component receipt path exceeds {MAX_IR_STRING_BYTES} bytes"),
+        ));
+    }
+    if value == "$" {
+        return Ok(());
+    }
+    if receipt_parent(value).is_none() {
+        return Err(ComponentError::new(
+            ComponentErrorCode::InvalidDefinition,
+            path,
+            "component receipt path must use canonical $.dependencies[N] segments",
+        ));
+    }
+    Ok(())
+}
+
+fn receipt_parent(path: &str) -> Option<&str> {
+    let without_close = path.strip_suffix(']')?;
+    let (parent, index) = without_close.rsplit_once(".dependencies[")?;
+    if parent.is_empty()
+        || index.is_empty()
+        || !index.bytes().all(|byte| byte.is_ascii_digit())
+        || (index.len() > 1 && index.starts_with('0'))
+    {
+        return None;
+    }
+    if parent != "$" && receipt_parent(parent).is_none() {
+        return None;
+    }
+    Some(parent)
 }
 
 /// Resolve and fully expand an exact component graph before scheduling.

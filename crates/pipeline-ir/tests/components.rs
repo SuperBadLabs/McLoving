@@ -384,6 +384,60 @@ fn expansion_digest_binds_exact_component_even_for_equal_concrete_steps() {
     );
 }
 
+#[test]
+fn expanded_canonicalization_rejects_mutated_receipt_ledgers() {
+    let item = component(TEMPLATE_A, 2);
+    let digest = item.semantic_digest().unwrap();
+    let mut catalog = ComponentCatalog::default();
+    catalog.insert_exact(digest, item).unwrap();
+    let expanded = expand_component(
+        ComponentInvocation {
+            digest,
+            inputs: BTreeMap::new(),
+        },
+        &catalog,
+        ExpansionLimits::default(),
+    )
+    .unwrap();
+
+    let mut missing = expanded.clone();
+    missing.components.clear();
+    assert_eq!(
+        missing.canonical_bytes().unwrap_err().code,
+        ComponentErrorCode::InvalidDefinition
+    );
+
+    let mut wrong_digest = expanded.clone();
+    wrong_digest.components[0].digest = ComponentDigest::from_bytes([9; 32]);
+    assert_eq!(
+        wrong_digest.canonical_bytes().unwrap_err().code,
+        ComponentErrorCode::DigestMismatch
+    );
+
+    let mut wrong_version = expanded.clone();
+    wrong_version.components[0].version.major = 2;
+    assert_eq!(
+        wrong_version.canonical_bytes().unwrap_err().code,
+        ComponentErrorCode::UnsupportedVersion
+    );
+
+    let mut duplicate = expanded.clone();
+    duplicate.components.push(duplicate.components[0].clone());
+    assert_eq!(
+        duplicate.canonical_bytes().unwrap_err().code,
+        ComponentErrorCode::InvalidDefinition
+    );
+
+    let mut orphan = expanded;
+    let mut receipt = orphan.components[0].clone();
+    receipt.path = "$.dependencies[0].dependencies[0]".to_owned();
+    orphan.components.push(receipt);
+    assert_eq!(
+        orphan.canonical_bytes().unwrap_err().code,
+        ComponentErrorCode::InvalidDefinition
+    );
+}
+
 fn process_arg(step: &mcloving_pipeline_ir::Step) -> &str {
     match step {
         mcloving_pipeline_ir::Step::Process(process) => &process.args[0],

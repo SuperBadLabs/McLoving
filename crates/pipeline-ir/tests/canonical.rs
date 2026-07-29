@@ -120,6 +120,32 @@ fn programmatic_ir_must_validate_before_canonicalization() {
     pipeline.name = "x".repeat(16 * 1024 + 1);
     assert!(pipeline.canonical_bytes().is_err());
     assert!(pipeline.semantic_digest().is_err());
+
+    let mut pipeline = compile_strict_yaml(
+        "fixture://parameter",
+        r#"
+version: 1
+name: canonical-parameter
+parameters:
+  foo:
+    type: string
+    default: value
+stages:
+  - id: test
+    name: Test
+    steps:
+      - process:
+          program: "true"
+"#,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    let definition = pipeline.parameters.remove("foo").unwrap();
+    pipeline
+        .parameters
+        .insert("x".repeat(16 * 1024 + 1), definition);
+    assert!(pipeline.canonical_bytes().is_err());
+    assert!(pipeline.semantic_digest().is_err());
 }
 
 #[test]
