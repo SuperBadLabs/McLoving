@@ -986,14 +986,14 @@ impl Store {
         Ok(true)
     }
 
-    /// Confirms one restored uncertain effect without restoring execution authority.
+    /// Confirms one fenced uncertain effect without restoring execution authority.
     ///
-    /// Restore activation leaves the historical attempt fenced and moves its
+    /// Restore activation and lease expiry leave the attempt fenced and move
     /// unresolved effect checkpoints to `uncertain`. Reconciliation may only
-    /// confirm an existing, payload-identical uncertain row; it cannot insert
-    /// a new effect or advance any other historical state.
+    /// confirm an existing, payload-identical uncertain row on the attempt's
+    /// current fence after its lease has been cleared.
     #[allow(clippy::too_many_arguments)]
-    pub async fn confirm_restored_uncertain_effect(
+    pub async fn confirm_uncertain_effect(
         &self,
         organization_id: Uuid,
         attempt_id: Uuid,
@@ -1027,9 +1027,12 @@ impl Store {
                AND e.status IN ('uncertain', 'confirmed')
                AND a.organization_id = e.organization_id
                AND a.id = e.attempt_id
+               AND a.fence = e.fence
                AND a.status = 'reconciliation_required'
+               AND a.lease_owner IS NULL
+               AND a.lease_expires_at IS NULL
                AND m.singleton
-               AND a.restore_epoch < m.restore_epoch
+               AND a.restore_epoch <= m.restore_epoch
              RETURNING e.attempt_id",
         )
         .bind(organization_id)
@@ -1042,6 +1045,103 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(reconciled.is_some())
+    }
+
+    /// Terminates one fully resolved reconciliation without granting a lease.
+    ///
+    /// An explicit operator decision may close the attempt only after every
+    /// uncertain effect on its current fence has been confirmed. The attempt,
+    /// node, build, event, and outbox update share the retry decision lock.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_reconciled_attempt(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        actor: &str,
+        outcome: TerminalOutcome,
+        summary: Value,
+    ) -> Result<bool, StoreError> {
+        if actor.is_empty() || actor.len() > 256 {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.retry.{attempt_id}"))
+            .execute(&mut *tx)
+            .await?;
+        let reconciled = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
+            "UPDATE attempts AS a
+             SET status = $4,
+                 terminal_summary = $5,
+                 completed_at = clock_timestamp()
+             FROM nodes AS n
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.status = 'reconciliation_required'
+               AND a.lease_owner IS NULL
+               AND a.lease_expires_at IS NULL
+               AND n.organization_id = a.organization_id
+               AND n.id = a.node_id
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM attempt_effects AS e
+                   WHERE e.organization_id = a.organization_id
+                     AND e.attempt_id = a.id
+                     AND e.fence = a.fence
+                     AND e.status = 'uncertain'
+               )
+             RETURNING n.id, n.build_id, a.restore_epoch",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(outcome.as_str())
+        .bind(&summary)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((node_id, build_id, restore_epoch)) = reconciled else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        sqlx::query(
+            "UPDATE nodes
+             SET status = $3
+             WHERE organization_id = $1 AND id = $2",
+        )
+        .bind(organization_id)
+        .bind(node_id)
+        .bind(outcome.as_str())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE builds
+             SET status = $3, completed_at = clock_timestamp()
+             WHERE organization_id = $1 AND id = $2",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(outcome.as_str())
+        .execute(&mut *tx)
+        .await?;
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "attempt.reconciliation_terminal",
+            json!({
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "restore_epoch": restore_epoch,
+                "actor": actor,
+                "outcome": outcome.as_str(),
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Returns every effect that requires explicit operator reconciliation.
@@ -1123,6 +1223,23 @@ impl Store {
             return Ok(RetryDecision::Ineligible);
         };
         if cancelled || !matches!(status.as_str(), "failed" | "reconciliation_required") {
+            tx.rollback().await?;
+            return Ok(RetryDecision::Ineligible);
+        }
+        let has_non_idempotent_effect = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM attempt_effects
+                 WHERE organization_id = $1
+                   AND attempt_id = $2
+                   AND effect_class = 'non_idempotent'
+             )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if has_non_idempotent_effect {
             tx.rollback().await?;
             return Ok(RetryDecision::Ineligible);
         }

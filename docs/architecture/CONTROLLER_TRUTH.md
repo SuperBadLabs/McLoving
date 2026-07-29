@@ -25,10 +25,12 @@ class and payload digest cannot change after preparation. State advances
 monotonically through prepared, applied, and confirmed, or enters the explicit
 uncertain state. Uncertain work is listed for reconciliation and cannot regress
 to an unconfirmed applied state.
-If a lease expires with a prepared or applied non-idempotent effect, the same
-transaction marks that effect uncertain and moves the attempt, node, and build
-to `reconciliation_required`. Such work is never returned to the runnable
-queue merely because its lease expired.
+If a lease expires with any non-idempotent effect checkpoint, the same
+transaction moves the attempt, node, and build to `reconciliation_required`.
+Prepared and applied effects become uncertain; confirmed effects retain their
+stronger evidence. Such work is never returned to the runnable queue or made
+retry-eligible. A fenced operator may confirm an exact uncertain payload and
+then explicitly terminate the reconciled attempt, with event and outbox audit.
 
 Claims share-lock and record the controller restore epoch. Every agent
 authority operation presents `(attempt_id, fence, restore_epoch, agent_id)`,

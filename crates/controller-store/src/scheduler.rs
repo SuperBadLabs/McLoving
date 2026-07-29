@@ -340,22 +340,42 @@ impl Store {
         let fence: i64 = expired.try_get("fence")?;
         let node_id: Uuid = expired.try_get("node_id")?;
         let build_id: Uuid = expired.try_get("build_id")?;
-        let uncertain_effects = sqlx::query_scalar::<_, String>(
-            "UPDATE attempt_effects
-             SET status = 'uncertain', updated_at = clock_timestamp()
+        let protected_effects = sqlx::query_as::<_, (String, String)>(
+            "SELECT effect_key, status
+             FROM attempt_effects
              WHERE organization_id = $1
                AND attempt_id = $2
                AND fence = $3
                AND effect_class = 'non_idempotent'
-               AND status IN ('prepared', 'applied')
-             RETURNING effect_key",
+               AND status IN ('prepared', 'applied', 'confirmed', 'uncertain')
+             ORDER BY effect_key
+             FOR UPDATE",
         )
         .bind(organization_id)
         .bind(attempt_id)
         .bind(fence)
         .fetch_all(&mut *tx)
         .await?;
-        let requires_reconciliation = !uncertain_effects.is_empty();
+        sqlx::query(
+            "UPDATE attempt_effects
+             SET status = 'uncertain', updated_at = clock_timestamp()
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND effect_class = 'non_idempotent'
+               AND status IN ('prepared', 'applied')",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .execute(&mut *tx)
+        .await?;
+        let requires_reconciliation = !protected_effects.is_empty();
+        let uncertain_effects = protected_effects
+            .iter()
+            .filter(|(_, status)| status != "confirmed")
+            .count();
+        let confirmed_effects = protected_effects.len() - uncertain_effects;
         let next_status = if requires_reconciliation {
             "reconciliation_required"
         } else {
@@ -417,7 +437,8 @@ impl Store {
                 "attempt_id": attempt_id,
                 "node_id": node_id,
                 "fence": fence,
-                "uncertain_effects": uncertain_effects.len(),
+                "uncertain_effects": uncertain_effects,
+                "confirmed_effects": confirmed_effects,
             }),
         )
         .await?;

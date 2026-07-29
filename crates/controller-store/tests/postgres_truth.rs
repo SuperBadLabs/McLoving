@@ -848,6 +848,239 @@ async fn expired_non_idempotent_effect_requires_reconciliation() {
     .expect("count reconciliation outbox");
     assert_eq!(event_count, 1);
     assert_eq!(outbox_count, 1);
+    assert!(
+        !store
+            .finalize_reconciled_attempt(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "operator-a",
+                TerminalOutcome::Succeeded,
+                json!({"resolution": "verified externally"}),
+            )
+            .await
+            .expect("unresolved effect blocks terminal reconciliation")
+    );
+    assert!(
+        store
+            .confirm_uncertain_effect(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &payload,
+            )
+            .await
+            .expect("confirm current-epoch uncertain effect")
+    );
+    assert!(
+        store
+            .uncertain_effects(organization_id)
+            .await
+            .expect("list after current-epoch reconciliation")
+            .is_empty()
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "operator-a",
+                TerminalOutcome::Succeeded,
+                json!({"resolution": "verified externally"}),
+            )
+            .await
+            .expect("finish current-epoch reconciliation")
+    );
+    let terminal = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("load terminal reconciled build")
+        .expect("terminal build exists");
+    assert_eq!(terminal.build_status, "succeeded");
+    assert_eq!(terminal.attempt_status, "succeeded");
+    let reconciliation_publications: (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM build_events
+            WHERE organization_id = $1
+              AND build_id = $2
+              AND kind = 'attempt.reconciliation_terminal'
+              AND payload->>'actor' = 'operator-a'),
+           (SELECT count(*) FROM outbox
+            WHERE organization_id = $1
+              AND aggregate_id = $2
+              AND topic = 'attempt.reconciliation_terminal'
+              AND payload->>'actor' = 'operator-a')",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read reconciliation audit publications");
+    assert_eq!(reconciliation_publications, (1, 1));
+}
+
+#[tokio::test]
+async fn expired_confirmed_non_idempotent_effect_cannot_be_replayed() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "confirmed-effect-expiry",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "confirmed-effect-expiry".into(),
+            pipeline_digest: [40; 32],
+            node_key: "deploy".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit confirmed effect work");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "agent-a".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim confirmed effect work")
+        .expect("claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-a",
+            )
+            .await
+            .expect("accept confirmed effect work")
+    );
+    let payload = json!({"destination": "production", "release": "r2"});
+    for status in [
+        EffectStatus::Prepared,
+        EffectStatus::Applied,
+        EffectStatus::Confirmed,
+    ] {
+        assert!(
+            store
+                .checkpoint_effect(
+                    organization_id,
+                    admission.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "agent-a",
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    status,
+                    &payload,
+                )
+                .await
+                .expect("advance confirmed non-idempotent effect")
+        );
+    }
+    sqlx::query(
+        "UPDATE attempts SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire confirmed effect lease");
+    assert!(
+        store
+            .requeue_one_expired(organization_id)
+            .await
+            .expect("route confirmed effect to reconciliation")
+    );
+    let snapshot = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("load confirmed reconciliation")
+        .expect("build exists");
+    assert_eq!(snapshot.attempt_status, "reconciliation_required");
+    let effect_status = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM attempt_effects
+         WHERE organization_id = $1
+           AND attempt_id = $2
+           AND fence = $3
+           AND effect_key = 'deploy'",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .bind(claim.fence)
+    .fetch_one(store.pool())
+    .await
+    .expect("read confirmed effect");
+    assert_eq!(effect_status, "confirmed");
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-b".into(),
+                agent_id: "agent-b".into(),
+                capabilities: vec!["linux".into()],
+                lease_seconds: 300,
+                fairness_seed: 2,
+            })
+            .await
+            .expect("check for automatic replay")
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .schedule_retry(
+                organization_id,
+                admission.attempt_id,
+                3,
+                "agent disappeared after confirmation",
+            )
+            .await
+            .expect("refuse non-idempotent retry"),
+        RetryDecision::Ineligible
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                "operator-b",
+                TerminalOutcome::Succeeded,
+                json!({"resolution": "effect confirmation was durable"}),
+            )
+            .await
+            .expect("finish confirmed-effect reconciliation")
+    );
+    let terminal = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("load terminal confirmed-effect build")
+        .expect("terminal build exists");
+    assert_eq!(terminal.build_status, "succeeded");
+    assert_eq!(terminal.attempt_status, "succeeded");
 }
 
 #[tokio::test]
@@ -2152,7 +2385,7 @@ async fn backup_restore_canary_verify() {
     );
     assert!(
         store
-            .confirm_restored_uncertain_effect(
+            .confirm_uncertain_effect(
                 organization_id,
                 admission.1,
                 uncertain[0].fence,
@@ -2165,7 +2398,7 @@ async fn backup_restore_canary_verify() {
     );
     assert!(
         store
-            .confirm_restored_uncertain_effect(
+            .confirm_uncertain_effect(
                 organization_id,
                 admission.1,
                 uncertain[0].fence,
@@ -2221,34 +2454,18 @@ async fn backup_restore_canary_verify() {
             .await
             .expect("accept current restore-epoch authority")
     );
-    let restored_retry = store
-        .schedule_retry(
-            organization_id,
-            admission.1,
-            3,
-            "restore reconciliation complete",
-        )
-        .await
-        .expect("schedule post-restore retry");
-    let RetryDecision::Scheduled {
-        attempt_id: retry_id,
-        created: true,
-        ..
-    } = restored_retry
-    else {
-        panic!("expected a post-restore retry, got {restored_retry:?}");
-    };
-    let retry_epoch = sqlx::query_scalar::<_, i64>(
-        "SELECT restore_epoch
-         FROM attempts
-         WHERE organization_id = $1 AND id = $2",
-    )
-    .bind(organization_id)
-    .bind(retry_id)
-    .fetch_one(store.pool())
-    .await
-    .expect("read post-restore retry epoch");
-    assert_eq!(retry_epoch, activation.restore_epoch);
+    assert_eq!(
+        store
+            .schedule_retry(
+                organization_id,
+                admission.1,
+                3,
+                "restore reconciliation complete",
+            )
+            .await
+            .expect("refuse replay of restored non-idempotent work"),
+        RetryDecision::Ineligible
+    );
     assert!(
         store
             .renew_attempt_lease(
@@ -2308,6 +2525,19 @@ async fn backup_restore_canary_verify() {
             )
             .await
             .expect("old effect checkpoint is rejected")
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                admission.1,
+                admission.2,
+                "restore-operator",
+                TerminalOutcome::Succeeded,
+                json!({"resolution": "restored effect verified externally"}),
+            )
+            .await
+            .expect("finish restored reconciliation")
     );
     let objects = store
         .build_objects(organization_id, project_id, admission.0)
