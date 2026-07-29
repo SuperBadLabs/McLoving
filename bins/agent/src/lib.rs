@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const OPEN_SESSION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentConfig {
@@ -91,6 +92,8 @@ pub enum AgentError {
     AlreadyRunning,
     #[error("agent probe exceeded its bounded deadline")]
     ProbeTimeout,
+    #[error("open-session RPC exceeded its bounded deadline")]
+    OpenSessionTimeout,
     #[error("lease renewal RPC exceeded its safe deadline")]
     LeaseRenewalTimeout,
     #[error("work poll RPC exceeded its bounded deadline")]
@@ -340,7 +343,7 @@ async fn open_session(
     };
     let response = tokio::select! {
         () = stop.cancelled() => return Err(AgentError::Stopped),
-        response = client.open_session(request) => response?,
+        response = bounded_open_session_rpc(OPEN_SESSION_TIMEOUT, client.open_session(request)) => response?,
     }
     .into_inner();
     if response.session_epoch != session_epoch {
@@ -357,6 +360,16 @@ async fn open_session(
             active_attempts,
         },
     ))
+}
+
+async fn bounded_open_session_rpc<T>(
+    deadline: Duration,
+    operation: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+) -> Result<tonic::Response<T>, AgentError> {
+    timeout(deadline, operation)
+        .await
+        .map_err(|_| AgentError::OpenSessionTimeout)?
+        .map_err(AgentError::from)
 }
 
 fn require_work_delivery_feature(features: &[String]) -> Result<(), AgentError> {
@@ -1059,6 +1072,16 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(AgentError::ProbeTimeout)));
+    }
+
+    #[tokio::test]
+    async fn stalled_open_session_rpc_is_bounded() {
+        let result = bounded_open_session_rpc::<()>(
+            Duration::from_millis(1),
+            std::future::pending::<Result<tonic::Response<()>, tonic::Status>>(),
+        )
+        .await;
+        assert!(matches!(result, Err(AgentError::OpenSessionTimeout)));
     }
 
     #[test]

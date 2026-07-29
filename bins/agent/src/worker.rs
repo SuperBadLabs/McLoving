@@ -1128,6 +1128,9 @@ async fn remove_terminal_replacement_entry(
             // RemoveDirectory; this deletes the reparse point, not its target.
             fs::remove_dir(path).await
         } else {
+            if !is_link_or_reparse_point(metadata) {
+                restore_file_deletion_access(path, metadata).await?;
+            }
             fs::remove_file(path).await
         }
     }
@@ -1136,6 +1139,19 @@ async fn remove_terminal_replacement_entry(
         let _ = metadata;
         fs::remove_file(path).await
     }
+}
+
+#[cfg(windows)]
+async fn restore_file_deletion_access(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), std::io::Error> {
+    if metadata.permissions().readonly() {
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions).await?;
+    }
+    Ok(())
 }
 
 async fn restore_directory_access(
@@ -1175,6 +1191,7 @@ fn remove_directory_tree_no_follow_sync(root: &Path) -> Result<(), std::io::Erro
             continue;
         }
         if !metadata.is_dir() {
+            restore_file_deletion_access_sync(&path, &metadata)?;
             std::fs::remove_file(&path)?;
             continue;
         }
@@ -1188,6 +1205,25 @@ fn remove_directory_tree_no_follow_sync(root: &Path) -> Result<(), std::io::Erro
         for entry in std::fs::read_dir(&path)? {
             stack.push((entry?.path(), false));
         }
+    }
+    Ok(())
+}
+
+fn restore_file_deletion_access_sync(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), std::io::Error> {
+    #[cfg(windows)]
+    {
+        if metadata.permissions().readonly() {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(path, permissions)?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, metadata);
     }
     Ok(())
 }
@@ -2450,6 +2486,27 @@ mod tests {
             b"must-survive"
         );
         assert!(displaced_path.join("attempt/7").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn read_only_windows_workspace_artifacts_are_reclaimed() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace_root = directory.path().join("workspace");
+        let workspace = PathBuf::from("organization/attempt/7");
+        let workspace_path = workspace_root.join(&workspace);
+        let artifact = workspace_path.join("artifact.txt");
+        fs::create_dir_all(&workspace_path).await.unwrap();
+        fs::write(&artifact, b"terminal-artifact").await.unwrap();
+        let mut permissions = fs::metadata(&artifact).await.unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&artifact, permissions).await.unwrap();
+
+        remove_attempt_workspace(&workspace_root, &workspace)
+            .await
+            .unwrap();
+
+        assert!(fs::symlink_metadata(&workspace_path).await.is_err());
     }
 
     #[tokio::test]
