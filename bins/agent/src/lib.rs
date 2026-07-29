@@ -96,7 +96,9 @@ pub enum AgentError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecoveredCancellation {
     Terminated,
+    #[cfg(unix)]
     AlreadyExited,
+    #[cfg(unix)]
     RetireStale,
     ReconciliationRequired,
 }
@@ -380,9 +382,11 @@ async fn send_reconciliation(
                     fence_token: attempt.fence_token,
                     outcome: match outcome {
                         RecoveredCancellation::Terminated => CancellationOutcome::Terminated as i32,
+                        #[cfg(unix)]
                         RecoveredCancellation::AlreadyExited => {
                             CancellationOutcome::AlreadyExited as i32
                         }
+                        #[cfg(unix)]
                         RecoveredCancellation::RetireStale => {
                             CancellationOutcome::IdentityMismatch as i32
                         }
