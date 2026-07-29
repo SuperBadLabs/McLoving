@@ -30,6 +30,39 @@ jobs:
       - name: Run tests
         run: cargo +1.97.1 test --locked --workspace
 
+  windows-agent:
+    name: Windows agent
+    runs-on: windows-2025
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: >-
+          rustup toolchain install 1.97.1 --profile minimal
+          --component clippy
+          --component rustfmt
+      - name: Check Windows workspace
+        shell: pwsh
+        run: cargo +1.97.1 check --locked --workspace --all-targets
+      - name: Lint Windows workspace
+        shell: pwsh
+        run: cargo +1.97.1 clippy --locked --workspace --all-targets -- -D warnings
+      - name: Run Windows runtime tests
+        shell: pwsh
+        run: >-
+          cargo +1.97.1 test --locked
+          -p mcloving-agent-runtime
+          -p mcloving-agent
+      - name: Build release agent
+        shell: pwsh
+        run: cargo +1.97.1 build --locked --release -p mcloving-agent
+      - name: Run native service and crash-recovery war gate
+        shell: pwsh
+        run: >-
+          ./scripts/windows-agent-war.ps1
+          -AgentBinary ./target/release/mcloving-agent.exe
+
   dependencies:
     name: Dependencies and licenses
     runs-on: ubuntu-24.04

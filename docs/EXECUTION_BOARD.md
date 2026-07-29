@@ -26,7 +26,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W1-B | AGENT-001, AGENT-002, AGENT-003 | DONE | Outbound mTLS contract, fenced sessions, durable journal, Linux process-tree containment |
 | W1-C | UX-001, E2E-001, E2E-002, E2E-003 | DONE | Truthful CLI-driven end-to-end spine and recovery |
 | W2-A | CTRL-003, OPS-001, OPS-002 | DONE | PR #7 merged recoverable execution, staged object truth, restore fencing, retention, and legal holds |
-| W2-B | WIN-001, WIN-002, WIN-003 | ACTIVE | Windows service agent, Job Object containment, and cross-platform parity |
+| W2-B | WIN-001, WIN-002, WIN-003 | ACTIVE | Native Windows service and Job Object implementation; hosted destructive gate in PR, persistent-host parity gate follows |
 
 ## Wave 0 — Architecture and foundation
 
@@ -62,9 +62,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | CTRL-003 | DONE | E2E-002 | Durable retry, timeout, post, cleanup, and uncertain-effect reconciliation |
 | OPS-001 | DONE | E2E-001 | Staged object storage, immutable artifacts, checksummed log chunks, explicit gaps and quotas |
 | OPS-002 | DONE | OPS-001 | Backup, PITR checkpoint contract, restore epoch, object reconciliation, retention and legal-hold drills |
-| WIN-001 | ACTIVE | AGENT-003 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove clean install/start/stop/uninstall, acceptance-before-ack, process restart, machine reboot, and journal reconciliation on a real Windows host |
-| WIN-002 | PENDING | WIN-001 | Add explicit direct-process, `cmd.exe`, and PowerShell execution modes; isolate each attempt in a Job Object and ACL-owned workspace; prove timeout/cancel/service-crash kills every descendant and preserves durable stdout/stderr/result evidence |
-| WIN-003 | PENDING | WIN-002, E2E-003 | Run one versioned Linux/Windows semantic-parity matrix plus destructive controller/agent/network/reboot recovery campaign; require matching terminal outcomes, logs, artifacts, cancellation, stale-authority rejection, and zero escaped descendants |
+| WIN-001 | ACTIVE | AGENT-003 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove hosted Windows install/start/stop/uninstall, monotonic session epochs, process restart, and journal reconciliation |
+| WIN-002 | ACTIVE | WIN-001 | Add explicit direct-process, `cmd.exe`, and PowerShell execution modes; isolate each attempt in a race-free Job Object and ACL-owned workspace; prove timeout/cancel/service-crash kills every descendant and preserves durable stdout/stderr/result evidence |
+| WIN-003 | ACTIVE | WIN-002, E2E-003 | Maintain one versioned Linux/Windows semantic-parity matrix and run destructive hosted-Windows proof; then close with a signed package on a persistent Windows host through controller/network interruption and machine reboot, requiring matching terminal outcomes, logs, artifacts, cancellation, stale-authority rejection, and zero escaped descendants |
 
 ## Wave 3 — Native product surface
 
@@ -92,7 +92,10 @@ canary, and release-readiness assessment.
 ## Current next batch
 
 `W2-B` is active on `codex/wave2-windows-agent`: `WIN-001`, `WIN-002`,
-and `WIN-003`. The implementation gate is pinned Rust cross-compilation and
-platform-specific unit tests; completion additionally requires a real Windows
-service host for signed-package, reboot, Job Object, ACL, and destructive
-parity evidence. Cross-compilation alone cannot close any Windows ticket.
+and `WIN-003`. This PR must clear pinned Linux gates plus a real hosted Windows
+service install/start/stop/uninstall, Job Object, ACL, hard-crash, journal, and
+no-duplicate-execution campaign. That evidence may close `WIN-001` and
+`WIN-002`; it cannot close `WIN-003`. The final parity ticket requires a signed
+package on a persistent Windows host through controller/network interruption
+and machine reboot. Cross-compilation or hosted CI alone cannot waive that
+external gate.
