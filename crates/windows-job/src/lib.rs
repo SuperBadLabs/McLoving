@@ -441,8 +441,20 @@ fn push_backslashes(command: &mut OsString, count: usize) {
 
 fn environment_block(overrides: &BTreeMap<OsString, OsString>) -> Result<Vec<u16>, JobError> {
     let mut entries = BTreeMap::<String, (OsString, OsString)>::new();
+    const BASELINE: [&str; 7] = [
+        "COMSPEC",
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "WINDIR",
+    ];
     for (key, value) in std::env::vars_os() {
-        entries.insert(normalized_environment_key(&key), (key, value));
+        let normalized = normalized_environment_key(&key);
+        if BASELINE.contains(&normalized.as_str()) {
+            entries.insert(normalized, (key, value));
+        }
     }
     for (key, value) in overrides {
         if key.is_empty()
@@ -601,5 +613,18 @@ mod tests {
         let mut empty = OsString::new();
         append_quoted_argument(&mut empty, OsStr::new("")).unwrap();
         assert_eq!(empty, OsString::from("\"\""));
+    }
+
+    #[test]
+    fn workload_environment_excludes_parent_identity_and_accepts_explicit_values() {
+        assert!(std::env::var_os("USERNAME").is_some());
+        let block = environment_block(&BTreeMap::from([(
+            OsString::from("EXPLICIT_VALUE"),
+            OsString::from("allowed"),
+        )]))
+        .unwrap();
+        let text = String::from_utf16_lossy(&block).replace('\0', "\n");
+        assert!(!text.to_uppercase().contains("USERNAME="));
+        assert!(text.contains("EXPLICIT_VALUE=allowed"));
     }
 }

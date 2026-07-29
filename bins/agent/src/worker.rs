@@ -1099,15 +1099,12 @@ async fn write_result(
         completion_protocol,
         cancellation_outcome,
     } = result;
-    let relative_path = PathBuf::from(AGENT_RESULT_DIRECTORY)
+    let relative_parent = PathBuf::from(AGENT_RESULT_DIRECTORY)
         .join(workspace)
-        .join(Uuid::new_v4().simple().to_string())
-        .join("result.json");
-    let path = workspace_root.join(&relative_path);
-    let parent = path.parent().ok_or_else(|| {
-        AgentError::InvalidAssignment("result spool has no parent directory".to_owned())
-    })?;
-    fs::create_dir_all(parent).await?;
+        .join(Uuid::new_v4().simple().to_string());
+    let parent = create_result_directory(workspace_root, &relative_parent).await?;
+    let relative_path = relative_parent.join("result.json");
+    let path = parent.join("result.json");
     let content = serde_json::to_vec(&json!({
         "outcome": outcome_name(outcome),
         "exit_code": exit_code,
@@ -1135,7 +1132,7 @@ async fn write_result(
         }
         Err(error) => return Err(error.into()),
     }
-    sync_result_directory_chain(workspace_root, parent)?;
+    sync_result_directory_chain(workspace_root, &parent)?;
     Ok(SpoolEntry {
         sequence: 0,
         relative_path,
@@ -1146,15 +1143,58 @@ async fn write_result(
     })
 }
 
+async fn create_result_directory(
+    workspace_root: &Path,
+    relative_parent: &Path,
+) -> Result<PathBuf, AgentError> {
+    if relative_parent.is_absolute()
+        || relative_parent
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(AgentError::InvalidAssignment(
+            "result spool parent must be normalized and relative".to_owned(),
+        ));
+    }
+    fs::create_dir_all(workspace_root).await?;
+    let mut directory = workspace_root.to_owned();
+    for component in relative_parent.components() {
+        let Component::Normal(component) = component else {
+            unreachable!("relative result parent was validated above");
+        };
+        directory.push(component);
+        match fs::create_dir(&directory).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let metadata = fs::symlink_metadata(&directory).await?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(AgentError::InvalidAssignment(
+                "result spool parent contains a non-directory or symlink".to_owned(),
+            ));
+        }
+    }
+    let canonical_root = fs::canonicalize(workspace_root).await?;
+    let canonical_parent = fs::canonicalize(&directory).await?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err(AgentError::InvalidAssignment(
+            "result spool parent escapes the workspace root".to_owned(),
+        ));
+    }
+    Ok(canonical_parent)
+}
+
 fn sync_result_directory_chain(workspace_root: &Path, parent: &Path) -> Result<(), AgentError> {
-    if !parent.starts_with(workspace_root) {
+    let canonical_root = std::fs::canonicalize(workspace_root)?;
+    if !parent.starts_with(&canonical_root) {
         return Err(AgentError::InvalidAssignment(
             "result spool escapes the workspace root".to_owned(),
         ));
     }
     for directory in parent.ancestors() {
         sync_directory(directory)?;
-        if directory == workspace_root {
+        if directory == canonical_root {
             return Ok(());
         }
     }
@@ -1652,6 +1692,36 @@ mod tests {
             cancellation_result.cancellation_outcome,
             Some(CancellationOutcome::Terminated as i32)
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn result_spool_rejects_a_symlinked_agent_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            outside.path(),
+            directory.path().join(AGENT_RESULT_DIRECTORY),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            write_result(
+                directory.path(),
+                Path::new("org/attempt"),
+                DurableResult {
+                    outcome: WorkOutcome::Failed,
+                    exit_code: None,
+                    termination: "process_spawn_failed",
+                    reason: Some("refused"),
+                    completion_protocol: WORK_COMPLETION_PROTOCOL,
+                    cancellation_outcome: None,
+                },
+            )
+            .await,
+            Err(AgentError::InvalidAssignment(_))
+        ));
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
     #[tokio::test]

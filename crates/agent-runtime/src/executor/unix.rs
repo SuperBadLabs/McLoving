@@ -71,6 +71,12 @@ where
     let mut command = Command::new(&request.program);
     command
         .args(&request.arguments)
+        .env_clear()
+        .env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
+        .env("LANG", "C.UTF-8")
         .envs(&request.environment)
         .current_dir(&workspace)
         .stdin(Stdio::null())
@@ -525,6 +531,40 @@ mod tests {
         assert_eq!(outcome.stdout.bytes, 8);
         let expected_digest: [u8; 32] = Sha256::digest(b"mcloving").into();
         assert_eq!(outcome.stdout.digest, expected_digest);
+    }
+
+    #[tokio::test]
+    async fn workload_environment_is_allowlisted_and_explicit() {
+        assert!(std::env::var_os("HOME").is_some());
+        let root = tempfile::tempdir().unwrap();
+        let request = ExecutionRequest {
+            workspace_root: root.path().to_owned(),
+            workspace: PathBuf::from("org/environment"),
+            mode: ExecutionMode::Direct,
+            program: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                OsString::from("-c"),
+                OsString::from(
+                    "test -z \"${HOME+x}\" && test \"$EXPLICIT_VALUE\" = allowed && printf clean",
+                ),
+            ],
+            environment: BTreeMap::from([(
+                OsString::from("EXPLICIT_VALUE"),
+                OsString::from("allowed"),
+            )]),
+            output_limit_bytes: None,
+            timeout: Duration::from_secs(5),
+            termination_grace: Duration::from_millis(100),
+        };
+
+        let outcome = execute(&request, CancellationToken::new()).await.unwrap();
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(
+            fs::read(root.path().join(outcome.stdout.relative_path))
+                .await
+                .unwrap(),
+            b"clean"
+        );
     }
 
     #[tokio::test]

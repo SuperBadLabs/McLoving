@@ -102,6 +102,246 @@ async fn agent_session_epoch_is_durable_and_monotonic() {
 }
 
 #[tokio::test]
+async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let agent_id = format!("session-fence-{}", Uuid::new_v4());
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "session-fenced-work".into(),
+            pipeline_digest: [0x5e; 32],
+            node_key: "execute".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit work");
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                10,
+                0,
+                &["work-delivery-v1".into()],
+                &["linux".into()],
+            )
+            .await
+            .expect("open original session")
+    );
+    let claim = store
+        .claim_next_in_session(
+            &ClaimRequest {
+                organization_id,
+                scheduler_id: "session-fence".into(),
+                agent_id: agent_id.clone(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 0,
+            },
+            10,
+        )
+        .await
+        .expect("claim under original session")
+        .expect("claim available work");
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                11,
+                0,
+                &["work-delivery-v1".into()],
+                &["linux".into()],
+            )
+            .await
+            .expect("advance session")
+    );
+
+    assert!(
+        !store
+            .accept_offer_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+            )
+            .await
+            .expect("reject stale acceptance")
+    );
+    assert!(
+        store
+            .attempt_execution_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+            )
+            .await
+            .expect("reject stale execution read")
+            .is_none()
+    );
+    assert!(
+        store
+            .accept_offer_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                11,
+            )
+            .await
+            .expect("accept under current session")
+    );
+    assert!(
+        !store
+            .mark_attempt_running_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+            )
+            .await
+            .expect("reject stale start")
+    );
+    assert!(
+        store
+            .mark_attempt_running_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                11,
+            )
+            .await
+            .expect("start under current session")
+    );
+    assert!(
+        store
+            .renew_attempt_lease_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+                30,
+            )
+            .await
+            .expect("reject stale renewal")
+            .is_none()
+    );
+    assert!(
+        store
+            .renew_attempt_lease_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                11,
+                30,
+            )
+            .await
+            .expect("renew current session")
+            .is_some()
+    );
+    let chunk = NewLogChunk {
+        organization_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        restore_epoch: claim.restore_epoch,
+        agent_id: &agent_id,
+        sequence: 0,
+        stream: "stdout",
+        content: b"session-fenced",
+    };
+    assert!(
+        !store
+            .append_log_in_session(&chunk, 10)
+            .await
+            .expect("reject stale log")
+    );
+    assert!(
+        store
+            .append_log_in_session(&chunk, 11)
+            .await
+            .expect("commit current log")
+    );
+    assert!(
+        !store
+            .finalize_attempt_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+                TerminalOutcome::Succeeded,
+                json!({"session": 10}),
+            )
+            .await
+            .expect("reject stale terminal publication")
+    );
+    assert!(
+        store
+            .finalize_attempt_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                11,
+                TerminalOutcome::Succeeded,
+                json!({"session": 11}),
+            )
+            .await
+            .expect("commit current terminal publication")
+    );
+    assert_eq!(
+        store
+            .renew_attempt_lease_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                11,
+                30,
+            )
+            .await
+            .expect("terminal replay renewal is an idempotent no-op"),
+        Some(false)
+    );
+}
+
+#[tokio::test]
 async fn admission_is_atomic_and_idempotent() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

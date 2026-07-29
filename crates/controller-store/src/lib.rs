@@ -447,7 +447,55 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
     ) -> Result<AgentReconciliationDisposition, StoreError> {
+        self.agent_reconciliation_disposition_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn agent_reconciliation_disposition_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<AgentReconciliationDisposition, StoreError> {
+        self.agent_reconciliation_disposition_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn agent_reconciliation_disposition_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+    ) -> Result<AgentReconciliationDisposition, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(AgentReconciliationDisposition::Cancel);
+        }
         let row = sqlx::query_as::<_, (bool, bool)>(
             "SELECT
                  a.fence = $3
@@ -504,10 +552,66 @@ impl Store {
         local_phase: &str,
         lease_seconds: i32,
     ) -> Result<bool, StoreError> {
+        self.recover_agent_finalization_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+            local_phase,
+            lease_seconds,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn recover_agent_finalization_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+        local_phase: &str,
+        lease_seconds: i32,
+    ) -> Result<bool, StoreError> {
+        self.recover_agent_finalization_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+            local_phase,
+            lease_seconds,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_agent_finalization_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+        local_phase: &str,
+        lease_seconds: i32,
+    ) -> Result<bool, StoreError> {
         if !matches!(local_phase, "finalizing" | "cancelling") || lease_seconds <= 0 {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.scheduler.{organization_id}"))
             .execute(&mut *tx)
@@ -592,18 +696,7 @@ impl Store {
         } = completion;
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
-        let session_epoch =
-            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
-        let current_session = sqlx::query_scalar::<_, i64>(
-            "SELECT session_epoch
-             FROM agent_sessions
-             WHERE agent_id = $1
-             FOR UPDATE",
-        )
-        .bind(agent_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if current_session != Some(session_epoch) {
+        if !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await? {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         }
@@ -1192,12 +1285,35 @@ impl Store {
 
     /// Commits a log chunk only for the exact live fenced attempt.
     pub async fn append_log(&self, chunk: &NewLogChunk<'_>) -> Result<bool, StoreError> {
+        self.append_log_with_session(chunk, None).await
+    }
+
+    pub async fn append_log_in_session(
+        &self,
+        chunk: &NewLogChunk<'_>,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        self.append_log_with_session(chunk, Some(session_epoch))
+            .await
+    }
+
+    async fn append_log_with_session(
+        &self,
+        chunk: &NewLogChunk<'_>,
+        session_epoch: Option<u64>,
+    ) -> Result<bool, StoreError> {
         if !log_sequence_is_bounded(chunk.sequence) {
             return Ok(false);
         }
         let digest: [u8; 32] = Sha256::digest(chunk.content).into();
         let mut tx = self.tenant_transaction(chunk.organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, chunk.agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
                 "mcloving.log.{}.{}.{}",
@@ -1303,8 +1419,56 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
     ) -> Result<Option<AttemptExecution>, StoreError> {
+        self.attempt_execution_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn attempt_execution_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<Option<AttemptExecution>, StoreError> {
+        self.attempt_execution_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn attempt_execution_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+    ) -> Result<Option<AttemptExecution>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         let row = sqlx::query_as::<_, (Uuid, Uuid, Value, bool)>(
             "SELECT b.id, b.project_id, n.execution_spec,
                     b.cancellation_requested_at IS NOT NULL
@@ -1351,8 +1515,56 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
     ) -> Result<bool, StoreError> {
+        self.mark_attempt_running_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mark_attempt_running_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        self.mark_attempt_running_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn mark_attempt_running_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+    ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
             "SELECT n.id, n.build_id, a.status
              FROM attempts AS a
@@ -2861,8 +3073,64 @@ impl Store {
         outcome: TerminalOutcome,
         summary: Value,
     ) -> Result<bool, StoreError> {
+        self.finalize_attempt_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+            outcome,
+            summary,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_attempt_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+        outcome: TerminalOutcome,
+        summary: Value,
+    ) -> Result<bool, StoreError> {
+        self.finalize_attempt_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+            outcome,
+            summary,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finalize_attempt_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+        outcome: TerminalOutcome,
+        summary: Value,
+    ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let existing = sqlx::query_as::<_, (String, Option<Value>)>(
             "SELECT a.status, a.terminal_summary
              FROM attempts AS a
@@ -3052,6 +3320,25 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         Ok(tx)
+    }
+
+    pub(crate) async fn lock_agent_session(
+        tx: &mut Transaction<'_, Postgres>,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        let current = sqlx::query_scalar::<_, i64>(
+            "SELECT session_epoch
+             FROM agent_sessions
+             WHERE agent_id = $1
+             FOR SHARE",
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        Ok(current == Some(session_epoch))
     }
 }
 

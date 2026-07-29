@@ -53,10 +53,35 @@ impl Store {
         &self,
         request: &ClaimRequest,
     ) -> Result<Option<ClaimedAttempt>, StoreError> {
+        self.claim_next_with_session(request, None).await
+    }
+
+    /// Production claim path: the authenticated epoch is locked through the
+    /// same transaction that creates fenced lease authority.
+    pub async fn claim_next_in_session(
+        &self,
+        request: &ClaimRequest,
+        session_epoch: u64,
+    ) -> Result<Option<ClaimedAttempt>, StoreError> {
+        self.claim_next_with_session(request, Some(session_epoch))
+            .await
+    }
+
+    async fn claim_next_with_session(
+        &self,
+        request: &ClaimRequest,
+        session_epoch: Option<u64>,
+    ) -> Result<Option<ClaimedAttempt>, StoreError> {
         if request.lease_seconds <= 0 || request.trust_pool.trim().is_empty() {
             return Ok(None);
         }
         let mut tx = self.tenant_transaction(request.organization_id).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, &request.agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.scheduler.{}", request.organization_id))
             .execute(&mut *tx)
@@ -184,7 +209,55 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
     ) -> Result<bool, StoreError> {
+        self.accept_offer_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_offer_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        self.accept_offer_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn accept_offer_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+    ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
             .bind(RESTORE_FENCE_LOCK_KEY)
             .execute(&mut *tx)
@@ -265,10 +338,62 @@ impl Store {
         agent_id: &str,
         lease_seconds: i32,
     ) -> Result<Option<bool>, StoreError> {
+        self.renew_attempt_lease_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+            lease_seconds,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn renew_attempt_lease_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+        lease_seconds: i32,
+    ) -> Result<Option<bool>, StoreError> {
+        self.renew_attempt_lease_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+            lease_seconds,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn renew_attempt_lease_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+        lease_seconds: i32,
+    ) -> Result<Option<bool>, StoreError> {
         if lease_seconds <= 0 {
             return Ok(None);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         sqlx::query("SELECT pg_advisory_xact_lock_shared($1)")
             .bind(RESTORE_FENCE_LOCK_KEY)
             .execute(&mut *tx)
@@ -302,8 +427,36 @@ impl Store {
         .bind(f64::from(lease_seconds))
         .fetch_optional(&mut *tx)
         .await?;
+        if cancellation_requested.is_some() {
+            tx.commit().await?;
+            return Ok(cancellation_requested);
+        }
+        // A response-loss replay can observe an already-terminal attempt.
+        // Its exact terminal publication is idempotent and needs no renewed
+        // lease, so acknowledge the renewal as a no-op instead of revoking the
+        // replay's authority-loss token.
+        let terminal = sqlx::query_scalar::<_, bool>(
+            "SELECT true
+             FROM attempts AS a
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND a.status IN ('succeeded', 'failed', 'aborted')
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
         tx.commit().await?;
-        Ok(cancellation_requested)
+        Ok(terminal.map(|_| false))
     }
 
     /// Resolves one expired active lease without changing its fence.

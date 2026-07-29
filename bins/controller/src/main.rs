@@ -206,12 +206,13 @@ impl AgentControl for ControllerAgentService {
             if matches!(attempt.phase.as_str(), "finalizing" | "cancelling")
                 && self
                     .store
-                    .recover_agent_finalization(
+                    .recover_agent_finalization_in_session(
                         organization_id,
                         attempt_id,
                         fence,
                         restore_epoch,
                         &request.agent_id,
+                        request.session_epoch,
                         &attempt.phase,
                         i32::try_from(RECOVERED_FINALIZATION_LEASE_SECONDS)
                             .expect("recovery lease fits the store wire type"),
@@ -228,12 +229,13 @@ impl AgentControl for ControllerAgentService {
             }
             match self
                 .store
-                .agent_reconciliation_disposition(
+                .agent_reconciliation_disposition_in_session(
                     organization_id,
                     attempt_id,
                     fence,
                     restore_epoch,
                     &request.agent_id,
+                    request.session_epoch,
                 )
                 .await
                 .map_err(internal_store_error)?
@@ -376,26 +378,30 @@ impl AgentControl for ControllerAgentService {
             .map_err(internal_store_error)?;
         let assignment = if let Some(claim) = self
             .store
-            .claim_next(&ClaimRequest {
-                organization_id: identity.organization_id,
-                scheduler_id: format!("agent:{}:{}", request.agent_id, request.session_epoch),
-                agent_id: request.agent_id.clone(),
-                capabilities,
-                trust_pool: identity.trust_pool.clone(),
-                lease_seconds,
-                fairness_seed: 0,
-            })
+            .claim_next_in_session(
+                &ClaimRequest {
+                    organization_id: identity.organization_id,
+                    scheduler_id: format!("agent:{}:{}", request.agent_id, request.session_epoch),
+                    agent_id: request.agent_id.clone(),
+                    capabilities,
+                    trust_pool: identity.trust_pool.clone(),
+                    lease_seconds,
+                    fairness_seed: 0,
+                },
+                request.session_epoch,
+            )
             .await
             .map_err(internal_store_error)?
         {
             let execution = self
                 .store
-                .attempt_execution(
+                .attempt_execution_in_session(
                     claim.organization_id,
                     claim.attempt_id,
                     claim.fence,
                     claim.restore_epoch,
                     &claim.agent_id,
+                    request.session_epoch,
                 )
                 .await
                 .map_err(internal_store_error)?
@@ -429,12 +435,13 @@ impl AgentControl for ControllerAgentService {
         let context = authorize_work_authority(&self.store, &identity, &authority).await?;
         let accepted = self
             .store
-            .accept_offer(
+            .accept_offer_in_session(
                 context.organization_id,
                 context.attempt_id,
                 context.fence,
                 context.restore_epoch,
                 &authority.agent_id,
+                authority.session_epoch,
             )
             .await
             .map_err(internal_store_error)?;
@@ -453,12 +460,13 @@ impl AgentControl for ControllerAgentService {
         let context = authorize_work_authority(&self.store, &identity, &authority).await?;
         let accepted = self
             .store
-            .mark_attempt_running(
+            .mark_attempt_running_in_session(
                 context.organization_id,
                 context.attempt_id,
                 context.fence,
                 context.restore_epoch,
                 &authority.agent_id,
+                authority.session_epoch,
             )
             .await
             .map_err(internal_store_error)?;
@@ -487,12 +495,13 @@ impl AgentControl for ControllerAgentService {
         }
         let cancellation_requested = self
             .store
-            .renew_attempt_lease(
+            .renew_attempt_lease_in_session(
                 context.organization_id,
                 context.attempt_id,
                 context.fence,
                 context.restore_epoch,
                 &authority.agent_id,
+                authority.session_epoch,
                 lease_seconds,
             )
             .await
@@ -525,16 +534,19 @@ impl AgentControl for ControllerAgentService {
             .map_err(|_| Status::invalid_argument("log sequence is out of range"))?;
         let accepted = self
             .store
-            .append_log(&NewLogChunk {
-                organization_id: context.organization_id,
-                attempt_id: context.attempt_id,
-                fence: context.fence,
-                restore_epoch: context.restore_epoch,
-                agent_id: &authority.agent_id,
-                sequence,
-                stream: &request.stream,
-                content: &request.content,
-            })
+            .append_log_in_session(
+                &NewLogChunk {
+                    organization_id: context.organization_id,
+                    attempt_id: context.attempt_id,
+                    fence: context.fence,
+                    restore_epoch: context.restore_epoch,
+                    agent_id: &authority.agent_id,
+                    sequence,
+                    stream: &request.stream,
+                    content: &request.content,
+                },
+                authority.session_epoch,
+            )
             .await
             .map_err(internal_store_error)?;
         Ok(Response::new(WorkReceipt {
@@ -568,12 +580,13 @@ impl AgentControl for ControllerAgentService {
         };
         let accepted = self
             .store
-            .finalize_attempt(
+            .finalize_attempt_in_session(
                 context.organization_id,
                 context.attempt_id,
                 context.fence,
                 context.restore_epoch,
                 &authority.agent_id,
+                authority.session_epoch,
                 outcome,
                 summary,
             )

@@ -32,7 +32,10 @@ organization UUID. Every session, reconciliation, and cancellation completion
 verifies the claims against the authenticated peer certificate.
 Possession of another certificate under the same CA cannot select a different
 agent identity or trust class. Session epochs are advanced atomically in
-PostgreSQL so a second controller replica cannot admit stale authority.
+PostgreSQL so a second controller replica cannot admit stale authority. Every
+production claim and subsequent work mutation locks that exact session epoch
+through the same PostgreSQL transaction as the fenced state change, so an
+already-authorized old RPC cannot mutate work after the epoch advances.
 Every executable node also persists one non-empty required trust pool.
 Scheduling uses the trust pool from the authenticated certificate binding,
 not an agent-reported capability, and claims only an exact pool match.
@@ -125,8 +128,15 @@ authority.
 - Terminal result evidence is written beneath the agent-owned
   `.agent-results` root, outside the workload workspace namespace, under a
   cryptographically random path created only after containment has ended. A
+  component-wise no-follow directory walk and canonical-root check reject
+  symlinks, reparse escapes, and non-directory parents before creation. A
   workload cannot predict, pre-create, or replace the authoritative result
   path.
+- Workloads never inherit the agent service environment. Unix starts from a
+  fixed `PATH`/locale baseline; Windows copies only the operating-system
+  process baseline required for process creation. The execution specification
+  then supplies explicit overrides, so controller URLs, journal paths, and
+  credential locations are not disclosed through inherited variables.
 - Execution timeouts are validated before process creation and must be between
   one second and seven days. Unbounded `u64` durations never reach platform
   deadline arithmetic.
