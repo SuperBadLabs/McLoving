@@ -233,13 +233,20 @@ async fn send_reconciliation(
         return Err(AgentError::StaleSession);
     }
     let cancelled = directive
-        .cancel_attempt_ids
+        .cancel_attempts
         .into_iter()
+        .map(|authority| {
+            (
+                authority.organization_id,
+                authority.attempt_id,
+                authority.fence_token,
+            )
+        })
         .collect::<std::collections::BTreeSet<_>>();
     if !cancelled.is_empty() {
         let mut journal = Journal::open(&config.journal_path)?;
         for attempt in &report.attempts {
-            if cancelled.contains(&attempt.attempt_id) {
+            if cancellation_targets(&cancelled, attempt) {
                 journal.transition(
                     &attempt.organization_id,
                     &attempt.attempt_id,
@@ -287,6 +294,17 @@ async fn send_reconciliation(
         }
     }
     Ok(())
+}
+
+fn cancellation_targets(
+    cancelled: &std::collections::BTreeSet<(String, String, u64)>,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> bool {
+    cancelled.contains(&(
+        attempt.organization_id.clone(),
+        attempt.attempt_id.clone(),
+        attempt.fence_token,
+    ))
 }
 
 #[cfg(unix)]
@@ -555,5 +573,24 @@ mod tests {
         assert_eq!(attempt.logs[0].sequence, 7);
         assert_eq!(attempt.logs[0].digest, vec![8; 32]);
         assert_eq!(attempt.result.as_ref().unwrap().bytes, 11);
+    }
+
+    #[test]
+    fn cancellation_authority_does_not_match_another_fence_of_the_same_attempt() {
+        let cancelled =
+            std::collections::BTreeSet::from([("org".to_owned(), "attempt".to_owned(), 7)]);
+        let attempt = mcloving_agent_runtime::ReconciliationAttempt {
+            organization_id: "org".to_owned(),
+            attempt_id: "attempt".to_owned(),
+            fence_token: 8,
+            session_epoch: 1,
+            payload_digest: [0; 32],
+            phase: AttemptPhase::Running,
+            workspace: PathBuf::from("org/attempt"),
+            process_id: None,
+            logs: Vec::new(),
+            result: None,
+        };
+        assert!(!cancellation_targets(&cancelled, &attempt));
     }
 }

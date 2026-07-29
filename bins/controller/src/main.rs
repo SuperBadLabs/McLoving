@@ -7,9 +7,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
 use mcloving_agent_protocol::wire::{
-    CancellationCompletion, CancellationDisposition, CancellationReceipt, OpenSessionRequest,
-    OpenSessionResponse, ReconciliationDirective, ReconciliationReport, RotateCertificateRequest,
-    RotateCertificateResponse,
+    AttemptAuthority, CancellationCompletion, CancellationDisposition, CancellationReceipt,
+    OpenSessionRequest, OpenSessionResponse, ReconciliationDirective, ReconciliationReport,
+    RotateCertificateRequest, RotateCertificateResponse,
 };
 use mcloving_agent_protocol::{ProtocolRange, negotiate};
 use mcloving_controller_api::{ApiState, router};
@@ -213,17 +213,43 @@ impl AgentControl for ControllerAgentService {
                 .map_err(internal_store_error)?
             {
                 AgentReconciliationDisposition::Retain => {
-                    retained.insert(attempt.attempt_id);
+                    retained.insert((
+                        attempt.organization_id,
+                        attempt.attempt_id,
+                        attempt.fence_token,
+                    ));
                 }
                 AgentReconciliationDisposition::Cancel => {
-                    cancelled.insert(attempt.attempt_id);
+                    cancelled.insert((
+                        attempt.organization_id,
+                        attempt.attempt_id,
+                        attempt.fence_token,
+                    ));
                 }
             }
         }
         Ok(Response::new(ReconciliationDirective {
             session_epoch: request.session_epoch,
-            retain_attempt_ids: retained.into_iter().collect(),
-            cancel_attempt_ids: cancelled.into_iter().collect(),
+            retain_attempts: retained
+                .into_iter()
+                .map(
+                    |(organization_id, attempt_id, fence_token)| AttemptAuthority {
+                        organization_id,
+                        attempt_id,
+                        fence_token,
+                    },
+                )
+                .collect(),
+            cancel_attempts: cancelled
+                .into_iter()
+                .map(
+                    |(organization_id, attempt_id, fence_token)| AttemptAuthority {
+                        organization_id,
+                        attempt_id,
+                        fence_token,
+                    },
+                )
+                .collect(),
         }))
     }
 

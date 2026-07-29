@@ -71,8 +71,14 @@ message ReconciliationReport {
 
 message ReconciliationDirective {
   uint64 session_epoch = 1;
-  repeated string retain_attempt_ids = 2;
-  repeated string cancel_attempt_ids = 3;
+  repeated AttemptAuthority retain_attempts = 2;
+  repeated AttemptAuthority cancel_attempts = 3;
+}
+
+message AttemptAuthority {
+  string organization_id = 1;
+  string attempt_id = 2;
+  uint64 fence_token = 3;
 }
 
 message CancellationCompletion {
