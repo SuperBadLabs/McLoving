@@ -124,8 +124,13 @@ pub struct FilesystemObjectStore {
 
 impl FilesystemObjectStore {
     pub fn open(root: &Path, quota: Quota) -> Result<Self, ObjectStoreError> {
-        fs::create_dir_all(root)?;
-        let root = root
+        let requested_root = if root.is_absolute() {
+            root.to_owned()
+        } else {
+            std::env::current_dir()?.join(root)
+        };
+        initialize_store_directories(&requested_root, &mut sync_directory)?;
+        let root = requested_root
             .canonicalize()
             .map_err(|_| ObjectStoreError::InvalidRoot)?;
         if !root.is_dir() {
@@ -134,8 +139,6 @@ impl FilesystemObjectStore {
         let staging = root.join("staging");
         let objects = root.join("objects").join("sha256");
         let quota_lock = root.join(".quota.lock");
-        fs::create_dir_all(&staging)?;
-        fs::create_dir_all(&objects)?;
         OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -539,6 +542,41 @@ fn directory_entries(path: &Path) -> Result<Vec<fs::DirEntry>, ObjectStoreError>
         .map_err(Into::into)
 }
 
+fn initialize_store_directories<F>(root: &Path, sync_parent: &mut F) -> Result<(), ObjectStoreError>
+where
+    F: FnMut(&Path) -> Result<(), ObjectStoreError>,
+{
+    ensure_directory_tree(root, sync_parent)?;
+    ensure_directory_tree(&root.join("staging"), sync_parent)?;
+    ensure_directory_tree(&root.join("objects").join("sha256"), sync_parent)?;
+    Ok(())
+}
+
+fn ensure_directory_tree<F>(path: &Path, sync_parent: &mut F) -> Result<(), ObjectStoreError>
+where
+    F: FnMut(&Path) -> Result<(), ObjectStoreError>,
+{
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    while !cursor.exists() {
+        missing.push(cursor.to_owned());
+        cursor = cursor.parent().ok_or(ObjectStoreError::InvalidRoot)?;
+    }
+    if !cursor.is_dir() {
+        return Err(ObjectStoreError::InvalidRoot);
+    }
+    for directory in missing.iter().rev() {
+        match fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let parent = directory.parent().ok_or(ObjectStoreError::InvalidRoot)?;
+        sync_parent(parent)?;
+    }
+    Ok(())
+}
+
 fn sync_directory(path: &Path) -> Result<(), ObjectStoreError> {
     File::open(path)?.sync_all()?;
     Ok(())
@@ -572,6 +610,30 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn initialization_persists_every_new_directory_entry_in_its_parent() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("store");
+        let mut synced = Vec::new();
+        initialize_store_directories(&root, &mut |path| {
+            synced.push(path.to_owned());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(
+            synced,
+            vec![
+                parent.path().to_owned(),
+                root.clone(),
+                root.clone(),
+                root.join("objects"),
+            ]
+        );
+        assert!(root.join("staging").is_dir());
+        assert!(root.join("objects").join("sha256").is_dir());
     }
 
     #[test]
