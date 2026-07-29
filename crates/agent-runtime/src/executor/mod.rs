@@ -166,12 +166,27 @@ fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
 }
 
 async fn sync_file(path: &Path) -> Result<(), io::Error> {
-    fs::OpenOptions::new()
-        .read(true)
-        .open(path)
-        .await?
-        .sync_all()
-        .await
+    #[cfg(unix)]
+    {
+        fs::OpenOptions::new()
+            .read(true)
+            .open(path)
+            .await?
+            .sync_all()
+            .await
+    }
+    #[cfg(windows)]
+    {
+        // FlushFileBuffers requires GENERIC_WRITE even when no further bytes
+        // will be appended. Reopen the completed spool file with write access
+        // so sync_all maps to the documented Win32 durability primitive.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .await?
+            .sync_all()
+            .await
+    }
 }
 
 fn sync_directory(path: &Path) -> Result<(), io::Error> {

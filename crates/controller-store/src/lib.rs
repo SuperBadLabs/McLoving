@@ -543,7 +543,6 @@ impl Store {
              SET status = 'aborted',
                  terminal_summary = $3,
                  completed_at = clock_timestamp(),
-                 lease_owner = NULL,
                  lease_expires_at = NULL
              WHERE id = $1 AND organization_id = $2",
         )
