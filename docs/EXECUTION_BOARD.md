@@ -29,8 +29,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W2-B | WIN-001, WIN-002, WIN-003 | DONE | PR #8 merged the Windows service/runtime foundation and hosted destructive fixture; the three product tickets remain active until their production work, recovery, atomic Job, and persistent-host gates close |
 | W2-C | AGENT-004, AGENT-005, AGENT-006, WIN-004 | DONE | PR #9 closes production remote work, atomic/replay-safe finalization, non-reusable Linux containment identity, and atomic Windows Job membership |
 | W3-A | IR-003, IR-004, CTRL-004 | DONE | Native pipeline semantics: typed parameters and bounded expressions, digest-pinned reusable components, deterministic matrix expansion, and durable parallel DAG execution |
-| W3-B | SEC-003, AUDIT-001, OPS-003, TEST-001 | ACTIVE | Grants and protected environments, append-only audit, artifact product journeys, and normalized test truth |
-| W3-C | API-002, UX-002, UI-001 | PENDING | Complete documented REST surface, end-to-end CLI journeys, and an API-only initial static UI |
+| W3-B | SEC-003, AUDIT-001, OPS-003, TEST-001 | DONE | Fenced grants and protected environments, tenant hash-chain audit, staged artifact product journeys, and immutable normalized test truth |
+| W3-C | API-002, UX-002, UI-001 | ACTIVE | Complete documented REST surface, end-to-end CLI journeys, and an API-only initial static UI |
 
 ## Wave 0 — Architecture and foundation
 
@@ -81,11 +81,11 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | IR-003 | DONE | IR-002, ARCH-002 | Add typed pipeline parameters and a non-Turing-complete expression language with explicit contexts, stable diagnostics, canonical encoding, deterministic evaluation, secret-taint propagation, and independently enforced depth/node/string/operation limits; arbitrary-input and boundary properties must remain panic-free and bounded |
 | IR-004 | DONE | IR-003 | Add versioned reusable components resolved by immutable digest; bind input/output types and provenance, reject cycles and floating references, cap expansion depth/count/bytes before scheduling, and prove presentation-independent canonical expansion plus component-substitution resistance |
 | CTRL-004 | DONE | IR-004, CTRL-003 | Compile matrix axes deterministically into a bounded DAG; persist dependency, fan-out, join, fail-fast, retry, post, and cancellation truth transactionally; schedule ready nodes fairly across exact platform/trust-pool constraints and prove parallel races, restart recovery, terminal monotonicity, and one logical outcome per node in real PostgreSQL |
-| SEC-003 | ACTIVE | SEC-002, CTRL-004 | Issue attempt-scoped credential grants and protected-environment approvals bound to organization, project, build, IR digest, environment, action, and expiry; deliver secrets only to the exact fenced attempt, redact every supported sink, reject stale/replayed approvals, and prove cross-tenant and cross-attempt denial |
-| AUDIT-001 | PENDING | SEC-003, OPS-002 | Persist an append-only tenant-keyed audit stream for identity, authorization, scheduling, grant, approval, artifact, and administrative actions; hash chained segments, externally verifiable export, retention/legal-hold integration, mutation denial, and gap/tamper detection are required |
-| OPS-003 | PENDING | OPS-001, CTRL-004 | Expose artifact upload, commit, list, metadata, and download journeys over staged immutable object truth; bind every artifact to tenant/build/node/attempt/name/digest/size/media type, enforce quotas and no-overwrite semantics, and prove partial upload, substitution, restore, and retention behavior |
-| TEST-001 | PENDING | OPS-003 | Normalize bounded JUnit-style test reports into versioned suite/case outcomes with provenance and raw immutable source retention; reject entity expansion and malformed/oversized input, preserve duplicate-name identity explicitly, aggregate deterministically, and expose flaky/retry history without rewriting prior outcomes |
-| API-002 | PENDING | CTRL-004, SEC-003, AUDIT-001, OPS-003, TEST-001 | Complete the documented REST API for pipelines/components, parameters, builds/nodes/attempts, approvals/grants, logs/artifacts/tests/audit, pagination/filtering, idempotency, optimistic concurrency, stable errors, OpenAPI, and tenant-scoped authorization; contract and real-PostgreSQL tests must cover every route and deny path |
+| SEC-003 | DONE | SEC-002, CTRL-004 | Issue attempt-scoped credential grants and protected-environment approvals bound to organization, project, build, IR digest, environment, action, and expiry; deliver secrets only to the exact fenced attempt, redact every supported sink, reject stale/replayed approvals, and prove cross-tenant and cross-attempt denial |
+| AUDIT-001 | DONE | SEC-003, OPS-002 | Persist an append-only tenant-keyed audit stream for identity, authorization, scheduling, grant, approval, artifact, and administrative actions; hash chained segments, externally verifiable export, retention/legal-hold integration, mutation denial, and gap/tamper detection are required |
+| OPS-003 | DONE | OPS-001, CTRL-004 | Expose artifact upload, commit, list, metadata, and download journeys over staged immutable object truth; bind every artifact to tenant/build/node/attempt/name/digest/size/media type, enforce quotas and no-overwrite semantics, and prove partial upload, substitution, restore, and retention behavior |
+| TEST-001 | DONE | OPS-003 | Normalize bounded JUnit-style test reports into versioned suite/case outcomes with provenance and raw immutable source retention; reject entity expansion and malformed/oversized input, preserve duplicate-name identity explicitly, aggregate deterministically, and expose flaky/retry history without rewriting prior outcomes |
+| API-002 | ACTIVE | CTRL-004, SEC-003, AUDIT-001, OPS-003, TEST-001 | Complete the documented REST API for pipelines/components, parameters, builds/nodes/attempts, approvals/grants, logs/artifacts/tests/audit, pagination/filtering, idempotency, optimistic concurrency, stable errors, OpenAPI, and tenant-scoped authorization; contract and real-PostgreSQL tests must cover every route and deny path |
 | UX-002 | PENDING | API-002 | Complete Rust CLI journeys for validate/plan/submit/watch/explain/cancel/retry/approve, logs, artifacts, tests, and audit; support machine-stable JSON plus human output, resumable watch, explicit uncertain states, shell completion, and API-only end-to-end tests |
 | UI-001 | PENDING | API-002 | Ship a content-security-policy-locked static web UI that uses only the public API for dashboard, pipeline/build graph, live logs, approvals, artifacts, tests, audit, and explainability; no privileged backend path, embedded secret, or client-side authorization claim is allowed, with accessibility and browser journey gates |
 
@@ -129,12 +129,11 @@ persistent Windows host through controller/network interruption and machine
 reboot. Cross-compilation, a test-only service fixture, or hosted CI alone
 cannot waive either boundary.
 
-Wave 3 is loaded as three dependency-ordered batches. `W3-A` is complete on
-`codex/wave3-native-pipeline`; it establishes the native authoring and durable
-execution semantics that every later security, artifact, API, CLI, and UI
-surface consumes. `W3-B` is now active and owns product security and
-operational truth. `W3-C` exposes those completed contracts without creating
-a privileged product path.
+Wave 3 is loaded as three dependency-ordered batches. `W3-A` and `W3-B` are
+complete. They establish the native authoring, durable execution, security,
+audit, artifact, and normalized-test contracts that the product consumes.
+`W3-C` is now active and exposes those completed contracts without creating a
+privileged product path.
 
 `IR-003` is complete. Pipeline IR v1.1 preserves v1.0 canonical bytes for
 legacy pipelines and adds typed public/secret parameters, explicit
@@ -160,6 +159,41 @@ parallel Linux/Windows claims, bounded retry, restart recovery, join/post
 ordering, identical-only terminal replay, fail-fast cancellation and
 lease-expiry crash recovery, queued skip, owner cancellation, and
 deterministic build derivation. W3-A is closed and `SEC-003` begins W3-B.
+
+`SEC-003` is complete. Protected-environment approvals and credential grants
+are durably bound to tenant, project, build, IR digest, environment, action,
+expiry, attempt fence, restore epoch, agent, and session. The agent waits for
+exact grants before process start; response-loss replay is safe before start
+and denied after consumption. Redaction precedes every supported durable sink,
+feature negotiation fails closed, and real remote execution proves
+cross-tenant, cross-attempt, stale, replayed, and substituted authority denial.
+
+`AUDIT-001` is complete. Tenant-prefixed append-only audit rows carry
+monotonic sequences and SHA-256 chain links, have an externally verifiable
+bounded export, deny update/delete, detect event/head gaps and substitutions,
+and integrate monotonic retention plus legal hold. Controller event/outbox
+publication automatically records scheduling, credential, approval, artifact,
+and administrative categories, with explicit entry points for identity and
+authentication actions.
+
+`OPS-003` is complete. The filesystem object store has durable staged upload
+tokens, resume, exact digest/size commit, explicit abort, quota enforcement,
+no-overwrite CAS semantics, and unavailable-until-commit reads. Public
+controller journeys stage, commit, list, inspect, and download artifacts bound
+to the exact tenant/build/node/attempt/fence/name/digest/size/media type.
+Substitution, partial upload, stale restore epoch, retention, missing/corrupt
+reconciliation, controller restart, and remote-agent generated-state
+isolation are gated.
+
+`TEST-001` is complete. JUnit-style XML normalization is bounded to 8 MiB,
+10,000 suites, 100,000 cases, depth 64, and 16 KiB fields. DTDs, entity
+declarations, processing instructions, malformed XML, invalid durations, and
+limit breaches fail closed. Schema-v1 suite/case rows retain stable ordinals
+and explicit duplicate ordinals, deterministic aggregates, exact raw artifact
+provenance, automatic 30-day source retention, immutable history, and a
+bounded flaky-outcome query. PostgreSQL mutation denial, idempotent ingestion,
+audit publication, and the shipped controller/agent execution journeys pass.
+W3-B is closed and `API-002` begins W3-C.
 
 The still-active `WIN-001`, `WIN-002`, and `WIN-003` persistent-host closure is
 tracked independently and remains a release gate for Windows parity; it does
