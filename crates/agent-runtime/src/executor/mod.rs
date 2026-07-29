@@ -189,7 +189,11 @@ async fn sync_file(path: &Path) -> Result<(), io::Error> {
     }
 }
 
-fn sync_directory(path: &Path) -> Result<(), io::Error> {
+/// Flushes the directory durability boundary used by executor-owned spools.
+///
+/// Callers that create additional replay-critical files must flush their
+/// containing directory before committing a reference to durable state.
+pub fn sync_directory(path: &Path) -> Result<(), io::Error> {
     #[cfg(unix)]
     {
         std::fs::File::open(path)?.sync_all()

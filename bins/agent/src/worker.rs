@@ -12,6 +12,7 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, execute_with_spawn_hook,
+    sync_directory,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Finalization, Journal, ProcessIdentity, SpoolEntry,
@@ -518,7 +519,21 @@ async fn run_assignment(
                 .await;
             }
         };
-        validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()])?;
+        if validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()]).is_err() {
+            return finalize_without_process(
+                config,
+                client,
+                &mut journal,
+                ProcesslessCompletion {
+                    authority: &assignment.authority,
+                    workspace: &assignment.workspace,
+                    session_epoch,
+                    outcome: WorkOutcome::Failed,
+                    reason: "log_spool_quota_exceeded".to_owned(),
+                },
+            )
+            .await;
+        }
         let terminal = match outcome.termination {
             Termination::Cancelled => WorkOutcome::Aborted,
             Termination::TimedOut => WorkOutcome::Failed,
@@ -830,6 +845,7 @@ async fn write_result(
         }
         Err(error) => return Err(error.into()),
     }
+    sync_result_directory_chain(workspace_root, parent)?;
     Ok(SpoolEntry {
         sequence: 0,
         relative_path,
@@ -838,6 +854,23 @@ async fn write_result(
             AgentError::InvalidAssignment("result length exceeds wire bounds".to_owned())
         })?,
     })
+}
+
+fn sync_result_directory_chain(workspace_root: &Path, parent: &Path) -> Result<(), AgentError> {
+    if !parent.starts_with(workspace_root) {
+        return Err(AgentError::InvalidAssignment(
+            "result spool escapes the workspace root".to_owned(),
+        ));
+    }
+    for directory in parent.ancestors() {
+        sync_directory(directory)?;
+        if directory == workspace_root {
+            return Ok(());
+        }
+    }
+    Err(AgentError::InvalidAssignment(
+        "result spool has no durable workspace-root ancestor".to_owned(),
+    ))
 }
 
 pub(super) async fn persist_recovered_cancellation(

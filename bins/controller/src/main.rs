@@ -181,10 +181,7 @@ impl AgentControl for ControllerAgentService {
         let mut retained = BTreeSet::new();
         let mut cancelled = BTreeSet::new();
         for attempt in request.attempts {
-            let organization_id = attempt
-                .organization_id
-                .parse()
-                .map_err(|_| Status::invalid_argument("organization_id must be a UUID"))?;
+            let organization_id = authenticated_organization(identity, &attempt.organization_id)?;
             let attempt_id = attempt
                 .attempt_id
                 .parse()
@@ -300,10 +297,7 @@ impl AgentControl for ControllerAgentService {
         {
             return Err(Status::failed_precondition("stale agent session epoch"));
         }
-        let organization_id = request
-            .organization_id
-            .parse()
-            .map_err(|_| Status::invalid_argument("organization_id must be a UUID"))?;
+        let organization_id = authenticated_organization(identity, &request.organization_id)?;
         let attempt_id = request
             .attempt_id
             .parse()
@@ -822,6 +816,21 @@ fn parse_sha256(value: &str) -> Result<[u8; 32]> {
     Ok(digest)
 }
 
+fn authenticated_organization(
+    identity: &AgentIdentity,
+    organization_id: &str,
+) -> Result<Uuid, Status> {
+    let organization_id = organization_id
+        .parse()
+        .map_err(|_| Status::invalid_argument("organization_id must be a UUID"))?;
+    if organization_id != identity.organization_id {
+        return Err(Status::permission_denied(
+            "organization does not match the authenticated certificate",
+        ));
+    }
+    Ok(organization_id)
+}
+
 struct EmbeddedWorker {
     organization_id: Uuid,
     scheduler_id: String,
@@ -981,5 +990,30 @@ mod tests {
                 .contains("legacy three-column format")
         );
         assert!(legacy_error.to_string().contains("organization UUID"));
+    }
+
+    #[test]
+    fn reconciliation_organization_is_certificate_bound() {
+        let identity = AgentIdentity {
+            agent_id: "agent-1".to_owned(),
+            trust_pool: "trusted".to_owned(),
+            organization_id: Uuid::from_u128(0x123),
+        };
+        assert_eq!(
+            authenticated_organization(&identity, "00000000-0000-0000-0000-000000000123").unwrap(),
+            identity.organization_id
+        );
+        assert_eq!(
+            authenticated_organization(&identity, "00000000-0000-0000-0000-000000000999")
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        assert_eq!(
+            authenticated_organization(&identity, "not-a-uuid")
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
     }
 }
