@@ -453,17 +453,7 @@ async fn send_reconciliation(
                 if receipt.session_epoch != session_epoch {
                     return Err(AgentError::StaleSession);
                 }
-                let phase = match CancellationDisposition::try_from(receipt.disposition) {
-                    Ok(
-                        CancellationDisposition::Completed | CancellationDisposition::RetireStale,
-                    ) => AttemptPhase::Aborted,
-                    Ok(CancellationDisposition::ReconciliationRequired) => {
-                        AttemptPhase::ReconciliationRequired
-                    }
-                    Ok(CancellationDisposition::Unspecified) | Err(_) => {
-                        return Err(AgentError::UnsupportedProtocol);
-                    }
-                };
+                let phase = recovered_cancellation_phase(outcome, receipt.disposition)?;
                 journal.transition(
                     &attempt.organization_id,
                     &attempt.attempt_id,
@@ -481,6 +471,29 @@ async fn send_reconciliation(
     } else {
         Ok(())
     }
+}
+
+fn recovered_cancellation_phase(
+    outcome: RecoveredCancellation,
+    disposition: i32,
+) -> Result<AttemptPhase, AgentError> {
+    let disposition = CancellationDisposition::try_from(disposition)
+        .map_err(|_| AgentError::UnsupportedProtocol)?;
+    if disposition == CancellationDisposition::Unspecified {
+        return Err(AgentError::UnsupportedProtocol);
+    }
+    // Local containment knowledge wins over a stale controller receipt. A
+    // retired fence does not prove an unverifiable process group is gone.
+    if outcome == RecoveredCancellation::ReconciliationRequired {
+        return Ok(AttemptPhase::ReconciliationRequired);
+    }
+    Ok(match disposition {
+        CancellationDisposition::Completed | CancellationDisposition::RetireStale => {
+            AttemptPhase::Aborted
+        }
+        CancellationDisposition::ReconciliationRequired => AttemptPhase::ReconciliationRequired,
+        CancellationDisposition::Unspecified => unreachable!("validated above"),
+    })
 }
 
 async fn cancel_recovered_attempt(
@@ -968,6 +981,26 @@ mod tests {
             Err(AgentError::UnsupportedProtocol)
         ));
         require_work_delivery_feature(&[WORK_DELIVERY_FEATURE.to_owned()]).unwrap();
+    }
+
+    #[test]
+    fn stale_receipt_cannot_retire_unverifiable_local_containment() {
+        assert_eq!(
+            recovered_cancellation_phase(
+                RecoveredCancellation::ReconciliationRequired,
+                CancellationDisposition::RetireStale as i32,
+            )
+            .unwrap(),
+            AttemptPhase::ReconciliationRequired
+        );
+        assert_eq!(
+            recovered_cancellation_phase(
+                RecoveredCancellation::AlreadyExited,
+                CancellationDisposition::RetireStale as i32,
+            )
+            .unwrap(),
+            AttemptPhase::Aborted
+        );
     }
 
     #[cfg(windows)]

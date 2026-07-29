@@ -6,10 +6,11 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(windows)]
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::fs;
-use tokio::io::AsyncReadExt;
+#[cfg(windows)]
+use tokio::{fs, io::AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::{JournalError, SpoolEntry, validate_relative_path};
@@ -80,6 +81,9 @@ pub enum ExecutionError {
     WorkspaceAlreadyExists,
     #[error("workspace contains a symlink or reparse-point component")]
     SymlinkWorkspaceComponent,
+    #[cfg(unix)]
+    #[error("executor-owned spool path no longer names its original file")]
+    ReplacedSpoolPath,
     #[error("process did not expose a valid process ID")]
     MissingProcessId,
     #[error("process spawn could not be recorded durably: {0}")]
@@ -168,28 +172,17 @@ fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
     }
 }
 
+#[cfg(windows)]
 async fn sync_file(path: &Path) -> Result<(), io::Error> {
-    #[cfg(unix)]
-    {
-        fs::OpenOptions::new()
-            .read(true)
-            .open(path)
-            .await?
-            .sync_all()
-            .await
-    }
-    #[cfg(windows)]
-    {
-        // FlushFileBuffers requires GENERIC_WRITE even when no further bytes
-        // will be appended. Reopen the completed spool file with write access
-        // so sync_all maps to the documented Win32 durability primitive.
-        fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .await?
-            .sync_all()
-            .await
-    }
+    // FlushFileBuffers requires GENERIC_WRITE even when no further bytes
+    // will be appended. Reopen the completed spool file with write access
+    // so sync_all maps to the documented Win32 durability primitive.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .await?
+        .sync_all()
+        .await
 }
 
 /// Flushes the directory durability boundary used by executor-owned spools.
@@ -222,6 +215,7 @@ pub fn sync_directory(path: &Path) -> Result<(), io::Error> {
     }
 }
 
+#[cfg(windows)]
 async fn spool_entry(
     workspace: &Path,
     suffix: &str,
@@ -237,6 +231,7 @@ async fn spool_entry(
     })
 }
 
+#[cfg(windows)]
 async fn digest_file(path: &Path) -> Result<[u8; 32], io::Error> {
     let mut file = fs::File::open(path).await?;
     let mut digest = Sha256::new();
@@ -251,6 +246,7 @@ async fn digest_file(path: &Path) -> Result<[u8; 32], io::Error> {
     Ok(digest.finalize().into())
 }
 
+#[cfg(windows)]
 async fn output_limit_exceeded(
     stdout: &Path,
     stderr: &Path,
@@ -264,24 +260,7 @@ async fn output_limit_exceeded(
     Ok(stdout_bytes.saturating_add(stderr_bytes) > limit)
 }
 
-#[cfg(unix)]
-async fn wait_for_output_limit(
-    stdout: &Path,
-    stderr: &Path,
-    limit: Option<u64>,
-) -> Result<(), io::Error> {
-    let Some(limit) = limit else {
-        std::future::pending::<()>().await;
-        unreachable!();
-    };
-    loop {
-        if output_limit_exceeded(stdout, stderr, Some(limit)).await? {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
+#[cfg(windows)]
 async fn truncate_output_to_limit(
     stdout: &Path,
     stderr: &Path,

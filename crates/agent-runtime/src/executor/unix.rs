@@ -1,19 +1,24 @@
 //! Unix process-group execution.
 
+use std::fs::File;
+use std::os::unix::fs::{FileExt, MetadataExt};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
+use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
 use tokio::time::{Instant, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
 
+use crate::SpoolEntry;
+
 use super::{
     Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, Termination,
-    create_workspace, output_limit_exceeded, spool_entry, sync_directory, sync_file,
-    truncate_output_to_limit, wait_for_output_limit,
+    create_workspace, sync_directory,
 };
 
 /// Executes one process in a new process group.
@@ -49,12 +54,19 @@ where
     let stderr_path = spool.join("stderr.log");
     let stdout = std::fs::OpenOptions::new()
         .create_new(true)
+        .read(true)
         .write(true)
         .open(&stdout_path)?;
     let stderr = std::fs::OpenOptions::new()
         .create_new(true)
+        .read(true)
         .write(true)
         .open(&stderr_path)?;
+    // The workload may rename or unlink its visible spool paths. Retain
+    // independent handles to the exact files created by the executor so quota,
+    // truncation, durability, and digest decisions cannot be redirected.
+    let stdout_control = stdout.try_clone()?;
+    let stderr_control = stderr.try_clone()?;
 
     let mut command = Command::new(&request.program);
     command
@@ -88,8 +100,8 @@ where
             (Termination::TimedOut, status)
         }
         result = wait_for_output_limit(
-            &stdout_path,
-            &stderr_path,
+            &stdout_control,
+            &stderr_control,
             request.output_limit_bytes,
         ) => {
             if let Err(error) = result {
@@ -105,15 +117,17 @@ where
 
     terminate_remaining_group(process_group_id, request.termination_grace).await?;
     let exceeded =
-        output_limit_exceeded(&stdout_path, &stderr_path, request.output_limit_bytes).await?;
+        output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     if termination.0 == Termination::Exited && exceeded {
         termination.0 = Termination::OutputLimitExceeded;
     }
     if termination.0 == Termination::OutputLimitExceeded || exceeded {
-        truncate_output_to_limit(&stdout_path, &stderr_path, request.output_limit_bytes).await?;
+        truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     }
-    sync_file(&stdout_path).await?;
-    sync_file(&stderr_path).await?;
+    stdout_control.sync_all()?;
+    stderr_control.sync_all()?;
+    ensure_original_spool_path(&stdout_control, &stdout_path)?;
+    ensure_original_spool_path(&stderr_control, &stderr_path)?;
     sync_directory(&spool)?;
     sync_directory(&workspace)?;
 
@@ -122,9 +136,107 @@ where
         exit_code: termination.1.code(),
         process_id,
         containment: Containment::UnixProcessGroup,
-        stdout: spool_entry(&request.workspace, "spool/stdout.log", 0, &stdout_path).await?,
-        stderr: spool_entry(&request.workspace, "spool/stderr.log", 1, &stderr_path).await?,
+        stdout: spool_entry(&request.workspace, "spool/stdout.log", 0, &stdout_control).await?,
+        stderr: spool_entry(&request.workspace, "spool/stderr.log", 1, &stderr_control).await?,
     })
+}
+
+fn output_limit_exceeded(
+    stdout: &File,
+    stderr: &File,
+    limit: Option<u64>,
+) -> Result<bool, std::io::Error> {
+    let Some(limit) = limit else {
+        return Ok(false);
+    };
+    Ok(stdout
+        .metadata()?
+        .len()
+        .saturating_add(stderr.metadata()?.len())
+        > limit)
+}
+
+async fn wait_for_output_limit(
+    stdout: &File,
+    stderr: &File,
+    limit: Option<u64>,
+) -> Result<(), std::io::Error> {
+    let Some(limit) = limit else {
+        std::future::pending::<()>().await;
+        unreachable!();
+    };
+    loop {
+        if output_limit_exceeded(stdout, stderr, Some(limit))? {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn truncate_output_to_limit(
+    stdout: &File,
+    stderr: &File,
+    limit: Option<u64>,
+) -> Result<(), std::io::Error> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    let stdout_bytes = stdout.metadata()?.len();
+    let stderr_bytes = stderr.metadata()?.len();
+    let retained_stdout = stdout_bytes.min(limit);
+    let retained_stderr = stderr_bytes.min(limit - retained_stdout);
+    stdout.set_len(retained_stdout)?;
+    stderr.set_len(retained_stderr)
+}
+
+fn ensure_original_spool_path(file: &File, path: &Path) -> Result<(), ExecutionError> {
+    let opened = file.metadata()?;
+    let named = std::fs::metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ExecutionError::ReplacedSpoolPath
+        } else {
+            error.into()
+        }
+    })?;
+    if opened.dev() == named.dev() && opened.ino() == named.ino() {
+        Ok(())
+    } else {
+        Err(ExecutionError::ReplacedSpoolPath)
+    }
+}
+
+async fn spool_entry(
+    workspace: &Path,
+    suffix: &str,
+    sequence: u64,
+    file: &File,
+) -> Result<SpoolEntry, ExecutionError> {
+    let bytes = file.metadata()?.len();
+    let file = file.try_clone()?;
+    let digest = tokio::task::spawn_blocking(move || digest_file(&file))
+        .await
+        .map_err(|error| std::io::Error::other(format!("spool digest task failed: {error}")))??;
+    Ok(SpoolEntry {
+        sequence,
+        relative_path: workspace.join(suffix),
+        digest,
+        bytes,
+    })
+}
+
+fn digest_file(file: &File) -> Result<[u8; 32], std::io::Error> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut offset = 0_u64;
+    loop {
+        let read = file.read_at(&mut buffer, offset)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        offset += u64::try_from(read).expect("buffer read length fits in u64");
+    }
+    Ok(digest.finalize().into())
 }
 
 async fn terminate_remaining_group(
@@ -419,17 +531,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quota_monitor_error_still_terminates_the_process_group() {
+    async fn renamed_spool_cannot_evade_the_output_quota() {
         let root = tempfile::tempdir().unwrap();
         let request = ExecutionRequest {
             workspace_root: root.path().to_owned(),
-            workspace: PathBuf::from("org/unlinked-log"),
+            workspace: PathBuf::from("org/renamed-log"),
             mode: ExecutionMode::Direct,
             program: PathBuf::from("/bin/sh"),
             arguments: vec![
                 OsString::from("-c"),
                 OsString::from(
-                    "printf '%s\\n' \"$$\" > child.pid; rm spool/stdout.log; exec sleep 30",
+                    "printf '%s\\n' \"$$\" > child.pid; \
+                     mv spool/stdout.log spool/renamed.log; : > spool/stdout.log; \
+                     while :; do printf 0123456789abcdef; done",
                 ),
             ],
             environment: BTreeMap::new(),
@@ -437,14 +551,21 @@ mod tests {
             timeout: Duration::from_secs(30),
             termination_grace: Duration::from_millis(50),
         };
-        let child_pid_path = root.path().join("org/unlinked-log/child.pid");
+        let child_pid_path = root.path().join("org/renamed-log/child.pid");
 
         assert!(matches!(
             execute(&request, CancellationToken::new()).await,
-            Err(ExecutionError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+            Err(ExecutionError::ReplacedSpoolPath)
         ));
         let pid = descendant_pid(&child_pid_path).await;
         assert_process_gone(pid).await;
+        assert!(
+            fs::metadata(root.path().join("org/renamed-log/spool/renamed.log"))
+                .await
+                .unwrap()
+                .len()
+                <= 4_096
+        );
     }
 
     #[tokio::test]
