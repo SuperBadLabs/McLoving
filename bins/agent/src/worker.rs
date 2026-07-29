@@ -994,10 +994,13 @@ async fn reclaim_spool_entries(
     result: Option<&SpoolEntry>,
     workspace: &Path,
 ) -> Result<(), AgentError> {
+    // Remove the attempt root first. Log entries live below it, and a workload
+    // may have replaced that root after containment. Cleanup must never follow
+    // such a replacement while trying to reach an individual log.
+    remove_attempt_workspace(&config.workspace_root, workspace).await?;
     for entry in logs.iter().chain(result) {
         remove_spool_file(&config.workspace_root, entry).await?;
     }
-    remove_attempt_workspace(&config.workspace_root, workspace).await?;
     Journal::open(&config.journal_path)?.retire_terminal_spools(
         organization_id,
         attempt_id,
@@ -1021,34 +1024,7 @@ async fn remove_attempt_workspace(
             "terminal workspace must be normalized and relative".to_owned(),
         ));
     }
-    let path = workspace_root.join(workspace);
-    let mut current = workspace_root.to_owned();
-    for component in workspace.components() {
-        let Component::Normal(component) = component else {
-            unreachable!("terminal workspace was validated above");
-        };
-        current.push(component);
-        match fs::symlink_metadata(&current).await {
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-            Ok(_) => {
-                return Err(AgentError::InvalidAssignment(
-                    "terminal workspace contains a non-directory or symlink".to_owned(),
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-            Err(error) => return Err(error.into()),
-        }
-    }
-    match fs::remove_dir_all(&path).await {
-        Ok(()) => {
-            if let Some(parent) = path.parent() {
-                sync_directory(parent)?;
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    prune_empty_spool_directories(workspace_root, path.parent()).await
+    remove_terminal_relative_path(workspace_root, workspace).await
 }
 
 async fn remove_spool_file(workspace_root: &Path, entry: &SpoolEntry) -> Result<(), AgentError> {
@@ -1062,15 +1038,54 @@ async fn remove_spool_file(workspace_root: &Path, entry: &SpoolEntry) -> Result<
             "terminal spool path must be normalized and relative".to_owned(),
         ));
     }
-    let path = workspace_root.join(&entry.relative_path);
-    let mut removed = false;
-    match fs::remove_file(&path).await {
-        Ok(()) => removed = true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    if removed && let Some(parent) = path.parent() {
-        sync_directory(parent)?;
+    remove_terminal_relative_path(workspace_root, &entry.relative_path).await
+}
+
+async fn remove_terminal_relative_path(
+    workspace_root: &Path,
+    relative_path: &Path,
+) -> Result<(), AgentError> {
+    let path = workspace_root.join(relative_path);
+    let mut current = workspace_root.to_owned();
+    let mut components = relative_path.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(component) = component else {
+            unreachable!("terminal path was validated by its caller");
+        };
+        current.push(component);
+        let is_leaf = components.peek().is_none();
+        match fs::symlink_metadata(&current).await {
+            Ok(metadata) if !is_leaf && metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            }
+            Ok(_) if !is_leaf => {
+                // An ancestor was replaced. Do not traverse or delete through
+                // it. Containment is already empty, so retiring the terminal
+                // metadata is safer than wedging every future session.
+                return Ok(());
+            }
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                fs::remove_dir_all(&current).await?;
+                sync_directory(
+                    current
+                        .parent()
+                        .expect("a normalized relative path has a parent"),
+                )?;
+                break;
+            }
+            Ok(_) => {
+                // remove_file removes a symlink itself and never follows its
+                // leaf target.
+                fs::remove_file(&current).await?;
+                sync_directory(
+                    current
+                        .parent()
+                        .expect("a normalized relative path has a parent"),
+                )?;
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
     }
     prune_empty_spool_directories(workspace_root, path.parent()).await
 }
@@ -2037,6 +2052,35 @@ mod tests {
                 .attempts
                 .is_empty()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replaced_terminal_workspace_leaf_is_removed_without_following() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace_root = directory.path().join("workspace");
+        let workspace = PathBuf::from("organization/attempt/7");
+        let workspace_path = workspace_root.join(&workspace);
+        let displaced_path = workspace_root.join("displaced-attempt");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(&workspace_path).await.unwrap();
+        fs::create_dir_all(&outside).await.unwrap();
+        fs::write(outside.join("sentinel"), b"must-survive")
+            .await
+            .unwrap();
+        fs::rename(&workspace_path, &displaced_path).await.unwrap();
+        std::os::unix::fs::symlink(&outside, &workspace_path).unwrap();
+
+        remove_attempt_workspace(&workspace_root, &workspace)
+            .await
+            .unwrap();
+
+        assert!(fs::symlink_metadata(&workspace_path).await.is_err());
+        assert_eq!(
+            fs::read(outside.join("sentinel")).await.unwrap(),
+            b"must-survive"
+        );
+        assert!(displaced_path.exists());
     }
 
     #[tokio::test]
