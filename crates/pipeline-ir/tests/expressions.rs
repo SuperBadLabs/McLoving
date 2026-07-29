@@ -254,6 +254,39 @@ fn expression_bindings_must_match_concrete_string_fields() {
 }
 
 #[test]
+fn canonical_validator_binds_expressions_to_materialized_fields() {
+    let pipeline = compile_strict_yaml(
+        "fixture://parameters",
+        PARAMETER_PIPELINE,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    let canonical = pipeline.canonical_bytes().unwrap();
+
+    let path = pipeline.expressions[0].path.as_bytes();
+    let path_offset = canonical
+        .windows(path.len())
+        .position(|window| window == path)
+        .expect("encoded expression path");
+    let mut substituted_path = canonical.clone();
+    let replacement = pipeline.expressions[0].path.replacen(".args", ".argx", 1);
+    assert_eq!(replacement.len(), path.len());
+    substituted_path[path_offset..path_offset + path.len()].copy_from_slice(replacement.as_bytes());
+    let error = validate_canonical_bytes(&substituted_path).unwrap_err();
+    assert!(error.message.contains("does not identify"));
+
+    let materialized = b"linux-release";
+    let field_offset = canonical
+        .windows(materialized.len())
+        .rposition(|window| window == materialized)
+        .expect("encoded materialized expression result");
+    let mut substituted_value = canonical;
+    substituted_value[field_offset] = b'x';
+    let error = validate_canonical_bytes(&substituted_value).unwrap_err();
+    assert!(error.message.contains("does not match"));
+}
+
+#[test]
 fn explicit_inputs_are_typed_and_change_the_semantic_digest() {
     let defaults = compile_strict_yaml(
         "fixture://defaults",

@@ -3,7 +3,9 @@ use std::fmt;
 
 use sha2::{Digest, Sha256};
 
-use crate::expression::{Expression, ExpressionLimits, ParameterValue};
+use crate::expression::{
+    EvaluatedValue, Expression, ExpressionLimits, ParameterValue, evaluate_expression,
+};
 use crate::model::{
     MAX_EXPRESSION_BINDINGS, MAX_IR_STRING_BYTES, MAX_PARAMETERS, MAX_STAGES, MAX_STEPS,
     ParameterType, PipelineIr, SchemaVersion, Step,
@@ -217,6 +219,8 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
     let pipeline_name = reader.string()?;
     let mut parameters = 0;
     let mut expressions = 0;
+    let mut expression_context = BTreeMap::new();
+    let mut expression_bindings = Vec::new();
     if schema.minor >= 1 {
         parameters = reader.count(MAX_PARAMETERS, "parameter")?;
         let mut definitions = BTreeMap::new();
@@ -254,7 +258,6 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         }
         let value_count = reader.count(MAX_PARAMETERS, "parameter value")?;
         let mut previous_value: Option<String> = None;
-        let mut public_values = BTreeSet::new();
         for _ in 0..value_count {
             let name = reader.canonical_string_after(&mut previous_value, "parameter value")?;
             let value = reader.parameter_value()?;
@@ -276,10 +279,16 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                     "parameter value type does not match its definition",
                 ));
             }
-            public_values.insert(name);
+            expression_context.insert(
+                name,
+                EvaluatedValue {
+                    value,
+                    secret: false,
+                },
+            );
         }
         for (name, (_, secret)) in &definitions {
-            if !secret && !public_values.contains(name) {
+            if !secret && !expression_context.contains_key(name) {
                 return Err(CanonicalError::new(
                     reader.offset,
                     "public parameter definition has no bound value",
@@ -289,11 +298,11 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         expressions = reader.count(MAX_EXPRESSION_BINDINGS, "expression binding")?;
         let mut previous_path: Option<String> = None;
         for _ in 0..expressions {
-            reader.canonical_string_after(&mut previous_path, "expression path")?;
+            let path = reader.canonical_string_after(&mut previous_path, "expression path")?;
             let mut expression_nodes = 0;
             let mut expression_operations = 0;
             let mut references = BTreeSet::new();
-            reader.expression(
+            let expression = reader.expression(
                 0,
                 &mut expression_nodes,
                 &mut expression_operations,
@@ -318,11 +327,13 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                     "expression materializes a secret-tainted parameter",
                 ));
             }
+            expression_bindings.push((path, expression));
         }
     }
     let stages = reader.count(MAX_STAGES, "stage")?;
     let mut steps = 0_usize;
-    for _ in 0..stages {
+    let mut materialized_fields = BTreeMap::new();
+    for stage_index in 0..stages {
         reader.string()?;
         reader.string()?;
         let stage_steps = reader.count(MAX_STEPS, "step")?;
@@ -330,17 +341,19 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
             .checked_add(stage_steps)
             .filter(|count| *count <= MAX_STEPS)
             .ok_or_else(|| CanonicalError::new(reader.offset, "total step count exceeds limit"))?;
-        for _ in 0..stage_steps {
+        for step_index in 0..stage_steps {
             if reader.u8()? != 1 {
                 return Err(CanonicalError::new(
                     reader.offset.saturating_sub(1),
                     "unknown step opcode",
                 ));
             }
-            reader.string()?;
+            let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
+            materialized_fields.insert(format!("{base}.program"), reader.string()?);
             let arguments = reader.count(MAX_STEPS, "argument")?;
-            for _ in 0..arguments {
-                reader.string()?;
+            for argument_index in 0..arguments {
+                materialized_fields
+                    .insert(format!("{base}.args[{argument_index}]"), reader.string()?);
             }
             let environment = reader.count(MAX_STEPS, "environment entry")?;
             let mut previous_key: Option<String> = None;
@@ -355,8 +368,9 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                         "environment keys are not in canonical order",
                     ));
                 }
+                let value = reader.string()?;
+                materialized_fields.insert(format!("{base}.env.{key}"), value);
                 previous_key = Some(key);
-                reader.string()?;
             }
             match reader.u8()? {
                 0 => {}
@@ -370,6 +384,32 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                     ));
                 }
             }
+        }
+    }
+    for (path, expression) in expression_bindings {
+        let Some(materialized) = materialized_fields.get(&path) else {
+            return Err(CanonicalError::new(
+                reader.offset,
+                "expression path does not identify a materializable process field",
+            ));
+        };
+        let evaluated = evaluate_expression(
+            &expression,
+            &expression_context,
+            ExpressionLimits::default(),
+        )
+        .map_err(|error| CanonicalError::new(reader.offset, error.to_string()))?;
+        let ParameterValue::String(evaluated) = evaluated.value else {
+            return Err(CanonicalError::new(
+                reader.offset,
+                "expression binding must evaluate to a string",
+            ));
+        };
+        if &evaluated != materialized {
+            return Err(CanonicalError::new(
+                reader.offset,
+                "expression result does not match the materialized process field",
+            ));
         }
     }
     if reader.offset != bytes.len() {
@@ -519,7 +559,7 @@ impl<'a> Reader<'a> {
         nodes: &mut usize,
         operations: &mut usize,
         references: &mut BTreeSet<String>,
-    ) -> Result<(), CanonicalError> {
+    ) -> Result<Expression, CanonicalError> {
         let limits = ExpressionLimits::default();
         if depth > limits.max_depth {
             return Err(CanonicalError::new(
@@ -534,21 +574,34 @@ impl<'a> Reader<'a> {
                 "expression node count exceeds limit",
             ));
         }
-        match self.u8()? {
-            1 => {
-                self.parameter_value()?;
-            }
+        let expression = match self.u8()? {
+            1 => Expression::Literal(self.parameter_value()?),
             2 => {
-                references.insert(self.string()?);
+                let name = self.string()?;
+                references.insert(name.clone());
+                Expression::Parameter(name)
             }
             3 => {
                 *operations = operations.saturating_add(1);
-                self.expression(depth + 1, nodes, operations, references)?;
+                Expression::Not(Box::new(self.expression(
+                    depth + 1,
+                    nodes,
+                    operations,
+                    references,
+                )?))
             }
-            4..=8 => {
+            opcode @ 4..=8 => {
                 *operations = operations.saturating_add(1);
-                self.expression(depth + 1, nodes, operations, references)?;
-                self.expression(depth + 1, nodes, operations, references)?;
+                let left = Box::new(self.expression(depth + 1, nodes, operations, references)?);
+                let right = Box::new(self.expression(depth + 1, nodes, operations, references)?);
+                match opcode {
+                    4 => Expression::Equal(left, right),
+                    5 => Expression::NotEqual(left, right),
+                    6 => Expression::And(left, right),
+                    7 => Expression::Or(left, right),
+                    8 => Expression::Add(left, right),
+                    _ => unreachable!("matched canonical binary expression opcode"),
+                }
             }
             _ => {
                 return Err(CanonicalError::new(
@@ -556,14 +609,14 @@ impl<'a> Reader<'a> {
                     "unknown expression opcode",
                 ));
             }
-        }
+        };
         if *operations > limits.max_operations {
             return Err(CanonicalError::new(
                 self.offset,
                 "expression operation count exceeds limit",
             ));
         }
-        Ok(())
+        Ok(expression)
     }
 }
 
