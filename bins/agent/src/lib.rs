@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -61,6 +62,8 @@ pub enum AgentError {
     StaleSession,
     #[error("controller selected an unsupported protocol minor")]
     UnsupportedProtocol,
+    #[error("agent identity and journal are already active in another process")]
+    AlreadyRunning,
     #[error("agent service was stopped")]
     Stopped,
     #[error("journal path cannot be represented in the wire protocol")]
@@ -81,6 +84,10 @@ enum RecoveredCancellation {
 pub struct SessionReceipt {
     pub session_epoch: u64,
     pub active_attempts: usize,
+}
+
+struct AgentInstanceGuard {
+    _lock: File,
 }
 
 impl AgentConfig {
@@ -122,6 +129,7 @@ pub async fn run_until_stopped(
     config: &AgentConfig,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
+    let _instance = acquire_instance_guard(config)?;
     loop {
         if stop.is_cancelled() {
             return Ok(());
@@ -141,10 +149,32 @@ pub async fn run_until_stopped(
 }
 
 pub async fn probe_once(config: &AgentConfig) -> Result<SessionReceipt, AgentError> {
+    let _instance = acquire_instance_guard(config)?;
     let stop = CancellationToken::new();
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
     send_reconciliation(config, &mut client, receipt.session_epoch, stop).await?;
     Ok(receipt)
+}
+
+fn acquire_instance_guard(config: &AgentConfig) -> Result<AgentInstanceGuard, AgentError> {
+    let lock_path = instance_lock_path(&config.journal_path);
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    match lock.try_lock() {
+        Ok(()) => Ok(AgentInstanceGuard { _lock: lock }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(AgentError::AlreadyRunning),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+fn instance_lock_path(journal_path: &Path) -> PathBuf {
+    let mut path = journal_path.as_os_str().to_os_string();
+    path.push(".agent.lock");
+    path.into()
 }
 
 async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<(), AgentError> {
@@ -538,6 +568,21 @@ mod tests {
             AgentConfig::from_values(&missing),
             Err(AgentError::MissingConfig("MCLOVING_AGENT_PRIVATE_KEY_PATH"))
         ));
+    }
+
+    #[test]
+    fn probe_cannot_reserve_a_session_while_the_agent_is_active() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = AgentConfig::from_values(&values()).unwrap();
+        config.journal_path = directory.path().join("agent.db");
+
+        let running_agent = acquire_instance_guard(&config).unwrap();
+        assert!(matches!(
+            acquire_instance_guard(&config),
+            Err(AgentError::AlreadyRunning)
+        ));
+        drop(running_agent);
+        acquire_instance_guard(&config).unwrap();
     }
 
     #[tokio::test]
