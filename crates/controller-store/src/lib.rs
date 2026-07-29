@@ -8,6 +8,7 @@ use uuid::Uuid;
 pub mod authz;
 mod dag;
 mod scheduler;
+mod security;
 
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
@@ -15,6 +16,7 @@ pub use dag::{
     validate_dag_contract,
 };
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
+pub use security::{CredentialDelivery, NewCredentialGrant, NewEnvironmentApproval};
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
 const MAX_ATTEMPT_LOG_BYTES: i64 = 64 * 1_048_576;
@@ -38,6 +40,9 @@ pub const AGENT_SESSIONS_V7: &str = include_str!("../migrations/0007_agent_sessi
 pub const NODE_TRUST_POOL_V8: &str = include_str!("../migrations/0008_node_trust_pool.sql");
 /// Durable bounded pipeline-DAG scheduling truth.
 pub const PIPELINE_DAG_V9: &str = include_str!("../migrations/0009_pipeline_dag.sql");
+/// Attempt-scoped credentials and protected-environment approvals.
+pub const ATTEMPT_CREDENTIALS_V10: &str =
+    include_str!("../migrations/0010_attempt_credentials.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -334,6 +339,8 @@ pub enum StoreError {
     InvalidTrustPool,
     #[error("invalid pipeline DAG: {0}")]
     InvalidDag(String),
+    #[error("invalid security operation: {0}")]
+    InvalidSecurityOperation(String),
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -375,6 +382,7 @@ impl Store {
         apply_migration(&mut tx, 7, AGENT_SESSIONS_V7).await?;
         apply_migration(&mut tx, 8, NODE_TRUST_POOL_V8).await?;
         apply_migration(&mut tx, 9, PIPELINE_DAG_V9).await?;
+        apply_migration(&mut tx, 10, ATTEMPT_CREDENTIALS_V10).await?;
         tx.commit().await?;
         Ok(())
     }

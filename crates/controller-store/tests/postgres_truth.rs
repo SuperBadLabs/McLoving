@@ -3,9 +3,10 @@ use std::sync::Arc;
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, DagDependency, DagNodeKind, DependencyCondition,
-    EffectClass, EffectStatus, NewBuild, NewDagBuild, NewDagNode, NewLogChunk, ObjectKind,
-    ObjectStatus, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
-    TerminalOutcome, WaitReason,
+    EffectClass, EffectStatus, NewBuild, NewCredentialGrant, NewDagBuild, NewDagNode,
+    NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus,
+    ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
+    WaitReason,
 };
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -4606,6 +4607,293 @@ async fn claim_order_index_is_tenant_prefixed() {
         ),
         "unexpected claim index: {definition}"
     );
+}
+
+#[tokio::test]
+async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let pipeline_digest = [0xa1; 32];
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "protected",
+        )
+        .await
+        .expect("create protected project");
+    assert!(
+        store
+            .configure_protected_environment(
+                organization_id,
+                project_id,
+                "production",
+                "deploy",
+                2,
+            )
+            .await
+            .expect("configure protected environment")
+    );
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "protected-deploy".into(),
+            pipeline_digest,
+            node_key: "deploy".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit protected build");
+    assert!(
+        store
+            .open_agent_session(
+                "agent-protected",
+                "trusted",
+                1,
+                3,
+                &["work-delivery-v1".to_owned()],
+                &["linux".to_owned()],
+            )
+            .await
+            .expect("open protected agent session")
+    );
+    let claim = store
+        .claim_next_in_session(
+            &ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-protected".into(),
+                agent_id: "agent-protected".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 300,
+                fairness_seed: 0,
+            },
+            1,
+        )
+        .await
+        .expect("claim protected build")
+        .expect("protected build is ready");
+    let approvals = [Uuid::new_v4(), Uuid::new_v4()];
+    for (approval_id, subject) in approvals
+        .into_iter()
+        .zip(["oidc:release-owner", "oidc:security-owner"])
+    {
+        assert!(
+            store
+                .approve_environment(&NewEnvironmentApproval {
+                    id: approval_id,
+                    organization_id,
+                    project_id,
+                    build_id: admission.build_id,
+                    pipeline_digest,
+                    environment: "production",
+                    action: "deploy",
+                    approver_subject: subject,
+                    ttl_seconds: 300,
+                })
+                .await
+                .expect("approve protected environment")
+        );
+    }
+    assert!(
+        !store
+            .approve_environment(&NewEnvironmentApproval {
+                id: approvals[0],
+                organization_id,
+                project_id,
+                build_id: admission.build_id,
+                pipeline_digest,
+                environment: "production",
+                action: "deploy",
+                approver_subject: "oidc:release-owner",
+                ttl_seconds: 300,
+            })
+            .await
+            .expect("reject approval replay")
+    );
+    let secret = b"marker-secret-value";
+    let grant_id = Uuid::new_v4();
+    let mut grant = NewCredentialGrant {
+        id: grant_id,
+        organization_id,
+        project_id,
+        build_id: admission.build_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        pipeline_digest,
+        environment: "production",
+        action: "deploy",
+        target_name: "DEPLOY_TOKEN",
+        secret_value: secret,
+        approval_ids: &approvals[..1],
+        ttl_seconds: 300,
+    };
+    assert!(
+        !store
+            .issue_credential_grant(&grant)
+            .await
+            .expect("reject insufficient approvals")
+    );
+    grant.approval_ids = &approvals;
+    assert!(
+        store
+            .issue_credential_grant(&grant)
+            .await
+            .expect("issue protected grant")
+    );
+    assert!(
+        !store
+            .issue_credential_grant(&grant)
+            .await
+            .expect("reject grant replay")
+    );
+    assert!(
+        store
+            .accept_offer_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+            )
+            .await
+            .expect("accept protected work")
+    );
+    assert!(
+        store
+            .mark_attempt_running_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+            )
+            .await
+            .expect("start protected work")
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                claim.attempt_id,
+                claim.fence + 1,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+            )
+            .await
+            .expect("reject another fence")
+            .is_empty()
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                Uuid::new_v4(),
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+            )
+            .await
+            .expect("reject another attempt")
+            .is_empty()
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                Uuid::new_v4(),
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+            )
+            .await
+            .expect("reject another tenant")
+            .is_empty()
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "another-agent",
+                1,
+            )
+            .await
+            .expect("reject another agent")
+            .is_empty()
+    );
+    let delivered = store
+        .redeem_credential_grants(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            "agent-protected",
+            1,
+        )
+        .await
+        .expect("redeem exact grant");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].grant_id, grant_id);
+    assert_eq!(delivered[0].target_name, "DEPLOY_TOKEN");
+    assert_eq!(delivered[0].secret_value, secret);
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+            )
+            .await
+            .expect("reject delivery replay")
+            .is_empty()
+    );
+
+    let payloads = sqlx::query_scalar::<_, String>(
+        "SELECT string_agg(payload::text, '')
+         FROM (
+             SELECT payload FROM build_events
+             WHERE organization_id = $1 AND build_id = $2
+             UNION ALL
+             SELECT payload FROM outbox
+             WHERE organization_id = $1 AND aggregate_id = $2
+         ) AS publications",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read security publications");
+    assert!(!payloads.contains("marker-secret-value"));
+    let rewritten = sqlx::query(
+        "UPDATE credential_grants
+         SET secret_value = 'rewritten'::bytea
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(grant_id)
+    .execute(store.pool())
+    .await;
+    assert!(rewritten.is_err());
 }
 
 #[tokio::test]
