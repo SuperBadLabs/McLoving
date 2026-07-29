@@ -1,7 +1,7 @@
 use std::net::TcpListener;
 use std::time::Duration;
 
-use mcloving_controller_api::Client;
+use mcloving_controller_api::{ArtifactCommitRequest, Client};
 use mcloving_controller_store::Store;
 use sqlx::postgres::PgPoolOptions;
 use tokio::process::Command;
@@ -17,7 +17,7 @@ stages:
     steps:
       - process:
           program: /bin/sh
-          args: [-c, "printf 'controller-binary-ran\n'"]
+          args: [-c, "printf 'controller-binary-ran\n'; sleep 2"]
           timeout_seconds: 10
 "#;
 
@@ -78,6 +78,7 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .env("MCLOVING_SESSION_EPOCH", "1")
         .env("MCLOVING_WORKSPACE_ROOT", root.path().join("workspace"))
         .env("MCLOVING_AGENT_JOURNAL", root.path().join("agent.db"))
+        .env("MCLOVING_OBJECT_ROOT", root.path().join("objects"))
         .kill_on_drop(true)
         .spawn()
         .expect("start shipped controller");
@@ -94,6 +95,102 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         )
         .await
         .expect("submit through shipped controller");
+
+    let running = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let status = client
+                .status(organization_id, project_id, admission.build_id)
+                .await
+                .expect("read running build status");
+            if status.attempt_status == "running" {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("embedded worker enters running state");
+    let staged = client
+        .stage_artifact(
+            organization_id,
+            project_id,
+            admission.build_id,
+            "reports/result.bin",
+            "application/octet-stream",
+            b"artifact-from-public-api".to_vec(),
+        )
+        .await
+        .expect("stage artifact through shipped controller");
+    let mut commit = ArtifactCommitRequest {
+        node_id: admission.node_id,
+        attempt_id: admission.attempt_id,
+        fence: running.fence,
+        restore_epoch: 1,
+        agent_id: running.lease_owner.expect("running lease owner"),
+        name: staged.name.clone(),
+        media_type: staged.media_type.clone(),
+        sha256: "00".repeat(32),
+        bytes: staged.bytes,
+        retention_seconds: 3600,
+    };
+    assert!(
+        client
+            .commit_artifact(
+                organization_id,
+                project_id,
+                admission.build_id,
+                &staged.upload_token,
+                &commit,
+            )
+            .await
+            .is_err(),
+        "digest substitution must not publish the staged upload"
+    );
+    commit.sha256.clone_from(&staged.sha256);
+    let artifact = client
+        .commit_artifact(
+            organization_id,
+            project_id,
+            admission.build_id,
+            &staged.upload_token,
+            &commit,
+        )
+        .await
+        .expect("commit artifact through shipped controller");
+    assert_eq!(artifact.name, "reports/result.bin");
+    assert_eq!(
+        client
+            .artifacts(organization_id, project_id, admission.build_id)
+            .await
+            .expect("list artifacts"),
+        vec![artifact.clone()]
+    );
+    assert_eq!(
+        client
+            .artifact_metadata(
+                organization_id,
+                project_id,
+                admission.build_id,
+                admission.attempt_id,
+                "reports/result.bin",
+            )
+            .await
+            .expect("read artifact metadata"),
+        artifact
+    );
+    assert_eq!(
+        client
+            .download_artifact(
+                organization_id,
+                project_id,
+                admission.build_id,
+                admission.attempt_id,
+                "reports/result.bin",
+            )
+            .await
+            .expect("download verified artifact"),
+        b"artifact-from-public-api"
+    );
 
     let status = tokio::time::timeout(Duration::from_secs(10), async {
         loop {

@@ -25,6 +25,7 @@ use mcloving_controller_store::{
     ReconciliationTrustPoolAuthorization, Store, TerminalOutcome,
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
+use mcloving_object_store::{FilesystemObjectStore, Quota};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
@@ -62,7 +63,26 @@ async fn main() -> Result<()> {
         .await
         .context("connect to PostgreSQL runtime role")?;
     let store = Store::new(runtime_pool);
-    let state = ApiState::new(store.clone(), &bearer_token).context("configure public API")?;
+    let object_root = PathBuf::from(
+        std::env::var("MCLOVING_OBJECT_ROOT").unwrap_or_else(|_| "./data/objects".to_owned()),
+    );
+    let max_object_bytes = bounded_u64_environment("MCLOVING_MAX_OBJECT_BYTES", 64 * 1024 * 1024)?;
+    let max_total_bytes =
+        bounded_u64_environment("MCLOVING_MAX_TOTAL_OBJECT_BYTES", 10 * 1024 * 1024 * 1024)?;
+    if max_total_bytes < max_object_bytes {
+        bail!("MCLOVING_MAX_TOTAL_OBJECT_BYTES must be at least MCLOVING_MAX_OBJECT_BYTES");
+    }
+    let object_store = FilesystemObjectStore::open(
+        &object_root,
+        Quota {
+            max_object_bytes,
+            max_total_bytes,
+        },
+    )
+    .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
+    let state = ApiState::new(store.clone(), &bearer_token)
+        .context("configure public API")?
+        .with_object_store(object_store);
     let worker = EmbeddedWorker::from_environment()?;
     tokio::fs::create_dir_all(&worker.config.workspace_root)
         .await
@@ -89,6 +109,22 @@ async fn main() -> Result<()> {
         result = &mut server => result,
         result = &mut agent_server => result,
         result = &mut worker_loop => result,
+    }
+}
+
+fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let parsed = value
+                .parse::<u64>()
+                .with_context(|| format!("{name} must be an unsigned integer"))?;
+            if parsed == 0 {
+                bail!("{name} must be greater than zero");
+            }
+            Ok(parsed)
+        }
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error).with_context(|| format!("read {name}")),
     }
 }
 

@@ -28,6 +28,28 @@ pub struct ObjectRef {
     pub bytes: u64,
 }
 
+/// Durable handle for a fully received object that has not been published.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingObject {
+    token: String,
+    reference: ObjectRef,
+}
+
+impl PendingObject {
+    pub fn from_parts(token: String, reference: ObjectRef) -> Result<Self, ObjectStoreError> {
+        validate_pending_token(&token)?;
+        Ok(Self { token, reference })
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub fn object_ref(&self) -> &ObjectRef {
+        &self.reference
+    }
+}
+
 /// A staged object that has not yet entered the immutable namespace.
 #[derive(Debug)]
 pub struct StagedObject {
@@ -39,6 +61,22 @@ pub struct StagedObject {
 impl StagedObject {
     pub fn object_ref(&self) -> &ObjectRef {
         &self.reference
+    }
+
+    /// Persists the staged upload so another controller process can commit it.
+    pub fn persist(mut self) -> Result<PendingObject, ObjectStoreError> {
+        let token = self
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or(ObjectStoreError::ForeignStagingPath)?
+            .to_owned();
+        validate_pending_token(&token)?;
+        self.active = false;
+        Ok(PendingObject {
+            token,
+            reference: self.reference.clone(),
+        })
     }
 
     /// Releases one staging reservation without publishing it.
@@ -283,6 +321,29 @@ impl FilesystemObjectStore {
         Ok(reference)
     }
 
+    /// Resumes and publishes a complete staged upload by its opaque token.
+    pub fn commit_pending(&self, pending: PendingObject) -> Result<ObjectRef, ObjectStoreError> {
+        let staged = self.resume_pending(&pending)?;
+        self.commit(staged)
+    }
+
+    /// Removes an unpublished upload without admitting its bytes.
+    pub fn abort_pending(&self, pending: &PendingObject) -> Result<(), ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let path = self.staging.join(&pending.token);
+        if path.parent() != Some(self.staging.as_path()) {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        let quota_lock = self.lock_quota()?;
+        match fs::remove_file(path) {
+            Ok(()) => sync_directory(&self.staging)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        drop(quota_lock);
+        Ok(())
+    }
+
     /// Reclaims crash-abandoned staging reservations older than `minimum_age`.
     ///
     /// Operators must choose an age greater than the longest permitted
@@ -397,6 +458,22 @@ impl FilesystemObjectStore {
         self.objects.join(&digest[..2]).join(digest)
     }
 
+    fn resume_pending(&self, pending: &PendingObject) -> Result<StagedObject, ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let path = self.staging.join(&pending.token);
+        if path.parent() != Some(self.staging.as_path()) || !path.is_file() {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        if inspect(&path)? != pending.reference {
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
+        Ok(StagedObject {
+            path,
+            reference: pending.reference.clone(),
+            active: true,
+        })
+    }
+
     fn lock_quota(&self) -> Result<File, ObjectStoreError> {
         let lock = OpenOptions::new()
             .read(true)
@@ -414,6 +491,19 @@ fn validate_namespace(value: &str) -> Result<(), ObjectStoreError> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     {
         return Err(ObjectStoreError::InvalidNamespace);
+    }
+    Ok(())
+}
+
+fn validate_pending_token(value: &str) -> Result<(), ObjectStoreError> {
+    if value.is_empty()
+        || value.len() > 256
+        || !value.ends_with(".staged")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(ObjectStoreError::ForeignStagingPath);
     }
     Ok(())
 }
@@ -769,6 +859,49 @@ mod tests {
         let valid = store.stage_artifact("tenant-a", b"original").unwrap();
         assert_eq!(store.commit(valid).unwrap(), reference);
         assert_eq!(store.read_verified(&reference).unwrap(), b"original");
+    }
+
+    #[test]
+    fn pending_upload_is_resumable_unpublished_and_substitution_safe() {
+        let root = tempfile::tempdir().unwrap();
+        let first_store = store(root.path(), 1024, 4096);
+        let pending = first_store
+            .stage_artifact("tenant-a", b"complete-upload")
+            .unwrap()
+            .persist()
+            .unwrap();
+        assert!(matches!(
+            first_store.read_verified(pending.object_ref()),
+            Err(ObjectGap::Missing { .. })
+        ));
+        let reopened = store(root.path(), 1024, 4096);
+        let committed = reopened.commit_pending(pending).unwrap();
+        assert_eq!(
+            reopened.read_verified(&committed).unwrap(),
+            b"complete-upload"
+        );
+
+        let substituted = reopened
+            .stage_artifact("tenant-a", b"declared")
+            .unwrap()
+            .persist()
+            .unwrap();
+        fs::write(reopened.staging.join(substituted.token()), b"substitute").unwrap();
+        assert!(matches!(
+            reopened.commit_pending(substituted.clone()),
+            Err(ObjectStoreError::CorruptStagedObject)
+        ));
+        assert!(matches!(
+            reopened.read_verified(substituted.object_ref()),
+            Err(ObjectGap::Missing { .. })
+        ));
+        reopened.abort_pending(&substituted).unwrap();
+        assert!(!reopened.staging.join(substituted.token()).exists());
+
+        assert!(matches!(
+            PendingObject::from_parts("../escape.staged".to_owned(), committed),
+            Err(ObjectStoreError::ForeignStagingPath)
+        ));
     }
 
     #[test]

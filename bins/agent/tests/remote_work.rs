@@ -96,6 +96,10 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
             "MCLOVING_AGENT_JOURNAL",
             directory.path().join("embedded-agent.db"),
         )
+        .env(
+            "MCLOVING_OBJECT_ROOT",
+            directory.path().join("embedded-objects"),
+        )
         .kill_on_drop(true)
         .spawn()
         .expect("start shipped controller");

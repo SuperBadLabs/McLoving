@@ -50,6 +50,8 @@ pub const ATTEMPT_CREDENTIALS_V10: &str =
     include_str!("../migrations/0010_attempt_credentials.sql");
 /// Tenant-scoped, hash-chained append-only audit truth.
 pub const TENANT_AUDIT_V11: &str = include_str!("../migrations/0011_tenant_audit.sql");
+/// Product-facing immutable artifact metadata.
+pub const ARTIFACT_METADATA_V12: &str = include_str!("../migrations/0012_artifact_metadata.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -280,6 +282,20 @@ pub struct StoredObject {
     pub status: ObjectStatus,
 }
 
+/// Product-facing artifact identity joined to its execution hierarchy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactMetadata {
+    pub build_id: Uuid,
+    pub node_id: Uuid,
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub name: String,
+    pub digest: [u8; 32],
+    pub bytes: i64,
+    pub media_type: String,
+    pub status: ObjectStatus,
+}
+
 /// Exclusive, durable authority to remove one globally unprotected CAS object.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectDeletionClaim {
@@ -398,6 +414,7 @@ impl Store {
         apply_migration(&mut tx, 9, PIPELINE_DAG_V9).await?;
         apply_migration(&mut tx, 10, ATTEMPT_CREDENTIALS_V10).await?;
         apply_migration(&mut tx, 11, TENANT_AUDIT_V11).await?;
+        apply_migration(&mut tx, 12, ARTIFACT_METADATA_V12).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -2542,6 +2559,203 @@ impl Store {
         Ok(inserted.is_some())
     }
 
+    /// Commits one immutable artifact identity and its retention atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_artifact(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+    ) -> Result<bool, StoreError> {
+        if name.is_empty()
+            || name.len() > 512
+            || name.chars().any(char::is_control)
+            || bytes < 0
+            || media_type.is_empty()
+            || media_type.len() > 255
+            || media_type.trim() != media_type
+            || media_type.chars().any(char::is_control)
+            || retention_seconds < 0
+        {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        acquire_object_deletion_fence(&mut tx, &digest).await?;
+        let inserted = match sqlx::query_scalar::<_, String>(
+            "INSERT INTO attempt_objects (
+                 organization_id, attempt_id, fence, kind, name,
+                 object_digest, bytes, media_type
+             )
+             SELECT $1, a.id, $5, 'artifact', $8, $9, $10, $11
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             JOIN builds AS b
+               ON b.organization_id = n.organization_id
+              AND b.id = n.build_id
+             WHERE a.organization_id = $1
+               AND b.id = $2
+               AND n.id = $3
+               AND a.id = $4
+               AND a.fence = $5
+               AND a.restore_epoch = $6
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $7
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+             ON CONFLICT (organization_id, attempt_id, fence, kind, name)
+             DO UPDATE SET checked_at = clock_timestamp()
+             WHERE attempt_objects.object_digest = EXCLUDED.object_digest
+               AND attempt_objects.bytes = EXCLUDED.bytes
+               AND attempt_objects.media_type = EXCLUDED.media_type
+             RETURNING name",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(node_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .bind(name)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .bind(media_type)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(inserted) => inserted,
+            Err(error) if is_object_deletion_fence_violation(&error) => {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if inserted.is_none() {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO object_retention (
+                 organization_id, object_digest, retain_until
+             )
+             VALUES (
+                 $1, $2,
+                 clock_timestamp() + ($3::double precision * interval '1 second')
+             )
+             ON CONFLICT (organization_id, object_digest) DO UPDATE
+             SET retain_until = GREATEST(
+                     object_retention.retain_until,
+                     EXCLUDED.retain_until
+                 ),
+                 updated_at = clock_timestamp()",
+        )
+        .bind(organization_id)
+        .bind(digest.as_slice())
+        .bind(retention_seconds as f64)
+        .execute(&mut *tx)
+        .await?;
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "artifact.committed",
+            json!({
+                "node_id": node_id,
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "name": name,
+                "sha256": hex_digest(&digest),
+                "bytes": bytes,
+                "media_type": media_type,
+                "retention_seconds": retention_seconds,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Lists product-facing artifact metadata in stable execution/name order.
+    pub async fn build_artifacts(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+    ) -> Result<Vec<ArtifactMetadata>, StoreError> {
+        type ArtifactRow = (Uuid, Uuid, Uuid, i64, String, Vec<u8>, i64, String, String);
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, ArtifactRow>(
+            "SELECT b.id, n.id, a.id, o.fence, o.name, o.object_digest,
+                    o.bytes, o.media_type, o.status
+             FROM attempt_objects AS o
+             JOIN attempts AS a
+               ON a.organization_id = o.organization_id
+              AND a.id = o.attempt_id
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             JOIN builds AS b
+               ON b.organization_id = n.organization_id
+              AND b.id = n.build_id
+             WHERE o.organization_id = $1
+               AND b.project_id = $2
+               AND b.id = $3
+               AND o.kind = 'artifact'
+             ORDER BY n.node_key, a.ordinal, o.name",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(
+                |(
+                    build_id,
+                    node_id,
+                    attempt_id,
+                    fence,
+                    name,
+                    digest,
+                    bytes,
+                    media_type,
+                    status,
+                )| {
+                    Ok(ArtifactMetadata {
+                        build_id,
+                        node_id,
+                        attempt_id,
+                        fence,
+                        name,
+                        digest: digest.try_into().map_err(|_| {
+                            StoreError::InvalidObjectRecord(
+                                "artifact digest is not 32 bytes".to_owned(),
+                            )
+                        })?,
+                        bytes,
+                        media_type,
+                        status: parse_object_status(&status)?,
+                    })
+                },
+            )
+            .collect()
+    }
+
     /// Records a verified availability result without changing object identity.
     #[allow(clippy::too_many_arguments)]
     pub async fn set_object_status(
@@ -3820,6 +4034,10 @@ fn parse_object_kind(value: &str) -> Result<ObjectKind, StoreError> {
             "unknown object kind {other}"
         ))),
     }
+}
+
+fn hex_digest(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn parse_object_status(value: &str) -> Result<ObjectStatus, StoreError> {

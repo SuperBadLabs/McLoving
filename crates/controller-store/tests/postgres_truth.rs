@@ -6305,3 +6305,172 @@ async fn tenant_audit_is_hash_chained_exportable_immutable_and_retained() {
         .await
         .expect("chain recovers after restoring the known head");
 }
+
+#[tokio::test]
+async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "artifact-product",
+        )
+        .await
+        .expect("create artifact project");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "artifact-build".to_owned(),
+            pipeline_digest: [0x81; 32],
+            node_key: "package".to_owned(),
+            required_capabilities: vec!["linux".to_owned()],
+            required_trust_pool: "trusted".to_owned(),
+            priority: 0,
+            execution_spec: json!({"program": "true"}),
+        })
+        .await
+        .expect("admit artifact build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "artifact-scheduler".to_owned(),
+            agent_id: "artifact-agent".to_owned(),
+            capabilities: vec!["linux".to_owned()],
+            trust_pool: "trusted".to_owned(),
+            lease_seconds: 60,
+            fairness_seed: 0,
+        })
+        .await
+        .expect("claim artifact work")
+        .expect("artifact work is ready");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+            )
+            .await
+            .expect("accept artifact work")
+    );
+    let digest = [0x82; 32];
+    assert!(
+        store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/result.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("register exact artifact")
+    );
+    assert!(
+        !store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/result.xml",
+                [0x83; 32],
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("reject digest substitution")
+    );
+    assert!(
+        !store
+            .register_artifact(
+                organization_id,
+                Uuid::new_v4(),
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/other.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("reject another build")
+    );
+    assert!(
+        !store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch + 1,
+                "artifact-agent",
+                "reports/stale.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("reject another restore epoch")
+    );
+    let artifacts = store
+        .build_artifacts(organization_id, project_id, admission.build_id)
+        .await
+        .expect("list build artifacts");
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].build_id, admission.build_id);
+    assert_eq!(artifacts[0].node_id, admission.node_id);
+    assert_eq!(artifacts[0].attempt_id, claim.attempt_id);
+    assert_eq!(artifacts[0].fence, claim.fence);
+    assert_eq!(artifacts[0].name, "reports/result.xml");
+    assert_eq!(artifacts[0].digest, digest);
+    assert_eq!(artifacts[0].bytes, 4096);
+    assert_eq!(artifacts[0].media_type, "application/xml");
+    assert_eq!(artifacts[0].status, ObjectStatus::Available);
+    let retained: bool = sqlx::query_scalar(
+        "SELECT retain_until > clock_timestamp()
+         FROM object_retention
+         WHERE organization_id = $1 AND object_digest = $2",
+    )
+    .bind(organization_id)
+    .bind(digest.as_slice())
+    .fetch_one(store.pool())
+    .await
+    .expect("read atomic artifact retention");
+    assert!(retained);
+    let audit = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify artifact audit");
+    assert!(audit.events.iter().any(|event| {
+        event.category == "artifact"
+            && event.action == "artifact.committed"
+            && event.payload["attempt_id"] == claim.attempt_id.to_string()
+    }));
+}

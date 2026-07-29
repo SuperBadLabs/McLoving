@@ -4,11 +4,16 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use mcloving_controller_store::{NewBuild, Store, StoreError, WaitReason};
+use mcloving_controller_store::{
+    ArtifactMetadata, NewBuild, ObjectKind, ObjectStatus, Store, StoreError, WaitReason,
+};
+use mcloving_object_store::{
+    FilesystemObjectStore, ObjectGap, ObjectRef, ObjectStoreError, PendingObject,
+};
 use mcloving_pipeline_ir::{ParseLimits, Step, compile_strict_yaml};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -18,6 +23,7 @@ use uuid::Uuid;
 pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 pub const TRUST_POOL_HEADER: &str = "mcloving-trust-pool";
 pub const PLATFORM_HEADER: &str = "mcloving-platform";
+pub const ARTIFACT_NAME_HEADER: &str = "mcloving-artifact-name";
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
 const DEFAULT_PLATFORM: &str = "linux";
 
@@ -25,6 +31,7 @@ const DEFAULT_PLATFORM: &str = "linux";
 pub struct ApiState {
     store: Store,
     token_digest: [u8; 32],
+    object_store: Option<FilesystemObjectStore>,
 }
 
 impl ApiState {
@@ -37,7 +44,13 @@ impl ApiState {
         Ok(Self {
             store,
             token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
+            object_store: None,
         })
+    }
+
+    pub fn with_object_store(mut self, object_store: FilesystemObjectStore) -> Self {
+        self.object_store = Some(object_store);
+        self
     }
 }
 
@@ -58,6 +71,26 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/cancel",
             post(cancel),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads",
+            post(stage_artifact),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads/{upload_token}/commit",
+            post(commit_artifact),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts",
+            get(list_artifacts),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts/metadata",
+            get(artifact_metadata),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts/content",
+            get(download_artifact),
         )
         .route(
             "/api/v1/organizations/{organization_id}/scheduler/explain",
@@ -101,6 +134,48 @@ pub struct LogResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CancellationResponse {
     pub accepted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StagedArtifactResponse {
+    pub upload_token: String,
+    pub name: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ArtifactCommitRequest {
+    pub node_id: Uuid,
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub restore_epoch: i64,
+    pub agent_id: String,
+    pub name: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub retention_seconds: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArtifactResponse {
+    pub build_id: Uuid,
+    pub node_id: Uuid,
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub name: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub media_type: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ArtifactQuery {
+    pub attempt_id: Uuid,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -331,6 +406,236 @@ async fn status(
     }))
 }
 
+async fn stage_artifact(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, build_id)): Path<BuildPath>,
+    headers: HeaderMap,
+    content: Bytes,
+) -> Result<(StatusCode, Json<StagedArtifactResponse>), ApiError> {
+    authorize(&state, &headers)?;
+    require_build(&state, organization_id, project_id, build_id).await?;
+    let name = bounded_header(
+        &headers,
+        ARTIFACT_NAME_HEADER,
+        512,
+        "artifact_name_required",
+    )?;
+    let media_type = bounded_header(
+        &headers,
+        header::CONTENT_TYPE.as_str(),
+        255,
+        "media_type_required",
+    )?;
+    if let Some(length) = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        && length != content.len() as u64
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "partial_upload",
+            "received artifact bytes do not match Content-Length",
+        ));
+    }
+    let staged = object_store(&state)?
+        .stage_artifact(&organization_id.to_string(), &content)
+        .map_err(object_store_error)?
+        .persist()
+        .map_err(object_store_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(StagedArtifactResponse {
+            upload_token: staged.token().to_owned(),
+            name,
+            media_type,
+            sha256: hex(&staged.object_ref().sha256),
+            bytes: staged.object_ref().bytes,
+        }),
+    ))
+}
+
+async fn commit_artifact(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, build_id, upload_token)): Path<(Uuid, Uuid, Uuid, String)>,
+    headers: HeaderMap,
+    Json(request): Json<ArtifactCommitRequest>,
+) -> Result<(StatusCode, Json<ArtifactResponse>), ApiError> {
+    authorize(&state, &headers)?;
+    require_build(&state, organization_id, project_id, build_id).await?;
+    if !upload_token.starts_with(&format!("{organization_id}-")) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "upload_tenant_mismatch",
+            "artifact upload token does not belong to this tenant",
+        ));
+    }
+    let digest = parse_hex_digest(&request.sha256)?;
+    let pending = PendingObject::from_parts(
+        upload_token,
+        ObjectRef {
+            sha256: digest,
+            bytes: request.bytes,
+        },
+    )
+    .map_err(object_store_error)?;
+    let committed = object_store(&state)?
+        .commit_pending(pending)
+        .map_err(object_store_error)?;
+    let bytes = i64::try_from(committed.bytes).map_err(|_| {
+        ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "artifact_too_large",
+            "artifact byte count exceeds controller metadata bounds",
+        )
+    })?;
+    let registered = state
+        .store
+        .register_artifact(
+            organization_id,
+            build_id,
+            request.node_id,
+            request.attempt_id,
+            request.fence,
+            request.restore_epoch,
+            &request.agent_id,
+            &request.name,
+            committed.sha256,
+            bytes,
+            &request.media_type,
+            request.retention_seconds,
+        )
+        .await
+        .map_err(internal)?;
+    if !registered {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "artifact_authority_rejected",
+            "artifact metadata did not match live fenced execution authority",
+        ));
+    }
+    let artifact = find_artifact(
+        &state,
+        organization_id,
+        project_id,
+        build_id,
+        request.attempt_id,
+        &request.name,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(artifact_response(artifact)?)))
+}
+
+async fn list_artifacts(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, build_id)): Path<BuildPath>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ArtifactResponse>>, ApiError> {
+    authorize(&state, &headers)?;
+    require_build(&state, organization_id, project_id, build_id).await?;
+    let artifacts = state
+        .store
+        .build_artifacts(organization_id, project_id, build_id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(artifact_response)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(artifacts))
+}
+
+async fn artifact_metadata(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, build_id)): Path<BuildPath>,
+    Query(query): Query<ArtifactQuery>,
+    headers: HeaderMap,
+) -> Result<Json<ArtifactResponse>, ApiError> {
+    authorize(&state, &headers)?;
+    require_build(&state, organization_id, project_id, build_id).await?;
+    let artifact = find_artifact(
+        &state,
+        organization_id,
+        project_id,
+        build_id,
+        query.attempt_id,
+        &query.name,
+    )
+    .await?;
+    Ok(Json(artifact_response(artifact)?))
+}
+
+async fn download_artifact(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, build_id)): Path<BuildPath>,
+    Query(query): Query<ArtifactQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers)?;
+    require_build(&state, organization_id, project_id, build_id).await?;
+    let artifact = find_artifact(
+        &state,
+        organization_id,
+        project_id,
+        build_id,
+        query.attempt_id,
+        &query.name,
+    )
+    .await?;
+    let reference = ObjectRef {
+        sha256: artifact.digest,
+        bytes: u64::try_from(artifact.bytes).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_artifact_metadata",
+                "stored artifact byte count is invalid",
+            )
+        })?,
+    };
+    let content = match object_store(&state)?.read_verified(&reference) {
+        Ok(content) => content,
+        Err(gap) => {
+            let status = match gap {
+                ObjectGap::Missing { .. } => ObjectStatus::Missing,
+                ObjectGap::Corrupt { .. } => ObjectStatus::Corrupt,
+            };
+            state
+                .store
+                .set_object_status(
+                    organization_id,
+                    artifact.attempt_id,
+                    artifact.fence,
+                    ObjectKind::Artifact,
+                    &artifact.name,
+                    artifact.digest,
+                    status,
+                )
+                .await
+                .map_err(internal)?;
+            return Err(ApiError::new(
+                StatusCode::GONE,
+                "artifact_gap",
+                "artifact bytes are missing or corrupt",
+            ));
+        }
+    };
+    let mut response = Response::new(content.into());
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&artifact.media_type).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_artifact_metadata",
+                "stored media type is not a valid HTTP header",
+            )
+        })?,
+    );
+    response.headers_mut().insert(
+        "mcloving-artifact-sha256",
+        HeaderValue::from_str(&hex(&artifact.digest)).expect("hex digest is a valid header"),
+    );
+    Ok(response)
+}
+
 async fn logs(
     State(state): State<Arc<ApiState>>,
     Path((organization_id, project_id, build_id)): Path<BuildPath>,
@@ -427,6 +732,146 @@ async fn explain(
         }
     };
     Ok(Json(response))
+}
+
+async fn require_build(
+    state: &ApiState,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+) -> Result<(), ApiError> {
+    if state
+        .store
+        .build_snapshot(organization_id, project_id, build_id)
+        .await
+        .map_err(internal)?
+        .is_none()
+    {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
+fn object_store(state: &ApiState) -> Result<&FilesystemObjectStore, ApiError> {
+    state.object_store.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "artifact_store_unavailable",
+            "artifact storage is not configured",
+        )
+    })
+}
+
+fn bounded_header(
+    headers: &HeaderMap,
+    name: &str,
+    max_bytes: usize,
+    code: &'static str,
+) -> Result<String, ApiError> {
+    let value = headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= max_bytes
+                && value.trim() == *value
+                && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                code,
+                format!("{name} must be non-empty, canonical, and bounded"),
+            )
+        })?;
+    Ok(value.to_owned())
+}
+
+async fn find_artifact(
+    state: &ApiState,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+    attempt_id: Uuid,
+    name: &str,
+) -> Result<ArtifactMetadata, ApiError> {
+    state
+        .store
+        .build_artifacts(organization_id, project_id, build_id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .find(|artifact| artifact.attempt_id == attempt_id && artifact.name == name)
+        .ok_or_else(not_found)
+}
+
+fn artifact_response(artifact: ArtifactMetadata) -> Result<ArtifactResponse, ApiError> {
+    Ok(ArtifactResponse {
+        build_id: artifact.build_id,
+        node_id: artifact.node_id,
+        attempt_id: artifact.attempt_id,
+        fence: artifact.fence,
+        name: artifact.name,
+        sha256: hex(&artifact.digest),
+        bytes: u64::try_from(artifact.bytes).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_artifact_metadata",
+                "stored artifact byte count is invalid",
+            )
+        })?,
+        media_type: artifact.media_type,
+        status: match artifact.status {
+            ObjectStatus::Available => "available",
+            ObjectStatus::Missing => "missing",
+            ObjectStatus::Corrupt => "corrupt",
+        }
+        .to_owned(),
+    })
+}
+
+fn parse_hex_digest(value: &str) -> Result<[u8; 32], ApiError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_artifact_digest",
+            "artifact SHA-256 must contain exactly 64 hexadecimal characters",
+        ));
+    }
+    let mut digest = [0_u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_artifact_digest",
+                "artifact SHA-256 is invalid",
+            )
+        })?;
+    }
+    Ok(digest)
+}
+
+fn object_store_error(error: ObjectStoreError) -> ApiError {
+    match error {
+        ObjectStoreError::ObjectQuotaExceeded => ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "artifact_object_quota",
+            error.to_string(),
+        ),
+        ObjectStoreError::TotalQuotaExceeded => ApiError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "artifact_total_quota",
+            error.to_string(),
+        ),
+        ObjectStoreError::ForeignStagingPath
+        | ObjectStoreError::CorruptStagedObject
+        | ObjectStoreError::ImmutableObjectConflict => ApiError::new(
+            StatusCode::CONFLICT,
+            "artifact_integrity",
+            error.to_string(),
+        ),
+        _ => internal(error),
+    }
 }
 
 fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -620,6 +1065,113 @@ impl Client {
             self.build_url(organization_id, project_id, build_id)
         )))
         .await
+    }
+
+    pub async fn stage_artifact(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        name: &str,
+        media_type: &str,
+        content: Vec<u8>,
+    ) -> Result<StagedArtifactResponse, ClientError> {
+        self.send(
+            self.inner
+                .post(format!(
+                    "{}/artifact-uploads",
+                    self.build_url(organization_id, project_id, build_id)
+                ))
+                .header(ARTIFACT_NAME_HEADER, name)
+                .header(header::CONTENT_TYPE, media_type)
+                .body(content),
+        )
+        .await
+    }
+
+    pub async fn commit_artifact(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        upload_token: &str,
+        request: &ArtifactCommitRequest,
+    ) -> Result<ArtifactResponse, ClientError> {
+        self.send(
+            self.inner
+                .post(format!(
+                    "{}/artifact-uploads/{upload_token}/commit",
+                    self.build_url(organization_id, project_id, build_id)
+                ))
+                .json(request),
+        )
+        .await
+    }
+
+    pub async fn artifacts(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+    ) -> Result<Vec<ArtifactResponse>, ClientError> {
+        self.send(self.inner.get(format!(
+            "{}/artifacts",
+            self.build_url(organization_id, project_id, build_id)
+        )))
+        .await
+    }
+
+    pub async fn artifact_metadata(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        attempt_id: Uuid,
+        name: &str,
+    ) -> Result<ArtifactResponse, ClientError> {
+        self.send(
+            self.inner
+                .get(format!(
+                    "{}/artifacts/metadata",
+                    self.build_url(organization_id, project_id, build_id)
+                ))
+                .query(&[
+                    ("attempt_id", attempt_id.to_string()),
+                    ("name", name.to_owned()),
+                ]),
+        )
+        .await
+    }
+
+    pub async fn download_artifact(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        attempt_id: Uuid,
+        name: &str,
+    ) -> Result<Vec<u8>, ClientError> {
+        let response = self
+            .inner
+            .get(format!(
+                "{}/artifacts/content",
+                self.build_url(organization_id, project_id, build_id)
+            ))
+            .query(&[
+                ("attempt_id", attempt_id.to_string()),
+                ("name", name.to_owned()),
+            ])
+            .bearer_auth(&self.bearer_token)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ClientError::Response {
+                status,
+                body: response.text().await?,
+            });
+        }
+        Ok(response.bytes().await?.to_vec())
     }
 
     pub async fn explain(
