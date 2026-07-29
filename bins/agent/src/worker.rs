@@ -14,7 +14,7 @@ use mcloving_agent_protocol::wire::{
 };
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, execute_with_spawn_hook,
-    sync_directory,
+    is_link_or_reparse_point, sync_directory,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Finalization, Journal, ProcessIdentity, SpoolEntry,
@@ -1281,6 +1281,13 @@ async fn create_result_directory(
         ));
     }
     fs::create_dir_all(workspace_root).await?;
+    let root_metadata = fs::symlink_metadata(workspace_root).await?;
+    if !root_metadata.is_dir() || is_link_or_reparse_point(&root_metadata) {
+        return Err(AgentError::InvalidAssignment(
+            "workspace root is a non-directory, symlink, or reparse point".to_owned(),
+        ));
+    }
+
     let mut directory = workspace_root.to_owned();
     for component in relative_parent.components() {
         let Component::Normal(component) = component else {
@@ -1293,9 +1300,10 @@ async fn create_result_directory(
             Err(error) => return Err(error.into()),
         }
         let metadata = fs::symlink_metadata(&directory).await?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
             return Err(AgentError::InvalidAssignment(
-                "result spool parent contains a non-directory or symlink".to_owned(),
+                "result spool parent contains a non-directory, symlink, or reparse point"
+                    .to_owned(),
             ));
         }
     }
@@ -1872,6 +1880,44 @@ mod tests {
             directory.path().join(AGENT_RESULT_DIRECTORY),
         )
         .unwrap();
+
+        assert!(matches!(
+            write_result(
+                directory.path(),
+                Path::new("org/attempt"),
+                DurableResult {
+                    outcome: WorkOutcome::Failed,
+                    exit_code: None,
+                    termination: "process_spawn_failed",
+                    reason: Some("refused"),
+                    completion_protocol: WORK_COMPLETION_PROTOCOL,
+                    cancellation_outcome: None,
+                },
+            )
+            .await,
+            Err(AgentError::InvalidAssignment(_))
+        ));
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn result_spool_rejects_a_windows_junction_ancestor() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let result_root = directory.path().join(AGENT_RESULT_DIRECTORY);
+        let junction = result_root.join("org");
+        std::fs::create_dir(&result_root).unwrap();
+        let command = format!(
+            "mklink /J \"{}\" \"{}\"",
+            junction.display(),
+            outside.path().display()
+        );
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/D", "/S", "/C", &command])
+            .status()
+            .unwrap();
+        assert!(status.success(), "failed to create the test junction");
 
         assert!(matches!(
             write_result(

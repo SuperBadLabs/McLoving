@@ -154,7 +154,7 @@ fn create_workspace(root: &Path, relative: &Path) -> Result<PathBuf, ExecutionEr
     Ok(canonical)
 }
 
-pub(super) fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+pub fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
