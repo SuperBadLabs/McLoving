@@ -1073,14 +1073,12 @@ async fn remove_terminal_relative_path(
         current.push(component);
         let is_leaf = components.peek().is_none();
         match fs::symlink_metadata(&current).await {
-            Ok(metadata) if !is_leaf && metadata.is_dir() && !metadata.file_type().is_symlink() => {
-            }
-            Ok(_) if !is_leaf => {
+            Ok(metadata)
+                if !is_leaf && metadata.is_dir() && !is_link_or_reparse_point(&metadata) => {}
+            Ok(metadata) if !is_leaf => {
                 // An ancestor was replaced. Remove only the replacement entry;
-                // remove_file never follows a symlink target. Leaving it behind
-                // would permanently obstruct every later workspace in the same
-                // organization after the terminal journal row is retired.
-                fs::remove_file(&current).await?;
+                // platform-specific unlinking never follows its target.
+                remove_terminal_replacement_entry(&current, &metadata).await?;
                 sync_directory(
                     current
                         .parent()
@@ -1088,7 +1086,7 @@ async fn remove_terminal_relative_path(
                 )?;
                 break;
             }
-            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            Ok(metadata) if metadata.is_dir() && !is_link_or_reparse_point(&metadata) => {
                 fs::remove_dir_all(&current).await?;
                 sync_directory(
                     current
@@ -1097,10 +1095,9 @@ async fn remove_terminal_relative_path(
                 )?;
                 break;
             }
-            Ok(_) => {
-                // remove_file removes a symlink itself and never follows its
-                // leaf target.
-                fs::remove_file(&current).await?;
+            Ok(metadata) => {
+                // Remove the replacement entry itself, never its target.
+                remove_terminal_replacement_entry(&current, &metadata).await?;
                 sync_directory(
                     current
                         .parent()
@@ -1113,6 +1110,27 @@ async fn remove_terminal_relative_path(
         }
     }
     prune_empty_spool_directories(workspace_root, path.parent()).await
+}
+
+async fn remove_terminal_replacement_entry(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), std::io::Error> {
+    #[cfg(windows)]
+    {
+        if metadata.is_dir() {
+            // Windows removes directory junctions and directory symlinks with
+            // RemoveDirectory; this deletes the reparse point, not its target.
+            fs::remove_dir(path).await
+        } else {
+            fs::remove_file(path).await
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        fs::remove_file(path).await
+    }
 }
 
 async fn prune_empty_spool_directories(
@@ -1901,6 +1919,25 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn create_windows_junction(junction: &Path, target: &Path) {
+        let command = format!(
+            "mklink /J \"{}\" \"{}\"",
+            junction.display(),
+            target.display()
+        );
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/D", "/S", "/C", &command])
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "failed to create junction {} -> {}",
+            junction.display(),
+            target.display()
+        );
+    }
+
+    #[cfg(windows)]
     #[tokio::test]
     async fn result_spool_rejects_a_windows_junction_ancestor() {
         let directory = tempfile::tempdir().unwrap();
@@ -1908,16 +1945,7 @@ mod tests {
         let result_root = directory.path().join(AGENT_RESULT_DIRECTORY);
         let junction = result_root.join("org");
         std::fs::create_dir(&result_root).unwrap();
-        let command = format!(
-            "mklink /J \"{}\" \"{}\"",
-            junction.display(),
-            outside.path().display()
-        );
-        let status = std::process::Command::new("cmd.exe")
-            .args(["/D", "/S", "/C", &command])
-            .status()
-            .unwrap();
-        assert!(status.success(), "failed to create the test junction");
+        create_windows_junction(&junction, outside.path());
 
         assert!(matches!(
             write_result(
@@ -2211,6 +2239,38 @@ mod tests {
             fs::read(outside.join("sentinel")).await.unwrap(),
             b"must-survive"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn replaced_terminal_workspace_junction_is_removed_without_following() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace_root = directory.path().join("workspace");
+        let workspace = PathBuf::from("organization/attempt/7");
+        let workspace_path = workspace_root.join(&workspace);
+        let organization_path = workspace_root.join("organization");
+        let displaced_path = workspace_root.join("displaced-organization");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(&workspace_path).await.unwrap();
+        fs::create_dir_all(&outside).await.unwrap();
+        fs::write(outside.join("sentinel"), b"must-survive")
+            .await
+            .unwrap();
+        fs::rename(&organization_path, &displaced_path)
+            .await
+            .unwrap();
+        create_windows_junction(&organization_path, &outside);
+
+        remove_attempt_workspace(&workspace_root, &workspace)
+            .await
+            .unwrap();
+
+        assert!(fs::symlink_metadata(&organization_path).await.is_err());
+        assert_eq!(
+            fs::read(outside.join("sentinel")).await.unwrap(),
+            b"must-survive"
+        );
+        assert!(displaced_path.join("attempt/7").exists());
     }
 
     #[tokio::test]
