@@ -93,6 +93,17 @@ pub struct SpoolEntry {
     pub bytes: u64,
 }
 
+pub struct Finalization<'a> {
+    pub organization_id: &'a str,
+    pub attempt_id: &'a str,
+    pub fence_token: u64,
+    pub session_epoch: u64,
+    pub phase: AttemptPhase,
+    pub process_id: Option<u32>,
+    pub logs: &'a [SpoolEntry],
+    pub result: &'a SpoolEntry,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReconciliationAttempt {
     pub organization_id: String,
@@ -144,6 +155,8 @@ pub enum JournalError {
         from: AttemptPhase,
         to: AttemptPhase,
     },
+    #[error("finalization phase must be Finalizing or Cancelling")]
+    InvalidFinalizationPhase,
     #[error("spool sequence conflicts with existing durable metadata")]
     SpoolConflict,
     #[error("spool path must be a normalized relative path")]
@@ -561,6 +574,208 @@ impl Journal {
         Ok(())
     }
 
+    /// Atomically records every terminal replay input and enters the
+    /// non-terminal finalization phase. No observer can see a completed
+    /// workload as `Running` after any spool descriptor becomes durable.
+    pub fn begin_finalization(
+        &mut self,
+        finalization: &Finalization<'_>,
+    ) -> Result<(), JournalError> {
+        if !matches!(
+            finalization.phase,
+            AttemptPhase::Finalizing | AttemptPhase::Cancelling
+        ) {
+            return Err(JournalError::InvalidFinalizationPhase);
+        }
+        for entry in finalization.logs {
+            validate_relative_path(&entry.relative_path)?;
+        }
+        validate_relative_path(&finalization.result.relative_path)?;
+
+        let fence_token = to_sql_integer(finalization.fence_token)?;
+        let session_epoch = to_sql_integer(finalization.session_epoch)?;
+        let process_id = finalization
+            .process_id
+            .map(|value| to_sql_integer(u64::from(value)))
+            .transpose()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = transaction
+            .query_row(
+                "
+                SELECT phase, process_group_id, process_birth_identity
+                FROM attempts
+                WHERE organization_id = ?1
+                  AND attempt_id = ?2
+                  AND fence_token = ?3
+                  AND session_epoch = ?4
+                ",
+                params![
+                    finalization.organization_id,
+                    finalization.attempt_id,
+                    fence_token,
+                    session_epoch
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(JournalError::StaleAuthority)?;
+        let current_phase = AttemptPhase::parse(&current.0)?;
+        if current_phase != finalization.phase
+            && !valid_transition(current_phase, finalization.phase)
+        {
+            return Err(JournalError::InvalidTransition {
+                from: current_phase,
+                to: finalization.phase,
+            });
+        }
+        let process_birth_identity = (current.1 == process_id && process_id.is_some())
+            .then(|| current.2.clone())
+            .flatten();
+        validate_process_birth_identity(
+            process_id
+                .map(|value| u32::try_from(value).map_err(|_| JournalError::AuthorityOverflow))
+                .transpose()?,
+            process_birth_identity.as_deref(),
+        )?;
+
+        for entry in finalization.logs {
+            let relative_path = path_text(&entry.relative_path)?;
+            let sequence = to_sql_integer(entry.sequence)?;
+            let bytes = to_sql_integer(entry.bytes)?;
+            let changed = transaction.execute(
+                "
+                INSERT INTO log_spool(
+                    organization_id, attempt_id, fence_token, sequence,
+                    relative_path, digest, bytes
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(organization_id, attempt_id, fence_token, sequence) DO NOTHING
+                ",
+                params![
+                    finalization.organization_id,
+                    finalization.attempt_id,
+                    fence_token,
+                    sequence,
+                    relative_path,
+                    entry.digest.as_slice(),
+                    bytes,
+                ],
+            )?;
+            if changed == 0 {
+                let existing = transaction.query_row(
+                    "
+                    SELECT relative_path, digest, bytes
+                    FROM log_spool
+                    WHERE organization_id = ?1
+                      AND attempt_id = ?2
+                      AND fence_token = ?3
+                      AND sequence = ?4
+                    ",
+                    params![
+                        finalization.organization_id,
+                        finalization.attempt_id,
+                        fence_token,
+                        sequence
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Vec<u8>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )?;
+                if existing.0 != relative_path
+                    || existing.1.as_slice() != entry.digest
+                    || existing.2 != bytes
+                {
+                    return Err(JournalError::SpoolConflict);
+                }
+            }
+        }
+
+        let result_path = path_text(&finalization.result.relative_path)?;
+        let result_bytes = to_sql_integer(finalization.result.bytes)?;
+        let changed = transaction.execute(
+            "
+            INSERT INTO result_spool(
+                organization_id, attempt_id, fence_token, relative_path, digest, bytes
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(organization_id, attempt_id, fence_token) DO NOTHING
+            ",
+            params![
+                finalization.organization_id,
+                finalization.attempt_id,
+                fence_token,
+                result_path,
+                finalization.result.digest.as_slice(),
+                result_bytes,
+            ],
+        )?;
+        if changed == 0 {
+            let existing = transaction.query_row(
+                "
+                SELECT relative_path, digest, bytes
+                FROM result_spool
+                WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
+                ",
+                params![
+                    finalization.organization_id,
+                    finalization.attempt_id,
+                    fence_token
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )?;
+            if existing.0 != result_path
+                || existing.1.as_slice() != finalization.result.digest
+                || existing.2 != result_bytes
+            {
+                return Err(JournalError::SpoolConflict);
+            }
+        }
+
+        transaction.execute(
+            "
+            UPDATE attempts
+            SET phase = ?1,
+                process_group_id = ?2,
+                process_birth_identity = ?3,
+                updated_at_unix_ms = ?4
+            WHERE organization_id = ?5
+              AND attempt_id = ?6
+              AND fence_token = ?7
+              AND session_epoch = ?8
+            ",
+            params![
+                finalization.phase.as_str(),
+                process_id,
+                process_birth_identity,
+                unix_time_ms()?,
+                finalization.organization_id,
+                finalization.attempt_id,
+                fence_token,
+                session_epoch,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn record_log(
         &mut self,
         organization_id: &str,
@@ -970,6 +1185,122 @@ mod tests {
 
         let mut reopened = Journal::open(&path).unwrap();
         assert_eq!(reopened.reserve_session_epoch(2).unwrap(), 8);
+    }
+
+    #[test]
+    fn finalization_phase_and_complete_spool_evidence_commit_atomically() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(directory.path().join("agent.db")).unwrap();
+        let acceptance = acceptance();
+        journal.accept(&acceptance).unwrap();
+        journal
+            .transition(
+                &acceptance.organization_id,
+                &acceptance.attempt_id,
+                acceptance.fence_token,
+                acceptance.session_epoch,
+                AttemptPhase::Running,
+                Some(42),
+            )
+            .unwrap();
+        let logs = [
+            SpoolEntry {
+                sequence: 0,
+                relative_path: PathBuf::from("org-1/attempt-1/spool/stdout.log"),
+                digest: [1; 32],
+                bytes: 10,
+            },
+            SpoolEntry {
+                sequence: 1,
+                relative_path: PathBuf::from("org-1/attempt-1/spool/stderr.log"),
+                digest: [2; 32],
+                bytes: 20,
+            },
+        ];
+        let result = SpoolEntry {
+            sequence: 0,
+            relative_path: PathBuf::from("org-1/attempt-1/spool/result.json"),
+            digest: [3; 32],
+            bytes: 30,
+        };
+
+        journal
+            .begin_finalization(&Finalization {
+                organization_id: &acceptance.organization_id,
+                attempt_id: &acceptance.attempt_id,
+                fence_token: acceptance.fence_token,
+                session_epoch: acceptance.session_epoch,
+                phase: AttemptPhase::Finalizing,
+                process_id: Some(42),
+                logs: &logs,
+                result: &result,
+            })
+            .unwrap();
+        let attempt = journal.reconcile().unwrap().attempts.remove(0);
+        assert_eq!(attempt.phase, AttemptPhase::Finalizing);
+        assert_eq!(attempt.logs, logs);
+        assert_eq!(attempt.result, Some(result));
+    }
+
+    #[test]
+    fn conflicting_finalization_rolls_back_phase_and_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(directory.path().join("agent.db")).unwrap();
+        let acceptance = acceptance();
+        journal.accept(&acceptance).unwrap();
+        journal
+            .transition(
+                &acceptance.organization_id,
+                &acceptance.attempt_id,
+                acceptance.fence_token,
+                acceptance.session_epoch,
+                AttemptPhase::Running,
+                Some(42),
+            )
+            .unwrap();
+        let recorded_log = SpoolEntry {
+            sequence: 0,
+            relative_path: PathBuf::from("org-1/attempt-1/spool/stdout.log"),
+            digest: [1; 32],
+            bytes: 10,
+        };
+        journal
+            .record_log(
+                &acceptance.organization_id,
+                &acceptance.attempt_id,
+                acceptance.fence_token,
+                acceptance.session_epoch,
+                &recorded_log,
+            )
+            .unwrap();
+        let conflicting_log = SpoolEntry {
+            digest: [9; 32],
+            ..recorded_log.clone()
+        };
+        let result = SpoolEntry {
+            sequence: 0,
+            relative_path: PathBuf::from("org-1/attempt-1/spool/result.json"),
+            digest: [3; 32],
+            bytes: 30,
+        };
+
+        assert!(matches!(
+            journal.begin_finalization(&Finalization {
+                organization_id: &acceptance.organization_id,
+                attempt_id: &acceptance.attempt_id,
+                fence_token: acceptance.fence_token,
+                session_epoch: acceptance.session_epoch,
+                phase: AttemptPhase::Finalizing,
+                process_id: Some(42),
+                logs: &[conflicting_log],
+                result: &result,
+            }),
+            Err(JournalError::SpoolConflict)
+        ));
+        let attempt = journal.reconcile().unwrap().attempts.remove(0);
+        assert_eq!(attempt.phase, AttemptPhase::Running);
+        assert_eq!(attempt.logs, vec![recorded_log]);
+        assert!(attempt.result.is_none());
     }
 
     #[test]

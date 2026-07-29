@@ -7,18 +7,20 @@ use std::time::Duration;
 
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
-    WorkAssignment, WorkAuthority, WorkCompletion, WorkLeaseRenewal, WorkLogChunk, WorkOutcome,
-    WorkPoll,
+    CancellationCompletion, CancellationDisposition, CancellationOutcome, WorkAssignment,
+    WorkAuthority, WorkCompletion, WorkLeaseRenewal, WorkLogChunk, WorkOutcome, WorkPoll,
 };
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, execute_with_spawn_hook,
 };
-use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal, ProcessIdentity, SpoolEntry};
+use mcloving_agent_runtime::{
+    Acceptance, AttemptPhase, Finalization, Journal, ProcessIdentity, SpoolEntry,
+};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use uuid::Uuid;
@@ -26,6 +28,10 @@ use uuid::Uuid;
 use crate::{AgentConfig, AgentError, process_birth_identity_for};
 
 const MAX_LOG_CHUNK_BYTES: usize = 1_048_576;
+const MAX_TOTAL_LOG_SPOOL_BYTES: u64 = 64 * 1_048_576;
+const MAX_RESULT_SPOOL_BYTES: u64 = 65_536;
+const WORK_COMPLETION_PROTOCOL: &str = "work";
+const CANCELLATION_COMPLETION_PROTOCOL: &str = "cancellation";
 
 #[derive(Deserialize)]
 struct ExecutionSpec {
@@ -51,6 +57,13 @@ struct PersistedResult {
     outcome: String,
     exit_code: Option<i32>,
     termination: String,
+    #[serde(default = "default_completion_protocol")]
+    completion_protocol: String,
+    cancellation_outcome: Option<i32>,
+}
+
+fn default_completion_protocol() -> String {
+    WORK_COMPLETION_PROTOCOL.to_owned()
 }
 
 #[derive(Clone, Copy, Default, Deserialize)]
@@ -67,6 +80,14 @@ struct ValidatedAssignment {
     workspace: PathBuf,
     payload_digest: [u8; 32],
     process: ProcessSpec,
+}
+
+struct ProcesslessCompletion<'a> {
+    authority: &'a WorkAuthority,
+    workspace: &'a Path,
+    session_epoch: u64,
+    outcome: WorkOutcome,
+    reason: String,
 }
 
 pub(super) async fn poll_and_run_one(
@@ -113,6 +134,7 @@ pub(super) async fn recover_finalizations(
             attempt_id: attempt.attempt_id.clone(),
             fence_token: attempt.fence_token,
         };
+        validate_log_spool_quota(&attempt.logs)?;
         let mut sequence = 0;
         for entry in &attempt.logs {
             let stream = spool_stream(entry)?;
@@ -143,28 +165,89 @@ pub(super) async fn recover_finalizations(
                 "journal phase conflicts with durable result outcome".to_owned(),
             ));
         }
-        let summary = serde_json::to_vec(&json!({
-            "exit_code": result.exit_code,
-            "termination": result.termination,
-            "result_sha256": hex(&result_entry.digest),
-        }))?;
-        require_work_receipt(
-            client
-                .complete_work(WorkCompletion {
-                    authority: Some(authority),
-                    outcome: outcome as i32,
-                    summary_json: summary,
-                })
-                .await?
-                .into_inner(),
-            session_epoch,
-        )?;
+        let terminal = match result.completion_protocol.as_str() {
+            WORK_COMPLETION_PROTOCOL => {
+                let summary = serde_json::to_vec(&json!({
+                    "exit_code": result.exit_code,
+                    "termination": result.termination,
+                    "result_sha256": hex(&result_entry.digest),
+                }))?;
+                require_work_receipt(
+                    client
+                        .complete_work(WorkCompletion {
+                            authority: Some(authority),
+                            outcome: outcome as i32,
+                            summary_json: summary,
+                        })
+                        .await?
+                        .into_inner(),
+                    session_epoch,
+                )?;
+                terminal_phase(outcome)?
+            }
+            CANCELLATION_COMPLETION_PROTOCOL => {
+                if attempt.phase != AttemptPhase::Cancelling || outcome != WorkOutcome::Aborted {
+                    return Err(AgentError::InvalidAssignment(
+                        "cancellation replay conflicts with durable journal state".to_owned(),
+                    ));
+                }
+                let cancellation_outcome = result.cancellation_outcome.ok_or_else(|| {
+                    AgentError::InvalidAssignment(
+                        "cancellation replay has no durable outcome".to_owned(),
+                    )
+                })?;
+                match CancellationOutcome::try_from(cancellation_outcome) {
+                    Ok(
+                        CancellationOutcome::Terminated
+                        | CancellationOutcome::AlreadyExited
+                        | CancellationOutcome::IdentityMismatch,
+                    ) => {}
+                    Ok(
+                        CancellationOutcome::Unspecified
+                        | CancellationOutcome::ReconciliationRequired,
+                    )
+                    | Err(_) => {
+                        return Err(AgentError::InvalidAssignment(
+                            "cancellation replay has an invalid durable outcome".to_owned(),
+                        ));
+                    }
+                }
+                let receipt = client
+                    .complete_cancellation(CancellationCompletion {
+                        agent_id: config.agent_id.clone(),
+                        session_epoch,
+                        organization_id: attempt.organization_id.clone(),
+                        attempt_id: attempt.attempt_id.clone(),
+                        fence_token: attempt.fence_token,
+                        outcome: cancellation_outcome,
+                    })
+                    .await?
+                    .into_inner();
+                ensure_session(receipt.session_epoch, session_epoch)?;
+                match CancellationDisposition::try_from(receipt.disposition) {
+                    Ok(
+                        CancellationDisposition::Completed | CancellationDisposition::RetireStale,
+                    ) => AttemptPhase::Aborted,
+                    Ok(CancellationDisposition::ReconciliationRequired) => {
+                        AttemptPhase::ReconciliationRequired
+                    }
+                    Ok(CancellationDisposition::Unspecified) | Err(_) => {
+                        return Err(AgentError::UnsupportedProtocol);
+                    }
+                }
+            }
+            _ => {
+                return Err(AgentError::InvalidAssignment(
+                    "durable result has an unknown completion protocol".to_owned(),
+                ));
+            }
+        };
         Journal::open(&config.journal_path)?.transition(
             &attempt.organization_id,
             &attempt.attempt_id,
             attempt.fence_token,
             attempt.session_epoch,
-            terminal_phase(outcome)?,
+            terminal,
             attempt.process_id,
         )?;
     }
@@ -270,12 +353,16 @@ async fn run_assignment(
     }
     if lease.cancellation_requested {
         return finalize_without_process(
+            config,
             client,
             &mut journal,
-            &assignment.authority,
-            session_epoch,
-            WorkOutcome::Aborted,
-            "cancelled_before_process_spawn",
+            ProcesslessCompletion {
+                authority: &assignment.authority,
+                workspace: &assignment.workspace,
+                session_epoch,
+                outcome: WorkOutcome::Aborted,
+                reason: "cancelled_before_process_spawn".to_owned(),
+            },
         )
         .await;
     }
@@ -351,30 +438,55 @@ async fn run_assignment(
         Ok(outcome) => outcome,
         Err(error) => {
             return finalize_without_process(
+                config,
                 client,
                 &mut journal,
-                &assignment.authority,
-                session_epoch,
-                WorkOutcome::Failed,
-                &format!("process_spawn_failed: {error}"),
+                ProcesslessCompletion {
+                    authority: &assignment.authority,
+                    workspace: &assignment.workspace,
+                    session_epoch,
+                    outcome: WorkOutcome::Failed,
+                    reason: format!("process_spawn_failed: {error}"),
+                },
             )
             .await;
         }
     };
-    journal.record_log(
-        &organization,
-        &attempt,
-        fence,
+    validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()])?;
+    let terminal = match outcome.termination {
+        Termination::Cancelled => WorkOutcome::Aborted,
+        Termination::TimedOut => WorkOutcome::Failed,
+        Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
+        Termination::Exited => WorkOutcome::Failed,
+    };
+    let result = write_result(
+        &config.workspace_root,
+        &assignment.workspace,
+        terminal,
+        outcome.exit_code,
+        termination_name(outcome.termination),
+        WORK_COMPLETION_PROTOCOL,
+        None,
+    )
+    .await?;
+    journal.begin_finalization(&Finalization {
+        organization_id: &organization,
+        attempt_id: &attempt,
+        fence_token: fence,
         session_epoch,
-        &outcome.stdout,
-    )?;
-    journal.record_log(
-        &organization,
-        &attempt,
-        fence,
-        session_epoch,
-        &outcome.stderr,
-    )?;
+        phase: if terminal == WorkOutcome::Aborted {
+            AttemptPhase::Cancelling
+        } else {
+            AttemptPhase::Finalizing
+        },
+        process_id: Some(outcome.process_id),
+        logs: &[outcome.stdout.clone(), outcome.stderr.clone()],
+        result: &result,
+    })?;
+
+    // Terminal truth and every replay input are durable before the first
+    // replayable upload. A committed log whose response is lost can therefore
+    // be resumed without executing the workload again.
     let next_sequence = publish_spool(
         client,
         &assignment.authority,
@@ -395,34 +507,6 @@ async fn run_assignment(
         next_sequence,
     )
     .await?;
-
-    let terminal = match outcome.termination {
-        Termination::Cancelled => WorkOutcome::Aborted,
-        Termination::TimedOut => WorkOutcome::Failed,
-        Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
-        Termination::Exited => WorkOutcome::Failed,
-    };
-    journal.transition(
-        &organization,
-        &attempt,
-        fence,
-        session_epoch,
-        if terminal == WorkOutcome::Aborted {
-            AttemptPhase::Cancelling
-        } else {
-            AttemptPhase::Finalizing
-        },
-        Some(outcome.process_id),
-    )?;
-    let result = write_result(
-        &config.workspace_root,
-        &assignment.workspace,
-        terminal,
-        outcome.exit_code,
-        outcome.termination,
-    )
-    .await?;
-    journal.record_result(&organization, &attempt, fence, session_epoch, &result)?;
     let summary = serde_json::to_vec(&json!({
         "exit_code": outcome.exit_code,
         "termination": termination_name(outcome.termination),
@@ -461,14 +545,23 @@ async fn renew_lease(
             () = cancellation.cancelled() => return Ok(()),
             () = tokio::time::sleep(renewal_interval) => {}
         }
-        let receipt = client
+        let receipt = match client
             .renew_work_lease(WorkLeaseRenewal {
                 authority: Some(authority.clone()),
                 lease_seconds,
             })
-            .await?
-            .into_inner();
-        ensure_session(receipt.session_epoch, authority.session_epoch)?;
+            .await
+        {
+            Ok(response) => response.into_inner(),
+            Err(error) => {
+                cancellation.cancel();
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = ensure_session(receipt.session_epoch, authority.session_epoch) {
+            cancellation.cancel();
+            return Err(error);
+        }
         if !receipt.accepted {
             cancellation.cancel();
             return Err(AgentError::StaleAuthority);
@@ -489,30 +582,40 @@ async fn publish_spool(
     entry: &SpoolEntry,
     first_sequence: u64,
 ) -> Result<u64, AgentError> {
-    let content = verified_spool_content(workspace_root, entry, "log").await?;
-    let chunks = content.len().max(1).div_ceil(MAX_LOG_CHUNK_BYTES);
-    for (offset, chunk) in content.chunks(MAX_LOG_CHUNK_BYTES).enumerate() {
-        let sequence = first_sequence
-            .checked_add(u64::try_from(offset).map_err(|_| {
-                AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned())
-            })?)
-            .ok_or_else(|| {
-                AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned())
-            })?;
+    if entry.bytes > MAX_TOTAL_LOG_SPOOL_BYTES {
+        return Err(AgentError::InvalidAssignment(
+            "durable log spool exceeds the per-attempt quota".to_owned(),
+        ));
+    }
+    let path = workspace_root.join(&entry.relative_path);
+    verify_spool_file(&path, entry, "log").await?;
+    let mut file = fs::File::open(path).await?;
+    let mut buffer = vec![0_u8; MAX_LOG_CHUNK_BYTES];
+    let mut sequence = first_sequence;
+    let mut published = false;
+    loop {
+        let bytes = file.read(&mut buffer).await?;
+        if bytes == 0 {
+            break;
+        }
         require_work_receipt(
             client
                 .publish_log(WorkLogChunk {
                     authority: Some(authority.clone()),
                     sequence,
                     stream: stream.to_owned(),
-                    content: chunk.to_vec(),
+                    content: buffer[..bytes].to_vec(),
                 })
                 .await?
                 .into_inner(),
             session_epoch,
         )?;
+        published = true;
+        sequence = sequence.checked_add(1).ok_or_else(|| {
+            AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned())
+        })?;
     }
-    if content.is_empty() {
+    if !published {
         require_work_receipt(
             client
                 .publish_log(WorkLogChunk {
@@ -525,12 +628,11 @@ async fn publish_spool(
                 .into_inner(),
             session_epoch,
         )?;
-    }
-    first_sequence
-        .checked_add(u64::try_from(chunks).map_err(|_| {
+        sequence = sequence.checked_add(1).ok_or_else(|| {
             AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned())
-        })?)
-        .ok_or_else(|| AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned()))
+        })?;
+    }
+    Ok(sequence)
 }
 
 async fn verified_spool_content(
@@ -538,14 +640,57 @@ async fn verified_spool_content(
     entry: &SpoolEntry,
     kind: &str,
 ) -> Result<Vec<u8>, AgentError> {
-    let content = fs::read(workspace_root.join(&entry.relative_path)).await?;
-    let calculated: [u8; 32] = Sha256::digest(&content).into();
-    if calculated != entry.digest || u64::try_from(content.len()).ok() != Some(entry.bytes) {
+    if entry.bytes > MAX_RESULT_SPOOL_BYTES {
+        return Err(AgentError::InvalidAssignment(format!(
+            "durable {kind} spool exceeds its quota"
+        )));
+    }
+    let path = workspace_root.join(&entry.relative_path);
+    verify_spool_file(&path, entry, kind).await?;
+    let content = fs::read(path).await?;
+    Ok(content)
+}
+
+async fn verify_spool_file(path: &Path, entry: &SpoolEntry, kind: &str) -> Result<(), AgentError> {
+    let mut file = fs::File::open(path).await?;
+    let mut buffer = vec![0_u8; MAX_LOG_CHUNK_BYTES];
+    let mut digest = Sha256::new();
+    let mut bytes = 0_u64;
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(u64::try_from(read).map_err(|_| {
+                AgentError::InvalidAssignment("spool size exceeds wire bounds".to_owned())
+            })?)
+            .ok_or_else(|| {
+                AgentError::InvalidAssignment("spool size exceeds wire bounds".to_owned())
+            })?;
+        digest.update(&buffer[..read]);
+    }
+    let calculated: [u8; 32] = digest.finalize().into();
+    if calculated != entry.digest || bytes != entry.bytes {
         return Err(AgentError::InvalidAssignment(format!(
             "durable {kind} spool metadata does not match its content"
         )));
     }
-    Ok(content)
+    Ok(())
+}
+
+fn validate_log_spool_quota(entries: &[SpoolEntry]) -> Result<(), AgentError> {
+    let total = entries.iter().try_fold(0_u64, |total, entry| {
+        total.checked_add(entry.bytes).ok_or_else(|| {
+            AgentError::InvalidAssignment("durable log spool exceeds its quota".to_owned())
+        })
+    })?;
+    if total > MAX_TOTAL_LOG_SPOOL_BYTES {
+        return Err(AgentError::InvalidAssignment(
+            "durable log spool exceeds its per-attempt quota".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn spool_stream(entry: &SpoolEntry) -> Result<&'static str, AgentError> {
@@ -567,22 +712,42 @@ async fn write_result(
     workspace: &Path,
     outcome: WorkOutcome,
     exit_code: Option<i32>,
-    termination: Termination,
+    termination: &str,
+    completion_protocol: &str,
+    cancellation_outcome: Option<i32>,
 ) -> Result<SpoolEntry, AgentError> {
     let relative_path = workspace.join("spool/result.json");
     let path = workspace_root.join(&relative_path);
+    let parent = path.parent().ok_or_else(|| {
+        AgentError::InvalidAssignment("result spool has no parent directory".to_owned())
+    })?;
+    fs::create_dir_all(parent).await?;
     let content = serde_json::to_vec(&json!({
         "outcome": outcome_name(outcome),
         "exit_code": exit_code,
-        "termination": termination_name(termination),
+        "termination": termination,
+        "completion_protocol": completion_protocol,
+        "cancellation_outcome": cancellation_outcome,
     }))?;
-    let mut file = fs::OpenOptions::new()
+    match fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&path)
-        .await?;
-    file.write_all(&content).await?;
-    file.sync_all().await?;
+        .await
+    {
+        Ok(mut file) => {
+            file.write_all(&content).await?;
+            file.sync_all().await?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if fs::read(&path).await? != content {
+                return Err(AgentError::InvalidAssignment(
+                    "durable result spool conflicts with replay evidence".to_owned(),
+                ));
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
     Ok(SpoolEntry {
         sequence: 0,
         relative_path,
@@ -593,32 +758,81 @@ async fn write_result(
     })
 }
 
+pub(super) async fn persist_recovered_cancellation(
+    config: &AgentConfig,
+    journal: &mut Journal,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+    cancellation_outcome: i32,
+) -> Result<(), AgentError> {
+    let result = write_result(
+        &config.workspace_root,
+        &attempt.workspace,
+        WorkOutcome::Aborted,
+        None,
+        "recovered_cancellation",
+        CANCELLATION_COMPLETION_PROTOCOL,
+        Some(cancellation_outcome),
+    )
+    .await?;
+    journal.begin_finalization(&Finalization {
+        organization_id: &attempt.organization_id,
+        attempt_id: &attempt.attempt_id,
+        fence_token: attempt.fence_token,
+        session_epoch: attempt.session_epoch,
+        phase: AttemptPhase::Cancelling,
+        process_id: attempt.process_id,
+        logs: &attempt.logs,
+        result: &result,
+    })?;
+    Ok(())
+}
+
 async fn finalize_without_process(
+    config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
     journal: &mut Journal,
-    authority: &WorkAuthority,
-    session_epoch: u64,
-    outcome: WorkOutcome,
-    reason: &str,
+    completion: ProcesslessCompletion<'_>,
 ) -> Result<(), AgentError> {
-    journal.transition(
-        &authority.organization_id,
-        &authority.attempt_id,
-        authority.fence_token,
+    let ProcesslessCompletion {
+        authority,
+        workspace,
         session_epoch,
-        if outcome == WorkOutcome::Aborted {
+        outcome,
+        reason,
+    } = completion;
+    let result = write_result(
+        &config.workspace_root,
+        workspace,
+        outcome,
+        None,
+        &reason,
+        WORK_COMPLETION_PROTOCOL,
+        None,
+    )
+    .await?;
+    journal.begin_finalization(&Finalization {
+        organization_id: &authority.organization_id,
+        attempt_id: &authority.attempt_id,
+        fence_token: authority.fence_token,
+        session_epoch,
+        phase: if outcome == WorkOutcome::Aborted {
             AttemptPhase::Cancelling
         } else {
             AttemptPhase::Finalizing
         },
-        None,
-    )?;
+        process_id: None,
+        logs: &[],
+        result: &result,
+    })?;
     require_work_receipt(
         client
             .complete_work(WorkCompletion {
                 authority: Some(authority.clone()),
                 outcome: outcome as i32,
-                summary_json: serde_json::to_vec(&json!({"reason": reason}))?,
+                summary_json: serde_json::to_vec(&json!({
+                    "reason": reason,
+                    "result_sha256": hex(&result.digest),
+                }))?,
             })
             .await?
             .into_inner(),
@@ -775,6 +989,98 @@ mod tests {
         assert!(matches!(
             validate_assignment(&config(), 1, assignment(wrong_kind)),
             Err(AgentError::UnsupportedSpec)
+        ));
+    }
+
+    #[test]
+    fn log_spool_quota_is_enforced_before_upload() {
+        let entry = |sequence, bytes| SpoolEntry {
+            sequence,
+            relative_path: PathBuf::from(format!("spool/{sequence}.log")),
+            digest: [0; 32],
+            bytes,
+        };
+        validate_log_spool_quota(&[
+            entry(0, MAX_TOTAL_LOG_SPOOL_BYTES / 2),
+            entry(1, MAX_TOTAL_LOG_SPOOL_BYTES / 2),
+        ])
+        .unwrap();
+        assert!(matches!(
+            validate_log_spool_quota(&[entry(0, MAX_TOTAL_LOG_SPOOL_BYTES), entry(1, 1)]),
+            Err(AgentError::InvalidAssignment(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn result_spool_is_idempotent_and_completion_protocol_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = PathBuf::from("org/attempt");
+
+        let first = write_result(
+            directory.path(),
+            &workspace,
+            WorkOutcome::Failed,
+            None,
+            "process_spawn_failed",
+            WORK_COMPLETION_PROTOCOL,
+            None,
+        )
+        .await
+        .unwrap();
+        let replay = write_result(
+            directory.path(),
+            &workspace,
+            WorkOutcome::Failed,
+            None,
+            "process_spawn_failed",
+            WORK_COMPLETION_PROTOCOL,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first, replay);
+
+        let result: PersistedResult = serde_json::from_slice(
+            &fs::read(directory.path().join(&first.relative_path))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result.completion_protocol, WORK_COMPLETION_PROTOCOL);
+        assert!(result.cancellation_outcome.is_none());
+
+        assert!(matches!(
+            write_result(
+                directory.path(),
+                &workspace,
+                WorkOutcome::Aborted,
+                None,
+                "recovered_cancellation",
+                CANCELLATION_COMPLETION_PROTOCOL,
+                Some(CancellationOutcome::Terminated as i32),
+            )
+            .await,
+            Err(AgentError::InvalidAssignment(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn spool_verification_streams_and_rejects_digest_mismatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large.log");
+        let content = vec![0x5a; MAX_LOG_CHUNK_BYTES + 17];
+        fs::write(&path, &content).await.unwrap();
+        let mut entry = SpoolEntry {
+            sequence: 0,
+            relative_path: PathBuf::from("large.log"),
+            digest: Sha256::digest(&content).into(),
+            bytes: u64::try_from(content.len()).unwrap(),
+        };
+        verify_spool_file(&path, &entry, "log").await.unwrap();
+        entry.digest[0] ^= 0xff;
+        assert!(matches!(
+            verify_spool_file(&path, &entry, "log").await,
+            Err(AgentError::InvalidAssignment(_))
         ));
     }
 }

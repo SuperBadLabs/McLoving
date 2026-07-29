@@ -13,7 +13,7 @@ use mcloving_agent_protocol::wire::{
     WorkAuthority, WorkCompletion, WorkLeaseReceipt, WorkLeaseRenewal, WorkLogChunk, WorkOffer,
     WorkOutcome, WorkPoll, WorkReceipt,
 };
-use mcloving_agent_protocol::{ProtocolRange, negotiate};
+use mcloving_agent_protocol::{ProtocolRange, WORK_DELIVERY_FEATURE, negotiate};
 use mcloving_controller_api::{ApiState, router};
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
@@ -123,6 +123,7 @@ impl AgentControl for ControllerAgentService {
             "journal-v1".to_owned(),
             "unix-process-group-v1".to_owned(),
             "windows-job-object-v1".to_owned(),
+            WORK_DELIVERY_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;

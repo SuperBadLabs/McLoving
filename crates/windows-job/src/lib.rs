@@ -39,6 +39,7 @@ use windows_sys::Win32::System::Threading::{
     STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
+const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_INVALID_PARAMETER: u32 = 87;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,7 +129,8 @@ impl JobProcess {
             "UpdateProcThreadAttribute(HANDLE_LIST)",
         )?;
 
-        let application = wide_nul(spec.program, "program contains NUL")?;
+        let resolved_program = resolve_program(spec)?;
+        let application = wide_nul(&resolved_program, "program contains NUL")?;
         let mut command_line = command_line(spec)?;
         let current_directory = wide_nul(
             spec.current_directory.as_os_str(),
@@ -276,6 +278,47 @@ fn create_kill_on_close_job() -> Result<OwnedHandle, JobError> {
     } else {
         Ok(job)
     }
+}
+
+fn resolve_program(spec: &SpawnSpec<'_>) -> Result<OsString, JobError> {
+    let program = Path::new(spec.program);
+    if program.is_absolute() {
+        return Ok(program.as_os_str().to_owned());
+    }
+    if program.components().count() > 1 {
+        return Ok(spec.current_directory.join(program).into_os_string());
+    }
+
+    let path = spec
+        .environment
+        .iter()
+        .find(|(key, _)| normalized_environment_key(key) == "PATH")
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var_os("PATH"))
+        .ok_or(JobError {
+            operation: "resolve program from PATH",
+            code: ERROR_FILE_NOT_FOUND,
+        })?;
+    let extensions: &[&str] = if program.extension().is_some() {
+        &[""]
+    } else {
+        &["", ".exe", ".com"]
+    };
+    for directory in std::env::split_paths(&path) {
+        for extension in extensions {
+            let mut candidate = directory.join(program);
+            if !extension.is_empty() {
+                candidate.set_extension(extension.trim_start_matches('.'));
+            }
+            if candidate.is_file() {
+                return Ok(candidate.into_os_string());
+            }
+        }
+    }
+    Err(JobError {
+        operation: "resolve program from PATH",
+        code: ERROR_FILE_NOT_FOUND,
+    })
 }
 
 fn duplicate_inheritable(file: &File) -> Result<OwnedHandle, JobError> {

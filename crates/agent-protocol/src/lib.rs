@@ -18,6 +18,7 @@ pub mod wire {
 
 pub const PROTOCOL_MAJOR: u16 = 1;
 pub const PROTOCOL_MINOR: u16 = 0;
+pub const WORK_DELIVERY_FEATURE: &str = "work-delivery-v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolRange {

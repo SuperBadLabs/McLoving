@@ -15,7 +15,9 @@ use mcloving_agent_protocol::wire::{
     AttemptState, CancellationCompletion, CancellationDisposition, CancellationOutcome,
     OpenSessionRequest, ProtocolOffer, ReconciliationReport as WireReport,
 };
-use mcloving_agent_protocol::{OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError};
+use mcloving_agent_protocol::{
+    OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError, WORK_DELIVERY_FEATURE,
+};
 #[cfg(windows)]
 use mcloving_agent_runtime::Acceptance;
 use mcloving_agent_runtime::executor::ExecutionError;
@@ -96,7 +98,6 @@ pub enum AgentError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecoveredCancellation {
     Terminated,
-    #[cfg(unix)]
     AlreadyExited,
     #[cfg(unix)]
     RetireStale,
@@ -312,7 +313,11 @@ async fn open_session(
             major: u32::from(PROTOCOL_MAJOR),
             minimum_minor: u32::from(PROTOCOL_MINOR),
             maximum_minor: u32::from(PROTOCOL_MINOR),
-            features: vec!["journal-v1".to_owned(), platform_feature().to_owned()],
+            features: vec![
+                "journal-v1".to_owned(),
+                platform_feature().to_owned(),
+                WORK_DELIVERY_FEATURE.to_owned(),
+            ],
         }),
         trust_pool: config.trust_pool.clone(),
         capabilities: vec![
@@ -331,6 +336,7 @@ async fn open_session(
     if response.protocol_minor != u32::from(PROTOCOL_MINOR) {
         return Err(AgentError::UnsupportedProtocol);
     }
+    require_work_delivery_feature(&response.features)?;
     Ok((
         client,
         SessionReceipt {
@@ -338,6 +344,17 @@ async fn open_session(
             active_attempts,
         },
     ))
+}
+
+fn require_work_delivery_feature(features: &[String]) -> Result<(), AgentError> {
+    if features
+        .iter()
+        .any(|feature| feature == WORK_DELIVERY_FEATURE)
+    {
+        Ok(())
+    } else {
+        Err(AgentError::UnsupportedProtocol)
+    }
 }
 
 async fn send_reconciliation(
@@ -374,26 +391,35 @@ async fn send_reconciliation(
                 let outcome =
                     cancel_recovered_attempt(&mut journal, attempt, config.termination_grace)
                         .await?;
+                let cancellation_outcome = match outcome {
+                    RecoveredCancellation::Terminated => CancellationOutcome::Terminated as i32,
+                    RecoveredCancellation::AlreadyExited => {
+                        CancellationOutcome::AlreadyExited as i32
+                    }
+                    #[cfg(unix)]
+                    RecoveredCancellation::RetireStale => {
+                        CancellationOutcome::IdentityMismatch as i32
+                    }
+                    RecoveredCancellation::ReconciliationRequired => {
+                        CancellationOutcome::ReconciliationRequired as i32
+                    }
+                };
+                if outcome != RecoveredCancellation::ReconciliationRequired {
+                    worker::persist_recovered_cancellation(
+                        config,
+                        &mut journal,
+                        attempt,
+                        cancellation_outcome,
+                    )
+                    .await?;
+                }
                 let request = CancellationCompletion {
                     agent_id: config.agent_id.clone(),
                     session_epoch,
                     organization_id: attempt.organization_id.clone(),
                     attempt_id: attempt.attempt_id.clone(),
                     fence_token: attempt.fence_token,
-                    outcome: match outcome {
-                        RecoveredCancellation::Terminated => CancellationOutcome::Terminated as i32,
-                        #[cfg(unix)]
-                        RecoveredCancellation::AlreadyExited => {
-                            CancellationOutcome::AlreadyExited as i32
-                        }
-                        #[cfg(unix)]
-                        RecoveredCancellation::RetireStale => {
-                            CancellationOutcome::IdentityMismatch as i32
-                        }
-                        RecoveredCancellation::ReconciliationRequired => {
-                            CancellationOutcome::ReconciliationRequired as i32
-                        }
-                    },
+                    outcome: cancellation_outcome,
                 };
                 let receipt = tokio::select! {
                     () = stop.cancelled() => return Err(AgentError::Stopped),
@@ -490,7 +516,10 @@ async fn terminate_recovered_process(
         return Ok(RecoveredCancellation::ReconciliationRequired);
     };
     match process_birth_identity_for(process_id)? {
-        None => return Ok(RecoveredCancellation::AlreadyExited),
+        // A dead process-group leader does not prove that its descendants are
+        // gone. Without the leader's birth identity we cannot safely
+        // distinguish the original group from a recycled PGID.
+        None => return Ok(RecoveredCancellation::ReconciliationRequired),
         Some(current) if current != expected_identity => {
             return Ok(RecoveredCancellation::RetireStale);
         }
@@ -514,7 +543,10 @@ async fn terminate_recovered_process(
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
         match process_birth_identity_for(process_id)? {
-            None => return Ok(RecoveredCancellation::Terminated),
+            None if !unix_process_group_exists(process_group)? => {
+                return Ok(RecoveredCancellation::Terminated);
+            }
+            None => {}
             Some(current) if current != expected_identity => {
                 return Ok(RecoveredCancellation::RetireStale);
             }
@@ -527,7 +559,10 @@ async fn terminate_recovered_process(
     // signalled, even if the original group disappeared during the grace
     // window.
     match process_birth_identity_for(process_id)? {
-        None => return Ok(RecoveredCancellation::Terminated),
+        None if !unix_process_group_exists(process_group)? => {
+            return Ok(RecoveredCancellation::Terminated);
+        }
+        None => {}
         Some(current) if current != expected_identity => {
             return Ok(RecoveredCancellation::RetireStale);
         }
@@ -539,15 +574,31 @@ async fn terminate_recovered_process(
     }
 }
 
+#[cfg(unix)]
+fn unix_process_group_exists(process_group: nix::unistd::Pid) -> Result<bool, AgentError> {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+
+    match killpg(process_group, None) {
+        Ok(()) | Err(Errno::EPERM) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(error) => Err(AgentError::Io(std::io::Error::other(error))),
+    }
+}
+
 #[cfg(windows)]
 async fn terminate_recovered_process(
-    _process_id: Option<u32>,
+    process_id: Option<u32>,
     _process_birth_identity: Option<&str>,
     _termination_grace: Duration,
 ) -> Result<RecoveredCancellation, AgentError> {
     // The previous service process owned the kill-on-close Job Object. SCM
     // restart cannot occur until that process and its complete Job have died.
-    Ok(RecoveredCancellation::Terminated)
+    Ok(if process_id.is_some() {
+        RecoveredCancellation::Terminated
+    } else {
+        RecoveredCancellation::AlreadyExited
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -863,6 +914,26 @@ mod tests {
         assert!(matches!(result, Err(AgentError::ProbeTimeout)));
     }
 
+    #[test]
+    fn work_delivery_must_be_negotiated_before_polling() {
+        assert!(matches!(
+            require_work_delivery_feature(&["journal-v1".to_owned()]),
+            Err(AgentError::UnsupportedProtocol)
+        ));
+        require_work_delivery_feature(&[WORK_DELIVERY_FEATURE.to_owned()]).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn recovered_windows_attempt_without_process_is_already_exited() {
+        assert_eq!(
+            terminate_recovered_process(None, None, Duration::from_millis(25))
+                .await
+                .unwrap(),
+            RecoveredCancellation::AlreadyExited
+        );
+    }
+
     #[tokio::test]
     async fn smoke_runtime_reserves_epoch_and_stops_cleanly() {
         let directory = tempfile::tempdir().unwrap();
@@ -898,6 +969,36 @@ mod tests {
         assert!(child.try_wait().unwrap().is_none());
         child.kill().await.unwrap();
         child.wait().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn missing_unix_group_leader_requires_reconciliation() {
+        use nix::sys::signal::{Signal, killpg};
+        use nix::unistd::Pid;
+
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 &"])
+            .process_group(0)
+            .kill_on_drop(false);
+        let mut leader = command.spawn().unwrap();
+        let process_id = leader.id().unwrap();
+        leader.wait().await.unwrap();
+
+        assert_eq!(
+            terminate_recovered_process(
+                Some(process_id),
+                Some("linux-proc-v1:gone:1"),
+                Duration::from_millis(25),
+            )
+            .await
+            .unwrap(),
+            RecoveredCancellation::ReconciliationRequired
+        );
+        let group = Pid::from_raw(i32::try_from(process_id).unwrap());
+        assert!(unix_process_group_exists(group).unwrap());
+        let _ = killpg(group, Signal::SIGKILL);
     }
 
     #[cfg(target_os = "linux")]
