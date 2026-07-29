@@ -4832,6 +4832,50 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             .expect("reject another agent")
             .is_none()
     );
+    assert!(
+        store
+            .open_agent_session(
+                "agent-protected",
+                "trusted",
+                2,
+                3,
+                &["work-delivery-v1".to_owned()],
+                &["linux".to_owned()],
+            )
+            .await
+            .expect("replace the session without credential support")
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                2,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject a session without credential support")
+            .is_none()
+    );
+    assert!(
+        store
+            .open_agent_session(
+                "agent-protected",
+                "trusted",
+                3,
+                3,
+                &[
+                    "work-delivery-v1".to_owned(),
+                    "attempt-credentials-v1".to_owned(),
+                ],
+                &["linux".to_owned()],
+            )
+            .await
+            .expect("restore credential support")
+    );
     let delivered = store
         .redeem_credential_grants(
             organization_id,
@@ -4839,7 +4883,7 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             claim.fence,
             claim.restore_epoch,
             "agent-protected",
-            1,
+            3,
             &["DEPLOY_TOKEN".to_owned()],
         )
         .await
@@ -4856,7 +4900,7 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             claim.fence,
             claim.restore_epoch,
             "agent-protected",
-            1,
+            3,
             &["DEPLOY_TOKEN".to_owned()],
         )
         .await
@@ -4871,7 +4915,7 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
                 claim.fence,
                 claim.restore_epoch,
                 "agent-protected",
-                1,
+                3,
             )
             .await
             .expect("start protected work")
@@ -4884,7 +4928,7 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
                 claim.fence,
                 claim.restore_epoch,
                 "agent-protected",
-                1,
+                3,
                 &["DEPLOY_TOKEN".to_owned()],
             )
             .await
@@ -4904,7 +4948,7 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
                     stream: "stdout",
                     content: b"before marker-secret-value after",
                 },
-                1,
+                3,
             )
             .await
             .expect("persist redacted credential-bearing log")
