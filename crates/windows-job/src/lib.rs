@@ -37,11 +37,12 @@ use windows_sys::Win32::System::JobObjects::{
     TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
-    STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcessToken,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
+    WaitForSingleObject,
 };
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -195,7 +196,7 @@ impl JobProcess {
                 null(),
                 null(),
                 1,
-                CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+                workload_creation_flags(),
                 environment.as_ptr().cast(),
                 current_directory.as_ptr(),
                 (&raw const startup.StartupInfo).cast(),
@@ -284,6 +285,14 @@ impl JobProcess {
             Ok(accounting.ActiveProcesses)
         }
     }
+}
+
+const fn workload_creation_flags() -> u32 {
+    // Agent workloads are always non-interactive and receive explicit standard
+    // handles. Prevent console applications from allocating a hidden conhost
+    // session: that session can block before user code starts when the agent is
+    // hosted by the Service Control Manager under LocalSystem.
+    CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
 }
 
 fn create_kill_on_close_job() -> Result<OwnedHandle, JobError> {
@@ -780,6 +789,15 @@ impl Drop for OwnedHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workload_processes_are_suspended_without_an_interactive_console() {
+        let flags = workload_creation_flags();
+        assert_ne!(flags & CREATE_NO_WINDOW, 0);
+        assert_ne!(flags & CREATE_SUSPENDED, 0);
+        assert_ne!(flags & CREATE_UNICODE_ENVIRONMENT, 0);
+        assert_ne!(flags & EXTENDED_STARTUPINFO_PRESENT, 0);
+    }
 
     #[test]
     fn windows_arguments_quote_only_when_the_c_argv_contract_requires_it() {
