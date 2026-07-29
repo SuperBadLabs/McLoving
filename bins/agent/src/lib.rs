@@ -426,6 +426,14 @@ async fn send_reconciliation(
                     if worker::recovered_attempt_has_durable_containment_proof(config, attempt)
                         .await?
                     {
+                        journal.transition(
+                            &attempt.organization_id,
+                            &attempt.attempt_id,
+                            attempt.fence_token,
+                            attempt.session_epoch,
+                            AttemptPhase::Cancelling,
+                            attempt.process_id,
+                        )?;
                         RecoveredCancellation::AlreadyExited
                     } else {
                         cancel_recovered_attempt(&mut journal, attempt, config.termination_grace)
