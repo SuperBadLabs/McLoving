@@ -1247,6 +1247,7 @@ dependencies = [
  "mcloving-controller-api",
  "mcloving-controller-store",
  "mcloving-execution-spine",
+ "serde_json",
  "sha2",
  "sqlx",
  "tempfile",

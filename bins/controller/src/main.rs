@@ -9,13 +9,15 @@ use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentCon
 use mcloving_agent_protocol::wire::{
     AttemptAuthority, CancellationCompletion, CancellationDisposition, CancellationOutcome,
     CancellationReceipt, OpenSessionRequest, OpenSessionResponse, ReconciliationDirective,
-    ReconciliationReport, RotateCertificateRequest, RotateCertificateResponse,
+    ReconciliationReport, RotateCertificateRequest, RotateCertificateResponse, WorkAssignment,
+    WorkAuthority, WorkCompletion, WorkLeaseReceipt, WorkLeaseRenewal, WorkLogChunk, WorkOffer,
+    WorkOutcome, WorkPoll, WorkReceipt,
 };
 use mcloving_agent_protocol::{ProtocolRange, negotiate};
 use mcloving_controller_api::{ApiState, router};
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, Store,
+    AgentReconciliationDisposition, ClaimRequest, NewLogChunk, Store, TerminalOutcome,
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use sha2::{Digest, Sha256};
@@ -321,6 +323,314 @@ impl AgentControl for ControllerAgentService {
             },
         }))
     }
+
+    async fn poll_work(&self, request: Request<WorkPoll>) -> Result<Response<WorkOffer>, Status> {
+        let identity = self.identities.authenticate(&request)?.clone();
+        let request = request.into_inner();
+        authorize_work_session(
+            &self.store,
+            &identity,
+            &request.agent_id,
+            request.session_epoch,
+            &request.organization_id,
+        )
+        .await?;
+        let lease_seconds = i32::try_from(request.lease_seconds)
+            .map_err(|_| Status::invalid_argument("lease_seconds is out of range"))?;
+        if !(5..=300).contains(&lease_seconds) {
+            return Err(Status::invalid_argument(
+                "lease_seconds must be between 5 and 300",
+            ));
+        }
+        let capabilities = self
+            .store
+            .agent_session_capabilities(&request.agent_id, request.session_epoch)
+            .await
+            .map_err(internal_store_error)?
+            .ok_or_else(|| Status::failed_precondition("stale agent session epoch"))?;
+        self.store
+            .requeue_one_expired(identity.organization_id)
+            .await
+            .map_err(internal_store_error)?;
+        let assignment = if let Some(claim) = self
+            .store
+            .claim_next(&ClaimRequest {
+                organization_id: identity.organization_id,
+                scheduler_id: format!("agent:{}:{}", request.agent_id, request.session_epoch),
+                agent_id: request.agent_id.clone(),
+                capabilities,
+                lease_seconds,
+                fairness_seed: 0,
+            })
+            .await
+            .map_err(internal_store_error)?
+        {
+            let execution = self
+                .store
+                .attempt_execution(
+                    claim.organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &claim.agent_id,
+                )
+                .await
+                .map_err(internal_store_error)?
+                .ok_or_else(|| Status::aborted("claimed work lost fenced authority"))?;
+            let execution_spec_json = serde_json::to_vec(&execution.execution_spec)
+                .map_err(|error| Status::internal(format!("serialize execution spec: {error}")))?;
+            Some(WorkAssignment {
+                organization_id: claim.organization_id.to_string(),
+                build_id: claim.build_id.to_string(),
+                node_id: claim.node_id.to_string(),
+                attempt_id: claim.attempt_id.to_string(),
+                fence_token: encode_authority_token(claim.restore_epoch, claim.fence)?,
+                payload_digest: Sha256::digest(&execution_spec_json).to_vec(),
+                execution_spec_json,
+            })
+        } else {
+            None
+        };
+        Ok(Response::new(WorkOffer {
+            session_epoch: request.session_epoch,
+            assignment,
+        }))
+    }
+
+    async fn accept_work(
+        &self,
+        request: Request<WorkAuthority>,
+    ) -> Result<Response<WorkReceipt>, Status> {
+        let identity = self.identities.authenticate(&request)?.clone();
+        let authority = request.into_inner();
+        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let accepted = self
+            .store
+            .accept_offer(
+                context.organization_id,
+                context.attempt_id,
+                context.fence,
+                context.restore_epoch,
+                &authority.agent_id,
+            )
+            .await
+            .map_err(internal_store_error)?;
+        Ok(Response::new(WorkReceipt {
+            session_epoch: authority.session_epoch,
+            accepted,
+        }))
+    }
+
+    async fn start_work(
+        &self,
+        request: Request<WorkAuthority>,
+    ) -> Result<Response<WorkReceipt>, Status> {
+        let identity = self.identities.authenticate(&request)?.clone();
+        let authority = request.into_inner();
+        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let accepted = self
+            .store
+            .mark_attempt_running(
+                context.organization_id,
+                context.attempt_id,
+                context.fence,
+                context.restore_epoch,
+                &authority.agent_id,
+            )
+            .await
+            .map_err(internal_store_error)?;
+        Ok(Response::new(WorkReceipt {
+            session_epoch: authority.session_epoch,
+            accepted,
+        }))
+    }
+
+    async fn renew_work_lease(
+        &self,
+        request: Request<WorkLeaseRenewal>,
+    ) -> Result<Response<WorkLeaseReceipt>, Status> {
+        let identity = self.identities.authenticate(&request)?.clone();
+        let request = request.into_inner();
+        let authority = request
+            .authority
+            .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
+        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let lease_seconds = i32::try_from(request.lease_seconds)
+            .map_err(|_| Status::invalid_argument("lease_seconds is out of range"))?;
+        if !(5..=300).contains(&lease_seconds) {
+            return Err(Status::invalid_argument(
+                "lease_seconds must be between 5 and 300",
+            ));
+        }
+        let cancellation_requested = self
+            .store
+            .renew_attempt_lease(
+                context.organization_id,
+                context.attempt_id,
+                context.fence,
+                context.restore_epoch,
+                &authority.agent_id,
+                lease_seconds,
+            )
+            .await
+            .map_err(internal_store_error)?;
+        Ok(Response::new(WorkLeaseReceipt {
+            session_epoch: authority.session_epoch,
+            accepted: cancellation_requested.is_some(),
+            cancellation_requested: cancellation_requested.unwrap_or(false),
+        }))
+    }
+
+    async fn publish_log(
+        &self,
+        request: Request<WorkLogChunk>,
+    ) -> Result<Response<WorkReceipt>, Status> {
+        let identity = self.identities.authenticate(&request)?.clone();
+        let request = request.into_inner();
+        let authority = request
+            .authority
+            .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
+        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        if !matches!(request.stream.as_str(), "stdout" | "stderr")
+            || request.content.len() > 1_048_576
+        {
+            return Err(Status::invalid_argument(
+                "log stream or one-MiB chunk bound is invalid",
+            ));
+        }
+        let sequence = i64::try_from(request.sequence)
+            .map_err(|_| Status::invalid_argument("log sequence is out of range"))?;
+        let accepted = self
+            .store
+            .append_log(&NewLogChunk {
+                organization_id: context.organization_id,
+                attempt_id: context.attempt_id,
+                fence: context.fence,
+                restore_epoch: context.restore_epoch,
+                agent_id: &authority.agent_id,
+                sequence,
+                stream: &request.stream,
+                content: &request.content,
+            })
+            .await
+            .map_err(internal_store_error)?;
+        Ok(Response::new(WorkReceipt {
+            session_epoch: authority.session_epoch,
+            accepted,
+        }))
+    }
+
+    async fn complete_work(
+        &self,
+        request: Request<WorkCompletion>,
+    ) -> Result<Response<WorkReceipt>, Status> {
+        let identity = self.identities.authenticate(&request)?.clone();
+        let request = request.into_inner();
+        let authority = request
+            .authority
+            .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
+        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        if request.summary_json.len() > 65_536 {
+            return Err(Status::invalid_argument("terminal summary exceeds 64 KiB"));
+        }
+        let summary: serde_json::Value = serde_json::from_slice(&request.summary_json)
+            .map_err(|_| Status::invalid_argument("terminal summary must be valid JSON"))?;
+        let outcome = match WorkOutcome::try_from(request.outcome) {
+            Ok(WorkOutcome::Succeeded) => TerminalOutcome::Succeeded,
+            Ok(WorkOutcome::Failed) => TerminalOutcome::Failed,
+            Ok(WorkOutcome::Aborted) => TerminalOutcome::Aborted,
+            Ok(WorkOutcome::Unspecified) | Err(_) => {
+                return Err(Status::invalid_argument("work outcome must be explicit"));
+            }
+        };
+        let accepted = self
+            .store
+            .finalize_attempt(
+                context.organization_id,
+                context.attempt_id,
+                context.fence,
+                context.restore_epoch,
+                &authority.agent_id,
+                outcome,
+                summary,
+            )
+            .await
+            .map_err(internal_store_error)?;
+        Ok(Response::new(WorkReceipt {
+            session_epoch: authority.session_epoch,
+            accepted,
+        }))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WorkContext {
+    organization_id: Uuid,
+    attempt_id: Uuid,
+    restore_epoch: i64,
+    fence: i64,
+}
+
+async fn authorize_work_session(
+    store: &Store,
+    identity: &AgentIdentity,
+    agent_id: &str,
+    session_epoch: u64,
+    organization_id: &str,
+) -> Result<(), Status> {
+    if agent_id != identity.agent_id
+        || organization_id.parse::<Uuid>().ok() != Some(identity.organization_id)
+    {
+        return Err(Status::permission_denied(
+            "work identity or organization does not match the authenticated certificate",
+        ));
+    }
+    if !store
+        .authorize_agent_session(agent_id, session_epoch)
+        .await
+        .map_err(internal_store_error)?
+    {
+        return Err(Status::failed_precondition("stale agent session epoch"));
+    }
+    Ok(())
+}
+
+async fn authorize_work_authority(
+    store: &Store,
+    identity: &AgentIdentity,
+    authority: &WorkAuthority,
+) -> Result<WorkContext, Status> {
+    authorize_work_session(
+        store,
+        identity,
+        &authority.agent_id,
+        authority.session_epoch,
+        &authority.organization_id,
+    )
+    .await?;
+    let organization_id = authority
+        .organization_id
+        .parse()
+        .map_err(|_| Status::invalid_argument("organization_id must be a UUID"))?;
+    let attempt_id = authority
+        .attempt_id
+        .parse()
+        .map_err(|_| Status::invalid_argument("attempt_id must be a UUID"))?;
+    let (restore_epoch, fence) = decode_authority_token(authority.fence_token);
+    Ok(WorkContext {
+        organization_id,
+        attempt_id,
+        restore_epoch,
+        fence,
+    })
+}
+
+fn encode_authority_token(restore_epoch: i64, fence: i64) -> Result<u64, Status> {
+    let restore_epoch = u32::try_from(restore_epoch)
+        .map_err(|_| Status::failed_precondition("restore epoch exceeds wire bounds"))?;
+    let fence = u32::try_from(fence)
+        .map_err(|_| Status::failed_precondition("fence exceeds wire bounds"))?;
+    Ok((u64::from(restore_epoch) << 32) | u64::from(fence))
 }
 
 fn decode_authority_token(token: u64) -> (i64, i64) {
@@ -372,6 +682,7 @@ async fn run_agent_control_server(store: Store) -> Result<()> {
 struct AgentIdentity {
     agent_id: String,
     trust_pool: String,
+    organization_id: Uuid,
 }
 
 #[derive(Debug)]
@@ -388,16 +699,16 @@ impl AgentIdentityBindings {
 
     fn parse(source: &str) -> Result<Self> {
         let mut by_certificate_sha256 = BTreeMap::new();
-        let mut trust_pool_by_agent = BTreeMap::new();
+        let mut claims_by_agent = BTreeMap::new();
         for (index, raw_line) in source.lines().enumerate() {
             let line = raw_line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
-            if fields.len() != 3 {
+            if fields.len() != 4 {
                 bail!(
-                    "identity binding line {} must contain SHA-256, agent ID, and trust pool",
+                    "identity binding line {} must contain SHA-256, agent ID, trust pool, and organization UUID",
                     index + 1
                 );
             }
@@ -407,6 +718,12 @@ impl AgentIdentityBindings {
             let identity = AgentIdentity {
                 agent_id: fields[1].to_owned(),
                 trust_pool: fields[2].to_owned(),
+                organization_id: fields[3].parse().with_context(|| {
+                    format!(
+                        "identity binding line {} has an invalid organization UUID",
+                        index + 1
+                    )
+                })?,
             };
             if identity.agent_id.trim().is_empty() || identity.trust_pool.trim().is_empty() {
                 bail!(
@@ -420,16 +737,17 @@ impl AgentIdentityBindings {
                     index + 1
                 );
             }
-            if let Some(existing_trust_pool) = trust_pool_by_agent.get(&identity.agent_id) {
-                if existing_trust_pool != &identity.trust_pool {
+            let claims = (identity.trust_pool.clone(), identity.organization_id);
+            if let Some(existing_claims) = claims_by_agent.get(&identity.agent_id) {
+                if existing_claims != &claims {
                     bail!(
-                        "identity binding line {} assigns agent {} to conflicting trust pools",
+                        "identity binding line {} assigns agent {} conflicting trust or organization claims",
                         index + 1,
                         identity.agent_id
                     );
                 }
             } else {
-                trust_pool_by_agent.insert(identity.agent_id.clone(), identity.trust_pool.clone());
+                claims_by_agent.insert(identity.agent_id.clone(), claims);
             }
             by_certificate_sha256.insert(digest, identity);
         }
@@ -585,7 +903,7 @@ mod tests {
     fn certificate_bindings_are_exact_and_fail_closed() {
         let digest = "11".repeat(32);
         let bindings = AgentIdentityBindings::parse(&format!(
-            "# sha256 agent trust-pool\n{digest} windows-1 trusted-windows\n"
+            "# sha256 agent trust-pool organization\n{digest} windows-1 trusted-windows 00000000-0000-0000-0000-000000000123\n"
         ))
         .unwrap();
         assert_eq!(
@@ -593,6 +911,7 @@ mod tests {
             &AgentIdentity {
                 agent_id: "windows-1".to_owned(),
                 trust_pool: "trusted-windows".to_owned(),
+                organization_id: Uuid::from_u128(0x123),
             }
         );
         assert!(AgentIdentityBindings::parse("").is_err());
@@ -605,17 +924,22 @@ mod tests {
         let rotated_digest = "22".repeat(32);
         assert!(
             AgentIdentityBindings::parse(&format!(
-                "{digest} agent pool\n{rotated_digest} agent pool\n"
+                "{digest} agent pool 00000000-0000-0000-0000-000000000123\n{rotated_digest} agent pool 00000000-0000-0000-0000-000000000123\n"
             ))
             .is_ok()
         );
         assert!(
             AgentIdentityBindings::parse(&format!(
-                "{digest} agent trusted\n{rotated_digest} agent untrusted\n"
+                "{digest} agent trusted 00000000-0000-0000-0000-000000000123\n{rotated_digest} agent untrusted 00000000-0000-0000-0000-000000000123\n"
             ))
             .is_err()
         );
-        assert!(AgentIdentityBindings::parse("not-a-digest agent pool\n").is_err());
-        assert!(AgentIdentityBindings::parse(&format!("{digest} agent\n")).is_err());
+        assert!(
+            AgentIdentityBindings::parse(
+                "not-a-digest agent pool 00000000-0000-0000-0000-000000000123\n"
+            )
+            .is_err()
+        );
+        assert!(AgentIdentityBindings::parse(&format!("{digest} agent pool\n")).is_err());
     }
 }
