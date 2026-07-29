@@ -48,7 +48,7 @@ where
         .write(true)
         .open(&stderr_path)?;
 
-    let (program, arguments) = windows_command(request);
+    let (program, arguments) = windows_command(request)?;
     let mut command = Command::new(program);
     command
         .args(arguments)
@@ -122,18 +122,20 @@ where
     })
 }
 
-fn windows_command(request: &ExecutionRequest) -> (PathBuf, Vec<OsString>) {
+fn windows_command(request: &ExecutionRequest) -> Result<(PathBuf, Vec<OsString>), ExecutionError> {
     match request.mode {
-        ExecutionMode::Direct => (request.program.clone(), request.arguments.clone()),
+        ExecutionMode::Direct => Ok((request.program.clone(), request.arguments.clone())),
         ExecutionMode::WindowsCmd => {
-            let mut arguments = vec![
-                OsString::from("/D"),
-                OsString::from("/S"),
-                OsString::from("/C"),
-                request.program.as_os_str().to_owned(),
-            ];
-            arguments.extend(request.arguments.iter().cloned());
-            (PathBuf::from("cmd.exe"), arguments)
+            let command = cmd_command_string(&request.program, &request.arguments)?;
+            Ok((
+                PathBuf::from("cmd.exe"),
+                vec![
+                    OsString::from("/D"),
+                    OsString::from("/S"),
+                    OsString::from("/C"),
+                    OsString::from(command),
+                ],
+            ))
         }
         ExecutionMode::PowerShell => {
             let mut arguments = vec![
@@ -146,9 +148,52 @@ fn windows_command(request: &ExecutionRequest) -> (PathBuf, Vec<OsString>) {
                 request.program.as_os_str().to_owned(),
             ];
             arguments.extend(request.arguments.iter().cloned());
-            (PathBuf::from("powershell.exe"), arguments)
+            Ok((PathBuf::from("powershell.exe"), arguments))
         }
     }
+}
+
+fn cmd_command_string(
+    program: &std::path::Path,
+    arguments: &[OsString],
+) -> Result<String, ExecutionError> {
+    let program = program
+        .to_str()
+        .ok_or(ExecutionError::UnsafeWindowsShellArgument)?;
+    let mut values = Vec::with_capacity(arguments.len() + 1);
+    values.push(program);
+    for argument in arguments {
+        values.push(
+            argument
+                .to_str()
+                .ok_or(ExecutionError::UnsafeWindowsShellArgument)?,
+        );
+    }
+    if values.iter().any(|value| {
+        value.chars().any(|character| {
+            matches!(
+                character,
+                '"' | '\r' | '\n' | '%' | '!' | '^' | '&' | '|' | '<' | '>'
+            )
+        })
+    }) {
+        return Err(ExecutionError::UnsafeWindowsShellArgument);
+    }
+
+    // /S strips the first and last quote after /C. One outer quote pair keeps
+    // the inner program-path quotes intact; each value then remains one cmd
+    // token even when normal Windows paths or arguments contain spaces.
+    let mut command = String::from("\"");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            command.push(' ');
+        }
+        command.push('"');
+        command.push_str(value);
+        command.push('"');
+    }
+    command.push('"');
+    Ok(command)
 }
 
 async fn terminate_job(job: &Job, child: &mut Child) -> Result<ExitStatus, ExecutionError> {
@@ -233,21 +278,23 @@ mod tests {
         assert_eq!(direct.exit_code, Some(0));
         assert_eq!(direct.containment, Containment::WindowsJobObject);
 
-        let command_script = root.path().join("mode.cmd");
-        fs::write(&command_script, "@echo off\r\necho cmd-%1\r\n").unwrap();
+        let command_directory = root.path().join("script directory");
+        fs::create_dir(&command_directory).unwrap();
+        let command_script = command_directory.join("mode.cmd");
+        fs::write(&command_script, "@echo off\r\necho cmd-%~1\r\n").unwrap();
         let cmd = request(
             root.path(),
             "cmd",
             ExecutionMode::WindowsCmd,
             command_script,
-            vec![OsString::from("ok")],
+            vec![OsString::from("hello world")],
         );
         let cmd = execute(&cmd, CancellationToken::new()).await.unwrap();
         assert_eq!(cmd.exit_code, Some(0));
         assert!(
             fs::read_to_string(root.path().join("cmd/spool/stdout.log"))
                 .unwrap()
-                .contains("cmd-ok")
+                .contains("cmd-hello world")
         );
 
         let powershell_script = root.path().join("mode.ps1");

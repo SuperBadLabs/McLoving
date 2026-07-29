@@ -8,7 +8,8 @@ use std::time::Duration;
 use mcloving_agent_protocol::wire;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
-    AttemptState, OpenSessionRequest, ProtocolOffer, ReconciliationReport as WireReport,
+    AttemptState, CancellationCompletion, OpenSessionRequest, ProtocolOffer,
+    ReconciliationReport as WireReport,
 };
 use mcloving_agent_protocol::{OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError};
 #[cfg(windows)]
@@ -235,10 +236,6 @@ async fn send_reconciliation(
         let mut journal = Journal::open(&config.journal_path)?;
         for attempt in &report.attempts {
             if cancelled.contains(&attempt.attempt_id) {
-                // Reconciliation runs before this service accepts new work.
-                // Any recovered Windows Job died when its previous service
-                // process closed the kill-on-close handle, so terminalizing
-                // the durable record cannot race a live child.
                 journal.transition(
                     &attempt.organization_id,
                     &attempt.attempt_id,
@@ -247,17 +244,66 @@ async fn send_reconciliation(
                     AttemptPhase::Cancelling,
                     attempt.process_id,
                 )?;
-                journal.transition(
-                    &attempt.organization_id,
-                    &attempt.attempt_id,
-                    attempt.fence_token,
-                    attempt.session_epoch,
-                    AttemptPhase::Aborted,
-                    attempt.process_id,
-                )?;
+                terminate_recovered_process(attempt.process_id).await?;
+                let request = CancellationCompletion {
+                    agent_id: config.agent_id.clone(),
+                    session_epoch,
+                    organization_id: attempt.organization_id.clone(),
+                    attempt_id: attempt.attempt_id.clone(),
+                    fence_token: attempt.fence_token,
+                };
+                let receipt = tokio::select! {
+                    () = stop.cancelled() => return Err(AgentError::Stopped),
+                    response = client.complete_cancellation(request) => response?,
+                }
+                .into_inner();
+                if receipt.session_epoch != session_epoch {
+                    return Err(AgentError::StaleSession);
+                }
+                if receipt.accepted {
+                    journal.transition(
+                        &attempt.organization_id,
+                        &attempt.attempt_id,
+                        attempt.fence_token,
+                        attempt.session_epoch,
+                        AttemptPhase::Aborted,
+                        attempt.process_id,
+                    )?;
+                }
             }
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn terminate_recovered_process(process_id: Option<u32>) -> Result<(), AgentError> {
+    use nix::errno::Errno;
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+
+    let Some(process_id) = process_id else {
+        return Ok(());
+    };
+    let process_group = i32::try_from(process_id)
+        .map(Pid::from_raw)
+        .map_err(|_| std::io::Error::other("recovered process ID exceeds Unix pid_t"))?;
+    match killpg(process_group, Signal::SIGTERM) {
+        Ok(()) => {}
+        Err(Errno::ESRCH) => return Ok(()),
+        Err(error) => return Err(std::io::Error::other(error).into()),
+    }
+    sleep(Duration::from_millis(100)).await;
+    match killpg(process_group, Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(std::io::Error::other(error).into()),
+    }
+}
+
+#[cfg(windows)]
+async fn terminate_recovered_process(_process_id: Option<u32>) -> Result<(), AgentError> {
+    // The previous service process owned the kill-on-close Job Object. SCM
+    // restart cannot occur until that process and its complete Job have died.
     Ok(())
 }
 
@@ -454,6 +500,22 @@ mod tests {
         assert_eq!(health.0, "wal");
         assert_eq!(health.1, "ok");
         assert_eq!(health.2, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recovered_unix_process_group_is_killed_before_completion() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 30"]).process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_id = child.id().unwrap();
+
+        terminate_recovered_process(Some(process_id)).await.unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("recovered process should become waitable")
+            .unwrap();
+        assert!(!status.success());
     }
 
     #[test]

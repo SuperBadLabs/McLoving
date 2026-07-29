@@ -21,8 +21,14 @@ The controller serves that contract when `MCLOVING_AGENT_LISTEN` is set. It
 requires `MCLOVING_AGENT_SERVER_CERT_PATH`,
 `MCLOVING_AGENT_SERVER_KEY_PATH`, and `MCLOVING_AGENT_CLIENT_CA_PATH`; the
 listener refuses plaintext and requires a client certificate rooted in the
-configured agent CA. Session epochs are advanced atomically in PostgreSQL so a
-second controller replica cannot admit stale authority.
+configured agent CA. `MCLOVING_AGENT_IDENTITY_BINDINGS_PATH` is also required
+when that listener is enabled. It names a root-owned, whitespace-delimited file
+whose non-comment rows contain the client leaf-certificate SHA-256, exact agent
+ID, and exact trust pool. Every session, reconciliation, and cancellation
+completion verifies the claims against the authenticated peer certificate.
+Possession of another certificate under the same CA cannot select a different
+agent identity or trust class. Session epochs are advanced atomically in
+PostgreSQL so a second controller replica cannot admit stale authority.
 
 ## Acceptance and reconciliation
 
@@ -39,10 +45,13 @@ platform process identity and checksummed log/result spool metadata. Terminal
 attempts remain durable history but are excluded from active reconciliation.
 The controller compares each report with current PostgreSQL lease, fence,
 restore epoch, owner, and cancellation state. Rejected attempts are returned
-as cancellation directives. Because this service reconciles before accepting
-new work, recovered Windows Jobs have already been killed by the previous
-service process's kill-on-close handle; the agent durably terminalizes those
-cancelled records.
+as cancellation directives. Before terminalizing a cancelled record, a
+reconnecting Unix agent terminates the recorded process group; recovered
+Windows Jobs have already been killed by the previous service process's
+kill-on-close handle. The agent then sends a fenced cancellation-completion
+RPC. PostgreSQL atomically terminalizes the attempt, node, build, event, and
+outbox before the local SQLite record becomes terminal. A lost response leaves
+the local record reconcilable and the controller completion is idempotent.
 
 ## Portable execution boundary
 
@@ -73,6 +82,9 @@ cancelled records.
   session and SQLite WAL reconciliation contract as Linux.
 - Direct process, `cmd.exe`, and PowerShell modes are explicit rather than
   inferred from input.
+- `cmd.exe /S /C` receives one outer-quoted command string so script paths and
+  arguments containing spaces remain intact. Shell metacharacters with
+  expansion semantics are rejected rather than interpolated.
 - A child is created suspended, durably recorded, assigned to an anonymous
   kill-on-close Job Object, and only then resumed. This removes the
   spawn-before-containment race.

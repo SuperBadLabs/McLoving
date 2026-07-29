@@ -83,6 +83,8 @@ pub enum ExecutionError {
     SpawnHook(String),
     #[error("execution mode {0:?} is unsupported on this platform")]
     UnsupportedMode(ExecutionMode),
+    #[error("cmd.exe program or argument contains unsupported shell metacharacters")]
+    UnsafeWindowsShellArgument,
     #[error("Windows Job Object operation failed: {0}")]
     WindowsJob(String),
     #[error("I/O error: {0}")]

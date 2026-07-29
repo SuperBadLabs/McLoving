@@ -1,20 +1,24 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
 use mcloving_agent_protocol::wire::{
-    OpenSessionRequest, OpenSessionResponse, ReconciliationDirective, ReconciliationReport,
-    RotateCertificateRequest, RotateCertificateResponse,
+    CancellationCompletion, CancellationReceipt, OpenSessionRequest, OpenSessionResponse,
+    ReconciliationDirective, ReconciliationReport, RotateCertificateRequest,
+    RotateCertificateResponse,
 };
 use mcloving_agent_protocol::{ProtocolRange, negotiate};
 use mcloving_controller_api::{ApiState, router};
 use mcloving_controller_store::{AgentReconciliationDisposition, ClaimRequest, Store};
 use mcloving_execution_spine::{WorkerConfig, run_claim};
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
+use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
@@ -66,9 +70,7 @@ async fn main() -> Result<()> {
             .await
             .context("serve public API")
     };
-    let agent_server = run_agent_control_server(ControllerAgentService {
-        store: store.clone(),
-    });
+    let agent_server = run_agent_control_server(store.clone());
     tokio::pin!(server);
     tokio::pin!(agent_server);
     let worker_loop = run_embedded_worker(store, worker);
@@ -83,6 +85,7 @@ async fn main() -> Result<()> {
 #[derive(Clone)]
 struct ControllerAgentService {
     store: Store,
+    identities: Arc<AgentIdentityBindings>,
 }
 
 #[tonic::async_trait]
@@ -91,10 +94,16 @@ impl AgentControl for ControllerAgentService {
         &self,
         request: Request<OpenSessionRequest>,
     ) -> Result<Response<OpenSessionResponse>, Status> {
+        let identity = self.identities.authenticate(&request)?;
         let request = request.into_inner();
         if request.agent_id.trim().is_empty() || request.trust_pool.trim().is_empty() {
             return Err(Status::invalid_argument(
                 "agent_id and trust_pool are required",
+            ));
+        }
+        if request.agent_id != identity.agent_id || request.trust_pool != identity.trust_pool {
+            return Err(Status::permission_denied(
+                "agent identity or trust pool does not match the authenticated certificate",
             ));
         }
         let offer = request
@@ -146,7 +155,13 @@ impl AgentControl for ControllerAgentService {
         &self,
         request: Request<ReconciliationReport>,
     ) -> Result<Response<ReconciliationDirective>, Status> {
+        let identity = self.identities.authenticate(&request)?;
         let request = request.into_inner();
+        if request.agent_id != identity.agent_id {
+            return Err(Status::permission_denied(
+                "agent identity does not match the authenticated certificate",
+            ));
+        }
         if !self
             .store
             .authorize_agent_session(&request.agent_id, request.session_epoch)
@@ -209,13 +224,53 @@ impl AgentControl for ControllerAgentService {
             cancel_attempt_ids: cancelled.into_iter().collect(),
         }))
     }
+
+    async fn complete_cancellation(
+        &self,
+        request: Request<CancellationCompletion>,
+    ) -> Result<Response<CancellationReceipt>, Status> {
+        let identity = self.identities.authenticate(&request)?;
+        let request = request.into_inner();
+        if request.agent_id != identity.agent_id {
+            return Err(Status::permission_denied(
+                "agent identity does not match the authenticated certificate",
+            ));
+        }
+        if !self
+            .store
+            .authorize_agent_session(&request.agent_id, request.session_epoch)
+            .await
+            .map_err(internal_store_error)?
+        {
+            return Err(Status::failed_precondition("stale agent session epoch"));
+        }
+        let organization_id = request
+            .organization_id
+            .parse()
+            .map_err(|_| Status::invalid_argument("organization_id must be a UUID"))?;
+        let attempt_id = request
+            .attempt_id
+            .parse()
+            .map_err(|_| Status::invalid_argument("attempt_id must be a UUID"))?;
+        let fence = i64::try_from(request.fence_token)
+            .map_err(|_| Status::invalid_argument("fence_token is out of range"))?;
+        let accepted = self
+            .store
+            .complete_agent_cancellation(organization_id, attempt_id, fence, &request.agent_id)
+            .await
+            .map_err(internal_store_error)?;
+        Ok(Response::new(CancellationReceipt {
+            session_epoch: request.session_epoch,
+            accepted,
+        }))
+    }
 }
 
 fn internal_store_error(error: mcloving_controller_store::StoreError) -> Status {
     Status::internal(format!("controller store failed: {error}"))
 }
 
-async fn run_agent_control_server(service: ControllerAgentService) -> Result<()> {
+async fn run_agent_control_server(store: Store) -> Result<()> {
     let Some(listen) = std::env::var("MCLOVING_AGENT_LISTEN").ok() else {
         std::future::pending::<()>().await;
         unreachable!("pending agent server future returned")
@@ -229,9 +284,17 @@ async fn run_agent_control_server(service: ControllerAgentService) -> Result<()>
         .context("read agent-control server private key")?;
     let client_ca = std::fs::read(required("MCLOVING_AGENT_CLIENT_CA_PATH")?)
         .context("read agent-control client CA")?;
+    let identities = AgentIdentityBindings::read(PathBuf::from(required(
+        "MCLOVING_AGENT_IDENTITY_BINDINGS_PATH",
+    )?))
+    .context("read agent certificate identity bindings")?;
     let tls = ServerTlsConfig::new()
         .identity(Identity::from_pem(certificate, private_key))
         .client_ca_root(Certificate::from_pem(client_ca));
+    let service = ControllerAgentService {
+        store,
+        identities: Arc::new(identities),
+    };
     Server::builder()
         .tls_config(tls)
         .context("configure agent-control mTLS")?
@@ -239,6 +302,96 @@ async fn run_agent_control_server(service: ControllerAgentService) -> Result<()>
         .serve(address)
         .await
         .with_context(|| format!("serve agent control on {address}"))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AgentIdentity {
+    agent_id: String,
+    trust_pool: String,
+}
+
+#[derive(Debug)]
+struct AgentIdentityBindings {
+    by_certificate_sha256: BTreeMap<[u8; 32], AgentIdentity>,
+}
+
+impl AgentIdentityBindings {
+    fn read(path: PathBuf) -> Result<Self> {
+        let source = std::fs::read_to_string(&path)
+            .with_context(|| format!("read identity bindings from {}", path.display()))?;
+        Self::parse(&source)
+    }
+
+    fn parse(source: &str) -> Result<Self> {
+        let mut by_certificate_sha256 = BTreeMap::new();
+        for (index, raw_line) in source.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+            if fields.len() != 3 {
+                bail!(
+                    "identity binding line {} must contain SHA-256, agent ID, and trust pool",
+                    index + 1
+                );
+            }
+            let digest = parse_sha256(fields[0]).with_context(|| {
+                format!("identity binding line {} has invalid SHA-256", index + 1)
+            })?;
+            let identity = AgentIdentity {
+                agent_id: fields[1].to_owned(),
+                trust_pool: fields[2].to_owned(),
+            };
+            if identity.agent_id.trim().is_empty() || identity.trust_pool.trim().is_empty() {
+                bail!(
+                    "identity binding line {} contains an empty claim",
+                    index + 1
+                );
+            }
+            if by_certificate_sha256.insert(digest, identity).is_some() {
+                bail!(
+                    "identity binding line {} repeats a certificate digest",
+                    index + 1
+                );
+            }
+        }
+        if by_certificate_sha256.is_empty() {
+            bail!("at least one agent certificate identity binding is required");
+        }
+        Ok(Self {
+            by_certificate_sha256,
+        })
+    }
+
+    fn authenticate<T>(&self, request: &Request<T>) -> Result<&AgentIdentity, Status> {
+        let tls = request
+            .extensions()
+            .get::<TlsConnectInfo<TcpConnectInfo>>()
+            .ok_or_else(|| Status::unauthenticated("mutual TLS connection identity is missing"))?;
+        let certificates = tls
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("client certificate is missing"))?;
+        let leaf = certificates
+            .first()
+            .ok_or_else(|| Status::unauthenticated("client certificate chain is empty"))?;
+        let digest: [u8; 32] = Sha256::digest(leaf.as_ref()).into();
+        self.by_certificate_sha256
+            .get(&digest)
+            .ok_or_else(|| Status::permission_denied("client certificate is not enrolled"))
+    }
+}
+
+fn parse_sha256(value: &str) -> Result<[u8; 32]> {
+    if value.len() != 64 {
+        bail!("SHA-256 must contain 64 hexadecimal characters");
+    }
+    let mut digest = [0_u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .context("SHA-256 contains a non-hexadecimal character")?;
+    }
+    Ok(digest)
 }
 
 struct EmbeddedWorker {
@@ -339,4 +492,34 @@ where
         bail!("{name} must be positive");
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certificate_bindings_are_exact_and_fail_closed() {
+        let digest = "11".repeat(32);
+        let bindings = AgentIdentityBindings::parse(&format!(
+            "# sha256 agent trust-pool\n{digest} windows-1 trusted-windows\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            bindings.by_certificate_sha256.get(&[0x11; 32]).unwrap(),
+            &AgentIdentity {
+                agent_id: "windows-1".to_owned(),
+                trust_pool: "trusted-windows".to_owned(),
+            }
+        );
+        assert!(AgentIdentityBindings::parse("").is_err());
+        assert!(
+            AgentIdentityBindings::parse(&format!(
+                "{digest} agent pool\n{digest} other other-pool\n"
+            ))
+            .is_err()
+        );
+        assert!(AgentIdentityBindings::parse("not-a-digest agent pool\n").is_err());
+        assert!(AgentIdentityBindings::parse(&format!("{digest} agent\n")).is_err());
+    }
 }

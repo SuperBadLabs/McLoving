@@ -424,6 +424,168 @@ impl Store {
         })
     }
 
+    /// Atomically acknowledges a fenced agent's completed cancellation.
+    ///
+    /// A reconnect may arrive after its lease deadline, so cancellation
+    /// completion is authorized by the current restore epoch, exact fence, and
+    /// exact lease owner rather than by an unexpired lease. Response-loss
+    /// replay of the same already-aborted attempt succeeds without emitting a
+    /// second event. Uncertain external effects fail closed into explicit
+    /// reconciliation instead of being mislabeled aborted.
+    pub async fn complete_agent_cancellation(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let authority = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+            "SELECT n.id, n.build_id, a.status
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id
+              AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id
+              AND b.organization_id = n.organization_id
+             WHERE a.id = $1
+               AND a.organization_id = $2
+               AND a.fence = $3
+               AND a.lease_owner = $4
+               AND a.restore_epoch = (
+                   SELECT restore_epoch
+                   FROM controller_metadata
+                   WHERE singleton
+               )
+               AND a.status IN ('cancelling', 'aborted')
+               AND b.cancellation_requested_at IS NOT NULL
+             FOR UPDATE OF a, n, b",
+        )
+        .bind(attempt_id)
+        .bind(organization_id)
+        .bind(fence)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((node_id, build_id, status)) = authority else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        if status == "aborted" {
+            tx.commit().await?;
+            return Ok(true);
+        }
+
+        let uncertain_effects = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+             FROM attempt_effects
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND status = 'uncertain'",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        if uncertain_effects > 0 {
+            sqlx::query(
+                "UPDATE attempts
+                 SET status = 'reconciliation_required',
+                     lease_owner = NULL,
+                     lease_expires_at = NULL
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(attempt_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'reconciliation_required'
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(node_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE builds
+                 SET status = 'reconciliation_required', completed_at = NULL
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(build_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            append_event_and_outbox(
+                &mut tx,
+                organization_id,
+                build_id,
+                "attempt.cancellation_reconciliation_required",
+                json!({
+                    "attempt_id": attempt_id,
+                    "fence": fence,
+                    "agent_id": agent_id,
+                    "uncertain_effects": uncertain_effects,
+                }),
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "UPDATE attempts
+             SET status = 'aborted',
+                 terminal_summary = $3,
+                 completed_at = clock_timestamp(),
+                 lease_owner = NULL,
+                 lease_expires_at = NULL
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(attempt_id)
+        .bind(organization_id)
+        .bind(json!({"reason": "agent_confirmed_cancellation"}))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE nodes
+             SET status = 'aborted'
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(node_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE builds
+             SET status = 'aborted', completed_at = clock_timestamp()
+             WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(build_id)
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "attempt.cancellation_completed",
+            json!({
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "agent_id": agent_id,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Creates an organization/project pair for bootstrap and tests.
     pub async fn create_project(
         &self,
