@@ -85,6 +85,36 @@ CREATE INDEX legal_holds_active_idx
     ON legal_holds (organization_id, object_digest, hold_key)
     WHERE released_at IS NULL;
 
+CREATE TABLE object_deletion_claims (
+    object_digest bytea PRIMARY KEY CHECK (octet_length(object_digest) = 32),
+    claim_token uuid NOT NULL UNIQUE,
+    status text NOT NULL CHECK (status IN ('claimed', 'deleted')),
+    claimed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    completed_at timestamptz,
+    CHECK (
+        (status = 'claimed' AND completed_at IS NULL)
+        OR (status = 'deleted' AND completed_at IS NOT NULL)
+    )
+);
+
+CREATE FUNCTION mcloving_object_deletion_claim_exists(candidate bytea)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT EXISTS (
+        SELECT 1
+        FROM object_deletion_claims
+        WHERE object_digest = candidate
+    )
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_object_deletion_claim_exists(bytea) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION mcloving_object_deletion_claim_exists(bytea)
+TO mcloving_tenant;
+
 GRANT SELECT ON controller_metadata TO mcloving_tenant;
 GRANT SELECT, INSERT, UPDATE ON object_retention, legal_holds
 TO mcloving_tenant;

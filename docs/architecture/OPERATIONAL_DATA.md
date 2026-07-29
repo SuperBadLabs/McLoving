@@ -96,6 +96,12 @@ and no tenant has an active legal hold on its digest. Retention deadlines can
 be extended but never shortened.
 Legal holds have stable keys and immutable reasons; release timestamps preserve
 their audit history, and a released hold cannot be silently reactivated.
+Eligibility inspection is diagnostic only. Physical deletion requires a
+durable tokenized claim under a digest-scoped transaction lock. While claimed,
+new references, retention extensions, and legal holds lose to that same lock.
+The deleter either abandons the claim while content still exists or completes
+it after removal. Completion leaves a permanent tombstone, so stale metadata
+cannot recreate a reference to physically deleted content.
 
 ## Boundaries
 

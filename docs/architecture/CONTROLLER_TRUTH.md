@@ -18,7 +18,9 @@ negative result.
 Retries never rewrite an attempt. A failed or reconciliation-required attempt
 may create exactly one child attempt with an incremented ordinal and an
 immutable `retry_of` link. Replaying the retry decision returns that same
-child. Exhausted retry budgets enter a checksummed dead-letter ledger.
+child. Scheduling that child and terminally closing the parent reconciliation
+are mutually exclusive decisions under the same advisory lock. Exhausted retry
+budgets enter a checksummed dead-letter ledger.
 
 External effects use a fenced, immutable-payload checkpoint ledger. Effect
 class and payload digest cannot change after preparation. State advances
@@ -100,9 +102,11 @@ The real-PostgreSQL gate proves:
   reconciliation routing, and stale-result rejection;
 - a tenant-prefixed scheduler claim-order index;
 - immutable, idempotent, bounded retry history and dead-letter exhaustion;
+- mutually exclusive retry-versus-terminal reconciliation decisions;
 - monotonic effect checkpoints, payload substitution rejection, and explicit
   uncertain-effect reconciliation;
-- monotonic retention, legal-hold precedence, logical backup/restore,
+- monotonic retention, legal-hold precedence, durable serialized deletion
+  claims, logical backup/restore,
   idempotent single-use activation, same-fence restore-epoch collision
   rejection, and stale recovery-point rejection; and
 - forced-RLS read filtering and cross-tenant write rejection.

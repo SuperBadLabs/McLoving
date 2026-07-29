@@ -213,6 +213,13 @@ pub struct StoredObject {
     pub status: ObjectStatus,
 }
 
+/// Exclusive, durable authority to remove one globally unprotected CAS object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectDeletionClaim {
+    pub digest: [u8; 32],
+    pub token: Uuid,
+}
+
 /// A sealed database checkpoint that can anchor backup and PITR operations.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryPoint {
@@ -1092,6 +1099,12 @@ impl Store {
                AND a.status = 'reconciliation_required'
                AND a.lease_owner IS NULL
                AND a.lease_expires_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM attempts AS child
+                   WHERE child.organization_id = a.organization_id
+                     AND child.retry_of = a.id
+               )
                AND n.organization_id = a.organization_id
                AND n.id = a.node_id
                AND NOT EXISTS (
@@ -1383,6 +1396,11 @@ impl Store {
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        acquire_object_deletion_fence(&mut tx, &digest).await?;
+        if object_deletion_claim_exists(&mut tx, &digest).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let inserted = sqlx::query_scalar::<_, String>(
             "INSERT INTO attempt_objects (
                  organization_id, attempt_id, fence, kind, name,
@@ -1768,6 +1786,11 @@ impl Store {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_object_deletion_fence(&mut tx, &digest).await?;
+        if object_deletion_claim_exists(&mut tx, &digest).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let retained = sqlx::query_scalar::<_, Vec<u8>>(
             "INSERT INTO object_retention (
                  organization_id, object_digest, retain_until
@@ -1809,6 +1832,11 @@ impl Store {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_object_deletion_fence(&mut tx, &digest).await?;
+        if object_deletion_claim_exists(&mut tx, &digest).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let held = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO legal_holds (
                  id, organization_id, object_digest, hold_key, reason
@@ -1862,12 +1890,14 @@ impl Store {
         Ok(released.is_some())
     }
 
-    /// Lists globally unreferenced-by-policy content for physical CAS deletion.
+    /// Inspects globally unprotected content without granting deletion authority.
     ///
     /// This privileged cross-tenant operation is deliberately not exposed
     /// through a tenant transaction. Every organization referencing a digest
     /// must have expired retention and no organization may have an active hold.
-    /// Absence of any retention record is fail-closed.
+    /// Absence of any retention record is fail-closed. Callers must use
+    /// [`Self::claim_objects_globally_for_deletion`] before physical deletion;
+    /// this point-in-time inspection result is never deletion authority.
     pub async fn objects_globally_eligible_for_deletion(
         &self,
         limit: i64,
@@ -1911,6 +1941,136 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Claims globally unprotected content for serialized physical deletion.
+    ///
+    /// Each durable claim fences new references, retention extensions, and
+    /// legal holds for its digest. The caller must either complete the claim
+    /// after physical CAS deletion or abandon it while the object still exists.
+    /// Completed claims remain as tombstones and permanently block stale
+    /// references to deleted content.
+    pub async fn claim_objects_globally_for_deletion(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<ObjectDeletionClaim>, StoreError> {
+        if !(1..=10_000).contains(&limit) {
+            return Ok(Vec::new());
+        }
+        let mut tx = self.pool.begin().await?;
+        let candidates = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT DISTINCT candidate.object_digest
+             FROM attempt_objects AS candidate
+             WHERE NOT EXISTS (
+                   SELECT 1
+                   FROM object_deletion_claims AS claim
+                   WHERE claim.object_digest = candidate.object_digest
+               )
+             ORDER BY candidate.object_digest
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut claims = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let digest: [u8; 32] = candidate.try_into().map_err(|_| {
+                StoreError::InvalidObjectRecord(
+                    "deletion candidate digest is not 32 bytes".to_owned(),
+                )
+            })?;
+            acquire_object_deletion_fence(&mut tx, &digest).await?;
+            let token = Uuid::new_v4();
+            let inserted = sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO object_deletion_claims (
+                     object_digest, claim_token, status
+                 )
+                 SELECT $1, $2, 'claimed'
+                 WHERE EXISTS (
+                       SELECT 1
+                       FROM attempt_objects
+                       WHERE object_digest = $1
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM attempt_objects AS referenced
+                       LEFT JOIN object_retention AS r
+                         ON r.organization_id = referenced.organization_id
+                        AND r.object_digest = referenced.object_digest
+                       WHERE referenced.object_digest = $1
+                         AND (
+                             r.object_digest IS NULL
+                             OR r.retain_until > clock_timestamp()
+                         )
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM legal_holds AS h
+                       WHERE h.object_digest = $1
+                         AND h.released_at IS NULL
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM object_deletion_claims
+                       WHERE object_digest = $1
+                   )
+                 RETURNING claim_token",
+            )
+            .bind(digest.as_slice())
+            .bind(token)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if inserted.is_some() {
+                claims.push(ObjectDeletionClaim { digest, token });
+            }
+        }
+        tx.commit().await?;
+        Ok(claims)
+    }
+
+    /// Completes an exact deletion claim after the CAS object is gone.
+    pub async fn complete_object_deletion(
+        &self,
+        claim: ObjectDeletionClaim,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        acquire_object_deletion_fence(&mut tx, &claim.digest).await?;
+        let completed = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE object_deletion_claims
+             SET status = 'deleted', completed_at = clock_timestamp()
+             WHERE object_digest = $1
+               AND claim_token = $2
+               AND status = 'claimed'
+             RETURNING claim_token",
+        )
+        .bind(claim.digest.as_slice())
+        .bind(claim.token)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(completed.is_some())
+    }
+
+    /// Abandons an exact claim only while physical content is still present.
+    pub async fn abandon_object_deletion(
+        &self,
+        claim: ObjectDeletionClaim,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        acquire_object_deletion_fence(&mut tx, &claim.digest).await?;
+        let abandoned = sqlx::query_scalar::<_, Uuid>(
+            "DELETE FROM object_deletion_claims
+             WHERE object_digest = $1
+               AND claim_token = $2
+               AND status = 'claimed'
+             RETURNING claim_token",
+        )
+        .bind(claim.digest.as_slice())
+        .bind(claim.token)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(abandoned.is_some())
     }
 
     /// Accepts exactly one terminal publication for the current attempt fence.
@@ -2107,6 +2267,31 @@ async fn acquire_restore_fence_shared(
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+async fn acquire_object_deletion_fence(
+    tx: &mut Transaction<'_, Postgres>,
+    digest: &[u8; 32],
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(
+             hashtextextended('mcloving.object.delete.' || encode($1, 'hex'), 0)
+         )",
+    )
+    .bind(digest.as_slice())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn object_deletion_claim_exists(
+    tx: &mut Transaction<'_, Postgres>,
+    digest: &[u8; 32],
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT mcloving_object_deletion_claim_exists($1)")
+        .bind(digest.as_slice())
+        .fetch_one(&mut **tx)
+        .await
 }
 
 fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {

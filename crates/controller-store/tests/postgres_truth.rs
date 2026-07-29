@@ -1084,6 +1084,118 @@ async fn expired_confirmed_non_idempotent_effect_cannot_be_replayed() {
 }
 
 #[tokio::test]
+async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "reconciliation-decision",
+        )
+        .await
+        .expect("create tenant");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "reconciliation-decision".into(),
+            pipeline_digest: [42; 32],
+            node_key: "recover".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit reconciliation work");
+    let mut reconciliation_tx = store.pool().begin().await.expect("begin reconciliation");
+    sqlx::query(
+        "UPDATE attempts
+         SET status = 'reconciliation_required',
+             lease_owner = NULL,
+             lease_expires_at = NULL
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.attempt_id)
+    .execute(&mut *reconciliation_tx)
+    .await
+    .expect("route attempt to reconciliation");
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'reconciliation_required'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.node_id)
+    .execute(&mut *reconciliation_tx)
+    .await
+    .expect("route node to reconciliation");
+    sqlx::query(
+        "UPDATE builds
+         SET status = 'reconciliation_required'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .execute(&mut *reconciliation_tx)
+    .await
+    .expect("route build to reconciliation");
+    reconciliation_tx
+        .commit()
+        .await
+        .expect("commit reconciliation state");
+    let retry = store
+        .schedule_retry(
+            organization_id,
+            admission.attempt_id,
+            3,
+            "operator selected retry",
+        )
+        .await
+        .expect("schedule reconciliation retry");
+    let RetryDecision::Scheduled {
+        attempt_id: child_id,
+        created: true,
+        ..
+    } = retry
+    else {
+        panic!("expected new retry child, got {retry:?}");
+    };
+    assert!(
+        !store
+            .finalize_reconciled_attempt(
+                organization_id,
+                admission.attempt_id,
+                0,
+                "operator-d",
+                TerminalOutcome::Succeeded,
+                json!({"resolution": "must not override scheduled retry"}),
+            )
+            .await
+            .expect("terminal reconciliation loses after retry decision")
+    );
+    let child = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-after-reconciliation".into(),
+            agent_id: "agent-after-reconciliation".into(),
+            capabilities: vec!["linux".into()],
+            lease_seconds: 300,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim scheduled retry")
+        .expect("retry remains claimable");
+    assert_eq!(child.attempt_id, child_id);
+}
+
+#[tokio::test]
 async fn build_logs_exclude_chunks_from_a_superseded_fence() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -2085,6 +2197,42 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("released content is deletable"),
         vec![digest]
     );
+    let deletion_claims = store
+        .claim_objects_globally_for_deletion(10)
+        .await
+        .expect("claim released content for deletion");
+    assert_eq!(deletion_claims.len(), 1);
+    let deletion_claim = deletion_claims[0];
+    assert_eq!(deletion_claim.digest, digest);
+    assert!(
+        !store
+            .retain_object_for(organization_id, digest, 3600)
+            .await
+            .expect("deletion claim blocks retention extension")
+    );
+    assert!(
+        !store
+            .acquire_legal_hold(
+                organization_id,
+                digest,
+                "late-case",
+                "must lose to deletion claim",
+            )
+            .await
+            .expect("deletion claim blocks legal hold")
+    );
+    assert!(
+        store
+            .abandon_object_deletion(deletion_claim)
+            .await
+            .expect("abandon deletion while physical content exists")
+    );
+    assert!(
+        !store
+            .complete_object_deletion(deletion_claim)
+            .await
+            .expect("abandoned token cannot complete")
+    );
     assert!(
         store
             .retain_object_for(organization_id, digest, 3600)
@@ -2103,6 +2251,71 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .await
             .expect("retention extension is monotonic")
             .is_empty()
+    );
+
+    let disposable_digest = [54; 32];
+    assert!(
+        store
+            .register_object(
+                organization_id,
+                admission.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent",
+                ObjectKind::Artifact,
+                "disposable.tar.zst",
+                disposable_digest,
+                1024,
+            )
+            .await
+            .expect("register disposable content")
+    );
+    assert!(
+        store
+            .retain_object_for(organization_id, disposable_digest, 0)
+            .await
+            .expect("expire disposable retention")
+    );
+    let completed_claims = store
+        .claim_objects_globally_for_deletion(10)
+        .await
+        .expect("claim disposable content");
+    assert_eq!(completed_claims.len(), 1);
+    let completed_claim = completed_claims[0];
+    assert_eq!(completed_claim.digest, disposable_digest);
+    assert!(
+        !store
+            .register_object(
+                second_organization_id,
+                second_admission.attempt_id,
+                second_claim.fence,
+                second_claim.restore_epoch,
+                "agent",
+                ObjectKind::Artifact,
+                "late-disposable.tar.zst",
+                disposable_digest,
+                1024,
+            )
+            .await
+            .expect("active deletion claim blocks a new reference")
+    );
+    assert!(
+        store
+            .complete_object_deletion(completed_claim)
+            .await
+            .expect("complete physical deletion claim")
+    );
+    assert!(
+        !store
+            .retain_object_for(organization_id, disposable_digest, 3600)
+            .await
+            .expect("deleted tombstone blocks stale retention")
+    );
+    assert!(
+        !store
+            .abandon_object_deletion(completed_claim)
+            .await
+            .expect("completed tombstone cannot be abandoned")
     );
 }
 
