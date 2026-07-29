@@ -54,9 +54,13 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             run_windows_service(ServiceMode::ExecutionSmoke {
                 journal: required_path(&arguments, 1, "JOURNAL")?,
                 workspace_root: required_path(&arguments, 2, "WORKSPACE_ROOT")?,
-                script: required_path(&arguments, 3, "SCRIPT")?,
+                marker_root: required_path(&arguments, 3, "MARKER_ROOT")?,
             })?;
         }
+        "workload-tree-smoke" => {
+            run_windows_workload_tree_smoke(&required_path(&arguments, 1, "MARKER_ROOT")?)?;
+        }
+        "workload-sleep-smoke" => run_windows_workload_sleep_smoke()?,
         "service-creation-boundary-smoke" => {
             let boundary = required_value(&arguments, 5, "BOUNDARY")?;
             let record_before_pause = match boundary.as_str() {
@@ -78,7 +82,7 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: mcloving-agent [foreground|probe|journal-check PATH|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT SCRIPT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
+                "usage: mcloving-agent [foreground|probe|journal-check PATH|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT MARKER_ROOT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
                     .into(),
             );
         }
@@ -122,7 +126,7 @@ enum ServiceMode {
     ExecutionSmoke {
         journal: PathBuf,
         workspace_root: PathBuf,
-        script: PathBuf,
+        marker_root: PathBuf,
     },
     CreationBoundarySmoke {
         journal: PathBuf,
@@ -160,11 +164,11 @@ fn run_windows_service(mode: ServiceMode) -> Result<(), Box<dyn std::error::Erro
                     ServiceMode::ExecutionSmoke {
                         journal,
                         workspace_root,
-                        script,
+                        marker_root,
                     } => ServiceTask::ExecutionSmoke {
                         journal: journal.clone(),
                         workspace_root: workspace_root.clone(),
-                        script: script.clone(),
+                        marker_root: marker_root.clone(),
                     },
                     ServiceMode::CreationBoundarySmoke {
                         journal,
@@ -196,13 +200,13 @@ fn run_windows_service(mode: ServiceMode) -> Result<(), Box<dyn std::error::Erro
                                         ServiceTask::ExecutionSmoke {
                                             journal,
                                             workspace_root,
-                                            script,
+                                            marker_root,
                                         },
                                     ) => {
                                         run_execution_service_smoke(
                                             &journal,
                                             &workspace_root,
-                                            &script,
+                                            &marker_root,
                                             stop,
                                         )
                                         .await
@@ -258,9 +262,9 @@ fn run_windows_service(mode: ServiceMode) -> Result<(), Box<dyn std::error::Erro
         ServiceMode::ExecutionSmoke {
             journal,
             workspace_root,
-            script,
+            marker_root,
         } => {
-            let _ = (journal, workspace_root, script);
+            let _ = (journal, workspace_root, marker_root);
         }
         ServiceMode::CreationBoundarySmoke {
             journal,
@@ -282,7 +286,7 @@ enum ServiceTask {
     ExecutionSmoke {
         journal: PathBuf,
         workspace_root: PathBuf,
-        script: PathBuf,
+        marker_root: PathBuf,
     },
     CreationBoundarySmoke {
         journal: PathBuf,
@@ -291,4 +295,46 @@ enum ServiceTask {
         marker: PathBuf,
         record_before_pause: bool,
     },
+}
+
+#[cfg(windows)]
+fn run_windows_workload_tree_smoke(
+    marker_root: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+
+    fn write_pid(path: &std::path::Path, process_id: u32) -> Result<(), std::io::Error> {
+        let mut marker = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)?;
+        writeln!(marker, "{process_id}")?;
+        marker.sync_all()
+    }
+
+    write_pid(&marker_root.join("parent.pid"), std::process::id())?;
+    let mut child = std::process::Command::new(std::env::current_exe()?)
+        .arg("workload-sleep-smoke")
+        .spawn()?;
+    write_pid(&marker_root.join("child.pid"), child.id())?;
+    child.wait()?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn run_windows_workload_tree_smoke(
+    _marker_root: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    Err("Windows workload-tree smoke is only available on Windows".into())
+}
+
+#[cfg(windows)]
+fn run_windows_workload_sleep_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    std::thread::sleep(std::time::Duration::from_secs(300));
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn run_windows_workload_sleep_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    Err("Windows workload sleep smoke is only available on Windows".into())
 }

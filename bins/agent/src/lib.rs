@@ -840,15 +840,18 @@ pub async fn run_service_smoke(
 
 /// Destructive Windows service-crash fixture.
 ///
-/// First start records an accepted/running attempt and launches the supplied
-/// PowerShell file in a Job Object. After the service process is force-killed,
-/// a second start observes the durable running attempt and waits for operator
-/// reconciliation instead of duplicating execution.
+/// First start records an accepted/running attempt and launches this exact
+/// agent binary as a native process-tree fixture in a Job Object. Keeping the
+/// WIN-004 crash gate independent of any shell startup policy makes it prove
+/// containment and recovery directly; shell parity remains a separate WIN-002
+/// gate. After the service process is force-killed, a second start observes
+/// the durable running attempt and waits for operator reconciliation instead
+/// of duplicating execution.
 #[cfg(windows)]
 pub async fn run_execution_service_smoke(
     journal_path: &Path,
     workspace_root: &Path,
-    script: &Path,
+    marker_root: &Path,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
     let mut journal = Journal::open(journal_path)?;
@@ -870,9 +873,12 @@ pub async fn run_execution_service_smoke(
     let request = ExecutionRequest {
         workspace_root: workspace_root.to_owned(),
         workspace: acceptance.workspace.clone(),
-        mode: ExecutionMode::PowerShell,
-        program: script.to_owned(),
-        arguments: Vec::<OsString>::new(),
+        mode: ExecutionMode::Direct,
+        program: std::env::current_exe()?,
+        arguments: vec![
+            OsString::from("workload-tree-smoke"),
+            marker_root.as_os_str().to_owned(),
+        ],
         environment: BTreeMap::new(),
         output_limit_bytes: None,
         timeout: Duration::from_secs(300),

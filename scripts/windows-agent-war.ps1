@@ -125,7 +125,6 @@ $AgentBinary = (Resolve-Path $AgentBinary).Path
 $root = Join-Path $env:RUNNER_TEMP "mcloving-windows-war"
 $journal = Join-Path $root "agent.db"
 $workspace = Join-Path $root "workspaces"
-$treeScript = Join-Path $root "tree.ps1"
 $boundaryScript = Join-Path $root "must-not-run.ps1"
 $lifecycleService = "McLovingAgentLifecycleCi"
 $crashService = "McLovingAgentCrashCi"
@@ -213,17 +212,10 @@ Start-Sleep -Seconds 300
     Remove-TestService $boundary.Name
   }
 
-  @'
-$childPidPath = Join-Path $PSScriptRoot "child.pid"
-$PID | Set-Content -LiteralPath (Join-Path $PSScriptRoot "parent.pid") -Encoding ascii
-$child = Start-Process powershell.exe -PassThru -ArgumentList @(
-  "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 300"
-)
-$child.Id | Set-Content -LiteralPath $childPidPath -Encoding ascii
-Wait-Process -Id $child.Id
-'@ | Set-Content -Encoding utf8NoBOM $treeScript
-
-  $crashPath = "`"$AgentBinary`" service-execution-smoke `"$journal`" `"$workspace`" `"$treeScript`""
+  # WIN-004 tests native atomic containment and durable recovery. PowerShell
+  # mode is exercised separately under WIN-002 so shell startup policy cannot
+  # mask a Job Object or reconciliation defect here.
+  $crashPath = "`"$AgentBinary`" service-execution-smoke `"$journal`" `"$workspace`" `"$root`""
   New-Service -Name $crashService -BinaryPathName $crashPath `
     -StartupType Manual | Out-Null
   Start-Service $crashService
