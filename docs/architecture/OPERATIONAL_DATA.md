@@ -13,9 +13,9 @@ directory is synced before the staged link is removed, so a crash cannot erase
 both names. Failed staging writes are removed and the staging directory is
 synced before the failure is returned.
 
-Artifacts are binary-preserving. Log redaction removes exact configured secret
-byte sequences to a fixed point before hashing and commitment, so a secret
-cannot survive inside a replacement marker or across a newly joined boundary.
+Artifacts are binary-preserving. Log redaction deletes exact configured secret
+byte sequences to a fixed point before hashing and commitment, including
+matches that appear only after an earlier deletion joins two byte ranges.
 Raw log input is bounded by the per-object quota before redaction. A redaction
 request is rejected above 256 nonempty patterns, 64 KiB of aggregate secret
 bytes, or 64 MiB of worst-case comparison work.
@@ -99,9 +99,15 @@ their audit history, and a released hold cannot be silently reactivated.
 Eligibility inspection is diagnostic only. Physical deletion requires a
 durable tokenized claim under a digest-scoped transaction lock. While claimed,
 new references, retention extensions, and legal holds lose to that same lock.
-The deleter either abandons the claim while content still exists or completes
-it after removal. Completion leaves a permanent tombstone, so stale metadata
-cannot recreate a reference to physically deleted content.
+Active claims are listable with their exact token after process restart. The
+deleter must commit an irrevocable `deleting` transition before touching
+physical storage. A merely claimed token can be abandoned; a deleting token
+cannot be revoked because its physical outcome may be ambiguous and must
+instead be recovered and completed. Completion leaves a permanent tombstone,
+so stale metadata cannot recreate a reference to physically deleted content.
+The global claim table and its trigger guard are inaccessible to the tenant
+role; tenant writes are fenced by the trigger without exposing a callable
+cross-tenant state oracle.
 
 ## Boundaries
 

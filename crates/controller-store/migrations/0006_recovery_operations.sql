@@ -88,32 +88,70 @@ CREATE INDEX legal_holds_active_idx
 CREATE TABLE object_deletion_claims (
     object_digest bytea PRIMARY KEY CHECK (octet_length(object_digest) = 32),
     claim_token uuid NOT NULL UNIQUE,
-    status text NOT NULL CHECK (status IN ('claimed', 'deleted')),
+    status text NOT NULL CHECK (status IN ('claimed', 'deleting', 'deleted')),
     claimed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    deletion_started_at timestamptz,
     completed_at timestamptz,
     CHECK (
-        (status = 'claimed' AND completed_at IS NULL)
-        OR (status = 'deleted' AND completed_at IS NOT NULL)
+        (
+            status = 'claimed'
+            AND deletion_started_at IS NULL
+            AND completed_at IS NULL
+        )
+        OR (
+            status = 'deleting'
+            AND deletion_started_at IS NOT NULL
+            AND completed_at IS NULL
+        )
+        OR (
+            status = 'deleted'
+            AND deletion_started_at IS NOT NULL
+            AND completed_at IS NOT NULL
+        )
     )
 );
 
-CREATE FUNCTION mcloving_object_deletion_claim_exists(candidate bytea)
-RETURNS boolean
-LANGUAGE sql
-STABLE
+CREATE FUNCTION mcloving_guard_object_deletion_write()
+RETURNS trigger
+LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
-    SELECT EXISTS (
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(
+            'mcloving.object.delete.' || encode(NEW.object_digest, 'hex'),
+            0
+        )
+    );
+    IF EXISTS (
         SELECT 1
         FROM object_deletion_claims
-        WHERE object_digest = candidate
-    )
+        WHERE object_digest = NEW.object_digest
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = 'P0001',
+            MESSAGE = 'mcloving object protection write is unavailable';
+    END IF;
+    RETURN NEW;
+END
 $$;
 
-REVOKE ALL ON FUNCTION mcloving_object_deletion_claim_exists(bytea) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION mcloving_object_deletion_claim_exists(bytea)
-TO mcloving_tenant;
+REVOKE ALL ON FUNCTION mcloving_guard_object_deletion_write() FROM PUBLIC;
+
+CREATE TRIGGER attempt_objects_deletion_fence
+BEFORE INSERT OR UPDATE OF object_digest ON attempt_objects
+FOR EACH ROW EXECUTE FUNCTION mcloving_guard_object_deletion_write();
+
+CREATE TRIGGER object_retention_deletion_fence
+BEFORE INSERT OR UPDATE OF object_digest, retain_until ON object_retention
+FOR EACH ROW EXECUTE FUNCTION mcloving_guard_object_deletion_write();
+
+CREATE TRIGGER legal_holds_deletion_fence
+BEFORE INSERT OR UPDATE OF object_digest, released_at ON legal_holds
+FOR EACH ROW
+WHEN (NEW.released_at IS NULL)
+EXECUTE FUNCTION mcloving_guard_object_deletion_write();
 
 GRANT SELECT ON controller_metadata TO mcloving_tenant;
 GRANT SELECT, INSERT, UPDATE ON object_retention, legal_holds

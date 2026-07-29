@@ -328,6 +328,21 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
     .await
     .expect("inspect authorization-table privileges");
     assert!(!can_mutate_grants);
+    let can_observe_global_deletion_state = sqlx::query_scalar::<_, bool>(
+        "SELECT
+           has_table_privilege(
+             'mcloving_tenant', 'object_deletion_claims', 'SELECT'
+           )
+           OR has_function_privilege(
+             'mcloving_tenant',
+             'mcloving_guard_object_deletion_write()',
+             'EXECUTE'
+           )",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("inspect global deletion-state privileges");
+    assert!(!can_observe_global_deletion_state);
     let mut escalation = store.pool().begin().await.expect("begin escalation test");
     sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
         .bind(organization_id.to_string())
@@ -1193,6 +1208,130 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
         .expect("claim scheduled retry")
         .expect("retry remains claimable");
     assert_eq!(child.attempt_id, child_id);
+
+    let exhausted = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "reconciliation-dead-letter".into(),
+            pipeline_digest: [43; 32],
+            node_key: "exhausted".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit exhausted reconciliation work");
+    let mut exhausted_tx = store.pool().begin().await.expect("begin exhausted state");
+    for (table, id) in [
+        ("attempts", exhausted.attempt_id),
+        ("nodes", exhausted.node_id),
+        ("builds", exhausted.build_id),
+    ] {
+        sqlx::query(&format!(
+            "UPDATE {table}
+             SET status = 'reconciliation_required'
+             WHERE organization_id = $1 AND id = $2"
+        ))
+        .bind(organization_id)
+        .bind(id)
+        .execute(&mut *exhausted_tx)
+        .await
+        .expect("route exhausted hierarchy to reconciliation");
+    }
+    exhausted_tx
+        .commit()
+        .await
+        .expect("commit exhausted reconciliation state");
+    assert_eq!(
+        store
+            .schedule_retry(
+                organization_id,
+                exhausted.attempt_id,
+                1,
+                "retry budget exhausted",
+            )
+            .await
+            .expect("dead-letter exhausted reconciliation"),
+        RetryDecision::DeadLettered
+    );
+    assert!(
+        !store
+            .finalize_reconciled_attempt(
+                organization_id,
+                exhausted.attempt_id,
+                0,
+                "operator-d",
+                TerminalOutcome::Failed,
+                json!({"resolution": "must not override dead letter"}),
+            )
+            .await
+            .expect("terminal reconciliation loses after dead-letter decision")
+    );
+
+    let terminal_first = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "reconciliation-terminal-first".into(),
+            pipeline_digest: [44; 32],
+            node_key: "terminal-first".into(),
+            required_capabilities: vec!["linux".into()],
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit terminal-first reconciliation work");
+    let mut terminal_first_tx = store
+        .pool()
+        .begin()
+        .await
+        .expect("begin terminal-first state");
+    for (table, id) in [
+        ("attempts", terminal_first.attempt_id),
+        ("nodes", terminal_first.node_id),
+        ("builds", terminal_first.build_id),
+    ] {
+        sqlx::query(&format!(
+            "UPDATE {table}
+             SET status = 'reconciliation_required'
+             WHERE organization_id = $1 AND id = $2"
+        ))
+        .bind(organization_id)
+        .bind(id)
+        .execute(&mut *terminal_first_tx)
+        .await
+        .expect("route terminal-first hierarchy to reconciliation");
+    }
+    terminal_first_tx
+        .commit()
+        .await
+        .expect("commit terminal-first reconciliation state");
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                terminal_first.attempt_id,
+                0,
+                "operator-d",
+                TerminalOutcome::Failed,
+                json!({"resolution": "terminal reconciliation wins"}),
+            )
+            .await
+            .expect("terminalize reconciliation before retry")
+    );
+    assert_eq!(
+        store
+            .schedule_retry(
+                organization_id,
+                terminal_first.attempt_id,
+                3,
+                "must not override terminal reconciliation",
+            )
+            .await
+            .expect("retry loses after terminal reconciliation"),
+        RetryDecision::Ineligible
+    );
 }
 
 #[tokio::test]
@@ -2204,6 +2343,19 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
     assert_eq!(deletion_claims.len(), 1);
     let deletion_claim = deletion_claims[0];
     assert_eq!(deletion_claim.digest, digest);
+    assert_eq!(
+        store
+            .pending_object_deletion_claims(10)
+            .await
+            .expect("recover committed claim after worker restart"),
+        vec![deletion_claim]
+    );
+    assert!(
+        !store
+            .complete_object_deletion(deletion_claim)
+            .await
+            .expect("claim cannot complete before physical-delete authorization")
+    );
     assert!(
         !store
             .retain_object_for(organization_id, digest, 3600)
@@ -2229,9 +2381,9 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
     );
     assert!(
         !store
-            .complete_object_deletion(deletion_claim)
+            .begin_object_deletion(deletion_claim)
             .await
-            .expect("abandoned token cannot complete")
+            .expect("abandoned token cannot authorize physical deletion")
     );
     assert!(
         store
@@ -2284,6 +2436,31 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
     let completed_claim = completed_claims[0];
     assert_eq!(completed_claim.digest, disposable_digest);
     assert!(
+        store
+            .pending_object_deletion_claims(10)
+            .await
+            .expect("recover disposable claim")
+            .contains(&completed_claim)
+    );
+    assert!(
+        store
+            .begin_object_deletion(completed_claim)
+            .await
+            .expect("authorize physical deletion")
+    );
+    assert!(
+        store
+            .begin_object_deletion(completed_claim)
+            .await
+            .expect("physical deletion authorization is idempotent")
+    );
+    assert!(
+        !store
+            .abandon_object_deletion(completed_claim)
+            .await
+            .expect("authorized physical deletion cannot be abandoned")
+    );
+    assert!(
         !store
             .register_object(
                 second_organization_id,
@@ -2304,6 +2481,13 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .complete_object_deletion(completed_claim)
             .await
             .expect("complete physical deletion claim")
+    );
+    assert!(
+        !store
+            .pending_object_deletion_claims(10)
+            .await
+            .expect("completed tombstone is not pending")
+            .contains(&completed_claim)
     );
     assert!(
         !store
