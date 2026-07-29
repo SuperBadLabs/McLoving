@@ -52,6 +52,13 @@ CREATE INDEX nodes_dag_ready_idx
     ON nodes (organization_id, required_trust_pool, priority DESC, queued_at, id)
     WHERE status = 'queued';
 
+DROP INDEX attempts_active_lease_idx;
+CREATE INDEX attempts_active_lease_idx
+    ON attempts (lease_expires_at, id)
+    WHERE status IN (
+        'offered', 'accepted', 'running', 'finalizing', 'cancelling'
+    );
+
 GRANT SELECT, INSERT, UPDATE, DELETE ON node_dependencies TO mcloving_tenant;
 
 ALTER TABLE node_dependencies ENABLE ROW LEVEL SECURITY;

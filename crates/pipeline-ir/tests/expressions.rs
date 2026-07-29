@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use mcloving_pipeline_ir::{
-    EvaluatedValue, ExpressionErrorCode, ExpressionLimits, IR_V1_1, ParameterValue, ParseLimits,
-    compile_strict_yaml, compile_strict_yaml_with_parameters, evaluate_expression,
+    EvaluatedValue, Expression, ExpressionErrorCode, ExpressionLimits, IR_V1_1, ParameterValue,
+    ParseLimits, compile_strict_yaml, compile_strict_yaml_with_parameters, evaluate_expression,
     parse_expression, validate_canonical_bytes, validate_pipeline,
 };
 use proptest::prelude::*;
@@ -126,6 +126,24 @@ fn parser_and_evaluator_enforce_independent_resource_limits() {
     .unwrap_err();
     assert_eq!(binary.code, ExpressionErrorCode::DepthLimit);
 
+    let parameter = Expression::Parameter("large".to_owned());
+    let error = evaluate_expression(
+        &parameter,
+        &BTreeMap::from([(
+            "large".to_owned(),
+            EvaluatedValue {
+                value: ParameterValue::String("12345".to_owned()),
+                secret: false,
+            },
+        )]),
+        ExpressionLimits {
+            max_string_bytes: 4,
+            ..ExpressionLimits::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code, ExpressionErrorCode::StringLimit);
+
     let error = parse_expression(
         r#""12345""#,
         ExpressionLimits {
@@ -207,6 +225,32 @@ fn dotted_parameter_names_are_rejected_by_yaml_and_ir_validation() {
         .insert("tool.name".to_owned(), definition);
     let error = validate_pipeline(&pipeline).unwrap_err();
     assert_eq!(error.path, "$.parameters.tool.name");
+}
+
+#[test]
+fn expression_bindings_must_match_concrete_string_fields() {
+    let pipeline = compile_strict_yaml(
+        "fixture://parameters",
+        PARAMETER_PIPELINE,
+        ParseLimits::default(),
+    )
+    .unwrap();
+
+    let mut missing = pipeline.clone();
+    missing.expressions[0].path = "$.missing".to_owned();
+    let error = validate_pipeline(&missing).unwrap_err();
+    assert!(error.message.contains("does not identify"));
+
+    let mut wrong_type = pipeline.clone();
+    wrong_type.expressions[0].expression = Expression::Literal(ParameterValue::Bool(true));
+    let error = validate_pipeline(&wrong_type).unwrap_err();
+    assert!(error.message.contains("must evaluate to a string"));
+
+    let mut stale = pipeline;
+    stale.expressions[0].expression =
+        Expression::Literal(ParameterValue::String("stale".to_owned()));
+    let error = validate_pipeline(&stale).unwrap_err();
+    assert!(error.message.contains("does not match"));
 }
 
 #[test]

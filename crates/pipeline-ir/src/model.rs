@@ -777,6 +777,20 @@ fn validate_parameters_and_expressions(pipeline: &PipelineIr) -> Result<(), IrVa
             format!("expression binding count exceeds {MAX_EXPRESSION_BINDINGS}"),
         ));
     }
+    let expression_context = pipeline
+        .parameter_values
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                EvaluatedValue {
+                    value: value.clone(),
+                    secret: false,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let materialized_fields = expression_materialized_fields(pipeline);
     let mut previous_path: Option<&str> = None;
     for (index, binding) in pipeline.expressions.iter().enumerate() {
         let path = format!("$.expressions[{index}]");
@@ -798,8 +812,50 @@ fn validate_parameters_and_expressions(pipeline: &PipelineIr) -> Result<(), IrVa
             IrValidationError::new(format!("{path}.expression"), error.to_string())
         })?;
         validate_expression_parameters(&binding.expression, &pipeline.parameters, &path)?;
+        let Some(materialized) = materialized_fields.get(&binding.path) else {
+            return Err(IrValidationError::new(
+                format!("{path}.path"),
+                "expression binding does not identify a materializable process field",
+            ));
+        };
+        let evaluated = evaluate_expression(
+            &binding.expression,
+            &expression_context,
+            ExpressionLimits::default(),
+        )
+        .map_err(|error| IrValidationError::new(format!("{path}.expression"), error.to_string()))?;
+        let ParameterValue::String(evaluated) = evaluated.value else {
+            return Err(IrValidationError::new(
+                format!("{path}.expression"),
+                "expression binding must evaluate to a string",
+            ));
+        };
+        if evaluated != *materialized {
+            return Err(IrValidationError::new(
+                format!("{path}.expression"),
+                "expression result does not match the materialized process field",
+            ));
+        }
     }
     Ok(())
+}
+
+fn expression_materialized_fields(pipeline: &PipelineIr) -> BTreeMap<String, &str> {
+    let mut fields = BTreeMap::new();
+    for (stage_index, stage) in pipeline.stages.iter().enumerate() {
+        for (step_index, step) in stage.steps.iter().enumerate() {
+            let Step::Process(process) = step;
+            let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
+            fields.insert(format!("{base}.program"), process.program.as_str());
+            for (argument_index, argument) in process.args.iter().enumerate() {
+                fields.insert(format!("{base}.args[{argument_index}]"), argument.as_str());
+            }
+            for (name, value) in &process.env {
+                fields.insert(format!("{base}.env.{name}"), value.as_str());
+            }
+        }
+    }
+    fields
 }
 
 fn validate_expression_parameters(

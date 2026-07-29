@@ -673,13 +673,28 @@ impl Evaluator<'_> {
                 value: value.clone(),
                 secret: false,
             }),
-            Expression::Parameter(name) => self.parameters.get(name).cloned().ok_or_else(|| {
-                ExpressionError::new(
-                    ExpressionErrorCode::MissingParameter,
-                    0,
-                    format!("parameter {name:?} is not defined"),
-                )
-            }),
+            Expression::Parameter(name) => {
+                let value = self.parameters.get(name).cloned().ok_or_else(|| {
+                    ExpressionError::new(
+                        ExpressionErrorCode::MissingParameter,
+                        0,
+                        format!("parameter {name:?} is not defined"),
+                    )
+                })?;
+                if let ParameterValue::String(string) = &value.value
+                    && string.len() > self.limits.max_string_bytes
+                {
+                    return Err(ExpressionError::new(
+                        ExpressionErrorCode::StringLimit,
+                        0,
+                        format!(
+                            "expression string exceeds {} bytes",
+                            self.limits.max_string_bytes
+                        ),
+                    ));
+                }
+                Ok(value)
+            }
             Expression::Not(value) => {
                 self.operation()?;
                 let value = self.evaluate(value, depth + 1)?;
