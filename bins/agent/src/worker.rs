@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::future::Future;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -1074,7 +1076,10 @@ async fn remove_terminal_relative_path(
         let is_leaf = components.peek().is_none();
         match fs::symlink_metadata(&current).await {
             Ok(metadata)
-                if !is_leaf && metadata.is_dir() && !is_link_or_reparse_point(&metadata) => {}
+                if !is_leaf && metadata.is_dir() && !is_link_or_reparse_point(&metadata) =>
+            {
+                restore_directory_access(&current, &metadata).await?;
+            }
             Ok(metadata) if !is_leaf => {
                 // An ancestor was replaced. Remove only the replacement entry;
                 // platform-specific unlinking never follows its target.
@@ -1087,7 +1092,7 @@ async fn remove_terminal_relative_path(
                 break;
             }
             Ok(metadata) if metadata.is_dir() && !is_link_or_reparse_point(&metadata) => {
-                fs::remove_dir_all(&current).await?;
+                remove_directory_tree_no_follow(&current).await?;
                 sync_directory(
                     current
                         .parent()
@@ -1130,6 +1135,96 @@ async fn remove_terminal_replacement_entry(
     {
         let _ = metadata;
         fs::remove_file(path).await
+    }
+}
+
+async fn restore_directory_access(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o700);
+        fs::set_permissions(path, permissions).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, metadata);
+        Ok(())
+    }
+}
+
+async fn remove_directory_tree_no_follow(path: &Path) -> Result<(), std::io::Error> {
+    let root = path.to_owned();
+    tokio::task::spawn_blocking(move || remove_directory_tree_no_follow_sync(&root))
+        .await
+        .map_err(|error| std::io::Error::other(format!("workspace cleanup task failed: {error}")))?
+}
+
+fn remove_directory_tree_no_follow_sync(root: &Path) -> Result<(), std::io::Error> {
+    let mut stack = vec![(root.to_owned(), false)];
+    while let Some((path, expanded)) = stack.pop() {
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if is_link_or_reparse_point(&metadata) {
+            remove_terminal_replacement_entry_sync(&path, &metadata)?;
+            continue;
+        }
+        if !metadata.is_dir() {
+            std::fs::remove_file(&path)?;
+            continue;
+        }
+        if expanded {
+            std::fs::remove_dir(&path)?;
+            continue;
+        }
+
+        restore_directory_access_sync(&path, &metadata)?;
+        stack.push((path.clone(), true));
+        for entry in std::fs::read_dir(&path)? {
+            stack.push((entry?.path(), false));
+        }
+    }
+    Ok(())
+}
+
+fn restore_directory_access_sync(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(permissions.mode() | 0o700);
+        std::fs::set_permissions(path, permissions)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, metadata);
+        Ok(())
+    }
+}
+
+fn remove_terminal_replacement_entry_sync(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), std::io::Error> {
+    #[cfg(windows)]
+    {
+        if metadata.is_dir() {
+            std::fs::remove_dir(path)
+        } else {
+            std::fs::remove_file(path)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        std::fs::remove_file(path)
     }
 }
 
@@ -1305,6 +1400,7 @@ async fn create_result_directory(
             "workspace root is a non-directory, symlink, or reparse point".to_owned(),
         ));
     }
+    restore_directory_access(workspace_root, &root_metadata).await?;
 
     let mut directory = workspace_root.to_owned();
     for component in relative_parent.components() {
@@ -1324,6 +1420,7 @@ async fn create_result_directory(
                     .to_owned(),
             ));
         }
+        restore_directory_access(&directory, &metadata).await?;
     }
     let canonical_root = fs::canonicalize(workspace_root).await?;
     let canonical_parent = fs::canonicalize(&directory).await?;
@@ -1966,6 +2063,47 @@ mod tests {
         assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn result_spool_restores_agent_owned_traversal_after_containment() {
+        let directory = tempfile::tempdir().unwrap();
+        let result_root = directory.path().join(AGENT_RESULT_DIRECTORY);
+        let organization = result_root.join("org");
+        fs::create_dir_all(&organization).await.unwrap();
+        fs::set_permissions(&organization, std::fs::Permissions::from_mode(0o000))
+            .await
+            .unwrap();
+        fs::set_permissions(&result_root, std::fs::Permissions::from_mode(0o000))
+            .await
+            .unwrap();
+
+        let result = write_result(
+            directory.path(),
+            Path::new("org/attempt"),
+            DurableResult {
+                outcome: WorkOutcome::Failed,
+                exit_code: None,
+                termination: "exited",
+                reason: Some("restored"),
+                completion_protocol: WORK_COMPLETION_PROTOCOL,
+                cancellation_outcome: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(directory.path().join(result.relative_path).is_file());
+        assert_eq!(
+            fs::metadata(&result_root)
+                .await
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o700,
+            0o700
+        );
+    }
+
     #[tokio::test]
     async fn recovered_cancellation_preserves_an_existing_work_result() {
         let directory = tempfile::tempdir().unwrap();
@@ -2235,6 +2373,39 @@ mod tests {
         assert!(fs::symlink_metadata(&organization_path).await.is_err());
         fs::create_dir_all(&workspace_path).await.unwrap();
         assert!(workspace_path.is_dir());
+        assert_eq!(
+            fs::read(outside.join("sentinel")).await.unwrap(),
+            b"must-survive"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn permission_restricted_workspace_descendants_are_reclaimed() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace_root = directory.path().join("workspace");
+        let workspace = PathBuf::from("organization/attempt/7");
+        let workspace_path = workspace_root.join(&workspace);
+        let locked = workspace_path.join("nested/locked");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(locked.join("deeper")).await.unwrap();
+        fs::write(locked.join("deeper/output"), b"remove-me")
+            .await
+            .unwrap();
+        fs::create_dir_all(&outside).await.unwrap();
+        fs::write(outside.join("sentinel"), b"must-survive")
+            .await
+            .unwrap();
+        std::os::unix::fs::symlink(&outside, locked.join("outside-link")).unwrap();
+        fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .await
+            .unwrap();
+
+        remove_attempt_workspace(&workspace_root, &workspace)
+            .await
+            .unwrap();
+
+        assert!(fs::symlink_metadata(&workspace_path).await.is_err());
         assert_eq!(
             fs::read(outside.join("sentinel")).await.unwrap(),
             b"must-survive"
