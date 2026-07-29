@@ -241,6 +241,7 @@ pub async fn run_claim(
             .iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect(),
+        output_limit_bytes: None,
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
@@ -296,7 +297,7 @@ pub async fn run_claim(
 
     let terminal = match outcome.termination {
         Termination::Cancelled => TerminalOutcome::Aborted,
-        Termination::TimedOut => TerminalOutcome::Failed,
+        Termination::TimedOut | Termination::OutputLimitExceeded => TerminalOutcome::Failed,
         Termination::Exited if outcome.exit_code == Some(0) => TerminalOutcome::Succeeded,
         Termination::Exited => TerminalOutcome::Failed,
     };

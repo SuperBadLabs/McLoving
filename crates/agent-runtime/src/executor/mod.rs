@@ -40,6 +40,8 @@ pub struct ExecutionRequest {
     pub program: PathBuf,
     pub arguments: Vec<OsString>,
     pub environment: BTreeMap<OsString, OsString>,
+    /// Maximum combined durable stdout/stderr bytes for this execution.
+    pub output_limit_bytes: Option<u64>,
     pub timeout: Duration,
     pub termination_grace: Duration,
 }
@@ -49,6 +51,7 @@ pub enum Termination {
     Exited,
     TimedOut,
     Cancelled,
+    OutputLimitExceeded,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,4 +249,60 @@ async fn digest_file(path: &Path) -> Result<[u8; 32], io::Error> {
         digest.update(&buffer[..read]);
     }
     Ok(digest.finalize().into())
+}
+
+async fn output_limit_exceeded(
+    stdout: &Path,
+    stderr: &Path,
+    limit: Option<u64>,
+) -> Result<bool, io::Error> {
+    let Some(limit) = limit else {
+        return Ok(false);
+    };
+    let stdout_bytes = fs::metadata(stdout).await?.len();
+    let stderr_bytes = fs::metadata(stderr).await?.len();
+    Ok(stdout_bytes.saturating_add(stderr_bytes) > limit)
+}
+
+async fn wait_for_output_limit(
+    stdout: &Path,
+    stderr: &Path,
+    limit: Option<u64>,
+) -> Result<(), io::Error> {
+    let Some(limit) = limit else {
+        std::future::pending::<()>().await;
+        unreachable!();
+    };
+    loop {
+        if output_limit_exceeded(stdout, stderr, Some(limit)).await? {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn truncate_output_to_limit(
+    stdout: &Path,
+    stderr: &Path,
+    limit: Option<u64>,
+) -> Result<(), io::Error> {
+    let Some(limit) = limit else {
+        return Ok(());
+    };
+    let stdout_bytes = fs::metadata(stdout).await?.len();
+    let stderr_bytes = fs::metadata(stderr).await?.len();
+    let retained_stdout = stdout_bytes.min(limit);
+    let retained_stderr = stderr_bytes.min(limit - retained_stdout);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(stdout)
+        .await?
+        .set_len(retained_stdout)
+        .await?;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(stderr)
+        .await?
+        .set_len(retained_stderr)
+        .await
 }

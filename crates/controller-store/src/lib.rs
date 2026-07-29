@@ -11,6 +11,7 @@ mod scheduler;
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
+const MAX_ATTEMPT_LOG_BYTES: i64 = 64 * 1_048_576;
 
 /// Schema installed by [`Store::migrate`].
 pub const CONTROLLER_SCHEMA_V1: &str = include_str!("../migrations/0001_controller_truth.sql");
@@ -530,11 +531,12 @@ impl Store {
             return Ok(false);
         };
         let terminal = matches!(status.as_str(), "succeeded" | "failed" | "aborted");
-        let resumable = match local_phase {
-            "finalizing" => matches!(status.as_str(), "running" | "finalizing"),
-            "cancelling" => status == "cancelling",
-            _ => false,
-        };
+        // The local phase records how evidence must be replayed, not which
+        // completion protocol won the race. Exact fenced authority may observe
+        // cancellation while work is completing (or completion while the
+        // controller is cancelling), so every nonterminal completion phase is
+        // recoverable and converges through the durable result.
+        let resumable = recoverable_finalization_status(&status);
         if !terminal && !resumable {
             tx.rollback().await?;
             return Ok(false);
@@ -1180,6 +1182,13 @@ impl Store {
         let digest: [u8; 32] = Sha256::digest(chunk.content).into();
         let mut tx = self.tenant_transaction(chunk.organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.log.{}.{}.{}",
+                chunk.organization_id, chunk.attempt_id, chunk.fence
+            ))
+            .execute(&mut *tx)
+            .await?;
         let existing = sqlx::query_as::<_, (String, Vec<u8>)>(
             "SELECT l.stream, l.digest
              FROM attempt_log_chunks AS l
@@ -1213,6 +1222,23 @@ impl Store {
                 tx.rollback().await?;
             }
             return Ok(identical);
+        }
+        let committed = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(sum(octet_length(content)), 0)::bigint
+             FROM attempt_log_chunks
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3",
+        )
+        .bind(chunk.organization_id)
+        .bind(chunk.attempt_id)
+        .bind(chunk.fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        let incoming = i64::try_from(chunk.content.len()).unwrap_or(i64::MAX);
+        if !log_quota_allows(committed, incoming) {
+            tx.rollback().await?;
+            return Ok(false);
         }
         let inserted = sqlx::query_scalar::<_, i64>(
             "INSERT INTO attempt_log_chunks (
@@ -3190,6 +3216,14 @@ fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
     )
 }
 
+fn recoverable_finalization_status(status: &str) -> bool {
+    matches!(status, "running" | "finalizing" | "cancelling")
+}
+
+fn log_quota_allows(committed: i64, incoming: i64) -> bool {
+    committed >= 0 && incoming >= 0 && committed.saturating_add(incoming) <= MAX_ATTEMPT_LOG_BYTES
+}
+
 fn parse_effect_class(value: &str) -> Result<EffectClass, StoreError> {
     match value {
         "idempotent" => Ok(EffectClass::Idempotent),
@@ -3232,5 +3266,36 @@ fn parse_object_status(value: &str) -> Result<ObjectStatus, StoreError> {
         other => Err(StoreError::InvalidObjectRecord(format!(
             "unknown object status {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn finalization_recovery_accepts_all_nonterminal_completion_races() {
+        for status in ["running", "finalizing", "cancelling"] {
+            assert!(recoverable_finalization_status(status));
+        }
+        for status in [
+            "queued",
+            "offered",
+            "accepted",
+            "reconciliation_required",
+            "succeeded",
+            "failed",
+            "aborted",
+        ] {
+            assert!(!recoverable_finalization_status(status));
+        }
+    }
+
+    #[test]
+    fn log_quota_is_closed_at_the_boundary() {
+        assert!(log_quota_allows(MAX_ATTEMPT_LOG_BYTES - 1, 1));
+        assert!(!log_quota_allows(MAX_ATTEMPT_LOG_BYTES, 1));
+        assert!(!log_quota_allows(i64::MAX, i64::MAX));
+        assert!(!log_quota_allows(-1, 1));
     }
 }

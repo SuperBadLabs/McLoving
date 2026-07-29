@@ -7,12 +7,13 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use tokio::process::{Child, Command};
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Instant, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
 
 use super::{
     Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, Termination,
-    create_workspace, spool_entry, sync_directory, sync_file,
+    create_workspace, output_limit_exceeded, spool_entry, sync_directory, sync_file,
+    truncate_output_to_limit, wait_for_output_limit,
 };
 
 /// Executes one process in a new process group.
@@ -74,7 +75,7 @@ where
     }
 
     let deadline = Instant::now() + request.timeout;
-    let termination = tokio::select! {
+    let mut termination = tokio::select! {
         status = child.wait() => (Termination::Exited, status?),
         () = cancellation.cancelled() => {
             let status = terminate_group(&mut child, process_group_id, request.termination_grace)
@@ -86,8 +87,27 @@ where
                 .await?;
             (Termination::TimedOut, status)
         }
+        result = wait_for_output_limit(
+            &stdout_path,
+            &stderr_path,
+            request.output_limit_bytes,
+        ) => {
+            result?;
+            let status =
+                terminate_group(&mut child, process_group_id, request.termination_grace).await?;
+            (Termination::OutputLimitExceeded, status)
+        }
     };
 
+    terminate_remaining_group(process_group_id, request.termination_grace).await?;
+    let exceeded =
+        output_limit_exceeded(&stdout_path, &stderr_path, request.output_limit_bytes).await?;
+    if termination.0 == Termination::Exited && exceeded {
+        termination.0 = Termination::OutputLimitExceeded;
+    }
+    if termination.0 == Termination::OutputLimitExceeded || exceeded {
+        truncate_output_to_limit(&stdout_path, &stderr_path, request.output_limit_bytes).await?;
+    }
     sync_file(&stdout_path).await?;
     sync_file(&stderr_path).await?;
     sync_directory(&spool)?;
@@ -101,6 +121,30 @@ where
         stdout: spool_entry(&request.workspace, "spool/stdout.log", 0, &stdout_path).await?,
         stderr: spool_entry(&request.workspace, "spool/stderr.log", 1, &stderr_path).await?,
     })
+}
+
+async fn terminate_remaining_group(
+    process_group_id: i32,
+    grace: Duration,
+) -> Result<(), ExecutionError> {
+    if !process_group_exists(process_group_id)? {
+        return Ok(());
+    }
+    signal_group(process_group_id, Signal::SIGTERM)?;
+    sleep_until(Instant::now() + grace).await;
+    if process_group_exists(process_group_id)? {
+        signal_group(process_group_id, Signal::SIGKILL)?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_group_exists(process_group_id)? {
+        if Instant::now() >= deadline {
+            return Err(ExecutionError::Io(std::io::Error::other(
+                "terminated process group remained alive for five seconds",
+            )));
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    Ok(())
 }
 
 async fn terminate_group(
@@ -207,6 +251,7 @@ mod tests {
                 OsString::from("sleep 30 & child=$!; printf '%s\\n' \"$child\" > child.pid; wait"),
             ],
             environment: BTreeMap::new(),
+            output_limit_bytes: None,
             timeout,
             termination_grace: Duration::from_millis(100),
         }
@@ -225,6 +270,7 @@ mod tests {
                 ),
             ],
             environment: BTreeMap::new(),
+            output_limit_bytes: None,
             timeout: Duration::from_secs(30),
             termination_grace: Duration::from_millis(100),
         }
@@ -291,6 +337,7 @@ mod tests {
             program: PathBuf::from("/bin/sh"),
             arguments: vec![OsString::from("-c"), OsString::from("printf mcloving")],
             environment: BTreeMap::new(),
+            output_limit_bytes: None,
             timeout: Duration::from_secs(5),
             termination_grace: Duration::from_millis(100),
         };
@@ -304,6 +351,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn successful_leader_exit_stabilizes_inherited_log_handles() {
+        let root = tempfile::tempdir().unwrap();
+        let request = ExecutionRequest {
+            workspace_root: root.path().to_owned(),
+            workspace: PathBuf::from("org/inherited-handle"),
+            mode: ExecutionMode::Direct,
+            program: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                OsString::from("-c"),
+                OsString::from(
+                    "sh -c 'printf \"%s\\n\" \"$$\" > child.pid; trap \"\" TERM; \
+                     while :; do printf x; done' & while [ ! -s child.pid ]; do :; done; exit 0",
+                ),
+            ],
+            environment: BTreeMap::new(),
+            output_limit_bytes: Some(65_536),
+            timeout: Duration::from_secs(5),
+            termination_grace: Duration::from_millis(50),
+        };
+        let child_pid_path = root.path().join("org/inherited-handle/child.pid");
+
+        let outcome = execute(&request, CancellationToken::new()).await.unwrap();
+        let pid = descendant_pid(&child_pid_path).await;
+
+        assert_process_gone(pid).await;
+        assert!(outcome.stdout.bytes + outcome.stderr.bytes <= 65_536);
+        let stable_bytes = fs::metadata(root.path().join(&outcome.stdout.relative_path))
+            .await
+            .unwrap()
+            .len();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            fs::metadata(root.path().join(&outcome.stdout.relative_path))
+                .await
+                .unwrap()
+                .len(),
+            stable_bytes
+        );
+    }
+
+    #[tokio::test]
+    async fn output_limit_terminates_and_caps_the_durable_spool() {
+        let root = tempfile::tempdir().unwrap();
+        let request = ExecutionRequest {
+            workspace_root: root.path().to_owned(),
+            workspace: PathBuf::from("org/quota"),
+            mode: ExecutionMode::Direct,
+            program: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                OsString::from("-c"),
+                OsString::from("while :; do printf 0123456789abcdef; done"),
+            ],
+            environment: BTreeMap::new(),
+            output_limit_bytes: Some(4_096),
+            timeout: Duration::from_secs(30),
+            termination_grace: Duration::from_millis(50),
+        };
+
+        let outcome = execute(&request, CancellationToken::new()).await.unwrap();
+        assert_eq!(outcome.termination, Termination::OutputLimitExceeded);
+        assert!(outcome.stdout.bytes + outcome.stderr.bytes <= 4_096);
+    }
+
+    #[tokio::test]
     async fn existing_or_symlinked_workspace_is_rejected() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("existing")).unwrap();
@@ -314,6 +425,7 @@ mod tests {
             program: PathBuf::from("/bin/true"),
             arguments: Vec::new(),
             environment: BTreeMap::new(),
+            output_limit_bytes: None,
             timeout: Duration::from_secs(1),
             termination_grace: Duration::from_millis(10),
         };

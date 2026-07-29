@@ -14,7 +14,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, Termination,
-    create_workspace, spool_entry, sync_directory, sync_file,
+    create_workspace, output_limit_exceeded, spool_entry, sync_directory, sync_file,
+    truncate_output_to_limit,
 };
 
 const TERMINATED_EXIT_CODE: u32 = 0xC000_013A;
@@ -73,12 +74,18 @@ where
     }
 
     let deadline = Instant::now() + request.timeout;
-    let (termination, status) = loop {
+    let (mut termination, status) = loop {
         if let Some(status) = child
             .try_wait()
             .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?
         {
             break (Termination::Exited, status);
+        }
+        if output_limit_exceeded(&stdout_path, &stderr_path, request.output_limit_bytes).await? {
+            break (
+                Termination::OutputLimitExceeded,
+                terminate_job(&child).await?,
+            );
         }
         tokio::select! {
             () = cancellation.cancelled() => {
@@ -105,6 +112,12 @@ where
         .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
     wait_for_empty_job(&child).await?;
     drop(child);
+    if output_limit_exceeded(&stdout_path, &stderr_path, request.output_limit_bytes).await? {
+        termination = Termination::OutputLimitExceeded;
+    }
+    if termination == Termination::OutputLimitExceeded {
+        truncate_output_to_limit(&stdout_path, &stderr_path, request.output_limit_bytes).await?;
+    }
     sync_file(&stdout_path).await?;
     sync_file(&stderr_path).await?;
     sync_directory(&spool)?;
@@ -266,6 +279,7 @@ mod tests {
             program: program.into(),
             arguments,
             environment: BTreeMap::new(),
+            output_limit_bytes: None,
             timeout: Duration::from_secs(10),
             termination_grace: Duration::from_millis(100),
         }

@@ -793,6 +793,7 @@ pub async fn run_execution_service_smoke(
         program: script.to_owned(),
         arguments: Vec::<OsString>::new(),
         environment: BTreeMap::new(),
+        output_limit_bytes: None,
         timeout: Duration::from_secs(300),
         termination_grace: Duration::from_millis(100),
     };
@@ -851,6 +852,7 @@ pub async fn run_creation_boundary_service_smoke(
         program: script.to_owned(),
         arguments: Vec::<OsString>::new(),
         environment: BTreeMap::new(),
+        output_limit_bytes: None,
         timeout: Duration::from_secs(300),
         termination_grace: Duration::from_millis(100),
     };

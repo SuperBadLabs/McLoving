@@ -479,6 +479,7 @@ async fn run_assignment(
             .into_iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect(),
+        output_limit_bytes: Some(MAX_TOTAL_LOG_SPOOL_BYTES),
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
@@ -529,24 +530,10 @@ async fn run_assignment(
                 .await;
             }
         };
-        if validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()]).is_err() {
-            return finalize_without_process(
-                config,
-                client,
-                &mut journal,
-                ProcesslessCompletion {
-                    authority: &assignment.authority,
-                    workspace: &assignment.workspace,
-                    session_epoch,
-                    outcome: WorkOutcome::Failed,
-                    reason: "log_spool_quota_exceeded".to_owned(),
-                },
-            )
-            .await;
-        }
+        validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()])?;
         let terminal = match outcome.termination {
             Termination::Cancelled => WorkOutcome::Aborted,
-            Termination::TimedOut => WorkOutcome::Failed,
+            Termination::TimedOut | Termination::OutputLimitExceeded => WorkOutcome::Failed,
             Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
             Termination::Exited => WorkOutcome::Failed,
         };
@@ -695,10 +682,17 @@ async fn publish_spool(
     let mut buffer = vec![0_u8; MAX_LOG_CHUNK_BYTES];
     let mut sequence = first_sequence;
     let mut published = false;
-    loop {
-        let bytes = file.read(&mut buffer).await?;
+    let mut remaining = entry.bytes;
+    while remaining > 0 {
+        let read_limit =
+            usize::try_from(remaining.min(MAX_LOG_CHUNK_BYTES as u64)).map_err(|_| {
+                AgentError::InvalidAssignment("log length exceeds platform bounds".to_owned())
+            })?;
+        let bytes = file.read(&mut buffer[..read_limit]).await?;
         if bytes == 0 {
-            break;
+            return Err(AgentError::InvalidAssignment(
+                "durable log spool became shorter after verification".to_owned(),
+            ));
         }
         require_work_receipt(
             client
@@ -713,9 +707,22 @@ async fn publish_spool(
             session_epoch,
         )?;
         published = true;
+        remaining = remaining
+            .checked_sub(u64::try_from(bytes).map_err(|_| {
+                AgentError::InvalidAssignment("log length exceeds wire bounds".to_owned())
+            })?)
+            .ok_or_else(|| {
+                AgentError::InvalidAssignment("log length exceeds wire bounds".to_owned())
+            })?;
         sequence = sequence.checked_add(1).ok_or_else(|| {
             AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned())
         })?;
+    }
+    let mut growth_probe = [0_u8; 1];
+    if file.read(&mut growth_probe).await? != 0 {
+        return Err(AgentError::InvalidAssignment(
+            "durable log spool grew after verification".to_owned(),
+        ));
     }
     if !published {
         require_work_receipt(
@@ -1044,6 +1051,7 @@ fn termination_name(termination: Termination) -> &'static str {
         Termination::Exited => "exited",
         Termination::TimedOut => "timed_out",
         Termination::Cancelled => "cancelled",
+        Termination::OutputLimitExceeded => "output_limit_exceeded",
     }
 }
 
