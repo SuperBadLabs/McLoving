@@ -40,12 +40,13 @@ Every executable node also persists one non-empty required trust pool.
 Scheduling uses the trust pool from the authenticated certificate binding,
 not an agent-reported capability, and claims only an exact pool match.
 
-The node trust-pool schema migration has no global default. It backfills a
-node only from the latest durable attempt owner joined to that agent's durable
-session. Before upgrading a database that contains any other nodes, create and
-populate the exact per-node mapping table below; migration fails and rolls
-back while any node remains unmapped, and consumes the table only after every
-node has an explicit trust pool:
+The node trust-pool schema migration has no global default and never infers a
+historical node pool from the current agent session. Agent sessions retain only
+the latest pool for an agent ID, so that inference could silently transfer old
+work authority after re-enrollment. Before upgrading any database that contains
+nodes, create and populate the exact per-node mapping table below for every
+existing node. Migration fails and rolls back while any node remains unmapped,
+and consumes the table only after every node has an explicit trust pool:
 
 ```sql
 CREATE TABLE node_trust_pool_migration_map (
