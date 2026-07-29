@@ -81,6 +81,7 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
         .env("MCLOVING_AGENT_ID", "embedded-disabled")
         .env("MCLOVING_AGENT_CAPABILITIES", "disabled")
+        .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
         .env("MCLOVING_LEASE_SECONDS", "5")
         .env("MCLOVING_POLL_MILLISECONDS", "10")
         .env("MCLOVING_CANCELLATION_POLL_MILLISECONDS", "50")

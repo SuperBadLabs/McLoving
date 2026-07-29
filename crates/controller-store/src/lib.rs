@@ -28,6 +28,8 @@ pub const OBJECT_REFERENCES_V5: &str = include_str!("../migrations/0005_object_r
 pub const RECOVERY_OPERATIONS_V6: &str = include_str!("../migrations/0006_recovery_operations.sql");
 /// Durable, active-active-safe agent session authority.
 pub const AGENT_SESSIONS_V7: &str = include_str!("../migrations/0007_agent_sessions.sql");
+/// Trust-pool routing for executable nodes.
+pub const NODE_TRUST_POOL_V8: &str = include_str!("../migrations/0008_node_trust_pool.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -71,6 +73,7 @@ pub struct NewBuild {
     pub pipeline_digest: [u8; 32],
     pub node_key: String,
     pub required_capabilities: Vec<String>,
+    pub required_trust_pool: String,
     pub priority: i32,
     pub execution_spec: Value,
 }
@@ -312,6 +315,8 @@ pub enum StoreError {
     InvalidRecoveryOperation(String),
     #[error("invalid agent session authority")]
     InvalidAgentSession,
+    #[error("required agent trust pool must be non-empty")]
+    InvalidTrustPool,
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -351,6 +356,7 @@ impl Store {
         apply_migration(&mut tx, 5, OBJECT_REFERENCES_V5).await?;
         apply_migration(&mut tx, 6, RECOVERY_OPERATIONS_V6).await?;
         apply_migration(&mut tx, 7, AGENT_SESSIONS_V7).await?;
+        apply_migration(&mut tx, 8, NODE_TRUST_POOL_V8).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -855,6 +861,11 @@ impl Store {
     /// Repeating the same project/idempotency-key returns the original durable
     /// identifiers without emitting a second event or outbox record.
     pub async fn admit_build(&self, input: &NewBuild) -> Result<BuildAdmission, StoreError> {
+        if input.required_trust_pool.trim().is_empty()
+            || input.required_trust_pool.trim() != input.required_trust_pool
+        {
+            return Err(StoreError::InvalidTrustPool);
+        }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         let build_id = Uuid::new_v4();
         let inserted = sqlx::query_scalar::<_, Uuid>(
@@ -888,15 +899,16 @@ impl Store {
         sqlx::query(
             "INSERT INTO nodes (
                  id, organization_id, build_id, node_key, status,
-                 required_capabilities, priority, execution_spec
+                 required_capabilities, required_trust_pool, priority, execution_spec
              )
-             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7)",
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8)",
         )
         .bind(node_id)
         .bind(input.organization_id)
         .bind(build_id)
         .bind(&input.node_key)
         .bind(&input.required_capabilities)
+        .bind(&input.required_trust_pool)
         .bind(input.priority)
         .bind(&input.execution_spec)
         .execute(&mut *tx)

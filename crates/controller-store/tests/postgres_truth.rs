@@ -125,6 +125,7 @@ async fn admission_is_atomic_and_idempotent() {
         pipeline_digest: [7; 32],
         node_key: "stage-1".into(),
         required_capabilities: vec!["linux".into()],
+        required_trust_pool: "trusted".into(),
         priority: 10,
         execution_spec: json!({}),
     };
@@ -177,6 +178,7 @@ async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
             pipeline_digest: [8; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -202,6 +204,7 @@ async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
                 scheduler_id: "scheduler-a".into(),
                 agent_id: "agent-a".into(),
                 capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
                 lease_seconds: 30,
                 fairness_seed: 1,
             })
@@ -275,6 +278,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             pipeline_digest: [0xAC; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -286,6 +290,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "windows-1".into(),
             capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -400,6 +405,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             pipeline_digest: [0xAE; 32],
             node_key: "stage-recovery".into(),
             required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -411,6 +417,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "windows-1".into(),
             capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -476,6 +483,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             pipeline_digest: [0xAD; 32],
             node_key: "stage-unverifiable".into(),
             required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -487,6 +495,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "windows-1".into(),
             capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 2,
         })
@@ -560,6 +569,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             pipeline_digest: [0xAE; 32],
             node_key: "stage-recycled".into(),
             required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -571,6 +581,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "windows-1".into(),
             capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 3,
         })
@@ -675,6 +686,7 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
             pipeline_digest: [0xCE; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -686,6 +698,7 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "windows-reconciliation-1".into(),
             capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -846,6 +859,7 @@ async fn cancellation_targets_the_latest_retry_attempt() {
             pipeline_digest: [9; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -857,6 +871,7 @@ async fn cancellation_targets_the_latest_retry_attempt() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -1030,6 +1045,7 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
             pipeline_digest: [8; 32],
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1079,6 +1095,7 @@ async fn concurrent_terminal_publication_has_one_winner() {
             pipeline_digest: [9; 32],
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1104,6 +1121,7 @@ async fn concurrent_terminal_publication_has_one_winner() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: Vec::new(),
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -1162,6 +1180,69 @@ async fn concurrent_terminal_publication_has_one_winner() {
 }
 
 #[tokio::test]
+async fn scheduler_requires_the_nodes_designated_trust_pool() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    let build = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "release-pool".into(),
+            pipeline_digest: [0x71; 32],
+            node_key: "release".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "release".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit release work");
+
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-untrusted".into(),
+                agent_id: "agent-untrusted".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "untrusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 0,
+            })
+            .await
+            .expect("evaluate mismatched pool")
+            .is_none()
+    );
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-release".into(),
+            agent_id: "agent-release".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "release".into(),
+            lease_seconds: 30,
+            fairness_seed: 0,
+        })
+        .await
+        .expect("claim from matching pool")
+        .expect("matching pool receives work");
+    assert_eq!(claim.node_id, build.node_id);
+}
+
+#[tokio::test]
 async fn scheduler_filters_capabilities_and_explains_the_wait() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1186,6 +1267,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
             pipeline_digest: [1; 32],
             node_key: "windows-stage".into(),
             required_capabilities: vec!["windows".into(), "powershell".into()],
+            required_trust_pool: "trusted".into(),
             priority: 100,
             execution_spec: json!({}),
         })
@@ -1199,6 +1281,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
             pipeline_digest: [2; 32],
             node_key: "linux-stage".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -1211,6 +1294,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "linux-agent".into(),
             capabilities: vec!["linux".into(), "podman".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 17,
         })
@@ -1284,6 +1368,7 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
             pipeline_digest: [3; 32],
             node_key: "stage".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1295,6 +1380,7 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 1,
             fairness_seed: 1,
         })
@@ -1333,6 +1419,7 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
             scheduler_id: "scheduler-b".into(),
             agent_id: "agent-b".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -1382,6 +1469,7 @@ async fn expired_non_idempotent_effect_requires_reconciliation() {
             pipeline_digest: [39; 32],
             node_key: "deploy".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1393,6 +1481,7 @@ async fn expired_non_idempotent_effect_requires_reconciliation() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 1,
         })
@@ -1470,6 +1559,7 @@ async fn expired_non_idempotent_effect_requires_reconciliation() {
                 scheduler_id: "scheduler-b".into(),
                 agent_id: "agent-b".into(),
                 capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
                 lease_seconds: 300,
                 fairness_seed: 2,
             })
@@ -1609,6 +1699,7 @@ async fn expired_confirmed_non_idempotent_effect_cannot_be_replayed() {
             pipeline_digest: [40; 32],
             node_key: "deploy".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1620,6 +1711,7 @@ async fn expired_confirmed_non_idempotent_effect_cannot_be_replayed() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 1,
         })
@@ -1704,6 +1796,7 @@ async fn expired_confirmed_non_idempotent_effect_cannot_be_replayed() {
                 scheduler_id: "scheduler-b".into(),
                 agent_id: "agent-b".into(),
                 capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
                 lease_seconds: 300,
                 fairness_seed: 2,
             })
@@ -1770,6 +1863,7 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
             pipeline_digest: [42; 32],
             node_key: "recover".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1848,6 +1942,7 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
             scheduler_id: "scheduler-after-reconciliation".into(),
             agent_id: "agent-after-reconciliation".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 1,
         })
@@ -1864,6 +1959,7 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
             pipeline_digest: [43; 32],
             node_key: "exhausted".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1965,6 +2061,7 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
             pipeline_digest: [44; 32],
             node_key: "terminal-first".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2091,6 +2188,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             pipeline_digest: [19; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2102,6 +2200,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -2155,6 +2254,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             scheduler_id: "scheduler-b".into(),
             agent_id: "agent-b".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -2238,6 +2338,7 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             pipeline_digest: [23; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2249,6 +2350,7 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             scheduler_id: "effect-scheduler".into(),
             agent_id: "effect-agent".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 1,
         })
@@ -2548,6 +2650,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
             pipeline_digest: [24; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2559,6 +2662,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -2649,6 +2753,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
             scheduler_id: "scheduler-b".into(),
             agent_id: "agent-b".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -2800,6 +2905,7 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
             pipeline_digest: [25; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2811,6 +2917,7 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
             scheduler_id: "scheduler".into(),
             agent_id: "agent".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -2940,6 +3047,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             pipeline_digest: [51; 32],
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2951,6 +3059,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             scheduler_id: "scheduler".into(),
             agent_id: "agent".into(),
             capabilities: Vec::new(),
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -3019,6 +3128,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             pipeline_digest: [53; 32],
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -3030,6 +3140,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             scheduler_id: "scheduler".into(),
             agent_id: "agent".into(),
             capabilities: Vec::new(),
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -3414,6 +3525,7 @@ async fn backup_restore_canary_seed() {
             pipeline_digest: [61; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({"command": "preserve-me"}),
         })
@@ -3425,6 +3537,7 @@ async fn backup_restore_canary_seed() {
             scheduler_id: "recovery-scheduler".into(),
             agent_id: "pre-restore-agent".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 1,
         })
@@ -3498,6 +3611,7 @@ async fn backup_restore_canary_seed() {
             scheduler_id: "recovery-scheduler".into(),
             agent_id: "post-reclaim-agent".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 2,
         })
@@ -3546,6 +3660,7 @@ async fn backup_restore_canary_seed() {
             pipeline_digest: [64; 32],
             node_key: "queued-stage".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 100,
             execution_spec: json!({"command": "claim-after-restore"}),
         })
@@ -3756,6 +3871,7 @@ async fn backup_restore_canary_verify() {
             scheduler_id: "post-restore-scheduler".into(),
             agent_id: "reused-agent".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 3,
         })
@@ -3960,6 +4076,7 @@ async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
                 pipeline_digest: [4; 32],
                 node_key: "stage".into(),
                 required_capabilities: Vec::new(),
+                required_trust_pool: "trusted".into(),
                 priority: 0,
                 execution_spec: json!({}),
             })

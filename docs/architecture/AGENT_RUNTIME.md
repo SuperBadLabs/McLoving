@@ -33,6 +33,9 @@ verifies the claims against the authenticated peer certificate.
 Possession of another certificate under the same CA cannot select a different
 agent identity or trust class. Session epochs are advanced atomically in
 PostgreSQL so a second controller replica cannot admit stale authority.
+Every executable node also persists one non-empty required trust pool.
+Scheduling uses the trust pool from the authenticated certificate binding,
+not an agent-reported capability, and claims only an exact pool match.
 
 The organization UUID is a required W2-C identity-binding migration. Before
 upgrading a controller from the earlier three-column format, append the
@@ -113,6 +116,12 @@ authority.
   attempt may retain at most 64 MiB of logs across at most 66 chunks and a
   64 KiB result. Both the agent and controller independently reject excess
   chunk cardinality.
+- Once the controller acknowledges terminal truth and the local terminal
+  transition commits, the agent immediately deletes the controller-owned log
+  and result spools and atomically retires their journal descriptors. A crash
+  between file deletion and metadata retirement is idempotently completed on
+  startup or at periodic reconciliation; terminal attempt history remains
+  durable.
 - Terminal result evidence is written beneath the agent-owned
   `.agent-results` root, outside the workload workspace namespace, under a
   cryptographically random path created only after containment has ended. A

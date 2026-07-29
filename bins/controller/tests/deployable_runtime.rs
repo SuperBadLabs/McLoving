@@ -70,6 +70,7 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
         .env("MCLOVING_AGENT_ID", "embedded-test-agent")
         .env("MCLOVING_AGENT_CAPABILITIES", "linux")
+        .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
         .env("MCLOVING_LEASE_SECONDS", "5")
         .env("MCLOVING_POLL_MILLISECONDS", "10")
         .env("MCLOVING_CANCELLATION_POLL_MILLISECONDS", "50")

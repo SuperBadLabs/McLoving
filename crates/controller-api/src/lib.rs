@@ -219,6 +219,7 @@ async fn submit(
             pipeline_digest: digest,
             node_key: stage.id.clone(),
             required_capabilities: vec!["linux".to_owned()],
+            required_trust_pool: "trusted-linux".to_owned(),
             priority: 0,
             execution_spec,
         })

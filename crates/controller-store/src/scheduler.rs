@@ -13,6 +13,8 @@ pub struct ClaimRequest {
     pub scheduler_id: String,
     pub agent_id: String,
     pub capabilities: Vec<String>,
+    /// Authenticated trust pool from the agent's certificate binding.
+    pub trust_pool: String,
     pub lease_seconds: i32,
     /// Changes the deterministic tie-break among otherwise equal candidates.
     pub fairness_seed: i64,
@@ -51,7 +53,7 @@ impl Store {
         &self,
         request: &ClaimRequest,
     ) -> Result<Option<ClaimedAttempt>, StoreError> {
-        if request.lease_seconds <= 0 {
+        if request.lease_seconds <= 0 || request.trust_pool.trim().is_empty() {
             return Ok(None);
         }
         let mut tx = self.tenant_transaction(request.organization_id).await?;
@@ -86,6 +88,7 @@ impl Store {
                AND b.status = 'queued'
                AND b.cancellation_requested_at IS NULL
                AND n.required_capabilities <@ $2::text[]
+               AND n.required_trust_pool = $4
              ORDER BY
                n.priority DESC,
                n.queued_at ASC,
@@ -97,6 +100,7 @@ impl Store {
         .bind(request.organization_id)
         .bind(&request.capabilities)
         .bind(request.fairness_seed)
+        .bind(&request.trust_pool)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -151,6 +155,7 @@ impl Store {
                 "attempt_id": attempt_id,
                 "node_id": node_id,
                 "agent_id": request.agent_id,
+                "trust_pool": request.trust_pool,
                 "scheduler_id": request.scheduler_id,
                 "fence": fence,
                 "restore_epoch": restore_epoch,

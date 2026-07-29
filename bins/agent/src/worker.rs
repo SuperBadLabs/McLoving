@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
@@ -153,6 +153,7 @@ pub(super) async fn recover_finalizations(
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
 ) -> Result<(), AgentError> {
+    reclaim_terminal_spools(config).await?;
     let report = Journal::open(&config.journal_path)?.reconcile()?;
     for attempt in report.attempts {
         if !matches!(
@@ -204,6 +205,7 @@ pub(super) async fn recover_finalizations(
             terminal,
             attempt.process_id,
         )?;
+        reclaim_attempt_spools(config, &attempt).await?;
         // The controller's terminal acknowledgement is authoritative even
         // when a concurrent renewal observes that the terminal lease is no
         // longer renewable. Never strand an acknowledged replay locally.
@@ -686,6 +688,16 @@ async fn run_assignment(
             terminal_phase(terminal)?,
             Some(outcome.process_id),
         )?;
+        reclaim_spool_entries(
+            config,
+            &organization,
+            &attempt,
+            fence,
+            session_epoch,
+            &[outcome.stdout.clone(), outcome.stderr.clone()],
+            Some(&result),
+        )
+        .await?;
         Ok(())
     }
     .await;
@@ -906,6 +918,116 @@ async fn verified_spool_content(
     verify_spool_file(&path, entry, kind).await?;
     let content = fs::read(path).await?;
     Ok(content)
+}
+
+pub(super) async fn reclaim_terminal_spools(config: &AgentConfig) -> Result<(), AgentError> {
+    let attempts = Journal::open(&config.journal_path)?
+        .terminal_spools()?
+        .attempts;
+    for attempt in &attempts {
+        reclaim_attempt_spools(config, attempt).await?;
+    }
+    Ok(())
+}
+
+async fn reclaim_attempt_spools(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<(), AgentError> {
+    reclaim_spool_entries(
+        config,
+        &attempt.organization_id,
+        &attempt.attempt_id,
+        attempt.fence_token,
+        attempt.session_epoch,
+        &attempt.logs,
+        attempt.result.as_ref(),
+    )
+    .await
+}
+
+async fn reclaim_spool_entries(
+    config: &AgentConfig,
+    organization_id: &str,
+    attempt_id: &str,
+    fence_token: u64,
+    session_epoch: u64,
+    logs: &[SpoolEntry],
+    result: Option<&SpoolEntry>,
+) -> Result<(), AgentError> {
+    for entry in logs.iter().chain(result) {
+        remove_spool_file(&config.workspace_root, entry).await?;
+    }
+    Journal::open(&config.journal_path)?.retire_terminal_spools(
+        organization_id,
+        attempt_id,
+        fence_token,
+        session_epoch,
+    )?;
+    Ok(())
+}
+
+async fn remove_spool_file(workspace_root: &Path, entry: &SpoolEntry) -> Result<(), AgentError> {
+    if entry.relative_path.is_absolute()
+        || entry
+            .relative_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(AgentError::InvalidAssignment(
+            "terminal spool path must be normalized and relative".to_owned(),
+        ));
+    }
+    let path = workspace_root.join(&entry.relative_path);
+    let mut removed = false;
+    match fs::remove_file(&path).await {
+        Ok(()) => removed = true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if removed && let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    prune_empty_spool_directories(workspace_root, path.parent()).await
+}
+
+async fn prune_empty_spool_directories(
+    workspace_root: &Path,
+    start: Option<&Path>,
+) -> Result<(), AgentError> {
+    let mut current = start.map(Path::to_owned);
+    while let Some(directory) = current {
+        if directory == workspace_root {
+            break;
+        }
+        if !directory.starts_with(workspace_root) {
+            return Err(AgentError::InvalidAssignment(
+                "terminal spool parent escapes the workspace root".to_owned(),
+            ));
+        }
+        let parent = directory.parent().map(Path::to_owned);
+        match fs::remove_dir(&directory).await {
+            Ok(()) => {
+                if let Some(parent) = &parent {
+                    sync_directory(parent)?;
+                }
+                current = parent;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current = parent;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 async fn verify_spool_file(path: &Path, entry: &SpoolEntry, kind: &str) -> Result<(), AgentError> {
@@ -1189,6 +1311,16 @@ async fn finalize_without_process(
         terminal_phase(outcome)?,
         None,
     )?;
+    reclaim_spool_entries(
+        config,
+        &authority.organization_id,
+        &authority.attempt_id,
+        authority.fence_token,
+        session_epoch,
+        &[],
+        Some(&result),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1595,6 +1727,116 @@ mod tests {
             !recovered_cancellation_requires_persistence(&config, &cancellation_attempt)
                 .await
                 .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn acknowledged_terminal_spools_are_reclaimed_and_metadata_is_retired() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = config();
+        config.workspace_root = directory.path().join("workspace");
+        config.journal_path = directory.path().join("agent.db");
+        let workspace = PathBuf::from(
+            "00000000-0000-0000-0000-000000000123/\
+             00000000-0000-0000-0000-000000000126/7",
+        );
+        let stdout_path = config
+            .workspace_root
+            .join(&workspace)
+            .join("spool/stdout.log");
+        let stderr_path = config
+            .workspace_root
+            .join(&workspace)
+            .join("spool/stderr.log");
+        fs::create_dir_all(stdout_path.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&stdout_path, b"stdout").await.unwrap();
+        fs::write(&stderr_path, b"stderr").await.unwrap();
+        let logs = [
+            SpoolEntry {
+                sequence: 0,
+                relative_path: workspace.join("spool/stdout.log"),
+                digest: Sha256::digest(b"stdout").into(),
+                bytes: 6,
+            },
+            SpoolEntry {
+                sequence: 1,
+                relative_path: workspace.join("spool/stderr.log"),
+                digest: Sha256::digest(b"stderr").into(),
+                bytes: 6,
+            },
+        ];
+        let result = write_result(
+            &config.workspace_root,
+            &workspace,
+            DurableResult {
+                outcome: WorkOutcome::Succeeded,
+                exit_code: Some(0),
+                termination: "exited",
+                reason: None,
+                completion_protocol: WORK_COMPLETION_PROTOCOL,
+                cancellation_outcome: None,
+            },
+        )
+        .await
+        .unwrap();
+        let result_path = config.workspace_root.join(&result.relative_path);
+        let acceptance = Acceptance {
+            organization_id: "00000000-0000-0000-0000-000000000123".to_owned(),
+            attempt_id: "00000000-0000-0000-0000-000000000126".to_owned(),
+            fence_token: 7,
+            session_epoch: 3,
+            payload_digest: [0x42; 32],
+            workspace: workspace.clone(),
+        };
+        let mut journal = Journal::open(&config.journal_path).unwrap();
+        journal.accept(&acceptance).unwrap();
+        journal
+            .begin_finalization(&Finalization {
+                organization_id: &acceptance.organization_id,
+                attempt_id: &acceptance.attempt_id,
+                fence_token: acceptance.fence_token,
+                session_epoch: acceptance.session_epoch,
+                phase: AttemptPhase::Finalizing,
+                process_id: Some(42),
+                logs: &logs,
+                result: &result,
+            })
+            .unwrap();
+        journal
+            .transition(
+                &acceptance.organization_id,
+                &acceptance.attempt_id,
+                acceptance.fence_token,
+                acceptance.session_epoch,
+                AttemptPhase::Succeeded,
+                Some(42),
+            )
+            .unwrap();
+        drop(journal);
+
+        reclaim_terminal_spools(&config).await.unwrap();
+
+        assert!(!stdout_path.exists());
+        assert!(!stderr_path.exists());
+        assert!(!result_path.exists());
+        assert!(
+            Journal::open(&config.journal_path)
+                .unwrap()
+                .terminal_spools()
+                .unwrap()
+                .attempts
+                .is_empty()
+        );
+        // The terminal journal row remains durable history.
+        assert!(
+            Journal::open(&config.journal_path)
+                .unwrap()
+                .reconcile()
+                .unwrap()
+                .attempts
+                .is_empty()
         );
     }
 

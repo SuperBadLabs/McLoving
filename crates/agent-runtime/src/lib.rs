@@ -161,6 +161,8 @@ pub enum JournalError {
     SpoolConflict,
     #[error("spool path must be a normalized relative path")]
     InvalidRelativePath,
+    #[error("terminal spool metadata cannot be retired before the attempt is terminal")]
+    SpoolRetirementBeforeTerminal,
     #[error("journal contains unknown attempt phase {0}")]
     UnknownPhase(String),
     #[error("journal contains an invalid fixed-size digest")]
@@ -958,6 +960,131 @@ impl Journal {
         Ok(ReconciliationReport { attempts })
     }
 
+    /// Returns terminal attempts whose controller-owned replay spools have not
+    /// yet been reclaimed. Terminal history remains in `attempts`; only the
+    /// bounded local upload evidence is selected here.
+    pub fn terminal_spools(&self) -> Result<ReconciliationReport, JournalError> {
+        let mut statement = self.connection.prepare(
+            "
+            SELECT organization_id, attempt_id, fence_token, session_epoch,
+                   payload_digest, phase, workspace, process_group_id,
+                   process_birth_identity
+            FROM attempts AS a
+            WHERE phase IN ('succeeded', 'failed', 'aborted')
+              AND (
+                EXISTS (
+                    SELECT 1 FROM log_spool AS l
+                    WHERE l.organization_id = a.organization_id
+                      AND l.attempt_id = a.attempt_id
+                      AND l.fence_token = a.fence_token
+                )
+                OR EXISTS (
+                    SELECT 1 FROM result_spool AS r
+                    WHERE r.organization_id = a.organization_id
+                      AND r.attempt_id = a.attempt_id
+                      AND r.fence_token = a.fence_token
+                )
+              )
+            ORDER BY organization_id, attempt_id, fence_token
+            ",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+            ))
+        })?;
+
+        let mut attempts = Vec::new();
+        for row in rows {
+            let (
+                organization_id,
+                attempt_id,
+                fence_token,
+                session_epoch,
+                payload_digest,
+                phase,
+                workspace,
+                process_id,
+                process_birth_identity,
+            ) = row?;
+            attempts.push(ReconciliationAttempt {
+                logs: self.log_entries(&organization_id, &attempt_id, fence_token)?,
+                result: self.result_entry(&organization_id, &attempt_id, fence_token)?,
+                organization_id,
+                attempt_id,
+                fence_token: from_sql_integer(fence_token)?,
+                session_epoch: from_sql_integer(session_epoch)?,
+                payload_digest: fixed_digest(payload_digest)?,
+                phase: AttemptPhase::parse(&phase)?,
+                workspace: PathBuf::from(workspace),
+                process_id: process_id
+                    .map(|value| u32::try_from(value).map_err(|_| JournalError::AuthorityOverflow))
+                    .transpose()?,
+                process_birth_identity,
+            });
+        }
+        Ok(ReconciliationReport { attempts })
+    }
+
+    /// Retires replay metadata only after the corresponding terminal spool
+    /// files have been deleted. A crash between file deletion and this
+    /// transaction is harmless: the next pass accepts missing files and
+    /// repeats this exact fenced retirement.
+    pub fn retire_terminal_spools(
+        &mut self,
+        organization_id: &str,
+        attempt_id: &str,
+        fence_token: u64,
+        session_epoch: u64,
+    ) -> Result<(), JournalError> {
+        let fence_token = to_sql_integer(fence_token)?;
+        let session_epoch = to_sql_integer(session_epoch)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let phase = transaction
+            .query_row(
+                "
+                SELECT phase FROM attempts
+                WHERE organization_id = ?1
+                  AND attempt_id = ?2
+                  AND fence_token = ?3
+                  AND session_epoch = ?4
+                ",
+                params![organization_id, attempt_id, fence_token, session_epoch],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or(JournalError::StaleAuthority)?;
+        if !AttemptPhase::parse(&phase)?.is_terminal() {
+            return Err(JournalError::SpoolRetirementBeforeTerminal);
+        }
+        transaction.execute(
+            "
+            DELETE FROM log_spool
+            WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
+            ",
+            params![organization_id, attempt_id, fence_token],
+        )?;
+        transaction.execute(
+            "
+            DELETE FROM result_spool
+            WHERE organization_id = ?1 AND attempt_id = ?2 AND fence_token = ?3
+            ",
+            params![organization_id, attempt_id, fence_token],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn journal_mode(&self) -> Result<String, JournalError> {
         Ok(self
             .connection
@@ -1239,7 +1366,40 @@ mod tests {
         let attempt = journal.reconcile().unwrap().attempts.remove(0);
         assert_eq!(attempt.phase, AttemptPhase::Finalizing);
         assert_eq!(attempt.logs, logs);
-        assert_eq!(attempt.result, Some(result));
+        assert_eq!(attempt.result, Some(result.clone()));
+
+        assert!(matches!(
+            journal.retire_terminal_spools(
+                &acceptance.organization_id,
+                &acceptance.attempt_id,
+                acceptance.fence_token,
+                acceptance.session_epoch,
+            ),
+            Err(JournalError::SpoolRetirementBeforeTerminal)
+        ));
+        journal
+            .transition(
+                &acceptance.organization_id,
+                &acceptance.attempt_id,
+                acceptance.fence_token,
+                acceptance.session_epoch,
+                AttemptPhase::Succeeded,
+                Some(42),
+            )
+            .unwrap();
+        let terminal = journal.terminal_spools().unwrap().attempts.remove(0);
+        assert_eq!(terminal.phase, AttemptPhase::Succeeded);
+        assert_eq!(terminal.logs, logs);
+        assert_eq!(terminal.result, Some(result));
+        journal
+            .retire_terminal_spools(
+                &acceptance.organization_id,
+                &acceptance.attempt_id,
+                acceptance.fence_token,
+                acceptance.session_epoch,
+            )
+            .unwrap();
+        assert!(journal.terminal_spools().unwrap().attempts.is_empty());
     }
 
     #[test]

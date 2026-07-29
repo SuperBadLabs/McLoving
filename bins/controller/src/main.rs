@@ -381,6 +381,7 @@ impl AgentControl for ControllerAgentService {
                 scheduler_id: format!("agent:{}:{}", request.agent_id, request.session_epoch),
                 agent_id: request.agent_id.clone(),
                 capabilities,
+                trust_pool: identity.trust_pool.clone(),
                 lease_seconds,
                 fairness_seed: 0,
             })
@@ -836,6 +837,7 @@ struct EmbeddedWorker {
     organization_id: Uuid,
     scheduler_id: String,
     capabilities: Vec<String>,
+    trust_pool: String,
     lease_seconds: i32,
     poll_interval: Duration,
     config: WorkerConfig,
@@ -856,6 +858,7 @@ impl EmbeddedWorker {
         if capabilities.is_empty() {
             bail!("MCLOVING_AGENT_CAPABILITIES must not be empty");
         }
+        let trust_pool = required("MCLOVING_AGENT_TRUST_POOL")?;
         let lease_seconds = parse_positive::<i32>("MCLOVING_LEASE_SECONDS")?;
         let poll_milliseconds = parse_positive::<u64>("MCLOVING_POLL_MILLISECONDS")?;
         let cancellation_milliseconds =
@@ -866,6 +869,7 @@ impl EmbeddedWorker {
             organization_id,
             scheduler_id: format!("embedded:{agent_id}"),
             capabilities,
+            trust_pool,
             lease_seconds,
             poll_interval: Duration::from_millis(poll_milliseconds),
             config: WorkerConfig {
@@ -892,6 +896,7 @@ async fn run_embedded_worker(store: Store, worker: EmbeddedWorker) -> Result<()>
                 scheduler_id: worker.scheduler_id.clone(),
                 agent_id: worker.config.agent_id.clone(),
                 capabilities: worker.capabilities.clone(),
+                trust_pool: worker.trust_pool.clone(),
                 lease_seconds: worker.lease_seconds,
                 fairness_seed: 0,
             })

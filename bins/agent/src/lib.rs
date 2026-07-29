@@ -284,6 +284,7 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
                     receipt.session_epoch,
                     stop.clone(),
                 ).await?;
+                worker::reclaim_terminal_spools(config).await?;
             }
             _ = work_tick.tick() => {
                 worker::poll_and_run_one(
