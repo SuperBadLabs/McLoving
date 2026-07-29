@@ -1300,10 +1300,13 @@ impl Store {
     ///
     /// Restore activation and lease expiry leave the attempt fenced and move
     /// unresolved effect checkpoints to `uncertain`. Reconciliation may only
-    /// confirm an existing, payload-identical uncertain row after its lease
-    /// has been cleared. Same-epoch lease expiry is restricted to the
-    /// attempt's current fence; restore reconciliation may also confirm an
-    /// historical fence that was made uncertain by the restore sweep.
+    /// confirm an existing, payload-identical uncertain row after executable
+    /// lease authority has been cleared. `lease_owner` may remain as durable
+    /// attribution for agent reconciliation; the null expiry and
+    /// `reconciliation_required` status prevent lease renewal or execution.
+    /// Same-epoch lease expiry is restricted to the attempt's current fence;
+    /// restore reconciliation may also confirm an historical fence that was
+    /// made uncertain by the restore sweep.
     #[allow(clippy::too_many_arguments)]
     pub async fn confirm_uncertain_effect(
         &self,
@@ -1340,7 +1343,6 @@ impl Store {
                AND a.organization_id = e.organization_id
                AND a.id = e.attempt_id
                AND a.status = 'reconciliation_required'
-               AND a.lease_owner IS NULL
                AND a.lease_expires_at IS NULL
                AND m.singleton
                AND a.restore_epoch <= m.restore_epoch
@@ -1425,7 +1427,6 @@ impl Store {
                AND a.id = $2
                AND a.fence = $3
                AND a.status = 'reconciliation_required'
-               AND a.lease_owner IS NULL
                AND a.lease_expires_at IS NULL
                AND NOT EXISTS (
                    SELECT 1

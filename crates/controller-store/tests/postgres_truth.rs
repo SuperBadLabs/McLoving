@@ -533,6 +533,44 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
     .await
     .expect("count cancellation reconciliation events");
     assert_eq!(reconciliation_events, 1);
+
+    assert!(
+        store
+            .confirm_uncertain_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "deploy",
+                EffectClass::NonIdempotent,
+                &effect_payload,
+            )
+            .await
+            .expect("confirm cancellation effect through operator reconciliation")
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                "operator-1",
+                TerminalOutcome::Aborted,
+                json!({"reason": "cancelled_after_effect_reconciliation"}),
+            )
+            .await
+            .expect("terminalize cancellation after operator reconciliation")
+    );
+    let terminal = store
+        .build_snapshot(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read terminal reconciliation snapshot")
+        .expect("build exists");
+    assert_eq!(terminal.build_status, "aborted");
+    assert_eq!(terminal.attempt_status, "aborted");
+    assert_eq!(
+        terminal.terminal_summary,
+        Some(json!({"reason": "cancelled_after_effect_reconciliation"}))
+    );
 }
 
 #[tokio::test]
