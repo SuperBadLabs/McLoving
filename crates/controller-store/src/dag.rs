@@ -411,6 +411,7 @@ pub(crate) async fn advance_dag_after_attempt(
                 }),
             )
             .await?;
+            derive_build_outcome(tx, organization_id, build_id).await?;
             return Ok(true);
         }
     }

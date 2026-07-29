@@ -5144,6 +5144,7 @@ async fn dag_reconciliation_required_pauses_other_ready_work() {
         .expect("create DAG reconciliation project");
     let mut uncertain = dag_node("uncertain", DagNodeKind::Work, vec![], "linux", "build");
     uncertain.priority = 20;
+    uncertain.max_attempts = 2;
     let mut peer = dag_node("peer", DagNodeKind::Work, vec![], "linux", "build");
     peer.priority = 10;
     let mut after = dag_node("after", DagNodeKind::Work, vec![], "linux", "build");
@@ -5182,7 +5183,9 @@ async fn dag_reconciliation_required_pauses_other_ready_work() {
 
     sqlx::query(
         "UPDATE attempts
-         SET status = 'reconciliation_required'
+         SET status = 'reconciliation_required',
+             lease_owner = NULL,
+             lease_expires_at = NULL
          WHERE organization_id = $1 AND id = $2",
     )
     .bind(organization_id)
@@ -5241,6 +5244,33 @@ async fn dag_reconciliation_required_pauses_other_ready_work() {
             .expect("poll paused DAG")
             .is_none()
     );
+    assert_eq!(
+        store
+            .explain_wait(organization_id, &["linux".to_owned()], "build")
+            .await
+            .expect("explain paused DAG"),
+        WaitReason::NoQueuedWork
+    );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                "operator-retry",
+                TerminalOutcome::Failed,
+                json!({"resolution": "safe to retry"}),
+            )
+            .await
+            .expect("schedule retry after reconciliation")
+    );
+    let retry = store
+        .claim_next(&dag_claim(organization_id, "agent-retry", "linux", "build"))
+        .await
+        .expect("claim reconciliation retry")
+        .expect("reconciliation retry is not stranded");
+    assert_eq!(retry.node_id, first.node_id);
+    assert_ne!(retry.attempt_id, first.attempt_id);
 }
 
 #[tokio::test]

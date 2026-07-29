@@ -769,13 +769,46 @@ impl Store {
         }
 
         let required = sqlx::query_as::<_, (Vec<String>, String)>(
-            "SELECT required_capabilities, required_trust_pool
-             FROM nodes
-             WHERE organization_id = $1 AND status = 'queued'
-             ORDER BY (required_trust_pool = $2) DESC,
-                      priority DESC,
-                      queued_at,
-                      id
+            "SELECT n.required_capabilities, n.required_trust_pool
+             FROM nodes AS n
+             JOIN builds AS b
+               ON b.id = n.build_id
+              AND b.organization_id = n.organization_id
+             WHERE n.organization_id = $1
+               AND n.status = 'queued'
+               AND (
+                   b.status = 'queued'
+                   OR (b.dag_mode AND b.status = 'running')
+               )
+               AND n.cancellation_requested_at IS NULL
+               AND b.cancellation_requested_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM node_dependencies AS dependency
+                   JOIN nodes AS parent
+                     ON parent.id = dependency.parent_node_id
+                    AND parent.organization_id = dependency.organization_id
+                    AND parent.build_id = dependency.build_id
+                   WHERE dependency.organization_id = n.organization_id
+                     AND dependency.build_id = n.build_id
+                     AND dependency.child_node_id = n.id
+                     AND (
+                         (
+                             dependency.condition = 'succeeded'
+                             AND parent.status <> 'succeeded'
+                         )
+                         OR (
+                             dependency.condition = 'completed'
+                             AND parent.status NOT IN (
+                                 'succeeded', 'failed', 'aborted', 'skipped'
+                             )
+                         )
+                     )
+               )
+             ORDER BY (n.required_trust_pool = $2) DESC,
+                      n.priority DESC,
+                      n.queued_at,
+                      n.id
              LIMIT 1",
         )
         .bind(organization_id)
