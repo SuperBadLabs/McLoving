@@ -8,8 +8,8 @@ use std::time::Duration;
 use mcloving_agent_protocol::wire;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
-    AttemptState, CancellationCompletion, CancellationDisposition, OpenSessionRequest,
-    ProtocolOffer, ReconciliationReport as WireReport,
+    AttemptState, CancellationCompletion, CancellationDisposition, CancellationOutcome,
+    OpenSessionRequest, ProtocolOffer, ReconciliationReport as WireReport,
 };
 use mcloving_agent_protocol::{OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError};
 #[cfg(windows)]
@@ -253,17 +253,19 @@ async fn send_reconciliation(
         let mut journal = Journal::open(&config.journal_path)?;
         for attempt in &report.attempts {
             if cancellation_targets(&cancelled, attempt) {
-                if cancel_recovered_attempt(&mut journal, attempt).await?
-                    == RecoveredCancellation::ReconciliationRequired
-                {
-                    continue;
-                }
+                let outcome = cancel_recovered_attempt(&mut journal, attempt).await?;
                 let request = CancellationCompletion {
                     agent_id: config.agent_id.clone(),
                     session_epoch,
                     organization_id: attempt.organization_id.clone(),
                     attempt_id: attempt.attempt_id.clone(),
                     fence_token: attempt.fence_token,
+                    outcome: match outcome {
+                        RecoveredCancellation::Completed => CancellationOutcome::Terminated as i32,
+                        RecoveredCancellation::ReconciliationRequired => {
+                            CancellationOutcome::ReconciliationRequired as i32
+                        }
+                    },
                 };
                 let receipt = tokio::select! {
                     () = stop.cancelled() => return Err(AgentError::Stopped),

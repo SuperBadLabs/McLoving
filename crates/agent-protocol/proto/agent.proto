@@ -87,6 +87,13 @@ message CancellationCompletion {
   string organization_id = 3;
   string attempt_id = 4;
   uint64 fence_token = 5;
+  CancellationOutcome outcome = 6;
+}
+
+enum CancellationOutcome {
+  CANCELLATION_OUTCOME_UNSPECIFIED = 0;
+  CANCELLATION_OUTCOME_TERMINATED = 1;
+  CANCELLATION_OUTCOME_RECONCILIATION_REQUIRED = 2;
 }
 
 message CancellationReceipt {

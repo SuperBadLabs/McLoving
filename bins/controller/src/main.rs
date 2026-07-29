@@ -7,14 +7,15 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
 use mcloving_agent_protocol::wire::{
-    AttemptAuthority, CancellationCompletion, CancellationDisposition, CancellationReceipt,
-    OpenSessionRequest, OpenSessionResponse, ReconciliationDirective, ReconciliationReport,
-    RotateCertificateRequest, RotateCertificateResponse,
+    AttemptAuthority, CancellationCompletion, CancellationDisposition, CancellationOutcome,
+    CancellationReceipt, OpenSessionRequest, OpenSessionResponse, ReconciliationDirective,
+    ReconciliationReport, RotateCertificateRequest, RotateCertificateResponse,
 };
 use mcloving_agent_protocol::{ProtocolRange, negotiate};
 use mcloving_controller_api::{ApiState, router};
 use mcloving_controller_store::{
-    AgentCancellationDisposition, AgentReconciliationDisposition, ClaimRequest, Store,
+    AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
+    AgentReconciliationDisposition, ClaimRequest, Store,
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use sha2::{Digest, Sha256};
@@ -280,17 +281,29 @@ impl AgentControl for ControllerAgentService {
             .attempt_id
             .parse()
             .map_err(|_| Status::invalid_argument("attempt_id must be a UUID"))?;
+        let outcome = match CancellationOutcome::try_from(request.outcome) {
+            Ok(CancellationOutcome::Terminated) => AgentCancellationOutcome::Terminated,
+            Ok(CancellationOutcome::ReconciliationRequired) => {
+                AgentCancellationOutcome::ReconciliationRequired
+            }
+            Ok(CancellationOutcome::Unspecified) | Err(_) => {
+                return Err(Status::invalid_argument(
+                    "cancellation outcome must be explicit",
+                ));
+            }
+        };
         let (restore_epoch, fence) = decode_authority_token(request.fence_token);
         let disposition = self
             .store
-            .complete_agent_cancellation(
+            .complete_agent_cancellation(AgentCancellationCompletion {
                 organization_id,
                 attempt_id,
                 fence,
                 restore_epoch,
-                &request.agent_id,
-                request.session_epoch,
-            )
+                agent_id: &request.agent_id,
+                session_epoch: request.session_epoch,
+                outcome,
+            })
             .await
             .map_err(internal_store_error)?;
         Ok(Response::new(CancellationReceipt {

@@ -40,6 +40,24 @@ pub enum AgentCancellationDisposition {
     ReconciliationRequired,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentCancellationOutcome {
+    Terminated,
+    ReconciliationRequired,
+}
+
+/// Fenced controller authority and the observed result of one cancellation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentCancellationCompletion<'a> {
+    pub organization_id: Uuid,
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub restore_epoch: i64,
+    pub agent_id: &'a str,
+    pub session_epoch: u64,
+    pub outcome: AgentCancellationOutcome,
+}
+
 /// A build and its first executable node, admitted as one durable unit.
 #[derive(Clone, Debug)]
 pub struct NewBuild {
@@ -439,23 +457,28 @@ impl Store {
         })
     }
 
-    /// Atomically acknowledges a fenced agent's completed cancellation.
+    /// Atomically acknowledges a fenced agent's cancellation outcome.
     ///
     /// A reconnect may arrive after its lease deadline, so cancellation
     /// completion is authorized by the current restore epoch, exact fence, and
     /// exact lease owner rather than by an unexpired lease. Response-loss
-    /// replay of the same already-aborted attempt succeeds without emitting a
-    /// second event. Uncertain external effects fail closed into explicit
-    /// reconciliation instead of being mislabeled aborted.
+    /// replay of an already-applied outcome succeeds without emitting a second
+    /// event. Unverifiable process termination and uncertain external effects
+    /// fail closed into explicit reconciliation instead of being mislabeled
+    /// aborted.
     pub async fn complete_agent_cancellation(
         &self,
-        organization_id: Uuid,
-        attempt_id: Uuid,
-        fence: i64,
-        restore_epoch: i64,
-        agent_id: &str,
-        session_epoch: u64,
+        completion: AgentCancellationCompletion<'_>,
     ) -> Result<AgentCancellationDisposition, StoreError> {
+        let AgentCancellationCompletion {
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            session_epoch,
+            outcome,
+        } = completion;
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         let session_epoch =
@@ -492,7 +515,7 @@ impl Store {
                    FROM controller_metadata
                    WHERE singleton
                )
-               AND a.status IN ('cancelling', 'aborted')
+               AND a.status IN ('cancelling', 'aborted', 'reconciliation_required')
                AND b.cancellation_requested_at IS NOT NULL
              FOR UPDATE OF a, n, b",
         )
@@ -511,6 +534,10 @@ impl Store {
             tx.commit().await?;
             return Ok(AgentCancellationDisposition::Completed);
         }
+        if status == "reconciliation_required" {
+            tx.commit().await?;
+            return Ok(AgentCancellationDisposition::ReconciliationRequired);
+        }
 
         let uncertain_effects = sqlx::query_scalar::<_, i64>(
             "SELECT count(*)
@@ -525,7 +552,7 @@ impl Store {
         .bind(fence)
         .fetch_one(&mut *tx)
         .await?;
-        if uncertain_effects > 0 {
+        if outcome == AgentCancellationOutcome::ReconciliationRequired || uncertain_effects > 0 {
             sqlx::query(
                 "UPDATE attempts
                  SET status = 'reconciliation_required',
@@ -563,6 +590,10 @@ impl Store {
                     "attempt_id": attempt_id,
                     "fence": fence,
                     "agent_id": agent_id,
+                    "process_termination": match outcome {
+                        AgentCancellationOutcome::Terminated => "terminated",
+                        AgentCancellationOutcome::ReconciliationRequired => "unverifiable",
+                    },
                     "uncertain_effects": uncertain_effects,
                 }),
             )
