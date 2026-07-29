@@ -15,8 +15,8 @@ use mcloving_agent_protocol::wire::{
     WorkAuthority, WorkCompletion, WorkLeaseRenewal, WorkLogChunk, WorkOutcome, WorkPoll,
 };
 use mcloving_agent_runtime::executor::{
-    ExecutionError, ExecutionMode, ExecutionRequest, Termination, execute_with_spawn_hook,
-    is_link_or_reparse_point, sync_directory,
+    ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
+    execute_with_spawn_hook, is_link_or_reparse_point, sync_directory,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Finalization, Journal, ProcessIdentity, SpoolEntry,
@@ -197,6 +197,9 @@ pub(super) async fn recover_finalizations(
             return Err(AgentError::StaleAuthority);
         }
         let lease_stop = CancellationToken::new();
+        // A probe timeout drops this recovery future. Keep cancellation tied
+        // to that lifetime so the spawned renewal task cannot outlive replay.
+        let _lease_stop_guard = lease_stop.clone().drop_guard();
         let authority_lost = CancellationToken::new();
         let execution_cancellation = CancellationToken::new();
         let lease_task = tokio::spawn(renew_lease(
@@ -1095,10 +1098,23 @@ async fn remove_terminal_relative_path(
     workspace_root: &Path,
     relative_path: &Path,
 ) -> Result<(), AgentError> {
+    let root_metadata = match fs::symlink_metadata(workspace_root).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !root_metadata.is_dir() || is_link_or_reparse_point(&root_metadata) {
+        return Err(ExecutionError::ReplacedWorkspaceRoot.into());
+    }
+    restore_directory_access(workspace_root, &root_metadata).await?;
+    let workspace_root_guard = WorkspaceRootGuard::open(workspace_root)?;
+    workspace_root_guard.ensure_original(workspace_root)?;
+
     let path = workspace_root.join(relative_path);
     let mut current = workspace_root.to_owned();
     let mut components = relative_path.components().peekable();
     while let Some(component) = components.next() {
+        workspace_root_guard.ensure_original(workspace_root)?;
         let Component::Normal(component) = component else {
             unreachable!("terminal path was validated by its caller");
         };
@@ -1144,7 +1160,8 @@ async fn remove_terminal_relative_path(
             Err(error) => return Err(error.into()),
         }
     }
-    prune_empty_spool_directories(workspace_root, path.parent()).await
+    workspace_root_guard.ensure_original(workspace_root)?;
+    prune_empty_spool_directories(workspace_root, &workspace_root_guard, path.parent()).await
 }
 
 async fn remove_terminal_replacement_entry(
@@ -1312,10 +1329,12 @@ fn windows_entry_is_directory(metadata: &std::fs::Metadata) -> bool {
 
 async fn prune_empty_spool_directories(
     workspace_root: &Path,
+    workspace_root_guard: &WorkspaceRootGuard,
     start: Option<&Path>,
 ) -> Result<(), AgentError> {
     let mut current = start.map(Path::to_owned);
     while let Some(directory) = current {
+        workspace_root_guard.ensure_original(workspace_root)?;
         if directory == workspace_root {
             break;
         }
@@ -1994,6 +2013,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropped_recovery_scope_cancels_lease_renewal() {
+        let lease_stop = CancellationToken::new();
+        let renewal_observer = lease_stop.clone();
+        let recovery = tokio::spawn(async move {
+            let _lease_stop_guard = lease_stop.drop_guard();
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+
+        recovery.abort();
+        assert!(recovery.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), renewal_observer.cancelled())
+            .await
+            .expect("dropping recovery must stop the detached lease renewal");
+    }
+
+    #[tokio::test]
     async fn result_spool_uses_post_containment_nonce_and_binds_completion_protocol() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = PathBuf::from("org/attempt");
@@ -2420,6 +2456,41 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn replaced_terminal_workspace_root_is_rejected_without_following() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace_root = directory.path().join("workspace");
+        let workspace = PathBuf::from("organization/attempt/7");
+        let displaced_root = directory.path().join("displaced-workspace");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(workspace_root.join(&workspace))
+            .await
+            .unwrap();
+        fs::create_dir_all(outside.join(&workspace)).await.unwrap();
+        fs::write(outside.join(&workspace).join("sentinel"), b"must-survive")
+            .await
+            .unwrap();
+        fs::rename(&workspace_root, &displaced_root).await.unwrap();
+        std::os::unix::fs::symlink(&outside, &workspace_root).unwrap();
+
+        let error = remove_attempt_workspace(&workspace_root, &workspace)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AgentError::Execution(ExecutionError::ReplacedWorkspaceRoot)
+        ));
+        assert_eq!(
+            fs::read(outside.join(&workspace).join("sentinel"))
+                .await
+                .unwrap(),
+            b"must-survive"
+        );
+        assert!(displaced_root.join(&workspace).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn replaced_terminal_workspace_leaf_is_removed_without_following() {
         let directory = tempfile::tempdir().unwrap();
         let workspace_root = directory.path().join("workspace");
@@ -2527,6 +2598,41 @@ mod tests {
             fs::read(outside.join("sentinel")).await.unwrap(),
             b"must-survive"
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn replaced_terminal_workspace_root_junction_is_rejected_without_following() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace_root = directory.path().join("workspace");
+        let workspace = PathBuf::from("organization/attempt/7");
+        let displaced_root = directory.path().join("displaced-workspace");
+        let outside = directory.path().join("outside");
+        fs::create_dir_all(workspace_root.join(&workspace))
+            .await
+            .unwrap();
+        fs::create_dir_all(outside.join(&workspace)).await.unwrap();
+        fs::write(outside.join(&workspace).join("sentinel"), b"must-survive")
+            .await
+            .unwrap();
+        fs::rename(&workspace_root, &displaced_root).await.unwrap();
+        create_windows_junction(&workspace_root, &outside);
+
+        let error = remove_attempt_workspace(&workspace_root, &workspace)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AgentError::Execution(ExecutionError::ReplacedWorkspaceRoot)
+        ));
+        assert_eq!(
+            fs::read(outside.join(&workspace).join("sentinel"))
+                .await
+                .unwrap(),
+            b"must-survive"
+        );
+        assert!(displaced_root.join(&workspace).exists());
     }
 
     #[cfg(windows)]

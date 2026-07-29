@@ -48,7 +48,7 @@ where
     if request.mode != ExecutionMode::Direct {
         return Err(ExecutionError::UnsupportedMode(request.mode));
     }
-    let workspace_root_control = File::open(&request.workspace_root)?;
+    let workspace_root_control = open_workspace_root(&request.workspace_root)?;
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
     let workspace = create_workspace(&request.workspace_root, &request.workspace)?;
@@ -280,7 +280,19 @@ fn truncate_output_to_limit(
     stderr.set_len(retained_stderr)
 }
 
-fn ensure_original_workspace_root(file: &File, path: &Path) -> Result<(), ExecutionError> {
+pub(super) fn open_workspace_root(path: &Path) -> Result<File, ExecutionError> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| ExecutionError::InvalidWorkspaceRoot)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(ExecutionError::InvalidWorkspaceRoot);
+    }
+    File::open(path).map_err(ExecutionError::Io)
+}
+
+pub(super) fn ensure_original_workspace_root(
+    file: &File,
+    path: &Path,
+) -> Result<(), ExecutionError> {
     let named_link =
         std::fs::symlink_metadata(path).map_err(|_| ExecutionError::ReplacedWorkspaceRoot)?;
     if !named_link.is_dir() || named_link.file_type().is_symlink() {

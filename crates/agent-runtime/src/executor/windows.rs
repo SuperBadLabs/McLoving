@@ -184,7 +184,7 @@ fn truncate_output_to_limit(
     stderr.set_len(retained_stderr)
 }
 
-fn open_workspace_root(path: &Path) -> Result<File, ExecutionError> {
+pub(super) fn open_workspace_root(path: &Path) -> Result<File, ExecutionError> {
     let metadata =
         std::fs::symlink_metadata(path).map_err(|_| ExecutionError::InvalidWorkspaceRoot)?;
     if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
@@ -198,7 +198,10 @@ fn open_workspace_root(path: &Path) -> Result<File, ExecutionError> {
         .map_err(ExecutionError::Io)
 }
 
-fn ensure_original_workspace_root(file: &File, path: &Path) -> Result<(), ExecutionError> {
+pub(super) fn ensure_original_workspace_root(
+    file: &File,
+    path: &Path,
+) -> Result<(), ExecutionError> {
     let metadata =
         std::fs::symlink_metadata(path).map_err(|_| ExecutionError::ReplacedWorkspaceRoot)?;
     if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {

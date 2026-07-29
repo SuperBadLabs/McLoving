@@ -17,7 +17,17 @@ mod unix;
 mod windows;
 
 #[cfg(unix)]
+use unix::{
+    ensure_original_workspace_root as platform_ensure_original_workspace_root,
+    open_workspace_root as platform_open_workspace_root,
+};
+#[cfg(unix)]
 pub use unix::{execute, execute_with_spawn_hook};
+#[cfg(windows)]
+use windows::{
+    ensure_original_workspace_root as platform_ensure_original_workspace_root,
+    open_workspace_root as platform_open_workspace_root,
+};
 #[cfg(windows)]
 pub use windows::{execute, execute_with_spawn_hook};
 
@@ -98,6 +108,24 @@ pub enum ExecutionError {
     #[cfg(unix)]
     #[error("signal error: {0}")]
     Signal(#[from] nix::errno::Errno),
+}
+
+/// Pins the configured workspace root so path-based maintenance can fail
+/// closed if untrusted work replaces that root before cleanup completes.
+pub struct WorkspaceRootGuard {
+    file: std::fs::File,
+}
+
+impl WorkspaceRootGuard {
+    pub fn open(path: &Path) -> Result<Self, ExecutionError> {
+        Ok(Self {
+            file: platform_open_workspace_root(path)?,
+        })
+    }
+
+    pub fn ensure_original(&self, path: &Path) -> Result<(), ExecutionError> {
+        platform_ensure_original_workspace_root(&self.file, path)
+    }
 }
 
 pub async fn execute_portable(
