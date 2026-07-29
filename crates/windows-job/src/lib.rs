@@ -25,6 +25,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, WAIT_FAILED,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+use windows_sys::Win32::Security::{TOKEN_DUPLICATE, TOKEN_QUERY};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
 };
@@ -38,7 +39,7 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    InitializeProcThreadAttributeList, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
     STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
 };
@@ -501,19 +502,24 @@ fn environment_block(
 }
 
 fn standard_workload_environment() -> Result<BTreeMap<String, (OsString, OsString)>, JobError> {
-    // Ask Windows for the system-only environment rather than deriving a
-    // user-profile block from the process token. This produces the same
-    // native-shell baseline for an interactive agent and a LocalSystem
-    // service while excluding CI controls, credentials, and arbitrary
-    // process-local or per-user values.
-    const BASELINE: [&str; 27] = [
+    // Seed missing standard values from the service token, then overlay the
+    // same fixed allowlist from the actual agent process. This preserves the
+    // environment SCM or the operator deliberately gave the service while
+    // filling profile values omitted by sparse service environments. CI
+    // controls, credentials, and arbitrary process-local values remain out.
+    const BASELINE: [&str; 36] = [
         "ALLUSERSPROFILE",
+        "APPDATA",
         "COMMONPROGRAMFILES",
         "COMMONPROGRAMFILES(X86)",
         "COMMONPROGRAMW6432",
         "COMPUTERNAME",
         "COMSPEC",
         "DRIVERDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
+        "LOGONSERVER",
         "NUMBER_OF_PROCESSORS",
         "OS",
         "PATH",
@@ -533,14 +539,33 @@ fn standard_workload_environment() -> Result<BTreeMap<String, (OsString, OsStrin
         "SYSTEMROOT",
         "TEMP",
         "TMP",
+        "USERDOMAIN",
+        "USERDOMAIN_ROAMINGPROFILE",
+        "USERNAME",
+        "USERPROFILE",
         "WINDIR",
     ];
+    let mut raw_token = null_mut();
+    // SAFETY: the current-process pseudo handle is valid and raw_token points
+    // to writable handle storage. Query/duplicate access is the documented
+    // requirement for a primary token passed to CreateEnvironmentBlock.
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &raw mut raw_token,
+        )
+    } == 0
+    {
+        return Err(JobError::last("OpenProcessToken"));
+    }
+    let token = OwnedHandle::new(raw_token, "OpenProcessToken")?;
     let mut raw_environment = null_mut();
-    // SAFETY: raw_environment points to writable pointer storage. A null token
-    // requests the documented system-variable-only block; inherit=false keeps
-    // arbitrary process-local values out of the result.
-    if unsafe { CreateEnvironmentBlock(&raw mut raw_environment, null_mut(), 0) } == 0 {
-        return Err(JobError::last("CreateEnvironmentBlock(system only)"));
+    // SAFETY: raw_environment points to writable pointer storage and token is
+    // the live primary token of the service process. inherit=false excludes
+    // arbitrary process-local values from this profile-derived seed.
+    if unsafe { CreateEnvironmentBlock(&raw mut raw_environment, token.handle, 0) } == 0 {
+        return Err(JobError::last("CreateEnvironmentBlock(current token)"));
     }
     let environment = EnvironmentBlock(raw_environment);
     let mut entries = BTreeMap::new();
@@ -572,6 +597,12 @@ fn standard_workload_environment() -> Result<BTreeMap<String, (OsString, OsStrin
         }
         // SAFETY: units spans the entry; one more unit skips its terminator.
         cursor = unsafe { cursor.add(units + 1) };
+    }
+    for (key, value) in std::env::vars_os() {
+        let normalized = normalized_environment_key(&key);
+        if BASELINE.contains(&normalized.as_str()) {
+            entries.insert(normalized, (key, value));
+        }
     }
     Ok(entries)
 }
@@ -736,6 +767,7 @@ mod tests {
 
     #[test]
     fn workload_environment_excludes_ci_values_and_accepts_explicit_values() {
+        assert!(std::env::var_os("USERNAME").is_some());
         let block = environment_block(
             &BTreeMap::from([
                 (OsString::from("EXPLICIT_VALUE"), OsString::from("allowed")),
@@ -749,8 +781,7 @@ mod tests {
         .unwrap();
         let text = String::from_utf16_lossy(&block).replace('\0', "\n");
         assert!(text.to_uppercase().contains("SYSTEMROOT="));
-        assert!(!text.to_uppercase().contains("USERNAME="));
-        assert!(!text.to_uppercase().contains("USERPROFILE="));
+        assert!(text.to_uppercase().contains("USERNAME="));
         assert!(!text.to_uppercase().contains("GITHUB_ACTIONS="));
         assert!(!text.to_uppercase().contains("GITHUB_TOKEN="));
         assert!(text.contains("EXPLICIT_VALUE=allowed"));

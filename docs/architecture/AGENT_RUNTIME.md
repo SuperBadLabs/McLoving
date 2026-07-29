@@ -134,12 +134,13 @@ authority.
   path.
 - Workloads never inherit the agent service environment wholesale. Unix starts
   from a fixed `PATH`/locale baseline. Windows copies a fixed allowlist of
-  standard system variables required by native shells from the documented
-  Windows system-only environment block, redirects `TEMP`/`TMP` into the
-  attempt workspace, and synthesizes the exact per-drive current-directory
-  entry required when a custom Unicode environment block is passed to
-  `CreateProcessW`. User-profile values are not inherited; an execution
-  specification must request them explicitly. Explicit overrides are accepted
+  standard operating-system and user-profile variables required by native
+  shells from a fixed allowlist. Missing standard values are seeded from the
+  service token and then the same allowlist from the actual agent process takes
+  precedence, preserving the environment SCM or the operator deliberately gave
+  that service. `TEMP`/`TMP` are redirected into the attempt workspace, and the
+  exact per-drive current-directory entry required by a custom Unicode
+  `CreateProcessW` environment is synthesized. Explicit overrides are accepted
   except for reserved `TEMP`/`TMP`, which remain attempt-scoped; controller
   URLs, journal paths, credentials, CI controls, and arbitrary process-local
   variables remain excluded.
