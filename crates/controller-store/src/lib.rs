@@ -1087,6 +1087,31 @@ impl Store {
             .bind(format!("mcloving.retry.{attempt_id}"))
             .execute(&mut *tx)
             .await?;
+        let exact_replay = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM build_events
+                 WHERE organization_id = $1
+                   AND kind = 'attempt.reconciliation_terminal'
+                   AND payload ->> 'attempt_id' = $2::text
+                   AND (payload ->> 'fence')::bigint = $3
+                   AND payload ->> 'actor' = $4
+                   AND payload ->> 'outcome' = $5
+                   AND payload -> 'summary' = $6::jsonb
+             )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(actor)
+        .bind(outcome.as_str())
+        .bind(&summary)
+        .fetch_one(&mut *tx)
+        .await?;
+        if exact_replay {
+            tx.commit().await?;
+            return Ok(true);
+        }
         let reconciled = sqlx::query_as::<_, (Uuid, Uuid, i64)>(
             "UPDATE attempts AS a
              SET status = $4,
@@ -1164,6 +1189,7 @@ impl Store {
                 "restore_epoch": restore_epoch,
                 "actor": actor,
                 "outcome": outcome.as_str(),
+                "summary": summary,
             }),
         )
         .await?;
@@ -2030,6 +2056,24 @@ impl Store {
                    SELECT 1
                    FROM object_deletion_claims AS claim
                    WHERE claim.object_digest = candidate.object_digest
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM attempt_objects AS referenced
+                   LEFT JOIN object_retention AS r
+                     ON r.organization_id = referenced.organization_id
+                    AND r.object_digest = referenced.object_digest
+                   WHERE referenced.object_digest = candidate.object_digest
+                     AND (
+                         r.object_digest IS NULL
+                         OR r.retain_until > clock_timestamp()
+                     )
+               )
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM legal_holds AS h
+                   WHERE h.object_digest = candidate.object_digest
+                     AND h.released_at IS NULL
                )
              ORDER BY candidate.object_digest
              LIMIT $1",

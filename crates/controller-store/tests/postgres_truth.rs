@@ -1348,6 +1348,7 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
         .commit()
         .await
         .expect("commit terminal-first reconciliation state");
+    let terminal_first_summary = json!({"resolution": "terminal reconciliation wins"});
     assert!(
         store
             .finalize_reconciled_attempt(
@@ -1356,11 +1357,54 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
                 0,
                 "operator-d",
                 TerminalOutcome::Failed,
-                json!({"resolution": "terminal reconciliation wins"}),
+                terminal_first_summary.clone(),
             )
             .await
             .expect("terminalize reconciliation before retry")
     );
+    assert!(
+        store
+            .finalize_reconciled_attempt(
+                organization_id,
+                terminal_first.attempt_id,
+                0,
+                "operator-d",
+                TerminalOutcome::Failed,
+                terminal_first_summary,
+            )
+            .await
+            .expect("response-loss terminal reconciliation replay succeeds")
+    );
+    assert!(
+        !store
+            .finalize_reconciled_attempt(
+                organization_id,
+                terminal_first.attempt_id,
+                0,
+                "different-operator",
+                TerminalOutcome::Failed,
+                json!({"resolution": "terminal reconciliation wins"}),
+            )
+            .await
+            .expect("conflicting terminal reconciliation replay is rejected")
+    );
+    let terminal_publications: (i64, i64) = sqlx::query_as(
+        "SELECT
+           (SELECT count(*) FROM build_events
+            WHERE organization_id = $1
+              AND build_id = $2
+              AND kind = 'attempt.reconciliation_terminal'),
+           (SELECT count(*) FROM outbox
+            WHERE organization_id = $1
+              AND aggregate_id = $2
+              AND topic = 'attempt.reconciliation_terminal')",
+    )
+    .bind(organization_id)
+    .bind(terminal_first.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count response-loss terminal publications");
+    assert_eq!(terminal_publications, (1, 1));
     assert_eq!(
         store
             .schedule_retry(
@@ -2470,9 +2514,9 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("expire disposable retention")
     );
     let completed_claims = store
-        .claim_objects_globally_for_deletion(10)
+        .claim_objects_globally_for_deletion(1)
         .await
-        .expect("claim disposable content");
+        .expect("eligible content is not starved by protected digest prefix");
     assert_eq!(completed_claims.len(), 1);
     let completed_claim = completed_claims[0];
     assert_eq!(completed_claim.digest, disposable_digest);

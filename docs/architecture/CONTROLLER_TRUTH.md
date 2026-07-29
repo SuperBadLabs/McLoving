@@ -37,6 +37,9 @@ Prepared and applied effects become uncertain; confirmed effects retain their
 stronger evidence. Such work is never returned to the runnable queue or made
 retry-eligible. A fenced operator may confirm an exact uncertain payload and
 then explicitly terminate the reconciled attempt, with event and outbox audit.
+An exact replay of a committed terminal reconciliation returns success without
+emitting another event; a conflicting actor, outcome, fence, or summary is
+rejected.
 
 Claims share-lock and record the controller restore epoch. Every agent
 authority operation presents `(attempt_id, fence, restore_epoch, agent_id)`,

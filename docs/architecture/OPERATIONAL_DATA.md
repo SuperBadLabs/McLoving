@@ -99,6 +99,9 @@ their audit history, and a released hold cannot be silently reactivated.
 Eligibility inspection is diagnostic only. Physical deletion requires a
 durable tokenized claim under a digest-scoped transaction lock. While claimed,
 new references, retention extensions, and legal holds lose to that same lock.
+Candidate pagination applies those global eligibility predicates before its
+limit and then revalidates each selected digest under the lock, so a protected
+sort-prefix cannot starve later eligible content.
 Active claims are listable with their exact token after process restart. The
 deleter must commit an irrevocable `deleting` transition before touching
 physical storage. A merely claimed token can be abandoned; a deleting token
