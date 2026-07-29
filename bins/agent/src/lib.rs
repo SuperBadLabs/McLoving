@@ -439,12 +439,7 @@ async fn send_reconciliation(
     if !cancelled.is_empty() || !retained.is_empty() {
         let mut journal = Journal::open(&config.journal_path)?;
         for attempt in &report.attempts {
-            let interrupted_execution = cancellation_targets(&retained, attempt)
-                && matches!(
-                    attempt.phase,
-                    AttemptPhase::Accepted | AttemptPhase::Running
-                );
-            if cancellation_targets(&cancelled, attempt) || interrupted_execution {
+            if recovered_attempt_requires_cancellation_report(&cancelled, &retained, attempt) {
                 let outcome =
                     if worker::recovered_attempt_has_durable_containment_proof(config, attempt)
                         .await?
@@ -631,6 +626,21 @@ fn cancellation_targets(
         attempt.attempt_id.clone(),
         attempt.fence_token,
     ))
+}
+
+fn recovered_attempt_requires_cancellation_report(
+    cancelled: &std::collections::BTreeSet<(String, String, u64)>,
+    retained: &std::collections::BTreeSet<(String, String, u64)>,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> bool {
+    cancellation_targets(cancelled, attempt)
+        || (cancellation_targets(retained, attempt)
+            && matches!(
+                attempt.phase,
+                AttemptPhase::Accepted
+                    | AttemptPhase::Running
+                    | AttemptPhase::ReconciliationRequired
+            ))
 }
 
 #[cfg(unix)]
@@ -1118,6 +1128,32 @@ mod tests {
             .unwrap(),
             AttemptPhase::Aborted
         );
+    }
+
+    #[test]
+    fn retained_reconciliation_required_attempt_is_reported_to_the_controller() {
+        let attempt = mcloving_agent_runtime::ReconciliationAttempt {
+            organization_id: "org".to_owned(),
+            attempt_id: "attempt".to_owned(),
+            fence_token: 7,
+            session_epoch: 3,
+            payload_digest: [0x42; 32],
+            phase: AttemptPhase::ReconciliationRequired,
+            workspace: PathBuf::from("org/attempt/7"),
+            process_id: Some(42),
+            process_birth_identity: None,
+            logs: Vec::new(),
+            result: None,
+        };
+        let retained = [("org".to_owned(), "attempt".to_owned(), 7)]
+            .into_iter()
+            .collect();
+
+        assert!(recovered_attempt_requires_cancellation_report(
+            &std::collections::BTreeSet::new(),
+            &retained,
+            &attempt
+        ));
     }
 
     #[cfg(windows)]
