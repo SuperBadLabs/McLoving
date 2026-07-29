@@ -8,8 +8,8 @@ use std::time::Duration;
 use mcloving_agent_protocol::wire;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
-    AttemptState, CancellationCompletion, OpenSessionRequest, ProtocolOffer,
-    ReconciliationReport as WireReport,
+    AttemptState, CancellationCompletion, CancellationDisposition, OpenSessionRequest,
+    ProtocolOffer, ReconciliationReport as WireReport,
 };
 use mcloving_agent_protocol::{OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError};
 #[cfg(windows)]
@@ -65,6 +65,10 @@ pub enum AgentError {
     Stopped,
     #[error("journal path cannot be represented in the wire protocol")]
     NonUtf8Path,
+    #[error(
+        "recovered Unix process {0} has no durable non-reusable identity; refusing to signal it"
+    )]
+    UnverifiableRecoveredProcess(u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -260,16 +264,25 @@ async fn send_reconciliation(
                 if receipt.session_epoch != session_epoch {
                     return Err(AgentError::StaleSession);
                 }
-                if receipt.accepted {
-                    journal.transition(
-                        &attempt.organization_id,
-                        &attempt.attempt_id,
-                        attempt.fence_token,
-                        attempt.session_epoch,
-                        AttemptPhase::Aborted,
-                        attempt.process_id,
-                    )?;
-                }
+                let phase = match CancellationDisposition::try_from(receipt.disposition) {
+                    Ok(
+                        CancellationDisposition::Completed | CancellationDisposition::RetireStale,
+                    ) => AttemptPhase::Aborted,
+                    Ok(CancellationDisposition::ReconciliationRequired) => {
+                        AttemptPhase::ReconciliationRequired
+                    }
+                    Ok(CancellationDisposition::Unspecified) | Err(_) => {
+                        return Err(AgentError::UnsupportedProtocol);
+                    }
+                };
+                journal.transition(
+                    &attempt.organization_id,
+                    &attempt.attempt_id,
+                    attempt.fence_token,
+                    attempt.session_epoch,
+                    phase,
+                    attempt.process_id,
+                )?;
             }
         }
     }
@@ -278,26 +291,15 @@ async fn send_reconciliation(
 
 #[cfg(unix)]
 async fn terminate_recovered_process(process_id: Option<u32>) -> Result<(), AgentError> {
-    use nix::errno::Errno;
-    use nix::sys::signal::{Signal, killpg};
-    use nix::unistd::Pid;
-
     let Some(process_id) = process_id else {
         return Ok(());
     };
-    let process_group = i32::try_from(process_id)
-        .map(Pid::from_raw)
-        .map_err(|_| std::io::Error::other("recovered process ID exceeds Unix pid_t"))?;
-    match killpg(process_group, Signal::SIGTERM) {
-        Ok(()) => {}
-        Err(Errno::ESRCH) => return Ok(()),
-        Err(error) => return Err(std::io::Error::other(error).into()),
-    }
-    sleep(Duration::from_millis(100)).await;
-    match killpg(process_group, Signal::SIGKILL) {
-        Ok(()) | Err(Errno::ESRCH) => Ok(()),
-        Err(error) => Err(std::io::Error::other(error).into()),
-    }
+    // A numeric PID/PGID can be recycled after the original service exits.
+    // Until the journal stores a non-reusable process birth identity or an
+    // independently durable containment handle, signaling here could kill an
+    // unrelated process group. Fail closed and leave the attempt visible for
+    // explicit reconciliation.
+    Err(AgentError::UnverifiableRecoveredProcess(process_id))
 }
 
 #[cfg(windows)]
@@ -504,18 +506,19 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn recovered_unix_process_group_is_killed_before_completion() {
+    async fn recovered_unix_process_group_without_birth_identity_is_not_signalled() {
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args(["-c", "exec sleep 30"]).process_group(0);
         let mut child = command.spawn().unwrap();
         let process_id = child.id().unwrap();
 
-        terminate_recovered_process(Some(process_id)).await.unwrap();
-        let status = tokio::time::timeout(Duration::from_secs(2), child.wait())
-            .await
-            .expect("recovered process should become waitable")
-            .unwrap();
-        assert!(!status.success());
+        assert!(matches!(
+            terminate_recovered_process(Some(process_id)).await,
+            Err(AgentError::UnverifiableRecoveredProcess(id)) if id == process_id
+        ));
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
     }
 
     #[test]

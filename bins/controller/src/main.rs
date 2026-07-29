@@ -7,13 +7,15 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
 use mcloving_agent_protocol::wire::{
-    CancellationCompletion, CancellationReceipt, OpenSessionRequest, OpenSessionResponse,
-    ReconciliationDirective, ReconciliationReport, RotateCertificateRequest,
+    CancellationCompletion, CancellationDisposition, CancellationReceipt, OpenSessionRequest,
+    OpenSessionResponse, ReconciliationDirective, ReconciliationReport, RotateCertificateRequest,
     RotateCertificateResponse,
 };
 use mcloving_agent_protocol::{ProtocolRange, negotiate};
 use mcloving_controller_api::{ApiState, router};
-use mcloving_controller_store::{AgentReconciliationDisposition, ClaimRequest, Store};
+use mcloving_controller_store::{
+    AgentCancellationDisposition, AgentReconciliationDisposition, ClaimRequest, Store,
+};
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -181,8 +183,7 @@ impl AgentControl for ControllerAgentService {
                 .attempt_id
                 .parse()
                 .map_err(|_| Status::invalid_argument("attempt_id must be a UUID"))?;
-            let fence = i64::try_from(attempt.fence_token)
-                .map_err(|_| Status::invalid_argument("fence_token is out of range"))?;
+            let (restore_epoch, fence) = decode_authority_token(attempt.fence_token);
             if attempt.attempt_id.trim().is_empty()
                 || attempt.organization_id.trim().is_empty()
                 || attempt.payload_digest.len() != 32
@@ -205,6 +206,7 @@ impl AgentControl for ControllerAgentService {
                     organization_id,
                     attempt_id,
                     fence,
+                    restore_epoch,
                     &request.agent_id,
                 )
                 .await
@@ -252,18 +254,40 @@ impl AgentControl for ControllerAgentService {
             .attempt_id
             .parse()
             .map_err(|_| Status::invalid_argument("attempt_id must be a UUID"))?;
-        let fence = i64::try_from(request.fence_token)
-            .map_err(|_| Status::invalid_argument("fence_token is out of range"))?;
-        let accepted = self
+        let (restore_epoch, fence) = decode_authority_token(request.fence_token);
+        let disposition = self
             .store
-            .complete_agent_cancellation(organization_id, attempt_id, fence, &request.agent_id)
+            .complete_agent_cancellation(
+                organization_id,
+                attempt_id,
+                fence,
+                restore_epoch,
+                &request.agent_id,
+            )
             .await
             .map_err(internal_store_error)?;
         Ok(Response::new(CancellationReceipt {
             session_epoch: request.session_epoch,
-            accepted,
+            disposition: match disposition {
+                AgentCancellationDisposition::Completed => {
+                    CancellationDisposition::Completed as i32
+                }
+                AgentCancellationDisposition::RetireStale => {
+                    CancellationDisposition::RetireStale as i32
+                }
+                AgentCancellationDisposition::ReconciliationRequired => {
+                    CancellationDisposition::ReconciliationRequired as i32
+                }
+            },
         }))
     }
+}
+
+fn decode_authority_token(token: u64) -> (i64, i64) {
+    (
+        i64::from((token >> 32) as u32),
+        i64::from((token & u64::from(u32::MAX)) as u32),
+    )
 }
 
 fn internal_store_error(error: mcloving_controller_store::StoreError) -> Status {
@@ -497,6 +521,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composite_authority_token_preserves_restore_epoch_and_fence() {
+        let token = (u64::from(17_u32) << 32) | u64::from(23_u32);
+        assert_eq!(decode_authority_token(token), (17, 23));
+    }
 
     #[test]
     fn certificate_bindings_are_exact_and_fail_closed() {

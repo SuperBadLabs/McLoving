@@ -47,7 +47,7 @@ The controller compares each report with current PostgreSQL lease, fence,
 restore epoch, owner, and cancellation state. Rejected attempts are returned
 as cancellation directives. Before terminalizing a cancelled record, a
 reconnecting Unix agent terminates the recorded process group; recovered
-Windows Jobs have already been killed by the previous service process's
+Windows Jobs that were successfully assigned have already been killed by the previous service process's
 kill-on-close handle. The agent then sends a fenced cancellation-completion
 RPC. PostgreSQL atomically terminalizes the attempt, node, build, event, and
 outbox before the local SQLite record becomes terminal. A lost response leaves
@@ -105,3 +105,17 @@ hard service-process termination, and no duplicate accepted execution after
 restart. A signed package on a persistent Windows host still must prove
 machine-reboot reconciliation, payload-directory survival, and cross-host
 controller/network interruption before full Windows parity is closed.
+
+The current executor creates the workload suspended and assigns it to a
+kill-on-close Job before resuming it. This prevents untrusted workload code
+from running before containment, but a hard service crash between
+`CreateProcess` and `AssignProcessToJobObject` can leave an inert suspended
+child outside the Job. `WIN-004` replaces that two-step sequence with atomic
+Job membership and is required before `WIN-002` closes.
+
+The outbound production service currently opens authenticated sessions and
+reconciles durable journal state; scheduled work is still executed by the
+controller-local embedded worker. `AGENT-004` owns production remote work
+delivery and completion, and `AGENT-005` owns recovery of checksummed
+`finalizing` evidence. Until those tickets close, the Windows service is a
+runtime/containment foundation rather than a deployable scheduler worker.

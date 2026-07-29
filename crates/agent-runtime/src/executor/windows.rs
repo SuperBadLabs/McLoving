@@ -48,10 +48,8 @@ where
         .write(true)
         .open(&stderr_path)?;
 
-    let (program, arguments) = windows_command(request)?;
-    let mut command = Command::new(program);
+    let mut command = windows_command(request)?;
     command
-        .args(arguments)
         .envs(&request.environment)
         .current_dir(&workspace)
         .stdin(Stdio::null())
@@ -122,23 +120,28 @@ where
     })
 }
 
-fn windows_command(request: &ExecutionRequest) -> Result<(PathBuf, Vec<OsString>), ExecutionError> {
+fn windows_command(request: &ExecutionRequest) -> Result<Command, ExecutionError> {
     match request.mode {
-        ExecutionMode::Direct => Ok((request.program.clone(), request.arguments.clone())),
+        ExecutionMode::Direct => {
+            let mut command = Command::new(&request.program);
+            command.args(&request.arguments);
+            Ok(command)
+        }
         ExecutionMode::WindowsCmd => {
-            let command = cmd_command_string(&request.program, &request.arguments)?;
-            Ok((
-                PathBuf::from("cmd.exe"),
-                vec![
-                    OsString::from("/D"),
-                    OsString::from("/S"),
-                    OsString::from("/C"),
-                    OsString::from(command),
-                ],
-            ))
+            use std::os::windows::process::CommandExt;
+
+            let command_string = cmd_command_string(&request.program, &request.arguments)?;
+            let mut command = Command::new("cmd.exe");
+            command.args(["/D", "/S", "/C"]);
+            // cmd.exe has its own command-line parser rather than the C argv
+            // decoder targeted by Command::arg. Append the validated nested
+            // quote sequence verbatim so /S can strip only its outer pair.
+            command.raw_arg(command_string);
+            Ok(command)
         }
         ExecutionMode::PowerShell => {
-            let mut arguments = vec![
+            let mut command = Command::new("powershell.exe");
+            command.args([
                 OsString::from("-NoLogo"),
                 OsString::from("-NoProfile"),
                 OsString::from("-NonInteractive"),
@@ -146,9 +149,9 @@ fn windows_command(request: &ExecutionRequest) -> Result<(PathBuf, Vec<OsString>
                 OsString::from("RemoteSigned"),
                 OsString::from("-File"),
                 request.program.as_os_str().to_owned(),
-            ];
-            arguments.extend(request.arguments.iter().cloned());
-            Ok((PathBuf::from("powershell.exe"), arguments))
+            ]);
+            command.args(&request.arguments);
+            Ok(command)
         }
     }
 }

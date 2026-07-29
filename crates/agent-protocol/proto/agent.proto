@@ -85,5 +85,12 @@ message CancellationCompletion {
 
 message CancellationReceipt {
   uint64 session_epoch = 1;
-  bool accepted = 2;
+  CancellationDisposition disposition = 2;
+}
+
+enum CancellationDisposition {
+  CANCELLATION_DISPOSITION_UNSPECIFIED = 0;
+  CANCELLATION_DISPOSITION_COMPLETED = 1;
+  CANCELLATION_DISPOSITION_RETIRE_STALE = 2;
+  CANCELLATION_DISPOSITION_RECONCILIATION_REQUIRED = 3;
 }

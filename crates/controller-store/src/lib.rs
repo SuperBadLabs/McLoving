@@ -33,6 +33,13 @@ pub enum AgentReconciliationDisposition {
     Cancel,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentCancellationDisposition {
+    Completed,
+    RetireStale,
+    ReconciliationRequired,
+}
+
 /// A build and its first executable node, admitted as one durable unit.
 #[derive(Clone, Debug)]
 pub struct NewBuild {
@@ -390,13 +397,15 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
         agent_id: &str,
     ) -> Result<AgentReconciliationDisposition, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         let row = sqlx::query_as::<_, (bool, bool)>(
             "SELECT
                  a.fence = $3
-                 AND a.lease_owner = $4
+                 AND a.restore_epoch = $4
+                 AND a.lease_owner = $5
                  AND a.restore_epoch = (
                      SELECT restore_epoch FROM controller_metadata WHERE singleton
                  )
@@ -414,6 +423,7 @@ impl Store {
         .bind(organization_id)
         .bind(attempt_id)
         .bind(fence)
+        .bind(restore_epoch)
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -437,8 +447,9 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         fence: i64,
+        restore_epoch: i64,
         agent_id: &str,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<AgentCancellationDisposition, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         let authority = sqlx::query_as::<_, (Uuid, Uuid, String)>(
@@ -453,7 +464,8 @@ impl Store {
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
-               AND a.lease_owner = $4
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
                AND a.restore_epoch = (
                    SELECT restore_epoch
                    FROM controller_metadata
@@ -466,16 +478,17 @@ impl Store {
         .bind(attempt_id)
         .bind(organization_id)
         .bind(fence)
+        .bind(restore_epoch)
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
         let Some((node_id, build_id, status)) = authority else {
             tx.rollback().await?;
-            return Ok(false);
+            return Ok(AgentCancellationDisposition::RetireStale);
         };
         if status == "aborted" {
             tx.commit().await?;
-            return Ok(true);
+            return Ok(AgentCancellationDisposition::Completed);
         }
 
         let uncertain_effects = sqlx::query_scalar::<_, i64>(
@@ -535,7 +548,7 @@ impl Store {
             )
             .await?;
             tx.commit().await?;
-            return Ok(false);
+            return Ok(AgentCancellationDisposition::ReconciliationRequired);
         }
 
         sqlx::query(
@@ -582,7 +595,7 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
-        Ok(true)
+        Ok(AgentCancellationDisposition::Completed)
     }
 
     /// Creates an organization/project pair for bootstrap and tests.

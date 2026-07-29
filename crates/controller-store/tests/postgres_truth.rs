@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use mcloving_controller_store::{
-    ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk, ObjectKind, ObjectStatus,
-    RetryDecision, Store, StoreError, TerminalOutcome, WaitReason,
+    AgentCancellationDisposition, ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk,
+    ObjectKind, ObjectStatus, RetryDecision, Store, StoreError, TerminalOutcome, WaitReason,
 };
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -307,38 +307,44 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     .await
     .expect("expire lease to model reconnect after deadline");
 
-    assert!(
-        !store
+    assert_eq!(
+        store
             .complete_agent_cancellation(
                 organization_id,
                 claim.attempt_id,
                 claim.fence + 1,
+                claim.restore_epoch,
                 "windows-1",
             )
             .await
-            .expect("reject stale fence")
+            .expect("reject stale fence"),
+        AgentCancellationDisposition::RetireStale
     );
-    assert!(
+    assert_eq!(
         store
             .complete_agent_cancellation(
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "windows-1",
             )
             .await
-            .expect("complete fenced cancellation")
+            .expect("complete fenced cancellation"),
+        AgentCancellationDisposition::Completed
     );
-    assert!(
+    assert_eq!(
         store
             .complete_agent_cancellation(
                 organization_id,
                 claim.attempt_id,
                 claim.fence,
+                claim.restore_epoch,
                 "windows-1",
             )
             .await
-            .expect("replay completion")
+            .expect("replay completion"),
+        AgentCancellationDisposition::Completed
     );
 
     let snapshot = store
