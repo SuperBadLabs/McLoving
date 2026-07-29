@@ -76,13 +76,18 @@ impl Job {
         let process_id = child.id();
         let process_handle = child.as_raw_handle().cast();
 
+        // Resolve and RAII-own the suspended initial thread before allocating
+        // the Job Object. Any snapshot/OpenThread failure therefore cannot
+        // strand a raw Job handle, and a later CreateJobObjectW failure drops
+        // the thread handle normally.
+        let initial_thread = initial_thread(process_id)?;
+
         // SAFETY: null security/name pointers request an anonymous job with
         // default security. The returned handle is checked and owned by Job.
         let handle = unsafe { CreateJobObjectW(null(), null()) };
         if handle.is_null() {
             return Err(JobError::last("CreateJobObjectW"));
         }
-        let initial_thread = initial_thread(process_id)?;
         let job = Self {
             handle,
             initial_thread,
