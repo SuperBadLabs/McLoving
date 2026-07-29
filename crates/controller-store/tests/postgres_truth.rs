@@ -253,6 +253,19 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
         )
         .await
         .expect("create tenant");
+    assert!(
+        store
+            .open_agent_session(
+                "windows-1",
+                "trusted-windows",
+                1,
+                0,
+                &["journal-v1".to_owned(), "windows-job-object-v1".to_owned()],
+                &["windows".to_owned()],
+            )
+            .await
+            .expect("open agent session")
+    );
     let admission = store
         .admit_build(&NewBuild {
             organization_id,
@@ -315,6 +328,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
                 claim.fence + 1,
                 claim.restore_epoch,
                 "windows-1",
+                1,
             )
             .await
             .expect("reject stale fence"),
@@ -328,6 +342,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
                 claim.fence,
                 claim.restore_epoch,
                 "windows-1",
+                1,
             )
             .await
             .expect("complete fenced cancellation"),
@@ -341,6 +356,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
                 claim.fence,
                 claim.restore_epoch,
                 "windows-1",
+                1,
             )
             .await
             .expect("replay completion"),

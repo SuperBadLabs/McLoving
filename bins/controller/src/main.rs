@@ -116,7 +116,7 @@ impl AgentControl for ControllerAgentService {
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
         let local = ProtocolRange::current([
             "journal-v1".to_owned(),
-            "linux-process-group-v1".to_owned(),
+            "unix-process-group-v1".to_owned(),
             "windows-job-object-v1".to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
@@ -289,6 +289,7 @@ impl AgentControl for ControllerAgentService {
                 fence,
                 restore_epoch,
                 &request.agent_id,
+                request.session_epoch,
             )
             .await
             .map_err(internal_store_error)?;

@@ -410,7 +410,8 @@ impl Store {
                      SELECT restore_epoch FROM controller_metadata WHERE singleton
                  )
                  AND a.status IN (
-                     'offered', 'accepted', 'running', 'finalizing', 'cancelling'
+                     'offered', 'accepted', 'running', 'finalizing', 'cancelling',
+                     'reconciliation_required'
                  ) AS current_authority,
                  b.cancellation_requested_at IS NOT NULL OR a.status = 'cancelling'
              FROM attempts AS a
@@ -449,9 +450,25 @@ impl Store {
         fence: i64,
         restore_epoch: i64,
         agent_id: &str,
+        session_epoch: u64,
     ) -> Result<AgentCancellationDisposition, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        let current_session = sqlx::query_scalar::<_, i64>(
+            "SELECT session_epoch
+             FROM agent_sessions
+             WHERE agent_id = $1
+             FOR UPDATE",
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if current_session != Some(session_epoch) {
+            tx.rollback().await?;
+            return Ok(AgentCancellationDisposition::RetireStale);
+        }
         let authority = sqlx::query_as::<_, (Uuid, Uuid, String)>(
             "SELECT n.id, n.build_id, a.status
              FROM attempts AS a
@@ -508,7 +525,6 @@ impl Store {
             sqlx::query(
                 "UPDATE attempts
                  SET status = 'reconciliation_required',
-                     lease_owner = NULL,
                      lease_expires_at = NULL
                  WHERE id = $1 AND organization_id = $2",
             )
