@@ -21,10 +21,31 @@ async fn test_store() -> Option<Store> {
 }
 
 async fn unprivileged_store(admin: &Store) -> Store {
-    sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
-        .execute(admin.pool())
+    let mut setup = admin
+        .pool()
+        .begin()
         .await
-        .expect("enable test-only login for the unprivileged role");
+        .expect("begin unprivileged-role setup");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind("mcloving.test.role-login")
+        .execute(&mut *setup)
+        .await
+        .expect("serialize unprivileged-role setup");
+    let login_enabled: bool =
+        sqlx::query_scalar("SELECT rolcanlogin FROM pg_roles WHERE rolname = 'mcloving_tenant'")
+            .fetch_one(&mut *setup)
+            .await
+            .expect("inspect unprivileged role");
+    if !login_enabled {
+        sqlx::query("ALTER ROLE mcloving_tenant LOGIN")
+            .execute(&mut *setup)
+            .await
+            .expect("enable test-only login for the unprivileged role");
+    }
+    setup
+        .commit()
+        .await
+        .expect("commit unprivileged-role setup");
     let url = std::env::var("MCLOVING_TEST_DATABASE_URL").expect("database URL remains configured");
     let options = url
         .parse::<PgConnectOptions>()
