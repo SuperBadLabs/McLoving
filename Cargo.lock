@@ -1342,6 +1342,7 @@ version = "0.0.0"
 name = "mcloving-windows-job"
 version = "0.0.0"
 dependencies = [
+ "tempfile",
  "windows-sys 0.61.2",
 ]
 

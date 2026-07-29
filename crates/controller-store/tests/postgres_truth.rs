@@ -1500,6 +1500,64 @@ async fn scheduler_requires_the_nodes_designated_trust_pool() {
 }
 
 #[tokio::test]
+async fn scheduler_explains_the_offered_pool_before_higher_priority_other_pool_work() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "higher-release".into(),
+            pipeline_digest: [0x72; 32],
+            node_key: "release".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "release".into(),
+            priority: 100,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit higher-priority release work");
+    store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "lower-trusted".into(),
+            pipeline_digest: [0x73; 32],
+            node_key: "trusted".into(),
+            required_capabilities: vec!["linux".into(), "powershell".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit lower-priority trusted work");
+
+    assert_eq!(
+        store
+            .explain_wait(organization_id, &["linux".into()], "trusted")
+            .await
+            .expect("explain offered pool"),
+        WaitReason::CapabilityMismatch {
+            required: ["linux".into(), "powershell".into()].into(),
+            missing: ["powershell".into()].into(),
+        }
+    );
+}
+
+#[tokio::test]
 async fn scheduler_filters_capabilities_and_explains_the_wait() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

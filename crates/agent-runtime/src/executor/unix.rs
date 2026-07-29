@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
+#[cfg(target_os = "linux")]
+use nix::sys::wait::{Id, WaitPidFlag, WaitStatus, waitid};
 use nix::unistd::Pid;
 use sha2::{Digest, Sha256};
 use tokio::process::{Child, Command};
@@ -100,18 +102,14 @@ where
 
     let deadline = Instant::now() + request.timeout;
     let mut termination = tokio::select! {
-        status = child.wait() => match status {
+        status = wait_for_leader_exit_and_cleanup(
+            &mut child,
+            process_id,
+            process_group_id,
+            request.termination_grace,
+        ) => match status {
             Ok(status) => (Termination::Exited, status),
-            Err(error) => {
-                terminate_and_prove_group_empty(
-                    &mut child,
-                    process_id,
-                    process_group_id,
-                    request.termination_grace,
-                )
-                .await?;
-                return Err(error.into());
-            }
+            Err(error) => return Err(error),
         },
         () = cancellation.cancelled() => {
             let status = terminate_and_prove_group_empty(
@@ -159,9 +157,6 @@ where
         }
     };
 
-    terminate_remaining_group(process_group_id, request.termination_grace)
-        .await
-        .map_err(|error| containment_unverified(process_id, error))?;
     let exceeded =
         output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     if termination.0 == Termination::Exited && exceeded {
@@ -285,6 +280,43 @@ fn digest_file(file: &File) -> Result<[u8; 32], std::io::Error> {
     Ok(digest.finalize().into())
 }
 
+async fn wait_for_leader_exit_and_cleanup(
+    child: &mut Child,
+    process_id: u32,
+    process_group_id: i32,
+    grace: Duration,
+) -> Result<std::process::ExitStatus, ExecutionError> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(error) = wait_for_unreaped_leader_exit(process_id, Duration::from_secs(5)).await
+        {
+            signal_group(process_group_id, Signal::SIGKILL)?;
+            let containment =
+                wait_for_anchored_descendants_to_exit(process_id, process_group_id).await;
+            child.wait().await?;
+            containment.map_err(|cleanup| containment_unverified(process_id, cleanup))?;
+            return Err(containment_unverified(process_id, error));
+        }
+        let containment =
+            terminate_descendants_while_leader_anchors_group(process_id, process_group_id, grace)
+                .await;
+        // Reap only after no descendants remain. Until this wait, the zombie
+        // leader keeps its numeric PID/PGID unavailable for reuse.
+        let status = child.wait().await?;
+        containment.map_err(|error| containment_unverified(process_id, error))?;
+        Ok(status)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let status = child.wait().await?;
+        terminate_remaining_group(process_group_id, grace)
+            .await
+            .map_err(|error| containment_unverified(process_id, error))?;
+        Ok(status)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
 async fn terminate_remaining_group(
     process_group_id: i32,
     grace: Duration,
@@ -315,12 +347,30 @@ async fn terminate_and_prove_group_empty(
     process_group_id: i32,
     grace: Duration,
 ) -> Result<std::process::ExitStatus, ExecutionError> {
-    let leader_result = terminate_group(child, process_group_id, grace).await;
-    let containment_result = terminate_remaining_group(process_group_id, grace).await;
-    if let Err(error) = containment_result {
-        return Err(containment_unverified(process_id, error));
+    #[cfg(target_os = "linux")]
+    {
+        signal_group(process_group_id, Signal::SIGTERM)?;
+        sleep(grace).await;
+        if !leader_exited_without_reaping(process_id)?
+            || group_has_members_other_than(process_group_id, process_id)?
+        {
+            signal_group(process_group_id, Signal::SIGKILL)?;
+        }
+        wait_for_unreaped_leader_exit(process_id, Duration::from_secs(5)).await?;
+        let containment = wait_for_anchored_descendants_to_exit(process_id, process_group_id).await;
+        let status = child.wait().await?;
+        containment.map_err(|error| containment_unverified(process_id, error))?;
+        Ok(status)
     }
-    leader_result
+    #[cfg(not(target_os = "linux"))]
+    {
+        let leader_result = terminate_group(child, process_group_id, grace).await;
+        let containment_result = terminate_remaining_group(process_group_id, grace).await;
+        if let Err(error) = containment_result {
+            return Err(containment_unverified(process_id, error));
+        }
+        leader_result
+    }
 }
 
 fn containment_unverified(process_id: u32, error: ExecutionError) -> ExecutionError {
@@ -330,6 +380,7 @@ fn containment_unverified(process_id: u32, error: ExecutionError) -> ExecutionEr
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 async fn terminate_group(
     child: &mut Child,
     process_group_id: i32,
@@ -356,6 +407,118 @@ async fn terminate_group(
     }
 }
 
+#[cfg(target_os = "linux")]
+async fn terminate_descendants_while_leader_anchors_group(
+    process_id: u32,
+    process_group_id: i32,
+    grace: Duration,
+) -> Result<(), ExecutionError> {
+    if !group_has_members_other_than(process_group_id, process_id)? {
+        return Ok(());
+    }
+    signal_group(process_group_id, Signal::SIGTERM)?;
+    sleep(grace).await;
+    if group_has_members_other_than(process_group_id, process_id)? {
+        signal_group(process_group_id, Signal::SIGKILL)?;
+    }
+    wait_for_anchored_descendants_to_exit(process_id, process_group_id).await
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_anchored_descendants_to_exit(
+    process_id: u32,
+    process_group_id: i32,
+) -> Result<(), ExecutionError> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while group_has_members_other_than(process_group_id, process_id)? {
+        if Instant::now() >= deadline {
+            return Err(ExecutionError::Io(std::io::Error::other(
+                "terminated process group retained descendants for five seconds",
+            )));
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_unreaped_leader_exit(
+    process_id: u32,
+    timeout: Duration,
+) -> Result<(), ExecutionError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if leader_exited_without_reaping(process_id)? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(ExecutionError::Io(std::io::Error::other(
+                "process-group leader did not exit within the bounded wait",
+            )));
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn leader_exited_without_reaping(process_id: u32) -> Result<bool, ExecutionError> {
+    let process_id = i32::try_from(process_id).map_err(|_| ExecutionError::MissingProcessId)?;
+    let status = waitid(
+        Id::Pid(Pid::from_raw(process_id)),
+        WaitPidFlag::WEXITED | WaitPidFlag::WNOWAIT | WaitPidFlag::WNOHANG,
+    )?;
+    Ok(matches!(
+        status,
+        WaitStatus::Exited(..) | WaitStatus::Signaled(..)
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn group_has_members_other_than(
+    process_group_id: i32,
+    process_id: u32,
+) -> Result<bool, ExecutionError> {
+    for entry in std::fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(candidate) = entry
+            .file_name()
+            .to_str()
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if candidate == process_id {
+            continue;
+        }
+        let stat = match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some((_, suffix)) = stat.rsplit_once(") ") else {
+            continue;
+        };
+        let Some(group) = suffix
+            .split_ascii_whitespace()
+            .nth(2)
+            .and_then(|value| value.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        if group == process_group_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn signal_group(process_group_id: i32, signal: Signal) -> Result<(), ExecutionError> {
     match killpg(Pid::from_raw(process_group_id), signal) {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
@@ -363,6 +526,7 @@ fn signal_group(process_group_id: i32, signal: Signal) -> Result<(), ExecutionEr
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn process_group_exists(process_group_id: i32) -> Result<bool, ExecutionError> {
     match killpg(Pid::from_raw(process_group_id), None) {
         Ok(()) | Err(Errno::EPERM) => Ok(true),

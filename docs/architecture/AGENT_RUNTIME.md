@@ -140,9 +140,9 @@ authority.
   environment block is passed to `CreateProcessW`. Standard identity strings
   are not treated as a security boundary because the workload runs under the
   same service token and can query it directly. The execution specification
-  then supplies explicit overrides; controller URLs, journal paths,
-  credentials, CI controls, and arbitrary process-local variables remain
-  excluded.
+  then supplies explicit overrides except for reserved `TEMP`/`TMP`, which
+  remain attempt-scoped; controller URLs, journal paths, credentials, CI
+  controls, and arbitrary process-local variables remain excluded.
 - Execution timeouts are validated before process creation and must be between
   one second and seven days. Unbounded `u64` durations never reach platform
   deadline arithmetic.

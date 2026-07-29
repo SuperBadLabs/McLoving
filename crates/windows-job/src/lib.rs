@@ -323,7 +323,11 @@ fn resolve_program(spec: &SpawnSpec<'_>) -> Result<OsString, JobError> {
         .iter()
         .find(|(key, _)| normalized_environment_key(key) == "PATH")
         .map(|(_, value)| value.clone())
-        .or_else(|| std::env::var_os("PATH"))
+        .or_else(|| {
+            standard_workload_environment()
+                .remove("PATH")
+                .map(|(_, value)| value)
+        })
         .ok_or(JobError {
             operation: "resolve program from PATH",
             code: ERROR_FILE_NOT_FOUND,
@@ -334,6 +338,11 @@ fn resolve_program(spec: &SpawnSpec<'_>) -> Result<OsString, JobError> {
         &["", ".exe", ".com"]
     };
     for directory in std::env::split_paths(&path) {
+        let directory = if directory.is_absolute() {
+            directory
+        } else {
+            spec.current_directory.join(directory)
+        };
         for extension in extensions {
             let mut candidate = directory.join(program);
             if !extension.is_empty() {
@@ -447,18 +456,6 @@ fn environment_block(
     if let Some((normalized, key, value)) = drive_current_directory(current_directory) {
         entries.insert(normalized, (key, value));
     }
-    // Even allowlisted parent TEMP/TMP values are service-owned ambient state.
-    // Keep temporary paths isolated to the already-created per-attempt
-    // workspace.
-    for key in ["TEMP", "TMP"] {
-        entries.insert(
-            key.to_owned(),
-            (
-                OsString::from(key),
-                current_directory.as_os_str().to_owned(),
-            ),
-        );
-    }
     for (key, value) in overrides {
         if key.is_empty()
             || key
@@ -471,6 +468,18 @@ fn environment_block(
         entries.insert(
             normalized_environment_key(key),
             (key.clone(), value.clone()),
+        );
+    }
+    // Even allowlisted or explicitly supplied TEMP/TMP values can point at
+    // shared state. Pin both keys after applying workload overrides so every
+    // attempt retains an isolated temporary directory.
+    for key in ["TEMP", "TMP"] {
+        entries.insert(
+            key.to_owned(),
+            (
+                OsString::from(key),
+                current_directory.as_os_str().to_owned(),
+            ),
         );
     }
 
@@ -692,7 +701,13 @@ mod tests {
     fn workload_environment_excludes_ci_values_and_accepts_explicit_values() {
         assert!(std::env::var_os("USERNAME").is_some());
         let block = environment_block(
-            &BTreeMap::from([(OsString::from("EXPLICIT_VALUE"), OsString::from("allowed"))]),
+            &BTreeMap::from([
+                (OsString::from("EXPLICIT_VALUE"), OsString::from("allowed")),
+                (
+                    OsString::from("temp"),
+                    OsString::from(r"D:\shared-service-temp"),
+                ),
+            ]),
             Path::new(r"D:\agent\work"),
         )
         .unwrap();
@@ -704,5 +719,29 @@ mod tests {
         assert!(text.contains("=D:=D:\\agent\\work"));
         assert!(text.contains("TEMP=D:\\agent\\work"));
         assert!(text.contains("TMP=D:\\agent\\work"));
+    }
+
+    #[test]
+    fn bare_program_resolution_anchors_relative_path_to_the_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let binary_directory = workspace.join("bin");
+        std::fs::create_dir_all(&binary_directory).unwrap();
+        let candidate = binary_directory.join("probe.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &candidate).unwrap();
+        let null = File::open("NUL").unwrap();
+        let environment = BTreeMap::from([(OsString::from("PATH"), OsString::from("bin"))]);
+        let spec = SpawnSpec {
+            program: OsStr::new("probe.exe"),
+            arguments: &[],
+            raw_argument_suffix: None,
+            environment: &environment,
+            current_directory: &workspace,
+            stdin: &null,
+            stdout: &null,
+            stderr: &null,
+        };
+
+        assert_eq!(resolve_program(&spec).unwrap(), candidate.into_os_string());
     }
 }

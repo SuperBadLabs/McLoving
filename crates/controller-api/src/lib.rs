@@ -8,7 +8,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use mcloving_controller_store::{NewBuild, Store, WaitReason};
+use mcloving_controller_store::{NewBuild, Store, StoreError, WaitReason};
 use mcloving_pipeline_ir::{ParseLimits, Step, compile_strict_yaml};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -368,7 +368,7 @@ async fn explain(
             &query.trust_pool,
         )
         .await
-        .map_err(internal)?
+        .map_err(explain_error)?
     {
         WaitReason::Ready => ExplainResponse::Ready,
         WaitReason::NoQueuedWork => ExplainResponse::NoQueuedWork,
@@ -428,6 +428,18 @@ fn unauthorized() -> ApiError {
 
 fn not_found() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "build was not found")
+}
+
+fn explain_error(error: StoreError) -> ApiError {
+    if matches!(error, StoreError::InvalidTrustPool) {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_trust_pool",
+            "trust_pool must be non-empty and contain no surrounding whitespace",
+        )
+    } else {
+        internal(error)
+    }
 }
 
 fn internal(error: impl std::fmt::Display) -> ApiError {
@@ -613,5 +625,12 @@ mod tests {
                 "https://controller.example/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}"
             )
         );
+    }
+
+    #[test]
+    fn invalid_trust_pool_is_a_client_error() {
+        let response = explain_error(StoreError::InvalidTrustPool);
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        assert_eq!(response.code, "invalid_trust_pool");
     }
 }

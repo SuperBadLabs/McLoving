@@ -54,6 +54,7 @@ jobs:
           cargo +1.97.1 test --locked
           -p mcloving-agent-runtime
           -p mcloving-agent
+          -p mcloving-windows-job
       - name: Build release agent
         shell: pwsh
         run: cargo +1.97.1 build --locked --release -p mcloving-agent

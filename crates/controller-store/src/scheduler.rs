@@ -642,10 +642,14 @@ impl Store {
             "SELECT required_capabilities, required_trust_pool
              FROM nodes
              WHERE organization_id = $1 AND status = 'queued'
-             ORDER BY priority DESC, queued_at, id
+             ORDER BY (required_trust_pool = $2) DESC,
+                      priority DESC,
+                      queued_at,
+                      id
              LIMIT 1",
         )
         .bind(organization_id)
+        .bind(trust_pool)
         .fetch_optional(&mut *tx)
         .await?;
         let Some((required, required_trust_pool)) = required else {
