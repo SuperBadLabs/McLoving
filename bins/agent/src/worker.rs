@@ -1142,6 +1142,9 @@ async fn remove_terminal_replacement_entry(
 }
 
 #[cfg(windows)]
+// Windows `readonly` is a single file attribute; clearing it does not broaden
+// Unix mode bits because this implementation is not compiled on Unix.
+#[allow(clippy::permissions_set_readonly_false)]
 async fn restore_file_deletion_access(
     path: &Path,
     metadata: &std::fs::Metadata,
@@ -1209,22 +1212,27 @@ fn remove_directory_tree_no_follow_sync(root: &Path) -> Result<(), std::io::Erro
     Ok(())
 }
 
+#[cfg(windows)]
+// See the async counterpart: this is Windows attribute recovery, not Unix
+// permission widening.
+#[allow(clippy::permissions_set_readonly_false)]
 fn restore_file_deletion_access_sync(
     path: &Path,
     metadata: &std::fs::Metadata,
 ) -> Result<(), std::io::Error> {
-    #[cfg(windows)]
-    {
-        if metadata.permissions().readonly() {
-            let mut permissions = metadata.permissions();
-            permissions.set_readonly(false);
-            std::fs::set_permissions(path, permissions)?;
-        }
+    if metadata.permissions().readonly() {
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(false);
+        std::fs::set_permissions(path, permissions)?;
     }
-    #[cfg(not(windows))]
-    {
-        let _ = (path, metadata);
-    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn restore_file_deletion_access_sync(
+    _path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> Result<(), std::io::Error> {
     Ok(())
 }
 
