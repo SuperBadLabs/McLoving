@@ -161,7 +161,7 @@ impl AgentConfig {
         if poll_milliseconds == 0
             || renewal_milliseconds == 0
             || termination_grace_milliseconds == 0
-            || renewal_milliseconds >= u64::from(lease_seconds) * 1_000
+            || renewal_milliseconds >= u64::from(lease_seconds.saturating_sub(1)) * 1_000
         {
             return Err(AgentError::InvalidConfig(
                 "agent polling, renewal, or termination timing",
@@ -373,11 +373,15 @@ async fn send_reconciliation(
     session_epoch: u64,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
+    quiesce_recovered_executions(config).await?;
     let report = Journal::open(&config.journal_path)?.reconcile()?;
     let request = wire_report(config, session_epoch, &report)?;
     let directive = tokio::select! {
         () = stop.cancelled() => return Err(AgentError::Stopped),
-        response = client.reconcile(request) => response?,
+        response = tokio::time::timeout(
+            worker::lease_rpc_budget(Duration::from_secs(u64::from(config.lease_seconds))),
+            client.reconcile(request),
+        ) => response.map_err(|_| AgentError::LeaseRenewalTimeout)??,
     }
     .into_inner();
     if directive.session_epoch != session_epoch {
@@ -455,7 +459,12 @@ async fn send_reconciliation(
                 };
                 let receipt = tokio::select! {
                     () = stop.cancelled() => return Err(AgentError::Stopped),
-                    response = client.complete_cancellation(request) => response?,
+                    response = tokio::time::timeout(
+                        worker::lease_rpc_budget(Duration::from_secs(
+                            u64::from(config.lease_seconds),
+                        )),
+                        client.complete_cancellation(request),
+                    ) => response.map_err(|_| AgentError::LeaseRenewalTimeout)??,
                 }
                 .into_inner();
                 if receipt.session_epoch != session_epoch {
@@ -479,6 +488,40 @@ async fn send_reconciliation(
     } else {
         Ok(())
     }
+}
+
+async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentError> {
+    let report = Journal::open(&config.journal_path)?.reconcile()?;
+    let mut journal = Journal::open(&config.journal_path)?;
+    for attempt in &report.attempts {
+        if !matches!(
+            attempt.phase,
+            AttemptPhase::Accepted | AttemptPhase::Running
+        ) {
+            continue;
+        }
+        let outcome =
+            cancel_recovered_attempt(&mut journal, attempt, config.termination_grace).await?;
+        if outcome != RecoveredCancellation::ReconciliationRequired
+            && worker::recovered_cancellation_requires_persistence(config, attempt).await?
+        {
+            let cancellation_outcome = match outcome {
+                RecoveredCancellation::Terminated => CancellationOutcome::Terminated as i32,
+                RecoveredCancellation::AlreadyExited => CancellationOutcome::AlreadyExited as i32,
+                #[cfg(unix)]
+                RecoveredCancellation::RetireStale => CancellationOutcome::IdentityMismatch as i32,
+                RecoveredCancellation::ReconciliationRequired => unreachable!("checked above"),
+            };
+            worker::persist_recovered_cancellation(
+                config,
+                &mut journal,
+                attempt,
+                cancellation_outcome,
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 fn recovered_cancellation_phase(
@@ -954,6 +997,19 @@ mod tests {
         assert!(matches!(
             AgentConfig::from_values(&missing),
             Err(AgentError::MissingConfig("MCLOVING_AGENT_PRIVATE_KEY_PATH"))
+        ));
+
+        let mut unsafe_renewal = values();
+        unsafe_renewal.insert("MCLOVING_AGENT_LEASE_SECONDS".to_owned(), "5".to_owned());
+        unsafe_renewal.insert(
+            "MCLOVING_AGENT_RENEW_MILLISECONDS".to_owned(),
+            "4500".to_owned(),
+        );
+        assert!(matches!(
+            AgentConfig::from_values(&unsafe_renewal),
+            Err(AgentError::InvalidConfig(
+                "agent polling, renewal, or termination timing"
+            ))
         ));
     }
 

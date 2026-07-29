@@ -12,6 +12,7 @@ pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
 const MAX_ATTEMPT_LOG_BYTES: i64 = 64 * 1_048_576;
+const MAX_ATTEMPT_LOG_CHUNKS: i64 = 66;
 
 /// Schema installed by [`Store::migrate`].
 pub const CONTROLLER_SCHEMA_V1: &str = include_str!("../migrations/0001_controller_truth.sql");
@@ -1179,6 +1180,9 @@ impl Store {
 
     /// Commits a log chunk only for the exact live fenced attempt.
     pub async fn append_log(&self, chunk: &NewLogChunk<'_>) -> Result<bool, StoreError> {
+        if !log_sequence_is_bounded(chunk.sequence) {
+            return Ok(false);
+        }
         let digest: [u8; 32] = Sha256::digest(chunk.content).into();
         let mut tx = self.tenant_transaction(chunk.organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
@@ -3224,6 +3228,10 @@ fn log_quota_allows(committed: i64, incoming: i64) -> bool {
     committed >= 0 && incoming >= 0 && committed.saturating_add(incoming) <= MAX_ATTEMPT_LOG_BYTES
 }
 
+fn log_sequence_is_bounded(sequence: i64) -> bool {
+    (0..MAX_ATTEMPT_LOG_CHUNKS).contains(&sequence)
+}
+
 fn parse_effect_class(value: &str) -> Result<EffectClass, StoreError> {
     match value {
         "idempotent" => Ok(EffectClass::Idempotent),
@@ -3297,5 +3305,9 @@ mod unit_tests {
         assert!(!log_quota_allows(MAX_ATTEMPT_LOG_BYTES, 1));
         assert!(!log_quota_allows(i64::MAX, i64::MAX));
         assert!(!log_quota_allows(-1, 1));
+        assert!(log_sequence_is_bounded(0));
+        assert!(log_sequence_is_bounded(MAX_ATTEMPT_LOG_CHUNKS - 1));
+        assert!(!log_sequence_is_bounded(MAX_ATTEMPT_LOG_CHUNKS));
+        assert!(!log_sequence_is_bounded(-1));
     }
 }

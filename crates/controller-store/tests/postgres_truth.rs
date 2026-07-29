@@ -2189,6 +2189,21 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             .await
             .expect("append current-fence log")
     );
+    assert!(
+        !store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: second.attempt_id,
+                fence: second.fence,
+                restore_epoch: second.restore_epoch,
+                agent_id: "agent-b",
+                sequence: 66,
+                stream: "stdout",
+                content: b"",
+            })
+            .await
+            .expect("reject out-of-range empty log chunk")
+    );
     let logs = store
         .build_logs(organization_id, project_id, admission.build_id)
         .await

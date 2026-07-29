@@ -63,6 +63,11 @@ complete checksummed log/result descriptors. On restart, reconciliation reports
 every non-terminal attempt plus its platform process identity and that durable
 spool metadata. Terminal attempts remain durable history but are excluded from
 active reconciliation.
+Before the first reconciliation RPC, the agent fail-closed quiesces every
+recovered accepted or running execution. It either proves the recorded
+containment identity has terminated and durably records that outcome, or keeps
+the attempt in `reconciliation_required`; controller unavailability can
+therefore never extend recovered execution authority.
 The controller compares each report with current PostgreSQL lease, fence,
 restore epoch, owner, and cancellation state. Rejected attempts are returned
 as cancellation directives. A retained accepted or running attempt is also
@@ -82,6 +87,12 @@ and the terminal controller acknowledgement. It stops only after the
 acknowledgement is received (or authority is rejected). Recovered finalization
 replay follows the same rule, rather than relying only on the controller's
 initial bounded recovery lease.
+Acceptance and initial lease RPCs are bounded by the configured lease window;
+`StartWork` must complete inside the exact initial lease-minus-one-second
+budget. Renewal configuration must leave that same one-second safety margin.
+If renewal, session, or fence authority is lost, in-flight log and terminal
+publication are interrupted rather than being allowed to complete under stale
+authority.
 
 ## Portable execution boundary
 
@@ -92,7 +103,14 @@ initial bounded recovery lease.
 - Standard output and error are written directly to files, fsynced, and hashed
   before the outcome is returned. Replay verifies each descriptor in a bounded
   first pass and publishes one-MiB chunks in a second streaming pass. A single
-  attempt may retain at most 64 MiB of logs and a 64 KiB result.
+  attempt may retain at most 64 MiB of logs across at most 66 chunks and a
+  64 KiB result. Both the agent and controller independently reject excess
+  chunk cardinality.
+- Terminal result evidence is written beneath the agent-owned
+  `.agent-results` root, outside the workload workspace namespace, under a
+  cryptographically random path created only after containment has ended. A
+  workload cannot predict, pre-create, or replace the authoritative result
+  path.
 - Execution timeouts are validated before process creation and must be between
   one second and seven days. Unbounded `u64` durations never reach platform
   deadline arithmetic.

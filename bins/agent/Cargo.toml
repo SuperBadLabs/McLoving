@@ -23,7 +23,7 @@ tokio = { version = "=1.47.1", features = [
 ] }
 tokio-util = { version = "=0.7.19", features = ["rt"] }
 tonic = { version = "=0.14.6", features = ["tls-ring", "transport"] }
-uuid = { version = "=1.18.1" }
+uuid = { version = "=1.18.1", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-services = "=0.26.1"

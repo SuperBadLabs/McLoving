@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -31,8 +32,10 @@ use crate::{AgentConfig, AgentError, process_birth_identity_for};
 
 const MAX_LOG_CHUNK_BYTES: usize = 1_048_576;
 const MAX_TOTAL_LOG_SPOOL_BYTES: u64 = 64 * 1_048_576;
+const MAX_LOG_CHUNKS_PER_ATTEMPT: u64 = 66;
 const MAX_RESULT_SPOOL_BYTES: u64 = 65_536;
 const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
+const AGENT_RESULT_DIRECTORY: &str = ".agent-results";
 const WORK_COMPLETION_PROTOCOL: &str = "work";
 const CANCELLATION_COMPLETION_PROTOCOL: &str = "cancellation";
 
@@ -104,6 +107,23 @@ struct DurableResult<'a> {
     cancellation_outcome: Option<i32>,
 }
 
+struct LeaseRenewalControl {
+    lease_seconds: u32,
+    renewal_interval: Duration,
+    lease_started_at: tokio::time::Instant,
+    lease_window: Duration,
+    execution_cancellation: CancellationToken,
+    authority_lost: CancellationToken,
+    stop: CancellationToken,
+}
+
+struct PublicationContext<'a> {
+    client: &'a mut AgentControlClient<Channel>,
+    authority: &'a WorkAuthority,
+    session_epoch: u64,
+    authority_lost: &'a CancellationToken,
+}
+
 pub(super) async fn poll_and_run_one(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
@@ -150,17 +170,29 @@ pub(super) async fn recover_finalizations(
         };
         let lease_stop = CancellationToken::new();
         let authority_lost = CancellationToken::new();
+        let execution_cancellation = CancellationToken::new();
         let lease_task = tokio::spawn(renew_lease(
             client.clone(),
             authority.clone(),
-            config.lease_seconds,
-            recovery_renewal_interval(config.lease_renewal_interval),
-            Duration::from_secs(RECOVERED_FINALIZATION_LEASE_SECONDS),
-            authority_lost,
-            lease_stop.clone(),
+            LeaseRenewalControl {
+                lease_seconds: config.lease_seconds,
+                renewal_interval: recovery_renewal_interval(config.lease_renewal_interval),
+                lease_started_at: tokio::time::Instant::now(),
+                lease_window: Duration::from_secs(RECOVERED_FINALIZATION_LEASE_SECONDS),
+                execution_cancellation,
+                authority_lost: authority_lost.clone(),
+                stop: lease_stop.clone(),
+            },
         ));
-        let replay_result =
-            replay_finalization(config, client, session_epoch, &attempt, authority).await;
+        let replay_result = replay_finalization(
+            config,
+            client,
+            session_epoch,
+            &attempt,
+            authority,
+            &authority_lost,
+        )
+        .await;
         lease_stop.cancel();
         let lease_result = lease_task.await;
         let terminal = replay_result?;
@@ -194,15 +226,20 @@ async fn replay_finalization(
     session_epoch: u64,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
     authority: WorkAuthority,
+    authority_lost: &CancellationToken,
 ) -> Result<AttemptPhase, AgentError> {
     validate_log_spool_quota(&attempt.logs)?;
     let mut sequence = 0;
+    let mut publication = PublicationContext {
+        client,
+        authority: &authority,
+        session_epoch,
+        authority_lost,
+    };
     for entry in &attempt.logs {
         let stream = spool_stream(entry)?;
         sequence = publish_spool(
-            client,
-            &authority,
-            session_epoch,
+            &mut publication,
             stream,
             &config.workspace_root,
             entry,
@@ -241,14 +278,15 @@ async fn replay_finalization(
                 }))?
             };
             require_work_receipt(
-                client
-                    .complete_work(WorkCompletion {
-                        authority: Some(authority),
+                authority_rpc(
+                    authority_lost,
+                    publication.client.complete_work(WorkCompletion {
+                        authority: Some(authority.clone()),
                         outcome: outcome as i32,
                         summary_json: summary,
-                    })
-                    .await?
-                    .into_inner(),
+                    }),
+                )
+                .await?,
                 session_epoch,
             )?;
             terminal_phase(outcome)
@@ -279,17 +317,20 @@ async fn replay_finalization(
                     ));
                 }
             }
-            let receipt = client
-                .complete_cancellation(CancellationCompletion {
-                    agent_id: config.agent_id.clone(),
-                    session_epoch,
-                    organization_id: attempt.organization_id.clone(),
-                    attempt_id: attempt.attempt_id.clone(),
-                    fence_token: attempt.fence_token,
-                    outcome: cancellation_outcome,
-                })
-                .await?
-                .into_inner();
+            let receipt = authority_rpc(
+                authority_lost,
+                publication
+                    .client
+                    .complete_cancellation(CancellationCompletion {
+                        agent_id: config.agent_id.clone(),
+                        session_epoch,
+                        organization_id: attempt.organization_id.clone(),
+                        attempt_id: attempt.attempt_id.clone(),
+                        fence_token: attempt.fence_token,
+                        outcome: cancellation_outcome,
+                    }),
+            )
+            .await?;
             ensure_session(receipt.session_epoch, session_epoch)?;
             match CancellationDisposition::try_from(receipt.disposition) {
                 Ok(CancellationDisposition::Completed | CancellationDisposition::RetireStale) => {
@@ -396,23 +437,24 @@ async fn run_assignment(
         workspace: assignment.workspace.clone(),
     })?;
 
+    let lease_window = Duration::from_secs(u64::from(config.lease_seconds));
     require_work_receipt(
-        client
-            .accept_work(assignment.authority.clone())
-            .await?
-            .into_inner(),
+        lease_window_rpc(
+            lease_window,
+            client.accept_work(assignment.authority.clone()),
+        )
+        .await?,
         session_epoch,
     )?;
-    let lease = tokio::time::timeout(
-        lease_rpc_budget(Duration::from_secs(u64::from(config.lease_seconds))),
+    let lease_started_at = tokio::time::Instant::now();
+    let lease = lease_deadline_rpc(
+        lease_started_at + lease_rpc_budget(lease_window),
         client.renew_work_lease(WorkLeaseRenewal {
             authority: Some(assignment.authority.clone()),
             lease_seconds: config.lease_seconds,
         }),
     )
-    .await
-    .map_err(|_| AgentError::LeaseRenewalTimeout)??
-    .into_inner();
+    .await?;
     ensure_session(lease.session_epoch, session_epoch)?;
     if !lease.accepted {
         return Err(AgentError::StaleAuthority);
@@ -421,14 +463,19 @@ async fn run_assignment(
         let lease_stop = CancellationToken::new();
         let execution_cancellation = CancellationToken::new();
         execution_cancellation.cancel();
+        let authority_lost = CancellationToken::new();
         let lease_task = tokio::spawn(renew_lease(
             client.clone(),
             assignment.authority.clone(),
-            config.lease_seconds,
-            config.lease_renewal_interval,
-            Duration::from_secs(u64::from(config.lease_seconds)),
-            execution_cancellation,
-            lease_stop.clone(),
+            LeaseRenewalControl {
+                lease_seconds: config.lease_seconds,
+                renewal_interval: config.lease_renewal_interval,
+                lease_started_at,
+                lease_window,
+                execution_cancellation,
+                authority_lost: authority_lost.clone(),
+                stop: lease_stop.clone(),
+            },
         ));
         let completion_result = finalize_without_process(
             config,
@@ -441,6 +488,7 @@ async fn run_assignment(
                 outcome: WorkOutcome::Aborted,
                 reason: "cancelled_before_process_spawn".to_owned(),
             },
+            &authority_lost,
         )
         .await;
         lease_stop.cancel();
@@ -451,23 +499,29 @@ async fn run_assignment(
         return lease_result;
     }
     require_work_receipt(
-        client
-            .start_work(assignment.authority.clone())
-            .await?
-            .into_inner(),
+        lease_deadline_rpc(
+            lease_started_at + lease_rpc_budget(lease_window),
+            client.start_work(assignment.authority.clone()),
+        )
+        .await?,
         session_epoch,
     )?;
 
     let execution_cancellation = stop.child_token();
+    let authority_lost = CancellationToken::new();
     let lease_stop = CancellationToken::new();
     let lease_task = tokio::spawn(renew_lease(
         client.clone(),
         assignment.authority.clone(),
-        config.lease_seconds,
-        config.lease_renewal_interval,
-        Duration::from_secs(u64::from(config.lease_seconds)),
-        execution_cancellation.clone(),
-        lease_stop.clone(),
+        LeaseRenewalControl {
+            lease_seconds: config.lease_seconds,
+            renewal_interval: config.lease_renewal_interval,
+            lease_started_at,
+            lease_window,
+            execution_cancellation: execution_cancellation.clone(),
+            authority_lost: authority_lost.clone(),
+            stop: lease_stop.clone(),
+        },
     ));
     let process = assignment.process;
     let request = ExecutionRequest {
@@ -532,6 +586,7 @@ async fn run_assignment(
                         outcome: WorkOutcome::Failed,
                         reason: format!("process_spawn_failed: {error}"),
                     },
+                    &authority_lost,
                 )
                 .await;
             }
@@ -574,10 +629,14 @@ async fn run_assignment(
         // Terminal truth and every replay input are durable before the first
         // replayable upload. A committed log whose response is lost can therefore
         // be resumed without executing the workload again.
-        let next_sequence = publish_spool(
+        let mut publication = PublicationContext {
             client,
-            &assignment.authority,
+            authority: &assignment.authority,
             session_epoch,
+            authority_lost: &authority_lost,
+        };
+        let next_sequence = publish_spool(
+            &mut publication,
             "stdout",
             &config.workspace_root,
             &outcome.stdout,
@@ -585,9 +644,7 @@ async fn run_assignment(
         )
         .await?;
         publish_spool(
-            client,
-            &assignment.authority,
-            session_epoch,
+            &mut publication,
             "stderr",
             &config.workspace_root,
             &outcome.stderr,
@@ -599,14 +656,15 @@ async fn run_assignment(
             "termination": termination_name(outcome.termination),
             "result_sha256": hex(&result.digest),
         }))?;
-        let completion = client
-            .complete_work(WorkCompletion {
-                authority: Some(assignment.authority),
+        let completion = authority_rpc(
+            &authority_lost,
+            publication.client.complete_work(WorkCompletion {
+                authority: Some(assignment.authority.clone()),
                 outcome: terminal as i32,
                 summary_json: summary,
-            })
-            .await?
-            .into_inner();
+            }),
+        )
+        .await?;
         require_work_receipt(completion, session_epoch)?;
         crash_after_terminal_commit_for_test();
         journal.transition(
@@ -631,22 +689,27 @@ async fn run_assignment(
 async fn renew_lease(
     mut client: AgentControlClient<Channel>,
     authority: WorkAuthority,
-    lease_seconds: u32,
-    renewal_interval: Duration,
-    initial_lease_window: Duration,
-    execution_cancellation: CancellationToken,
-    lease_stop: CancellationToken,
+    control: LeaseRenewalControl,
 ) -> Result<(), AgentError> {
-    let mut lease_started_at = tokio::time::Instant::now();
-    let mut lease_window = initial_lease_window;
+    let LeaseRenewalControl {
+        lease_seconds,
+        renewal_interval,
+        lease_started_at,
+        lease_window,
+        execution_cancellation,
+        authority_lost,
+        stop,
+    } = control;
+    let mut lease_started_at = lease_started_at;
+    let mut lease_window = lease_window;
     loop {
         tokio::select! {
-            () = lease_stop.cancelled() => return Ok(()),
-            () = tokio::time::sleep(renewal_interval) => {}
+            () = stop.cancelled() => return Ok(()),
+            () = tokio::time::sleep_until(lease_started_at + renewal_interval) => {}
         }
         let deadline = lease_started_at + lease_rpc_budget(lease_window);
         let renewal = tokio::select! {
-            () = lease_stop.cancelled() => return Ok(()),
+            () = stop.cancelled() => return Ok(()),
             result = tokio::time::timeout_at(
                 deadline,
                 client.renew_work_lease(WorkLeaseRenewal {
@@ -658,11 +721,13 @@ async fn renew_lease(
         let receipt = match renewal {
             Err(_) => {
                 execution_cancellation.cancel();
+                authority_lost.cancel();
                 return Err(AgentError::LeaseRenewalTimeout);
             }
             Ok(Ok(response)) => response.into_inner(),
             Ok(Err(error)) => {
                 execution_cancellation.cancel();
+                authority_lost.cancel();
                 return Err(error.into());
             }
         };
@@ -670,11 +735,13 @@ async fn renew_lease(
             Ok(()) => {}
             Err(error) => {
                 execution_cancellation.cancel();
+                authority_lost.cancel();
                 return Err(error);
             }
         }
         if !receipt.accepted {
             execution_cancellation.cancel();
+            authority_lost.cancel();
             return Err(AgentError::StaleAuthority);
         }
         if receipt.cancellation_requested {
@@ -685,14 +752,45 @@ async fn renew_lease(
     }
 }
 
-fn lease_rpc_budget(lease_window: Duration) -> Duration {
+pub(super) fn lease_rpc_budget(lease_window: Duration) -> Duration {
     lease_window.saturating_sub(Duration::from_secs(1))
 }
 
+async fn lease_window_rpc<T>(
+    lease_window: Duration,
+    operation: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+) -> Result<T, AgentError> {
+    lease_deadline_rpc(
+        tokio::time::Instant::now() + lease_rpc_budget(lease_window),
+        operation,
+    )
+    .await
+}
+
+async fn lease_deadline_rpc<T>(
+    deadline: tokio::time::Instant,
+    operation: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+) -> Result<T, AgentError> {
+    tokio::time::timeout_at(deadline, operation)
+        .await
+        .map_err(|_| AgentError::LeaseRenewalTimeout)?
+        .map(tonic::Response::into_inner)
+        .map_err(AgentError::from)
+}
+
+async fn authority_rpc<T>(
+    authority_lost: &CancellationToken,
+    operation: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+) -> Result<T, AgentError> {
+    tokio::select! {
+        biased;
+        () = authority_lost.cancelled() => Err(AgentError::StaleAuthority),
+        result = operation => Ok(result?.into_inner()),
+    }
+}
+
 async fn publish_spool(
-    client: &mut AgentControlClient<Channel>,
-    authority: &WorkAuthority,
-    session_epoch: u64,
+    publication: &mut PublicationContext<'_>,
     stream: &str,
     workspace_root: &Path,
     entry: &SpoolEntry,
@@ -721,17 +819,23 @@ async fn publish_spool(
                 "durable log spool became shorter after verification".to_owned(),
             ));
         }
+        if sequence >= MAX_LOG_CHUNKS_PER_ATTEMPT {
+            return Err(AgentError::InvalidAssignment(
+                "log chunk count exceeds the per-attempt quota".to_owned(),
+            ));
+        }
         require_work_receipt(
-            client
-                .publish_log(WorkLogChunk {
-                    authority: Some(authority.clone()),
+            authority_rpc(
+                publication.authority_lost,
+                publication.client.publish_log(WorkLogChunk {
+                    authority: Some(publication.authority.clone()),
                     sequence,
                     stream: stream.to_owned(),
                     content: buffer[..bytes].to_vec(),
-                })
-                .await?
-                .into_inner(),
-            session_epoch,
+                }),
+            )
+            .await?,
+            publication.session_epoch,
         )?;
         published = true;
         remaining = remaining
@@ -752,17 +856,23 @@ async fn publish_spool(
         ));
     }
     if !published {
+        if first_sequence >= MAX_LOG_CHUNKS_PER_ATTEMPT {
+            return Err(AgentError::InvalidAssignment(
+                "log chunk count exceeds the per-attempt quota".to_owned(),
+            ));
+        }
         require_work_receipt(
-            client
-                .publish_log(WorkLogChunk {
-                    authority: Some(authority.clone()),
+            authority_rpc(
+                publication.authority_lost,
+                publication.client.publish_log(WorkLogChunk {
+                    authority: Some(publication.authority.clone()),
                     sequence: first_sequence,
                     stream: stream.to_owned(),
                     content: Vec::new(),
-                })
-                .await?
-                .into_inner(),
-            session_epoch,
+                }),
+            )
+            .await?,
+            publication.session_epoch,
         )?;
         sequence = sequence.checked_add(1).ok_or_else(|| {
             AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned())
@@ -856,7 +966,10 @@ async fn write_result(
         completion_protocol,
         cancellation_outcome,
     } = result;
-    let relative_path = workspace.join("spool/result.json");
+    let relative_path = PathBuf::from(AGENT_RESULT_DIRECTORY)
+        .join(workspace)
+        .join(Uuid::new_v4().simple().to_string())
+        .join("result.json");
     let path = workspace_root.join(&relative_path);
     let parent = path.parent().ok_or_else(|| {
         AgentError::InvalidAssignment("result spool has no parent directory".to_owned())
@@ -974,6 +1087,7 @@ async fn finalize_without_process(
     client: &mut AgentControlClient<Channel>,
     journal: &mut Journal,
     completion: ProcesslessCompletion<'_>,
+    authority_lost: &CancellationToken,
 ) -> Result<(), AgentError> {
     let ProcesslessCompletion {
         authority,
@@ -1010,17 +1124,18 @@ async fn finalize_without_process(
         result: &result,
     })?;
     require_work_receipt(
-        client
-            .complete_work(WorkCompletion {
+        authority_rpc(
+            authority_lost,
+            client.complete_work(WorkCompletion {
                 authority: Some(authority.clone()),
                 outcome: outcome as i32,
                 summary_json: serde_json::to_vec(&json!({
                     "reason": reason,
                     "result_sha256": hex(&result.digest),
                 }))?,
-            })
-            .await?
-            .into_inner(),
+            }),
+        )
+        .await?,
         session_epoch,
     )?;
     journal.transition(
@@ -1184,6 +1299,28 @@ mod tests {
         assert_eq!(lease_rpc_budget(Duration::from_millis(500)), Duration::ZERO);
     }
 
+    #[tokio::test]
+    async fn authority_loss_interrupts_a_stalled_terminal_rpc() {
+        let authority_lost = CancellationToken::new();
+        authority_lost.cancel();
+        let result = authority_rpc::<()>(
+            &authority_lost,
+            std::future::pending::<Result<tonic::Response<()>, tonic::Status>>(),
+        )
+        .await;
+        assert!(matches!(result, Err(AgentError::StaleAuthority)));
+    }
+
+    #[tokio::test]
+    async fn startup_rpc_deadline_is_fail_closed() {
+        let result = lease_deadline_rpc::<()>(
+            tokio::time::Instant::now() + Duration::from_millis(1),
+            std::future::pending::<Result<tonic::Response<()>, tonic::Status>>(),
+        )
+        .await;
+        assert!(matches!(result, Err(AgentError::LeaseRenewalTimeout)));
+    }
+
     #[test]
     fn execution_spec_is_fail_closed() {
         let multiple =
@@ -1231,9 +1368,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn result_spool_is_idempotent_and_completion_protocol_bound() {
+    async fn result_spool_uses_post_containment_nonce_and_binds_completion_protocol() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = PathBuf::from("org/attempt");
+        let workload_result = directory.path().join(&workspace).join("spool/result.json");
+        let predictable_agent_result = directory
+            .path()
+            .join(AGENT_RESULT_DIRECTORY)
+            .join(&workspace)
+            .join("result.json");
+        fs::create_dir_all(workload_result.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&workload_result, b"workload-controlled")
+            .await
+            .unwrap();
+        fs::create_dir_all(predictable_agent_result.parent().unwrap())
+            .await
+            .unwrap();
+        fs::write(&predictable_agent_result, b"workload-controlled")
+            .await
+            .unwrap();
 
         let first = write_result(
             directory.path(),
@@ -1263,7 +1418,22 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(first, replay);
+        assert_ne!(first.relative_path, replay.relative_path);
+        assert_eq!(first.digest, replay.digest);
+        assert_eq!(first.bytes, replay.bytes);
+        assert!(
+            first
+                .relative_path
+                .starts_with(Path::new(AGENT_RESULT_DIRECTORY))
+        );
+        assert_eq!(
+            fs::read(workload_result).await.unwrap(),
+            b"workload-controlled"
+        );
+        assert_eq!(
+            fs::read(predictable_agent_result).await.unwrap(),
+            b"workload-controlled"
+        );
 
         let result: PersistedResult = serde_json::from_slice(
             &fs::read(directory.path().join(&first.relative_path))
@@ -1278,22 +1448,35 @@ mod tests {
         );
         assert!(result.cancellation_outcome.is_none());
 
-        assert!(matches!(
-            write_result(
-                directory.path(),
-                &workspace,
-                DurableResult {
-                    outcome: WorkOutcome::Aborted,
-                    exit_code: None,
-                    termination: "recovered_cancellation",
-                    reason: None,
-                    completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
-                    cancellation_outcome: Some(CancellationOutcome::Terminated as i32),
-                },
-            )
-            .await,
-            Err(AgentError::InvalidAssignment(_))
-        ));
+        let cancellation = write_result(
+            directory.path(),
+            &workspace,
+            DurableResult {
+                outcome: WorkOutcome::Aborted,
+                exit_code: None,
+                termination: "recovered_cancellation",
+                reason: None,
+                completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
+                cancellation_outcome: Some(CancellationOutcome::Terminated as i32),
+            },
+        )
+        .await
+        .unwrap();
+        assert_ne!(first.relative_path, cancellation.relative_path);
+        let cancellation_result: PersistedResult = serde_json::from_slice(
+            &fs::read(directory.path().join(cancellation.relative_path))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            cancellation_result.completion_protocol,
+            CANCELLATION_COMPLETION_PROTOCOL
+        );
+        assert_eq!(
+            cancellation_result.cancellation_outcome,
+            Some(CancellationOutcome::Terminated as i32)
+        );
     }
 
     #[tokio::test]
