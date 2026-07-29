@@ -17,7 +17,7 @@ use std::mem::{size_of, size_of_val, zeroed};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Component, Path, Prefix};
 use std::process::ExitStatus;
 use std::ptr::{null, null_mut};
 
@@ -165,7 +165,7 @@ impl JobProcess {
             spec.current_directory.as_os_str(),
             "working directory contains NUL",
         )?;
-        let environment = environment_block(spec.environment)?;
+        let environment = environment_block(spec.environment, spec.current_directory)?;
 
         // SAFETY: zero is the documented initial state for both POD Win32
         // structures. Every pointer below remains live through CreateProcessW.
@@ -439,7 +439,10 @@ fn push_backslashes(command: &mut OsString, count: usize) {
     }
 }
 
-fn environment_block(overrides: &BTreeMap<OsString, OsString>) -> Result<Vec<u16>, JobError> {
+fn environment_block(
+    overrides: &BTreeMap<OsString, OsString>,
+    current_directory: &Path,
+) -> Result<Vec<u16>, JobError> {
     let mut entries = BTreeMap::<String, (OsString, OsString)>::new();
     const BASELINE: [&str; 7] = [
         "COMSPEC",
@@ -455,6 +458,9 @@ fn environment_block(overrides: &BTreeMap<OsString, OsString>) -> Result<Vec<u16
         if BASELINE.contains(&normalized.as_str()) {
             entries.insert(normalized, (key, value));
         }
+    }
+    if let Some((normalized, key, value)) = drive_current_directory(current_directory) {
+        entries.insert(normalized, (key, value));
     }
     for (key, value) in overrides {
         if key.is_empty()
@@ -483,6 +489,22 @@ fn environment_block(overrides: &BTreeMap<OsString, OsString>) -> Result<Vec<u16
         block.push(0);
     }
     Ok(block)
+}
+
+fn drive_current_directory(current_directory: &Path) -> Option<(String, OsString, OsString)> {
+    let Component::Prefix(prefix) = current_directory.components().next()? else {
+        return None;
+    };
+    let drive = match prefix.kind() {
+        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+        _ => return None,
+    };
+    let key = OsString::from(format!("={}:", char::from(drive).to_ascii_uppercase()));
+    Some((
+        normalized_environment_key(&key),
+        key,
+        current_directory.as_os_str().to_owned(),
+    ))
 }
 
 fn normalized_environment_key(key: &OsStr) -> String {
@@ -618,13 +640,14 @@ mod tests {
     #[test]
     fn workload_environment_excludes_parent_identity_and_accepts_explicit_values() {
         assert!(std::env::var_os("USERNAME").is_some());
-        let block = environment_block(&BTreeMap::from([(
-            OsString::from("EXPLICIT_VALUE"),
-            OsString::from("allowed"),
-        )]))
+        let block = environment_block(
+            &BTreeMap::from([(OsString::from("EXPLICIT_VALUE"), OsString::from("allowed"))]),
+            Path::new(r"D:\agent\work"),
+        )
         .unwrap();
         let text = String::from_utf16_lossy(&block).replace('\0', "\n");
         assert!(!text.to_uppercase().contains("USERNAME="));
         assert!(text.contains("EXPLICIT_VALUE=allowed"));
+        assert!(text.contains("=D:=D:\\agent\\work"));
     }
 }

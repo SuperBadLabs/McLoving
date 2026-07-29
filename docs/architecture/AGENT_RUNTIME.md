@@ -134,9 +134,12 @@ authority.
   path.
 - Workloads never inherit the agent service environment. Unix starts from a
   fixed `PATH`/locale baseline; Windows copies only the operating-system
-  process baseline required for process creation. The execution specification
-  then supplies explicit overrides, so controller URLs, journal paths, and
-  credential locations are not disclosed through inherited variables.
+  process baseline required for process creation and synthesizes the exact
+  per-drive current-directory entry required when a custom Unicode environment
+  block is passed to `CreateProcessW`. The execution specification then
+  supplies explicit overrides, so controller URLs, journal paths, credential
+  locations, and unrelated service identity are not disclosed through
+  inherited variables.
 - Execution timeouts are validated before process creation and must be between
   one second and seven days. Unbounded `u64` durations never reach platform
   deadline arithmetic.
