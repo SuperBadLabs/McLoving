@@ -84,39 +84,40 @@ where
     .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
     let process_id = child.process_id();
     if let Err(error) = on_spawn(process_id) {
-        terminate_job(&child).await?;
+        terminate_job(&child, process_id).await?;
         return Err(error);
     }
     if let Err(error) = child.resume() {
-        terminate_job(&child).await?;
+        terminate_job(&child, process_id).await?;
         return Err(ExecutionError::WindowsJob(error.to_string()));
     }
 
     let deadline = Instant::now() + request.timeout;
     let (mut termination, status) = loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?
-        {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            containment_unverified(process_id, ExecutionError::WindowsJob(error.to_string()))
+        })? {
             break (Termination::Exited, status);
         }
-        if output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)? {
+        if output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)
+            .map_err(|error| containment_unverified(process_id, ExecutionError::Io(error)))?
+        {
             break (
                 Termination::OutputLimitExceeded,
-                terminate_job(&child).await?,
+                terminate_job(&child, process_id).await?,
             );
         }
         tokio::select! {
             () = cancellation.cancelled() => {
                 break (
                     Termination::Cancelled,
-                    terminate_job(&child).await?,
+                    terminate_job(&child, process_id).await?,
                 );
             }
             () = sleep_until(deadline) => {
                 break (
                     Termination::TimedOut,
-                    terminate_job(&child).await?,
+                    terminate_job(&child, process_id).await?,
                 );
             }
             () = sleep(Duration::from_millis(20)) => {}
@@ -126,10 +127,7 @@ where
     // A leader may exit while descendants still hold inherited spool handles.
     // Terminate the complete job and observe zero active processes before
     // syncing or hashing either log.
-    child
-        .terminate(TERMINATED_EXIT_CODE)
-        .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
-    wait_for_empty_job(&child).await?;
+    terminate_job(&child, process_id).await?;
     drop(child);
     if output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)? {
         termination = Termination::OutputLimitExceeded;
@@ -360,42 +358,56 @@ fn cmd_command_string(
     Ok(command)
 }
 
-async fn terminate_job(child: &JobProcess) -> Result<ExitStatus, ExecutionError> {
-    child
-        .terminate(TERMINATED_EXIT_CODE)
-        .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
+async fn terminate_job(child: &JobProcess, process_id: u32) -> Result<ExitStatus, ExecutionError> {
+    child.terminate(TERMINATED_EXIT_CODE).map_err(|error| {
+        containment_unverified(process_id, ExecutionError::WindowsJob(error.to_string()))
+    })?;
     let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?
-        {
-            return Ok(status);
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|error| {
+            containment_unverified(process_id, ExecutionError::WindowsJob(error.to_string()))
+        })? {
+            break status;
         }
         if Instant::now() >= deadline {
-            return Err(ExecutionError::WindowsJob(
-                "terminated process did not become waitable within five seconds".to_owned(),
+            return Err(containment_unverified(
+                process_id,
+                ExecutionError::WindowsJob(
+                    "terminated process did not become waitable within five seconds".to_owned(),
+                ),
+            ));
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
+    wait_for_empty_job(child, process_id).await?;
+    Ok(status)
+}
+
+async fn wait_for_empty_job(job: &JobProcess, process_id: u32) -> Result<(), ExecutionError> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let active = job.active_processes().map_err(|error| {
+            containment_unverified(process_id, ExecutionError::WindowsJob(error.to_string()))
+        })?;
+        if active == 0 {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(containment_unverified(
+                process_id,
+                ExecutionError::WindowsJob(format!(
+                    "terminated Job Object still contains {active} process(es)"
+                )),
             ));
         }
         sleep(Duration::from_millis(10)).await;
     }
 }
 
-async fn wait_for_empty_job(job: &JobProcess) -> Result<(), ExecutionError> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let active = job
-            .active_processes()
-            .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
-        if active == 0 {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(ExecutionError::WindowsJob(format!(
-                "terminated Job Object still contains {active} process(es)"
-            )));
-        }
-        sleep(Duration::from_millis(10)).await;
+fn containment_unverified(process_id: u32, error: ExecutionError) -> ExecutionError {
+    ExecutionError::ContainmentUnverified {
+        process_id,
+        reason: error.to_string(),
     }
 }
 
@@ -426,6 +438,22 @@ mod tests {
             timeout: Duration::from_secs(10),
             termination_grace: Duration::from_millis(100),
         }
+    }
+
+    #[test]
+    fn post_spawn_cleanup_failure_preserves_recovery_identity() {
+        let error = containment_unverified(
+            4_242,
+            ExecutionError::WindowsJob("QueryInformationJobObject failed".to_owned()),
+        );
+
+        assert!(matches!(
+            error,
+            ExecutionError::ContainmentUnverified {
+                process_id: 4_242,
+                reason
+            } if reason.contains("QueryInformationJobObject")
+        ));
     }
 
     #[tokio::test]
