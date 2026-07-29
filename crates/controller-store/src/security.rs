@@ -7,6 +7,7 @@ use super::{Store, StoreError, append_event_and_outbox};
 const MAX_SECURITY_LABEL_BYTES: usize = 128;
 const MAX_APPROVER_SUBJECT_BYTES: usize = 256;
 const MAX_SECRET_BYTES: usize = 65_536;
+const MAX_TOTAL_SECRET_BYTES: usize = 65_536;
 const MAX_APPROVALS: usize = 8;
 const MAX_TTL_SECONDS: i32 = 24 * 60 * 60;
 
@@ -198,6 +199,29 @@ impl Store {
         let required_approvals: i16 = policy.try_get("required_approvals")?;
         let required_approvals =
             usize::try_from(required_approvals).expect("database constraint is non-negative");
+        let (existing_grants, existing_secret_bytes) = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT COUNT(*), COALESCE(SUM(octet_length(secret_value)), 0)
+             FROM credential_grants
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3",
+        )
+        .bind(grant.organization_id)
+        .bind(grant.attempt_id)
+        .bind(grant.fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        let proposed_secret_bytes = existing_secret_bytes.checked_add(
+            i64::try_from(grant.secret_value.len()).expect("validated bound fits i64"),
+        );
+        if existing_grants >= i64::try_from(MAX_APPROVALS).expect("bound fits i64")
+            || proposed_secret_bytes.is_none_or(|bytes| {
+                bytes > i64::try_from(MAX_TOTAL_SECRET_BYTES).expect("bound fits i64")
+            })
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
 
         let locked_approvals = if grant.approval_ids.is_empty() {
             Vec::new()
@@ -358,6 +382,7 @@ impl Store {
                AND b.pipeline_digest = g.pipeline_digest
                AND s.agent_id = $5
                AND s.session_epoch = $6
+               AND s.features @> ARRAY['attempt-credentials-v1']::text[]
              RETURNING g.id, g.target_name, g.secret_value, g.build_id",
         )
         .bind(organization_id)
@@ -418,6 +443,8 @@ fn validate_grant(grant: &NewCredentialGrant<'_>) -> Result<(), StoreError> {
         || !valid_environment_name(grant.target_name)
         || grant.secret_value.is_empty()
         || grant.secret_value.len() > MAX_SECRET_BYTES
+        || grant.secret_value.contains(&0)
+        || std::str::from_utf8(grant.secret_value).is_err()
         || grant.approval_ids.len() > MAX_APPROVALS
         || grant
             .approval_ids

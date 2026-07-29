@@ -8,13 +8,14 @@ use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
 use mcloving_agent_protocol::wire::{
     AttemptAuthority, CancellationCompletion, CancellationDisposition, CancellationOutcome,
-    CancellationReceipt, OpenSessionRequest, OpenSessionResponse, ReconciliationDirective,
-    ReconciliationReport, RotateCertificateRequest, RotateCertificateResponse, WorkAssignment,
-    WorkAuthority, WorkCompletion, WorkLeaseReceipt, WorkLeaseRenewal, WorkLogChunk, WorkOffer,
-    WorkOutcome, WorkPoll, WorkReceipt,
+    CancellationReceipt, CredentialBinding, CredentialEnvelope, OpenSessionRequest,
+    OpenSessionResponse, ReconciliationDirective, ReconciliationReport, RotateCertificateRequest,
+    RotateCertificateResponse, WorkAssignment, WorkAuthority, WorkCompletion, WorkLeaseReceipt,
+    WorkLeaseRenewal, WorkLogChunk, WorkOffer, WorkOutcome, WorkPoll, WorkReceipt,
 };
 use mcloving_agent_protocol::{
-    ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS, WORK_DELIVERY_FEATURE, negotiate,
+    ATTEMPT_CREDENTIALS_FEATURE, ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS,
+    WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{ApiState, router};
 use mcloving_controller_store::{
@@ -125,6 +126,7 @@ impl AgentControl for ControllerAgentService {
             "unix-process-group-v1".to_owned(),
             "windows-job-object-v1".to_owned(),
             WORK_DELIVERY_FEATURE.to_owned(),
+            ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -476,6 +478,38 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+        }))
+    }
+
+    async fn fetch_credentials(
+        &self,
+        request: Request<WorkAuthority>,
+    ) -> Result<Response<CredentialEnvelope>, Status> {
+        let identity = self.identities.authenticate(&request)?.clone();
+        let authority = request.into_inner();
+        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let credentials = self
+            .store
+            .redeem_credential_grants(
+                context.organization_id,
+                context.attempt_id,
+                context.fence,
+                context.restore_epoch,
+                &authority.agent_id,
+                authority.session_epoch,
+            )
+            .await
+            .map_err(internal_store_error)?
+            .into_iter()
+            .map(|credential| CredentialBinding {
+                grant_id: credential.grant_id.to_string(),
+                target_name: credential.target_name,
+                secret_value: credential.secret_value,
+            })
+            .collect();
+        Ok(Response::new(CredentialEnvelope {
+            session_epoch: authority.session_epoch,
+            credentials,
         }))
     }
 

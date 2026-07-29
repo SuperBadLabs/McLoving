@@ -8,15 +8,17 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use aho_corasick::AhoCorasick;
 use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
-    CancellationCompletion, CancellationDisposition, CancellationOutcome, WorkAssignment,
-    WorkAuthority, WorkCompletion, WorkLeaseRenewal, WorkLogChunk, WorkOutcome, WorkPoll,
+    CancellationCompletion, CancellationDisposition, CancellationOutcome, CredentialBinding,
+    WorkAssignment, WorkAuthority, WorkCompletion, WorkLeaseRenewal, WorkLogChunk, WorkOutcome,
+    WorkPoll,
 };
 use mcloving_agent_runtime::executor::{
-    ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
-    execute_with_spawn_hook, is_link_or_reparse_point, sync_directory,
+    ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, Termination,
+    WorkspaceRootGuard, execute_with_spawn_hook, is_link_or_reparse_point, sync_directory,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Finalization, Journal, ProcessIdentity, SpoolEntry,
@@ -58,6 +60,11 @@ struct ProcessSpec {
     #[serde(default)]
     env: BTreeMap<String, String>,
     timeout_seconds: Option<u64>,
+}
+
+struct ExecutionEnvironment {
+    values: BTreeMap<String, String>,
+    redactions: Vec<Vec<u8>>,
 }
 
 #[derive(Deserialize)]
@@ -557,6 +564,12 @@ async fn run_assignment(
         .await?,
         session_epoch,
     )?;
+    let credentials = lease_deadline_rpc(
+        lease_started_at + lease_rpc_budget(lease_window),
+        client.fetch_credentials(assignment.authority.clone()),
+    )
+    .await?;
+    ensure_session(credentials.session_epoch, session_epoch)?;
 
     let execution_cancellation = stop.child_token();
     let authority_lost = CancellationToken::new();
@@ -575,6 +588,7 @@ async fn run_assignment(
         },
     ));
     let process = assignment.process;
+    let execution_environment = execution_environment(process.env, credentials.credentials)?;
     let request = ExecutionRequest {
         workspace_root: config.workspace_root.clone(),
         workspace: assignment.workspace.clone(),
@@ -585,8 +599,8 @@ async fn run_assignment(
         },
         program: PathBuf::from(process.program),
         arguments: process.args.into_iter().map(OsString::from).collect(),
-        environment: process
-            .env
+        environment: execution_environment
+            .values
             .into_iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect(),
@@ -623,7 +637,7 @@ async fn run_assignment(
         })
         .await;
     let completion_result: Result<(), AgentError> = async {
-        let outcome = match execution {
+        let mut outcome = match execution {
             Ok(outcome) => outcome,
             Err(error) => {
                 if let Some(process_id) = unverified_containment_process_id(&error) {
@@ -671,6 +685,12 @@ async fn run_assignment(
                 .await;
             }
         };
+        redact_execution_logs(
+            &config.workspace_root,
+            &mut outcome,
+            &execution_environment.redactions,
+        )
+        .await?;
         validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()])?;
         let terminal = match outcome.termination {
             Termination::Cancelled => WorkOutcome::Aborted,
@@ -779,6 +799,119 @@ async fn run_assignment(
         .map_err(|error| AgentError::InvalidAssignment(format!("lease task failed: {error}")))?;
     completion_result?;
     lease_result
+}
+
+fn execution_environment(
+    mut environment: BTreeMap<String, String>,
+    credentials: Vec<CredentialBinding>,
+) -> Result<ExecutionEnvironment, AgentError> {
+    if credentials.len() > 8 {
+        return Err(AgentError::InvalidAssignment(
+            "credential count exceeds the per-attempt bound".to_owned(),
+        ));
+    }
+    let mut grant_ids = std::collections::BTreeSet::new();
+    let mut redactions = Vec::with_capacity(credentials.len());
+    let mut total_secret_bytes = 0_usize;
+    for credential in credentials {
+        let grant_id = Uuid::parse_str(&credential.grant_id).map_err(|_| {
+            AgentError::InvalidAssignment("credential grant ID is invalid".to_owned())
+        })?;
+        if !grant_ids.insert(grant_id) {
+            return Err(AgentError::InvalidAssignment(
+                "credential grant IDs must be unique".to_owned(),
+            ));
+        }
+        if !valid_environment_name(&credential.target_name)
+            || credential.secret_value.is_empty()
+            || credential.secret_value.len() > 65_536
+            || credential.secret_value.contains(&0)
+        {
+            return Err(AgentError::InvalidAssignment(
+                "credential binding is outside its bounds".to_owned(),
+            ));
+        }
+        total_secret_bytes = total_secret_bytes
+            .checked_add(credential.secret_value.len())
+            .ok_or_else(|| {
+                AgentError::InvalidAssignment("credential redaction set is too large".to_owned())
+            })?;
+        if total_secret_bytes > 65_536 {
+            return Err(AgentError::InvalidAssignment(
+                "credential redaction set is too large".to_owned(),
+            ));
+        }
+        let secret = String::from_utf8(credential.secret_value.clone()).map_err(|_| {
+            AgentError::InvalidAssignment("credential value must be valid UTF-8".to_owned())
+        })?;
+        if environment.insert(credential.target_name, secret).is_some() {
+            return Err(AgentError::InvalidAssignment(
+                "credential target collides with the pipeline environment".to_owned(),
+            ));
+        }
+        redactions.push(credential.secret_value);
+    }
+    Ok(ExecutionEnvironment {
+        values: environment,
+        redactions,
+    })
+}
+
+fn valid_environment_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(byte) if byte.is_ascii_alphabetic() || byte == b'_')
+        && value.len() <= 128
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+async fn redact_execution_logs(
+    workspace_root: &Path,
+    outcome: &mut ExecutionOutcome,
+    secrets: &[Vec<u8>],
+) -> Result<(), AgentError> {
+    if secrets.is_empty() {
+        return Ok(());
+    }
+    let matcher = AhoCorasick::new(secrets).map_err(|error| {
+        AgentError::InvalidAssignment(format!("credential redaction set is invalid: {error}"))
+    })?;
+    outcome.stdout =
+        redact_spool_entry(workspace_root, &outcome.stdout, &matcher, secrets.len()).await?;
+    outcome.stderr =
+        redact_spool_entry(workspace_root, &outcome.stderr, &matcher, secrets.len()).await?;
+    Ok(())
+}
+
+async fn redact_spool_entry(
+    workspace_root: &Path,
+    entry: &SpoolEntry,
+    matcher: &AhoCorasick,
+    pattern_count: usize,
+) -> Result<SpoolEntry, AgentError> {
+    let path = workspace_root.join(&entry.relative_path);
+    verify_spool_file(&path, entry, "credential-bearing log").await?;
+    let content = fs::read(&path).await?;
+    let replacements = vec![Vec::<u8>::new(); pattern_count];
+    let redacted = matcher.replace_all_bytes(&content, &replacements);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .await?;
+    file.write_all(&redacted).await?;
+    file.sync_all().await?;
+    sync_directory(
+        path.parent()
+            .ok_or_else(|| AgentError::InvalidAssignment("log has no parent".to_owned()))?,
+    )?;
+    Ok(SpoolEntry {
+        sequence: entry.sequence,
+        relative_path: entry.relative_path.clone(),
+        digest: Sha256::digest(&redacted).into(),
+        bytes: u64::try_from(redacted.len()).map_err(|_| {
+            AgentError::InvalidAssignment("redacted log exceeds platform bounds".to_owned())
+        })?,
+    })
 }
 
 fn unverified_containment_process_id(error: &ExecutionError) -> Option<u32> {
@@ -1830,6 +1963,71 @@ mod tests {
             execution_spec_json: spec.to_vec(),
             payload_digest: Sha256::digest(spec).to_vec(),
         }
+    }
+
+    #[test]
+    fn credential_bindings_are_bounded_unique_and_collision_free() {
+        let grant_id = Uuid::new_v4();
+        let execution = execution_environment(
+            BTreeMap::from([("SAFE".to_owned(), "value".to_owned())]),
+            vec![CredentialBinding {
+                grant_id: grant_id.to_string(),
+                target_name: "DEPLOY_TOKEN".to_owned(),
+                secret_value: b"marker-secret".to_vec(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(execution.values["SAFE"], "value");
+        assert_eq!(execution.values["DEPLOY_TOKEN"], "marker-secret");
+        assert_eq!(execution.redactions, vec![b"marker-secret".to_vec()]);
+
+        assert!(
+            execution_environment(
+                BTreeMap::from([("DEPLOY_TOKEN".to_owned(), "pipeline".to_owned())]),
+                vec![CredentialBinding {
+                    grant_id: grant_id.to_string(),
+                    target_name: "DEPLOY_TOKEN".to_owned(),
+                    secret_value: b"marker-secret".to_vec(),
+                }],
+            )
+            .is_err()
+        );
+        assert!(
+            execution_environment(
+                BTreeMap::new(),
+                vec![CredentialBinding {
+                    grant_id: grant_id.to_string(),
+                    target_name: "invalid-name".to_owned(),
+                    secret_value: b"marker-secret".to_vec(),
+                }],
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_values_are_removed_before_log_spools_are_persisted() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("stdout.log");
+        let content = b"before marker-secret after marker-secret";
+        fs::write(&path, content).await.unwrap();
+        let entry = SpoolEntry {
+            sequence: 0,
+            relative_path: PathBuf::from("stdout.log"),
+            digest: Sha256::digest(content).into(),
+            bytes: u64::try_from(content.len()).unwrap(),
+        };
+        let patterns = vec![b"marker-secret".to_vec()];
+        let matcher = AhoCorasick::new(&patterns).unwrap();
+
+        let redacted = redact_spool_entry(directory.path(), &entry, &matcher, patterns.len())
+            .await
+            .unwrap();
+
+        assert_eq!(fs::read(&path).await.unwrap(), b"before  after ");
+        verify_spool_file(&path, &redacted, "redacted log")
+            .await
+            .unwrap();
     }
 
     #[test]

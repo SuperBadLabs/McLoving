@@ -4660,7 +4660,10 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
                 "trusted",
                 1,
                 3,
-                &["work-delivery-v1".to_owned()],
+                &[
+                    "work-delivery-v1".to_owned(),
+                    "attempt-credentials-v1".to_owned(),
+                ],
                 &["linux".to_owned()],
             )
             .await
@@ -4867,6 +4870,39 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             .expect("reject delivery replay")
             .is_empty()
     );
+    assert!(
+        store
+            .append_log_in_session(
+                &NewLogChunk {
+                    organization_id,
+                    attempt_id: claim.attempt_id,
+                    fence: claim.fence,
+                    restore_epoch: claim.restore_epoch,
+                    agent_id: "agent-protected",
+                    sequence: 0,
+                    stream: "stdout",
+                    content: b"before marker-secret-value after",
+                },
+                1,
+            )
+            .await
+            .expect("persist redacted credential-bearing log")
+    );
+    let persisted_log = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT content
+         FROM attempt_log_chunks
+         WHERE organization_id = $1
+           AND attempt_id = $2
+           AND fence = $3
+           AND sequence = 0",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .fetch_one(store.pool())
+    .await
+    .expect("read redacted log");
+    assert_eq!(persisted_log, b"before  after");
 
     let payloads = sqlx::query_scalar::<_, String>(
         "SELECT string_agg(payload::text, '')

@@ -16,7 +16,8 @@ use mcloving_agent_protocol::wire::{
     OpenSessionRequest, ProtocolOffer, ReconciliationReport as WireReport,
 };
 use mcloving_agent_protocol::{
-    OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError, WORK_DELIVERY_FEATURE,
+    ATTEMPT_CREDENTIALS_FEATURE, OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    TransportError, WORK_DELIVERY_FEATURE,
 };
 #[cfg(windows)]
 use mcloving_agent_runtime::Acceptance;
@@ -340,6 +341,7 @@ async fn open_session(
                 "journal-v1".to_owned(),
                 platform_feature().to_owned(),
                 WORK_DELIVERY_FEATURE.to_owned(),
+                ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
             ],
         }),
         trust_pool: config.trust_pool.clone(),
@@ -360,6 +362,7 @@ async fn open_session(
         return Err(AgentError::UnsupportedProtocol);
     }
     require_work_delivery_feature(&response.features)?;
+    require_attempt_credentials_feature(&response.features)?;
     Ok((
         client,
         SessionReceipt {
@@ -383,6 +386,17 @@ fn require_work_delivery_feature(features: &[String]) -> Result<(), AgentError> 
     if features
         .iter()
         .any(|feature| feature == WORK_DELIVERY_FEATURE)
+    {
+        Ok(())
+    } else {
+        Err(AgentError::UnsupportedProtocol)
+    }
+}
+
+fn require_attempt_credentials_feature(features: &[String]) -> Result<(), AgentError> {
+    if features
+        .iter()
+        .any(|feature| feature == ATTEMPT_CREDENTIALS_FEATURE)
     {
         Ok(())
     } else {

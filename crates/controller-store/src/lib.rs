@@ -1,5 +1,6 @@
 //! PostgreSQL-backed controller truth and transaction boundaries.
 
+use aho_corasick::AhoCorasick;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Acquire, PgPool, Postgres, Transaction};
@@ -1468,7 +1469,6 @@ impl Store {
         if !log_sequence_is_bounded(chunk.sequence) {
             return Ok(false);
         }
-        let digest: [u8; 32] = Sha256::digest(chunk.content).into();
         let mut tx = self.tenant_transaction(chunk.organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         if let Some(session_epoch) = session_epoch
@@ -1484,6 +1484,30 @@ impl Store {
             ))
             .execute(&mut *tx)
             .await?;
+        let redactions = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT secret_value
+             FROM credential_grants
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+             ORDER BY id",
+        )
+        .bind(chunk.organization_id)
+        .bind(chunk.attempt_id)
+        .bind(chunk.fence)
+        .fetch_all(&mut *tx)
+        .await?;
+        let content = if redactions.is_empty() {
+            chunk.content.to_vec()
+        } else {
+            let matcher = AhoCorasick::new(&redactions).map_err(|error| {
+                StoreError::InvalidSecurityOperation(format!(
+                    "credential redaction set is invalid: {error}"
+                ))
+            })?;
+            matcher.replace_all_bytes(chunk.content, &vec![Vec::<u8>::new(); redactions.len()])
+        };
+        let digest: [u8; 32] = Sha256::digest(&content).into();
         let existing = sqlx::query_as::<_, (String, Vec<u8>)>(
             "SELECT l.stream, l.digest
              FROM attempt_log_chunks AS l
@@ -1530,7 +1554,7 @@ impl Store {
         .bind(chunk.fence)
         .fetch_one(&mut *tx)
         .await?;
-        let incoming = i64::try_from(chunk.content.len()).unwrap_or(i64::MAX);
+        let incoming = i64::try_from(content.len()).unwrap_or(i64::MAX);
         if !log_quota_allows(committed, incoming) {
             tx.rollback().await?;
             return Ok(false);
@@ -1565,7 +1589,7 @@ impl Store {
         .bind(chunk.agent_id)
         .bind(chunk.sequence)
         .bind(chunk.stream)
-        .bind(chunk.content)
+        .bind(&content)
         .bind(digest.as_slice())
         .fetch_optional(&mut *tx)
         .await?;
