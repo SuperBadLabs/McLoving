@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,11 +24,12 @@ use mcloving_agent_runtime::{AttemptPhase, Journal, JournalError, Reconciliation
 #[cfg(windows)]
 use std::ffi::OsString;
 use thiserror::Error;
-use tokio::time::{MissedTickBehavior, interval, sleep};
+use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentConfig {
@@ -64,6 +66,8 @@ pub enum AgentError {
     UnsupportedProtocol,
     #[error("agent identity and journal are already active in another process")]
     AlreadyRunning,
+    #[error("agent probe exceeded its bounded deadline")]
+    ProbeTimeout,
     #[error("agent service was stopped")]
     Stopped,
     #[error("journal path cannot be represented in the wire protocol")]
@@ -150,10 +154,22 @@ pub async fn run_until_stopped(
 
 pub async fn probe_once(config: &AgentConfig) -> Result<SessionReceipt, AgentError> {
     let _instance = acquire_instance_guard(config)?;
-    let stop = CancellationToken::new();
-    let (mut client, receipt) = open_session(config, stop.clone()).await?;
-    send_reconciliation(config, &mut client, receipt.session_epoch, stop).await?;
-    Ok(receipt)
+    with_probe_timeout(PROBE_TIMEOUT, async {
+        let stop = CancellationToken::new();
+        let (mut client, receipt) = open_session(config, stop.clone()).await?;
+        send_reconciliation(config, &mut client, receipt.session_epoch, stop).await?;
+        Ok(receipt)
+    })
+    .await
+}
+
+async fn with_probe_timeout<T>(
+    deadline: Duration,
+    operation: impl Future<Output = Result<T, AgentError>>,
+) -> Result<T, AgentError> {
+    timeout(deadline, operation)
+        .await
+        .map_err(|_| AgentError::ProbeTimeout)?
 }
 
 fn acquire_instance_guard(config: &AgentConfig) -> Result<AgentInstanceGuard, AgentError> {
@@ -583,6 +599,16 @@ mod tests {
         ));
         drop(running_agent);
         acquire_instance_guard(&config).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_probe_is_bounded() {
+        let result = with_probe_timeout::<()>(
+            Duration::from_millis(1),
+            std::future::pending::<Result<(), AgentError>>(),
+        )
+        .await;
+        assert!(matches!(result, Err(AgentError::ProbeTimeout)));
     }
 
     #[tokio::test]

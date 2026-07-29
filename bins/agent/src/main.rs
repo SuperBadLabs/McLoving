@@ -159,6 +159,10 @@ fn run_windows_service(mode: ServiceMode) -> Result<(), Box<dyn std::error::Erro
                     });
                     if let Err(error) = result {
                         eprintln!("Windows service worker failed: {error}");
+                        // The SCM must observe a failed service process rather
+                        // than a dispatcher that remains alive without its
+                        // production worker.
+                        std::process::exit(1);
                     }
                 });
             }
