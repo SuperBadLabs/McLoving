@@ -235,7 +235,8 @@ pub async fn probe_once(config: &AgentConfig) -> Result<SessionReceipt, AgentErr
     with_probe_timeout(PROBE_TIMEOUT, async {
         let stop = CancellationToken::new();
         let (mut client, receipt) = open_session(config, stop.clone()).await?;
-        send_reconciliation(config, &mut client, receipt.session_epoch, stop).await?;
+        send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
+        worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await?;
         Ok(receipt)
     })
     .await

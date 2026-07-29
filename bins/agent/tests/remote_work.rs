@@ -130,6 +130,24 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         "controller committed terminal truth before the agent journal advanced"
     );
 
+    let probe_status = tokio::time::timeout(
+        Duration::from_secs(10),
+        agent_command(organization_id, agent_port, &tls, &journal, &workspace)
+            .arg("probe")
+            .status(),
+    )
+    .await
+    .expect("probe exits within bound")
+    .expect("run shipped agent probe");
+    assert!(probe_status.success(), "probe replays durable finalization");
+    assert_eq!(
+        mcloving_agent::journal_health(&journal)
+            .expect("read probe-recovered agent journal")
+            .2,
+        0,
+        "probe must not renew and strand a replayable finalization"
+    );
+
     let mut agent = agent_command(organization_id, agent_port, &tls, &journal, &workspace)
         .kill_on_drop(true)
         .spawn()
