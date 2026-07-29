@@ -355,47 +355,62 @@ pub(crate) async fn advance_dag_after_attempt(
     let ordinal: i32 = row.try_get("ordinal")?;
 
     if outcome == TerminalOutcome::Failed && ordinal < max_attempts && !cancelled {
-        let retry_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO attempts (
-                 id, organization_id, node_id, ordinal, status, retry_of
-             )
-             VALUES ($1, $2, $3, $4, 'queued', $5)",
+        let has_non_idempotent_effect = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM attempt_effects
+                 WHERE organization_id = $1
+                   AND attempt_id = $2
+                   AND effect_class = 'non_idempotent'
+             )",
         )
-        .bind(retry_id)
         .bind(organization_id)
-        .bind(node_id)
-        .bind(ordinal + 1)
         .bind(attempt_id)
-        .execute(&mut **tx)
+        .fetch_one(&mut **tx)
         .await?;
-        sqlx::query(
-            "UPDATE nodes
-             SET status = 'queued',
-                 cancellation_requested_at = NULL
-             WHERE organization_id = $1
-               AND id = $2
-               AND logical_outcome IS NULL",
-        )
-        .bind(organization_id)
-        .bind(node_id)
-        .execute(&mut **tx)
-        .await?;
-        append_event_and_outbox(
-            tx,
-            organization_id,
-            build_id,
-            "dag.node_retry_scheduled",
-            json!({
-                "node_id": node_id,
-                "node_key": node_key,
-                "attempt_id": retry_id,
-                "ordinal": ordinal + 1,
-                "max_attempts": max_attempts,
-            }),
-        )
-        .await?;
-        return Ok(true);
+        if !has_non_idempotent_effect {
+            let retry_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO attempts (
+                     id, organization_id, node_id, ordinal, status, retry_of
+                 )
+                 VALUES ($1, $2, $3, $4, 'queued', $5)",
+            )
+            .bind(retry_id)
+            .bind(organization_id)
+            .bind(node_id)
+            .bind(ordinal + 1)
+            .bind(attempt_id)
+            .execute(&mut **tx)
+            .await?;
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'queued',
+                     cancellation_requested_at = NULL
+                 WHERE organization_id = $1
+                   AND id = $2
+                   AND logical_outcome IS NULL",
+            )
+            .bind(organization_id)
+            .bind(node_id)
+            .execute(&mut **tx)
+            .await?;
+            append_event_and_outbox(
+                tx,
+                organization_id,
+                build_id,
+                "dag.node_retry_scheduled",
+                json!({
+                    "node_id": node_id,
+                    "node_key": node_key,
+                    "attempt_id": retry_id,
+                    "ordinal": ordinal + 1,
+                    "max_attempts": max_attempts,
+                }),
+            )
+            .await?;
+            return Ok(true);
+        }
     }
 
     let node_outcome = outcome.as_str();

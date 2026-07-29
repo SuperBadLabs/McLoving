@@ -4977,6 +4977,112 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
 }
 
 #[tokio::test]
+async fn dag_retry_refuses_confirmed_non_idempotent_effects() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-non-idempotent",
+        )
+        .await
+        .expect("create DAG project");
+    let mut deploy = dag_node("deploy", DagNodeKind::Work, vec![], "linux", "deploy");
+    deploy.max_attempts = 2;
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "dag-non-idempotent".to_owned(),
+            pipeline_digest: [0xe4; 32],
+            priority: 0,
+            nodes: vec![deploy],
+        })
+        .await
+        .expect("admit DAG");
+    let claim = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-deploy",
+            "linux",
+            "deploy",
+        ))
+        .await
+        .expect("claim deploy")
+        .expect("deploy ready");
+    run_dag_claim(&store, &claim).await;
+    let payload = json!({"release": "r1"});
+    for status in [
+        EffectStatus::Prepared,
+        EffectStatus::Applied,
+        EffectStatus::Confirmed,
+    ] {
+        assert!(
+            store
+                .checkpoint_effect(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    &claim.agent_id,
+                    "deploy",
+                    EffectClass::NonIdempotent,
+                    status,
+                    &payload,
+                )
+                .await
+                .expect("checkpoint non-idempotent effect")
+        );
+    }
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                TerminalOutcome::Failed,
+                json!({"failure": "after confirmed effect"}),
+            )
+            .await
+            .expect("terminalize deploy")
+    );
+
+    let attempts = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM attempts WHERE node_id = $1")
+        .bind(claim.node_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("count DAG attempts");
+    assert_eq!(attempts, 1);
+    let outcome =
+        sqlx::query_scalar::<_, Option<String>>("SELECT logical_outcome FROM nodes WHERE id = $1")
+            .bind(admission.nodes["deploy"].node_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("read deploy outcome");
+    assert_eq!(outcome.as_deref(), Some("failed"));
+    assert!(
+        store
+            .claim_next(&dag_claim(
+                organization_id,
+                "agent-retry",
+                "linux",
+                "deploy",
+            ))
+            .await
+            .expect("check retry absence")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn dag_reconciliation_required_pauses_other_ready_work() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

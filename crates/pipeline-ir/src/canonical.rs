@@ -227,6 +227,12 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         let mut previous_name: Option<String> = None;
         for _ in 0..parameters {
             let name = reader.canonical_string_after(&mut previous_name, "parameter")?;
+            if !is_parameter_identifier(&name) {
+                return Err(CanonicalError::new(
+                    reader.offset.saturating_sub(name.len()),
+                    "invalid parameter identifier",
+                ));
+            }
             let parameter_type = reader.parameter_type()?;
             let secret = reader.bool_marker("secret")?;
             let default = match reader.u8()? {
@@ -427,6 +433,13 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         steps,
         sha256: Sha256::digest(bytes).into(),
     })
+}
+
+fn is_parameter_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 struct Reader<'a> {
