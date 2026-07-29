@@ -1,7 +1,9 @@
 //! Windows execution using race-free kill-on-close Job Objects.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
 

@@ -60,6 +60,15 @@ pub struct Job {
     initial_thread: ThreadHandle,
 }
 
+// SAFETY: Windows kernel handles may be used by threads in the owning process.
+// Job exposes no mutable memory through either handle, ResumeThread is called
+// once before execution begins, and Windows synchronizes concurrent Job Object
+// operations.
+unsafe impl Send for Job {}
+// SAFETY: See the Send justification. Shared access invokes only thread-safe
+// Win32 handle operations and Drop still has unique ownership.
+unsafe impl Sync for Job {}
+
 impl Job {
     /// Creates a kill-on-close job and assigns a suspended child.
     pub fn attach(child: &Child) -> Result<Self, JobError> {
@@ -142,6 +151,13 @@ impl Drop for Job {
 struct ThreadHandle {
     handle: HANDLE,
 }
+
+// SAFETY: A thread HANDLE is a process-wide kernel reference and this wrapper
+// owns it without exposing pointee memory.
+unsafe impl Send for ThreadHandle {}
+// SAFETY: Shared access does not mutate Rust memory; Win32 synchronizes handle
+// operations and the owning Job controls the single resume point.
+unsafe impl Sync for ThreadHandle {}
 
 impl Drop for ThreadHandle {
     fn drop(&mut self) {
