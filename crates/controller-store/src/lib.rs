@@ -476,6 +476,86 @@ impl Store {
         })
     }
 
+    /// Re-establishes bounded upload authority for an exact locally-finalizing
+    /// attempt after an agent reconnect.
+    ///
+    /// The scheduler lock prevents an expired lease from being requeued while
+    /// immutable spool evidence is replayed. Already-terminal exact authority
+    /// is retained so response-loss replay can converge without another
+    /// terminal event.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn recover_agent_finalization(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        local_phase: &str,
+        lease_seconds: i32,
+    ) -> Result<bool, StoreError> {
+        if !matches!(local_phase, "finalizing" | "cancelling") || lease_seconds <= 0 {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT a.status
+             FROM attempts AS a
+             CROSS JOIN controller_metadata AS m
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             FOR UPDATE OF a",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(status) = status else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        let terminal = matches!(status.as_str(), "succeeded" | "failed" | "aborted");
+        let resumable = match local_phase {
+            "finalizing" => matches!(status.as_str(), "running" | "finalizing"),
+            "cancelling" => status == "cancelling",
+            _ => false,
+        };
+        if !terminal && !resumable {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        if resumable {
+            sqlx::query(
+                "UPDATE attempts
+                 SET status = $3,
+                     lease_expires_at =
+                         clock_timestamp() + make_interval(secs => $4)
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(attempt_id)
+            .bind(local_phase)
+            .bind(f64::from(lease_seconds))
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// Atomically acknowledges a fenced agent's cancellation outcome.
     ///
     /// A reconnect may arrive after its lease deadline, so cancellation
@@ -1025,6 +1105,40 @@ impl Store {
         let digest: [u8; 32] = Sha256::digest(chunk.content).into();
         let mut tx = self.tenant_transaction(chunk.organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        let existing = sqlx::query_as::<_, (String, Vec<u8>)>(
+            "SELECT l.stream, l.digest
+             FROM attempt_log_chunks AS l
+             JOIN attempts AS a
+               ON a.organization_id = l.organization_id
+              AND a.id = l.attempt_id
+             CROSS JOIN controller_metadata AS m
+             WHERE l.organization_id = $1
+               AND l.attempt_id = $2
+               AND l.fence = $3
+               AND l.sequence = $4
+               AND a.restore_epoch = $5
+               AND a.lease_owner = $6
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             FOR UPDATE OF l",
+        )
+        .bind(chunk.organization_id)
+        .bind(chunk.attempt_id)
+        .bind(chunk.fence)
+        .bind(chunk.sequence)
+        .bind(chunk.restore_epoch)
+        .bind(chunk.agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((stream, existing_digest)) = existing {
+            let identical = stream == chunk.stream && existing_digest == digest;
+            if identical {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
+            return Ok(identical);
+        }
         let inserted = sqlx::query_scalar::<_, i64>(
             "INSERT INTO attempt_log_chunks (
                  organization_id, attempt_id, fence, sequence,
@@ -2632,6 +2746,38 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        let existing = sqlx::query_as::<_, (String, Option<Value>)>(
+            "SELECT a.status, a.terminal_summary
+             FROM attempts AS a
+             CROSS JOIN controller_metadata AS m
+             WHERE a.id = $1
+               AND a.organization_id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             FOR UPDATE OF a",
+        )
+        .bind(attempt_id)
+        .bind(organization_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((status, terminal_summary)) = existing
+            && matches!(status.as_str(), "succeeded" | "failed" | "aborted")
+        {
+            let identical =
+                status == outcome.as_str() && terminal_summary.as_ref() == Some(&summary);
+            if identical {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
+            return Ok(identical);
+        }
         let authority = sqlx::query_as::<_, (Uuid, Uuid)>(
             "SELECT n.id, n.build_id
              FROM attempts AS a

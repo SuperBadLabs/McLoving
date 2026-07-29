@@ -100,30 +100,9 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
     let client = Client::new(&format!("http://127.0.0.1:{api_port}"), TOKEN);
     wait_until_listening(&client, organization_id).await;
 
-    let mut agent = Command::new(env!("CARGO_BIN_EXE_mcloving-agent"))
-        .env("MCLOVING_AGENT_ID", "remote-test-agent")
-        .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
-        .env(
-            "MCLOVING_AGENT_ORGANIZATION_ID",
-            organization_id.to_string(),
-        )
-        .env(
-            "MCLOVING_CONTROLLER_URI",
-            format!("https://127.0.0.1:{agent_port}"),
-        )
-        .env("MCLOVING_CONTROLLER_DNS_NAME", "controller.internal")
-        .env("MCLOVING_CONTROLLER_CA_PATH", &tls.ca_certificate)
-        .env("MCLOVING_AGENT_CERTIFICATE_PATH", &tls.agent_certificate)
-        .env("MCLOVING_AGENT_PRIVATE_KEY_PATH", &tls.agent_key)
-        .env(
-            "MCLOVING_AGENT_JOURNAL_PATH",
-            directory.path().join("remote-agent.db"),
-        )
-        .env("MCLOVING_AGENT_WORKSPACE_ROOT", &workspace)
-        .env("MCLOVING_AGENT_LEASE_SECONDS", "5")
-        .env("MCLOVING_AGENT_POLL_MILLISECONDS", "10")
-        .env("MCLOVING_AGENT_RENEW_MILLISECONDS", "100")
-        .env("MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS", "100")
+    let journal = directory.path().join("remote-agent.db");
+    let mut agent = agent_command(organization_id, agent_port, &tls, &journal, &workspace)
+        .env("MCLOVING_TEST_CRASH_AFTER_TERMINAL_COMMIT", "1")
         .kill_on_drop(true)
         .spawn()
         .expect("start shipped remote agent");
@@ -137,6 +116,37 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         )
         .await
         .expect("submit work");
+    let first_exit = tokio::time::timeout(Duration::from_secs(15), agent.wait())
+        .await
+        .expect("fault-injected agent exits within bound")
+        .expect("wait for fault-injected agent");
+    assert_eq!(first_exit.code(), Some(86));
+    assert_eq!(
+        mcloving_agent::journal_health(&journal)
+            .expect("read crashed agent journal")
+            .2,
+        1,
+        "controller committed terminal truth before the agent journal advanced"
+    );
+
+    let mut agent = agent_command(organization_id, agent_port, &tls, &journal, &workspace)
+        .kill_on_drop(true)
+        .spawn()
+        .expect("restart shipped remote agent");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if mcloving_agent::journal_health(&journal)
+                .expect("read recovering agent journal")
+                .2
+                == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("finalizing journal converges after response-loss restart");
     let status = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let status = client
@@ -163,9 +173,54 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
     assert_eq!(logs[0].text, "remote-agent-ran\n");
     assert_eq!(logs[1].stream, "stderr");
     assert_eq!(logs[1].text, "remote-agent-stderr\n");
+    let terminal_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.terminal'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count terminal events");
+    assert_eq!(terminal_events, 1, "response-loss replay is idempotent");
 
     stop(&mut agent).await;
     stop(&mut controller).await;
+}
+
+fn agent_command(
+    organization_id: Uuid,
+    agent_port: u16,
+    tls: &MtlsFiles,
+    journal: &Path,
+    workspace: &Path,
+) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mcloving-agent"));
+    command
+        .env("MCLOVING_AGENT_ID", "remote-test-agent")
+        .env("MCLOVING_AGENT_TRUST_POOL", "trusted-linux")
+        .env(
+            "MCLOVING_AGENT_ORGANIZATION_ID",
+            organization_id.to_string(),
+        )
+        .env(
+            "MCLOVING_CONTROLLER_URI",
+            format!("https://127.0.0.1:{agent_port}"),
+        )
+        .env("MCLOVING_CONTROLLER_DNS_NAME", "controller.internal")
+        .env("MCLOVING_CONTROLLER_CA_PATH", &tls.ca_certificate)
+        .env("MCLOVING_AGENT_CERTIFICATE_PATH", &tls.agent_certificate)
+        .env("MCLOVING_AGENT_PRIVATE_KEY_PATH", &tls.agent_key)
+        .env("MCLOVING_AGENT_JOURNAL_PATH", journal)
+        .env("MCLOVING_AGENT_WORKSPACE_ROOT", workspace)
+        .env("MCLOVING_AGENT_LEASE_SECONDS", "5")
+        .env("MCLOVING_AGENT_POLL_MILLISECONDS", "10")
+        .env("MCLOVING_AGENT_RENEW_MILLISECONDS", "100")
+        .env("MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS", "100");
+    command
 }
 
 async fn wait_until_listening(client: &Client, organization_id: Uuid) {

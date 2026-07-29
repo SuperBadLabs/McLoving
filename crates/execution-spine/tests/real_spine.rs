@@ -322,7 +322,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
     drop(store);
     let store = restart();
     assert!(
-        !store
+        store
             .finalize_attempt(
                 organization_id,
                 claim.attempt_id,
@@ -333,7 +333,21 @@ async fn controller_restart_replay_is_logically_exactly_once() {
                 json!({"sha256": hex(&Sha256::digest(log))}),
             )
             .await
-            .expect("terminal replay is rejected without duplication")
+            .expect("exact terminal replay is accepted without duplication")
+    );
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "restart-agent",
+                TerminalOutcome::Failed,
+                json!({"reason": "conflicting replay"}),
+            )
+            .await
+            .expect("conflicting terminal replay is rejected")
     );
     let snapshot = store
         .build_snapshot(organization_id, project_id, admission.build_id)

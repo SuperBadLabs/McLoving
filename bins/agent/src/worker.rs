@@ -46,6 +46,13 @@ struct ProcessSpec {
     timeout_seconds: Option<u64>,
 }
 
+#[derive(Deserialize)]
+struct PersistedResult {
+    outcome: String,
+    exit_code: Option<i32>,
+    termination: String,
+}
+
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ProcessMode {
@@ -84,6 +91,84 @@ pub(super) async fn poll_and_run_one(
     };
     let assignment = validate_assignment(config, session_epoch, assignment)?;
     run_assignment(config, client, session_epoch, assignment, stop).await
+}
+
+pub(super) async fn recover_finalizations(
+    config: &AgentConfig,
+    client: &mut AgentControlClient<Channel>,
+    session_epoch: u64,
+) -> Result<(), AgentError> {
+    let report = Journal::open(&config.journal_path)?.reconcile()?;
+    for attempt in report.attempts {
+        if !matches!(
+            attempt.phase,
+            AttemptPhase::Finalizing | AttemptPhase::Cancelling
+        ) {
+            continue;
+        }
+        let authority = WorkAuthority {
+            agent_id: config.agent_id.clone(),
+            session_epoch,
+            organization_id: attempt.organization_id.clone(),
+            attempt_id: attempt.attempt_id.clone(),
+            fence_token: attempt.fence_token,
+        };
+        let mut sequence = 0;
+        for entry in &attempt.logs {
+            let stream = spool_stream(entry)?;
+            sequence = publish_spool(
+                client,
+                &authority,
+                session_epoch,
+                stream,
+                &config.workspace_root,
+                entry,
+                sequence,
+            )
+            .await?;
+        }
+        let result_entry = attempt.result.as_ref().ok_or_else(|| {
+            AgentError::InvalidAssignment(
+                "finalizing journal attempt has no durable result spool".to_owned(),
+            )
+        })?;
+        let result_content =
+            verified_spool_content(&config.workspace_root, result_entry, "result").await?;
+        let result: PersistedResult = serde_json::from_slice(&result_content)?;
+        let outcome = persisted_outcome(&result.outcome)?;
+        if (attempt.phase == AttemptPhase::Finalizing && outcome == WorkOutcome::Aborted)
+            || (attempt.phase == AttemptPhase::Cancelling && outcome != WorkOutcome::Aborted)
+        {
+            return Err(AgentError::InvalidAssignment(
+                "journal phase conflicts with durable result outcome".to_owned(),
+            ));
+        }
+        let summary = serde_json::to_vec(&json!({
+            "exit_code": result.exit_code,
+            "termination": result.termination,
+            "result_sha256": hex(&result_entry.digest),
+        }))?;
+        require_work_receipt(
+            client
+                .complete_work(WorkCompletion {
+                    authority: Some(authority),
+                    outcome: outcome as i32,
+                    summary_json: summary,
+                })
+                .await?
+                .into_inner(),
+            session_epoch,
+        )?;
+        Journal::open(&config.journal_path)?.transition(
+            &attempt.organization_id,
+            &attempt.attempt_id,
+            attempt.fence_token,
+            attempt.session_epoch,
+            terminal_phase(outcome)?,
+            attempt.process_id,
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_assignment(
@@ -329,17 +414,16 @@ async fn run_assignment(
         "termination": termination_name(outcome.termination),
         "result_sha256": hex(&result.digest),
     }))?;
-    require_work_receipt(
-        client
-            .complete_work(WorkCompletion {
-                authority: Some(assignment.authority),
-                outcome: terminal as i32,
-                summary_json: summary,
-            })
-            .await?
-            .into_inner(),
-        session_epoch,
-    )?;
+    let completion = client
+        .complete_work(WorkCompletion {
+            authority: Some(assignment.authority),
+            outcome: terminal as i32,
+            summary_json: summary,
+        })
+        .await?
+        .into_inner();
+    require_work_receipt(completion, session_epoch)?;
+    crash_after_terminal_commit_for_test();
     journal.transition(
         &organization,
         &attempt,
@@ -391,13 +475,7 @@ async fn publish_spool(
     entry: &SpoolEntry,
     first_sequence: u64,
 ) -> Result<u64, AgentError> {
-    let content = fs::read(workspace_root.join(&entry.relative_path)).await?;
-    let calculated: [u8; 32] = Sha256::digest(&content).into();
-    if calculated != entry.digest || u64::try_from(content.len()).ok() != Some(entry.bytes) {
-        return Err(AgentError::InvalidAssignment(
-            "durable log spool metadata does not match its content".to_owned(),
-        ));
-    }
+    let content = verified_spool_content(workspace_root, entry, "log").await?;
     let chunks = content.len().max(1).div_ceil(MAX_LOG_CHUNK_BYTES);
     for (offset, chunk) in content.chunks(MAX_LOG_CHUNK_BYTES).enumerate() {
         let sequence = first_sequence
@@ -439,6 +517,35 @@ async fn publish_spool(
             AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned())
         })?)
         .ok_or_else(|| AgentError::InvalidAssignment("log sequence exceeds wire bounds".to_owned()))
+}
+
+async fn verified_spool_content(
+    workspace_root: &Path,
+    entry: &SpoolEntry,
+    kind: &str,
+) -> Result<Vec<u8>, AgentError> {
+    let content = fs::read(workspace_root.join(&entry.relative_path)).await?;
+    let calculated: [u8; 32] = Sha256::digest(&content).into();
+    if calculated != entry.digest || u64::try_from(content.len()).ok() != Some(entry.bytes) {
+        return Err(AgentError::InvalidAssignment(format!(
+            "durable {kind} spool metadata does not match its content"
+        )));
+    }
+    Ok(content)
+}
+
+fn spool_stream(entry: &SpoolEntry) -> Result<&'static str, AgentError> {
+    match entry
+        .relative_path
+        .file_name()
+        .and_then(|name| name.to_str())
+    {
+        Some("stdout.log") => Ok("stdout"),
+        Some("stderr.log") => Ok("stderr"),
+        _ => Err(AgentError::InvalidAssignment(
+            "journal log spool has an unknown stream path".to_owned(),
+        )),
+    }
 }
 
 async fn write_result(
@@ -542,6 +649,27 @@ fn terminal_phase(outcome: WorkOutcome) -> Result<AttemptPhase, AgentError> {
         WorkOutcome::Unspecified => Err(AgentError::UnsupportedProtocol),
     }
 }
+
+fn persisted_outcome(outcome: &str) -> Result<WorkOutcome, AgentError> {
+    match outcome {
+        "succeeded" => Ok(WorkOutcome::Succeeded),
+        "failed" => Ok(WorkOutcome::Failed),
+        "aborted" => Ok(WorkOutcome::Aborted),
+        _ => Err(AgentError::InvalidAssignment(
+            "durable result has an unknown terminal outcome".to_owned(),
+        )),
+    }
+}
+
+#[cfg(debug_assertions)]
+fn crash_after_terminal_commit_for_test() {
+    if std::env::var_os("MCLOVING_TEST_CRASH_AFTER_TERMINAL_COMMIT").is_some() {
+        std::process::exit(86);
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn crash_after_terminal_commit_for_test() {}
 
 fn outcome_name(outcome: WorkOutcome) -> &'static str {
     match outcome {

@@ -28,6 +28,8 @@ use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+const RECOVERED_FINALIZATION_LEASE_SECONDS: i32 = 30;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let migration_database_url = std::env::var("MCLOVING_MIGRATION_DATABASE_URL")
@@ -202,6 +204,28 @@ impl AgentControl for ControllerAgentService {
                 return Err(Status::invalid_argument(
                     "reconciliation attempt metadata is invalid",
                 ));
+            }
+            if matches!(attempt.phase.as_str(), "finalizing" | "cancelling")
+                && self
+                    .store
+                    .recover_agent_finalization(
+                        organization_id,
+                        attempt_id,
+                        fence,
+                        restore_epoch,
+                        &request.agent_id,
+                        &attempt.phase,
+                        RECOVERED_FINALIZATION_LEASE_SECONDS,
+                    )
+                    .await
+                    .map_err(internal_store_error)?
+            {
+                retained.insert((
+                    attempt.organization_id,
+                    attempt.attempt_id,
+                    attempt.fence_token,
+                ));
+                continue;
             }
             match self
                 .store

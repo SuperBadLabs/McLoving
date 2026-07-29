@@ -256,6 +256,7 @@ fn instance_lock_path(journal_path: &Path) -> PathBuf {
 async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<(), AgentError> {
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
     send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
+    worker::recover_finalizations(config, &mut client, receipt.session_epoch).await?;
     let mut reconciliation_tick = interval(RECONCILIATION_INTERVAL);
     reconciliation_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     reconciliation_tick.tick().await;
