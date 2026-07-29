@@ -17,7 +17,7 @@ use std::mem::{size_of, size_of_val, zeroed};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::ExitStatusExt;
-use std::path::{Component, Path, Prefix};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::ExitStatus;
 use std::ptr::{null, null_mut};
 
@@ -604,7 +604,38 @@ fn standard_workload_environment() -> Result<BTreeMap<String, (OsString, OsStrin
             entries.insert(normalized, (key, value));
         }
     }
+    normalize_standard_shell_path(&mut entries)?;
     Ok(entries)
+}
+
+fn normalize_standard_shell_path(
+    entries: &mut BTreeMap<String, (OsString, OsString)>,
+) -> Result<(), JobError> {
+    let system_root = entries
+        .get("SYSTEMROOT")
+        .map(|(_, value)| PathBuf::from(value))
+        .ok_or_else(|| JobError::invalid("system environment has no SystemRoot"))?;
+    let mut directories = vec![
+        system_root.join("System32"),
+        system_root.clone(),
+        system_root.join("System32/Wbem"),
+        system_root.join("System32/WindowsPowerShell/v1.0"),
+    ];
+    if let Some((_, path)) = entries.get("PATH") {
+        for directory in std::env::split_paths(path).filter(|path| path.is_absolute()) {
+            if !directories.iter().any(|existing| {
+                existing
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&directory.to_string_lossy())
+            }) {
+                directories.push(directory);
+            }
+        }
+    }
+    let path = std::env::join_paths(directories)
+        .map_err(|_| JobError::invalid("standard PATH could not be joined"))?;
+    entries.insert("PATH".to_owned(), (OsString::from("PATH"), path));
+    Ok(())
 }
 
 struct EnvironmentBlock(*mut core::ffi::c_void);
@@ -788,6 +819,10 @@ mod tests {
         assert!(text.contains("=D:=D:\\agent\\work"));
         assert!(text.contains("TEMP=D:\\agent\\work"));
         assert!(text.contains("TMP=D:\\agent\\work"));
+        assert!(
+            text.to_uppercase()
+                .contains(r"\SYSTEM32\WINDOWSPOWERSHELL\V1.0")
+        );
     }
 
     #[test]

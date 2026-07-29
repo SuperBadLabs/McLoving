@@ -138,8 +138,11 @@ authority.
   shells from a fixed allowlist. Missing standard values are seeded from the
   service token and then the same allowlist from the actual agent process takes
   precedence, preserving the environment SCM or the operator deliberately gave
-  that service. `TEMP`/`TMP` are redirected into the attempt workspace, and the
-  exact per-drive current-directory entry required by a custom Unicode
+  that service. The standard PATH is normalized to absolute entries and
+  prepended with canonical `System32`, `Wbem`, and Windows PowerShell
+  directories so LocalSystem does not depend on an interactive profile.
+  `TEMP`/`TMP` are redirected into the attempt workspace, and the exact
+  per-drive current-directory entry required by a custom Unicode
   `CreateProcessW` environment is synthesized. Explicit overrides are accepted
   except for reserved `TEMP`/`TMP`, which remain attempt-scoped; controller
   URLs, journal paths, credentials, CI controls, and arbitrary process-local
