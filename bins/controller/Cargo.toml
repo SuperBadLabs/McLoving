@@ -11,6 +11,7 @@ axum = "=0.8.6"
 mcloving-controller-api = { version = "0.0.0", path = "../../crates/controller-api" }
 mcloving-controller-store = { version = "0.0.0", path = "../../crates/controller-store" }
 mcloving-execution-spine = { version = "0.0.0", path = "../../crates/execution-spine" }
+mcloving-agent-protocol = { version = "0.0.0", path = "../../crates/agent-protocol" }
 sqlx = { version = "=0.8.6", default-features = false, features = [
   "runtime-tokio",
   "postgres",
@@ -23,6 +24,7 @@ tokio = { version = "=1.47.1", features = [
   "rt-multi-thread",
   "time",
 ] }
+tonic = { version = "=0.14.6", features = ["tls-ring", "transport"] }
 uuid = { version = "=1.18.1" }
 
 [dev-dependencies]

@@ -1,12 +1,22 @@
+use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
+use mcloving_agent_protocol::wire::{
+    OpenSessionRequest, OpenSessionResponse, ReconciliationDirective, ReconciliationReport,
+    RotateCertificateRequest, RotateCertificateResponse,
+};
+use mcloving_agent_protocol::{ProtocolRange, negotiate};
 use mcloving_controller_api::{ApiState, router};
-use mcloving_controller_store::{ClaimRequest, Store};
+use mcloving_controller_store::{AgentReconciliationDisposition, ClaimRequest, Store};
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
 #[tokio::main]
@@ -56,13 +66,179 @@ async fn main() -> Result<()> {
             .await
             .context("serve public API")
     };
+    let agent_server = run_agent_control_server(ControllerAgentService {
+        store: store.clone(),
+    });
     tokio::pin!(server);
+    tokio::pin!(agent_server);
     let worker_loop = run_embedded_worker(store, worker);
     tokio::pin!(worker_loop);
     tokio::select! {
         result = &mut server => result,
+        result = &mut agent_server => result,
         result = &mut worker_loop => result,
     }
+}
+
+#[derive(Clone)]
+struct ControllerAgentService {
+    store: Store,
+}
+
+#[tonic::async_trait]
+impl AgentControl for ControllerAgentService {
+    async fn open_session(
+        &self,
+        request: Request<OpenSessionRequest>,
+    ) -> Result<Response<OpenSessionResponse>, Status> {
+        let request = request.into_inner();
+        if request.agent_id.trim().is_empty() || request.trust_pool.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "agent_id and trust_pool are required",
+            ));
+        }
+        let offer = request
+            .protocol
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("protocol offer is required"))?;
+        let remote = ProtocolRange::try_from(offer)
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
+        let local = ProtocolRange::current([
+            "journal-v1".to_owned(),
+            "linux-process-group-v1".to_owned(),
+            "windows-job-object-v1".to_owned(),
+        ]);
+        let negotiated = negotiate(&local, &remote)
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
+        if !self
+            .store
+            .open_agent_session(
+                &request.agent_id,
+                &request.trust_pool,
+                request.session_epoch,
+                negotiated.minor,
+                &negotiated.features.iter().cloned().collect::<Vec<_>>(),
+                &request.capabilities,
+            )
+            .await
+            .map_err(internal_store_error)?
+        {
+            return Err(Status::failed_precondition("stale agent session epoch"));
+        }
+        Ok(Response::new(OpenSessionResponse {
+            session_epoch: request.session_epoch,
+            protocol_minor: u32::from(negotiated.minor),
+            features: negotiated.features.into_iter().collect(),
+            certificate_not_after_unix_ms: 0,
+        }))
+    }
+
+    async fn rotate_certificate(
+        &self,
+        _request: Request<RotateCertificateRequest>,
+    ) -> Result<Response<RotateCertificateResponse>, Status> {
+        Err(Status::unimplemented(
+            "certificate issuance is owned by the enrollment service",
+        ))
+    }
+
+    async fn reconcile(
+        &self,
+        request: Request<ReconciliationReport>,
+    ) -> Result<Response<ReconciliationDirective>, Status> {
+        let request = request.into_inner();
+        if !self
+            .store
+            .authorize_agent_session(&request.agent_id, request.session_epoch)
+            .await
+            .map_err(internal_store_error)?
+        {
+            return Err(Status::failed_precondition("stale agent session epoch"));
+        }
+        let mut retained = BTreeSet::new();
+        let mut cancelled = BTreeSet::new();
+        for attempt in request.attempts {
+            let organization_id = attempt
+                .organization_id
+                .parse()
+                .map_err(|_| Status::invalid_argument("organization_id must be a UUID"))?;
+            let attempt_id = attempt
+                .attempt_id
+                .parse()
+                .map_err(|_| Status::invalid_argument("attempt_id must be a UUID"))?;
+            let fence = i64::try_from(attempt.fence_token)
+                .map_err(|_| Status::invalid_argument("fence_token is out of range"))?;
+            if attempt.attempt_id.trim().is_empty()
+                || attempt.organization_id.trim().is_empty()
+                || attempt.payload_digest.len() != 32
+                || attempt.workspace.trim().is_empty()
+                || attempt
+                    .logs
+                    .iter()
+                    .any(|entry| entry.relative_path.trim().is_empty() || entry.digest.len() != 32)
+                || attempt.result.as_ref().is_some_and(|entry| {
+                    entry.relative_path.trim().is_empty() || entry.digest.len() != 32
+                })
+            {
+                return Err(Status::invalid_argument(
+                    "reconciliation attempt metadata is invalid",
+                ));
+            }
+            match self
+                .store
+                .agent_reconciliation_disposition(
+                    organization_id,
+                    attempt_id,
+                    fence,
+                    &request.agent_id,
+                )
+                .await
+                .map_err(internal_store_error)?
+            {
+                AgentReconciliationDisposition::Retain => {
+                    retained.insert(attempt.attempt_id);
+                }
+                AgentReconciliationDisposition::Cancel => {
+                    cancelled.insert(attempt.attempt_id);
+                }
+            }
+        }
+        Ok(Response::new(ReconciliationDirective {
+            session_epoch: request.session_epoch,
+            retain_attempt_ids: retained.into_iter().collect(),
+            cancel_attempt_ids: cancelled.into_iter().collect(),
+        }))
+    }
+}
+
+fn internal_store_error(error: mcloving_controller_store::StoreError) -> Status {
+    Status::internal(format!("controller store failed: {error}"))
+}
+
+async fn run_agent_control_server(service: ControllerAgentService) -> Result<()> {
+    let Some(listen) = std::env::var("MCLOVING_AGENT_LISTEN").ok() else {
+        std::future::pending::<()>().await;
+        unreachable!("pending agent server future returned")
+    };
+    let address: SocketAddr = listen
+        .parse()
+        .with_context(|| format!("MCLOVING_AGENT_LISTEN is invalid: {listen}"))?;
+    let certificate = std::fs::read(required("MCLOVING_AGENT_SERVER_CERT_PATH")?)
+        .context("read agent-control server certificate")?;
+    let private_key = std::fs::read(required("MCLOVING_AGENT_SERVER_KEY_PATH")?)
+        .context("read agent-control server private key")?;
+    let client_ca = std::fs::read(required("MCLOVING_AGENT_CLIENT_CA_PATH")?)
+        .context("read agent-control client CA")?;
+    let tls = ServerTlsConfig::new()
+        .identity(Identity::from_pem(certificate, private_key))
+        .client_ca_root(Certificate::from_pem(client_ca));
+    Server::builder()
+        .tls_config(tls)
+        .context("configure agent-control mTLS")?
+        .add_service(AgentControlServer::new(service))
+        .serve(address)
+        .await
+        .with_context(|| format!("serve agent control on {address}"))
 }
 
 struct EmbeddedWorker {

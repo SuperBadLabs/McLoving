@@ -49,8 +49,9 @@ Remove-TestService $crashService
 Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $root, $workspace | Out-Null
 
-# The service account owns its inherited workspace ACL. No attempt code may
-# widen this boundary or traverse a reparse point.
+# The LocalSystem service and the CI operator are the only principals granted
+# access after inherited permissions are removed. No attempt code may widen
+# this boundary or traverse a reparse point.
 & icacls.exe $root /inheritance:r /grant:r `
   "SYSTEM:(OI)(CI)F" "$env:USERNAME`:(OI)(CI)F" | Out-Null
 
@@ -115,4 +116,3 @@ finally {
   Remove-TestService $lifecycleService
   Remove-TestService $crashService
 }
-

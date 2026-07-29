@@ -60,6 +60,47 @@ async fn unprivileged_store(admin: &Store) -> Store {
 }
 
 #[tokio::test]
+async fn agent_session_epoch_is_durable_and_monotonic() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let store = unprivileged_store(&admin).await;
+    let agent_id = format!("windows-{}", Uuid::new_v4());
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                5,
+                0,
+                &["journal-v1".to_owned()],
+                &["windows".to_owned()],
+            )
+            .await
+            .expect("open first durable session")
+    );
+    assert!(
+        !store
+            .open_agent_session(&agent_id, "trusted", 5, 0, &[], &[])
+            .await
+            .expect("reject repeated session epoch")
+    );
+    assert!(
+        store
+            .authorize_agent_session(&agent_id, 5)
+            .await
+            .expect("authorize exact epoch")
+    );
+    assert!(
+        !store
+            .authorize_agent_session(&agent_id, 4)
+            .await
+            .expect("reject stale epoch")
+    );
+}
+
+#[tokio::test]
 async fn admission_is_atomic_and_idempotent() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

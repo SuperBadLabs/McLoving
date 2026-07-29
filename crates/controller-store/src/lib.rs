@@ -24,6 +24,14 @@ pub const DURABLE_RETRY_V4: &str = include_str!("../migrations/0004_durable_retr
 pub const OBJECT_REFERENCES_V5: &str = include_str!("../migrations/0005_object_references.sql");
 /// Backup checkpoints, restore fencing, retention, and legal-hold migration.
 pub const RECOVERY_OPERATIONS_V6: &str = include_str!("../migrations/0006_recovery_operations.sql");
+/// Durable, active-active-safe agent session authority.
+pub const AGENT_SESSIONS_V7: &str = include_str!("../migrations/0007_agent_sessions.sql");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentReconciliationDisposition {
+    Retain,
+    Cancel,
+}
 
 /// A build and its first executable node, admitted as one durable unit.
 #[derive(Clone, Debug)]
@@ -273,6 +281,8 @@ pub enum StoreError {
     InvalidObjectRecord(String),
     #[error("invalid recovery operation: {0}")]
     InvalidRecoveryOperation(String),
+    #[error("invalid agent session authority")]
+    InvalidAgentSession,
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -311,8 +321,107 @@ impl Store {
         apply_migration(&mut tx, 4, DURABLE_RETRY_V4).await?;
         apply_migration(&mut tx, 5, OBJECT_REFERENCES_V5).await?;
         apply_migration(&mut tx, 6, RECOVERY_OPERATIONS_V6).await?;
+        apply_migration(&mut tx, 7, AGENT_SESSIONS_V7).await?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// Atomically advances one agent session epoch across controller replicas.
+    pub async fn open_agent_session(
+        &self,
+        agent_id: &str,
+        trust_pool: &str,
+        session_epoch: u64,
+        protocol_minor: u16,
+        features: &[String],
+        capabilities: &[String],
+    ) -> Result<bool, StoreError> {
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        let row = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO agent_sessions(
+                 agent_id, trust_pool, session_epoch, protocol_minor,
+                 features, capabilities
+             )
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (agent_id) DO UPDATE
+             SET trust_pool = EXCLUDED.trust_pool,
+                 session_epoch = EXCLUDED.session_epoch,
+                 protocol_minor = EXCLUDED.protocol_minor,
+                 features = EXCLUDED.features,
+                 capabilities = EXCLUDED.capabilities,
+                 updated_at = clock_timestamp()
+             WHERE agent_sessions.session_epoch < EXCLUDED.session_epoch
+             RETURNING session_epoch",
+        )
+        .bind(agent_id)
+        .bind(trust_pool)
+        .bind(session_epoch)
+        .bind(i32::from(protocol_minor))
+        .bind(features)
+        .bind(capabilities)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
+    }
+
+    pub async fn authorize_agent_session(
+        &self,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        Ok(sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM agent_sessions
+                 WHERE agent_id = $1 AND session_epoch = $2
+             )",
+        )
+        .bind(agent_id)
+        .bind(session_epoch)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Resolves a recovered attempt against current durable controller truth.
+    pub async fn agent_reconciliation_disposition(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        agent_id: &str,
+    ) -> Result<AgentReconciliationDisposition, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query_as::<_, (bool, bool)>(
+            "SELECT
+                 a.fence = $3
+                 AND a.lease_owner = $4
+                 AND a.restore_epoch = (
+                     SELECT restore_epoch FROM controller_metadata WHERE singleton
+                 )
+                 AND a.status IN (
+                     'offered', 'accepted', 'running', 'finalizing', 'cancelling'
+                 ) AS current_authority,
+                 b.cancellation_requested_at IS NOT NULL OR a.status = 'cancelling'
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE a.organization_id = $1 AND a.id = $2",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(match row {
+            Some((true, false)) => AgentReconciliationDisposition::Retain,
+            _ => AgentReconciliationDisposition::Cancel,
+        })
     }
 
     /// Creates an organization/project pair for bootstrap and tests.

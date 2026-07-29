@@ -5,18 +5,19 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use mcloving_agent_protocol::wire;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
     AttemptState, OpenSessionRequest, ProtocolOffer, ReconciliationReport as WireReport,
 };
 use mcloving_agent_protocol::{OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError};
 #[cfg(windows)]
+use mcloving_agent_runtime::Acceptance;
+#[cfg(windows)]
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, execute_with_spawn_hook,
 };
-#[cfg(windows)]
-use mcloving_agent_runtime::{Acceptance, AttemptPhase};
-use mcloving_agent_runtime::{Journal, JournalError, ReconciliationReport};
+use mcloving_agent_runtime::{AttemptPhase, Journal, JournalError, ReconciliationReport};
 #[cfg(windows)]
 use std::ffi::OsString;
 use thiserror::Error;
@@ -59,6 +60,10 @@ pub enum AgentError {
     StaleSession,
     #[error("controller selected an unsupported protocol minor")]
     UnsupportedProtocol,
+    #[error("agent service was stopped")]
+    Stopped,
+    #[error("journal path cannot be represented in the wire protocol")]
+    NonUtf8Path,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -162,7 +167,7 @@ async fn open_session(
     let active_attempts = journal.reconcile()?.attempts.len();
     let endpoint = outbound_config(config).await?.endpoint()?;
     let channel = tokio::select! {
-        () = stop.cancelled() => return Err(AgentError::StaleSession),
+        () = stop.cancelled() => return Err(AgentError::Stopped),
         result = endpoint.connect() => result?,
     };
     let mut client = AgentControlClient::new(channel);
@@ -206,11 +211,42 @@ async fn send_reconciliation(
 ) -> Result<(), AgentError> {
     let report = Journal::open(&config.journal_path)?.reconcile()?;
     let directive = client
-        .reconcile(wire_report(config, session_epoch, &report))
+        .reconcile(wire_report(config, session_epoch, &report)?)
         .await?
         .into_inner();
     if directive.session_epoch != session_epoch {
         return Err(AgentError::StaleSession);
+    }
+    let cancelled = directive
+        .cancel_attempt_ids
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if !cancelled.is_empty() {
+        let mut journal = Journal::open(&config.journal_path)?;
+        for attempt in &report.attempts {
+            if cancelled.contains(&attempt.attempt_id) {
+                // Reconciliation runs before this service accepts new work.
+                // Any recovered Windows Job died when its previous service
+                // process closed the kill-on-close handle, so terminalizing
+                // the durable record cannot race a live child.
+                journal.transition(
+                    &attempt.organization_id,
+                    &attempt.attempt_id,
+                    attempt.fence_token,
+                    attempt.session_epoch,
+                    AttemptPhase::Cancelling,
+                    attempt.process_id,
+                )?;
+                journal.transition(
+                    &attempt.organization_id,
+                    &attempt.attempt_id,
+                    attempt.fence_token,
+                    attempt.session_epoch,
+                    AttemptPhase::Aborted,
+                    attempt.process_id,
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -219,22 +255,47 @@ fn wire_report(
     config: &AgentConfig,
     session_epoch: u64,
     report: &ReconciliationReport,
-) -> WireReport {
-    WireReport {
+) -> Result<WireReport, AgentError> {
+    Ok(WireReport {
         agent_id: config.agent_id.clone(),
         session_epoch,
         attempts: report
             .attempts
             .iter()
-            .map(|attempt| AttemptState {
-                organization_id: attempt.organization_id.clone(),
-                attempt_id: attempt.attempt_id.clone(),
-                fence_token: attempt.fence_token,
-                phase: attempt.phase.wire_name().to_owned(),
-                payload_digest: attempt.payload_digest.to_vec(),
+            .map(|attempt| {
+                Ok(AttemptState {
+                    organization_id: attempt.organization_id.clone(),
+                    attempt_id: attempt.attempt_id.clone(),
+                    fence_token: attempt.fence_token,
+                    phase: attempt.phase.wire_name().to_owned(),
+                    payload_digest: attempt.payload_digest.to_vec(),
+                    process_id: attempt.process_id,
+                    workspace: wire_path(&attempt.workspace)?,
+                    logs: attempt
+                        .logs
+                        .iter()
+                        .map(wire_spool)
+                        .collect::<Result<_, AgentError>>()?,
+                    result: attempt.result.as_ref().map(wire_spool).transpose()?,
+                })
             })
-            .collect(),
-    }
+            .collect::<Result<_, AgentError>>()?,
+    })
+}
+
+fn wire_spool(entry: &mcloving_agent_runtime::SpoolEntry) -> Result<wire::SpoolEntry, AgentError> {
+    Ok(wire::SpoolEntry {
+        relative_path: wire_path(&entry.relative_path)?,
+        digest: entry.digest.to_vec(),
+        bytes: entry.bytes,
+        sequence: entry.sequence,
+    })
+}
+
+fn wire_path(path: &Path) -> Result<String, AgentError> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or(AgentError::NonUtf8Path)
 }
 
 async fn outbound_config(config: &AgentConfig) -> Result<OutboundMtlsConfig, AgentError> {
@@ -383,5 +444,41 @@ mod tests {
         assert_eq!(health.0, "wal");
         assert_eq!(health.1, "ok");
         assert_eq!(health.2, 0);
+    }
+
+    #[test]
+    fn reconciliation_wire_preserves_process_and_spool_metadata() {
+        let config = AgentConfig::from_values(&values()).unwrap();
+        let report = ReconciliationReport {
+            attempts: vec![mcloving_agent_runtime::ReconciliationAttempt {
+                organization_id: "org".to_owned(),
+                attempt_id: "attempt".to_owned(),
+                fence_token: 3,
+                session_epoch: 4,
+                payload_digest: [5; 32],
+                phase: AttemptPhase::Running,
+                workspace: PathBuf::from("org/attempt"),
+                process_id: Some(42),
+                logs: vec![mcloving_agent_runtime::SpoolEntry {
+                    sequence: 7,
+                    relative_path: PathBuf::from("spool/stdout.log"),
+                    digest: [8; 32],
+                    bytes: 9,
+                }],
+                result: Some(mcloving_agent_runtime::SpoolEntry {
+                    sequence: 0,
+                    relative_path: PathBuf::from("spool/result.pb"),
+                    digest: [10; 32],
+                    bytes: 11,
+                }),
+            }],
+        };
+        let wire = wire_report(&config, 4, &report).unwrap();
+        let attempt = &wire.attempts[0];
+        assert_eq!(attempt.process_id, Some(42));
+        assert_eq!(attempt.workspace, "org/attempt");
+        assert_eq!(attempt.logs[0].sequence, 7);
+        assert_eq!(attempt.logs[0].digest, vec![8; 32]);
+        assert_eq!(attempt.result.as_ref().unwrap().bytes, 11);
     }
 }

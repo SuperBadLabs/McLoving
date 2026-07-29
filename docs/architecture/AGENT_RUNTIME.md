@@ -17,6 +17,13 @@ Status: implemented Wave 1-B baseline
 The generated controller service is a contract surface. The agent crate does
 not expose a listener.
 
+The controller serves that contract when `MCLOVING_AGENT_LISTEN` is set. It
+requires `MCLOVING_AGENT_SERVER_CERT_PATH`,
+`MCLOVING_AGENT_SERVER_KEY_PATH`, and `MCLOVING_AGENT_CLIENT_CA_PATH`; the
+listener refuses plaintext and requires a client certificate rooted in the
+configured agent CA. Session epochs are advanced atomically in PostgreSQL so a
+second controller replica cannot admit stale authority.
+
 ## Acceptance and reconciliation
 
 The local SQLite journal uses WAL, `synchronous=FULL`, foreign keys, strict
@@ -30,6 +37,12 @@ credentials are not stored in the journal.
 On restart, reconciliation reports every non-terminal attempt plus its
 platform process identity and checksummed log/result spool metadata. Terminal
 attempts remain durable history but are excluded from active reconciliation.
+The controller compares each report with current PostgreSQL lease, fence,
+restore epoch, owner, and cancellation state. Rejected attempts are returned
+as cancellation directives. Because this service reconciles before accepting
+new work, recovered Windows Jobs have already been killed by the previous
+service process's kill-on-close handle; the agent durably terminalizes those
+cancelled records.
 
 ## Portable execution boundary
 

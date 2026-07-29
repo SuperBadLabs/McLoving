@@ -1242,12 +1242,14 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "mcloving-agent-protocol",
  "mcloving-controller-api",
  "mcloving-controller-store",
  "mcloving-execution-spine",
  "sqlx",
  "tempfile",
  "tokio",
+ "tonic",
  "uuid",
 ]
 

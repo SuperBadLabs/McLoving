@@ -78,7 +78,7 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 |---|---|---|---|---|---|
 | TM-001 | Cross-tenant object ID is substituted in an API call | Tenant IDs in keys, centralized authz, PostgreSQL RLS | Generated authz matrix and negative integration tests | SEC | Privileged DB operator |
 | TM-002 | Fork pipeline requests protected credentials | Immutable trust class, grant policy, restricted pool | Fork/fork-to-trusted transition tests | SEC/AGENT | Malicious trusted maintainer |
-| TM-003 | Stale lease publishes a result after fencing | Epoch and lease token checked transactionally | TLC model, DB race tests, agent-session epoch unit tests, reconnect E2E | ARCH/CTRL | DB compromise |
+| TM-003 | Stale lease publishes a result after fencing | Epoch and lease token checked transactionally; agent session epochs advanced in PostgreSQL across replicas | TLC model, DB race tests, durable agent-session epoch tests, reconnect E2E | ARCH/CTRL | DB compromise |
 | TM-004 | Lost connection triggers duplicate deployment | Reconciliation and effect idempotency class | Partition and ambiguous-effect war test | CTRL/EXT | External API lacking reconciliation |
 | TM-005 | Controller restart loses accepted work | PostgreSQL transaction plus outbox | Kill-after-each-transition fault injection | CTRL | Correlated DB failure |
 | TM-006 | Agent restart loses process identity or result | Local SQLite WAL, FULL synchronous commits, durable session epochs, and durable spool metadata | Linux reopen/integrity and Windows service-process SIGKILL/reconciliation now; persistent-host machine reboot next | AGENT | Host disk corruption |

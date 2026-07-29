@@ -40,19 +40,19 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         "journal-check" => {
-            let path = required_path(&arguments, 1)?;
+            let path = required_path(&arguments, 1, "JOURNAL")?;
             let (mode, integrity, active) = journal_health(&path)?;
             println!("journal_mode={mode} integrity={integrity} active_attempts={active}");
         }
         "service" => run_windows_service(ServiceMode::Production)?,
         "service-smoke" => {
-            run_windows_service(ServiceMode::Smoke(required_path(&arguments, 1)?))?;
+            run_windows_service(ServiceMode::Smoke(required_path(&arguments, 1, "JOURNAL")?))?;
         }
         "service-execution-smoke" => {
             run_windows_service(ServiceMode::ExecutionSmoke {
-                journal: required_path(&arguments, 1)?,
-                workspace_root: required_path(&arguments, 2)?,
-                script: required_path(&arguments, 3)?,
+                journal: required_path(&arguments, 1, "JOURNAL")?,
+                workspace_root: required_path(&arguments, 2, "WORKSPACE_ROOT")?,
+                script: required_path(&arguments, 3, "SCRIPT")?,
             })?;
         }
         _ => {
@@ -74,12 +74,13 @@ fn runtime() -> Result<tokio::runtime::Runtime, std::io::Error> {
 fn required_path(
     arguments: &[String],
     index: usize,
+    label: &'static str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     arguments
         .get(index)
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
-        .ok_or_else(|| "journal path is required".into())
+        .ok_or_else(|| format!("{label} path is required").into())
 }
 
 enum ServiceMode {

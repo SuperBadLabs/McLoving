@@ -179,8 +179,15 @@ fn sync_directory(path: &Path) -> Result<(), io::Error> {
     }
     #[cfg(windows)]
     {
-        let _ = path;
-        Ok(())
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?
+            .sync_all()
     }
 }
 

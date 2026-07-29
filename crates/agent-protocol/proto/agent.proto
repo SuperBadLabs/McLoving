@@ -49,6 +49,17 @@ message AttemptState {
   uint64 fence_token = 3;
   string phase = 4;
   bytes payload_digest = 5;
+  optional uint32 process_id = 6;
+  string workspace = 7;
+  repeated SpoolEntry logs = 8;
+  optional SpoolEntry result = 9;
+}
+
+message SpoolEntry {
+  string relative_path = 1;
+  bytes digest = 2;
+  uint64 bytes = 3;
+  uint64 sequence = 4;
 }
 
 message ReconciliationReport {
