@@ -721,7 +721,8 @@ impl Store {
     ///
     /// A reconnect may arrive after its lease deadline, so cancellation
     /// completion is authorized by the current restore epoch, exact fence, and
-    /// exact lease owner rather than by an unexpired lease. Response-loss
+    /// exact lease owner and current session trust pool rather than by an
+    /// unexpired lease. Response-loss
     /// replay of an already-applied outcome succeeds without emitting a second
     /// event. Unverifiable process termination and uncertain external effects
     /// fail closed into explicit reconciliation instead of being mislabeled
@@ -755,6 +756,10 @@ impl Store {
              JOIN builds AS b
                ON b.id = n.build_id
               AND b.organization_id = n.organization_id
+             JOIN agent_sessions AS s
+               ON s.agent_id = a.lease_owner
+              AND s.session_epoch = $6
+              AND s.trust_pool = n.required_trust_pool
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
@@ -776,6 +781,7 @@ impl Store {
         .bind(fence)
         .bind(restore_epoch)
         .bind(agent_id)
+        .bind(i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?)
         .fetch_optional(&mut *tx)
         .await?;
         let Some((node_id, build_id, status, terminal_summary, owner_cancelled)) = authority else {

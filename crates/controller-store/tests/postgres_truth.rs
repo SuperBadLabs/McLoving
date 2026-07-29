@@ -501,7 +501,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
         store
             .open_agent_session(
                 "windows-1",
-                "trusted-windows",
+                "trusted",
                 1,
                 0,
                 &["journal-v1".to_owned(), "windows-job-object-v1".to_owned()],
@@ -886,6 +886,88 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     .await
     .expect("count recycled PID cancellation events");
     assert_eq!(recycled_events, 1);
+
+    let re_enrolled = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "agent-cancellation-re-enrolled-trust-pool".into(),
+            pipeline_digest: [0xAF; 32],
+            node_key: "stage-re-enrolled".into(),
+            required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit trust-pool cancellation build");
+    let re_enrolled_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "windows-1".into(),
+            capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 4,
+        })
+        .await
+        .expect("claim trust-pool cancellation")
+        .expect("trust-pool cancellation claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                re_enrolled_claim.attempt_id,
+                re_enrolled_claim.fence,
+                re_enrolled_claim.restore_epoch,
+                "windows-1",
+            )
+            .await
+            .expect("accept trust-pool cancellation offer")
+    );
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, re_enrolled.build_id)
+            .await
+            .expect("request trust-pool cancellation")
+    );
+    assert!(
+        store
+            .open_agent_session(
+                "windows-1",
+                "untrusted",
+                2,
+                0,
+                &["journal-v1".to_owned(), "windows-job-object-v1".to_owned()],
+                &["windows".to_owned()],
+            )
+            .await
+            .expect("re-enroll agent in lower trust pool")
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                organization_id,
+                attempt_id: re_enrolled_claim.attempt_id,
+                fence: re_enrolled_claim.fence,
+                restore_epoch: re_enrolled_claim.restore_epoch,
+                agent_id: "windows-1",
+                session_epoch: 2,
+                outcome: AgentCancellationOutcome::Terminated,
+            })
+            .await
+            .expect("reject lower-trust cancellation completion"),
+        AgentCancellationDisposition::RetireStale
+    );
+    let re_enrolled_snapshot = store
+        .build_snapshot(organization_id, project_id, re_enrolled.build_id)
+        .await
+        .expect("read trust-pool cancellation")
+        .expect("trust-pool build exists");
+    assert_eq!(re_enrolled_snapshot.build_status, "running");
+    assert_eq!(re_enrolled_snapshot.attempt_status, "cancelling");
+    assert_eq!(re_enrolled_snapshot.terminal_summary, None);
 }
 
 #[tokio::test]
@@ -909,7 +991,7 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
         store
             .open_agent_session(
                 "windows-reconciliation-1",
-                "trusted-windows",
+                "trusted",
                 1,
                 0,
                 &["journal-v1".to_owned(), "windows-job-object-v1".to_owned()],
