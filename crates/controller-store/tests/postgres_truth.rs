@@ -1255,6 +1255,47 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
             .expect("dead-letter exhausted reconciliation"),
         RetryDecision::DeadLettered
     );
+    assert_eq!(
+        store
+            .schedule_retry(
+                organization_id,
+                exhausted.attempt_id,
+                3,
+                "larger later budget cannot overturn the dead letter",
+            )
+            .await
+            .expect("dead-letter replay remains terminal"),
+        RetryDecision::DeadLettered
+    );
+    let exhausted_snapshot = store
+        .build_snapshot(organization_id, project_id, exhausted.build_id)
+        .await
+        .expect("load dead-lettered reconciliation")
+        .expect("dead-lettered build exists");
+    assert_eq!(exhausted_snapshot.attempt_status, "failed");
+    assert_eq!(exhausted_snapshot.build_status, "failed");
+    let exhausted_node_status = sqlx::query_scalar::<_, String>(
+        "SELECT status
+         FROM nodes
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(exhausted.node_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read dead-lettered node");
+    assert_eq!(exhausted_node_status, "failed");
+    let exhausted_children = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM attempts
+         WHERE organization_id = $1 AND retry_of = $2",
+    )
+    .bind(organization_id)
+    .bind(exhausted.attempt_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count exhausted retry children");
+    assert_eq!(exhausted_children, 0);
     assert!(
         !store
             .finalize_reconciled_attempt(
@@ -2482,6 +2523,33 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .await
             .expect("complete physical deletion claim")
     );
+    let first_completion = sqlx::query_scalar::<_, String>(
+        "SELECT completed_at::text
+         FROM object_deletion_claims
+         WHERE object_digest = $1 AND claim_token = $2",
+    )
+    .bind(completed_claim.digest.as_slice())
+    .bind(completed_claim.token)
+    .fetch_one(store.pool())
+    .await
+    .expect("read first completion timestamp");
+    assert!(
+        store
+            .complete_object_deletion(completed_claim)
+            .await
+            .expect("response-loss completion replay succeeds")
+    );
+    let replay_completion = sqlx::query_scalar::<_, String>(
+        "SELECT completed_at::text
+         FROM object_deletion_claims
+         WHERE object_digest = $1 AND claim_token = $2",
+    )
+    .bind(completed_claim.digest.as_slice())
+    .bind(completed_claim.token)
+    .fetch_one(store.pool())
+    .await
+    .expect("read replay completion timestamp");
+    assert_eq!(replay_completion, first_completion);
     assert!(
         !store
             .pending_object_deletion_claims(10)

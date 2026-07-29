@@ -105,6 +105,9 @@ physical storage. A merely claimed token can be abandoned; a deleting token
 cannot be revoked because its physical outcome may be ambiguous and must
 instead be recovered and completed. Completion leaves a permanent tombstone,
 so stale metadata cannot recreate a reference to physically deleted content.
+Replaying completion with the same digest and token succeeds without changing
+the first completion timestamp, so a lost response is distinguishable from an
+invalid token.
 The global claim table and its trigger guard are inaccessible to the tenant
 role; tenant writes are fenced by the trigger without exposing a callable
 cross-tenant state oracle.

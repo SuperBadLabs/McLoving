@@ -21,7 +21,10 @@ immutable `retry_of` link. Replaying the retry decision returns that same
 child. Scheduling that child and terminally closing the parent reconciliation
 are mutually exclusive decisions under the same advisory lock. Exhausted retry
 budgets enter a checksummed dead-letter ledger, and that dead-letter decision
-is likewise mutually exclusive with terminal reconciliation.
+is likewise mutually exclusive with terminal reconciliation. Replaying the
+decision cannot replace the dead letter with a larger retry budget.
+Dead-lettering reconciliation work terminally fails its attempt hierarchy in
+the same transaction instead of stranding non-runnable reconciliation state.
 
 External effects use a fenced, immutable-payload checkpoint ledger. Effect
 class and payload digest cannot change after preparation. State advances

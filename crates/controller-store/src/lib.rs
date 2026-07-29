@@ -1283,6 +1283,30 @@ impl Store {
             tx.rollback().await?;
             return Ok(RetryDecision::Ineligible);
         }
+        let has_dead_letter = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM dead_letters
+                 WHERE organization_id = $1 AND attempt_id = $2
+             )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if has_dead_letter {
+            terminalize_dead_lettered_reconciliation(
+                &mut tx,
+                organization_id,
+                attempt_id,
+                node_id,
+                build_id,
+                reason,
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(RetryDecision::DeadLettered);
+        }
         if let Some((child_id, child_ordinal)) = sqlx::query_as::<_, (Uuid, i32)>(
             "SELECT id, ordinal
              FROM attempts
@@ -1336,6 +1360,15 @@ impl Store {
                 )
                 .await?;
             }
+            terminalize_dead_lettered_reconciliation(
+                &mut tx,
+                organization_id,
+                attempt_id,
+                node_id,
+                build_id,
+                reason,
+            )
+            .await?;
             tx.commit().await?;
             return Ok(RetryDecision::DeadLettered);
         }
@@ -2131,12 +2164,22 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         acquire_object_deletion_fence(&mut tx, &claim.digest).await?;
         let completed = sqlx::query_scalar::<_, Uuid>(
-            "UPDATE object_deletion_claims
-             SET status = 'deleted', completed_at = clock_timestamp()
+            "WITH transitioned AS (
+                 UPDATE object_deletion_claims
+                 SET status = 'deleted', completed_at = clock_timestamp()
+                 WHERE object_digest = $1
+                   AND claim_token = $2
+                   AND status = 'deleting'
+                 RETURNING claim_token
+             )
+             SELECT claim_token FROM transitioned
+             UNION ALL
+             SELECT claim_token
+             FROM object_deletion_claims
              WHERE object_digest = $1
                AND claim_token = $2
-               AND status = 'deleting'
-             RETURNING claim_token",
+               AND status = 'deleted'
+             LIMIT 1",
         )
         .bind(claim.digest.as_slice())
         .bind(claim.token)
@@ -2353,6 +2396,53 @@ async fn append_event_and_outbox(
     .bind(kind)
     .bind(build_id)
     .bind(payload)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn terminalize_dead_lettered_reconciliation(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    attempt_id: Uuid,
+    node_id: Uuid,
+    build_id: Uuid,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    let terminalized = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE attempts
+         SET status = 'failed',
+             terminal_summary = $3,
+             completed_at = clock_timestamp()
+         WHERE organization_id = $1
+           AND id = $2
+           AND status = 'reconciliation_required'
+         RETURNING id",
+    )
+    .bind(organization_id)
+    .bind(attempt_id)
+    .bind(json!({"dead_lettered": true, "reason": reason}))
+    .fetch_optional(&mut **tx)
+    .await?;
+    if terminalized.is_none() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'failed'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(node_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE builds
+         SET status = 'failed', completed_at = clock_timestamp()
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(build_id)
     .execute(&mut **tx)
     .await?;
     Ok(())
