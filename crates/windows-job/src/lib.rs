@@ -25,9 +25,11 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, WAIT_FAILED,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+use windows_sys::Win32::Security::{TOKEN_DUPLICATE, TOKEN_QUERY};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
 };
+use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
@@ -37,7 +39,7 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+    InitializeProcThreadAttributeList, OpenProcessToken, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
     PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
     STARTUPINFOEXW, UpdateProcThreadAttribute, WaitForSingleObject,
 };
@@ -318,20 +320,22 @@ fn resolve_program(spec: &SpawnSpec<'_>) -> Result<OsString, JobError> {
         return Ok(spec.current_directory.join(program).into_os_string());
     }
 
-    let path = spec
+    let explicit_path = spec
         .environment
         .iter()
         .find(|(key, _)| normalized_environment_key(key) == "PATH")
-        .map(|(_, value)| value.clone())
-        .or_else(|| {
-            standard_workload_environment()
-                .remove("PATH")
-                .map(|(_, value)| value)
-        })
-        .ok_or(JobError {
-            operation: "resolve program from PATH",
-            code: ERROR_FILE_NOT_FOUND,
-        })?;
+        .map(|(_, value)| value.clone());
+    let path = if let Some(path) = explicit_path {
+        path
+    } else {
+        standard_workload_environment()?
+            .remove("PATH")
+            .map(|(_, value)| value)
+            .ok_or(JobError {
+                operation: "resolve program from PATH",
+                code: ERROR_FILE_NOT_FOUND,
+            })?
+    };
     let extensions: &[&str] = if program.extension().is_some() {
         &[""]
     } else {
@@ -452,7 +456,7 @@ fn environment_block(
     overrides: &BTreeMap<OsString, OsString>,
     current_directory: &Path,
 ) -> Result<Vec<u16>, JobError> {
-    let mut entries = standard_workload_environment();
+    let mut entries = standard_workload_environment()?;
     if let Some((normalized, key, value)) = drive_current_directory(current_directory) {
         entries.insert(normalized, (key, value));
     }
@@ -497,7 +501,7 @@ fn environment_block(
     Ok(block)
 }
 
-fn standard_workload_environment() -> BTreeMap<String, (OsString, OsString)> {
+fn standard_workload_environment() -> Result<BTreeMap<String, (OsString, OsString)>, JobError> {
     // The workload currently runs under the agent service token, so hiding
     // identity strings is not a security boundary: the child can query that
     // token directly. Use a fixed allowlist of ordinary Windows runtime and
@@ -541,14 +545,73 @@ fn standard_workload_environment() -> BTreeMap<String, (OsString, OsString)> {
         "USERPROFILE",
         "WINDIR",
     ];
+    let mut raw_token = null_mut();
+    // SAFETY: the current-process pseudo handle is valid and raw_token points
+    // to writable handle storage. Query/duplicate access is the documented
+    // requirement for a primary token passed to CreateEnvironmentBlock.
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &raw mut raw_token,
+        )
+    } == 0
+    {
+        return Err(JobError::last("OpenProcessToken"));
+    }
+    let token = OwnedHandle::new(raw_token, "OpenProcessToken")?;
+    let mut raw_environment = null_mut();
+    // SAFETY: raw_environment points to writable pointer storage and token is
+    // the live primary token of the service process. inherit=false excludes
+    // arbitrary process-local and CI variables while including the standard
+    // user-profile values native shells require under a real service account.
+    if unsafe { CreateEnvironmentBlock(&raw mut raw_environment, token.handle, 0) } == 0 {
+        return Err(JobError::last("CreateEnvironmentBlock(current token)"));
+    }
+    let environment = EnvironmentBlock(raw_environment);
     let mut entries = BTreeMap::new();
-    for (key, value) in std::env::vars_os() {
+    let mut cursor = environment.0.cast::<u16>();
+    loop {
+        // SAFETY: CreateEnvironmentBlock returns terminated UTF-16 strings
+        // followed by a second null. cursor advances only over those strings.
+        if unsafe { *cursor } == 0 {
+            break;
+        }
+        let mut units = 0;
+        // SAFETY: every entry is terminated by the API contract.
+        while unsafe { *cursor.add(units) } != 0 {
+            units += 1;
+        }
+        // SAFETY: the scan established the initialized entry length.
+        let entry = unsafe { std::slice::from_raw_parts(cursor, units) };
+        let separator = entry
+            .iter()
+            .enumerate()
+            .skip(usize::from(entry.first() == Some(&u16::from(b'='))))
+            .find_map(|(index, unit)| (*unit == u16::from(b'=')).then_some(index))
+            .ok_or_else(|| JobError::invalid("token environment entry has no separator"))?;
+        let key = OsString::from_wide(&entry[..separator]);
+        let value = OsString::from_wide(&entry[separator + 1..]);
         let normalized = normalized_environment_key(&key);
         if BASELINE.contains(&normalized.as_str()) {
             entries.insert(normalized, (key, value));
         }
+        // SAFETY: units spans the entry; one more unit skips its terminator.
+        cursor = unsafe { cursor.add(units + 1) };
     }
-    entries
+    Ok(entries)
+}
+
+struct EnvironmentBlock(*mut core::ffi::c_void);
+
+impl Drop for EnvironmentBlock {
+    fn drop(&mut self) {
+        // SAFETY: this pointer is the exact successful
+        // CreateEnvironmentBlock result and is released once.
+        unsafe {
+            DestroyEnvironmentBlock(self.0);
+        }
+    }
 }
 
 fn drive_current_directory(current_directory: &Path) -> Option<(String, OsString, OsString)> {
