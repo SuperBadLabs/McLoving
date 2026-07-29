@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::future::Future;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
@@ -545,8 +547,15 @@ async fn run_assignment(
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
+    // The executor can fail after process creation while proving containment
+    // empty. Retain the exact PID as soon as the hook is invoked so every such
+    // error remains recoverable instead of being misreported as a processless
+    // spawn failure.
+    let spawned_process_id = Arc::new(AtomicU32::new(0));
+    let observed_process_id = Arc::clone(&spawned_process_id);
     let execution =
         execute_with_spawn_hook(&request, execution_cancellation.clone(), |process_id| {
+            observed_process_id.store(process_id, Ordering::Release);
             let process_birth_identity = process_birth_identity_for(process_id)
                 .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
             match process_birth_identity {
@@ -576,18 +585,18 @@ async fn run_assignment(
     let completion_result: Result<(), AgentError> = async {
         let outcome = match execution {
             Ok(outcome) => outcome,
-            Err(ExecutionError::ContainmentUnverified { process_id, .. }) => {
-                journal.transition(
-                    &organization,
-                    &attempt,
-                    fence,
-                    session_epoch,
-                    AttemptPhase::ReconciliationRequired,
-                    Some(process_id),
-                )?;
-                return Err(AgentError::UnresolvedReconciliation);
-            }
             Err(error) => {
+                if let Some(process_id) = post_spawn_process_id(&error, &spawned_process_id) {
+                    journal.transition(
+                        &organization,
+                        &attempt,
+                        fence,
+                        session_epoch,
+                        AttemptPhase::ReconciliationRequired,
+                        Some(process_id),
+                    )?;
+                    return Err(AgentError::UnresolvedReconciliation);
+                }
                 return finalize_without_process(
                     config,
                     client,
@@ -707,6 +716,16 @@ async fn run_assignment(
         .map_err(|error| AgentError::InvalidAssignment(format!("lease task failed: {error}")))?;
     completion_result?;
     lease_result
+}
+
+fn post_spawn_process_id(error: &ExecutionError, observed: &AtomicU32) -> Option<u32> {
+    match error {
+        ExecutionError::ContainmentUnverified { process_id, .. } => Some(*process_id),
+        _ => {
+            let process_id = observed.load(Ordering::Acquire);
+            (process_id != 0).then_some(process_id)
+        }
+    }
 }
 
 async fn renew_lease(
@@ -1470,6 +1489,35 @@ mod tests {
             execution_spec_json: spec.to_vec(),
             payload_digest: Sha256::digest(spec).to_vec(),
         }
+    }
+
+    #[test]
+    fn every_observed_post_spawn_error_retains_reconciliation_identity() {
+        let observed = AtomicU32::new(41);
+        assert_eq!(
+            post_spawn_process_id(
+                &ExecutionError::WindowsJob("job drain failed".to_owned()),
+                &observed,
+            ),
+            Some(41)
+        );
+        assert_eq!(
+            post_spawn_process_id(
+                &ExecutionError::ContainmentUnverified {
+                    process_id: 43,
+                    reason: "group still exists".to_owned(),
+                },
+                &AtomicU32::new(0),
+            ),
+            Some(43)
+        );
+        assert_eq!(
+            post_spawn_process_id(
+                &ExecutionError::WindowsJob("pre-spawn failure".to_owned()),
+                &AtomicU32::new(0),
+            ),
+            None
+        );
     }
 
     #[test]
