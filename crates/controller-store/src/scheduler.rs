@@ -37,6 +37,10 @@ pub struct ClaimedAttempt {
 pub enum WaitReason {
     Ready,
     NoQueuedWork,
+    TrustPoolMismatch {
+        required: String,
+        offered: String,
+    },
     CapabilityMismatch {
         required: BTreeSet<String>,
         missing: BTreeSet<String>,
@@ -609,7 +613,11 @@ impl Store {
         &self,
         organization_id: Uuid,
         capabilities: &[String],
+        trust_pool: &str,
     ) -> Result<WaitReason, StoreError> {
+        if trust_pool.trim().is_empty() || trust_pool.trim() != trust_pool {
+            return Err(StoreError::InvalidTrustPool);
+        }
         let mut tx = self.tenant_transaction(organization_id).await?;
         let compatible = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
@@ -617,10 +625,12 @@ impl Store {
                  WHERE organization_id = $1
                    AND status = 'queued'
                    AND required_capabilities <@ $2::text[]
+                   AND required_trust_pool = $3
              )",
         )
         .bind(organization_id)
         .bind(capabilities)
+        .bind(trust_pool)
         .fetch_one(&mut *tx)
         .await?;
         if compatible {
@@ -628,8 +638,8 @@ impl Store {
             return Ok(WaitReason::Ready);
         }
 
-        let required = sqlx::query_scalar::<_, Vec<String>>(
-            "SELECT required_capabilities
+        let required = sqlx::query_as::<_, (Vec<String>, String)>(
+            "SELECT required_capabilities, required_trust_pool
              FROM nodes
              WHERE organization_id = $1 AND status = 'queued'
              ORDER BY priority DESC, queued_at, id
@@ -638,10 +648,17 @@ impl Store {
         .bind(organization_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(required) = required else {
+        let Some((required, required_trust_pool)) = required else {
             tx.commit().await?;
             return Ok(WaitReason::NoQueuedWork);
         };
+        if required_trust_pool != trust_pool {
+            tx.commit().await?;
+            return Ok(WaitReason::TrustPoolMismatch {
+                required: required_trust_pool,
+                offered: trust_pool.to_owned(),
+            });
+        }
         let required = required.into_iter().collect::<BTreeSet<_>>();
         let offered = capabilities.iter().cloned().collect::<BTreeSet<_>>();
         let missing = required.difference(&offered).cloned().collect();

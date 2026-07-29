@@ -104,6 +104,10 @@ pub struct CancellationResponse {
 pub enum ExplainResponse {
     Ready,
     NoQueuedWork,
+    TrustPoolMismatch {
+        required: String,
+        offered: String,
+    },
     CapabilityMismatch {
         required: Vec<String>,
         missing: Vec<String>,
@@ -334,6 +338,12 @@ async fn cancel(
 struct ExplainQuery {
     #[serde(default)]
     capability: Option<String>,
+    #[serde(default = "default_trust_pool")]
+    trust_pool: String,
+}
+
+fn default_trust_pool() -> String {
+    "trusted-linux".to_owned()
 }
 
 async fn explain(
@@ -355,12 +365,16 @@ async fn explain(
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned)
                 .collect::<Vec<_>>(),
+            &query.trust_pool,
         )
         .await
         .map_err(internal)?
     {
         WaitReason::Ready => ExplainResponse::Ready,
         WaitReason::NoQueuedWork => ExplainResponse::NoQueuedWork,
+        WaitReason::TrustPoolMismatch { required, offered } => {
+            ExplainResponse::TrustPoolMismatch { required, offered }
+        }
         WaitReason::CapabilityMismatch { required, missing } => {
             ExplainResponse::CapabilityMismatch {
                 required: required.into_iter().collect(),
@@ -517,12 +531,25 @@ impl Client {
         organization_id: Uuid,
         capabilities: &[String],
     ) -> Result<ExplainResponse, ClientError> {
+        self.explain_in_pool(organization_id, capabilities, "trusted-linux")
+            .await
+    }
+
+    pub async fn explain_in_pool(
+        &self,
+        organization_id: Uuid,
+        capabilities: &[String],
+        trust_pool: &str,
+    ) -> Result<ExplainResponse, ClientError> {
         let request = self.inner.get(format!(
             "{}/api/v1/organizations/{organization_id}/scheduler/explain",
             self.base_url
         ));
         let joined = capabilities.join(",");
-        let request = request.query(&[("capability", joined)]);
+        let request = request.query(&[
+            ("capability", joined),
+            ("trust_pool", trust_pool.to_owned()),
+        ]);
         self.send(request).await
     }
 

@@ -39,6 +39,8 @@ enum Command {
     Explain {
         #[arg(long = "capability")]
         capabilities: Vec<String>,
+        #[arg(long, default_value = "trusted-linux")]
+        trust_pool: String,
     },
 }
 
@@ -94,10 +96,13 @@ async fn main() -> Result<()> {
                     .await?,
             )?;
         }
-        Command::Explain { capabilities } => {
+        Command::Explain {
+            capabilities,
+            trust_pool,
+        } => {
             print_json(
                 &client
-                    .explain(arguments.organization, &capabilities)
+                    .explain_in_pool(arguments.organization, &capabilities, &trust_pool)
                     .await?,
             )?;
         }

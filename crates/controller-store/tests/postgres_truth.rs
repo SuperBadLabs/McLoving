@@ -1451,6 +1451,23 @@ async fn scheduler_requires_the_nodes_designated_trust_pool() {
         .await
         .expect("admit release work");
 
+    assert_eq!(
+        store
+            .explain_wait(organization_id, &["linux".into()], "untrusted")
+            .await
+            .expect("explain mismatched pool"),
+        WaitReason::TrustPoolMismatch {
+            required: "release".into(),
+            offered: "untrusted".into(),
+        }
+    );
+    assert_eq!(
+        store
+            .explain_wait(organization_id, &["linux".into()], "release")
+            .await
+            .expect("explain matching pool"),
+        WaitReason::Ready
+    );
     assert!(
         store
             .claim_next(&ClaimRequest {
@@ -1570,7 +1587,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
 
     let tenant_store = unprivileged_store(&store).await;
     let reason = tenant_store
-        .explain_wait(organization_id, &["linux".into()])
+        .explain_wait(organization_id, &["linux".into()], "trusted")
         .await
         .expect("explain queue");
     assert_eq!(
