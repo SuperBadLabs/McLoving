@@ -79,6 +79,8 @@ pub enum ExecutionError {
     SymlinkWorkspaceComponent,
     #[error("executor-owned spool path no longer names its original file")]
     ReplacedSpoolPath,
+    #[error("configured workspace root no longer names its original directory")]
+    ReplacedWorkspaceRoot,
     #[error("process did not expose a valid process ID")]
     MissingProcessId,
     #[error("process spawn could not be recorded durably: {0}")]
@@ -152,7 +154,7 @@ fn create_workspace(root: &Path, relative: &Path) -> Result<PathBuf, ExecutionEr
     Ok(canonical)
 }
 
-fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+pub(super) fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }

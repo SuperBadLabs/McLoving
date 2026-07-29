@@ -605,6 +605,20 @@ async fn run_assignment(
                     )?;
                     return Err(AgentError::UnresolvedReconciliation);
                 }
+                if requires_processless_reconciliation(&error) {
+                    // Containment is proven empty, but the configured root has
+                    // lost its pinned identity. Never write result evidence
+                    // through an attacker-controlled replacement pathname.
+                    journal.transition(
+                        &organization,
+                        &attempt,
+                        fence,
+                        session_epoch,
+                        AttemptPhase::ReconciliationRequired,
+                        None,
+                    )?;
+                    return Err(AgentError::UnresolvedReconciliation);
+                }
                 return finalize_without_process(
                     config,
                     client,
@@ -732,6 +746,10 @@ fn unverified_containment_process_id(error: &ExecutionError) -> Option<u32> {
         ExecutionError::ContainmentUnverified { process_id, .. } => Some(*process_id),
         _ => None,
     }
+}
+
+fn requires_processless_reconciliation(error: &ExecutionError) -> bool {
+    matches!(error, ExecutionError::ReplacedWorkspaceRoot)
 }
 
 async fn renew_lease(
@@ -1600,6 +1618,16 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn replaced_workspace_root_requires_processless_reconciliation() {
+        assert!(requires_processless_reconciliation(
+            &ExecutionError::ReplacedWorkspaceRoot
+        ));
+        assert!(!requires_processless_reconciliation(
+            &ExecutionError::ReplacedSpoolPath
+        ));
     }
 
     #[test]

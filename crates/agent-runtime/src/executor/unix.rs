@@ -48,6 +48,9 @@ where
     if request.mode != ExecutionMode::Direct {
         return Err(ExecutionError::UnsupportedMode(request.mode));
     }
+    let workspace_root_control = File::open(&request.workspace_root)?;
+    ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
+
     let workspace = create_workspace(&request.workspace_root, &request.workspace)?;
     let spool = workspace.join("spool");
     tokio::fs::create_dir(&spool).await?;
@@ -75,6 +78,9 @@ where
     // truncation, durability, and digest decisions cannot be redirected.
     let stdout_control = stdout.try_clone()?;
     let stderr_control = stderr.try_clone()?;
+    // Pin the configured root itself, not merely a canonical path derived from
+    // it. A sibling workload running as the same OS account may rename it.
+    ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
     let mut command = Command::new(&request.program);
     command
@@ -176,6 +182,7 @@ where
     }
     restore_agent_spool_permissions(&stdout_control)?;
     restore_agent_spool_permissions(&stderr_control)?;
+    ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
     stdout_control.sync_all()?;
     stderr_control.sync_all()?;
     ensure_original_spool_path(&stdout_control, &stdout_path)?;
@@ -271,6 +278,23 @@ fn truncate_output_to_limit(
     let retained_stderr = stderr_bytes.min(limit - retained_stdout);
     stdout.set_len(retained_stdout)?;
     stderr.set_len(retained_stderr)
+}
+
+fn ensure_original_workspace_root(file: &File, path: &Path) -> Result<(), ExecutionError> {
+    let named_link =
+        std::fs::symlink_metadata(path).map_err(|_| ExecutionError::ReplacedWorkspaceRoot)?;
+    if !named_link.is_dir() || named_link.file_type().is_symlink() {
+        return Err(ExecutionError::ReplacedWorkspaceRoot);
+    }
+    let opened = file
+        .metadata()
+        .map_err(|_| ExecutionError::ReplacedWorkspaceRoot)?;
+    let named = std::fs::metadata(path).map_err(|_| ExecutionError::ReplacedWorkspaceRoot)?;
+    if opened.dev() == named.dev() && opened.ino() == named.ino() {
+        Ok(())
+    } else {
+        Err(ExecutionError::ReplacedWorkspaceRoot)
+    }
 }
 
 fn ensure_original_spool_path(file: &File, path: &Path) -> Result<(), ExecutionError> {
@@ -934,5 +958,54 @@ mod tests {
             execute(&linked, CancellationToken::new()).await,
             Err(ExecutionError::SymlinkWorkspaceComponent)
         ));
+    }
+
+    #[tokio::test]
+    async fn replaced_workspace_root_is_rejected_without_following_the_replacement() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace_root = parent.path().join("workspace");
+        let displaced_root = parent.path().join("displaced-workspace");
+        let outside = parent.path().join("outside");
+        std::fs::create_dir(&workspace_root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), "outside").unwrap();
+
+        let request = ExecutionRequest {
+            workspace_root: workspace_root.clone(),
+            workspace: PathBuf::from("org/replaced-root"),
+            mode: ExecutionMode::Direct,
+            program: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                OsString::from("-c"),
+                OsString::from(
+                    "mv \"$WORKSPACE_ROOT\" \"$DISPLACED_ROOT\"; \
+                     ln -s \"$OUTSIDE\" \"$WORKSPACE_ROOT\"",
+                ),
+            ],
+            environment: BTreeMap::from([
+                (
+                    OsString::from("WORKSPACE_ROOT"),
+                    workspace_root.as_os_str().to_owned(),
+                ),
+                (
+                    OsString::from("DISPLACED_ROOT"),
+                    displaced_root.as_os_str().to_owned(),
+                ),
+                (OsString::from("OUTSIDE"), outside.as_os_str().to_owned()),
+            ]),
+            output_limit_bytes: None,
+            timeout: Duration::from_secs(5),
+            termination_grace: Duration::from_millis(100),
+        };
+
+        assert!(matches!(
+            execute(&request, CancellationToken::new()).await,
+            Err(ExecutionError::ReplacedWorkspaceRoot)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sentinel")).unwrap(),
+            "outside"
+        );
+        assert!(displaced_root.join("org/replaced-root/spool").is_dir());
     }
 }

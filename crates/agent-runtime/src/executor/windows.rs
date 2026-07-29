@@ -3,6 +3,7 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -20,10 +21,15 @@ use crate::SpoolEntry;
 
 use super::{
     Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, Termination,
-    create_workspace, sync_directory,
+    create_workspace, is_link_or_reparse_point, sync_directory,
 };
 
 const TERMINATED_EXIT_CODE: u32 = 0xC000_013A;
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 pub async fn execute(
     request: &ExecutionRequest,
@@ -40,6 +46,9 @@ pub async fn execute_with_spawn_hook<F>(
 where
     F: FnOnce(u32) -> Result<(), ExecutionError>,
 {
+    let workspace_root_control = open_workspace_root(&request.workspace_root)?;
+    ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
+
     let workspace = create_workspace(&request.workspace_root, &request.workspace)?;
     let spool = workspace.join("spool");
     tokio::fs::create_dir(&spool).await?;
@@ -60,6 +69,7 @@ where
     let stdout_control = stdout.try_clone()?;
     let stderr_control = stderr.try_clone()?;
 
+    ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
     let command = windows_command(request)?;
     let mut child = JobProcess::spawn_suspended(&SpawnSpec {
         program: &command.program,
@@ -127,6 +137,7 @@ where
     if termination == Termination::OutputLimitExceeded {
         truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     }
+    ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
     stdout_control.sync_all()?;
     stderr_control.sync_all()?;
     ensure_original_spool_path(&stdout_control, &stdout_path)?;
@@ -173,6 +184,42 @@ fn truncate_output_to_limit(
     let retained_stderr = stderr_bytes.min(limit - retained_stdout);
     stdout.set_len(retained_stdout)?;
     stderr.set_len(retained_stderr)
+}
+
+fn open_workspace_root(path: &Path) -> Result<File, ExecutionError> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| ExecutionError::InvalidWorkspaceRoot)?;
+    if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
+        return Err(ExecutionError::InvalidWorkspaceRoot);
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(ExecutionError::Io)
+}
+
+fn ensure_original_workspace_root(file: &File, path: &Path) -> Result<(), ExecutionError> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| ExecutionError::ReplacedWorkspaceRoot)?;
+    if !metadata.is_dir() || is_link_or_reparse_point(&metadata) {
+        return Err(ExecutionError::ReplacedWorkspaceRoot);
+    }
+    let named = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|_| ExecutionError::ReplacedWorkspaceRoot)?;
+    let opened_identity = file_identity(file).map_err(|_| ExecutionError::ReplacedWorkspaceRoot)?;
+    let named_identity =
+        file_identity(&named).map_err(|_| ExecutionError::ReplacedWorkspaceRoot)?;
+    if opened_identity == named_identity {
+        Ok(())
+    } else {
+        Err(ExecutionError::ReplacedWorkspaceRoot)
+    }
 }
 
 fn ensure_original_spool_path(file: &File, path: &Path) -> Result<(), ExecutionError> {
@@ -584,5 +631,24 @@ Wait-Process -Id $child.Id
             status.success(),
             "descendant {child_pid} escaped the Job Object"
         );
+    }
+
+    #[test]
+    fn replaced_workspace_root_is_rejected_by_handle_identity() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace_root = parent.path().join("workspace");
+        let displaced_root = parent.path().join("displaced-workspace");
+        fs::create_dir(&workspace_root).unwrap();
+        let control = open_workspace_root(&workspace_root).unwrap();
+        ensure_original_workspace_root(&control, &workspace_root).unwrap();
+
+        fs::rename(&workspace_root, &displaced_root).unwrap();
+        fs::create_dir(&workspace_root).unwrap();
+
+        assert!(matches!(
+            ensure_original_workspace_root(&control, &workspace_root),
+            Err(ExecutionError::ReplacedWorkspaceRoot)
+        ));
+        assert!(displaced_root.is_dir());
     }
 }
