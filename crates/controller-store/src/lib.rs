@@ -38,6 +38,13 @@ pub enum AgentReconciliationDisposition {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconciliationTrustPoolAuthorization {
+    Matching,
+    Missing,
+    Mismatched,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentCancellationDisposition {
     Completed,
     RetireStale,
@@ -474,27 +481,29 @@ impl Store {
         organization_id: Uuid,
         attempt_id: Uuid,
         trust_pool: &str,
-    ) -> Result<bool, StoreError> {
+    ) -> Result<ReconciliationTrustPoolAuthorization, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let authorized = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(
-                 SELECT 1
-                 FROM attempts AS a
-                 JOIN nodes AS n
-                   ON n.id = a.node_id
-                  AND n.organization_id = a.organization_id
-                 WHERE a.organization_id = $1
-                   AND a.id = $2
-                   AND n.required_trust_pool = $3
-             )",
+        let required_trust_pool = sqlx::query_scalar::<_, String>(
+            "SELECT n.required_trust_pool
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id
+              AND n.organization_id = a.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2",
         )
         .bind(organization_id)
         .bind(attempt_id)
-        .bind(trust_pool)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
         tx.commit().await?;
-        Ok(authorized)
+        Ok(match required_trust_pool {
+            Some(required) if required == trust_pool => {
+                ReconciliationTrustPoolAuthorization::Matching
+            }
+            Some(_) => ReconciliationTrustPoolAuthorization::Mismatched,
+            None => ReconciliationTrustPoolAuthorization::Missing,
+        })
     }
 
     /// Returns only the capabilities durably bound to the exact current session.

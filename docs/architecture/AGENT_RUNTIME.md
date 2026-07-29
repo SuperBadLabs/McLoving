@@ -40,6 +40,32 @@ Every executable node also persists one non-empty required trust pool.
 Scheduling uses the trust pool from the authenticated certificate binding,
 not an agent-reported capability, and claims only an exact pool match.
 
+The node trust-pool schema migration has no global default. It backfills a
+node only from the latest durable attempt owner joined to that agent's durable
+session. Before upgrading a database that contains any other nodes, create and
+populate the exact per-node mapping table below; migration fails and rolls
+back while any node remains unmapped, and consumes the table only after every
+node has an explicit trust pool:
+
+```sql
+CREATE TABLE node_trust_pool_migration_map (
+    organization_id uuid NOT NULL,
+    node_id uuid NOT NULL,
+    required_trust_pool text NOT NULL
+        CHECK (btrim(required_trust_pool) <> ''),
+    PRIMARY KEY (organization_id, node_id),
+    FOREIGN KEY (node_id, organization_id)
+        REFERENCES nodes(id, organization_id)
+);
+
+INSERT INTO node_trust_pool_migration_map
+    (organization_id, node_id, required_trust_pool)
+VALUES
+    ('00000000-0000-0000-0000-000000000123',
+     '00000000-0000-0000-0000-000000000456',
+     'trusted-build');
+```
+
 The organization UUID is a required W2-C identity-binding migration. Before
 upgrading a controller from the earlier three-column format, append the
 organization UUID authorized for each agent:

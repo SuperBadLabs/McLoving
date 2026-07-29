@@ -123,7 +123,14 @@ struct PublicationContext<'a> {
     client: &'a mut AgentControlClient<Channel>,
     authority: &'a WorkAuthority,
     session_epoch: u64,
+    control: AuthorityRpcControl<'a>,
+}
+
+#[derive(Clone, Copy)]
+struct AuthorityRpcControl<'a> {
     authority_lost: &'a CancellationToken,
+    stop: &'a CancellationToken,
+    lease_window: Duration,
 }
 
 pub(super) async fn poll_and_run_one(
@@ -156,6 +163,7 @@ pub(super) async fn recover_finalizations(
     config: &AgentConfig,
     client: &mut AgentControlClient<Channel>,
     session_epoch: u64,
+    stop: &CancellationToken,
 ) -> Result<(), AgentError> {
     reclaim_terminal_spools(config).await?;
     let report = Journal::open(&config.journal_path)?.reconcile()?;
@@ -210,7 +218,11 @@ pub(super) async fn recover_finalizations(
             session_epoch,
             &attempt,
             authority,
-            &authority_lost,
+            AuthorityRpcControl {
+                authority_lost: &authority_lost,
+                stop,
+                lease_window,
+            },
         )
         .await;
         lease_stop.cancel();
@@ -247,7 +259,7 @@ async fn replay_finalization(
     session_epoch: u64,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
     authority: WorkAuthority,
-    authority_lost: &CancellationToken,
+    control: AuthorityRpcControl<'_>,
 ) -> Result<AttemptPhase, AgentError> {
     validate_log_spool_quota(&attempt.logs)?;
     let mut sequence = 0;
@@ -255,7 +267,7 @@ async fn replay_finalization(
         client,
         authority: &authority,
         session_epoch,
-        authority_lost,
+        control,
     };
     for entry in &attempt.logs {
         let stream = spool_stream(entry)?;
@@ -300,7 +312,7 @@ async fn replay_finalization(
             };
             require_work_receipt(
                 authority_rpc(
-                    authority_lost,
+                    control,
                     publication.client.complete_work(WorkCompletion {
                         authority: Some(authority.clone()),
                         outcome: outcome as i32,
@@ -339,7 +351,7 @@ async fn replay_finalization(
                 }
             }
             let receipt = authority_rpc(
-                authority_lost,
+                control,
                 publication
                     .client
                     .complete_cancellation(CancellationCompletion {
@@ -509,7 +521,11 @@ async fn run_assignment(
                 outcome: WorkOutcome::Aborted,
                 reason: "cancelled_before_process_spawn".to_owned(),
             },
-            &authority_lost,
+            AuthorityRpcControl {
+                authority_lost: &authority_lost,
+                stop: &stop,
+                lease_window,
+            },
         )
         .await;
         lease_stop.cancel();
@@ -632,7 +648,11 @@ async fn run_assignment(
                         outcome: WorkOutcome::Failed,
                         reason: format!("process_spawn_failed: {error}"),
                     },
-                    &authority_lost,
+                    AuthorityRpcControl {
+                        authority_lost: &authority_lost,
+                        stop: &stop,
+                        lease_window,
+                    },
                 )
                 .await;
             }
@@ -679,7 +699,11 @@ async fn run_assignment(
             client,
             authority: &assignment.authority,
             session_epoch,
-            authority_lost: &authority_lost,
+            control: AuthorityRpcControl {
+                authority_lost: &authority_lost,
+                stop: &stop,
+                lease_window,
+            },
         };
         let next_sequence = publish_spool(
             &mut publication,
@@ -703,7 +727,7 @@ async fn run_assignment(
             "result_sha256": hex(&result.digest),
         }))?;
         let completion = authority_rpc(
-            &authority_lost,
+            publication.control,
             publication.client.complete_work(WorkCompletion {
                 authority: Some(assignment.authority.clone()),
                 outcome: terminal as i32,
@@ -858,13 +882,19 @@ async fn poll_rpc<T>(
 }
 
 async fn authority_rpc<T>(
-    authority_lost: &CancellationToken,
+    control: AuthorityRpcControl<'_>,
     operation: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,
 ) -> Result<T, AgentError> {
     tokio::select! {
         biased;
-        () = authority_lost.cancelled() => Err(AgentError::StaleAuthority),
-        result = operation => Ok(result?.into_inner()),
+        () = control.authority_lost.cancelled() => Err(AgentError::StaleAuthority),
+        () = control.stop.cancelled() => Err(AgentError::Stopped),
+        result = tokio::time::timeout(lease_rpc_budget(control.lease_window), operation) => {
+            result
+                .map_err(|_| AgentError::AuthorityRpcTimeout)?
+                .map(tonic::Response::into_inner)
+                .map_err(AgentError::from)
+        },
     }
 }
 
@@ -905,7 +935,7 @@ async fn publish_spool(
         }
         require_work_receipt(
             authority_rpc(
-                publication.authority_lost,
+                publication.control,
                 publication.client.publish_log(WorkLogChunk {
                     authority: Some(publication.authority.clone()),
                     sequence,
@@ -942,7 +972,7 @@ async fn publish_spool(
         }
         require_work_receipt(
             authority_rpc(
-                publication.authority_lost,
+                publication.control,
                 publication.client.publish_log(WorkLogChunk {
                     authority: Some(publication.authority.clone()),
                     sequence: first_sequence,
@@ -1591,7 +1621,7 @@ async fn finalize_without_process(
     client: &mut AgentControlClient<Channel>,
     journal: &mut Journal,
     completion: ProcesslessCompletion<'_>,
-    authority_lost: &CancellationToken,
+    control: AuthorityRpcControl<'_>,
 ) -> Result<(), AgentError> {
     let ProcesslessCompletion {
         authority,
@@ -1629,7 +1659,7 @@ async fn finalize_without_process(
     })?;
     require_work_receipt(
         authority_rpc(
-            authority_lost,
+            control,
             client.complete_work(WorkCompletion {
                 authority: Some(authority.clone()),
                 outcome: outcome as i32,
@@ -1851,12 +1881,50 @@ mod tests {
     async fn authority_loss_interrupts_a_stalled_terminal_rpc() {
         let authority_lost = CancellationToken::new();
         authority_lost.cancel();
+        let stop = CancellationToken::new();
         let result = authority_rpc::<()>(
-            &authority_lost,
+            AuthorityRpcControl {
+                authority_lost: &authority_lost,
+                stop: &stop,
+                lease_window: Duration::from_secs(30),
+            },
             std::future::pending::<Result<tonic::Response<()>, tonic::Status>>(),
         )
         .await;
         assert!(matches!(result, Err(AgentError::StaleAuthority)));
+    }
+
+    #[tokio::test]
+    async fn service_stop_interrupts_a_stalled_terminal_rpc() {
+        let authority_lost = CancellationToken::new();
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let result = authority_rpc::<()>(
+            AuthorityRpcControl {
+                authority_lost: &authority_lost,
+                stop: &stop,
+                lease_window: Duration::from_secs(30),
+            },
+            std::future::pending::<Result<tonic::Response<()>, tonic::Status>>(),
+        )
+        .await;
+        assert!(matches!(result, Err(AgentError::Stopped)));
+    }
+
+    #[tokio::test]
+    async fn stalled_authority_rpc_is_lease_bounded() {
+        let authority_lost = CancellationToken::new();
+        let stop = CancellationToken::new();
+        let result = authority_rpc::<()>(
+            AuthorityRpcControl {
+                authority_lost: &authority_lost,
+                stop: &stop,
+                lease_window: Duration::from_millis(1_001),
+            },
+            std::future::pending::<Result<tonic::Response<()>, tonic::Status>>(),
+        )
+        .await;
+        assert!(matches!(result, Err(AgentError::AuthorityRpcTimeout)));
     }
 
     #[tokio::test]

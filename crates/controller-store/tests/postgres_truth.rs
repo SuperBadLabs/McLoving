@@ -3,7 +3,8 @@ use std::sync::Arc;
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk,
-    ObjectKind, ObjectStatus, RetryDecision, Store, StoreError, TerminalOutcome, WaitReason,
+    ObjectKind, ObjectStatus, ReconciliationTrustPoolAuthorization, RetryDecision, Store,
+    StoreError, TerminalOutcome, WaitReason,
 };
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -1640,17 +1641,26 @@ async fn scheduler_requires_the_nodes_designated_trust_pool() {
             .await
             .expect("reject mismatched attempt pool")
     );
-    assert!(
+    assert_eq!(
         store
-            .authorize_reconciliation_trust_pool(organization_id, claim.attempt_id, "release",)
+            .authorize_reconciliation_trust_pool(organization_id, claim.attempt_id, "release")
             .await
-            .expect("authorize matching reconciliation pool")
+            .expect("authorize matching reconciliation pool"),
+        ReconciliationTrustPoolAuthorization::Matching
     );
-    assert!(
-        !store
-            .authorize_reconciliation_trust_pool(organization_id, claim.attempt_id, "untrusted",)
+    assert_eq!(
+        store
+            .authorize_reconciliation_trust_pool(organization_id, claim.attempt_id, "untrusted")
             .await
-            .expect("reject mismatched reconciliation pool")
+            .expect("reject mismatched reconciliation pool"),
+        ReconciliationTrustPoolAuthorization::Mismatched
+    );
+    assert_eq!(
+        store
+            .authorize_reconciliation_trust_pool(organization_id, Uuid::new_v4(), "release")
+            .await
+            .expect("allow a missing restored attempt to retire"),
+        ReconciliationTrustPoolAuthorization::Missing
     );
     assert!(
         !store

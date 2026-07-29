@@ -96,6 +96,8 @@ pub enum AgentError {
     OpenSessionTimeout,
     #[error("lease renewal RPC exceeded its safe deadline")]
     LeaseRenewalTimeout,
+    #[error("authority RPC exceeded its bounded lease deadline")]
+    AuthorityRpcTimeout,
     #[error("work poll RPC exceeded its bounded deadline")]
     PollTimeout,
     #[error("agent service was stopped")]
@@ -272,7 +274,7 @@ fn instance_lock_path(journal_path: &Path) -> PathBuf {
 async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<(), AgentError> {
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
     send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
-    worker::recover_finalizations(config, &mut client, receipt.session_epoch).await?;
+    worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await?;
     let mut reconciliation_tick = interval(RECONCILIATION_INTERVAL);
     reconciliation_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     reconciliation_tick.tick().await;

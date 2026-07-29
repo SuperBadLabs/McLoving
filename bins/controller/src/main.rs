@@ -19,7 +19,8 @@ use mcloving_agent_protocol::{
 use mcloving_controller_api::{ApiState, router};
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, NewLogChunk, Store, TerminalOutcome,
+    AgentReconciliationDisposition, ClaimRequest, NewLogChunk,
+    ReconciliationTrustPoolAuthorization, Store, TerminalOutcome,
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use sha2::{Digest, Sha256};
@@ -709,16 +710,16 @@ async fn require_reconciliation_trust_pool(
     organization_id: Uuid,
     attempt_id: Uuid,
 ) -> Result<(), Status> {
-    if store
+    match store
         .authorize_reconciliation_trust_pool(organization_id, attempt_id, &identity.trust_pool)
         .await
         .map_err(internal_store_error)?
     {
-        Ok(())
-    } else {
-        Err(Status::permission_denied(
+        ReconciliationTrustPoolAuthorization::Matching
+        | ReconciliationTrustPoolAuthorization::Missing => Ok(()),
+        ReconciliationTrustPoolAuthorization::Mismatched => Err(Status::permission_denied(
             "reconciliation attempt does not match the certificate trust pool",
-        ))
+        )),
     }
 }
 
