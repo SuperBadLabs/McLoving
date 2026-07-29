@@ -799,9 +799,9 @@ impl Store {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         }
-        let authority = sqlx::query_as::<_, (Uuid, Uuid, String, Option<Value>, bool)>(
+        let authority = sqlx::query_as::<_, (Uuid, Uuid, String, Option<Value>, bool, bool)>(
             "SELECT n.id, n.build_id, a.status, a.terminal_summary,
-                    b.cancellation_requested_at IS NOT NULL
+                    b.cancellation_requested_at IS NOT NULL, b.dag_mode
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id
@@ -837,7 +837,9 @@ impl Store {
         .bind(i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((node_id, build_id, status, terminal_summary, owner_cancelled)) = authority else {
+        let Some((node_id, build_id, status, terminal_summary, owner_cancelled, dag_mode)) =
+            authority
+        else {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         };
@@ -994,24 +996,36 @@ impl Store {
         .bind(json!({"reason": terminal_reason}))
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "UPDATE nodes
-             SET status = 'aborted'
-             WHERE id = $1 AND organization_id = $2",
-        )
-        .bind(node_id)
-        .bind(organization_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE builds
-             SET status = 'aborted', completed_at = clock_timestamp()
-             WHERE id = $1 AND organization_id = $2",
-        )
-        .bind(build_id)
-        .bind(organization_id)
-        .execute(&mut *tx)
-        .await?;
+        if dag_mode {
+            dag::advance_dag_after_attempt(
+                &mut tx,
+                organization_id,
+                build_id,
+                node_id,
+                attempt_id,
+                TerminalOutcome::Aborted,
+            )
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'aborted'
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(node_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE builds
+                 SET status = 'aborted', completed_at = clock_timestamp()
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(build_id)
+            .bind(organization_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         append_event_and_outbox(
             &mut tx,
             organization_id,

@@ -725,6 +725,10 @@ impl Store {
                   AND b.organization_id = n.organization_id
                  WHERE n.organization_id = $1
                    AND n.status = 'queued'
+                   AND (
+                       b.status = 'queued'
+                       OR (b.dag_mode AND b.status = 'running')
+                   )
                    AND n.required_capabilities <@ $2::text[]
                    AND n.required_trust_pool = $3
                    AND n.cancellation_requested_at IS NULL

@@ -321,7 +321,11 @@ pub(crate) async fn advance_dag_after_attempt(
     outcome: TerminalOutcome,
 ) -> Result<bool, StoreError> {
     let row = sqlx::query(
-        "SELECT b.dag_mode, b.cancellation_requested_at IS NOT NULL AS cancelled,
+        "SELECT b.dag_mode,
+                (
+                    b.cancellation_requested_at IS NOT NULL
+                    OR n.cancellation_requested_at IS NOT NULL
+                ) AS cancelled,
                 n.node_key, n.fail_fast, n.max_attempts, a.ordinal
          FROM builds AS b
          JOIN nodes AS n
