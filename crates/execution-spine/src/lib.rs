@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use mcloving_agent_runtime::executor::{
-    ExecutionError, ExecutionRequest, Termination, execute_with_spawn_hook,
+    ExecutionError, ExecutionMode, ExecutionRequest, Termination, execute_with_spawn_hook,
 };
 use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal, JournalError, SpoolEntry};
 use mcloving_controller_store::{ClaimedAttempt, NewLogChunk, Store, StoreError, TerminalOutcome};
@@ -69,12 +69,23 @@ struct ExecutionSpec {
 #[derive(Deserialize)]
 struct ProcessSpec {
     kind: String,
+    #[serde(default)]
+    mode: ProcessMode,
     program: String,
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
     env: std::collections::BTreeMap<String, String>,
     timeout_seconds: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProcessMode {
+    #[default]
+    Direct,
+    WindowsCmd,
+    PowerShell,
 }
 
 fn journal_authority_token(restore_epoch: i64, fence: i64) -> Result<u64, SpineError> {
@@ -218,6 +229,11 @@ pub async fn run_claim(
     let request = ExecutionRequest {
         workspace_root: config.workspace_root.clone(),
         workspace: workspace.clone(),
+        mode: match process.mode {
+            ProcessMode::Direct => ExecutionMode::Direct,
+            ProcessMode::WindowsCmd => ExecutionMode::WindowsCmd,
+            ProcessMode::PowerShell => ExecutionMode::PowerShell,
+        },
         program: PathBuf::from(&process.program),
         arguments: process.args.iter().map(OsString::from).collect(),
         environment: process
@@ -228,7 +244,7 @@ pub async fn run_claim(
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
-    let outcome = execute_with_spawn_hook(&request, cancellation.clone(), |process_group_id| {
+    let outcome = execute_with_spawn_hook(&request, cancellation.clone(), |process_id| {
         journal
             .transition(
                 &organization,
@@ -236,7 +252,7 @@ pub async fn run_claim(
                 journal_fence,
                 config.session_epoch,
                 AttemptPhase::Running,
-                Some(process_group_id),
+                Some(process_id),
             )
             .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
     })
@@ -295,7 +311,7 @@ pub async fn run_claim(
         journal_fence,
         config.session_epoch,
         transition,
-        Some(outcome.process_group_id),
+        Some(outcome.process_id),
     )?;
     let result = write_result(
         &config.workspace_root,
@@ -339,7 +355,7 @@ pub async fn run_claim(
             TerminalOutcome::Failed => AttemptPhase::Failed,
             TerminalOutcome::Aborted => AttemptPhase::Aborted,
         },
-        Some(outcome.process_group_id),
+        Some(outcome.process_id),
     )?;
     Ok(RunReceipt {
         build_id: claim.build_id,
