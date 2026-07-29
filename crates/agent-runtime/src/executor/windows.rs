@@ -289,7 +289,13 @@ mod tests {
         );
         let direct = execute(&direct, CancellationToken::new()).await.unwrap();
         assert_eq!(direct.termination, Termination::Exited);
-        assert_eq!(direct.exit_code, Some(0));
+        assert_eq!(
+            direct.exit_code,
+            Some(0),
+            "stdout={:?}; stderr={:?}",
+            fs::read_to_string(root.path().join("direct/spool/stdout.log")),
+            fs::read_to_string(root.path().join("direct/spool/stderr.log"))
+        );
         assert_eq!(direct.containment, Containment::WindowsJobObject);
 
         let command_directory = root.path().join("script directory");
@@ -304,7 +310,13 @@ mod tests {
             vec![OsString::from("hello world")],
         );
         let cmd = execute(&cmd, CancellationToken::new()).await.unwrap();
-        assert_eq!(cmd.exit_code, Some(0));
+        assert_eq!(
+            cmd.exit_code,
+            Some(0),
+            "stdout={:?}; stderr={:?}",
+            fs::read_to_string(root.path().join("cmd/spool/stdout.log")),
+            fs::read_to_string(root.path().join("cmd/spool/stderr.log"))
+        );
         assert!(
             fs::read_to_string(root.path().join("cmd/spool/stdout.log"))
                 .unwrap()
@@ -327,7 +339,13 @@ mod tests {
         let powershell = execute(&powershell, CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!(powershell.exit_code, Some(0));
+        assert_eq!(
+            powershell.exit_code,
+            Some(0),
+            "stdout={:?}; stderr={:?}",
+            fs::read_to_string(root.path().join("powershell/spool/stdout.log")),
+            fs::read_to_string(root.path().join("powershell/spool/stderr.log"))
+        );
         assert!(
             fs::read_to_string(root.path().join("powershell/spool/stdout.log"))
                 .unwrap()

@@ -368,7 +368,18 @@ fn append_quoted_argument(command: &mut OsString, value: &OsStr) -> Result<(), J
     if units.contains(&0) {
         return Err(JobError::invalid("command argument contains NUL"));
     }
-    command.push("\"");
+    // Match the Windows C-argv contract used by std::process::Command:
+    // switches and other whitespace-free arguments must remain unquoted,
+    // while empty or whitespace-bearing arguments need an outer quote pair.
+    // This distinction is observable for programs such as cmd.exe that parse
+    // their raw command line instead of using the C runtime decoder.
+    let quoted = units.is_empty()
+        || units
+            .iter()
+            .any(|unit| *unit == u16::from(b' ') || *unit == u16::from(b'\t'));
+    if quoted {
+        command.push("\"");
+    }
     let mut backslashes = 0;
     for unit in units {
         if unit == u16::from(b'\\') {
@@ -384,8 +395,12 @@ fn append_quoted_argument(command: &mut OsString, value: &OsStr) -> Result<(), J
         }
         backslashes = 0;
     }
-    push_backslashes(command, backslashes * 2);
-    command.push("\"");
+    if quoted {
+        push_backslashes(command, backslashes * 2);
+        command.push("\"");
+    } else {
+        push_backslashes(command, backslashes);
+    }
     Ok(())
 }
 
@@ -537,5 +552,25 @@ impl Drop for OwnedHandle {
         unsafe {
             CloseHandle(self.handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_arguments_quote_only_when_the_c_argv_contract_requires_it() {
+        let mut switch = OsString::new();
+        append_quoted_argument(&mut switch, OsStr::new("/D")).unwrap();
+        assert_eq!(switch, OsString::from("/D"));
+
+        let mut spaced = OsString::new();
+        append_quoted_argument(&mut spaced, OsStr::new("hello world")).unwrap();
+        assert_eq!(spaced, OsString::from("\"hello world\""));
+
+        let mut empty = OsString::new();
+        append_quoted_argument(&mut empty, OsStr::new("")).unwrap();
+        assert_eq!(empty, OsString::from("\"\""));
     }
 }
