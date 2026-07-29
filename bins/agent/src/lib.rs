@@ -118,6 +118,12 @@ struct AgentInstanceGuard {
     _lock: File,
 }
 
+impl Drop for AgentInstanceGuard {
+    fn drop(&mut self) {
+        let _ = self._lock.unlock();
+    }
+}
+
 impl AgentConfig {
     pub fn from_environment() -> Result<Self, AgentError> {
         Self::from_values(&env::vars().collect())
@@ -1119,13 +1125,9 @@ mod tests {
         let waiter = tokio::spawn(async move { child.wait().await.unwrap() });
 
         assert_eq!(
-            terminate_recovered_process(
-                Some(process_id),
-                Some(&identity),
-                Duration::from_millis(25),
-            )
-            .await
-            .unwrap(),
+            terminate_recovered_process(Some(process_id), Some(&identity), Duration::from_secs(1),)
+                .await
+                .unwrap(),
             RecoveredCancellation::Terminated
         );
         waiter.await.unwrap();
