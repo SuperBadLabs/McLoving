@@ -355,8 +355,7 @@ async fn wait_for_leader_exit_and_cleanup(
 ) -> Result<std::process::ExitStatus, ExecutionError> {
     #[cfg(target_os = "linux")]
     {
-        if let Err(error) = wait_for_unreaped_leader_exit(process_id, Duration::from_secs(5)).await
-        {
+        if let Err(error) = wait_for_unreaped_leader_exit(process_id).await {
             signal_group(process_group_id, Signal::SIGKILL)?;
             let containment =
                 wait_for_anchored_descendants_to_exit(process_id, process_group_id).await;
@@ -423,7 +422,7 @@ async fn terminate_and_prove_group_empty(
         {
             signal_group(process_group_id, Signal::SIGKILL)?;
         }
-        wait_for_unreaped_leader_exit(process_id, Duration::from_secs(5)).await?;
+        wait_for_unreaped_leader_exit_bounded(process_id, Duration::from_secs(5)).await?;
         let containment = wait_for_anchored_descendants_to_exit(process_id, process_group_id).await;
         let status = child.wait().await?;
         containment.map_err(|error| containment_unverified(process_id, error))?;
@@ -509,22 +508,27 @@ async fn wait_for_anchored_descendants_to_exit(
 }
 
 #[cfg(target_os = "linux")]
-async fn wait_for_unreaped_leader_exit(
-    process_id: u32,
-    timeout: Duration,
-) -> Result<(), ExecutionError> {
-    let deadline = Instant::now() + timeout;
+async fn wait_for_unreaped_leader_exit(process_id: u32) -> Result<(), ExecutionError> {
     loop {
         if leader_exited_without_reaping(process_id)? {
             return Ok(());
         }
-        if Instant::now() >= deadline {
-            return Err(ExecutionError::Io(std::io::Error::other(
-                "process-group leader did not exit within the bounded wait",
-            )));
-        }
         sleep(Duration::from_millis(10)).await;
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_unreaped_leader_exit_bounded(
+    process_id: u32,
+    timeout: Duration,
+) -> Result<(), ExecutionError> {
+    tokio::time::timeout(timeout, wait_for_unreaped_leader_exit(process_id))
+        .await
+        .map_err(|_| {
+            ExecutionError::Io(std::io::Error::other(
+                "process-group leader did not exit within the bounded termination wait",
+            ))
+        })?
 }
 
 #[cfg(target_os = "linux")]
@@ -762,6 +766,36 @@ mod tests {
         assert_eq!(outcome.stdout.bytes, 8);
         let expected_digest: [u8; 32] = Sha256::digest(b"mcloving").into();
         assert_eq!(outcome.stdout.digest, expected_digest);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn normal_execution_is_not_capped_by_the_containment_wait() {
+        let root = tempfile::tempdir().unwrap();
+        let request = ExecutionRequest {
+            workspace_root: root.path().to_owned(),
+            workspace: PathBuf::from("org/long-running-success"),
+            mode: ExecutionMode::Direct,
+            program: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                OsString::from("-c"),
+                OsString::from("sleep 6; printf completed"),
+            ],
+            environment: BTreeMap::new(),
+            output_limit_bytes: None,
+            timeout: Duration::from_secs(10),
+            termination_grace: Duration::from_millis(100),
+        };
+
+        let outcome = execute(&request, CancellationToken::new()).await.unwrap();
+        assert_eq!(outcome.termination, Termination::Exited);
+        assert_eq!(outcome.exit_code, Some(0));
+        assert_eq!(
+            fs::read(root.path().join(outcome.stdout.relative_path))
+                .await
+                .unwrap(),
+            b"completed"
+        );
     }
 
     #[tokio::test]
