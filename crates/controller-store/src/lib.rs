@@ -6,8 +6,13 @@ use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 pub mod authz;
+mod dag;
 mod scheduler;
 
+pub use dag::{
+    DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
+    DagNodeKind, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode, compile_matrix,
+};
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
@@ -30,6 +35,8 @@ pub const RECOVERY_OPERATIONS_V6: &str = include_str!("../migrations/0006_recove
 pub const AGENT_SESSIONS_V7: &str = include_str!("../migrations/0007_agent_sessions.sql");
 /// Trust-pool routing for executable nodes.
 pub const NODE_TRUST_POOL_V8: &str = include_str!("../migrations/0008_node_trust_pool.sql");
+/// Durable bounded pipeline-DAG scheduling truth.
+pub const PIPELINE_DAG_V9: &str = include_str!("../migrations/0009_pipeline_dag.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -324,6 +331,8 @@ pub enum StoreError {
     InvalidAgentSession,
     #[error("required agent trust pool must be non-empty")]
     InvalidTrustPool,
+    #[error("invalid pipeline DAG: {0}")]
+    InvalidDag(String),
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -364,6 +373,7 @@ impl Store {
         apply_migration(&mut tx, 6, RECOVERY_OPERATIONS_V6).await?;
         apply_migration(&mut tx, 7, AGENT_SESSIONS_V7).await?;
         apply_migration(&mut tx, 8, NODE_TRUST_POOL_V8).await?;
+        apply_migration(&mut tx, 9, PIPELINE_DAG_V9).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1221,6 +1231,38 @@ impl Store {
             .bind(format!("mcloving.scheduler.{organization_id}"))
             .execute(&mut *tx)
             .await?;
+        let dag_mode = sqlx::query_scalar::<_, bool>(
+            "SELECT dag_mode
+             FROM builds
+             WHERE organization_id = $1
+               AND project_id = $2
+               AND id = $3
+               AND status IN ('queued', 'running')
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if dag_mode == Some(true) {
+            if !dag::cancel_dag_build(&mut tx, organization_id, build_id).await? {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            append_event_and_outbox(
+                &mut tx,
+                organization_id,
+                build_id,
+                "build.cancellation_requested",
+                json!({
+                    "dag": true,
+                }),
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(true);
+        }
         let attempt = sqlx::query_as::<_, (Uuid, Uuid, String, bool)>(
             "SELECT a.id, n.id, b.status,
                     b.cancellation_requested_at IS NOT NULL
@@ -2053,26 +2095,37 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         };
-        sqlx::query(
-            "UPDATE nodes
-             SET status = $3
-             WHERE organization_id = $1 AND id = $2",
+        if !dag::advance_dag_after_attempt(
+            &mut tx,
+            organization_id,
+            build_id,
+            node_id,
+            attempt_id,
+            outcome,
         )
-        .bind(organization_id)
-        .bind(node_id)
-        .bind(outcome.as_str())
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE builds
-             SET status = $3, completed_at = clock_timestamp()
-             WHERE organization_id = $1 AND id = $2",
-        )
-        .bind(organization_id)
-        .bind(build_id)
-        .bind(outcome.as_str())
-        .execute(&mut *tx)
-        .await?;
+        .await?
+        {
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = $3
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(node_id)
+            .bind(outcome.as_str())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE builds
+                 SET status = $3, completed_at = clock_timestamp()
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(build_id)
+            .bind(outcome.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
         append_event_and_outbox(
             &mut tx,
             organization_id,
@@ -2151,9 +2204,10 @@ impl Store {
             .bind(format!("mcloving.retry.{attempt_id}"))
             .execute(&mut *tx)
             .await?;
-        let current = sqlx::query_as::<_, (Uuid, Uuid, i32, String, bool, bool)>(
+        let current = sqlx::query_as::<_, (Uuid, Uuid, i32, String, bool, bool, bool)>(
             "SELECT n.id, n.build_id, a.ordinal, a.status,
                     b.cancellation_requested_at IS NOT NULL,
+                    b.dag_mode,
                     EXISTS (
                         SELECT 1
                         FROM build_events AS e
@@ -2174,13 +2228,21 @@ impl Store {
         .bind(attempt_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((node_id, build_id, ordinal, status, cancelled, reconciliation_terminalized)) =
-            current
+        let Some((
+            node_id,
+            build_id,
+            ordinal,
+            status,
+            cancelled,
+            dag_mode,
+            reconciliation_terminalized,
+        )) = current
         else {
             tx.rollback().await?;
             return Ok(RetryDecision::Ineligible);
         };
-        if cancelled
+        if dag_mode
+            || cancelled
             || reconciliation_terminalized
             || !matches!(status.as_str(), "failed" | "reconciliation_required")
         {
@@ -3371,26 +3433,37 @@ impl Store {
         .bind(&summary)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "UPDATE nodes
-             SET status = $3
-             WHERE id = $1 AND organization_id = $2",
+        if !dag::advance_dag_after_attempt(
+            &mut tx,
+            organization_id,
+            build_id,
+            node_id,
+            attempt_id,
+            outcome,
         )
-        .bind(node_id)
-        .bind(organization_id)
-        .bind(outcome.as_str())
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "UPDATE builds
-             SET status = $3, completed_at = clock_timestamp()
-             WHERE id = $1 AND organization_id = $2",
-        )
-        .bind(build_id)
-        .bind(organization_id)
-        .bind(outcome.as_str())
-        .execute(&mut *tx)
-        .await?;
+        .await?
+        {
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = $3
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(node_id)
+            .bind(organization_id)
+            .bind(outcome.as_str())
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE builds
+                 SET status = $3, completed_at = clock_timestamp()
+                 WHERE id = $1 AND organization_id = $2",
+            )
+            .bind(build_id)
+            .bind(organization_id)
+            .bind(outcome.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
         append_event_and_outbox(
             &mut tx,
             organization_id,

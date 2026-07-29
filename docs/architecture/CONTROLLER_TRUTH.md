@@ -1,6 +1,6 @@
 # Controller truth v1
 
-Status: implemented through batch W2-A.
+Status: implemented through batch W3-A.
 
 ## Transaction boundary
 
@@ -68,13 +68,45 @@ rather than rewriting that history.
 Migrations use a database advisory lock and a version ledger, so concurrent
 controller startup installs each migration exactly once.
 
-## Scheduler boundary
+## Scheduler and pipeline-DAG boundary
 
-The Wave 1 scheduler is intentionally single-node. A tenant-scoped
-transaction advisory lock serializes claims. Candidate rows are selected with
-`FOR UPDATE SKIP LOCKED`, the partial claim-order index, required-capability
-containment, priority, queue age, and a caller-provided deterministic fairness
-seed.
+Pipeline structure is first-class PostgreSQL truth rather than controller
+memory. A DAG admission transaction persists the build, every logical node,
+every first attempt, every typed dependency edge, one event, and one outbox
+record. An exact project/idempotency-key replay returns the original
+identifiers. A conflicting pipeline digest or node set fails closed.
+
+Matrix axes and values are sorted before Cartesian expansion. Admission caps
+axes at 8, values per axis at 32, and total cells at 256. DAG admission caps
+logical nodes at 256, edges at 4,096, retries per node at 16, contract text at
+256 bytes, and each execution specification at 256 KiB. Node keys are unique,
+all dependencies exist, and a deterministic topological walk rejects cycles
+before the transaction begins.
+
+Every node carries an exact trust pool and normalized
+`platform:<platform>` capability. Active-active claims require both exact
+constraints and recheck durable dependency conditions in the locked claim
+transaction. Candidate rows use `FOR UPDATE SKIP LOCKED`, priority, queue age,
+and a caller-provided deterministic fairness seed. `succeeded` edges release
+only after successful logical parents; `completed` edges release after any
+terminal logical parent. Join nodes require at least two parents. Post nodes
+require completion-only parents so cleanup can run after success, failure,
+fail-fast cancellation, or skip.
+
+Attempts retain individual terminal history. A retryable failure creates one
+immutable `retry_of` child and returns the logical node to the queue in the
+same transaction. Only exhaustion writes the node's single
+`logical_outcome`. Fail-fast marks active peers for lease-polled cancellation,
+skips unstarted non-post peers, and leaves completion-only post nodes blocked
+until all parents settle. Owner cancellation atomically aborts all unstarted
+nodes and marks active peers for the same fenced cancellation path.
+
+After each exhausted logical outcome, the controller repeatedly advances
+newly impossible and newly ready nodes, then derives build status from all
+logical outcomes. No in-memory queue is required for restart recovery.
+Terminal replay is identical-only, dependency advancement is transactional,
+and concurrent replicas serialize graph transitions through locked build,
+node, and attempt rows.
 
 Every offer increments the attempt fence. Expired offers return to the queue
 without changing the fence; the next offer increments it before work can be
@@ -110,6 +142,11 @@ The real-PostgreSQL gate proves:
 - one winner from 16 concurrent terminal publishers, with uncertain effects
   routed to explicit reconciliation rather than terminalized;
 - capability-filtered scheduling and stable wait diagnostics;
+- deterministic bounded matrices, parallel platform-specific claims,
+  dependency-safe joins, bounded durable retries, completion-only post work,
+  fail-fast active cancellation and unstarted skip, controller restart
+  recovery, owner cancellation, terminal monotonicity, and one logical outcome
+  per DAG node;
 - accepted-lease expiry, safe requeue and fence increment, uncertain-effect
   reconciliation routing, and stale-result rejection;
 - a tenant-prefixed scheduler claim-order index;
