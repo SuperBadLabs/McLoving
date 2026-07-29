@@ -69,8 +69,8 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .env("MCLOVING_LISTEN", format!("127.0.0.1:{port}"))
         .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
         .env("MCLOVING_AGENT_ID", "embedded-test-agent")
-        .env("MCLOVING_AGENT_CAPABILITIES", "linux")
-        .env("MCLOVING_AGENT_TRUST_POOL", "trusted-build")
+        .env("MCLOVING_AGENT_CAPABILITIES", "windows")
+        .env("MCLOVING_AGENT_TRUST_POOL", "trusted-windows")
         .env("MCLOVING_LEASE_SECONDS", "5")
         .env("MCLOVING_POLL_MILLISECONDS", "10")
         .env("MCLOVING_CANCELLATION_POLL_MILLISECONDS", "50")
@@ -84,11 +84,12 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
     let client = Client::new(&format!("http://127.0.0.1:{port}"), TOKEN);
     wait_until_listening(&client, organization_id).await;
     let admission = client
-        .submit_in_pool(
+        .submit_on_platform_in_pool(
             organization_id,
             project_id,
             "binary-e2e",
-            "trusted-build",
+            "windows",
+            "trusted-windows",
             PIPELINE.to_owned(),
         )
         .await

@@ -28,6 +28,8 @@ enum Command {
         idempotency_key: String,
         #[arg(long, default_value = "trusted-linux")]
         trust_pool: String,
+        #[arg(long, default_value = "linux", value_parser = ["linux", "windows"])]
+        platform: String,
     },
     Status {
         build: Uuid,
@@ -55,6 +57,7 @@ async fn main() -> Result<()> {
             pipeline,
             idempotency_key,
             trust_pool,
+            platform,
         } => {
             let project = required_project(arguments.project)?;
             let source = tokio::fs::read_to_string(&pipeline)
@@ -62,10 +65,11 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("read {}", pipeline.display()))?;
             print_json(
                 &client
-                    .submit_in_pool(
+                    .submit_on_platform_in_pool(
                         arguments.organization,
                         project,
                         &idempotency_key,
+                        &platform,
                         &trust_pool,
                         source,
                     )

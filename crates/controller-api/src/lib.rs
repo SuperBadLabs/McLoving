@@ -17,7 +17,9 @@ use uuid::Uuid;
 
 pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 pub const TRUST_POOL_HEADER: &str = "mcloving-trust-pool";
+pub const PLATFORM_HEADER: &str = "mcloving-platform";
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
+const DEFAULT_PLATFORM: &str = "linux";
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -168,6 +170,7 @@ async fn submit(
 ) -> Result<(StatusCode, Json<AdmissionResponse>), ApiError> {
     authorize(&state, &headers)?;
     let required_trust_pool = submission_trust_pool(&headers)?;
+    let required_platform = submission_platform(&headers)?;
     let idempotency_key = headers
         .get(IDEMPOTENCY_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -225,7 +228,7 @@ async fn submit(
             idempotency_key: idempotency_key.to_owned(),
             pipeline_digest: digest,
             node_key: stage.id.clone(),
-            required_capabilities: vec!["linux".to_owned()],
+            required_capabilities: vec![required_platform],
             required_trust_pool,
             priority: 0,
             execution_spec,
@@ -265,6 +268,25 @@ fn invalid_trust_pool() -> ApiError {
         StatusCode::BAD_REQUEST,
         "invalid_trust_pool",
         "trust pool must be non-empty and contain no surrounding whitespace",
+    )
+}
+
+fn submission_platform(headers: &HeaderMap) -> Result<String, ApiError> {
+    let value = match headers.get(PLATFORM_HEADER) {
+        Some(value) => value.to_str().map_err(|_| invalid_platform())?,
+        None => DEFAULT_PLATFORM,
+    };
+    if !matches!(value, "linux" | "windows") {
+        return Err(invalid_platform());
+    }
+    Ok(value.to_owned())
+}
+
+fn invalid_platform() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "invalid_platform",
+        "platform must be exactly linux or windows",
     )
 }
 
@@ -526,6 +548,26 @@ impl Client {
         trust_pool: &str,
         source: String,
     ) -> Result<AdmissionResponse, ClientError> {
+        self.submit_on_platform_in_pool(
+            organization_id,
+            project_id,
+            idempotency_key,
+            DEFAULT_PLATFORM,
+            trust_pool,
+            source,
+        )
+        .await
+    }
+
+    pub async fn submit_on_platform_in_pool(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        idempotency_key: &str,
+        platform: &str,
+        trust_pool: &str,
+        source: String,
+    ) -> Result<AdmissionResponse, ClientError> {
         self.send(
             self.inner
                 .post(format!(
@@ -533,6 +575,7 @@ impl Client {
                     self.base_url
                 ))
                 .header(IDEMPOTENCY_HEADER, idempotency_key)
+                .header(PLATFORM_HEADER, platform)
                 .header(TRUST_POOL_HEADER, trust_pool)
                 .header("content-type", "application/yaml")
                 .body(source),
@@ -691,5 +734,23 @@ mod tests {
         let error = submission_trust_pool(&headers).expect_err("reject padded trust pool");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.code, "invalid_trust_pool");
+    }
+
+    #[test]
+    fn submission_platform_is_explicit_and_closed() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            submission_platform(&headers).expect("default platform"),
+            DEFAULT_PLATFORM
+        );
+        headers.insert(PLATFORM_HEADER, "windows".parse().unwrap());
+        assert_eq!(
+            submission_platform(&headers).expect("explicit platform"),
+            "windows"
+        );
+        headers.insert(PLATFORM_HEADER, "macos".parse().unwrap());
+        let error = submission_platform(&headers).expect_err("reject unsupported platform");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "invalid_platform");
     }
 }
