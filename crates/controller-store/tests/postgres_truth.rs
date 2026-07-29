@@ -4799,6 +4799,49 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
         .expect("replay exact DAG admission");
     assert!(!replay.created);
     assert_eq!(replay.build_id, admission.build_id);
+    let mut changed_linux = dag_node("linux", DagNodeKind::Work, vec![], "linux", "build");
+    changed_linux.max_attempts = 2;
+    changed_linux.execution_spec = json!({"program": "false", "node": "linux"});
+    let changed_replay = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "parallel-retry-join-post".to_owned(),
+            pipeline_digest: [0xd4; 32],
+            priority: 0,
+            nodes: vec![
+                changed_linux,
+                dag_node("windows", DagNodeKind::Work, vec![], "windows", "build"),
+                dag_node(
+                    "join",
+                    DagNodeKind::Join,
+                    vec![
+                        DagDependency {
+                            node_key: "linux".to_owned(),
+                            condition: DependencyCondition::Succeeded,
+                        },
+                        DagDependency {
+                            node_key: "windows".to_owned(),
+                            condition: DependencyCondition::Succeeded,
+                        },
+                    ],
+                    "linux",
+                    "join",
+                ),
+                dag_node(
+                    "post",
+                    DagNodeKind::Post,
+                    vec![DagDependency {
+                        node_key: "join".to_owned(),
+                        condition: DependencyCondition::Completed,
+                    }],
+                    "linux",
+                    "post",
+                ),
+            ],
+        })
+        .await;
+    assert!(matches!(changed_replay, Err(StoreError::InvalidDag(_))));
 
     let linux_store = store.clone();
     let windows_store = store.clone();

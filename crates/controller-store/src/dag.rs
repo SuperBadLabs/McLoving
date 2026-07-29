@@ -191,12 +191,13 @@ impl Store {
         validate_dag_contract(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         let build_id = Uuid::new_v4();
+        let contract = normalized_dag_contract(input);
         let inserted = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO builds (
                  id, organization_id, project_id, idempotency_key,
-                 pipeline_digest, status, priority, dag_mode
+                 pipeline_digest, status, priority, dag_mode, dag_contract
              )
-             VALUES ($1, $2, $3, $4, $5, 'queued', $6, true)
+             VALUES ($1, $2, $3, $4, $5, 'queued', $6, true, $7)
              ON CONFLICT (project_id, idempotency_key) DO NOTHING
              RETURNING id",
         )
@@ -206,11 +207,12 @@ impl Store {
         .bind(&input.idempotency_key)
         .bind(input.pipeline_digest.as_slice())
         .bind(input.priority)
+        .bind(&contract)
         .fetch_optional(&mut *tx)
         .await?;
 
         let Some(build_id) = inserted else {
-            let admission = existing_dag_admission(&mut tx, input).await?;
+            let admission = existing_dag_admission(&mut tx, input, &contract).await?;
             tx.commit().await?;
             return Ok(admission);
         };
@@ -787,18 +789,21 @@ async fn derive_build_outcome(
 async fn existing_dag_admission(
     tx: &mut Transaction<'_, Postgres>,
     input: &NewDagBuild,
+    contract: &Value,
 ) -> Result<DagAdmission, StoreError> {
-    let row = sqlx::query_as::<_, (Uuid, Vec<u8>, bool)>(
-        "SELECT id, pipeline_digest, dag_mode
+    let row = sqlx::query_as::<_, (Uuid, Vec<u8>, bool, bool)>(
+        "SELECT id, pipeline_digest, dag_mode,
+                dag_contract IS NOT DISTINCT FROM $3 AS contract_matches
          FROM builds
          WHERE project_id = $1 AND idempotency_key = $2",
     )
     .bind(input.project_id)
     .bind(&input.idempotency_key)
+    .bind(contract)
     .fetch_one(&mut **tx)
     .await?;
-    let (build_id, digest, dag_mode) = row;
-    if !dag_mode || digest != input.pipeline_digest {
+    let (build_id, digest, dag_mode, contract_matches) = row;
+    if !dag_mode || digest != input.pipeline_digest || !contract_matches {
         return Err(StoreError::InvalidDag(
             "idempotency key already belongs to a different build contract".to_owned(),
         ));
@@ -843,6 +848,52 @@ async fn existing_dag_admission(
         build_id,
         nodes,
         created: false,
+    })
+}
+
+fn normalized_dag_contract(input: &NewDagBuild) -> Value {
+    let mut nodes = input.nodes.iter().collect::<Vec<_>>();
+    nodes.sort_by(|left, right| left.node_key.cmp(&right.node_key));
+    let nodes = nodes
+        .into_iter()
+        .map(|node| {
+            let mut dependencies = node.dependencies.iter().collect::<Vec<_>>();
+            dependencies.sort_by(|left, right| {
+                left.node_key
+                    .cmp(&right.node_key)
+                    .then_with(|| left.condition.as_str().cmp(right.condition.as_str()))
+            });
+            let dependencies = dependencies
+                .into_iter()
+                .map(|dependency| {
+                    json!({
+                        "node_key": dependency.node_key,
+                        "condition": dependency.condition.as_str(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut capabilities = node.required_capabilities.clone();
+            capabilities.push(format!("platform:{}", node.required_platform));
+            capabilities.sort();
+            capabilities.dedup();
+            json!({
+                "node_key": node.node_key,
+                "kind": node.kind.as_str(),
+                "dependencies": dependencies,
+                "required_capabilities": capabilities,
+                "required_platform": node.required_platform,
+                "required_trust_pool": node.required_trust_pool,
+                "priority": node.priority,
+                "execution_spec": node.execution_spec,
+                "fail_fast": node.fail_fast,
+                "max_attempts": node.max_attempts,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "version": 1,
+        "priority": input.priority,
+        "nodes": nodes,
     })
 }
 

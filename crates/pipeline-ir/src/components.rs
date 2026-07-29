@@ -18,6 +18,7 @@ const MAX_COMPONENT_OUTPUTS: usize = 128;
 const MAX_COMPONENT_DEPENDENCIES: usize = 128;
 const MAX_EXPANDED_COMPONENTS: usize = 128;
 const EXPANDED_NAME_PREFIX: &str = "expanded.";
+const EXPANDED_STAGE_ID_PREFIX_MAX_BYTES: usize = "c127.".len();
 
 /// The first reusable-component contract.
 pub const COMPONENT_V1: ComponentVersion = ComponentVersion { major: 1, minor: 0 };
@@ -148,6 +149,18 @@ impl VersionedComponent {
                 error.message,
             )
         })?;
+        if self
+            .pipeline
+            .stages
+            .iter()
+            .any(|stage| stage.id.len() > MAX_IR_STRING_BYTES - EXPANDED_STAGE_ID_PREFIX_MAX_BYTES)
+        {
+            return Err(ComponentError::new(
+                ComponentErrorCode::InvalidDefinition,
+                "$.pipeline.stages.id",
+                "component stage ID leaves no room for the generated expansion prefix",
+            ));
+        }
         if self
             .pipeline
             .parameters

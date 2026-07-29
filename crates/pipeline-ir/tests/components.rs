@@ -113,6 +113,33 @@ fn component_names_reserve_space_for_the_expansion_prefix() {
 }
 
 #[test]
+fn component_stage_ids_reserve_space_for_the_longest_expansion_prefix() {
+    let mut template = component(TEMPLATE_A, 1);
+    template.pipeline.stages[0].id = "x".repeat(16 * 1024 - "c127.".len());
+    assert!(
+        VersionedComponent::new(
+            "bounded-stage",
+            template.pipeline.clone(),
+            BTreeMap::new(),
+            Vec::new(),
+            provenance(1),
+        )
+        .is_ok()
+    );
+
+    template.pipeline.stages[0].id.push('x');
+    let rejected = VersionedComponent::new(
+        "oversized-stage",
+        template.pipeline,
+        BTreeMap::new(),
+        Vec::new(),
+        provenance(1),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.code, ComponentErrorCode::InvalidDefinition);
+}
+
+#[test]
 fn expansion_identity_excludes_source_presentation_provenance() {
     let first = component(TEMPLATE_A, 1);
     let second = component(TEMPLATE_B, 9);

@@ -1,5 +1,10 @@
 ALTER TABLE builds
-    ADD COLUMN dag_mode boolean NOT NULL DEFAULT false;
+    ADD COLUMN dag_mode boolean NOT NULL DEFAULT false,
+    ADD COLUMN dag_contract jsonb,
+    ADD CONSTRAINT builds_dag_contract_check CHECK (
+        (dag_mode AND dag_contract IS NOT NULL)
+        OR (NOT dag_mode AND dag_contract IS NULL)
+    );
 
 ALTER TABLE nodes DROP CONSTRAINT nodes_status_check;
 ALTER TABLE nodes ADD CONSTRAINT nodes_status_check CHECK (
