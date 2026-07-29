@@ -26,8 +26,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W1-B | AGENT-001, AGENT-002, AGENT-003 | DONE | Outbound mTLS contract, fenced sessions, durable journal, Linux process-tree containment |
 | W1-C | UX-001, E2E-001, E2E-002, E2E-003 | DONE | Truthful CLI-driven end-to-end spine and recovery |
 | W2-A | CTRL-003, OPS-001, OPS-002 | DONE | PR #7 merged recoverable execution, staged object truth, restore fencing, retention, and legal holds |
-| W2-B | WIN-001, WIN-002, WIN-003 | ACTIVE | PR #8 provides the Windows service/runtime foundation and hosted destructive fixture; production work delivery, restart recovery, atomic Job assignment, and persistent-host parity remain explicit gates |
-| W2-C | AGENT-004, AGENT-005, AGENT-006, WIN-004 | PENDING | Next batch: production remote work protocol, finalization recovery, non-reusable containment identity, and atomic Windows Job membership |
+| W2-B | WIN-001, WIN-002, WIN-003 | DONE | PR #8 merged the Windows service/runtime foundation and hosted destructive fixture; the three product tickets remain active until their production work, recovery, atomic Job, and persistent-host gates close |
+| W2-C | AGENT-004, AGENT-005, AGENT-006, WIN-004 | ACTIVE | Production remote work protocol, finalization recovery, non-reusable containment identity, and atomic Windows Job membership |
 
 ## Wave 0 — Architecture and foundation
 
@@ -96,14 +96,16 @@ canary, and release-readiness assessment.
 
 ## Current next batch
 
-`W2-B` is active on `codex/wave2-windows-agent`: `WIN-001`, `WIN-002`,
-and `WIN-003`. PR #8 is a foundation checkpoint, not a production-agent
-closure: it must clear pinned Linux gates plus the hosted Windows service,
-executor, ACL, Job Object, journal, and destructive fixture, while leaving all
-three tickets open. Review proved that production remote work delivery,
-checksummed finalization recovery, restart-safe Unix containment identity, and
-atomic-at-creation Windows Job membership are still required. Those four
-release gates are the next coherent batch `W2-C`.
+`W2-B` merged through PR #8 at protected-main commit `776d842`. It is a
+completed foundation batch, not closure of `WIN-001`, `WIN-002`, or `WIN-003`;
+those tickets remain active for the explicit production and persistent-host
+gates above.
+
+`W2-C` is active on `codex/wave2-agent-completion`: `AGENT-004`,
+`AGENT-005`, `AGENT-006`, and `WIN-004`. Implement production remote
+claim/accept/lease/work delivery first, then recover checksummed finalization,
+add restart-safe Unix containment identity, and remove the Windows
+pre-assignment crash window.
 
 After `W2-C`, the Windows tickets still require the full controller-driven
 hosted campaign. `WIN-003` additionally requires a signed package on a
