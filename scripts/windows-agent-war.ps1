@@ -41,11 +41,16 @@ $root = Join-Path $env:RUNNER_TEMP "mcloving-windows-war"
 $journal = Join-Path $root "agent.db"
 $workspace = Join-Path $root "workspaces"
 $treeScript = Join-Path $root "tree.ps1"
+$boundaryScript = Join-Path $root "must-not-run.ps1"
 $lifecycleService = "McLovingAgentLifecycleCi"
 $crashService = "McLovingAgentCrashCi"
+$containedService = "McLovingAgentContainedBoundaryCi"
+$recordedService = "McLovingAgentRecordedBoundaryCi"
 
 Remove-TestService $lifecycleService
 Remove-TestService $crashService
+Remove-TestService $containedService
+Remove-TestService $recordedService
 Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Path $root, $workspace | Out-Null
 
@@ -70,6 +75,58 @@ try {
     throw "journal health failed after service restart: $health"
   }
   Remove-TestService $lifecycleService
+
+  @'
+"unexpected-resume" | Set-Content -Encoding ascii ran.txt
+Start-Sleep -Seconds 300
+'@ | Set-Content -Encoding utf8NoBOM $boundaryScript
+
+  $boundaries = @(
+    @{
+      Name = $containedService
+      Boundary = "contained-before-record"
+      Journal = (Join-Path $root "contained-boundary.db")
+      Marker = (Join-Path $root "contained-boundary.pid")
+      Workspace = (Join-Path $workspace "service-boundary\contained-before-record")
+    },
+    @{
+      Name = $recordedService
+      Boundary = "recorded-before-resume"
+      Journal = (Join-Path $root "recorded-boundary.db")
+      Marker = (Join-Path $root "recorded-boundary.pid")
+      Workspace = (Join-Path $workspace "service-boundary\recorded-before-resume")
+    }
+  )
+  foreach ($boundary in $boundaries) {
+    $boundaryPath = "`"$AgentBinary`" service-creation-boundary-smoke " +
+      "`"$($boundary.Journal)`" `"$workspace`" `"$boundaryScript`" " +
+      "`"$($boundary.Marker)`" $($boundary.Boundary)"
+    New-Service -Name $boundary.Name -BinaryPathName $boundaryPath `
+      -StartupType Manual | Out-Null
+    Start-Service $boundary.Name
+    Wait-Until { Test-Path $boundary.Marker } "$($boundary.Boundary) marker"
+    $workloadPid = [int](Get-Content $boundary.Marker)
+    $boundaryServicePid = [int](
+      Get-CimInstance Win32_Service -Filter "Name='$($boundary.Name)'"
+    ).ProcessId
+    if ($workloadPid -le 0 -or $boundaryServicePid -le 0) {
+      throw "$($boundary.Boundary) returned an invalid process ID"
+    }
+    if ($null -eq (Get-Process -Id $workloadPid -ErrorAction SilentlyContinue)) {
+      throw "$($boundary.Boundary) workload disappeared before crash injection"
+    }
+    Stop-Process -Id $boundaryServicePid -Force
+    Wait-Until {
+      $null -eq (Get-Process -Id $workloadPid -ErrorAction SilentlyContinue)
+    } "$($boundary.Boundary) atomic Job cleanup"
+    Wait-Until {
+      (Get-Service -Name $boundary.Name).Status -eq "Stopped"
+    } "$($boundary.Boundary) SCM crash observation"
+    if (Test-Path (Join-Path $boundary.Workspace "ran.txt")) {
+      throw "$($boundary.Boundary) suspended workload ran before durable resume"
+    }
+    Remove-TestService $boundary.Name
+  }
 
   @'
 $child = Start-Process powershell.exe -PassThru -ArgumentList @(
@@ -110,9 +167,11 @@ Wait-Process -Id $child.Id
   Stop-Service $crashService
   Remove-TestService $crashService
 
-  Write-Output "windows-agent-war-ok lifecycle=2 crash_cleanup=1 reconciliation=1"
+  Write-Output "windows-agent-war-ok lifecycle=2 atomic_boundaries=2 crash_cleanup=1 reconciliation=1"
 }
 finally {
   Remove-TestService $lifecycleService
   Remove-TestService $crashService
+  Remove-TestService $containedService
+  Remove-TestService $recordedService
 }

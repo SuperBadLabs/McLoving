@@ -715,6 +715,77 @@ pub async fn run_execution_service_smoke(
     .map_err(|error| AgentError::Io(std::io::Error::other(error)))
 }
 
+/// Holds a newly created Windows workload at a named pre-resume boundary.
+///
+/// The hosted war gate force-kills the service while this callback is blocked.
+/// Because `CreateProcessW` atomically applied Job-list membership, closing the
+/// service's Job handle must remove the suspended workload at both the
+/// contained-before-record and recorded-before-resume boundaries.
+#[cfg(windows)]
+pub async fn run_creation_boundary_service_smoke(
+    journal_path: &Path,
+    workspace_root: &Path,
+    script: &Path,
+    marker: &Path,
+    record_before_pause: bool,
+    stop: CancellationToken,
+) -> Result<(), AgentError> {
+    let mut journal = Journal::open(journal_path)?;
+    let session_epoch = journal.reserve_session_epoch(0)?;
+    let boundary = if record_before_pause {
+        "recorded-before-resume"
+    } else {
+        "contained-before-record"
+    };
+    let acceptance = Acceptance {
+        organization_id: "service-boundary".to_owned(),
+        attempt_id: boundary.to_owned(),
+        fence_token: 1,
+        session_epoch,
+        payload_digest: [0x58; 32],
+        workspace: PathBuf::from(format!("service-boundary/{boundary}")),
+    };
+    journal.accept(&acceptance)?;
+    let request = ExecutionRequest {
+        workspace_root: workspace_root.to_owned(),
+        workspace: acceptance.workspace.clone(),
+        mode: ExecutionMode::PowerShell,
+        program: script.to_owned(),
+        arguments: Vec::<OsString>::new(),
+        environment: BTreeMap::new(),
+        timeout: Duration::from_secs(300),
+        termination_grace: Duration::from_millis(100),
+    };
+    execute_with_spawn_hook(&request, stop, |process_id| {
+        if record_before_pause {
+            journal
+                .transition(
+                    &acceptance.organization_id,
+                    &acceptance.attempt_id,
+                    acceptance.fence_token,
+                    session_epoch,
+                    AttemptPhase::Running,
+                    Some(process_id),
+                )
+                .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
+        }
+        let mut marker_file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(marker)
+            .map_err(ExecutionError::Io)?;
+        use std::io::Write;
+        writeln!(marker_file, "{process_id}").map_err(ExecutionError::Io)?;
+        marker_file.sync_all().map_err(ExecutionError::Io)?;
+        loop {
+            std::thread::park_timeout(Duration::from_secs(60));
+        }
+    })
+    .await
+    .map(|_| ())
+    .map_err(|error| AgentError::Io(std::io::Error::other(error)))
+}
+
 pub fn journal_health(path: &Path) -> Result<(String, String, usize), AgentError> {
     let journal = Journal::open(path)?;
     Ok((

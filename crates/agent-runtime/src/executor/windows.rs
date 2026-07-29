@@ -3,10 +3,12 @@
 use std::ffi::OsString;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(test)]
+use std::process::Command;
+use std::process::ExitStatus;
 use std::time::Duration;
 
-use mcloving_windows_job::{CREATE_SUSPENDED, Job};
+use mcloving_windows_job::{JobProcess, SpawnSpec};
 use tokio::time::{Instant, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
 
@@ -38,6 +40,7 @@ where
 
     let stdout_path = spool.join("stdout.log");
     let stderr_path = spool.join("stderr.log");
+    let stdin = std::fs::OpenOptions::new().read(true).open("NUL")?;
     let stdout = std::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -47,50 +50,47 @@ where
         .write(true)
         .open(&stderr_path)?;
 
-    let mut command = windows_command(request)?;
-    command
-        .envs(&request.environment)
-        .current_dir(&workspace)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-    std::os::windows::process::CommandExt::creation_flags(&mut command, CREATE_SUSPENDED);
-
-    let mut child = command.spawn()?;
-    let process_id = child.id();
-    let job = match Job::attach(&child) {
-        Ok(job) => job,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(ExecutionError::WindowsJob(error.to_string()));
-        }
-    };
+    let command = windows_command(request)?;
+    let mut child = JobProcess::spawn_suspended(&SpawnSpec {
+        program: &command.program,
+        arguments: &command.arguments,
+        raw_argument_suffix: command.raw_argument_suffix.as_deref(),
+        environment: &request.environment,
+        current_directory: &workspace,
+        stdin: &stdin,
+        stdout: &stdout,
+        stderr: &stderr,
+    })
+    .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
+    let process_id = child.process_id();
     if let Err(error) = on_spawn(process_id) {
-        terminate_job(&job, &mut child).await?;
+        terminate_job(&child).await?;
         return Err(error);
     }
-    if let Err(error) = job.resume() {
-        terminate_job(&job, &mut child).await?;
+    if let Err(error) = child.resume() {
+        terminate_job(&child).await?;
         return Err(ExecutionError::WindowsJob(error.to_string()));
     }
 
     let deadline = Instant::now() + request.timeout;
     let (termination, status) = loop {
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?
+        {
             break (Termination::Exited, status);
         }
         tokio::select! {
             () = cancellation.cancelled() => {
                 break (
                     Termination::Cancelled,
-                    terminate_job(&job, &mut child).await?,
+                    terminate_job(&child).await?,
                 );
             }
             () = sleep_until(deadline) => {
                 break (
                     Termination::TimedOut,
-                    terminate_job(&job, &mut child).await?,
+                    terminate_job(&child).await?,
                 );
             }
             () = sleep(Duration::from_millis(20)) => {}
@@ -100,10 +100,11 @@ where
     // A leader may exit while descendants still hold inherited spool handles.
     // Terminate the complete job and observe zero active processes before
     // syncing or hashing either log.
-    job.terminate(TERMINATED_EXIT_CODE)
+    child
+        .terminate(TERMINATED_EXIT_CODE)
         .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
-    wait_for_empty_job(&job).await?;
-    drop(job);
+    wait_for_empty_job(&child).await?;
+    drop(child);
     sync_file(&stdout_path).await?;
     sync_file(&stderr_path).await?;
     sync_directory(&spool)?;
@@ -119,28 +120,33 @@ where
     })
 }
 
-fn windows_command(request: &ExecutionRequest) -> Result<Command, ExecutionError> {
-    match request.mode {
-        ExecutionMode::Direct => {
-            let mut command = Command::new(&request.program);
-            command.args(&request.arguments);
-            Ok(command)
-        }
-        ExecutionMode::WindowsCmd => {
-            use std::os::windows::process::CommandExt;
+struct WindowsCommand {
+    program: OsString,
+    arguments: Vec<OsString>,
+    raw_argument_suffix: Option<OsString>,
+}
 
+fn windows_command(request: &ExecutionRequest) -> Result<WindowsCommand, ExecutionError> {
+    match request.mode {
+        ExecutionMode::Direct => Ok(WindowsCommand {
+            program: request.program.as_os_str().to_owned(),
+            arguments: request.arguments.clone(),
+            raw_argument_suffix: None,
+        }),
+        ExecutionMode::WindowsCmd => {
             let command_string = cmd_command_string(&request.program, &request.arguments)?;
-            let mut command = Command::new("cmd.exe");
-            command.args(["/D", "/S", "/C"]);
-            // cmd.exe has its own command-line parser rather than the C argv
-            // decoder targeted by Command::arg. Append the validated nested
-            // quote sequence verbatim so /S can strip only its outer pair.
-            command.raw_arg(command_string);
-            Ok(command)
+            Ok(WindowsCommand {
+                program: OsString::from("cmd.exe"),
+                arguments: ["/D", "/S", "/C"].into_iter().map(OsString::from).collect(),
+                // cmd.exe has its own parser rather than the C argv decoder.
+                // Append the validated nested quote sequence verbatim so /S
+                // strips only its outer pair.
+                raw_argument_suffix: Some(OsString::from(command_string)),
+            })
         }
-        ExecutionMode::PowerShell => {
-            let mut command = Command::new("powershell.exe");
-            command.args([
+        ExecutionMode::PowerShell => Ok(WindowsCommand {
+            program: OsString::from("powershell.exe"),
+            arguments: [
                 OsString::from("-NoLogo"),
                 OsString::from("-NoProfile"),
                 OsString::from("-NonInteractive"),
@@ -148,10 +154,12 @@ fn windows_command(request: &ExecutionRequest) -> Result<Command, ExecutionError
                 OsString::from("RemoteSigned"),
                 OsString::from("-File"),
                 request.program.as_os_str().to_owned(),
-            ]);
-            command.args(&request.arguments);
-            Ok(command)
-        }
+            ]
+            .into_iter()
+            .chain(request.arguments.iter().cloned())
+            .collect(),
+            raw_argument_suffix: None,
+        }),
     }
 }
 
@@ -198,12 +206,16 @@ fn cmd_command_string(
     Ok(command)
 }
 
-async fn terminate_job(job: &Job, child: &mut Child) -> Result<ExitStatus, ExecutionError> {
-    job.terminate(TERMINATED_EXIT_CODE)
+async fn terminate_job(child: &JobProcess) -> Result<ExitStatus, ExecutionError> {
+    child
+        .terminate(TERMINATED_EXIT_CODE)
         .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?
+        {
             return Ok(status);
         }
         if Instant::now() >= deadline {
@@ -215,7 +227,7 @@ async fn terminate_job(job: &Job, child: &mut Child) -> Result<ExitStatus, Execu
     }
 }
 
-async fn wait_for_empty_job(job: &Job) -> Result<(), ExecutionError> {
+async fn wait_for_empty_job(job: &JobProcess) -> Result<(), ExecutionError> {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let active = job

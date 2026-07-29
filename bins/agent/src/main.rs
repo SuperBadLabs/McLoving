@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use mcloving_agent::{AgentConfig, journal_health, probe_once, run_until_stopped};
 #[cfg(windows)]
-use mcloving_agent::{run_execution_service_smoke, run_service_smoke};
+use mcloving_agent::{
+    run_creation_boundary_service_smoke, run_execution_service_smoke, run_service_smoke,
+};
 use tokio_util::sync::CancellationToken;
 
 fn main() {
@@ -55,9 +57,28 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 script: required_path(&arguments, 3, "SCRIPT")?,
             })?;
         }
+        "service-creation-boundary-smoke" => {
+            let boundary = required_value(&arguments, 5, "BOUNDARY")?;
+            let record_before_pause = match boundary.as_str() {
+                "contained-before-record" => false,
+                "recorded-before-resume" => true,
+                _ => {
+                    return Err(
+                        "BOUNDARY must be contained-before-record or recorded-before-resume".into(),
+                    );
+                }
+            };
+            run_windows_service(ServiceMode::CreationBoundarySmoke {
+                journal: required_path(&arguments, 1, "JOURNAL")?,
+                workspace_root: required_path(&arguments, 2, "WORKSPACE_ROOT")?,
+                script: required_path(&arguments, 3, "SCRIPT")?,
+                marker: required_path(&arguments, 4, "MARKER")?,
+                record_before_pause,
+            })?;
+        }
         _ => {
             return Err(
-                "usage: mcloving-agent [foreground|probe|journal-check PATH|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT SCRIPT]"
+                "usage: mcloving-agent [foreground|probe|journal-check PATH|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT SCRIPT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
                     .into(),
             );
         }
@@ -83,6 +104,18 @@ fn required_path(
         .ok_or_else(|| format!("{label} path is required").into())
 }
 
+fn required_value(
+    arguments: &[String],
+    index: usize,
+    label: &'static str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    arguments
+        .get(index)
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| format!("{label} is required").into())
+}
+
 enum ServiceMode {
     Production,
     Smoke(PathBuf),
@@ -90,6 +123,13 @@ enum ServiceMode {
         journal: PathBuf,
         workspace_root: PathBuf,
         script: PathBuf,
+    },
+    CreationBoundarySmoke {
+        journal: PathBuf,
+        workspace_root: PathBuf,
+        script: PathBuf,
+        marker: PathBuf,
+        record_before_pause: bool,
     },
 }
 
@@ -102,7 +142,9 @@ fn run_windows_service(mode: ServiceMode) -> Result<(), Box<dyn std::error::Erro
 
     let config = match &mode {
         ServiceMode::Production => Some(AgentConfig::from_environment()?),
-        ServiceMode::Smoke(_) | ServiceMode::ExecutionSmoke { .. } => None,
+        ServiceMode::Smoke(_)
+        | ServiceMode::ExecutionSmoke { .. }
+        | ServiceMode::CreationBoundarySmoke { .. } => None,
     };
     let stop = CancellationToken::new();
     let started = Arc::new(AtomicBool::new(false));
@@ -123,6 +165,19 @@ fn run_windows_service(mode: ServiceMode) -> Result<(), Box<dyn std::error::Erro
                         journal: journal.clone(),
                         workspace_root: workspace_root.clone(),
                         script: script.clone(),
+                    },
+                    ServiceMode::CreationBoundarySmoke {
+                        journal,
+                        workspace_root,
+                        script,
+                        marker,
+                        record_before_pause,
+                    } => ServiceTask::CreationBoundarySmoke {
+                        journal: journal.clone(),
+                        workspace_root: workspace_root.clone(),
+                        script: script.clone(),
+                        marker: marker.clone(),
+                        record_before_pause: *record_before_pause,
                     },
                 };
                 std::thread::spawn(move || {
@@ -148,6 +203,26 @@ fn run_windows_service(mode: ServiceMode) -> Result<(), Box<dyn std::error::Erro
                                             &journal,
                                             &workspace_root,
                                             &script,
+                                            stop,
+                                        )
+                                        .await
+                                    }
+                                    (
+                                        None,
+                                        ServiceTask::CreationBoundarySmoke {
+                                            journal,
+                                            workspace_root,
+                                            script,
+                                            marker,
+                                            record_before_pause,
+                                        },
+                                    ) => {
+                                        run_creation_boundary_service_smoke(
+                                            &journal,
+                                            &workspace_root,
+                                            &script,
+                                            &marker,
+                                            record_before_pause,
                                             stop,
                                         )
                                         .await
@@ -187,6 +262,15 @@ fn run_windows_service(mode: ServiceMode) -> Result<(), Box<dyn std::error::Erro
         } => {
             let _ = (journal, workspace_root, script);
         }
+        ServiceMode::CreationBoundarySmoke {
+            journal,
+            workspace_root,
+            script,
+            marker,
+            record_before_pause,
+        } => {
+            let _ = (journal, workspace_root, script, marker, record_before_pause);
+        }
     }
     Err("Windows service mode is only available on Windows".into())
 }
@@ -199,5 +283,12 @@ enum ServiceTask {
         journal: PathBuf,
         workspace_root: PathBuf,
         script: PathBuf,
+    },
+    CreationBoundarySmoke {
+        journal: PathBuf,
+        workspace_root: PathBuf,
+        script: PathBuf,
+        marker: PathBuf,
+        record_before_pause: bool,
     },
 }
