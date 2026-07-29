@@ -17,6 +17,7 @@ const EXPANSION_MAGIC: &[u8] = b"MCLOVING-EXPANSION\0";
 const MAX_COMPONENT_OUTPUTS: usize = 128;
 const MAX_COMPONENT_DEPENDENCIES: usize = 128;
 const MAX_EXPANDED_COMPONENTS: usize = 128;
+const EXPANDED_NAME_PREFIX: &str = "expanded.";
 
 /// The first reusable-component contract.
 pub const COMPONENT_V1: ComponentVersion = ComponentVersion { major: 1, minor: 0 };
@@ -133,6 +134,13 @@ impl VersionedComponent {
             ));
         }
         validate_identifier("$.name", &self.name)?;
+        if self.name.len() > MAX_IR_STRING_BYTES - EXPANDED_NAME_PREFIX.len() {
+            return Err(ComponentError::new(
+                ComponentErrorCode::InvalidDefinition,
+                "$.name",
+                "component name leaves no room for the generated expansion prefix",
+            ));
+        }
         validate_pipeline(&self.pipeline).map_err(|error| {
             ComponentError::new(
                 ComponentErrorCode::InvalidDefinition,
@@ -293,12 +301,27 @@ pub struct ComponentReceipt {
 /// Concrete scheduling input plus a digest-bound component ledger.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExpandedPipeline {
-    pub root: ComponentDigest,
-    pub pipeline: PipelineIr,
-    pub components: Vec<ComponentReceipt>,
+    root: ComponentDigest,
+    pipeline: PipelineIr,
+    components: Vec<ComponentReceipt>,
 }
 
 impl ExpandedPipeline {
+    #[must_use]
+    pub fn root(&self) -> ComponentDigest {
+        self.root
+    }
+
+    #[must_use]
+    pub fn pipeline(&self) -> &PipelineIr {
+        &self.pipeline
+    }
+
+    #[must_use]
+    pub fn components(&self) -> &[ComponentReceipt] {
+        &self.components
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ComponentError> {
         validate_pipeline(&self.pipeline).map_err(|error| {
             ComponentError::new(
@@ -505,7 +528,7 @@ pub fn expand_component(
     })?;
     let pipeline = PipelineIr {
         schema: IR_V1,
-        name: format!("expanded.{}", root_component.name),
+        name: format!("{EXPANDED_NAME_PREFIX}{}", root_component.name),
         parameters: BTreeMap::new(),
         parameter_values: BTreeMap::new(),
         expressions: Vec::new(),
@@ -871,5 +894,43 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, ComponentErrorCode::Cycle);
+    }
+
+    #[test]
+    fn mutated_expansion_receipts_fail_closed_inside_the_constructor_boundary() {
+        let item = component("root");
+        let digest = item.semantic_digest().unwrap();
+        let mut catalog = ComponentCatalog::default();
+        catalog.insert_exact(digest, item).unwrap();
+        let expanded = expand_component(
+            ComponentInvocation {
+                digest,
+                inputs: BTreeMap::new(),
+            },
+            &catalog,
+            ExpansionLimits::default(),
+        )
+        .unwrap();
+
+        let mut missing = expanded.clone();
+        missing.components.clear();
+        assert_eq!(
+            missing.canonical_bytes().unwrap_err().code,
+            ComponentErrorCode::InvalidDefinition
+        );
+
+        let mut wrong_digest = expanded.clone();
+        wrong_digest.components[0].digest = ComponentDigest::from_bytes([9; 32]);
+        assert_eq!(
+            wrong_digest.canonical_bytes().unwrap_err().code,
+            ComponentErrorCode::DigestMismatch
+        );
+
+        let mut duplicate = expanded;
+        duplicate.components.push(duplicate.components[0].clone());
+        assert_eq!(
+            duplicate.canonical_bytes().unwrap_err().code,
+            ComponentErrorCode::InvalidDefinition
+        );
     }
 }

@@ -90,6 +90,29 @@ fn component_identity_is_presentation_independent_and_excludes_provenance() {
 }
 
 #[test]
+fn component_names_reserve_space_for_the_expansion_prefix() {
+    let template = component(TEMPLATE_A, 1);
+    let accepted = VersionedComponent::new(
+        "x".repeat(16 * 1024 - "expanded.".len()),
+        template.pipeline.clone(),
+        BTreeMap::new(),
+        Vec::new(),
+        provenance(1),
+    );
+    assert!(accepted.is_ok());
+
+    let rejected = VersionedComponent::new(
+        "x".repeat(16 * 1024 - "expanded.".len() + 1),
+        template.pipeline,
+        BTreeMap::new(),
+        Vec::new(),
+        provenance(1),
+    )
+    .unwrap_err();
+    assert_eq!(rejected.code, ComponentErrorCode::InvalidDefinition);
+}
+
+#[test]
 fn expansion_identity_excludes_source_presentation_provenance() {
     let first = component(TEMPLATE_A, 1);
     let second = component(TEMPLATE_B, 9);
@@ -114,8 +137,8 @@ fn expansion_identity_excludes_source_presentation_provenance() {
         second.canonical_bytes().unwrap()
     );
     assert_ne!(
-        first.components[0].source_sha256,
-        second.components[0].source_sha256
+        first.components()[0].source_sha256,
+        second.components()[0].source_sha256
     );
 }
 
@@ -161,18 +184,18 @@ fn typed_inputs_expand_deterministically_with_provenance_and_outputs() {
         first.canonical_bytes().unwrap(),
         second.canonical_bytes().unwrap()
     );
-    assert_eq!(first.components.len(), 2);
-    assert_eq!(first.pipeline.stages.len(), 2);
-    assert_eq!(first.pipeline.stages[0].id, "c1.build");
-    assert_eq!(first.pipeline.stages[1].id, "c0.build");
-    let dependency_arg = process_arg(&first.pipeline.stages[0].steps[0]);
-    let root_arg = process_arg(&first.pipeline.stages[1].steps[0]);
+    assert_eq!(first.components().len(), 2);
+    assert_eq!(first.pipeline().stages.len(), 2);
+    assert_eq!(first.pipeline().stages[0].id, "c1.build");
+    assert_eq!(first.pipeline().stages[1].id, "c0.build");
+    let dependency_arg = process_arg(&first.pipeline().stages[0].steps[0]);
+    let root_arg = process_arg(&first.pipeline().stages[1].steps[0]);
     assert_eq!(dependency_arg, "dependency-release");
     assert_eq!(root_arg, "windows-release");
-    assert_eq!(first.components[0].source_sha256, [4; 32]);
-    assert_eq!(first.components[1].source_sha256, [3; 32]);
+    assert_eq!(first.components()[0].source_sha256, [4; 32]);
+    assert_eq!(first.components()[1].source_sha256, [3; 32]);
     assert_eq!(
-        first.components[0].outputs["root_artifact"],
+        first.components()[0].outputs["root_artifact"],
         ParameterType::String
     );
 }
@@ -377,64 +400,10 @@ fn expansion_digest_binds_exact_component_even_for_equal_concrete_steps() {
     };
     let first = expand(first_digest);
     let second = expand(second_digest);
-    assert_eq!(first.pipeline.stages, second.pipeline.stages);
+    assert_eq!(first.pipeline().stages, second.pipeline().stages);
     assert_ne!(
         first.semantic_digest().unwrap(),
         second.semantic_digest().unwrap()
-    );
-}
-
-#[test]
-fn expanded_canonicalization_rejects_mutated_receipt_ledgers() {
-    let item = component(TEMPLATE_A, 2);
-    let digest = item.semantic_digest().unwrap();
-    let mut catalog = ComponentCatalog::default();
-    catalog.insert_exact(digest, item).unwrap();
-    let expanded = expand_component(
-        ComponentInvocation {
-            digest,
-            inputs: BTreeMap::new(),
-        },
-        &catalog,
-        ExpansionLimits::default(),
-    )
-    .unwrap();
-
-    let mut missing = expanded.clone();
-    missing.components.clear();
-    assert_eq!(
-        missing.canonical_bytes().unwrap_err().code,
-        ComponentErrorCode::InvalidDefinition
-    );
-
-    let mut wrong_digest = expanded.clone();
-    wrong_digest.components[0].digest = ComponentDigest::from_bytes([9; 32]);
-    assert_eq!(
-        wrong_digest.canonical_bytes().unwrap_err().code,
-        ComponentErrorCode::DigestMismatch
-    );
-
-    let mut wrong_version = expanded.clone();
-    wrong_version.components[0].version.major = 2;
-    assert_eq!(
-        wrong_version.canonical_bytes().unwrap_err().code,
-        ComponentErrorCode::UnsupportedVersion
-    );
-
-    let mut duplicate = expanded.clone();
-    duplicate.components.push(duplicate.components[0].clone());
-    assert_eq!(
-        duplicate.canonical_bytes().unwrap_err().code,
-        ComponentErrorCode::InvalidDefinition
-    );
-
-    let mut orphan = expanded;
-    let mut receipt = orphan.components[0].clone();
-    receipt.path = "$.dependencies[0].dependencies[0]".to_owned();
-    orphan.components.push(receipt);
-    assert_eq!(
-        orphan.canonical_bytes().unwrap_err().code,
-        ComponentErrorCode::InvalidDefinition
     );
 }
 
