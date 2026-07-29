@@ -733,6 +733,12 @@ impl AgentIdentityBindings {
                 continue;
             }
             let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+            if fields.len() == 3 {
+                bail!(
+                    "identity binding line {} uses the legacy three-column format; append the exact organization UUID as column four before starting this controller",
+                    index + 1
+                );
+            }
             if fields.len() != 4 {
                 bail!(
                     "identity binding line {} must contain SHA-256, agent ID, trust pool, and organization UUID",
@@ -967,6 +973,13 @@ mod tests {
             )
             .is_err()
         );
-        assert!(AgentIdentityBindings::parse(&format!("{digest} agent pool\n")).is_err());
+        let legacy_error =
+            AgentIdentityBindings::parse(&format!("{digest} agent pool\n")).unwrap_err();
+        assert!(
+            legacy_error
+                .to_string()
+                .contains("legacy three-column format")
+        );
+        assert!(legacy_error.to_string().contains("organization UUID"));
     }
 }

@@ -75,6 +75,8 @@ pub enum AgentError {
     StaleSession,
     #[error("controller rejected the current fenced work authority")]
     StaleAuthority,
+    #[error("agent has an unresolved recovered attempt and will not poll for more work")]
+    UnresolvedReconciliation,
     #[error("controller returned an invalid work assignment: {0}")]
     InvalidAssignment(String),
     #[error("execution specification is invalid: {0}")]
@@ -384,10 +386,30 @@ async fn send_reconciliation(
             )
         })
         .collect::<std::collections::BTreeSet<_>>();
-    if !cancelled.is_empty() {
+    let retained = directive
+        .retain_attempts
+        .into_iter()
+        .map(|authority| {
+            (
+                authority.organization_id,
+                authority.attempt_id,
+                authority.fence_token,
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut unresolved = report
+        .attempts
+        .iter()
+        .any(|attempt| attempt.phase == AttemptPhase::ReconciliationRequired);
+    if !cancelled.is_empty() || !retained.is_empty() {
         let mut journal = Journal::open(&config.journal_path)?;
         for attempt in &report.attempts {
-            if cancellation_targets(&cancelled, attempt) {
+            let interrupted_execution = cancellation_targets(&retained, attempt)
+                && matches!(
+                    attempt.phase,
+                    AttemptPhase::Accepted | AttemptPhase::Running
+                );
+            if cancellation_targets(&cancelled, attempt) || interrupted_execution {
                 let outcome =
                     cancel_recovered_attempt(&mut journal, attempt, config.termination_grace)
                         .await?;
@@ -448,10 +470,15 @@ async fn send_reconciliation(
                     phase,
                     attempt.process_id,
                 )?;
+                unresolved |= phase == AttemptPhase::ReconciliationRequired;
             }
         }
     }
-    Ok(())
+    if unresolved {
+        Err(AgentError::UnresolvedReconciliation)
+    } else {
+        Ok(())
+    }
 }
 
 async fn cancel_recovered_attempt(

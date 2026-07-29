@@ -360,27 +360,29 @@ mod tests {
         fs::write(
             &script,
             r#"
+param([string]$PidPath)
 $child = Start-Process powershell.exe -PassThru -ArgumentList @(
   "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"
 )
-$child.Id | Set-Content -Encoding ascii child.pid
+$child.Id | Set-Content -LiteralPath $PidPath -Encoding ascii
 Wait-Process -Id $child.Id
 "#,
         )
         .unwrap();
+        let pid_path = root.path().join("cancel-child.pid");
         let request = request(
             root.path(),
             "cancel",
             ExecutionMode::PowerShell,
             script,
-            Vec::new(),
+            vec![pid_path.as_os_str().to_owned()],
         );
         let token = CancellationToken::new();
         let cancel = token.clone();
-        let pid_path = root.path().join("cancel/child.pid");
+        let cancellation_pid_path = pid_path.clone();
         let cancellation = tokio::spawn(async move {
             for _ in 0..1_500 {
-                if pid_path.exists() {
+                if cancellation_pid_path.exists() {
                     cancel.cancel();
                     return;
                 }
@@ -392,7 +394,7 @@ Wait-Process -Id $child.Id
         let outcome = execute(&request, token).await.unwrap();
         cancellation.await.unwrap();
         assert_eq!(outcome.termination, Termination::Cancelled);
-        let child_pid = fs::read_to_string(root.path().join("cancel/child.pid"))
+        let child_pid = fs::read_to_string(pid_path)
             .unwrap()
             .trim()
             .parse::<u32>()

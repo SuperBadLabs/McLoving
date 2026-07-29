@@ -558,7 +558,8 @@ impl Store {
         Ok(true)
     }
 
-    /// Atomically acknowledges a fenced agent's cancellation outcome.
+    /// Atomically acknowledges a fenced agent's cancellation or interrupted
+    /// execution recovery outcome.
     ///
     /// A reconnect may arrive after its lease deadline, so cancellation
     /// completion is authorized by the current restore epoch, exact fence, and
@@ -597,8 +598,9 @@ impl Store {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         }
-        let authority = sqlx::query_as::<_, (Uuid, Uuid, String, Option<Value>)>(
-            "SELECT n.id, n.build_id, a.status, a.terminal_summary
+        let authority = sqlx::query_as::<_, (Uuid, Uuid, String, Option<Value>, bool)>(
+            "SELECT n.id, n.build_id, a.status, a.terminal_summary,
+                    b.cancellation_requested_at IS NOT NULL
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id
@@ -616,8 +618,10 @@ impl Store {
                    FROM controller_metadata
                    WHERE singleton
                )
-               AND a.status IN ('cancelling', 'aborted', 'reconciliation_required')
-               AND b.cancellation_requested_at IS NOT NULL
+               AND a.status IN (
+                   'accepted', 'running', 'cancelling', 'aborted',
+                   'reconciliation_required'
+               )
              FOR UPDATE OF a, n, b",
         )
         .bind(attempt_id)
@@ -627,19 +631,20 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((node_id, build_id, status, terminal_summary)) = authority else {
+        let Some((node_id, build_id, status, terminal_summary, owner_cancelled)) = authority else {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         };
         if status == "aborted" {
             tx.commit().await?;
             return Ok(
-                if terminal_summary
-                    .as_ref()
-                    .and_then(|value| value.get("reason"))
-                    .and_then(Value::as_str)
-                    == Some("agent_process_identity_mismatch")
-                {
+                if matches!(
+                    terminal_summary
+                        .as_ref()
+                        .and_then(|value| value.get("reason"))
+                        .and_then(Value::as_str),
+                    Some("agent_process_identity_mismatch" | "agent_recovery_stale_process")
+                ) {
                     AgentCancellationDisposition::RetireStale
                 } else {
                     AgentCancellationDisposition::Completed
@@ -716,20 +721,49 @@ impl Store {
             return Ok(AgentCancellationDisposition::ReconciliationRequired);
         }
 
+        let recovery = !owner_cancelled && matches!(status.as_str(), "accepted" | "running");
+        if !owner_cancelled && !recovery {
+            tx.rollback().await?;
+            return Ok(AgentCancellationDisposition::RetireStale);
+        }
         let (terminal_reason, event_kind, disposition) = match outcome {
             AgentCancellationOutcome::Terminated => (
-                "agent_confirmed_cancellation",
-                "attempt.cancellation_completed",
+                if recovery {
+                    "agent_recovery_terminated"
+                } else {
+                    "agent_confirmed_cancellation"
+                },
+                if recovery {
+                    "attempt.recovery_terminated"
+                } else {
+                    "attempt.cancellation_completed"
+                },
                 AgentCancellationDisposition::Completed,
             ),
             AgentCancellationOutcome::AlreadyExited => (
-                "agent_process_already_exited",
-                "attempt.cancellation_completed",
+                if recovery {
+                    "agent_recovery_process_already_exited"
+                } else {
+                    "agent_process_already_exited"
+                },
+                if recovery {
+                    "attempt.recovery_process_already_exited"
+                } else {
+                    "attempt.cancellation_completed"
+                },
                 AgentCancellationDisposition::Completed,
             ),
             AgentCancellationOutcome::IdentityMismatch => (
-                "agent_process_identity_mismatch",
-                "attempt.cancellation_stale_process",
+                if recovery {
+                    "agent_recovery_stale_process"
+                } else {
+                    "agent_process_identity_mismatch"
+                },
+                if recovery {
+                    "attempt.recovery_stale_process"
+                } else {
+                    "attempt.cancellation_stale_process"
+                },
                 AgentCancellationDisposition::RetireStale,
             ),
             AgentCancellationOutcome::ReconciliationRequired => {

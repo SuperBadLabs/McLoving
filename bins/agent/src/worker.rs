@@ -57,6 +57,8 @@ struct PersistedResult {
     outcome: String,
     exit_code: Option<i32>,
     termination: String,
+    #[serde(default)]
+    reason: Option<String>,
     #[serde(default = "default_completion_protocol")]
     completion_protocol: String,
     cancellation_outcome: Option<i32>,
@@ -88,6 +90,15 @@ struct ProcesslessCompletion<'a> {
     session_epoch: u64,
     outcome: WorkOutcome,
     reason: String,
+}
+
+struct DurableResult<'a> {
+    outcome: WorkOutcome,
+    exit_code: Option<i32>,
+    termination: &'a str,
+    reason: Option<&'a str>,
+    completion_protocol: &'a str,
+    cancellation_outcome: Option<i32>,
 }
 
 pub(super) async fn poll_and_run_one(
@@ -134,114 +145,24 @@ pub(super) async fn recover_finalizations(
             attempt_id: attempt.attempt_id.clone(),
             fence_token: attempt.fence_token,
         };
-        validate_log_spool_quota(&attempt.logs)?;
-        let mut sequence = 0;
-        for entry in &attempt.logs {
-            let stream = spool_stream(entry)?;
-            sequence = publish_spool(
-                client,
-                &authority,
-                session_epoch,
-                stream,
-                &config.workspace_root,
-                entry,
-                sequence,
-            )
-            .await?;
-        }
-        let result_entry = attempt.result.as_ref().ok_or_else(|| {
-            AgentError::InvalidAssignment(
-                "finalizing journal attempt has no durable result spool".to_owned(),
-            )
+        let lease_stop = CancellationToken::new();
+        let authority_lost = CancellationToken::new();
+        let lease_task = tokio::spawn(renew_lease(
+            client.clone(),
+            authority.clone(),
+            config.lease_seconds,
+            config.lease_renewal_interval,
+            authority_lost,
+            lease_stop.clone(),
+        ));
+        let replay_result =
+            replay_finalization(config, client, session_epoch, &attempt, authority).await;
+        lease_stop.cancel();
+        let lease_result = lease_task.await.map_err(|error| {
+            AgentError::InvalidAssignment(format!("lease task failed: {error}"))
         })?;
-        let result_content =
-            verified_spool_content(&config.workspace_root, result_entry, "result").await?;
-        let result: PersistedResult = serde_json::from_slice(&result_content)?;
-        let outcome = persisted_outcome(&result.outcome)?;
-        if (attempt.phase == AttemptPhase::Finalizing && outcome == WorkOutcome::Aborted)
-            || (attempt.phase == AttemptPhase::Cancelling && outcome != WorkOutcome::Aborted)
-        {
-            return Err(AgentError::InvalidAssignment(
-                "journal phase conflicts with durable result outcome".to_owned(),
-            ));
-        }
-        let terminal = match result.completion_protocol.as_str() {
-            WORK_COMPLETION_PROTOCOL => {
-                let summary = serde_json::to_vec(&json!({
-                    "exit_code": result.exit_code,
-                    "termination": result.termination,
-                    "result_sha256": hex(&result_entry.digest),
-                }))?;
-                require_work_receipt(
-                    client
-                        .complete_work(WorkCompletion {
-                            authority: Some(authority),
-                            outcome: outcome as i32,
-                            summary_json: summary,
-                        })
-                        .await?
-                        .into_inner(),
-                    session_epoch,
-                )?;
-                terminal_phase(outcome)?
-            }
-            CANCELLATION_COMPLETION_PROTOCOL => {
-                if attempt.phase != AttemptPhase::Cancelling || outcome != WorkOutcome::Aborted {
-                    return Err(AgentError::InvalidAssignment(
-                        "cancellation replay conflicts with durable journal state".to_owned(),
-                    ));
-                }
-                let cancellation_outcome = result.cancellation_outcome.ok_or_else(|| {
-                    AgentError::InvalidAssignment(
-                        "cancellation replay has no durable outcome".to_owned(),
-                    )
-                })?;
-                match CancellationOutcome::try_from(cancellation_outcome) {
-                    Ok(
-                        CancellationOutcome::Terminated
-                        | CancellationOutcome::AlreadyExited
-                        | CancellationOutcome::IdentityMismatch,
-                    ) => {}
-                    Ok(
-                        CancellationOutcome::Unspecified
-                        | CancellationOutcome::ReconciliationRequired,
-                    )
-                    | Err(_) => {
-                        return Err(AgentError::InvalidAssignment(
-                            "cancellation replay has an invalid durable outcome".to_owned(),
-                        ));
-                    }
-                }
-                let receipt = client
-                    .complete_cancellation(CancellationCompletion {
-                        agent_id: config.agent_id.clone(),
-                        session_epoch,
-                        organization_id: attempt.organization_id.clone(),
-                        attempt_id: attempt.attempt_id.clone(),
-                        fence_token: attempt.fence_token,
-                        outcome: cancellation_outcome,
-                    })
-                    .await?
-                    .into_inner();
-                ensure_session(receipt.session_epoch, session_epoch)?;
-                match CancellationDisposition::try_from(receipt.disposition) {
-                    Ok(
-                        CancellationDisposition::Completed | CancellationDisposition::RetireStale,
-                    ) => AttemptPhase::Aborted,
-                    Ok(CancellationDisposition::ReconciliationRequired) => {
-                        AttemptPhase::ReconciliationRequired
-                    }
-                    Ok(CancellationDisposition::Unspecified) | Err(_) => {
-                        return Err(AgentError::UnsupportedProtocol);
-                    }
-                }
-            }
-            _ => {
-                return Err(AgentError::InvalidAssignment(
-                    "durable result has an unknown completion protocol".to_owned(),
-                ));
-            }
-        };
+        let terminal = replay_result?;
+        lease_result?;
         Journal::open(&config.journal_path)?.transition(
             &attempt.organization_id,
             &attempt.attempt_id,
@@ -252,6 +173,127 @@ pub(super) async fn recover_finalizations(
         )?;
     }
     Ok(())
+}
+
+async fn replay_finalization(
+    config: &AgentConfig,
+    client: &mut AgentControlClient<Channel>,
+    session_epoch: u64,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+    authority: WorkAuthority,
+) -> Result<AttemptPhase, AgentError> {
+    validate_log_spool_quota(&attempt.logs)?;
+    let mut sequence = 0;
+    for entry in &attempt.logs {
+        let stream = spool_stream(entry)?;
+        sequence = publish_spool(
+            client,
+            &authority,
+            session_epoch,
+            stream,
+            &config.workspace_root,
+            entry,
+            sequence,
+        )
+        .await?;
+    }
+    let result_entry = attempt.result.as_ref().ok_or_else(|| {
+        AgentError::InvalidAssignment(
+            "finalizing journal attempt has no durable result spool".to_owned(),
+        )
+    })?;
+    let result_content =
+        verified_spool_content(&config.workspace_root, result_entry, "result").await?;
+    let result: PersistedResult = serde_json::from_slice(&result_content)?;
+    let outcome = persisted_outcome(&result.outcome)?;
+    if (attempt.phase == AttemptPhase::Finalizing && outcome == WorkOutcome::Aborted)
+        || (attempt.phase == AttemptPhase::Cancelling && outcome != WorkOutcome::Aborted)
+    {
+        return Err(AgentError::InvalidAssignment(
+            "journal phase conflicts with durable result outcome".to_owned(),
+        ));
+    }
+    match result.completion_protocol.as_str() {
+        WORK_COMPLETION_PROTOCOL => {
+            let summary = if let Some(reason) = result.reason {
+                serde_json::to_vec(&json!({
+                    "reason": reason,
+                    "result_sha256": hex(&result_entry.digest),
+                }))?
+            } else {
+                serde_json::to_vec(&json!({
+                    "exit_code": result.exit_code,
+                    "termination": result.termination,
+                    "result_sha256": hex(&result_entry.digest),
+                }))?
+            };
+            require_work_receipt(
+                client
+                    .complete_work(WorkCompletion {
+                        authority: Some(authority),
+                        outcome: outcome as i32,
+                        summary_json: summary,
+                    })
+                    .await?
+                    .into_inner(),
+                session_epoch,
+            )?;
+            terminal_phase(outcome)
+        }
+        CANCELLATION_COMPLETION_PROTOCOL => {
+            if attempt.phase != AttemptPhase::Cancelling || outcome != WorkOutcome::Aborted {
+                return Err(AgentError::InvalidAssignment(
+                    "cancellation replay conflicts with durable journal state".to_owned(),
+                ));
+            }
+            let cancellation_outcome = result.cancellation_outcome.ok_or_else(|| {
+                AgentError::InvalidAssignment(
+                    "cancellation replay has no durable outcome".to_owned(),
+                )
+            })?;
+            match CancellationOutcome::try_from(cancellation_outcome) {
+                Ok(
+                    CancellationOutcome::Terminated
+                    | CancellationOutcome::AlreadyExited
+                    | CancellationOutcome::IdentityMismatch,
+                ) => {}
+                Ok(
+                    CancellationOutcome::Unspecified | CancellationOutcome::ReconciliationRequired,
+                )
+                | Err(_) => {
+                    return Err(AgentError::InvalidAssignment(
+                        "cancellation replay has an invalid durable outcome".to_owned(),
+                    ));
+                }
+            }
+            let receipt = client
+                .complete_cancellation(CancellationCompletion {
+                    agent_id: config.agent_id.clone(),
+                    session_epoch,
+                    organization_id: attempt.organization_id.clone(),
+                    attempt_id: attempt.attempt_id.clone(),
+                    fence_token: attempt.fence_token,
+                    outcome: cancellation_outcome,
+                })
+                .await?
+                .into_inner();
+            ensure_session(receipt.session_epoch, session_epoch)?;
+            match CancellationDisposition::try_from(receipt.disposition) {
+                Ok(CancellationDisposition::Completed | CancellationDisposition::RetireStale) => {
+                    Ok(AttemptPhase::Aborted)
+                }
+                Ok(CancellationDisposition::ReconciliationRequired) => {
+                    Ok(AttemptPhase::ReconciliationRequired)
+                }
+                Ok(CancellationDisposition::Unspecified) | Err(_) => {
+                    Err(AgentError::UnsupportedProtocol)
+                }
+            }
+        }
+        _ => Err(AgentError::InvalidAssignment(
+            "durable result has an unknown completion protocol".to_owned(),
+        )),
+    }
 }
 
 fn validate_assignment(
@@ -352,7 +394,18 @@ async fn run_assignment(
         return Err(AgentError::StaleAuthority);
     }
     if lease.cancellation_requested {
-        return finalize_without_process(
+        let lease_stop = CancellationToken::new();
+        let execution_cancellation = CancellationToken::new();
+        execution_cancellation.cancel();
+        let lease_task = tokio::spawn(renew_lease(
+            client.clone(),
+            assignment.authority.clone(),
+            config.lease_seconds,
+            config.lease_renewal_interval,
+            execution_cancellation,
+            lease_stop.clone(),
+        ));
+        let completion_result = finalize_without_process(
             config,
             client,
             &mut journal,
@@ -365,6 +418,12 @@ async fn run_assignment(
             },
         )
         .await;
+        lease_stop.cancel();
+        let lease_result = lease_task.await.map_err(|error| {
+            AgentError::InvalidAssignment(format!("lease task failed: {error}"))
+        })?;
+        completion_result?;
+        return lease_result;
     }
     require_work_receipt(
         client
@@ -375,12 +434,14 @@ async fn run_assignment(
     )?;
 
     let execution_cancellation = stop.child_token();
+    let lease_stop = CancellationToken::new();
     let lease_task = tokio::spawn(renew_lease(
         client.clone(),
         assignment.authority.clone(),
         config.lease_seconds,
         config.lease_renewal_interval,
         execution_cancellation.clone(),
+        lease_stop.clone(),
     ));
     let process = assignment.process;
     let request = ExecutionRequest {
@@ -429,108 +490,115 @@ async fn run_assignment(
             .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
         })
         .await;
-    execution_cancellation.cancel();
-    lease_task
+    let completion_result: Result<(), AgentError> = async {
+        let outcome = match execution {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return finalize_without_process(
+                    config,
+                    client,
+                    &mut journal,
+                    ProcesslessCompletion {
+                        authority: &assignment.authority,
+                        workspace: &assignment.workspace,
+                        session_epoch,
+                        outcome: WorkOutcome::Failed,
+                        reason: format!("process_spawn_failed: {error}"),
+                    },
+                )
+                .await;
+            }
+        };
+        validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()])?;
+        let terminal = match outcome.termination {
+            Termination::Cancelled => WorkOutcome::Aborted,
+            Termination::TimedOut => WorkOutcome::Failed,
+            Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
+            Termination::Exited => WorkOutcome::Failed,
+        };
+        let result = write_result(
+            &config.workspace_root,
+            &assignment.workspace,
+            DurableResult {
+                outcome: terminal,
+                exit_code: outcome.exit_code,
+                termination: termination_name(outcome.termination),
+                reason: None,
+                completion_protocol: WORK_COMPLETION_PROTOCOL,
+                cancellation_outcome: None,
+            },
+        )
+        .await?;
+        journal.begin_finalization(&Finalization {
+            organization_id: &organization,
+            attempt_id: &attempt,
+            fence_token: fence,
+            session_epoch,
+            phase: if terminal == WorkOutcome::Aborted {
+                AttemptPhase::Cancelling
+            } else {
+                AttemptPhase::Finalizing
+            },
+            process_id: Some(outcome.process_id),
+            logs: &[outcome.stdout.clone(), outcome.stderr.clone()],
+            result: &result,
+        })?;
+
+        // Terminal truth and every replay input are durable before the first
+        // replayable upload. A committed log whose response is lost can therefore
+        // be resumed without executing the workload again.
+        let next_sequence = publish_spool(
+            client,
+            &assignment.authority,
+            session_epoch,
+            "stdout",
+            &config.workspace_root,
+            &outcome.stdout,
+            0,
+        )
+        .await?;
+        publish_spool(
+            client,
+            &assignment.authority,
+            session_epoch,
+            "stderr",
+            &config.workspace_root,
+            &outcome.stderr,
+            next_sequence,
+        )
+        .await?;
+        let summary = serde_json::to_vec(&json!({
+            "exit_code": outcome.exit_code,
+            "termination": termination_name(outcome.termination),
+            "result_sha256": hex(&result.digest),
+        }))?;
+        let completion = client
+            .complete_work(WorkCompletion {
+                authority: Some(assignment.authority),
+                outcome: terminal as i32,
+                summary_json: summary,
+            })
+            .await?
+            .into_inner();
+        require_work_receipt(completion, session_epoch)?;
+        crash_after_terminal_commit_for_test();
+        journal.transition(
+            &organization,
+            &attempt,
+            fence,
+            session_epoch,
+            terminal_phase(terminal)?,
+            Some(outcome.process_id),
+        )?;
+        Ok(())
+    }
+    .await;
+    lease_stop.cancel();
+    let lease_result = lease_task
         .await
-        .map_err(|error| AgentError::InvalidAssignment(format!("lease task failed: {error}")))??;
-
-    let outcome = match execution {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            return finalize_without_process(
-                config,
-                client,
-                &mut journal,
-                ProcesslessCompletion {
-                    authority: &assignment.authority,
-                    workspace: &assignment.workspace,
-                    session_epoch,
-                    outcome: WorkOutcome::Failed,
-                    reason: format!("process_spawn_failed: {error}"),
-                },
-            )
-            .await;
-        }
-    };
-    validate_log_spool_quota(&[outcome.stdout.clone(), outcome.stderr.clone()])?;
-    let terminal = match outcome.termination {
-        Termination::Cancelled => WorkOutcome::Aborted,
-        Termination::TimedOut => WorkOutcome::Failed,
-        Termination::Exited if outcome.exit_code == Some(0) => WorkOutcome::Succeeded,
-        Termination::Exited => WorkOutcome::Failed,
-    };
-    let result = write_result(
-        &config.workspace_root,
-        &assignment.workspace,
-        terminal,
-        outcome.exit_code,
-        termination_name(outcome.termination),
-        WORK_COMPLETION_PROTOCOL,
-        None,
-    )
-    .await?;
-    journal.begin_finalization(&Finalization {
-        organization_id: &organization,
-        attempt_id: &attempt,
-        fence_token: fence,
-        session_epoch,
-        phase: if terminal == WorkOutcome::Aborted {
-            AttemptPhase::Cancelling
-        } else {
-            AttemptPhase::Finalizing
-        },
-        process_id: Some(outcome.process_id),
-        logs: &[outcome.stdout.clone(), outcome.stderr.clone()],
-        result: &result,
-    })?;
-
-    // Terminal truth and every replay input are durable before the first
-    // replayable upload. A committed log whose response is lost can therefore
-    // be resumed without executing the workload again.
-    let next_sequence = publish_spool(
-        client,
-        &assignment.authority,
-        session_epoch,
-        "stdout",
-        &config.workspace_root,
-        &outcome.stdout,
-        0,
-    )
-    .await?;
-    publish_spool(
-        client,
-        &assignment.authority,
-        session_epoch,
-        "stderr",
-        &config.workspace_root,
-        &outcome.stderr,
-        next_sequence,
-    )
-    .await?;
-    let summary = serde_json::to_vec(&json!({
-        "exit_code": outcome.exit_code,
-        "termination": termination_name(outcome.termination),
-        "result_sha256": hex(&result.digest),
-    }))?;
-    let completion = client
-        .complete_work(WorkCompletion {
-            authority: Some(assignment.authority),
-            outcome: terminal as i32,
-            summary_json: summary,
-        })
-        .await?
-        .into_inner();
-    require_work_receipt(completion, session_epoch)?;
-    crash_after_terminal_commit_for_test();
-    journal.transition(
-        &organization,
-        &attempt,
-        fence,
-        session_epoch,
-        terminal_phase(terminal)?,
-        Some(outcome.process_id),
-    )?;
-    Ok(())
+        .map_err(|error| AgentError::InvalidAssignment(format!("lease task failed: {error}")))?;
+    completion_result?;
+    lease_result
 }
 
 async fn renew_lease(
@@ -538,11 +606,12 @@ async fn renew_lease(
     authority: WorkAuthority,
     lease_seconds: u32,
     renewal_interval: Duration,
-    cancellation: CancellationToken,
+    execution_cancellation: CancellationToken,
+    lease_stop: CancellationToken,
 ) -> Result<(), AgentError> {
     loop {
         tokio::select! {
-            () = cancellation.cancelled() => return Ok(()),
+            () = lease_stop.cancelled() => return Ok(()),
             () = tokio::time::sleep(renewal_interval) => {}
         }
         let receipt = match client
@@ -554,21 +623,20 @@ async fn renew_lease(
         {
             Ok(response) => response.into_inner(),
             Err(error) => {
-                cancellation.cancel();
+                execution_cancellation.cancel();
                 return Err(error.into());
             }
         };
         if let Err(error) = ensure_session(receipt.session_epoch, authority.session_epoch) {
-            cancellation.cancel();
+            execution_cancellation.cancel();
             return Err(error);
         }
         if !receipt.accepted {
-            cancellation.cancel();
+            execution_cancellation.cancel();
             return Err(AgentError::StaleAuthority);
         }
         if receipt.cancellation_requested {
-            cancellation.cancel();
-            return Ok(());
+            execution_cancellation.cancel();
         }
     }
 }
@@ -710,12 +778,16 @@ fn spool_stream(entry: &SpoolEntry) -> Result<&'static str, AgentError> {
 async fn write_result(
     workspace_root: &Path,
     workspace: &Path,
-    outcome: WorkOutcome,
-    exit_code: Option<i32>,
-    termination: &str,
-    completion_protocol: &str,
-    cancellation_outcome: Option<i32>,
+    result: DurableResult<'_>,
 ) -> Result<SpoolEntry, AgentError> {
+    let DurableResult {
+        outcome,
+        exit_code,
+        termination,
+        reason,
+        completion_protocol,
+        cancellation_outcome,
+    } = result;
     let relative_path = workspace.join("spool/result.json");
     let path = workspace_root.join(&relative_path);
     let parent = path.parent().ok_or_else(|| {
@@ -726,6 +798,7 @@ async fn write_result(
         "outcome": outcome_name(outcome),
         "exit_code": exit_code,
         "termination": termination,
+        "reason": reason,
         "completion_protocol": completion_protocol,
         "cancellation_outcome": cancellation_outcome,
     }))?;
@@ -767,11 +840,14 @@ pub(super) async fn persist_recovered_cancellation(
     let result = write_result(
         &config.workspace_root,
         &attempt.workspace,
-        WorkOutcome::Aborted,
-        None,
-        "recovered_cancellation",
-        CANCELLATION_COMPLETION_PROTOCOL,
-        Some(cancellation_outcome),
+        DurableResult {
+            outcome: WorkOutcome::Aborted,
+            exit_code: None,
+            termination: "recovered_cancellation",
+            reason: None,
+            completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
+            cancellation_outcome: Some(cancellation_outcome),
+        },
     )
     .await?;
     journal.begin_finalization(&Finalization {
@@ -803,11 +879,14 @@ async fn finalize_without_process(
     let result = write_result(
         &config.workspace_root,
         workspace,
-        outcome,
-        None,
-        &reason,
-        WORK_COMPLETION_PROTOCOL,
-        None,
+        DurableResult {
+            outcome,
+            exit_code: None,
+            termination: &reason,
+            reason: Some(&reason),
+            completion_protocol: WORK_COMPLETION_PROTOCOL,
+            cancellation_outcome: None,
+        },
     )
     .await?;
     journal.begin_finalization(&Finalization {
@@ -1019,22 +1098,28 @@ mod tests {
         let first = write_result(
             directory.path(),
             &workspace,
-            WorkOutcome::Failed,
-            None,
-            "process_spawn_failed",
-            WORK_COMPLETION_PROTOCOL,
-            None,
+            DurableResult {
+                outcome: WorkOutcome::Failed,
+                exit_code: None,
+                termination: "process_spawn_failed",
+                reason: Some("process_spawn_failed: refused"),
+                completion_protocol: WORK_COMPLETION_PROTOCOL,
+                cancellation_outcome: None,
+            },
         )
         .await
         .unwrap();
         let replay = write_result(
             directory.path(),
             &workspace,
-            WorkOutcome::Failed,
-            None,
-            "process_spawn_failed",
-            WORK_COMPLETION_PROTOCOL,
-            None,
+            DurableResult {
+                outcome: WorkOutcome::Failed,
+                exit_code: None,
+                termination: "process_spawn_failed",
+                reason: Some("process_spawn_failed: refused"),
+                completion_protocol: WORK_COMPLETION_PROTOCOL,
+                cancellation_outcome: None,
+            },
         )
         .await
         .unwrap();
@@ -1047,17 +1132,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.completion_protocol, WORK_COMPLETION_PROTOCOL);
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("process_spawn_failed: refused")
+        );
         assert!(result.cancellation_outcome.is_none());
 
         assert!(matches!(
             write_result(
                 directory.path(),
                 &workspace,
-                WorkOutcome::Aborted,
-                None,
-                "recovered_cancellation",
-                CANCELLATION_COMPLETION_PROTOCOL,
-                Some(CancellationOutcome::Terminated as i32),
+                DurableResult {
+                    outcome: WorkOutcome::Aborted,
+                    exit_code: None,
+                    termination: "recovered_cancellation",
+                    reason: None,
+                    completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
+                    cancellation_outcome: Some(CancellationOutcome::Terminated as i32),
+                },
             )
             .await,
             Err(AgentError::InvalidAssignment(_))

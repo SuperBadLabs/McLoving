@@ -392,6 +392,82 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     .expect("count cancellation completion events");
     assert_eq!(completions, 1);
 
+    let recovered = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "agent-recovery-termination".into(),
+            pipeline_digest: [0xAE; 32],
+            node_key: "stage-recovery".into(),
+            required_capabilities: vec!["windows".into()],
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit interrupted agent build");
+    let recovered_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "windows-1".into(),
+            capabilities: vec!["windows".into()],
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim interrupted work")
+        .expect("interrupted claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                recovered_claim.attempt_id,
+                recovered_claim.fence,
+                recovered_claim.restore_epoch,
+                "windows-1",
+            )
+            .await
+            .expect("accept interrupted work")
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                organization_id,
+                attempt_id: recovered_claim.attempt_id,
+                fence: recovered_claim.fence,
+                restore_epoch: recovered_claim.restore_epoch,
+                agent_id: "windows-1",
+                session_epoch: 1,
+                outcome: AgentCancellationOutcome::AlreadyExited,
+            })
+            .await
+            .expect("settle interrupted work without an owner cancellation"),
+        AgentCancellationDisposition::Completed
+    );
+    let recovered_snapshot = store
+        .build_snapshot(organization_id, project_id, recovered.build_id)
+        .await
+        .expect("read interrupted build")
+        .expect("interrupted build exists");
+    assert_eq!(recovered_snapshot.build_status, "aborted");
+    assert_eq!(
+        recovered_snapshot.terminal_summary,
+        Some(json!({"reason": "agent_recovery_process_already_exited"}))
+    );
+    let recovery_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.recovery_process_already_exited'",
+    )
+    .bind(organization_id)
+    .bind(recovered.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count recovery completion events");
+    assert_eq!(recovery_events, 1);
+
     let retained = store
         .admit_build(&NewBuild {
             organization_id,

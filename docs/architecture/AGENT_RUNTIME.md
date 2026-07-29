@@ -26,12 +26,26 @@ requires `MCLOVING_AGENT_SERVER_CERT_PATH`,
 listener refuses plaintext and requires a client certificate rooted in the
 configured agent CA. `MCLOVING_AGENT_IDENTITY_BINDINGS_PATH` is also required
 when that listener is enabled. It names a root-owned, whitespace-delimited file
-whose non-comment rows contain the client leaf-certificate SHA-256, exact agent
-ID, and exact trust pool. Every session, reconciliation, and cancellation
-completion verifies the claims against the authenticated peer certificate.
+whose non-comment rows contain four whitespace-delimited fields: the client
+leaf-certificate SHA-256, exact agent ID, exact trust pool, and exact
+organization UUID. Every session, reconciliation, and cancellation completion
+verifies the claims against the authenticated peer certificate.
 Possession of another certificate under the same CA cannot select a different
 agent identity or trust class. Session epochs are advanced atomically in
 PostgreSQL so a second controller replica cannot admit stale authority.
+
+The organization UUID is a required W2-C identity-binding migration. Before
+upgrading a controller from the earlier three-column format, append the
+organization UUID authorized for each agent:
+
+```text
+# sha256 agent-id trust-pool organization-uuid
+0123...cdef windows-1 trusted-windows 00000000-0000-0000-0000-000000000123
+```
+
+Legacy three-column rows fail startup with an explicit migration error. The
+controller never infers a tenant because doing so could turn a certificate
+rotation or configuration mistake into cross-tenant authority.
 
 ## Acceptance and reconciliation
 
@@ -51,13 +65,23 @@ spool metadata. Terminal attempts remain durable history but are excluded from
 active reconciliation.
 The controller compares each report with current PostgreSQL lease, fence,
 restore epoch, owner, and cancellation state. Rejected attempts are returned
-as cancellation directives. Before terminalizing a cancelled record, a
+as cancellation directives. A retained accepted or running attempt is also
+settled before the reconnected agent may poll again: the agent cannot recover
+the original wait handle and therefore must prove termination or move the work
+to `reconciliation_required`. Before terminalizing either kind of record, a
 reconnecting Unix agent terminates the recorded process group; recovered
-Windows Jobs that were successfully assigned have already been killed by the previous service process's
-kill-on-close handle. The agent then sends a fenced cancellation-completion
-RPC. PostgreSQL atomically terminalizes the attempt, node, build, event, and
-outbox before the local SQLite record becomes terminal. A lost response leaves
-the local record reconcilable and the controller completion is idempotent.
+Windows Jobs that were successfully assigned have already been killed by the
+previous service process's kill-on-close handle. The agent then sends a fenced
+cancellation-completion RPC. PostgreSQL atomically terminalizes the attempt,
+node, build, event, and outbox before the local SQLite record becomes terminal.
+A lost response leaves the local record reconcilable and the controller
+completion is idempotent.
+
+Lease renewal continues through durable result creation, bounded log upload,
+and the terminal controller acknowledgement. It stops only after the
+acknowledgement is received (or authority is rejected). Recovered finalization
+replay follows the same rule, rather than relying only on the controller's
+initial bounded recovery lease.
 
 ## Portable execution boundary
 
