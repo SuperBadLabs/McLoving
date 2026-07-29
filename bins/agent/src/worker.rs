@@ -12,8 +12,8 @@ use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
     CancellationCompletion, CancellationDisposition, CancellationOutcome, CredentialBinding,
-    WorkAssignment, WorkAuthority, WorkCompletion, WorkLeaseRenewal, WorkLogChunk, WorkOutcome,
-    WorkPoll,
+    CredentialRequest, WorkAssignment, WorkAuthority, WorkCompletion, WorkLeaseRenewal,
+    WorkLogChunk, WorkOutcome, WorkPoll,
 };
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
@@ -58,6 +58,8 @@ struct ProcessSpec {
     args: Vec<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    #[serde(default)]
+    credentials: Vec<String>,
     timeout_seconds: Option<u64>,
 }
 
@@ -442,6 +444,21 @@ fn validate_assignment(
             "process timeout must be between 1 and {MAX_EXECUTION_TIMEOUT_SECONDS} seconds"
         )));
     }
+    let credential_targets = &spec.steps[0].credentials;
+    if credential_targets.len() > 8
+        || credential_targets
+            .iter()
+            .any(|name| !valid_environment_name(name) || spec.steps[0].env.contains_key(name))
+        || credential_targets
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != credential_targets.len()
+    {
+        return Err(AgentError::InvalidAssignment(
+            "credential targets must be unique bounded environment names and must not collide with pipeline environment".to_owned(),
+        ));
+    }
     let workspace = PathBuf::from(format!(
         "{}/{}/{}",
         assignment.organization_id, assignment.attempt_id, assignment.fence_token
@@ -555,21 +572,6 @@ async fn run_assignment(
         completion_result?;
         return lease_result;
     }
-    require_work_receipt(
-        lease_deadline_rpc(
-            lease_started_at + lease_rpc_budget(lease_window),
-            client.start_work(assignment.authority.clone()),
-        )
-        .await?,
-        session_epoch,
-    )?;
-    let credentials = lease_deadline_rpc(
-        lease_started_at + lease_rpc_budget(lease_window),
-        client.fetch_credentials(assignment.authority.clone()),
-    )
-    .await?;
-    ensure_session(credentials.session_epoch, session_epoch)?;
-
     let execution_cancellation = stop.child_token();
     let authority_lost = CancellationToken::new();
     let lease_stop = CancellationToken::new();
@@ -587,7 +589,77 @@ async fn run_assignment(
         },
     ));
     let process = assignment.process;
-    let execution_environment = execution_environment(process.env, credentials.credentials)?;
+    let credentials = if process.credentials.is_empty() {
+        Vec::new()
+    } else {
+        match wait_for_credentials(
+            client,
+            &assignment.authority,
+            &process.credentials,
+            session_epoch,
+            lease_window,
+            &execution_cancellation,
+            &authority_lost,
+        )
+        .await
+        {
+            Ok(Some(credentials)) => credentials,
+            Ok(None) => {
+                let completion_result = finalize_without_process(
+                    config,
+                    client,
+                    &mut journal,
+                    ProcesslessCompletion {
+                        authority: &assignment.authority,
+                        workspace: &assignment.workspace,
+                        session_epoch,
+                        outcome: WorkOutcome::Aborted,
+                        reason: "cancelled_while_waiting_for_credentials".to_owned(),
+                    },
+                    AuthorityRpcControl {
+                        authority_lost: &authority_lost,
+                        stop: &stop,
+                        lease_window,
+                    },
+                )
+                .await;
+                lease_stop.cancel();
+                let lease_result = lease_task.await.map_err(|error| {
+                    AgentError::InvalidAssignment(format!("lease task failed: {error}"))
+                })?;
+                completion_result?;
+                return lease_result;
+            }
+            Err(error) => {
+                lease_stop.cancel();
+                let _ = lease_task.await;
+                return Err(error);
+            }
+        }
+    };
+    let start_result = authority_rpc(
+        AuthorityRpcControl {
+            authority_lost: &authority_lost,
+            stop: &stop,
+            lease_window,
+        },
+        client.start_work(assignment.authority.clone()),
+    )
+    .await
+    .and_then(|receipt| require_work_receipt(receipt, session_epoch));
+    if let Err(error) = start_result {
+        lease_stop.cancel();
+        let _ = lease_task.await;
+        return Err(error);
+    }
+    let execution_environment = match execution_environment(process.env, credentials) {
+        Ok(environment) => environment,
+        Err(error) => {
+            lease_stop.cancel();
+            let _ = lease_task.await;
+            return Err(error);
+        }
+    };
     let request = ExecutionRequest {
         workspace_root: config.workspace_root.clone(),
         workspace: assignment.workspace.clone(),
@@ -859,6 +931,42 @@ fn valid_environment_name(value: &str) -> bool {
     matches!(bytes.next(), Some(byte) if byte.is_ascii_alphabetic() || byte == b'_')
         && value.len() <= 128
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+async fn wait_for_credentials(
+    client: &mut AgentControlClient<Channel>,
+    authority: &WorkAuthority,
+    target_names: &[String],
+    session_epoch: u64,
+    lease_window: Duration,
+    execution_cancellation: &CancellationToken,
+    authority_lost: &CancellationToken,
+) -> Result<Option<Vec<CredentialBinding>>, AgentError> {
+    loop {
+        let response = tokio::select! {
+            () = execution_cancellation.cancelled() => return Ok(None),
+            () = authority_lost.cancelled() => return Err(AgentError::StaleAuthority),
+            response = tokio::time::timeout(
+                lease_rpc_budget(lease_window),
+                client.fetch_credentials(CredentialRequest {
+                    authority: Some(authority.clone()),
+                    target_names: target_names.to_vec(),
+                }),
+            ) => response
+                .map_err(|_| AgentError::AuthorityRpcTimeout)?
+                .map(tonic::Response::into_inner)
+                .map_err(AgentError::from)?,
+        };
+        ensure_session(response.session_epoch, session_epoch)?;
+        if response.ready {
+            return Ok(Some(response.credentials));
+        }
+        tokio::select! {
+            () = execution_cancellation.cancelled() => return Ok(None),
+            () = authority_lost.cancelled() => return Err(AgentError::StaleAuthority),
+            () = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+    }
 }
 
 fn unverified_containment_process_id(error: &ExecutionError) -> Option<u32> {

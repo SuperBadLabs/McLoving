@@ -347,14 +347,33 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
         session_epoch: u64,
-    ) -> Result<Vec<CredentialDelivery>, StoreError> {
+        target_names: &[String],
+    ) -> Result<Option<Vec<CredentialDelivery>>, StoreError> {
+        if target_names.is_empty()
+            || target_names.len() > MAX_APPROVALS
+            || target_names
+                .iter()
+                .any(|name| !valid_environment_name(name))
+            || target_names
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != target_names.len()
+        {
+            return Err(StoreError::InvalidSecurityOperation(
+                "credential request targets are outside their bounds".to_owned(),
+            ));
+        }
         let session_epoch =
             i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let rows = sqlx::query_as::<_, (Uuid, String, Vec<u8>, Uuid)>(
-            "UPDATE credential_grants AS g
-             SET delivered_at = clock_timestamp()
-             FROM attempts AS a
+        let rows = sqlx::query_as::<_, (Uuid, String, Vec<u8>, Uuid, bool)>(
+            "SELECT g.id, g.target_name, g.secret_value, g.build_id,
+                    g.delivered_at IS NOT NULL AS already_delivered
+             FROM credential_grants AS g
+             JOIN attempts AS a
+               ON a.organization_id = g.organization_id
+              AND a.id = g.attempt_id
              JOIN nodes AS n
                ON n.organization_id = a.organization_id AND n.id = a.node_id
              JOIN builds AS b
@@ -363,8 +382,10 @@ impl Store {
              WHERE g.organization_id = $1
                AND g.attempt_id = $2
                AND g.fence = $3
-               AND g.delivered_at IS NULL
-               AND g.expires_at > clock_timestamp()
+               AND (
+                   g.delivered_at IS NOT NULL
+                   OR g.expires_at > clock_timestamp()
+               )
                AND a.organization_id = g.organization_id
                AND a.id = g.attempt_id
                AND a.fence = g.fence
@@ -376,14 +397,15 @@ impl Store {
                )
                AND a.lease_owner = $5
                AND a.lease_expires_at > clock_timestamp()
-               AND a.status = 'running'
+               AND a.status = 'accepted'
                AND b.id = g.build_id
                AND b.project_id = g.project_id
                AND b.pipeline_digest = g.pipeline_digest
                AND s.agent_id = $5
                AND s.session_epoch = $6
                AND s.features @> ARRAY['attempt-credentials-v1']::text[]
-             RETURNING g.id, g.target_name, g.secret_value, g.build_id",
+             ORDER BY g.target_name
+             FOR UPDATE OF g",
         )
         .bind(organization_id)
         .bind(attempt_id)
@@ -393,7 +415,53 @@ impl Store {
         .bind(session_epoch)
         .fetch_all(&mut *tx)
         .await?;
-        if let Some((_, _, _, build_id)) = rows.first() {
+        let requested = target_names
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let available = rows
+            .iter()
+            .map(|row| row.1.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        if !available.is_subset(&requested) {
+            return Err(StoreError::InvalidSecurityOperation(
+                "credential grants do not match the execution contract".to_owned(),
+            ));
+        }
+        if available != requested {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let delivered_count = rows.iter().filter(|row| row.4).count();
+        if delivered_count != 0 && delivered_count != rows.len() {
+            return Err(StoreError::InvalidSecurityOperation(
+                "credential delivery has a partial atomic grant set".to_owned(),
+            ));
+        }
+        if delivered_count == 0 {
+            let grant_ids = rows.iter().map(|row| row.0).collect::<Vec<_>>();
+            let delivered = sqlx::query_scalar::<_, Uuid>(
+                "UPDATE credential_grants
+                 SET delivered_at = clock_timestamp()
+                 WHERE organization_id = $1
+                   AND id = ANY($2::uuid[])
+                   AND delivered_at IS NULL
+                 RETURNING id",
+            )
+            .bind(organization_id)
+            .bind(&grant_ids)
+            .fetch_all(&mut *tx)
+            .await?;
+            if delivered.len() != rows.len() {
+                return Err(StoreError::InvalidSecurityOperation(
+                    "credential delivery lost its atomic grant set".to_owned(),
+                ));
+            }
+        }
+        if delivered_count == 0 {
+            let (_, _, _, build_id, _) = rows
+                .first()
+                .expect("an exact non-empty target set has at least one grant");
             append_event_and_outbox(
                 &mut tx,
                 organization_id,
@@ -409,16 +477,17 @@ impl Store {
             .await?;
         }
         tx.commit().await?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(grant_id, target_name, secret_value, _)| CredentialDelivery {
-                    grant_id,
-                    target_name,
-                    secret_value,
-                },
-            )
-            .collect())
+        Ok(Some(
+            rows.into_iter()
+                .map(
+                    |(grant_id, target_name, secret_value, _, _)| CredentialDelivery {
+                        grant_id,
+                        target_name,
+                        secret_value,
+                    },
+                )
+                .collect(),
+        ))
     }
 }
 

@@ -8,10 +8,11 @@ use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
 use mcloving_agent_protocol::wire::{
     AttemptAuthority, CancellationCompletion, CancellationDisposition, CancellationOutcome,
-    CancellationReceipt, CredentialBinding, CredentialEnvelope, OpenSessionRequest,
-    OpenSessionResponse, ReconciliationDirective, ReconciliationReport, RotateCertificateRequest,
-    RotateCertificateResponse, WorkAssignment, WorkAuthority, WorkCompletion, WorkLeaseReceipt,
-    WorkLeaseRenewal, WorkLogChunk, WorkOffer, WorkOutcome, WorkPoll, WorkReceipt,
+    CancellationReceipt, CredentialBinding, CredentialEnvelope, CredentialRequest,
+    OpenSessionRequest, OpenSessionResponse, ReconciliationDirective, ReconciliationReport,
+    RotateCertificateRequest, RotateCertificateResponse, WorkAssignment, WorkAuthority,
+    WorkCompletion, WorkLeaseReceipt, WorkLeaseRenewal, WorkLogChunk, WorkOffer, WorkOutcome,
+    WorkPoll, WorkReceipt,
 };
 use mcloving_agent_protocol::{
     ATTEMPT_CREDENTIALS_FEATURE, ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS,
@@ -483,12 +484,15 @@ impl AgentControl for ControllerAgentService {
 
     async fn fetch_credentials(
         &self,
-        request: Request<WorkAuthority>,
+        request: Request<CredentialRequest>,
     ) -> Result<Response<CredentialEnvelope>, Status> {
         let identity = self.identities.authenticate(&request)?.clone();
-        let authority = request.into_inner();
+        let request = request.into_inner();
+        let authority = request
+            .authority
+            .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
         let context = authorize_work_authority(&self.store, &identity, &authority).await?;
-        let credentials = self
+        let deliveries = self
             .store
             .redeem_credential_grants(
                 context.organization_id,
@@ -497,9 +501,13 @@ impl AgentControl for ControllerAgentService {
                 context.restore_epoch,
                 &authority.agent_id,
                 authority.session_epoch,
+                &request.target_names,
             )
             .await
-            .map_err(internal_store_error)?
+            .map_err(internal_store_error)?;
+        let ready = deliveries.is_some();
+        let credentials = deliveries
+            .unwrap_or_default()
             .into_iter()
             .map(|credential| CredentialBinding {
                 grant_id: credential.grant_id.to_string(),
@@ -510,6 +518,7 @@ impl AgentControl for ControllerAgentService {
         Ok(Response::new(CredentialEnvelope {
             session_epoch: authority.session_epoch,
             credentials,
+            ready,
         }))
     }
 

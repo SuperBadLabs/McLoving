@@ -4774,6 +4774,97 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
     );
     assert!(
         store
+            .redeem_credential_grants(
+                organization_id,
+                claim.attempt_id,
+                claim.fence + 1,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject another fence")
+            .is_none()
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                Uuid::new_v4(),
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject another attempt")
+            .is_none()
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                Uuid::new_v4(),
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject another tenant")
+            .is_none()
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "another-agent",
+                1,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject another agent")
+            .is_none()
+    );
+    let delivered = store
+        .redeem_credential_grants(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            "agent-protected",
+            1,
+            &["DEPLOY_TOKEN".to_owned()],
+        )
+        .await
+        .expect("redeem exact grant")
+        .expect("exact grant set is ready");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].grant_id, grant_id);
+    assert_eq!(delivered[0].target_name, "DEPLOY_TOKEN");
+    assert_eq!(delivered[0].secret_value, secret);
+    let replayed = store
+        .redeem_credential_grants(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            "agent-protected",
+            1,
+            &["DEPLOY_TOKEN".to_owned()],
+        )
+        .await
+        .expect("replay delivery after response loss")
+        .expect("same accepted authority recovers its exact envelope");
+    assert_eq!(replayed, delivered);
+    assert!(
+        store
             .mark_attempt_running_in_session(
                 organization_id,
                 claim.attempt_id,
@@ -4790,85 +4881,15 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             .redeem_credential_grants(
                 organization_id,
                 claim.attempt_id,
-                claim.fence + 1,
-                claim.restore_epoch,
-                "agent-protected",
-                1,
-            )
-            .await
-            .expect("reject another fence")
-            .is_empty()
-    );
-    assert!(
-        store
-            .redeem_credential_grants(
-                organization_id,
-                Uuid::new_v4(),
                 claim.fence,
                 claim.restore_epoch,
                 "agent-protected",
                 1,
+                &["DEPLOY_TOKEN".to_owned()],
             )
             .await
-            .expect("reject another attempt")
-            .is_empty()
-    );
-    assert!(
-        store
-            .redeem_credential_grants(
-                Uuid::new_v4(),
-                claim.attempt_id,
-                claim.fence,
-                claim.restore_epoch,
-                "agent-protected",
-                1,
-            )
-            .await
-            .expect("reject another tenant")
-            .is_empty()
-    );
-    assert!(
-        store
-            .redeem_credential_grants(
-                organization_id,
-                claim.attempt_id,
-                claim.fence,
-                claim.restore_epoch,
-                "another-agent",
-                1,
-            )
-            .await
-            .expect("reject another agent")
-            .is_empty()
-    );
-    let delivered = store
-        .redeem_credential_grants(
-            organization_id,
-            claim.attempt_id,
-            claim.fence,
-            claim.restore_epoch,
-            "agent-protected",
-            1,
-        )
-        .await
-        .expect("redeem exact grant");
-    assert_eq!(delivered.len(), 1);
-    assert_eq!(delivered[0].grant_id, grant_id);
-    assert_eq!(delivered[0].target_name, "DEPLOY_TOKEN");
-    assert_eq!(delivered[0].secret_value, secret);
-    assert!(
-        store
-            .redeem_credential_grants(
-                organization_id,
-                claim.attempt_id,
-                claim.fence,
-                claim.restore_epoch,
-                "agent-protected",
-                1,
-            )
-            .await
-            .expect("reject delivery replay")
-            .is_empty()
+            .expect("reject delivery replay after execution start")
+            .is_none()
     );
     assert!(
         store
