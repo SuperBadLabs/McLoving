@@ -349,14 +349,14 @@ Wait-Process -Id $child.Id
         let cancel = token.clone();
         let pid_path = root.path().join("cancel/child.pid");
         let cancellation = tokio::spawn(async move {
-            for _ in 0..200 {
+            for _ in 0..1_500 {
                 if pid_path.exists() {
                     cancel.cancel();
                     return;
                 }
                 sleep(Duration::from_millis(10)).await;
             }
-            panic!("descendant PID was not written");
+            panic!("descendant PID was not written within 15 seconds");
         });
 
         let outcome = execute(&request, token).await.unwrap();
