@@ -83,6 +83,8 @@ pub enum ExecutionError {
     MissingProcessId,
     #[error("process spawn could not be recorded durably: {0}")]
     SpawnHook(String),
+    #[error("process {process_id} containment could not be verified: {reason}")]
+    ContainmentUnverified { process_id: u32, reason: String },
     #[error("execution mode {0:?} is unsupported on this platform")]
     UnsupportedMode(ExecutionMode),
     #[error("cmd.exe program or argument contains unsupported shell metacharacters")]

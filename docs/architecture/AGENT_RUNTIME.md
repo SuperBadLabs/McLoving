@@ -81,6 +81,13 @@ cancellation-completion RPC. PostgreSQL atomically terminalizes the attempt,
 node, build, event, and outbox before the local SQLite record becomes terminal.
 A lost response leaves the local record reconcilable and the controller
 completion is idempotent.
+Once finalization and its result descriptor commit atomically, they also serve
+as durable proof that the executor already observed empty containment. A stale
+fence may retire that exact evidence without re-probing a now-missing Unix
+leader. Conversely, any post-spawn executor error that cannot prove the process
+group empty is recorded as `reconciliation_required`, with its original
+process identity retained; it is never converted into a processless terminal
+failure.
 
 Lease renewal continues through durable result creation, bounded log upload,
 and the terminal controller acknowledgement. It stops only after the

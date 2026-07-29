@@ -423,8 +423,14 @@ async fn send_reconciliation(
                 );
             if cancellation_targets(&cancelled, attempt) || interrupted_execution {
                 let outcome =
-                    cancel_recovered_attempt(&mut journal, attempt, config.termination_grace)
-                        .await?;
+                    if worker::recovered_attempt_has_durable_containment_proof(config, attempt)
+                        .await?
+                    {
+                        RecoveredCancellation::AlreadyExited
+                    } else {
+                        cancel_recovered_attempt(&mut journal, attempt, config.termination_grace)
+                            .await?
+                    };
                 let cancellation_outcome = match outcome {
                     RecoveredCancellation::Terminated => CancellationOutcome::Terminated as i32,
                     RecoveredCancellation::AlreadyExited => {

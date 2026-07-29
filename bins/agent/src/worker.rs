@@ -574,6 +574,17 @@ async fn run_assignment(
     let completion_result: Result<(), AgentError> = async {
         let outcome = match execution {
             Ok(outcome) => outcome,
+            Err(ExecutionError::ContainmentUnverified { process_id, .. }) => {
+                journal.transition(
+                    &organization,
+                    &attempt,
+                    fence,
+                    session_epoch,
+                    AttemptPhase::ReconciliationRequired,
+                    Some(process_id),
+                )?;
+                return Err(AgentError::UnresolvedReconciliation);
+            }
             Err(error) => {
                 return finalize_without_process(
                     config,
@@ -1066,20 +1077,52 @@ pub(super) async fn recovered_cancellation_requires_persistence(
     config: &AgentConfig,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
 ) -> Result<bool, AgentError> {
-    let Some(result_entry) = &attempt.result else {
+    let Some(result) = recovered_persisted_result(config, attempt).await? else {
         return Ok(true);
     };
-    let content = verified_spool_content(&config.workspace_root, result_entry, "result").await?;
-    let result: PersistedResult = serde_json::from_slice(&content)?;
     match result.completion_protocol.as_str() {
         // A stale-fence cancellation retires this local authority; it must not
         // replace the immutable evidence of the work that already completed.
         WORK_COMPLETION_PROTOCOL => Ok(false),
-        CANCELLATION_COMPLETION_PROTOCOL => Ok(true),
+        // Cancellation evidence was already committed atomically with this
+        // journal phase and is equally immutable.
+        CANCELLATION_COMPLETION_PROTOCOL => Ok(false),
         _ => Err(AgentError::InvalidAssignment(
             "durable result has an unknown completion protocol".to_owned(),
         )),
     }
+}
+
+pub(super) async fn recovered_attempt_has_durable_containment_proof(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<bool, AgentError> {
+    if !matches!(
+        attempt.phase,
+        AttemptPhase::Finalizing | AttemptPhase::Cancelling
+    ) {
+        return Ok(false);
+    }
+    let Some(result) = recovered_persisted_result(config, attempt).await? else {
+        return Ok(false);
+    };
+    match result.completion_protocol.as_str() {
+        WORK_COMPLETION_PROTOCOL | CANCELLATION_COMPLETION_PROTOCOL => Ok(true),
+        _ => Err(AgentError::InvalidAssignment(
+            "durable result has an unknown completion protocol".to_owned(),
+        )),
+    }
+}
+
+async fn recovered_persisted_result(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<Option<PersistedResult>, AgentError> {
+    let Some(result_entry) = &attempt.result else {
+        return Ok(None);
+    };
+    let content = verified_spool_content(&config.workspace_root, result_entry, "result").await?;
+    Ok(Some(serde_json::from_slice(&content)?))
 }
 
 async fn finalize_without_process(
@@ -1515,6 +1558,41 @@ mod tests {
 
         assert!(
             !recovered_cancellation_requires_persistence(&config, &attempt)
+                .await
+                .unwrap()
+        );
+        assert!(
+            recovered_attempt_has_durable_containment_proof(&config, &attempt)
+                .await
+                .unwrap()
+        );
+
+        let cancellation_result = write_result(
+            directory.path(),
+            &attempt.workspace,
+            DurableResult {
+                outcome: WorkOutcome::Aborted,
+                exit_code: None,
+                termination: "recovered_cancellation",
+                reason: None,
+                completion_protocol: CANCELLATION_COMPLETION_PROTOCOL,
+                cancellation_outcome: Some(CancellationOutcome::Terminated as i32),
+            },
+        )
+        .await
+        .unwrap();
+        let cancellation_attempt = mcloving_agent_runtime::ReconciliationAttempt {
+            phase: AttemptPhase::Cancelling,
+            result: Some(cancellation_result),
+            ..attempt
+        };
+        assert!(
+            recovered_attempt_has_durable_containment_proof(&config, &cancellation_attempt)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !recovered_cancellation_requires_persistence(&config, &cancellation_attempt)
                 .await
                 .unwrap()
         );

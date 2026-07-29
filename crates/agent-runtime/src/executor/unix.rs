@@ -82,21 +82,49 @@ where
     let process_group_id =
         i32::try_from(process_id).map_err(|_| ExecutionError::MissingProcessId)?;
     if let Err(error) = on_spawn(process_id) {
-        terminate_group(&mut child, process_group_id, request.termination_grace).await?;
+        terminate_and_prove_group_empty(
+            &mut child,
+            process_id,
+            process_group_id,
+            request.termination_grace,
+        )
+        .await?;
         return Err(error);
     }
 
     let deadline = Instant::now() + request.timeout;
     let mut termination = tokio::select! {
-        status = child.wait() => (Termination::Exited, status?),
-        () = cancellation.cancelled() => {
-            let status = terminate_group(&mut child, process_group_id, request.termination_grace)
+        status = child.wait() => match status {
+            Ok(status) => (Termination::Exited, status),
+            Err(error) => {
+                terminate_and_prove_group_empty(
+                    &mut child,
+                    process_id,
+                    process_group_id,
+                    request.termination_grace,
+                )
                 .await?;
+                return Err(error.into());
+            }
+        },
+        () = cancellation.cancelled() => {
+            let status = terminate_and_prove_group_empty(
+                &mut child,
+                process_id,
+                process_group_id,
+                request.termination_grace,
+            )
+            .await?;
             (Termination::Cancelled, status)
         }
         () = sleep_until(deadline) => {
-            let status = terminate_group(&mut child, process_group_id, request.termination_grace)
-                .await?;
+            let status = terminate_and_prove_group_empty(
+                &mut child,
+                process_id,
+                process_group_id,
+                request.termination_grace,
+            )
+            .await?;
             (Termination::TimedOut, status)
         }
         result = wait_for_output_limit(
@@ -105,17 +133,29 @@ where
             request.output_limit_bytes,
         ) => {
             if let Err(error) = result {
-                terminate_group(&mut child, process_group_id, request.termination_grace).await?;
-                terminate_remaining_group(process_group_id, request.termination_grace).await?;
+                terminate_and_prove_group_empty(
+                    &mut child,
+                    process_id,
+                    process_group_id,
+                    request.termination_grace,
+                )
+                .await?;
                 return Err(error.into());
             }
-            let status =
-                terminate_group(&mut child, process_group_id, request.termination_grace).await?;
+            let status = terminate_and_prove_group_empty(
+                &mut child,
+                process_id,
+                process_group_id,
+                request.termination_grace,
+            )
+            .await?;
             (Termination::OutputLimitExceeded, status)
         }
     };
 
-    terminate_remaining_group(process_group_id, request.termination_grace).await?;
+    terminate_remaining_group(process_group_id, request.termination_grace)
+        .await
+        .map_err(|error| containment_unverified(process_id, error))?;
     let exceeded =
         output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     if termination.0 == Termination::Exited && exceeded {
@@ -261,6 +301,27 @@ async fn terminate_remaining_group(
         sleep(Duration::from_millis(10)).await;
     }
     Ok(())
+}
+
+async fn terminate_and_prove_group_empty(
+    child: &mut Child,
+    process_id: u32,
+    process_group_id: i32,
+    grace: Duration,
+) -> Result<std::process::ExitStatus, ExecutionError> {
+    let leader_result = terminate_group(child, process_group_id, grace).await;
+    let containment_result = terminate_remaining_group(process_group_id, grace).await;
+    if let Err(error) = containment_result {
+        return Err(containment_unverified(process_id, error));
+    }
+    leader_result
+}
+
+fn containment_unverified(process_id: u32, error: ExecutionError) -> ExecutionError {
+    ExecutionError::ContainmentUnverified {
+        process_id,
+        reason: error.to_string(),
+    }
 }
 
 async fn terminate_group(
