@@ -9,7 +9,8 @@ publish.workspace = true
 windows-sys = { version = "=0.61.2", features = [
   "Win32_Foundation",
   "Win32_Security",
-  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Environment",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
 ] }
@@ -22,3 +23,5 @@ unsafe_code = "allow"
 [lints.clippy]
 all = "deny"
 
+[dev-dependencies]
+tempfile = "=3.27.0"

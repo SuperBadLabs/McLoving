@@ -54,6 +54,15 @@ jobs:
           cargo +1.97.1 test --locked
           -p mcloving-agent-runtime
           -p mcloving-agent
+          -p mcloving-windows-job
+      - name: Build debug agent for native service gate
+        shell: pwsh
+        run: cargo +1.97.1 build --locked -p mcloving-agent
+      - name: Run debug native service and crash-recovery war gate
+        shell: pwsh
+        run: >-
+          ./scripts/windows-agent-war.ps1
+          -AgentBinary ./target/debug/mcloving-agent.exe
       - name: Build release agent
         shell: pwsh
         run: cargo +1.97.1 build --locked --release -p mcloving-agent

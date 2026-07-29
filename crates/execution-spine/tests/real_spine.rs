@@ -103,6 +103,7 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
             scheduler_id: "scheduler-e2e".to_owned(),
             agent_id: "agent-e2e".to_owned(),
             capabilities: vec!["linux".to_owned()],
+            trust_pool: "trusted-linux".into(),
             lease_seconds: 60,
             fairness_seed: 1,
         })
@@ -191,6 +192,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
         pipeline_digest: [42; 32],
         node_key: "execute".to_owned(),
         required_capabilities: vec!["linux".to_owned()],
+        required_trust_pool: "trusted".into(),
         priority: 0,
         execution_spec: json!({
             "version": 1,
@@ -216,6 +218,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
             scheduler_id: "restart-scheduler".to_owned(),
             agent_id: "restart-agent".to_owned(),
             capabilities: vec!["linux".to_owned()],
+            trust_pool: "trusted".into(),
             lease_seconds: 60,
             fairness_seed: 9,
         })
@@ -231,6 +234,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
                 scheduler_id: "restart-scheduler".to_owned(),
                 agent_id: "restart-agent".to_owned(),
                 capabilities: vec!["linux".to_owned()],
+                trust_pool: "trusted".into(),
                 lease_seconds: 60,
                 fairness_seed: 9,
             })
@@ -322,7 +326,7 @@ async fn controller_restart_replay_is_logically_exactly_once() {
     drop(store);
     let store = restart();
     assert!(
-        !store
+        store
             .finalize_attempt(
                 organization_id,
                 claim.attempt_id,
@@ -333,7 +337,21 @@ async fn controller_restart_replay_is_logically_exactly_once() {
                 json!({"sha256": hex(&Sha256::digest(log))}),
             )
             .await
-            .expect("terminal replay is rejected without duplication")
+            .expect("exact terminal replay is accepted without duplication")
+    );
+    assert!(
+        !store
+            .finalize_attempt(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "restart-agent",
+                TerminalOutcome::Failed,
+                json!({"reason": "conflicting replay"}),
+            )
+            .await
+            .expect("conflicting terminal replay is rejected")
     );
     let snapshot = store
         .build_snapshot(organization_id, project_id, admission.build_id)
@@ -465,6 +483,7 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
             scheduler_id: "scheduler-recovery".to_owned(),
             agent_id: "agent-recovery".to_owned(),
             capabilities: vec!["linux".to_owned()],
+            trust_pool: "trusted-linux".into(),
             lease_seconds: 60,
             fairness_seed: 3,
         })
@@ -589,6 +608,7 @@ async fn cancellation_between_offer_and_acceptance_finishes_without_spawning() {
             pipeline_digest: [21; 32],
             node_key: "execute".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: serde_json::from_str(
                 r#"{"version":1,"steps":[{"kind":"process","program":"/bin/sh","args":["-c","touch should-not-exist"],"env":{},"timeout_seconds":10}]}"#,
@@ -603,6 +623,7 @@ async fn cancellation_between_offer_and_acceptance_finishes_without_spawning() {
             scheduler_id: "scheduler-pre-cancel".into(),
             agent_id: "agent-pre-cancel".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -790,6 +811,7 @@ async fn admitted_claim(
             pipeline_digest: Sha256::digest(idempotency_key).into(),
             node_key: "execute".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec,
         })
@@ -801,6 +823,7 @@ async fn admitted_claim(
             scheduler_id: "scheduler-regression".into(),
             agent_id: "agent-regression".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds,
             fairness_seed: 1,
         })

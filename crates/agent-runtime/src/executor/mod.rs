@@ -6,10 +6,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::fs;
-use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::{JournalError, SpoolEntry, validate_relative_path};
@@ -20,7 +17,17 @@ mod unix;
 mod windows;
 
 #[cfg(unix)]
+use unix::{
+    ensure_original_workspace_root as platform_ensure_original_workspace_root,
+    open_workspace_root as platform_open_workspace_root,
+};
+#[cfg(unix)]
 pub use unix::{execute, execute_with_spawn_hook};
+#[cfg(windows)]
+use windows::{
+    ensure_original_workspace_root as platform_ensure_original_workspace_root,
+    open_workspace_root as platform_open_workspace_root,
+};
 #[cfg(windows)]
 pub use windows::{execute, execute_with_spawn_hook};
 
@@ -40,6 +47,8 @@ pub struct ExecutionRequest {
     pub program: PathBuf,
     pub arguments: Vec<OsString>,
     pub environment: BTreeMap<OsString, OsString>,
+    /// Maximum combined durable stdout/stderr bytes for this execution.
+    pub output_limit_bytes: Option<u64>,
     pub timeout: Duration,
     pub termination_grace: Duration,
 }
@@ -49,6 +58,7 @@ pub enum Termination {
     Exited,
     TimedOut,
     Cancelled,
+    OutputLimitExceeded,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,10 +87,16 @@ pub enum ExecutionError {
     WorkspaceAlreadyExists,
     #[error("workspace contains a symlink or reparse-point component")]
     SymlinkWorkspaceComponent,
+    #[error("executor-owned spool path no longer names its original file")]
+    ReplacedSpoolPath,
+    #[error("configured workspace root no longer names its original directory")]
+    ReplacedWorkspaceRoot,
     #[error("process did not expose a valid process ID")]
     MissingProcessId,
     #[error("process spawn could not be recorded durably: {0}")]
     SpawnHook(String),
+    #[error("process {process_id} containment could not be verified: {reason}")]
+    ContainmentUnverified { process_id: u32, reason: String },
     #[error("execution mode {0:?} is unsupported on this platform")]
     UnsupportedMode(ExecutionMode),
     #[error("cmd.exe program or argument contains unsupported shell metacharacters")]
@@ -92,6 +108,24 @@ pub enum ExecutionError {
     #[cfg(unix)]
     #[error("signal error: {0}")]
     Signal(#[from] nix::errno::Errno),
+}
+
+/// Pins the configured workspace root so path-based maintenance can fail
+/// closed if untrusted work replaces that root before cleanup completes.
+pub struct WorkspaceRootGuard {
+    file: std::fs::File,
+}
+
+impl WorkspaceRootGuard {
+    pub fn open(path: &Path) -> Result<Self, ExecutionError> {
+        Ok(Self {
+            file: platform_open_workspace_root(path)?,
+        })
+    }
+
+    pub fn ensure_original(&self, path: &Path) -> Result<(), ExecutionError> {
+        platform_ensure_original_workspace_root(&self.file, path)
+    }
 }
 
 pub async fn execute_portable(
@@ -148,7 +182,7 @@ fn create_workspace(root: &Path, relative: &Path) -> Result<PathBuf, ExecutionEr
     Ok(canonical)
 }
 
-fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
+pub fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }
@@ -165,31 +199,11 @@ fn is_link_or_reparse_point(metadata: &std::fs::Metadata) -> bool {
     }
 }
 
-async fn sync_file(path: &Path) -> Result<(), io::Error> {
-    #[cfg(unix)]
-    {
-        fs::OpenOptions::new()
-            .read(true)
-            .open(path)
-            .await?
-            .sync_all()
-            .await
-    }
-    #[cfg(windows)]
-    {
-        // FlushFileBuffers requires GENERIC_WRITE even when no further bytes
-        // will be appended. Reopen the completed spool file with write access
-        // so sync_all maps to the documented Win32 durability primitive.
-        fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .await?
-            .sync_all()
-            .await
-    }
-}
-
-fn sync_directory(path: &Path) -> Result<(), io::Error> {
+/// Flushes the directory durability boundary used by executor-owned spools.
+///
+/// Callers that create additional replay-critical files must flush their
+/// containing directory before committing a reference to durable state.
+pub fn sync_directory(path: &Path) -> Result<(), io::Error> {
     #[cfg(unix)]
     {
         std::fs::File::open(path)?.sync_all()
@@ -213,33 +227,4 @@ fn sync_directory(path: &Path) -> Result<(), io::Error> {
             ))
         }
     }
-}
-
-async fn spool_entry(
-    workspace: &Path,
-    suffix: &str,
-    sequence: u64,
-    path: &Path,
-) -> Result<SpoolEntry, ExecutionError> {
-    let metadata = fs::metadata(path).await?;
-    Ok(SpoolEntry {
-        sequence,
-        relative_path: workspace.join(suffix),
-        digest: digest_file(path).await?,
-        bytes: metadata.len(),
-    })
-}
-
-async fn digest_file(path: &Path) -> Result<[u8; 32], io::Error> {
-    let mut file = fs::File::open(path).await?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(digest.finalize().into())
 }

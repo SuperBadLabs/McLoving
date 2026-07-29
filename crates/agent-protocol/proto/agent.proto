@@ -7,6 +7,12 @@ service AgentControl {
   rpc RotateCertificate(RotateCertificateRequest) returns (RotateCertificateResponse);
   rpc Reconcile(ReconciliationReport) returns (ReconciliationDirective);
   rpc CompleteCancellation(CancellationCompletion) returns (CancellationReceipt);
+  rpc PollWork(WorkPoll) returns (WorkOffer);
+  rpc AcceptWork(WorkAuthority) returns (WorkReceipt);
+  rpc StartWork(WorkAuthority) returns (WorkReceipt);
+  rpc RenewWorkLease(WorkLeaseRenewal) returns (WorkLeaseReceipt);
+  rpc PublishLog(WorkLogChunk) returns (WorkReceipt);
+  rpc CompleteWork(WorkCompletion) returns (WorkReceipt);
 }
 
 message ProtocolOffer {
@@ -54,6 +60,7 @@ message AttemptState {
   string workspace = 7;
   repeated SpoolEntry logs = 8;
   optional SpoolEntry result = 9;
+  optional string process_birth_identity = 10;
 }
 
 message SpoolEntry {
@@ -94,6 +101,8 @@ enum CancellationOutcome {
   CANCELLATION_OUTCOME_UNSPECIFIED = 0;
   CANCELLATION_OUTCOME_TERMINATED = 1;
   CANCELLATION_OUTCOME_RECONCILIATION_REQUIRED = 2;
+  CANCELLATION_OUTCOME_ALREADY_EXITED = 3;
+  CANCELLATION_OUTCOME_IDENTITY_MISMATCH = 4;
 }
 
 message CancellationReceipt {
@@ -106,4 +115,71 @@ enum CancellationDisposition {
   CANCELLATION_DISPOSITION_COMPLETED = 1;
   CANCELLATION_DISPOSITION_RETIRE_STALE = 2;
   CANCELLATION_DISPOSITION_RECONCILIATION_REQUIRED = 3;
+}
+
+message WorkPoll {
+  string agent_id = 1;
+  uint64 session_epoch = 2;
+  string organization_id = 3;
+  reserved 4;
+  uint32 lease_seconds = 5;
+}
+
+message WorkOffer {
+  uint64 session_epoch = 1;
+  optional WorkAssignment assignment = 2;
+}
+
+message WorkAssignment {
+  string organization_id = 1;
+  string build_id = 2;
+  string node_id = 3;
+  string attempt_id = 4;
+  uint64 fence_token = 5;
+  bytes execution_spec_json = 6;
+  bytes payload_digest = 7;
+}
+
+message WorkAuthority {
+  string agent_id = 1;
+  uint64 session_epoch = 2;
+  string organization_id = 3;
+  string attempt_id = 4;
+  uint64 fence_token = 5;
+}
+
+message WorkLeaseRenewal {
+  WorkAuthority authority = 1;
+  uint32 lease_seconds = 2;
+}
+
+message WorkLeaseReceipt {
+  uint64 session_epoch = 1;
+  bool accepted = 2;
+  bool cancellation_requested = 3;
+}
+
+message WorkLogChunk {
+  WorkAuthority authority = 1;
+  uint64 sequence = 2;
+  string stream = 3;
+  bytes content = 4;
+}
+
+message WorkCompletion {
+  WorkAuthority authority = 1;
+  WorkOutcome outcome = 2;
+  bytes summary_json = 3;
+}
+
+enum WorkOutcome {
+  WORK_OUTCOME_UNSPECIFIED = 0;
+  WORK_OUTCOME_SUCCEEDED = 1;
+  WORK_OUTCOME_FAILED = 2;
+  WORK_OUTCOME_ABORTED = 3;
+}
+
+message WorkReceipt {
+  uint64 session_epoch = 1;
+  bool accepted = 2;
 }

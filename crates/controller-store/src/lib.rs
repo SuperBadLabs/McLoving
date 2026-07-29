@@ -11,6 +11,8 @@ mod scheduler;
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
+const MAX_ATTEMPT_LOG_BYTES: i64 = 64 * 1_048_576;
+const MAX_ATTEMPT_LOG_CHUNKS: i64 = 66;
 
 /// Schema installed by [`Store::migrate`].
 pub const CONTROLLER_SCHEMA_V1: &str = include_str!("../migrations/0001_controller_truth.sql");
@@ -26,11 +28,20 @@ pub const OBJECT_REFERENCES_V5: &str = include_str!("../migrations/0005_object_r
 pub const RECOVERY_OPERATIONS_V6: &str = include_str!("../migrations/0006_recovery_operations.sql");
 /// Durable, active-active-safe agent session authority.
 pub const AGENT_SESSIONS_V7: &str = include_str!("../migrations/0007_agent_sessions.sql");
+/// Trust-pool routing for executable nodes.
+pub const NODE_TRUST_POOL_V8: &str = include_str!("../migrations/0008_node_trust_pool.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
     Retain,
     Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconciliationTrustPoolAuthorization {
+    Matching,
+    Missing,
+    Mismatched,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +54,8 @@ pub enum AgentCancellationDisposition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentCancellationOutcome {
     Terminated,
+    AlreadyExited,
+    IdentityMismatch,
     ReconciliationRequired,
 }
 
@@ -67,6 +80,7 @@ pub struct NewBuild {
     pub pipeline_digest: [u8; 32],
     pub node_key: String,
     pub required_capabilities: Vec<String>,
+    pub required_trust_pool: String,
     pub priority: i32,
     pub execution_spec: Value,
 }
@@ -308,6 +322,8 @@ pub enum StoreError {
     InvalidRecoveryOperation(String),
     #[error("invalid agent session authority")]
     InvalidAgentSession,
+    #[error("required agent trust pool must be non-empty")]
+    InvalidTrustPool,
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -347,6 +363,7 @@ impl Store {
         apply_migration(&mut tx, 5, OBJECT_REFERENCES_V5).await?;
         apply_migration(&mut tx, 6, RECOVERY_OPERATIONS_V6).await?;
         apply_migration(&mut tx, 7, AGENT_SESSIONS_V7).await?;
+        apply_migration(&mut tx, 8, NODE_TRUST_POOL_V8).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -409,6 +426,105 @@ impl Store {
         .await?)
     }
 
+    /// Binds a fenced attempt authority to the trust pool durably required by
+    /// its node. Re-enrollment may advance an agent session, but it must never
+    /// let a certificate in a different pool inherit prior fenced authority.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn authorize_attempt_trust_pool(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        trust_pool: &str,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let authorized = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM attempts AS a
+                 JOIN nodes AS n
+                   ON n.id = a.node_id
+                  AND n.organization_id = a.organization_id
+                 CROSS JOIN controller_metadata AS m
+                 WHERE a.organization_id = $1
+                   AND a.id = $2
+                   AND a.fence = $3
+                   AND a.restore_epoch = $4
+                   AND a.lease_owner = $5
+                   AND n.required_trust_pool = $6
+                   AND m.singleton
+                   AND a.restore_epoch = m.restore_epoch
+             )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .bind(trust_pool)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(authorized)
+    }
+
+    /// Authorizes a journaled attempt to enter reconciliation using only its
+    /// immutable node trust pool. Live fence, restore epoch, and lease-owner
+    /// checks belong to the subsequent disposition/recovery transaction:
+    /// stale authority must be able to receive `Cancel`, but can never be
+    /// retained or recovered.
+    pub async fn authorize_reconciliation_trust_pool(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        trust_pool: &str,
+    ) -> Result<ReconciliationTrustPoolAuthorization, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let required_trust_pool = sqlx::query_scalar::<_, String>(
+            "SELECT n.required_trust_pool
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id
+              AND n.organization_id = a.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(match required_trust_pool {
+            Some(required) if required == trust_pool => {
+                ReconciliationTrustPoolAuthorization::Matching
+            }
+            Some(_) => ReconciliationTrustPoolAuthorization::Mismatched,
+            None => ReconciliationTrustPoolAuthorization::Missing,
+        })
+    }
+
+    /// Returns only the capabilities durably bound to the exact current session.
+    pub async fn agent_session_capabilities(
+        &self,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<Option<Vec<String>>, StoreError> {
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        Ok(sqlx::query_scalar::<_, Vec<String>>(
+            "SELECT capabilities
+             FROM agent_sessions
+             WHERE agent_id = $1 AND session_epoch = $2",
+        )
+        .bind(agent_id)
+        .bind(session_epoch)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     /// Resolves a recovered attempt against current durable controller truth.
     pub async fn agent_reconciliation_disposition(
         &self,
@@ -418,7 +534,55 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
     ) -> Result<AgentReconciliationDisposition, StoreError> {
+        self.agent_reconciliation_disposition_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn agent_reconciliation_disposition_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<AgentReconciliationDisposition, StoreError> {
+        self.agent_reconciliation_disposition_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn agent_reconciliation_disposition_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+    ) -> Result<AgentReconciliationDisposition, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(AgentReconciliationDisposition::Cancel);
+        }
         let row = sqlx::query_as::<_, (bool, bool)>(
             "SELECT
                  a.fence = $3
@@ -457,11 +621,150 @@ impl Store {
         })
     }
 
-    /// Atomically acknowledges a fenced agent's cancellation outcome.
+    /// Re-establishes bounded upload authority for an exact locally-finalizing
+    /// attempt after an agent reconnect.
+    ///
+    /// The scheduler lock prevents an expired lease from being requeued while
+    /// immutable spool evidence is replayed. Already-terminal exact authority
+    /// is retained so response-loss replay can converge without another
+    /// terminal event.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn recover_agent_finalization(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        local_phase: &str,
+        lease_seconds: i32,
+    ) -> Result<bool, StoreError> {
+        self.recover_agent_finalization_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+            local_phase,
+            lease_seconds,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn recover_agent_finalization_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+        local_phase: &str,
+        lease_seconds: i32,
+    ) -> Result<bool, StoreError> {
+        self.recover_agent_finalization_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+            local_phase,
+            lease_seconds,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_agent_finalization_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+        local_phase: &str,
+        lease_seconds: i32,
+    ) -> Result<bool, StoreError> {
+        if !matches!(local_phase, "finalizing" | "cancelling") || lease_seconds <= 0 {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("mcloving.scheduler.{organization_id}"))
+            .execute(&mut *tx)
+            .await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT a.status
+             FROM attempts AS a
+             CROSS JOIN controller_metadata AS m
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             FOR UPDATE OF a",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(status) = status else {
+            tx.rollback().await?;
+            return Ok(false);
+        };
+        let terminal = matches!(status.as_str(), "succeeded" | "failed" | "aborted");
+        // The local phase records how evidence must be replayed, not which
+        // completion protocol won the race. Exact fenced authority may observe
+        // cancellation while work is completing (or completion while the
+        // controller is cancelling), so every nonterminal completion phase is
+        // recoverable and converges through the durable result.
+        let resumable = recoverable_finalization_status(&status);
+        if !terminal && !resumable {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        if resumable {
+            sqlx::query(
+                "UPDATE attempts
+                 SET status = $3,
+                     lease_expires_at =
+                         clock_timestamp() + make_interval(secs => $4)
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(attempt_id)
+            .bind(local_phase)
+            .bind(f64::from(lease_seconds))
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Atomically acknowledges a fenced agent's cancellation or interrupted
+    /// execution recovery outcome.
     ///
     /// A reconnect may arrive after its lease deadline, so cancellation
     /// completion is authorized by the current restore epoch, exact fence, and
-    /// exact lease owner rather than by an unexpired lease. Response-loss
+    /// exact lease owner and current session trust pool rather than by an
+    /// unexpired lease. Response-loss
     /// replay of an already-applied outcome succeeds without emitting a second
     /// event. Unverifiable process termination and uncertain external effects
     /// fail closed into explicit reconciliation instead of being mislabeled
@@ -481,23 +784,13 @@ impl Store {
         } = completion;
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
-        let session_epoch =
-            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
-        let current_session = sqlx::query_scalar::<_, i64>(
-            "SELECT session_epoch
-             FROM agent_sessions
-             WHERE agent_id = $1
-             FOR UPDATE",
-        )
-        .bind(agent_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if current_session != Some(session_epoch) {
+        if !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await? {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         }
-        let authority = sqlx::query_as::<_, (Uuid, Uuid, String)>(
-            "SELECT n.id, n.build_id, a.status
+        let authority = sqlx::query_as::<_, (Uuid, Uuid, String, Option<Value>, bool)>(
+            "SELECT n.id, n.build_id, a.status, a.terminal_summary,
+                    b.cancellation_requested_at IS NOT NULL
              FROM attempts AS a
              JOIN nodes AS n
                ON n.id = a.node_id
@@ -505,6 +798,10 @@ impl Store {
              JOIN builds AS b
                ON b.id = n.build_id
               AND b.organization_id = n.organization_id
+             JOIN agent_sessions AS s
+               ON s.agent_id = a.lease_owner
+              AND s.session_epoch = $6
+              AND s.trust_pool = n.required_trust_pool
              WHERE a.id = $1
                AND a.organization_id = $2
                AND a.fence = $3
@@ -515,8 +812,10 @@ impl Store {
                    FROM controller_metadata
                    WHERE singleton
                )
-               AND a.status IN ('cancelling', 'aborted', 'reconciliation_required')
-               AND b.cancellation_requested_at IS NOT NULL
+               AND a.status IN (
+                   'accepted', 'running', 'cancelling', 'aborted',
+                   'reconciliation_required'
+               )
              FOR UPDATE OF a, n, b",
         )
         .bind(attempt_id)
@@ -524,15 +823,28 @@ impl Store {
         .bind(fence)
         .bind(restore_epoch)
         .bind(agent_id)
+        .bind(i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((node_id, build_id, status)) = authority else {
+        let Some((node_id, build_id, status, terminal_summary, owner_cancelled)) = authority else {
             tx.rollback().await?;
             return Ok(AgentCancellationDisposition::RetireStale);
         };
         if status == "aborted" {
             tx.commit().await?;
-            return Ok(AgentCancellationDisposition::Completed);
+            return Ok(
+                if matches!(
+                    terminal_summary
+                        .as_ref()
+                        .and_then(|value| value.get("reason"))
+                        .and_then(Value::as_str),
+                    Some("agent_process_identity_mismatch" | "agent_recovery_stale_process")
+                ) {
+                    AgentCancellationDisposition::RetireStale
+                } else {
+                    AgentCancellationDisposition::Completed
+                },
+            );
         }
         if status == "reconciliation_required" {
             tx.commit().await?;
@@ -592,6 +904,8 @@ impl Store {
                     "agent_id": agent_id,
                     "process_termination": match outcome {
                         AgentCancellationOutcome::Terminated => "terminated",
+                        AgentCancellationOutcome::AlreadyExited => "already_exited",
+                        AgentCancellationOutcome::IdentityMismatch => "identity_mismatch",
                         AgentCancellationOutcome::ReconciliationRequired => "unverifiable",
                     },
                     "uncertain_effects": uncertain_effects,
@@ -602,6 +916,60 @@ impl Store {
             return Ok(AgentCancellationDisposition::ReconciliationRequired);
         }
 
+        // Reconciliation promotes a locally cancelling interrupted execution
+        // from accepted/running to cancelling before its durable cancellation
+        // result is replayed. With no owner cancellation request, that status
+        // is still recovery-originated and must converge to a terminal result.
+        let recovery =
+            !owner_cancelled && matches!(status.as_str(), "accepted" | "running" | "cancelling");
+        if !owner_cancelled && !recovery {
+            tx.rollback().await?;
+            return Ok(AgentCancellationDisposition::RetireStale);
+        }
+        let (terminal_reason, event_kind, disposition) = match outcome {
+            AgentCancellationOutcome::Terminated => (
+                if recovery {
+                    "agent_recovery_terminated"
+                } else {
+                    "agent_confirmed_cancellation"
+                },
+                if recovery {
+                    "attempt.recovery_terminated"
+                } else {
+                    "attempt.cancellation_completed"
+                },
+                AgentCancellationDisposition::Completed,
+            ),
+            AgentCancellationOutcome::AlreadyExited => (
+                if recovery {
+                    "agent_recovery_process_already_exited"
+                } else {
+                    "agent_process_already_exited"
+                },
+                if recovery {
+                    "attempt.recovery_process_already_exited"
+                } else {
+                    "attempt.cancellation_completed"
+                },
+                AgentCancellationDisposition::Completed,
+            ),
+            AgentCancellationOutcome::IdentityMismatch => (
+                if recovery {
+                    "agent_recovery_stale_process"
+                } else {
+                    "agent_process_identity_mismatch"
+                },
+                if recovery {
+                    "attempt.recovery_stale_process"
+                } else {
+                    "attempt.cancellation_stale_process"
+                },
+                AgentCancellationDisposition::RetireStale,
+            ),
+            AgentCancellationOutcome::ReconciliationRequired => {
+                unreachable!("reconciliation-required outcome returned above")
+            }
+        };
         sqlx::query(
             "UPDATE attempts
              SET status = 'aborted',
@@ -612,7 +980,7 @@ impl Store {
         )
         .bind(attempt_id)
         .bind(organization_id)
-        .bind(json!({"reason": "agent_confirmed_cancellation"}))
+        .bind(json!({"reason": terminal_reason}))
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -637,16 +1005,22 @@ impl Store {
             &mut tx,
             organization_id,
             build_id,
-            "attempt.cancellation_completed",
+            event_kind,
             json!({
                 "attempt_id": attempt_id,
                 "fence": fence,
                 "agent_id": agent_id,
+                "process_termination": match outcome {
+                    AgentCancellationOutcome::Terminated => "terminated",
+                    AgentCancellationOutcome::AlreadyExited => "already_exited",
+                    AgentCancellationOutcome::IdentityMismatch => "identity_mismatch",
+                    AgentCancellationOutcome::ReconciliationRequired => "unverifiable",
+                },
             }),
         )
         .await?;
         tx.commit().await?;
-        Ok(AgentCancellationDisposition::Completed)
+        Ok(disposition)
     }
 
     /// Creates an organization/project pair for bootstrap and tests.
@@ -678,6 +1052,11 @@ impl Store {
     /// Repeating the same project/idempotency-key returns the original durable
     /// identifiers without emitting a second event or outbox record.
     pub async fn admit_build(&self, input: &NewBuild) -> Result<BuildAdmission, StoreError> {
+        if input.required_trust_pool.trim().is_empty()
+            || input.required_trust_pool.trim() != input.required_trust_pool
+        {
+            return Err(StoreError::InvalidTrustPool);
+        }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         let build_id = Uuid::new_v4();
         let inserted = sqlx::query_scalar::<_, Uuid>(
@@ -711,15 +1090,16 @@ impl Store {
         sqlx::query(
             "INSERT INTO nodes (
                  id, organization_id, build_id, node_key, status,
-                 required_capabilities, priority, execution_spec
+                 required_capabilities, required_trust_pool, priority, execution_spec
              )
-             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7)",
+             VALUES ($1, $2, $3, $4, 'queued', $5, $6, $7, $8)",
         )
         .bind(node_id)
         .bind(input.organization_id)
         .bind(build_id)
         .bind(&input.node_key)
         .bind(&input.required_capabilities)
+        .bind(&input.required_trust_pool)
         .bind(input.priority)
         .bind(&input.execution_spec)
         .execute(&mut *tx)
@@ -1003,9 +1383,93 @@ impl Store {
 
     /// Commits a log chunk only for the exact live fenced attempt.
     pub async fn append_log(&self, chunk: &NewLogChunk<'_>) -> Result<bool, StoreError> {
+        self.append_log_with_session(chunk, None).await
+    }
+
+    pub async fn append_log_in_session(
+        &self,
+        chunk: &NewLogChunk<'_>,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        self.append_log_with_session(chunk, Some(session_epoch))
+            .await
+    }
+
+    async fn append_log_with_session(
+        &self,
+        chunk: &NewLogChunk<'_>,
+        session_epoch: Option<u64>,
+    ) -> Result<bool, StoreError> {
+        if !log_sequence_is_bounded(chunk.sequence) {
+            return Ok(false);
+        }
         let digest: [u8; 32] = Sha256::digest(chunk.content).into();
         let mut tx = self.tenant_transaction(chunk.organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, chunk.agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.log.{}.{}.{}",
+                chunk.organization_id, chunk.attempt_id, chunk.fence
+            ))
+            .execute(&mut *tx)
+            .await?;
+        let existing = sqlx::query_as::<_, (String, Vec<u8>)>(
+            "SELECT l.stream, l.digest
+             FROM attempt_log_chunks AS l
+             JOIN attempts AS a
+               ON a.organization_id = l.organization_id
+              AND a.id = l.attempt_id
+             CROSS JOIN controller_metadata AS m
+             WHERE l.organization_id = $1
+               AND l.attempt_id = $2
+               AND l.fence = $3
+               AND l.sequence = $4
+               AND a.restore_epoch = $5
+               AND a.lease_owner = $6
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             FOR UPDATE OF l",
+        )
+        .bind(chunk.organization_id)
+        .bind(chunk.attempt_id)
+        .bind(chunk.fence)
+        .bind(chunk.sequence)
+        .bind(chunk.restore_epoch)
+        .bind(chunk.agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((stream, existing_digest)) = existing {
+            let identical = stream == chunk.stream && existing_digest == digest;
+            if identical {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
+            return Ok(identical);
+        }
+        let committed = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(sum(octet_length(content)), 0)::bigint
+             FROM attempt_log_chunks
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3",
+        )
+        .bind(chunk.organization_id)
+        .bind(chunk.attempt_id)
+        .bind(chunk.fence)
+        .fetch_one(&mut *tx)
+        .await?;
+        let incoming = i64::try_from(chunk.content.len()).unwrap_or(i64::MAX);
+        if !log_quota_allows(committed, incoming) {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let inserted = sqlx::query_scalar::<_, i64>(
             "INSERT INTO attempt_log_chunks (
                  organization_id, attempt_id, fence, sequence,
@@ -1053,8 +1517,56 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
     ) -> Result<Option<AttemptExecution>, StoreError> {
+        self.attempt_execution_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn attempt_execution_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<Option<AttemptExecution>, StoreError> {
+        self.attempt_execution_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn attempt_execution_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+    ) -> Result<Option<AttemptExecution>, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(None);
+        }
         let row = sqlx::query_as::<_, (Uuid, Uuid, Value, bool)>(
             "SELECT b.id, b.project_id, n.execution_spec,
                     b.cancellation_requested_at IS NOT NULL
@@ -1101,8 +1613,56 @@ impl Store {
         restore_epoch: i64,
         agent_id: &str,
     ) -> Result<bool, StoreError> {
+        self.mark_attempt_running_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mark_attempt_running_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        self.mark_attempt_running_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn mark_attempt_running_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+    ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
             "SELECT n.id, n.build_id, a.status
              FROM attempts AS a
@@ -2611,8 +3171,96 @@ impl Store {
         outcome: TerminalOutcome,
         summary: Value,
     ) -> Result<bool, StoreError> {
+        self.finalize_attempt_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            None,
+            outcome,
+            summary,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_attempt_in_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: u64,
+        outcome: TerminalOutcome,
+        summary: Value,
+    ) -> Result<bool, StoreError> {
+        self.finalize_attempt_with_session(
+            organization_id,
+            attempt_id,
+            fence,
+            restore_epoch,
+            agent_id,
+            Some(session_epoch),
+            outcome,
+            summary,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finalize_attempt_with_session(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        session_epoch: Option<u64>,
+        outcome: TerminalOutcome,
+        summary: Value,
+    ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
+        if let Some(session_epoch) = session_epoch
+            && !Self::lock_agent_session(&mut tx, agent_id, session_epoch).await?
+        {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let existing = sqlx::query_as::<_, (String, Option<Value>)>(
+            "SELECT a.status, a.terminal_summary
+             FROM attempts AS a
+             CROSS JOIN controller_metadata AS m
+             WHERE a.id = $1
+               AND a.organization_id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND m.singleton
+               AND a.restore_epoch = m.restore_epoch
+             FOR UPDATE OF a",
+        )
+        .bind(attempt_id)
+        .bind(organization_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((status, terminal_summary)) = existing
+            && matches!(status.as_str(), "succeeded" | "failed" | "aborted")
+        {
+            let identical =
+                status == outcome.as_str() && terminal_summary.as_ref() == Some(&summary);
+            if identical {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
+            return Ok(identical);
+        }
         let authority = sqlx::query_as::<_, (Uuid, Uuid)>(
             "SELECT n.id, n.build_id
              FROM attempts AS a
@@ -2770,6 +3418,25 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         Ok(tx)
+    }
+
+    pub(crate) async fn lock_agent_session(
+        tx: &mut Transaction<'_, Postgres>,
+        agent_id: &str,
+        session_epoch: u64,
+    ) -> Result<bool, StoreError> {
+        let session_epoch =
+            i64::try_from(session_epoch).map_err(|_| StoreError::InvalidAgentSession)?;
+        let current = sqlx::query_scalar::<_, i64>(
+            "SELECT session_epoch
+             FROM agent_sessions
+             WHERE agent_id = $1
+             FOR SHARE",
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        Ok(current == Some(session_epoch))
     }
 }
 
@@ -2950,6 +3617,18 @@ fn valid_effect_transition(current: &str, requested: EffectStatus) -> bool {
     )
 }
 
+fn recoverable_finalization_status(status: &str) -> bool {
+    matches!(status, "running" | "finalizing" | "cancelling")
+}
+
+fn log_quota_allows(committed: i64, incoming: i64) -> bool {
+    committed >= 0 && incoming >= 0 && committed.saturating_add(incoming) <= MAX_ATTEMPT_LOG_BYTES
+}
+
+fn log_sequence_is_bounded(sequence: i64) -> bool {
+    (0..MAX_ATTEMPT_LOG_CHUNKS).contains(&sequence)
+}
+
 fn parse_effect_class(value: &str) -> Result<EffectClass, StoreError> {
     match value {
         "idempotent" => Ok(EffectClass::Idempotent),
@@ -2992,5 +3671,40 @@ fn parse_object_status(value: &str) -> Result<ObjectStatus, StoreError> {
         other => Err(StoreError::InvalidObjectRecord(format!(
             "unknown object status {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+
+    #[test]
+    fn finalization_recovery_accepts_all_nonterminal_completion_races() {
+        for status in ["running", "finalizing", "cancelling"] {
+            assert!(recoverable_finalization_status(status));
+        }
+        for status in [
+            "queued",
+            "offered",
+            "accepted",
+            "reconciliation_required",
+            "succeeded",
+            "failed",
+            "aborted",
+        ] {
+            assert!(!recoverable_finalization_status(status));
+        }
+    }
+
+    #[test]
+    fn log_quota_is_closed_at_the_boundary() {
+        assert!(log_quota_allows(MAX_ATTEMPT_LOG_BYTES - 1, 1));
+        assert!(!log_quota_allows(MAX_ATTEMPT_LOG_BYTES, 1));
+        assert!(!log_quota_allows(i64::MAX, i64::MAX));
+        assert!(!log_quota_allows(-1, 1));
+        assert!(log_sequence_is_bounded(0));
+        assert!(log_sequence_is_bounded(MAX_ATTEMPT_LOG_CHUNKS - 1));
+        assert!(!log_sequence_is_bounded(MAX_ATTEMPT_LOG_CHUNKS));
+        assert!(!log_sequence_is_bounded(-1));
     }
 }

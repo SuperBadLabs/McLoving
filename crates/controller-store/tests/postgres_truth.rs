@@ -3,7 +3,8 @@ use std::sync::Arc;
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk,
-    ObjectKind, ObjectStatus, RetryDecision, Store, StoreError, TerminalOutcome, WaitReason,
+    ObjectKind, ObjectStatus, ReconciliationTrustPoolAuthorization, RetryDecision, Store,
+    StoreError, TerminalOutcome, WaitReason,
 };
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -102,6 +103,246 @@ async fn agent_session_epoch_is_durable_and_monotonic() {
 }
 
 #[tokio::test]
+async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let agent_id = format!("session-fence-{}", Uuid::new_v4());
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "session-fenced-work".into(),
+            pipeline_digest: [0x5e; 32],
+            node_key: "execute".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit work");
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                10,
+                0,
+                &["work-delivery-v1".into()],
+                &["linux".into()],
+            )
+            .await
+            .expect("open original session")
+    );
+    let claim = store
+        .claim_next_in_session(
+            &ClaimRequest {
+                organization_id,
+                scheduler_id: "session-fence".into(),
+                agent_id: agent_id.clone(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 0,
+            },
+            10,
+        )
+        .await
+        .expect("claim under original session")
+        .expect("claim available work");
+    assert!(
+        store
+            .open_agent_session(
+                &agent_id,
+                "trusted",
+                11,
+                0,
+                &["work-delivery-v1".into()],
+                &["linux".into()],
+            )
+            .await
+            .expect("advance session")
+    );
+
+    assert!(
+        !store
+            .accept_offer_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+            )
+            .await
+            .expect("reject stale acceptance")
+    );
+    assert!(
+        store
+            .attempt_execution_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+            )
+            .await
+            .expect("reject stale execution read")
+            .is_none()
+    );
+    assert!(
+        store
+            .accept_offer_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                11,
+            )
+            .await
+            .expect("accept under current session")
+    );
+    assert!(
+        !store
+            .mark_attempt_running_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+            )
+            .await
+            .expect("reject stale start")
+    );
+    assert!(
+        store
+            .mark_attempt_running_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                11,
+            )
+            .await
+            .expect("start under current session")
+    );
+    assert!(
+        store
+            .renew_attempt_lease_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+                30,
+            )
+            .await
+            .expect("reject stale renewal")
+            .is_none()
+    );
+    assert!(
+        store
+            .renew_attempt_lease_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                11,
+                30,
+            )
+            .await
+            .expect("renew current session")
+            .is_some()
+    );
+    let chunk = NewLogChunk {
+        organization_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        restore_epoch: claim.restore_epoch,
+        agent_id: &agent_id,
+        sequence: 0,
+        stream: "stdout",
+        content: b"session-fenced",
+    };
+    assert!(
+        !store
+            .append_log_in_session(&chunk, 10)
+            .await
+            .expect("reject stale log")
+    );
+    assert!(
+        store
+            .append_log_in_session(&chunk, 11)
+            .await
+            .expect("commit current log")
+    );
+    assert!(
+        !store
+            .finalize_attempt_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                10,
+                TerminalOutcome::Succeeded,
+                json!({"session": 10}),
+            )
+            .await
+            .expect("reject stale terminal publication")
+    );
+    assert!(
+        store
+            .finalize_attempt_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                11,
+                TerminalOutcome::Succeeded,
+                json!({"session": 11}),
+            )
+            .await
+            .expect("commit current terminal publication")
+    );
+    assert_eq!(
+        store
+            .renew_attempt_lease_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &agent_id,
+                11,
+                30,
+            )
+            .await
+            .expect("terminal replay renewal is an idempotent no-op"),
+        Some(false)
+    );
+}
+
+#[tokio::test]
 async fn admission_is_atomic_and_idempotent() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -125,6 +366,7 @@ async fn admission_is_atomic_and_idempotent() {
         pipeline_digest: [7; 32],
         node_key: "stage-1".into(),
         required_capabilities: vec!["linux".into()],
+        required_trust_pool: "trusted".into(),
         priority: 10,
         execution_spec: json!({}),
     };
@@ -177,6 +419,7 @@ async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
             pipeline_digest: [8; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -202,6 +445,7 @@ async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
                 scheduler_id: "scheduler-a".into(),
                 agent_id: "agent-a".into(),
                 capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
                 lease_seconds: 30,
                 fairness_seed: 1,
             })
@@ -258,7 +502,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
         store
             .open_agent_session(
                 "windows-1",
-                "trusted-windows",
+                "trusted",
                 1,
                 0,
                 &["journal-v1".to_owned(), "windows-job-object-v1".to_owned()],
@@ -275,6 +519,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             pipeline_digest: [0xAC; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -286,6 +531,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "windows-1".into(),
             capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -392,6 +638,119 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     .expect("count cancellation completion events");
     assert_eq!(completions, 1);
 
+    let recovered = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "agent-recovery-termination".into(),
+            pipeline_digest: [0xAE; 32],
+            node_key: "stage-recovery".into(),
+            required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit interrupted agent build");
+    let recovered_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "windows-1".into(),
+            capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 1,
+        })
+        .await
+        .expect("claim interrupted work")
+        .expect("interrupted claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                recovered_claim.attempt_id,
+                recovered_claim.fence,
+                recovered_claim.restore_epoch,
+                "windows-1",
+            )
+            .await
+            .expect("accept interrupted work")
+    );
+    assert!(
+        store
+            .mark_attempt_running_in_session(
+                organization_id,
+                recovered_claim.attempt_id,
+                recovered_claim.fence,
+                recovered_claim.restore_epoch,
+                "windows-1",
+                1,
+            )
+            .await
+            .expect("start interrupted work")
+    );
+    assert!(
+        store
+            .recover_agent_finalization_in_session(
+                organization_id,
+                recovered_claim.attempt_id,
+                recovered_claim.fence,
+                recovered_claim.restore_epoch,
+                "windows-1",
+                1,
+                "cancelling",
+                30,
+            )
+            .await
+            .expect("retain interrupted cancellation replay")
+    );
+    let replay_snapshot = store
+        .build_snapshot(organization_id, project_id, recovered.build_id)
+        .await
+        .expect("read interrupted cancellation replay")
+        .expect("interrupted cancellation replay exists");
+    assert_eq!(replay_snapshot.build_status, "running");
+    assert_eq!(replay_snapshot.attempt_status, "cancelling");
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                organization_id,
+                attempt_id: recovered_claim.attempt_id,
+                fence: recovered_claim.fence,
+                restore_epoch: recovered_claim.restore_epoch,
+                agent_id: "windows-1",
+                session_epoch: 1,
+                outcome: AgentCancellationOutcome::AlreadyExited,
+            })
+            .await
+            .expect("settle interrupted work without an owner cancellation"),
+        AgentCancellationDisposition::Completed
+    );
+    let recovered_snapshot = store
+        .build_snapshot(organization_id, project_id, recovered.build_id)
+        .await
+        .expect("read interrupted build")
+        .expect("interrupted build exists");
+    assert_eq!(recovered_snapshot.build_status, "aborted");
+    assert_eq!(
+        recovered_snapshot.terminal_summary,
+        Some(json!({"reason": "agent_recovery_process_already_exited"}))
+    );
+    let recovery_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.recovery_process_already_exited'",
+    )
+    .bind(organization_id)
+    .bind(recovered.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count recovery completion events");
+    assert_eq!(recovery_events, 1);
+
     let retained = store
         .admit_build(&NewBuild {
             organization_id,
@@ -400,6 +759,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             pipeline_digest: [0xAD; 32],
             node_key: "stage-unverifiable".into(),
             required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -411,6 +771,7 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "windows-1".into(),
             capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 2,
         })
@@ -475,6 +836,174 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     .await
     .expect("count retained cancellation events");
     assert_eq!(retained_events, 1);
+
+    let recycled = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "agent-cancellation-recycled-pid".into(),
+            pipeline_digest: [0xAE; 32],
+            node_key: "stage-recycled".into(),
+            required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit recycled PID cancellation build");
+    let recycled_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "windows-1".into(),
+            capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 3,
+        })
+        .await
+        .expect("claim recycled PID cancellation")
+        .expect("recycled PID cancellation claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                recycled_claim.attempt_id,
+                recycled_claim.fence,
+                recycled_claim.restore_epoch,
+                "windows-1",
+            )
+            .await
+            .expect("accept recycled PID cancellation offer")
+    );
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, recycled.build_id)
+            .await
+            .expect("request recycled PID cancellation")
+    );
+    for label in ["retire recycled PID", "replay recycled PID retirement"] {
+        assert_eq!(
+            store
+                .complete_agent_cancellation(AgentCancellationCompletion {
+                    organization_id,
+                    attempt_id: recycled_claim.attempt_id,
+                    fence: recycled_claim.fence,
+                    restore_epoch: recycled_claim.restore_epoch,
+                    agent_id: "windows-1",
+                    session_epoch: 1,
+                    outcome: AgentCancellationOutcome::IdentityMismatch,
+                })
+                .await
+                .expect(label),
+            AgentCancellationDisposition::RetireStale
+        );
+    }
+    let recycled_snapshot = store
+        .build_snapshot(organization_id, project_id, recycled.build_id)
+        .await
+        .expect("read recycled PID cancellation")
+        .expect("recycled PID build exists");
+    assert_eq!(recycled_snapshot.build_status, "aborted");
+    assert_eq!(
+        recycled_snapshot.terminal_summary,
+        Some(json!({"reason": "agent_process_identity_mismatch"}))
+    );
+    let recycled_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'attempt.cancellation_stale_process'",
+    )
+    .bind(organization_id)
+    .bind(recycled.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count recycled PID cancellation events");
+    assert_eq!(recycled_events, 1);
+
+    let re_enrolled = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "agent-cancellation-re-enrolled-trust-pool".into(),
+            pipeline_digest: [0xAF; 32],
+            node_key: "stage-re-enrolled".into(),
+            required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit trust-pool cancellation build");
+    let re_enrolled_claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-a".into(),
+            agent_id: "windows-1".into(),
+            capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
+            lease_seconds: 30,
+            fairness_seed: 4,
+        })
+        .await
+        .expect("claim trust-pool cancellation")
+        .expect("trust-pool cancellation claim exists");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                re_enrolled_claim.attempt_id,
+                re_enrolled_claim.fence,
+                re_enrolled_claim.restore_epoch,
+                "windows-1",
+            )
+            .await
+            .expect("accept trust-pool cancellation offer")
+    );
+    assert!(
+        store
+            .request_cancellation(organization_id, project_id, re_enrolled.build_id)
+            .await
+            .expect("request trust-pool cancellation")
+    );
+    assert!(
+        store
+            .open_agent_session(
+                "windows-1",
+                "untrusted",
+                2,
+                0,
+                &["journal-v1".to_owned(), "windows-job-object-v1".to_owned()],
+                &["windows".to_owned()],
+            )
+            .await
+            .expect("re-enroll agent in lower trust pool")
+    );
+    assert_eq!(
+        store
+            .complete_agent_cancellation(AgentCancellationCompletion {
+                organization_id,
+                attempt_id: re_enrolled_claim.attempt_id,
+                fence: re_enrolled_claim.fence,
+                restore_epoch: re_enrolled_claim.restore_epoch,
+                agent_id: "windows-1",
+                session_epoch: 2,
+                outcome: AgentCancellationOutcome::Terminated,
+            })
+            .await
+            .expect("reject lower-trust cancellation completion"),
+        AgentCancellationDisposition::RetireStale
+    );
+    let re_enrolled_snapshot = store
+        .build_snapshot(organization_id, project_id, re_enrolled.build_id)
+        .await
+        .expect("read trust-pool cancellation")
+        .expect("trust-pool build exists");
+    assert_eq!(re_enrolled_snapshot.build_status, "running");
+    assert_eq!(re_enrolled_snapshot.attempt_status, "cancelling");
+    assert_eq!(re_enrolled_snapshot.terminal_summary, None);
 }
 
 #[tokio::test]
@@ -498,7 +1027,7 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
         store
             .open_agent_session(
                 "windows-reconciliation-1",
-                "trusted-windows",
+                "trusted",
                 1,
                 0,
                 &["journal-v1".to_owned(), "windows-job-object-v1".to_owned()],
@@ -515,6 +1044,7 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
             pipeline_digest: [0xCE; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["windows".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -526,6 +1056,7 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "windows-reconciliation-1".into(),
             capabilities: vec!["windows".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -686,6 +1217,7 @@ async fn cancellation_targets_the_latest_retry_attempt() {
             pipeline_digest: [9; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -697,6 +1229,7 @@ async fn cancellation_targets_the_latest_retry_attempt() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -870,6 +1403,7 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
             pipeline_digest: [8; 32],
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -919,6 +1453,7 @@ async fn concurrent_terminal_publication_has_one_winner() {
             pipeline_digest: [9; 32],
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -944,6 +1479,7 @@ async fn concurrent_terminal_publication_has_one_winner() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: Vec::new(),
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -1002,6 +1538,217 @@ async fn concurrent_terminal_publication_has_one_winner() {
 }
 
 #[tokio::test]
+async fn scheduler_requires_the_nodes_designated_trust_pool() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    let build = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "release-pool".into(),
+            pipeline_digest: [0x71; 32],
+            node_key: "release".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "release".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit release work");
+
+    assert_eq!(
+        store
+            .explain_wait(organization_id, &["linux".into()], "untrusted")
+            .await
+            .expect("explain mismatched pool"),
+        WaitReason::TrustPoolMismatch {
+            required: "release".into(),
+            offered: "untrusted".into(),
+        }
+    );
+    assert_eq!(
+        store
+            .explain_wait(organization_id, &["linux".into()], "release")
+            .await
+            .expect("explain matching pool"),
+        WaitReason::Ready
+    );
+    assert!(
+        store
+            .claim_next(&ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-untrusted".into(),
+                agent_id: "agent-untrusted".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "untrusted".into(),
+                lease_seconds: 30,
+                fairness_seed: 0,
+            })
+            .await
+            .expect("evaluate mismatched pool")
+            .is_none()
+    );
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "scheduler-release".into(),
+            agent_id: "agent-release".into(),
+            capabilities: vec!["linux".into()],
+            trust_pool: "release".into(),
+            lease_seconds: 30,
+            fairness_seed: 0,
+        })
+        .await
+        .expect("claim from matching pool")
+        .expect("matching pool receives work");
+    assert_eq!(claim.node_id, build.node_id);
+    assert!(
+        store
+            .authorize_attempt_trust_pool(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "release",
+            )
+            .await
+            .expect("authorize matching attempt pool")
+    );
+    assert!(
+        !store
+            .authorize_attempt_trust_pool(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "untrusted",
+            )
+            .await
+            .expect("reject mismatched attempt pool")
+    );
+    assert_eq!(
+        store
+            .authorize_reconciliation_trust_pool(organization_id, claim.attempt_id, "release")
+            .await
+            .expect("authorize matching reconciliation pool"),
+        ReconciliationTrustPoolAuthorization::Matching
+    );
+    assert_eq!(
+        store
+            .authorize_reconciliation_trust_pool(organization_id, claim.attempt_id, "untrusted")
+            .await
+            .expect("reject mismatched reconciliation pool"),
+        ReconciliationTrustPoolAuthorization::Mismatched
+    );
+    assert_eq!(
+        store
+            .authorize_reconciliation_trust_pool(organization_id, Uuid::new_v4(), "release")
+            .await
+            .expect("allow a missing restored attempt to retire"),
+        ReconciliationTrustPoolAuthorization::Missing
+    );
+    assert!(
+        !store
+            .authorize_attempt_trust_pool(
+                organization_id,
+                claim.attempt_id,
+                claim.fence + 1,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "release",
+            )
+            .await
+            .expect("reject stale attempt authority")
+    );
+    assert_eq!(
+        store
+            .agent_reconciliation_disposition(
+                organization_id,
+                claim.attempt_id,
+                claim.fence + 1,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("cancel stale authority after pool authorization"),
+        AgentReconciliationDisposition::Cancel
+    );
+}
+
+#[tokio::test]
+async fn scheduler_explains_the_offered_pool_before_higher_priority_other_pool_work() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "project",
+        )
+        .await
+        .expect("create tenant");
+    store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "higher-release".into(),
+            pipeline_digest: [0x72; 32],
+            node_key: "release".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "release".into(),
+            priority: 100,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit higher-priority release work");
+    store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "lower-trusted".into(),
+            pipeline_digest: [0x73; 32],
+            node_key: "trusted".into(),
+            required_capabilities: vec!["linux".into(), "powershell".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 10,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit lower-priority trusted work");
+
+    assert_eq!(
+        store
+            .explain_wait(organization_id, &["linux".into()], "trusted")
+            .await
+            .expect("explain offered pool"),
+        WaitReason::CapabilityMismatch {
+            required: ["linux".into(), "powershell".into()].into(),
+            missing: ["powershell".into()].into(),
+        }
+    );
+}
+
+#[tokio::test]
 async fn scheduler_filters_capabilities_and_explains_the_wait() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -1026,6 +1773,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
             pipeline_digest: [1; 32],
             node_key: "windows-stage".into(),
             required_capabilities: vec!["windows".into(), "powershell".into()],
+            required_trust_pool: "trusted".into(),
             priority: 100,
             execution_spec: json!({}),
         })
@@ -1039,6 +1787,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
             pipeline_digest: [2; 32],
             node_key: "linux-stage".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({}),
         })
@@ -1051,6 +1800,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "linux-agent".into(),
             capabilities: vec!["linux".into(), "podman".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 17,
         })
@@ -1086,7 +1836,7 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
 
     let tenant_store = unprivileged_store(&store).await;
     let reason = tenant_store
-        .explain_wait(organization_id, &["linux".into()])
+        .explain_wait(organization_id, &["linux".into()], "trusted")
         .await
         .expect("explain queue");
     assert_eq!(
@@ -1124,6 +1874,7 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
             pipeline_digest: [3; 32],
             node_key: "stage".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1135,6 +1886,7 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 1,
             fairness_seed: 1,
         })
@@ -1173,6 +1925,7 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
             scheduler_id: "scheduler-b".into(),
             agent_id: "agent-b".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -1222,6 +1975,7 @@ async fn expired_non_idempotent_effect_requires_reconciliation() {
             pipeline_digest: [39; 32],
             node_key: "deploy".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1233,6 +1987,7 @@ async fn expired_non_idempotent_effect_requires_reconciliation() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 1,
         })
@@ -1310,6 +2065,7 @@ async fn expired_non_idempotent_effect_requires_reconciliation() {
                 scheduler_id: "scheduler-b".into(),
                 agent_id: "agent-b".into(),
                 capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
                 lease_seconds: 300,
                 fairness_seed: 2,
             })
@@ -1449,6 +2205,7 @@ async fn expired_confirmed_non_idempotent_effect_cannot_be_replayed() {
             pipeline_digest: [40; 32],
             node_key: "deploy".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1460,6 +2217,7 @@ async fn expired_confirmed_non_idempotent_effect_cannot_be_replayed() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 1,
         })
@@ -1544,6 +2302,7 @@ async fn expired_confirmed_non_idempotent_effect_cannot_be_replayed() {
                 scheduler_id: "scheduler-b".into(),
                 agent_id: "agent-b".into(),
                 capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
                 lease_seconds: 300,
                 fairness_seed: 2,
             })
@@ -1610,6 +2369,7 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
             pipeline_digest: [42; 32],
             node_key: "recover".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1688,6 +2448,7 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
             scheduler_id: "scheduler-after-reconciliation".into(),
             agent_id: "agent-after-reconciliation".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 1,
         })
@@ -1704,6 +2465,7 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
             pipeline_digest: [43; 32],
             node_key: "exhausted".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1805,6 +2567,7 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
             pipeline_digest: [44; 32],
             node_key: "terminal-first".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1931,6 +2694,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             pipeline_digest: [19; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -1942,6 +2706,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -1995,6 +2760,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             scheduler_id: "scheduler-b".into(),
             agent_id: "agent-b".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -2028,6 +2794,21 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             })
             .await
             .expect("append current-fence log")
+    );
+    assert!(
+        !store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: second.attempt_id,
+                fence: second.fence,
+                restore_epoch: second.restore_epoch,
+                agent_id: "agent-b",
+                sequence: 66,
+                stream: "stdout",
+                content: b"",
+            })
+            .await
+            .expect("reject out-of-range empty log chunk")
     );
     let logs = store
         .build_logs(organization_id, project_id, admission.build_id)
@@ -2063,6 +2844,7 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             pipeline_digest: [23; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2074,6 +2856,7 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
             scheduler_id: "effect-scheduler".into(),
             agent_id: "effect-agent".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 1,
         })
@@ -2373,6 +3156,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
             pipeline_digest: [24; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2384,6 +3168,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
             scheduler_id: "scheduler-a".into(),
             agent_id: "agent-a".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -2474,6 +3259,7 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
             scheduler_id: "scheduler-b".into(),
             agent_id: "agent-b".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -2625,6 +3411,7 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
             pipeline_digest: [25; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2636,6 +3423,7 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
             scheduler_id: "scheduler".into(),
             agent_id: "agent".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -2765,6 +3553,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             pipeline_digest: [51; 32],
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2776,6 +3565,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             scheduler_id: "scheduler".into(),
             agent_id: "agent".into(),
             capabilities: Vec::new(),
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -2844,6 +3634,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             pipeline_digest: [53; 32],
             node_key: "stage-1".into(),
             required_capabilities: Vec::new(),
+            required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec: json!({}),
         })
@@ -2855,6 +3646,7 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             scheduler_id: "scheduler".into(),
             agent_id: "agent".into(),
             capabilities: Vec::new(),
+            trust_pool: "trusted".into(),
             lease_seconds: 30,
             fairness_seed: 1,
         })
@@ -3239,6 +4031,7 @@ async fn backup_restore_canary_seed() {
             pipeline_digest: [61; 32],
             node_key: "stage-1".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 10,
             execution_spec: json!({"command": "preserve-me"}),
         })
@@ -3250,6 +4043,7 @@ async fn backup_restore_canary_seed() {
             scheduler_id: "recovery-scheduler".into(),
             agent_id: "pre-restore-agent".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 1,
         })
@@ -3323,6 +4117,7 @@ async fn backup_restore_canary_seed() {
             scheduler_id: "recovery-scheduler".into(),
             agent_id: "post-reclaim-agent".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 2,
         })
@@ -3371,6 +4166,7 @@ async fn backup_restore_canary_seed() {
             pipeline_digest: [64; 32],
             node_key: "queued-stage".into(),
             required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
             priority: 100,
             execution_spec: json!({"command": "claim-after-restore"}),
         })
@@ -3581,6 +4377,7 @@ async fn backup_restore_canary_verify() {
             scheduler_id: "post-restore-scheduler".into(),
             agent_id: "reused-agent".into(),
             capabilities: vec!["linux".into()],
+            trust_pool: "trusted".into(),
             lease_seconds: 300,
             fairness_seed: 3,
         })
@@ -3785,6 +4582,7 @@ async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
                 pipeline_digest: [4; 32],
                 node_key: "stage".into(),
                 required_capabilities: Vec::new(),
+                required_trust_pool: "trusted".into(),
                 priority: 0,
                 execution_spec: json!({}),
             })

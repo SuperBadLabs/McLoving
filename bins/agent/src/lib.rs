@@ -7,19 +7,22 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod worker;
+
 use mcloving_agent_protocol::wire;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
     AttemptState, CancellationCompletion, CancellationDisposition, CancellationOutcome,
     OpenSessionRequest, ProtocolOffer, ReconciliationReport as WireReport,
 };
-use mcloving_agent_protocol::{OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError};
+use mcloving_agent_protocol::{
+    OutboundMtlsConfig, PROTOCOL_MAJOR, PROTOCOL_MINOR, TransportError, WORK_DELIVERY_FEATURE,
+};
 #[cfg(windows)]
 use mcloving_agent_runtime::Acceptance;
+use mcloving_agent_runtime::executor::ExecutionError;
 #[cfg(windows)]
-use mcloving_agent_runtime::executor::{
-    ExecutionError, ExecutionMode, ExecutionRequest, execute_with_spawn_hook,
-};
+use mcloving_agent_runtime::executor::{ExecutionMode, ExecutionRequest, execute_with_spawn_hook};
 use mcloving_agent_runtime::{AttemptPhase, Journal, JournalError, ReconciliationReport};
 #[cfg(windows)]
 use std::ffi::OsString;
@@ -30,18 +33,25 @@ use tokio_util::sync::CancellationToken;
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+const OPEN_SESSION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentConfig {
     pub agent_id: String,
     pub trust_pool: String,
+    pub organization_id: String,
     pub controller_uri: String,
     pub controller_dns_name: String,
     pub controller_ca_path: PathBuf,
     pub agent_certificate_path: PathBuf,
     pub agent_private_key_path: PathBuf,
     pub journal_path: PathBuf,
+    pub workspace_root: PathBuf,
     pub minimum_session_epoch: u64,
+    pub lease_seconds: u32,
+    pub poll_interval: Duration,
+    pub lease_renewal_interval: Duration,
+    pub termination_grace: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -50,6 +60,8 @@ pub enum AgentError {
     MissingConfig(&'static str),
     #[error("configuration MCLOVING_AGENT_MINIMUM_SESSION_EPOCH is invalid")]
     InvalidMinimumSessionEpoch,
+    #[error("configuration {0} is invalid")]
+    InvalidConfig(&'static str),
     #[error("agent journal failed: {0}")]
     Journal(#[from] JournalError),
     #[error("agent configuration or identity file I/O failed: {0}")]
@@ -62,25 +74,44 @@ pub enum AgentError {
     Rpc(#[from] tonic::Status),
     #[error("controller returned a stale session epoch")]
     StaleSession,
+    #[error("controller rejected the current fenced work authority")]
+    StaleAuthority,
+    #[error("agent has an unresolved recovered attempt and will not poll for more work")]
+    UnresolvedReconciliation,
+    #[error("controller returned an invalid work assignment: {0}")]
+    InvalidAssignment(String),
+    #[error("execution specification is invalid: {0}")]
+    InvalidSpec(#[from] serde_json::Error),
+    #[error("execution specification is unsupported")]
+    UnsupportedSpec,
+    #[error("agent execution failed: {0}")]
+    Execution(#[from] ExecutionError),
     #[error("controller selected an unsupported protocol minor")]
     UnsupportedProtocol,
     #[error("agent identity and journal are already active in another process")]
     AlreadyRunning,
     #[error("agent probe exceeded its bounded deadline")]
     ProbeTimeout,
+    #[error("open-session RPC exceeded its bounded deadline")]
+    OpenSessionTimeout,
+    #[error("lease renewal RPC exceeded its safe deadline")]
+    LeaseRenewalTimeout,
+    #[error("authority RPC exceeded its bounded lease deadline")]
+    AuthorityRpcTimeout,
+    #[error("work poll RPC exceeded its bounded deadline")]
+    PollTimeout,
     #[error("agent service was stopped")]
     Stopped,
     #[error("journal path cannot be represented in the wire protocol")]
     NonUtf8Path,
-    #[error(
-        "recovered Unix process {0} has no durable non-reusable identity; refusing to signal it"
-    )]
-    UnverifiableRecoveredProcess(u32),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RecoveredCancellation {
-    Completed,
+    Terminated,
+    AlreadyExited,
+    #[cfg(unix)]
+    RetireStale,
     ReconciliationRequired,
 }
 
@@ -92,6 +123,12 @@ pub struct SessionReceipt {
 
 struct AgentInstanceGuard {
     _lock: File,
+}
+
+impl Drop for AgentInstanceGuard {
+    fn drop(&mut self) {
+        let _ = self._lock.unlock();
+    }
 }
 
 impl AgentConfig {
@@ -115,18 +152,59 @@ impl AgentConfig {
                         .parse()
                         .map_err(|_| AgentError::InvalidMinimumSessionEpoch)
                 })?;
+        let lease_seconds = parse_config::<u32>(values, "MCLOVING_AGENT_LEASE_SECONDS", 30)?;
+        if !(5..=300).contains(&lease_seconds) {
+            return Err(AgentError::InvalidConfig("MCLOVING_AGENT_LEASE_SECONDS"));
+        }
+        let poll_milliseconds =
+            parse_config::<u64>(values, "MCLOVING_AGENT_POLL_MILLISECONDS", 500)?;
+        let renewal_milliseconds =
+            parse_config::<u64>(values, "MCLOVING_AGENT_RENEW_MILLISECONDS", 5_000)?;
+        let termination_grace_milliseconds = parse_config::<u64>(
+            values,
+            "MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS",
+            2_000,
+        )?;
+        if poll_milliseconds == 0
+            || renewal_milliseconds == 0
+            || termination_grace_milliseconds == 0
+            || renewal_milliseconds >= u64::from(lease_seconds.saturating_sub(1)) * 1_000
+        {
+            return Err(AgentError::InvalidConfig(
+                "agent polling, renewal, or termination timing",
+            ));
+        }
         Ok(Self {
             agent_id: required("MCLOVING_AGENT_ID")?,
             trust_pool: required("MCLOVING_AGENT_TRUST_POOL")?,
+            organization_id: required("MCLOVING_AGENT_ORGANIZATION_ID")?,
             controller_uri: required("MCLOVING_CONTROLLER_URI")?,
             controller_dns_name: required("MCLOVING_CONTROLLER_DNS_NAME")?,
             controller_ca_path: PathBuf::from(required("MCLOVING_CONTROLLER_CA_PATH")?),
             agent_certificate_path: PathBuf::from(required("MCLOVING_AGENT_CERTIFICATE_PATH")?),
             agent_private_key_path: PathBuf::from(required("MCLOVING_AGENT_PRIVATE_KEY_PATH")?),
             journal_path: PathBuf::from(required("MCLOVING_AGENT_JOURNAL_PATH")?),
+            workspace_root: PathBuf::from(required("MCLOVING_AGENT_WORKSPACE_ROOT")?),
             minimum_session_epoch,
+            lease_seconds,
+            poll_interval: Duration::from_millis(poll_milliseconds),
+            lease_renewal_interval: Duration::from_millis(renewal_milliseconds),
+            termination_grace: Duration::from_millis(termination_grace_milliseconds),
         })
     }
+}
+
+fn parse_config<T>(
+    values: &BTreeMap<String, String>,
+    name: &'static str,
+    default: T,
+) -> Result<T, AgentError>
+where
+    T: std::str::FromStr,
+{
+    values.get(name).map_or(Ok(default), |value| {
+        value.parse().map_err(|_| AgentError::InvalidConfig(name))
+    })
 }
 
 pub async fn run_until_stopped(
@@ -156,8 +234,13 @@ pub async fn probe_once(config: &AgentConfig) -> Result<SessionReceipt, AgentErr
     let _instance = acquire_instance_guard(config)?;
     with_probe_timeout(PROBE_TIMEOUT, async {
         let stop = CancellationToken::new();
-        let (mut client, receipt) = open_session(config, stop.clone()).await?;
-        send_reconciliation(config, &mut client, receipt.session_epoch, stop).await?;
+        let (mut client, mut receipt) = open_session(config, stop.clone()).await?;
+        send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
+        worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await?;
+        receipt.active_attempts = Journal::open(&config.journal_path)?
+            .reconcile()?
+            .attempts
+            .len();
         Ok(receipt)
     })
     .await
@@ -196,14 +279,27 @@ fn instance_lock_path(journal_path: &Path) -> PathBuf {
 async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<(), AgentError> {
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
     send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
-    let mut tick = interval(RECONCILIATION_INTERVAL);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    tick.tick().await;
+    worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await?;
+    let mut reconciliation_tick = interval(RECONCILIATION_INTERVAL);
+    reconciliation_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    reconciliation_tick.tick().await;
+    let mut work_tick = interval(config.poll_interval);
+    work_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    work_tick.tick().await;
     loop {
         tokio::select! {
             () = stop.cancelled() => return Ok(()),
-            _ = tick.tick() => {
+            _ = reconciliation_tick.tick() => {
                 send_reconciliation(
+                    config,
+                    &mut client,
+                    receipt.session_epoch,
+                    stop.clone(),
+                ).await?;
+                worker::reclaim_terminal_spools(config).await?;
+            }
+            _ = work_tick.tick() => {
+                worker::poll_and_run_one(
                     config,
                     &mut client,
                     receipt.session_epoch,
@@ -240,7 +336,11 @@ async fn open_session(
             major: u32::from(PROTOCOL_MAJOR),
             minimum_minor: u32::from(PROTOCOL_MINOR),
             maximum_minor: u32::from(PROTOCOL_MINOR),
-            features: vec!["journal-v1".to_owned(), platform_feature().to_owned()],
+            features: vec![
+                "journal-v1".to_owned(),
+                platform_feature().to_owned(),
+                WORK_DELIVERY_FEATURE.to_owned(),
+            ],
         }),
         trust_pool: config.trust_pool.clone(),
         capabilities: vec![
@@ -250,7 +350,7 @@ async fn open_session(
     };
     let response = tokio::select! {
         () = stop.cancelled() => return Err(AgentError::Stopped),
-        response = client.open_session(request) => response?,
+        response = bounded_open_session_rpc(OPEN_SESSION_TIMEOUT, client.open_session(request)) => response?,
     }
     .into_inner();
     if response.session_epoch != session_epoch {
@@ -259,6 +359,7 @@ async fn open_session(
     if response.protocol_minor != u32::from(PROTOCOL_MINOR) {
         return Err(AgentError::UnsupportedProtocol);
     }
+    require_work_delivery_feature(&response.features)?;
     Ok((
         client,
         SessionReceipt {
@@ -268,17 +369,42 @@ async fn open_session(
     ))
 }
 
+async fn bounded_open_session_rpc<T>(
+    deadline: Duration,
+    operation: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+) -> Result<tonic::Response<T>, AgentError> {
+    timeout(deadline, operation)
+        .await
+        .map_err(|_| AgentError::OpenSessionTimeout)?
+        .map_err(AgentError::from)
+}
+
+fn require_work_delivery_feature(features: &[String]) -> Result<(), AgentError> {
+    if features
+        .iter()
+        .any(|feature| feature == WORK_DELIVERY_FEATURE)
+    {
+        Ok(())
+    } else {
+        Err(AgentError::UnsupportedProtocol)
+    }
+}
+
 async fn send_reconciliation(
     config: &AgentConfig,
     client: &mut AgentControlClient<tonic::transport::Channel>,
     session_epoch: u64,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
+    quiesce_recovered_executions(config).await?;
     let report = Journal::open(&config.journal_path)?.reconcile()?;
     let request = wire_report(config, session_epoch, &report)?;
     let directive = tokio::select! {
         () = stop.cancelled() => return Err(AgentError::Stopped),
-        response = client.reconcile(request) => response?,
+        response = tokio::time::timeout(
+            worker::lease_rpc_budget(Duration::from_secs(u64::from(config.lease_seconds))),
+            client.reconcile(request),
+        ) => response.map_err(|_| AgentError::LeaseRenewalTimeout)??,
     }
     .into_inner();
     if directive.session_epoch != session_epoch {
@@ -295,43 +421,88 @@ async fn send_reconciliation(
             )
         })
         .collect::<std::collections::BTreeSet<_>>();
-    if !cancelled.is_empty() {
+    let retained = directive
+        .retain_attempts
+        .into_iter()
+        .map(|authority| {
+            (
+                authority.organization_id,
+                authority.attempt_id,
+                authority.fence_token,
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut unresolved = report
+        .attempts
+        .iter()
+        .any(|attempt| attempt.phase == AttemptPhase::ReconciliationRequired);
+    if !cancelled.is_empty() || !retained.is_empty() {
         let mut journal = Journal::open(&config.journal_path)?;
         for attempt in &report.attempts {
-            if cancellation_targets(&cancelled, attempt) {
-                let outcome = cancel_recovered_attempt(&mut journal, attempt).await?;
+            if recovered_attempt_requires_cancellation_report(&cancelled, &retained, attempt) {
+                let outcome =
+                    if worker::recovered_attempt_has_durable_containment_proof(config, attempt)
+                        .await?
+                    {
+                        journal.transition(
+                            &attempt.organization_id,
+                            &attempt.attempt_id,
+                            attempt.fence_token,
+                            attempt.session_epoch,
+                            AttemptPhase::Cancelling,
+                            attempt.process_id,
+                        )?;
+                        RecoveredCancellation::AlreadyExited
+                    } else {
+                        cancel_recovered_attempt(&mut journal, attempt, config.termination_grace)
+                            .await?
+                    };
+                let cancellation_outcome = match outcome {
+                    RecoveredCancellation::Terminated => CancellationOutcome::Terminated as i32,
+                    RecoveredCancellation::AlreadyExited => {
+                        CancellationOutcome::AlreadyExited as i32
+                    }
+                    #[cfg(unix)]
+                    RecoveredCancellation::RetireStale => {
+                        CancellationOutcome::IdentityMismatch as i32
+                    }
+                    RecoveredCancellation::ReconciliationRequired => {
+                        CancellationOutcome::ReconciliationRequired as i32
+                    }
+                };
+                if outcome != RecoveredCancellation::ReconciliationRequired
+                    && worker::recovered_cancellation_requires_persistence(config, attempt).await?
+                {
+                    worker::persist_recovered_cancellation(
+                        config,
+                        &mut journal,
+                        attempt,
+                        cancellation_outcome,
+                    )
+                    .await?;
+                }
                 let request = CancellationCompletion {
                     agent_id: config.agent_id.clone(),
                     session_epoch,
                     organization_id: attempt.organization_id.clone(),
                     attempt_id: attempt.attempt_id.clone(),
                     fence_token: attempt.fence_token,
-                    outcome: match outcome {
-                        RecoveredCancellation::Completed => CancellationOutcome::Terminated as i32,
-                        RecoveredCancellation::ReconciliationRequired => {
-                            CancellationOutcome::ReconciliationRequired as i32
-                        }
-                    },
+                    outcome: cancellation_outcome,
                 };
                 let receipt = tokio::select! {
                     () = stop.cancelled() => return Err(AgentError::Stopped),
-                    response = client.complete_cancellation(request) => response?,
+                    response = tokio::time::timeout(
+                        worker::lease_rpc_budget(Duration::from_secs(
+                            u64::from(config.lease_seconds),
+                        )),
+                        client.complete_cancellation(request),
+                    ) => response.map_err(|_| AgentError::LeaseRenewalTimeout)??,
                 }
                 .into_inner();
                 if receipt.session_epoch != session_epoch {
                     return Err(AgentError::StaleSession);
                 }
-                let phase = match CancellationDisposition::try_from(receipt.disposition) {
-                    Ok(
-                        CancellationDisposition::Completed | CancellationDisposition::RetireStale,
-                    ) => AttemptPhase::Aborted,
-                    Ok(CancellationDisposition::ReconciliationRequired) => {
-                        AttemptPhase::ReconciliationRequired
-                    }
-                    Ok(CancellationDisposition::Unspecified) | Err(_) => {
-                        return Err(AgentError::UnsupportedProtocol);
-                    }
-                };
+                let phase = recovered_cancellation_phase(outcome, receipt.disposition)?;
                 journal.transition(
                     &attempt.organization_id,
                     &attempt.attempt_id,
@@ -340,15 +511,78 @@ async fn send_reconciliation(
                     phase,
                     attempt.process_id,
                 )?;
+                unresolved |= phase == AttemptPhase::ReconciliationRequired;
             }
+        }
+    }
+    if unresolved {
+        Err(AgentError::UnresolvedReconciliation)
+    } else {
+        Ok(())
+    }
+}
+
+async fn quiesce_recovered_executions(config: &AgentConfig) -> Result<(), AgentError> {
+    let report = Journal::open(&config.journal_path)?.reconcile()?;
+    let mut journal = Journal::open(&config.journal_path)?;
+    for attempt in &report.attempts {
+        if !matches!(
+            attempt.phase,
+            AttemptPhase::Accepted | AttemptPhase::Running
+        ) {
+            continue;
+        }
+        let outcome =
+            cancel_recovered_attempt(&mut journal, attempt, config.termination_grace).await?;
+        if outcome != RecoveredCancellation::ReconciliationRequired
+            && worker::recovered_cancellation_requires_persistence(config, attempt).await?
+        {
+            let cancellation_outcome = match outcome {
+                RecoveredCancellation::Terminated => CancellationOutcome::Terminated as i32,
+                RecoveredCancellation::AlreadyExited => CancellationOutcome::AlreadyExited as i32,
+                #[cfg(unix)]
+                RecoveredCancellation::RetireStale => CancellationOutcome::IdentityMismatch as i32,
+                RecoveredCancellation::ReconciliationRequired => unreachable!("checked above"),
+            };
+            worker::persist_recovered_cancellation(
+                config,
+                &mut journal,
+                attempt,
+                cancellation_outcome,
+            )
+            .await?;
         }
     }
     Ok(())
 }
 
+fn recovered_cancellation_phase(
+    outcome: RecoveredCancellation,
+    disposition: i32,
+) -> Result<AttemptPhase, AgentError> {
+    let disposition = CancellationDisposition::try_from(disposition)
+        .map_err(|_| AgentError::UnsupportedProtocol)?;
+    if disposition == CancellationDisposition::Unspecified {
+        return Err(AgentError::UnsupportedProtocol);
+    }
+    // Local containment knowledge wins over a stale controller receipt. A
+    // retired fence does not prove an unverifiable process group is gone.
+    if outcome == RecoveredCancellation::ReconciliationRequired {
+        return Ok(AttemptPhase::ReconciliationRequired);
+    }
+    Ok(match disposition {
+        CancellationDisposition::Completed | CancellationDisposition::RetireStale => {
+            AttemptPhase::Aborted
+        }
+        CancellationDisposition::ReconciliationRequired => AttemptPhase::ReconciliationRequired,
+        CancellationDisposition::Unspecified => unreachable!("validated above"),
+    })
+}
+
 async fn cancel_recovered_attempt(
     journal: &mut Journal,
     attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+    termination_grace: Duration,
 ) -> Result<RecoveredCancellation, AgentError> {
     if attempt.phase == AttemptPhase::ReconciliationRequired {
         return Ok(RecoveredCancellation::ReconciliationRequired);
@@ -361,9 +595,14 @@ async fn cancel_recovered_attempt(
         AttemptPhase::Cancelling,
         attempt.process_id,
     )?;
-    match terminate_recovered_process(attempt.process_id).await {
-        Ok(()) => Ok(RecoveredCancellation::Completed),
-        Err(AgentError::UnverifiableRecoveredProcess(_)) => {
+    match terminate_recovered_process(
+        attempt.process_id,
+        attempt.process_birth_identity.as_deref(),
+        termination_grace,
+    )
+    .await?
+    {
+        RecoveredCancellation::ReconciliationRequired => {
             journal.transition(
                 &attempt.organization_id,
                 &attempt.attempt_id,
@@ -374,7 +613,7 @@ async fn cancel_recovered_attempt(
             )?;
             Ok(RecoveredCancellation::ReconciliationRequired)
         }
-        Err(error) => Err(error),
+        outcome => Ok(outcome),
     }
 }
 
@@ -389,24 +628,167 @@ fn cancellation_targets(
     ))
 }
 
+fn recovered_attempt_requires_cancellation_report(
+    cancelled: &std::collections::BTreeSet<(String, String, u64)>,
+    retained: &std::collections::BTreeSet<(String, String, u64)>,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> bool {
+    cancellation_targets(cancelled, attempt)
+        || (cancellation_targets(retained, attempt)
+            && matches!(
+                attempt.phase,
+                AttemptPhase::Accepted
+                    | AttemptPhase::Running
+                    | AttemptPhase::ReconciliationRequired
+            ))
+}
+
 #[cfg(unix)]
-async fn terminate_recovered_process(process_id: Option<u32>) -> Result<(), AgentError> {
+async fn terminate_recovered_process(
+    process_id: Option<u32>,
+    process_birth_identity: Option<&str>,
+    termination_grace: Duration,
+) -> Result<RecoveredCancellation, AgentError> {
     let Some(process_id) = process_id else {
-        return Ok(());
+        return Ok(RecoveredCancellation::AlreadyExited);
     };
-    // A numeric PID/PGID can be recycled after the original service exits.
-    // Until the journal stores a non-reusable process birth identity or an
-    // independently durable containment handle, signaling here could kill an
-    // unrelated process group. Fail closed and leave the attempt visible for
-    // explicit reconciliation.
-    Err(AgentError::UnverifiableRecoveredProcess(process_id))
+    let Some(expected_identity) = process_birth_identity else {
+        return Ok(RecoveredCancellation::ReconciliationRequired);
+    };
+    match process_birth_identity_for(process_id)? {
+        // A dead process-group leader does not prove that its descendants are
+        // gone. Without the leader's birth identity we cannot safely
+        // distinguish the original group from a recycled PGID.
+        None => return Ok(RecoveredCancellation::ReconciliationRequired),
+        Some(current) if current != expected_identity => {
+            return Ok(RecoveredCancellation::RetireStale);
+        }
+        Some(_) => {}
+    }
+
+    use nix::errno::Errno;
+    use nix::sys::signal::{Signal, killpg};
+    use nix::unistd::Pid;
+    let process_group =
+        Pid::from_raw(i32::try_from(process_id).map_err(|_| {
+            AgentError::Io(std::io::Error::other("process ID exceeds Unix PID range"))
+        })?);
+    match killpg(process_group, Signal::SIGTERM) {
+        Ok(()) => {}
+        Err(Errno::ESRCH) => return Ok(RecoveredCancellation::AlreadyExited),
+        Err(error) => return Err(AgentError::Io(std::io::Error::other(error))),
+    }
+
+    let deadline = std::time::Instant::now() + termination_grace;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        match process_birth_identity_for(process_id)? {
+            None if !unix_process_group_exists(process_group)? => {
+                return Ok(RecoveredCancellation::Terminated);
+            }
+            None => {}
+            Some(current) if current != expected_identity => {
+                return Ok(RecoveredCancellation::RetireStale);
+            }
+            Some(_) => {}
+        }
+    }
+
+    // Re-read the non-reusable identity immediately before escalation. This is
+    // the decisive recycled-PID guard: a mismatched process group is never
+    // signalled, even if the original group disappeared during the grace
+    // window.
+    match process_birth_identity_for(process_id)? {
+        None if !unix_process_group_exists(process_group)? => {
+            return Ok(RecoveredCancellation::Terminated);
+        }
+        None => {}
+        Some(current) if current != expected_identity => {
+            return Ok(RecoveredCancellation::RetireStale);
+        }
+        Some(_) => {}
+    }
+    match killpg(process_group, Signal::SIGKILL) {
+        Ok(()) => {}
+        Err(Errno::ESRCH) => return Ok(RecoveredCancellation::Terminated),
+        Err(error) => return Err(AgentError::Io(std::io::Error::other(error))),
+    }
+    let deadline = std::time::Instant::now() + termination_grace;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        match process_birth_identity_for(process_id)? {
+            None if !unix_process_group_exists(process_group)? => {
+                return Ok(RecoveredCancellation::Terminated);
+            }
+            None => {}
+            Some(current) if current != expected_identity => {
+                return Ok(RecoveredCancellation::RetireStale);
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(RecoveredCancellation::ReconciliationRequired)
+}
+
+#[cfg(unix)]
+fn unix_process_group_exists(process_group: nix::unistd::Pid) -> Result<bool, AgentError> {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+
+    match killpg(process_group, None) {
+        Ok(()) | Err(Errno::EPERM) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(error) => Err(AgentError::Io(std::io::Error::other(error))),
+    }
 }
 
 #[cfg(windows)]
-async fn terminate_recovered_process(_process_id: Option<u32>) -> Result<(), AgentError> {
+async fn terminate_recovered_process(
+    process_id: Option<u32>,
+    _process_birth_identity: Option<&str>,
+    _termination_grace: Duration,
+) -> Result<RecoveredCancellation, AgentError> {
     // The previous service process owned the kill-on-close Job Object. SCM
     // restart cannot occur until that process and its complete Job have died.
-    Ok(())
+    Ok(if process_id.is_some() {
+        RecoveredCancellation::Terminated
+    } else {
+        RecoveredCancellation::AlreadyExited
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn process_birth_identity_for(process_id: u32) -> Result<Option<String>, AgentError> {
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let stat = match std::fs::read_to_string(format!("/proc/{process_id}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let (_, fields) = stat.rsplit_once(") ").ok_or_else(|| {
+        AgentError::Io(std::io::Error::other(
+            "Linux process stat has no command terminator",
+        ))
+    })?;
+    let start_ticks = fields.split_whitespace().nth(19).ok_or_else(|| {
+        AgentError::Io(std::io::Error::other(
+            "Linux process stat has no birth tick",
+        ))
+    })?;
+    Ok(Some(format!(
+        "linux-proc-v1:{}:{start_ticks}",
+        boot_id.trim()
+    )))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) fn process_birth_identity_for(_process_id: u32) -> Result<Option<String>, AgentError> {
+    Ok(None)
+}
+
+#[cfg(windows)]
+pub(crate) fn process_birth_identity_for(_process_id: u32) -> Result<Option<String>, AgentError> {
+    Ok(None)
 }
 
 fn wire_report(
@@ -428,6 +810,7 @@ fn wire_report(
                     phase: attempt.phase.wire_name().to_owned(),
                     payload_digest: attempt.payload_digest.to_vec(),
                     process_id: attempt.process_id,
+                    process_birth_identity: attempt.process_birth_identity.clone(),
                     workspace: wire_path(&attempt.workspace)?,
                     logs: attempt
                         .logs
@@ -489,15 +872,18 @@ pub async fn run_service_smoke(
 
 /// Destructive Windows service-crash fixture.
 ///
-/// First start records an accepted/running attempt and launches the supplied
-/// PowerShell file in a Job Object. After the service process is force-killed,
-/// a second start observes the durable running attempt and waits for operator
-/// reconciliation instead of duplicating execution.
+/// First start records an accepted/running attempt and launches this exact
+/// agent binary as a native process-tree fixture in a Job Object. Keeping the
+/// WIN-004 crash gate independent of any shell startup policy makes it prove
+/// containment and recovery directly; shell parity remains a separate WIN-002
+/// gate. After the service process is force-killed, a second start observes
+/// the durable running attempt and waits for operator reconciliation instead
+/// of duplicating execution.
 #[cfg(windows)]
 pub async fn run_execution_service_smoke(
     journal_path: &Path,
     workspace_root: &Path,
-    script: &Path,
+    marker_root: &Path,
     stop: CancellationToken,
 ) -> Result<(), AgentError> {
     let mut journal = Journal::open(journal_path)?;
@@ -519,10 +905,14 @@ pub async fn run_execution_service_smoke(
     let request = ExecutionRequest {
         workspace_root: workspace_root.to_owned(),
         workspace: acceptance.workspace.clone(),
-        mode: ExecutionMode::PowerShell,
-        program: script.to_owned(),
-        arguments: Vec::<OsString>::new(),
+        mode: ExecutionMode::Direct,
+        program: std::env::current_exe()?,
+        arguments: vec![
+            OsString::from("workload-tree-smoke"),
+            marker_root.as_os_str().to_owned(),
+        ],
         environment: BTreeMap::new(),
+        output_limit_bytes: None,
         timeout: Duration::from_secs(300),
         termination_grace: Duration::from_millis(100),
     };
@@ -537,6 +927,78 @@ pub async fn run_execution_service_smoke(
                 Some(process_id),
             )
             .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
+    })
+    .await
+    .map(|_| ())
+    .map_err(|error| AgentError::Io(std::io::Error::other(error)))
+}
+
+/// Holds a newly created Windows workload at a named pre-resume boundary.
+///
+/// The hosted war gate force-kills the service while this callback is blocked.
+/// Because `CreateProcessW` atomically applied Job-list membership, closing the
+/// service's Job handle must remove the suspended workload at both the
+/// contained-before-record and recorded-before-resume boundaries.
+#[cfg(windows)]
+pub async fn run_creation_boundary_service_smoke(
+    journal_path: &Path,
+    workspace_root: &Path,
+    script: &Path,
+    marker: &Path,
+    record_before_pause: bool,
+    stop: CancellationToken,
+) -> Result<(), AgentError> {
+    let mut journal = Journal::open(journal_path)?;
+    let session_epoch = journal.reserve_session_epoch(0)?;
+    let boundary = if record_before_pause {
+        "recorded-before-resume"
+    } else {
+        "contained-before-record"
+    };
+    let acceptance = Acceptance {
+        organization_id: "service-boundary".to_owned(),
+        attempt_id: boundary.to_owned(),
+        fence_token: 1,
+        session_epoch,
+        payload_digest: [0x58; 32],
+        workspace: PathBuf::from(format!("service-boundary/{boundary}")),
+    };
+    journal.accept(&acceptance)?;
+    let request = ExecutionRequest {
+        workspace_root: workspace_root.to_owned(),
+        workspace: acceptance.workspace.clone(),
+        mode: ExecutionMode::PowerShell,
+        program: script.to_owned(),
+        arguments: Vec::<OsString>::new(),
+        environment: BTreeMap::new(),
+        output_limit_bytes: None,
+        timeout: Duration::from_secs(300),
+        termination_grace: Duration::from_millis(100),
+    };
+    execute_with_spawn_hook(&request, stop, |process_id| {
+        if record_before_pause {
+            journal
+                .transition(
+                    &acceptance.organization_id,
+                    &acceptance.attempt_id,
+                    acceptance.fence_token,
+                    session_epoch,
+                    AttemptPhase::Running,
+                    Some(process_id),
+                )
+                .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
+        }
+        let mut marker_file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(marker)
+            .map_err(ExecutionError::Io)?;
+        use std::io::Write;
+        writeln!(marker_file, "{process_id}").map_err(ExecutionError::Io)?;
+        marker_file.sync_all().map_err(ExecutionError::Io)?;
+        loop {
+            std::thread::park_timeout(Duration::from_secs(60));
+        }
     })
     .await
     .map(|_| ())
@@ -560,12 +1022,17 @@ mod tests {
         [
             ("MCLOVING_AGENT_ID", "windows-1"),
             ("MCLOVING_AGENT_TRUST_POOL", "trusted-build"),
+            (
+                "MCLOVING_AGENT_ORGANIZATION_ID",
+                "00000000-0000-0000-0000-000000000123",
+            ),
             ("MCLOVING_CONTROLLER_URI", "https://controller.internal"),
             ("MCLOVING_CONTROLLER_DNS_NAME", "controller.internal"),
             ("MCLOVING_CONTROLLER_CA_PATH", "ca.pem"),
             ("MCLOVING_AGENT_CERTIFICATE_PATH", "agent.pem"),
             ("MCLOVING_AGENT_PRIVATE_KEY_PATH", "agent-key.pem"),
             ("MCLOVING_AGENT_JOURNAL_PATH", "agent.db"),
+            ("MCLOVING_AGENT_WORKSPACE_ROOT", "workspace"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
@@ -583,6 +1050,19 @@ mod tests {
         assert!(matches!(
             AgentConfig::from_values(&missing),
             Err(AgentError::MissingConfig("MCLOVING_AGENT_PRIVATE_KEY_PATH"))
+        ));
+
+        let mut unsafe_renewal = values();
+        unsafe_renewal.insert("MCLOVING_AGENT_LEASE_SECONDS".to_owned(), "5".to_owned());
+        unsafe_renewal.insert(
+            "MCLOVING_AGENT_RENEW_MILLISECONDS".to_owned(),
+            "4500".to_owned(),
+        );
+        assert!(matches!(
+            AgentConfig::from_values(&unsafe_renewal),
+            Err(AgentError::InvalidConfig(
+                "agent polling, renewal, or termination timing"
+            ))
         ));
     }
 
@@ -612,6 +1092,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stalled_open_session_rpc_is_bounded() {
+        let result = bounded_open_session_rpc::<()>(
+            Duration::from_millis(1),
+            std::future::pending::<Result<tonic::Response<()>, tonic::Status>>(),
+        )
+        .await;
+        assert!(matches!(result, Err(AgentError::OpenSessionTimeout)));
+    }
+
+    #[test]
+    fn work_delivery_must_be_negotiated_before_polling() {
+        assert!(matches!(
+            require_work_delivery_feature(&["journal-v1".to_owned()]),
+            Err(AgentError::UnsupportedProtocol)
+        ));
+        require_work_delivery_feature(&[WORK_DELIVERY_FEATURE.to_owned()]).unwrap();
+    }
+
+    #[test]
+    fn stale_receipt_cannot_retire_unverifiable_local_containment() {
+        assert_eq!(
+            recovered_cancellation_phase(
+                RecoveredCancellation::ReconciliationRequired,
+                CancellationDisposition::RetireStale as i32,
+            )
+            .unwrap(),
+            AttemptPhase::ReconciliationRequired
+        );
+        assert_eq!(
+            recovered_cancellation_phase(
+                RecoveredCancellation::AlreadyExited,
+                CancellationDisposition::RetireStale as i32,
+            )
+            .unwrap(),
+            AttemptPhase::Aborted
+        );
+    }
+
+    #[test]
+    fn retained_reconciliation_required_attempt_is_reported_to_the_controller() {
+        let attempt = mcloving_agent_runtime::ReconciliationAttempt {
+            organization_id: "org".to_owned(),
+            attempt_id: "attempt".to_owned(),
+            fence_token: 7,
+            session_epoch: 3,
+            payload_digest: [0x42; 32],
+            phase: AttemptPhase::ReconciliationRequired,
+            workspace: PathBuf::from("org/attempt/7"),
+            process_id: Some(42),
+            process_birth_identity: None,
+            logs: Vec::new(),
+            result: None,
+        };
+        let retained = [("org".to_owned(), "attempt".to_owned(), 7)]
+            .into_iter()
+            .collect();
+
+        assert!(recovered_attempt_requires_cancellation_report(
+            &std::collections::BTreeSet::new(),
+            &retained,
+            &attempt
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn recovered_windows_attempt_without_process_is_already_exited() {
+        assert_eq!(
+            terminate_recovered_process(None, None, Duration::from_millis(25))
+                .await
+                .unwrap(),
+            RecoveredCancellation::AlreadyExited
+        );
+    }
+
+    #[tokio::test]
     async fn smoke_runtime_reserves_epoch_and_stops_cleanly() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("agent.db");
@@ -629,7 +1185,7 @@ mod tests {
         assert_eq!(health.2, 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn recovered_unix_process_group_without_birth_identity_is_not_signalled() {
         let mut command = tokio::process::Command::new("/bin/sh");
@@ -637,16 +1193,92 @@ mod tests {
         let mut child = command.spawn().unwrap();
         let process_id = child.id().unwrap();
 
-        assert!(matches!(
-            terminate_recovered_process(Some(process_id)).await,
-            Err(AgentError::UnverifiableRecoveredProcess(id)) if id == process_id
-        ));
+        assert_eq!(
+            terminate_recovered_process(Some(process_id), None, Duration::from_millis(25))
+                .await
+                .unwrap(),
+            RecoveredCancellation::ReconciliationRequired
+        );
         assert!(child.try_wait().unwrap().is_none());
         child.kill().await.unwrap();
         child.wait().await.unwrap();
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn missing_unix_group_leader_requires_reconciliation() {
+        use nix::sys::signal::{Signal, killpg};
+        use nix::unistd::Pid;
+
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 &"])
+            .process_group(0)
+            .kill_on_drop(false);
+        let mut leader = command.spawn().unwrap();
+        let process_id = leader.id().unwrap();
+        leader.wait().await.unwrap();
+
+        assert_eq!(
+            terminate_recovered_process(
+                Some(process_id),
+                Some("linux-proc-v1:gone:1"),
+                Duration::from_millis(25),
+            )
+            .await
+            .unwrap(),
+            RecoveredCancellation::ReconciliationRequired
+        );
+        let group = Pid::from_raw(i32::try_from(process_id).unwrap());
+        assert!(unix_process_group_exists(group).unwrap());
+        let _ = killpg(group, Signal::SIGKILL);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn recovered_unix_process_group_with_mismatched_birth_identity_is_retired_not_signalled()
+    {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 30"]).process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_id = child.id().unwrap();
+        let identity = process_birth_identity_for(process_id).unwrap().unwrap();
+
+        assert_eq!(
+            terminate_recovered_process(
+                Some(process_id),
+                Some(&format!("{identity}-recycled")),
+                Duration::from_millis(25),
+            )
+            .await
+            .unwrap(),
+            RecoveredCancellation::RetireStale
+        );
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn recovered_unix_process_group_with_matching_birth_identity_is_terminated() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 30"]).process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_id = child.id().unwrap();
+        let identity = process_birth_identity_for(process_id).unwrap().unwrap();
+        let waiter = tokio::spawn(async move { child.wait().await.unwrap() });
+
+        assert_eq!(
+            terminate_recovered_process(Some(process_id), Some(&identity), Duration::from_secs(1),)
+                .await
+                .unwrap(),
+            RecoveredCancellation::Terminated
+        );
+        waiter.await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn unverifiable_recovered_cancellation_is_retained_without_session_failure() {
         use mcloving_agent_runtime::Acceptance;
@@ -680,7 +1312,7 @@ mod tests {
         let attempt = journal.reconcile().unwrap().attempts.remove(0);
 
         assert_eq!(
-            cancel_recovered_attempt(&mut journal, &attempt)
+            cancel_recovered_attempt(&mut journal, &attempt, Duration::from_millis(25))
                 .await
                 .unwrap(),
             RecoveredCancellation::ReconciliationRequired
@@ -708,6 +1340,7 @@ mod tests {
                 phase: AttemptPhase::Running,
                 workspace: PathBuf::from("org/attempt"),
                 process_id: Some(42),
+                process_birth_identity: Some("linux-proc-v1:boot:42".to_owned()),
                 logs: vec![mcloving_agent_runtime::SpoolEntry {
                     sequence: 7,
                     relative_path: PathBuf::from("spool/stdout.log"),
@@ -725,6 +1358,10 @@ mod tests {
         let wire = wire_report(&config, 4, &report).unwrap();
         let attempt = &wire.attempts[0];
         assert_eq!(attempt.process_id, Some(42));
+        assert_eq!(
+            attempt.process_birth_identity.as_deref(),
+            Some("linux-proc-v1:boot:42")
+        );
         assert_eq!(attempt.workspace, "org/attempt");
         assert_eq!(attempt.logs[0].sequence, 7);
         assert_eq!(attempt.logs[0].digest, vec![8; 32]);
@@ -744,6 +1381,7 @@ mod tests {
             phase: AttemptPhase::Running,
             workspace: PathBuf::from("org/attempt"),
             process_id: None,
+            process_birth_identity: None,
             logs: Vec::new(),
             result: None,
         };

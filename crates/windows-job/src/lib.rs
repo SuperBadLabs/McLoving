@@ -1,37 +1,63 @@
-//! Race-free Windows Job Object containment.
+//! Atomic Windows Job Object process creation.
 //!
-//! This is the workspace's only Win32 FFI capsule. Callers create a child with
-//! [`CREATE_SUSPENDED`], then call [`Job::attach`], durably record the process,
-//! and call [`Job::resume`]. The process cannot create descendants before the
-//! Job Object owns it or before the durable spawn record exists.
+//! This is the workspace's only Win32 FFI capsule. A workload is created
+//! suspended with `PROC_THREAD_ATTRIBUTE_JOB_LIST`, so the kernel places it in
+//! the kill-on-close Job Object as part of `CreateProcessW`. There is no
+//! child-bearing interval between process creation and containment. Callers
+//! durably record the returned process ID and only then call
+//! [`JobProcess::resume`].
 
 #![cfg(windows)]
 
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::mem::{size_of, zeroed};
+use std::fs::File;
+use std::mem::{size_of, size_of_val, zeroed};
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::AsRawHandle;
-use std::process::Child;
-use std::ptr::null;
+use std::os::windows::process::ExitStatusExt;
+use std::path::{Component, Path, PathBuf, Prefix};
+use std::process::ExitStatus;
+use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE, WAIT_FAILED,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
+use windows_sys::Win32::Security::{TOKEN_DUPLICATE, TOKEN_QUERY};
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+};
+use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+    CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicAccountingInformation,
+    JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+    TerminateJobObject,
 };
-use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcessToken,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_JOB_LIST, PROCESS_INFORMATION,
+    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, UpdateProcThreadAttribute,
+    WaitForSingleObject,
+};
 
-/// Win32 process-creation flag required before attaching a child.
-pub const CREATE_SUSPENDED: u32 = 0x0000_0004;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+const ERROR_INVALID_PARAMETER: u32 = 87;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JobError {
     operation: &'static str,
     code: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
 }
 
 impl JobError {
@@ -40,6 +66,13 @@ impl JobError {
         // Win32 state immediately after the failed call.
         let code = unsafe { GetLastError() };
         Self { operation, code }
+    }
+
+    fn invalid(operation: &'static str) -> Self {
+        Self {
+            operation,
+            code: ERROR_INVALID_PARAMETER,
+        }
     }
 }
 
@@ -55,108 +88,202 @@ impl fmt::Display for JobError {
 
 impl std::error::Error for JobError {}
 
-/// Owns an anonymous kill-on-close Job Object.
-pub struct Job {
-    handle: HANDLE,
-    initial_thread: ThreadHandle,
+/// Returns the stable volume/file-index identity of an open file handle.
+///
+/// Keeping this Win32 query in the audited FFI capsule lets safe callers
+/// detect workload rename-and-replace attacks without reopening mutable paths.
+pub fn file_identity(file: &File) -> Result<FileIdentity, JobError> {
+    // SAFETY: zero is the documented initial state for this POD structure.
+    let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
+    let handle: HANDLE = file.as_raw_handle().cast();
+    // SAFETY: handle comes from a live File and information points to writable
+    // storage of the exact structure required by GetFileInformationByHandle.
+    if unsafe { GetFileInformationByHandle(handle, &raw mut information) } == 0 {
+        return Err(JobError::last("GetFileInformationByHandle"));
+    }
+    Ok(FileIdentity {
+        volume_serial_number: information.dwVolumeSerialNumber,
+        file_index: (u64::from(information.nFileIndexHigh) << 32)
+            | u64::from(information.nFileIndexLow),
+    })
 }
 
-// SAFETY: Windows kernel handles may be used by threads in the owning process.
-// Job exposes no mutable memory through either handle, ResumeThread is called
-// once before execution begins, and Windows synchronizes concurrent Job Object
-// operations.
-unsafe impl Send for Job {}
-// SAFETY: See the Send justification. Shared access invokes only thread-safe
-// Win32 handle operations and Drop still has unique ownership.
-unsafe impl Sync for Job {}
+/// Complete creation specification for one atomically contained child.
+pub struct SpawnSpec<'a> {
+    pub program: &'a OsStr,
+    pub arguments: &'a [OsString],
+    /// Validated suffix appended without C-argv quoting (used by `cmd.exe`).
+    pub raw_argument_suffix: Option<&'a OsStr>,
+    pub environment: &'a BTreeMap<OsString, OsString>,
+    pub current_directory: &'a Path,
+    pub stdin: &'a File,
+    pub stdout: &'a File,
+    pub stderr: &'a File,
+}
 
-impl Job {
-    /// Creates a kill-on-close job and assigns a suspended child.
-    pub fn attach(child: &Child) -> Result<Self, JobError> {
-        let process_id = child.id();
-        let process_handle = child.as_raw_handle().cast();
+/// Owns a process created suspended and atomically inside a kill-on-close Job.
+pub struct JobProcess {
+    job: OwnedHandle,
+    process: OwnedHandle,
+    initial_thread: Option<OwnedHandle>,
+    process_id: u32,
+}
 
-        // Resolve and RAII-own the suspended initial thread before allocating
-        // the Job Object. Any snapshot/OpenThread failure therefore cannot
-        // strand a raw Job handle, and a later CreateJobObjectW failure drops
-        // the thread handle normally.
-        let initial_thread = initial_thread(process_id)?;
+// SAFETY: Windows kernel handles are process-wide synchronized references.
+// This type owns every handle and exposes no pointee memory.
+unsafe impl Send for JobProcess {}
+// SAFETY: Shared methods invoke only thread-safe query operations. Resume
+// requires unique access and Drop retains unique ownership.
+unsafe impl Sync for JobProcess {}
 
-        // SAFETY: null security/name pointers request an anonymous job with
-        // default security. The returned handle is checked and owned by Job.
-        let handle = unsafe { CreateJobObjectW(null(), null()) };
-        if handle.is_null() {
-            return Err(JobError::last("CreateJobObjectW"));
-        }
-        let job = Self {
-            handle,
-            initial_thread,
-        };
+impl JobProcess {
+    /// Creates a suspended workload with atomic Job-list membership.
+    pub fn spawn_suspended(spec: &SpawnSpec<'_>) -> Result<Self, JobError> {
+        let job = create_kill_on_close_job()?;
+        let stdin = duplicate_inheritable(spec.stdin)?;
+        let stdout = duplicate_inheritable(spec.stdout)?;
+        let stderr = duplicate_inheritable(spec.stderr)?;
+        let inherited = [stdin.handle, stdout.handle, stderr.handle];
 
-        // SAFETY: zero is the documented initial state for this POD Win32
-        // structure; its size and information class match.
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        // SAFETY: handle is live, pointer references the correctly sized
-        // structure for JobObjectExtendedLimitInformation for this call.
-        let configured = unsafe {
-            SetInformationJobObject(
-                job.handle,
-                JobObjectExtendedLimitInformation,
-                (&raw const limits).cast(),
-                u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
-                    .expect("Win32 structure size fits u32"),
+        let mut attributes = AttributeList::new(2)?;
+        attributes.set(
+            usize::try_from(PROC_THREAD_ATTRIBUTE_JOB_LIST)
+                .expect("Win32 attribute identifier fits usize"),
+            (&raw const job.handle).cast(),
+            size_of::<HANDLE>(),
+            "UpdateProcThreadAttribute(JOB_LIST)",
+        )?;
+        attributes.set(
+            usize::try_from(PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+                .expect("Win32 attribute identifier fits usize"),
+            inherited.as_ptr().cast(),
+            size_of_val(&inherited),
+            "UpdateProcThreadAttribute(HANDLE_LIST)",
+        )?;
+
+        let resolved_program = resolve_program(spec)?;
+        let application = wide_nul(&resolved_program, "program contains NUL")?;
+        let mut command_line = command_line(spec)?;
+        let current_directory = wide_nul(
+            spec.current_directory.as_os_str(),
+            "working directory contains NUL",
+        )?;
+        let environment = environment_block(spec.environment, spec.current_directory)?;
+
+        // SAFETY: zero is the documented initial state for both POD Win32
+        // structures. Every pointer below remains live through CreateProcessW.
+        let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
+        startup.StartupInfo.cb =
+            u32::try_from(size_of::<STARTUPINFOEXW>()).expect("STARTUPINFOEXW size fits u32");
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = stdin.handle;
+        startup.StartupInfo.hStdOutput = stdout.handle;
+        startup.StartupInfo.hStdError = stderr.handle;
+        startup.lpAttributeList = attributes.pointer();
+        // SAFETY: zero is the documented initial state. Successful creation
+        // returns four owned scalar/handle values in this structure.
+        let mut information: PROCESS_INFORMATION = unsafe { zeroed() };
+
+        // SAFETY: application/current-directory/environment are terminated
+        // UTF-16 buffers; command_line is mutable as required by CreateProcessW;
+        // the startup pointer is layout-compatible because cb names the
+        // extended structure; inherited handles are explicitly restricted by
+        // HANDLE_LIST; JOB_LIST makes containment part of process creation.
+        let created = unsafe {
+            CreateProcessW(
+                application.as_ptr(),
+                command_line.as_mut_ptr(),
+                null(),
+                null(),
+                1,
+                workload_creation_flags(),
+                environment.as_ptr().cast(),
+                current_directory.as_ptr(),
+                (&raw const startup.StartupInfo).cast(),
+                &raw mut information,
             )
         };
-        if configured == 0 {
-            return Err(JobError::last("SetInformationJobObject"));
+        if created == 0 {
+            return Err(JobError::last("CreateProcessW(JOB_LIST)"));
         }
-
-        // SAFETY: both handles are live. The child is still suspended, so it
-        // cannot create a descendant in the assignment window.
-        if unsafe { AssignProcessToJobObject(job.handle, process_handle) } == 0 {
-            return Err(JobError::last("AssignProcessToJobObject"));
-        }
-
-        Ok(job)
+        let process = OwnedHandle::new(information.hProcess, "CreateProcessW process handle")?;
+        let initial_thread = OwnedHandle::new(information.hThread, "CreateProcessW thread handle")?;
+        Ok(Self {
+            job,
+            process,
+            initial_thread: Some(initial_thread),
+            process_id: information.dwProcessId,
+        })
     }
 
-    /// Resumes the initial thread after the caller has durably recorded the
-    /// contained process identity.
-    pub fn resume(&self) -> Result<(), JobError> {
-        // SAFETY: thread was opened with THREAD_SUSPEND_RESUME and belongs to
-        // the newly created suspended process.
-        let previous = unsafe { ResumeThread(self.initial_thread.handle) };
+    #[must_use]
+    pub fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    /// Resumes the exact initial thread after durable spawn recording.
+    pub fn resume(&mut self) -> Result<(), JobError> {
+        let thread = self
+            .initial_thread
+            .take()
+            .ok_or_else(|| JobError::invalid("ResumeThread called more than once"))?;
+        // SAFETY: the handle is the exact suspended initial thread returned by
+        // CreateProcessW and has not previously been resumed.
+        let previous = unsafe { ResumeThread(thread.handle) };
         if previous == u32::MAX {
             return Err(JobError::last("ResumeThread"));
+        }
+        if previous != 1 {
+            return Err(JobError::invalid(if previous == 0 {
+                "initial workload thread was already running"
+            } else {
+                "initial workload thread had multiple suspend holds"
+            }));
         }
         Ok(())
     }
 
     /// Atomically terminates every process in the job.
     pub fn terminate(&self, exit_code: u32) -> Result<(), JobError> {
-        // SAFETY: handle remains live for self's lifetime.
-        if unsafe { TerminateJobObject(self.handle, exit_code) } == 0 {
+        // SAFETY: the Job handle remains live for self's lifetime.
+        if unsafe { TerminateJobObject(self.job.handle, exit_code) } == 0 {
             Err(JobError::last("TerminateJobObject"))
         } else {
             Ok(())
         }
     }
 
+    /// Returns the leader exit status when it is waitable.
+    pub fn try_wait(&self) -> Result<Option<ExitStatus>, JobError> {
+        // SAFETY: process handle is live; a zero timeout only observes state.
+        match unsafe { WaitForSingleObject(self.process.handle, 0) } {
+            WAIT_TIMEOUT => return Ok(None),
+            WAIT_OBJECT_0 => {}
+            WAIT_FAILED => return Err(JobError::last("WaitForSingleObject")),
+            _ => return Err(JobError::invalid("WaitForSingleObject result")),
+        }
+        let mut code = 0;
+        // SAFETY: process handle is live and code points to writable storage.
+        if unsafe { GetExitCodeProcess(self.process.handle, &raw mut code) } == 0 {
+            return Err(JobError::last("GetExitCodeProcess"));
+        }
+        Ok(Some(ExitStatus::from_raw(code)))
+    }
+
     /// Returns the number of processes that remain members of the job.
     pub fn active_processes(&self) -> Result<u32, JobError> {
         // SAFETY: zero is the documented initial state for this POD structure.
         let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
-        // SAFETY: handle is live and the information class, pointer, and size
-        // all describe JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.
+        // SAFETY: the Job handle is live and the information class, pointer,
+        // and size all describe the accounting structure.
         let queried = unsafe {
             QueryInformationJobObject(
-                self.handle,
+                self.job.handle,
                 JobObjectBasicAccountingInformation,
                 (&raw mut accounting).cast(),
                 u32::try_from(size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>())
                     .expect("Win32 structure size fits u32"),
-                std::ptr::null_mut(),
+                null_mut(),
             )
         };
         if queried == 0 {
@@ -167,79 +294,583 @@ impl Job {
     }
 }
 
-impl Drop for Job {
-    fn drop(&mut self) {
-        // SAFETY: Job uniquely owns this non-null handle. Kill-on-close makes
-        // this the final no-orphan backstop on normal exit and service crash.
-        unsafe {
-            CloseHandle(self.handle);
-        }
+const fn workload_creation_flags() -> u32 {
+    // Agent workloads are always non-interactive and receive explicit standard
+    // handles. Prevent console applications from allocating a hidden conhost
+    // session: that session can block before user code starts when the agent is
+    // hosted by the Service Control Manager under LocalSystem.
+    CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
+}
+
+fn create_kill_on_close_job() -> Result<OwnedHandle, JobError> {
+    // SAFETY: null security/name pointers request an anonymous Job with default
+    // security. The checked result is immediately RAII-owned.
+    let handle = unsafe { CreateJobObjectW(null(), null()) };
+    let job = OwnedHandle::new(handle, "CreateJobObjectW")?;
+    // SAFETY: zero is the documented initial state for this POD structure.
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: Job handle and correctly sized limits structure are live.
+    let configured = unsafe {
+        SetInformationJobObject(
+            job.handle,
+            JobObjectExtendedLimitInformation,
+            (&raw const limits).cast(),
+            u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                .expect("Win32 structure size fits u32"),
+        )
+    };
+    if configured == 0 {
+        Err(JobError::last("SetInformationJobObject"))
+    } else {
+        Ok(job)
     }
 }
 
-struct ThreadHandle {
-    handle: HANDLE,
-}
-
-// SAFETY: A thread HANDLE is a process-wide kernel reference and this wrapper
-// owns it without exposing pointee memory.
-unsafe impl Send for ThreadHandle {}
-// SAFETY: Shared access does not mutate Rust memory; Win32 synchronizes handle
-// operations and the owning Job controls the single resume point.
-unsafe impl Sync for ThreadHandle {}
-
-impl Drop for ThreadHandle {
-    fn drop(&mut self) {
-        // SAFETY: ThreadHandle uniquely owns this non-null handle.
-        unsafe {
-            CloseHandle(self.handle);
-        }
+fn resolve_program(spec: &SpawnSpec<'_>) -> Result<OsString, JobError> {
+    let program = Path::new(spec.program);
+    if program.is_absolute() {
+        return Ok(program.as_os_str().to_owned());
     }
-}
-
-fn initial_thread(process_id: u32) -> Result<ThreadHandle, JobError> {
-    // SAFETY: documented snapshot call with no pointer arguments.
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
-    if snapshot == INVALID_HANDLE_VALUE {
-        return Err(JobError::last("CreateToolhelp32Snapshot"));
-    }
-    let snapshot = SnapshotHandle { handle: snapshot };
-
-    // SAFETY: zero is the documented initial state; dwSize is set before use.
-    let mut entry: THREADENTRY32 = unsafe { zeroed() };
-    entry.dwSize =
-        u32::try_from(size_of::<THREADENTRY32>()).expect("Win32 structure size fits u32");
-    // SAFETY: snapshot and entry are valid for the duration of the call.
-    if unsafe { Thread32First(snapshot.handle, &raw mut entry) } == 0 {
-        return Err(JobError::last("Thread32First"));
+    if program.components().count() > 1 {
+        return Ok(spec.current_directory.join(program).into_os_string());
     }
 
-    loop {
-        if entry.th32OwnerProcessID == process_id {
-            // SAFETY: thread ID came from the live snapshot; no inheritable
-            // handle is requested.
-            let handle = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
-            if handle.is_null() {
-                return Err(JobError::last("OpenThread"));
+    let explicit_path = spec
+        .environment
+        .iter()
+        .find(|(key, _)| normalized_environment_key(key) == "PATH")
+        .map(|(_, value)| value.clone());
+    let path = if let Some(path) = explicit_path {
+        path
+    } else {
+        standard_workload_environment()?
+            .remove("PATH")
+            .map(|(_, value)| value)
+            .ok_or(JobError {
+                operation: "resolve program from PATH",
+                code: ERROR_FILE_NOT_FOUND,
+            })?
+    };
+    let extensions: &[&str] = if program.extension().is_some() {
+        &[""]
+    } else {
+        &["", ".exe", ".com"]
+    };
+    for directory in std::env::split_paths(&path) {
+        let directory = if directory.is_absolute() {
+            directory
+        } else {
+            spec.current_directory.join(directory)
+        };
+        for extension in extensions {
+            let mut candidate = directory.join(program);
+            if !extension.is_empty() {
+                candidate.set_extension(extension.trim_start_matches('.'));
             }
-            return Ok(ThreadHandle { handle });
+            if candidate.is_file() {
+                return Ok(candidate.into_os_string());
+            }
         }
-        // SAFETY: snapshot and entry remain valid.
-        if unsafe { Thread32Next(snapshot.handle, &raw mut entry) } == 0 {
-            return Err(JobError::last("Thread32Next"));
+    }
+    Err(JobError {
+        operation: "resolve program from PATH",
+        code: ERROR_FILE_NOT_FOUND,
+    })
+}
+
+fn duplicate_inheritable(file: &File) -> Result<OwnedHandle, JobError> {
+    let source: HANDLE = file.as_raw_handle().cast();
+    let mut duplicated = null_mut();
+    // SAFETY: current-process pseudo handles are valid; source comes from a
+    // live File; target points to writable handle storage; same-access and
+    // inherit=true are documented DuplicateHandle options.
+    let current = unsafe { GetCurrentProcess() };
+    let copied = unsafe {
+        DuplicateHandle(
+            current,
+            source,
+            current,
+            &raw mut duplicated,
+            0,
+            1,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
+    if copied == 0 {
+        Err(JobError::last("DuplicateHandle"))
+    } else {
+        OwnedHandle::new(duplicated, "DuplicateHandle")
+    }
+}
+
+fn command_line(spec: &SpawnSpec<'_>) -> Result<Vec<u16>, JobError> {
+    let mut command = OsString::new();
+    append_quoted_argument(&mut command, spec.program)?;
+    for argument in spec.arguments {
+        command.push(" ");
+        append_quoted_argument(&mut command, argument)?;
+    }
+    if let Some(raw) = spec.raw_argument_suffix {
+        if raw.encode_wide().any(|unit| unit == 0) {
+            return Err(JobError::invalid("raw command suffix contains NUL"));
+        }
+        command.push(" ");
+        command.push(raw);
+    }
+    wide_nul(&command, "command line contains NUL")
+}
+
+fn append_quoted_argument(command: &mut OsString, value: &OsStr) -> Result<(), JobError> {
+    let units = value.encode_wide().collect::<Vec<_>>();
+    if units.contains(&0) {
+        return Err(JobError::invalid("command argument contains NUL"));
+    }
+    // Match the Windows C-argv contract used by std::process::Command:
+    // switches and other whitespace-free arguments must remain unquoted,
+    // while empty or whitespace-bearing arguments need an outer quote pair.
+    // This distinction is observable for programs such as cmd.exe that parse
+    // their raw command line instead of using the C runtime decoder.
+    let quoted = units.is_empty()
+        || units
+            .iter()
+            .any(|unit| *unit == u16::from(b' ') || *unit == u16::from(b'\t'));
+    if quoted {
+        command.push("\"");
+    }
+    let mut backslashes = 0;
+    for unit in units {
+        if unit == u16::from(b'\\') {
+            backslashes += 1;
+            continue;
+        }
+        if unit == u16::from(b'"') {
+            push_backslashes(command, backslashes * 2 + 1);
+            command.push(OsString::from_wide(&[unit]));
+        } else {
+            push_backslashes(command, backslashes);
+            command.push(OsString::from_wide(&[unit]));
+        }
+        backslashes = 0;
+    }
+    if quoted {
+        push_backslashes(command, backslashes * 2);
+        command.push("\"");
+    } else {
+        push_backslashes(command, backslashes);
+    }
+    Ok(())
+}
+
+fn push_backslashes(command: &mut OsString, count: usize) {
+    if count > 0 {
+        command.push(OsString::from_wide(&vec![u16::from(b'\\'); count]));
+    }
+}
+
+fn environment_block(
+    overrides: &BTreeMap<OsString, OsString>,
+    current_directory: &Path,
+) -> Result<Vec<u16>, JobError> {
+    let mut entries = standard_workload_environment()?;
+    if let Some((normalized, key, value)) = drive_current_directory(current_directory) {
+        entries.insert(normalized, (key, value));
+    }
+    for (key, value) in overrides {
+        if key.is_empty()
+            || key
+                .encode_wide()
+                .any(|unit| unit == 0 || unit == u16::from(b'='))
+            || value.encode_wide().any(|unit| unit == 0)
+        {
+            return Err(JobError::invalid("environment contains invalid UTF-16"));
+        }
+        entries.insert(
+            normalized_environment_key(key),
+            (key.clone(), value.clone()),
+        );
+    }
+    // Even allowlisted or explicitly supplied TEMP/TMP values can point at
+    // shared state. Pin both keys after applying workload overrides so every
+    // attempt retains an isolated temporary directory.
+    for key in ["TEMP", "TMP"] {
+        entries.insert(
+            key.to_owned(),
+            (
+                OsString::from(key),
+                current_directory.as_os_str().to_owned(),
+            ),
+        );
+    }
+
+    let mut block = Vec::new();
+    for (_, (key, value)) in entries {
+        block.extend(key.encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(value.encode_wide());
+        block.push(0);
+    }
+    block.push(0);
+    if block.len() == 1 {
+        block.push(0);
+    }
+    Ok(block)
+}
+
+fn standard_workload_environment() -> Result<BTreeMap<String, (OsString, OsString)>, JobError> {
+    // Seed missing standard values from the service token, then overlay the
+    // same fixed allowlist from the actual agent process. This preserves the
+    // environment SCM or the operator deliberately gave the service while
+    // filling profile values omitted by sparse service environments. CI
+    // controls, credentials, and arbitrary process-local values remain out.
+    const BASELINE: [&str; 36] = [
+        "ALLUSERSPROFILE",
+        "APPDATA",
+        "COMMONPROGRAMFILES",
+        "COMMONPROGRAMFILES(X86)",
+        "COMMONPROGRAMW6432",
+        "COMPUTERNAME",
+        "COMSPEC",
+        "DRIVERDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
+        "LOGONSERVER",
+        "NUMBER_OF_PROCESSORS",
+        "OS",
+        "PATH",
+        "PATHEXT",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_ARCHITEW6432",
+        "PROCESSOR_IDENTIFIER",
+        "PROCESSOR_LEVEL",
+        "PROCESSOR_REVISION",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "PSMODULEPATH",
+        "PUBLIC",
+        "SYSTEMDRIVE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "USERDOMAIN",
+        "USERDOMAIN_ROAMINGPROFILE",
+        "USERNAME",
+        "USERPROFILE",
+        "WINDIR",
+    ];
+    let mut raw_token = null_mut();
+    // SAFETY: the current-process pseudo handle is valid and raw_token points
+    // to writable handle storage. Query/duplicate access is the documented
+    // requirement for a primary token passed to CreateEnvironmentBlock.
+    if unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &raw mut raw_token,
+        )
+    } == 0
+    {
+        return Err(JobError::last("OpenProcessToken"));
+    }
+    let token = OwnedHandle::new(raw_token, "OpenProcessToken")?;
+    let mut raw_environment = null_mut();
+    // SAFETY: raw_environment points to writable pointer storage and token is
+    // the live primary token of the service process. inherit=false excludes
+    // arbitrary process-local values from this profile-derived seed.
+    if unsafe { CreateEnvironmentBlock(&raw mut raw_environment, token.handle, 0) } == 0 {
+        return Err(JobError::last("CreateEnvironmentBlock(current token)"));
+    }
+    let environment = EnvironmentBlock(raw_environment);
+    let mut entries = BTreeMap::new();
+    let mut cursor = environment.0.cast::<u16>();
+    loop {
+        // SAFETY: CreateEnvironmentBlock returns terminated UTF-16 strings
+        // followed by a second null. cursor advances only over those strings.
+        if unsafe { *cursor } == 0 {
+            break;
+        }
+        let mut units = 0;
+        // SAFETY: every entry is terminated by the API contract.
+        while unsafe { *cursor.add(units) } != 0 {
+            units += 1;
+        }
+        // SAFETY: the scan established the initialized entry length.
+        let entry = unsafe { std::slice::from_raw_parts(cursor, units) };
+        let separator = entry
+            .iter()
+            .enumerate()
+            .skip(usize::from(entry.first() == Some(&u16::from(b'='))))
+            .find_map(|(index, unit)| (*unit == u16::from(b'=')).then_some(index))
+            .ok_or_else(|| JobError::invalid("token environment entry has no separator"))?;
+        let key = OsString::from_wide(&entry[..separator]);
+        let value = OsString::from_wide(&entry[separator + 1..]);
+        let normalized = normalized_environment_key(&key);
+        if BASELINE.contains(&normalized.as_str()) {
+            entries.insert(normalized, (key, value));
+        }
+        // SAFETY: units spans the entry; one more unit skips its terminator.
+        cursor = unsafe { cursor.add(units + 1) };
+    }
+    for (key, value) in std::env::vars_os() {
+        let normalized = normalized_environment_key(&key);
+        if BASELINE.contains(&normalized.as_str()) {
+            entries.insert(normalized, (key, value));
+        }
+    }
+    normalize_standard_shell_path(&mut entries)?;
+    Ok(entries)
+}
+
+fn normalize_standard_shell_path(
+    entries: &mut BTreeMap<String, (OsString, OsString)>,
+) -> Result<(), JobError> {
+    let system_root = entries
+        .get("SYSTEMROOT")
+        .map(|(_, value)| PathBuf::from(value))
+        .ok_or_else(|| JobError::invalid("system environment has no SystemRoot"))?;
+    let mut directories = vec![
+        system_root.join("System32"),
+        system_root.clone(),
+        system_root.join("System32/Wbem"),
+        system_root.join("System32/WindowsPowerShell/v1.0"),
+    ];
+    if let Some((_, path)) = entries.get("PATH") {
+        for directory in std::env::split_paths(path).filter(|path| path.is_absolute()) {
+            if !directories.iter().any(|existing| {
+                existing
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&directory.to_string_lossy())
+            }) {
+                directories.push(directory);
+            }
+        }
+    }
+    let path = std::env::join_paths(directories)
+        .map_err(|_| JobError::invalid("standard PATH could not be joined"))?;
+    entries.insert("PATH".to_owned(), (OsString::from("PATH"), path));
+    Ok(())
+}
+
+struct EnvironmentBlock(*mut core::ffi::c_void);
+
+impl Drop for EnvironmentBlock {
+    fn drop(&mut self) {
+        // SAFETY: this pointer is the exact successful
+        // CreateEnvironmentBlock result and is released once.
+        unsafe {
+            DestroyEnvironmentBlock(self.0);
         }
     }
 }
 
-struct SnapshotHandle {
+fn drive_current_directory(current_directory: &Path) -> Option<(String, OsString, OsString)> {
+    let Component::Prefix(prefix) = current_directory.components().next()? else {
+        return None;
+    };
+    let drive = match prefix.kind() {
+        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+        _ => return None,
+    };
+    let key = OsString::from(format!("={}:", char::from(drive).to_ascii_uppercase()));
+    Some((
+        normalized_environment_key(&key),
+        key,
+        current_directory.as_os_str().to_owned(),
+    ))
+}
+
+fn normalized_environment_key(key: &OsStr) -> String {
+    key.to_string_lossy().to_uppercase()
+}
+
+fn wide_nul(value: &OsStr, operation: &'static str) -> Result<Vec<u16>, JobError> {
+    let mut wide = value.encode_wide().collect::<Vec<_>>();
+    if wide.contains(&0) {
+        return Err(JobError::invalid(operation));
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+struct AttributeList {
+    storage: Vec<usize>,
+    initialized: bool,
+}
+
+impl AttributeList {
+    fn new(count: u32) -> Result<Self, JobError> {
+        let mut bytes = 0;
+        // SAFETY: documented sizing call; null list is required and bytes
+        // points to writable storage.
+        unsafe {
+            InitializeProcThreadAttributeList(null_mut(), count, 0, &raw mut bytes);
+        }
+        if bytes == 0 {
+            return Err(JobError::last("InitializeProcThreadAttributeList(size)"));
+        }
+        let mut list = Self {
+            storage: vec![0; bytes.div_ceil(size_of::<usize>())],
+            initialized: false,
+        };
+        // SAFETY: storage is usize-aligned and at least the requested byte
+        // length; pointer remains stable because the vector is never resized.
+        if unsafe { InitializeProcThreadAttributeList(list.pointer(), count, 0, &raw mut bytes) }
+            == 0
+        {
+            return Err(JobError::last("InitializeProcThreadAttributeList"));
+        }
+        list.initialized = true;
+        Ok(list)
+    }
+
+    fn pointer(&mut self) -> *mut core::ffi::c_void {
+        self.storage.as_mut_ptr().cast()
+    }
+
+    fn set(
+        &mut self,
+        attribute: usize,
+        value: *const core::ffi::c_void,
+        bytes: usize,
+        operation: &'static str,
+    ) -> Result<(), JobError> {
+        // SAFETY: list was initialized for two attributes; caller-owned value
+        // remains live through process creation; no previous value is needed.
+        if unsafe {
+            UpdateProcThreadAttribute(
+                self.pointer(),
+                0,
+                attribute,
+                value,
+                bytes,
+                null_mut(),
+                null(),
+            )
+        } == 0
+        {
+            Err(JobError::last(operation))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for AttributeList {
+    fn drop(&mut self) {
+        // SAFETY: the list was successfully initialized and its storage
+        // remains allocated until this call returns.
+        if self.initialized {
+            unsafe {
+                DeleteProcThreadAttributeList(self.pointer());
+            }
+        }
+    }
+}
+
+struct OwnedHandle {
     handle: HANDLE,
 }
 
-impl Drop for SnapshotHandle {
+impl OwnedHandle {
+    fn new(handle: HANDLE, operation: &'static str) -> Result<Self, JobError> {
+        if handle.is_null() {
+            Err(JobError::last(operation))
+        } else {
+            Ok(Self { handle })
+        }
+    }
+}
+
+impl Drop for OwnedHandle {
     fn drop(&mut self) {
-        // SAFETY: SnapshotHandle uniquely owns the ToolHelp snapshot.
+        // SAFETY: OwnedHandle uniquely owns this non-null kernel handle.
         unsafe {
             CloseHandle(self.handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workload_processes_are_suspended_without_an_interactive_console() {
+        let flags = workload_creation_flags();
+        assert_ne!(flags & CREATE_NO_WINDOW, 0);
+        assert_ne!(flags & CREATE_SUSPENDED, 0);
+        assert_ne!(flags & CREATE_UNICODE_ENVIRONMENT, 0);
+        assert_ne!(flags & EXTENDED_STARTUPINFO_PRESENT, 0);
+    }
+
+    #[test]
+    fn windows_arguments_quote_only_when_the_c_argv_contract_requires_it() {
+        let mut switch = OsString::new();
+        append_quoted_argument(&mut switch, OsStr::new("/D")).unwrap();
+        assert_eq!(switch, OsString::from("/D"));
+
+        let mut spaced = OsString::new();
+        append_quoted_argument(&mut spaced, OsStr::new("hello world")).unwrap();
+        assert_eq!(spaced, OsString::from("\"hello world\""));
+
+        let mut empty = OsString::new();
+        append_quoted_argument(&mut empty, OsStr::new("")).unwrap();
+        assert_eq!(empty, OsString::from("\"\""));
+    }
+
+    #[test]
+    fn workload_environment_excludes_ci_values_and_accepts_explicit_values() {
+        assert!(std::env::var_os("USERNAME").is_some());
+        let block = environment_block(
+            &BTreeMap::from([
+                (OsString::from("EXPLICIT_VALUE"), OsString::from("allowed")),
+                (
+                    OsString::from("temp"),
+                    OsString::from(r"D:\shared-service-temp"),
+                ),
+            ]),
+            Path::new(r"D:\agent\work"),
+        )
+        .unwrap();
+        let text = String::from_utf16_lossy(&block).replace('\0', "\n");
+        assert!(text.to_uppercase().contains("SYSTEMROOT="));
+        assert!(text.to_uppercase().contains("USERNAME="));
+        assert!(!text.to_uppercase().contains("GITHUB_ACTIONS="));
+        assert!(!text.to_uppercase().contains("GITHUB_TOKEN="));
+        assert!(text.contains("EXPLICIT_VALUE=allowed"));
+        assert!(text.contains("=D:=D:\\agent\\work"));
+        assert!(text.contains("TEMP=D:\\agent\\work"));
+        assert!(text.contains("TMP=D:\\agent\\work"));
+        assert!(
+            text.to_uppercase()
+                .contains(r"\SYSTEM32\WINDOWSPOWERSHELL\V1.0")
+        );
+    }
+
+    #[test]
+    fn bare_program_resolution_anchors_relative_path_to_the_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        let binary_directory = workspace.join("bin");
+        std::fs::create_dir_all(&binary_directory).unwrap();
+        let candidate = binary_directory.join("probe.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &candidate).unwrap();
+        let null = File::open("NUL").unwrap();
+        let environment = BTreeMap::from([(OsString::from("PATH"), OsString::from("bin"))]);
+        let spec = SpawnSpec {
+            program: OsStr::new("probe.exe"),
+            arguments: &[],
+            raw_argument_suffix: None,
+            environment: &environment,
+            current_directory: &workspace,
+            stdin: &null,
+            stdout: &null,
+            stderr: &null,
+        };
+
+        assert_eq!(resolve_program(&spec).unwrap(), candidate.into_os_string());
     }
 }

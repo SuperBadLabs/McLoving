@@ -1186,13 +1186,20 @@ version = "0.0.0"
 dependencies = [
  "mcloving-agent-protocol",
  "mcloving-agent-runtime",
+ "mcloving-controller-api",
+ "mcloving-controller-store",
  "mcloving-domain",
  "nix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
  "tonic",
+ "uuid",
  "windows-services",
 ]
 
@@ -1247,6 +1254,7 @@ dependencies = [
  "mcloving-controller-api",
  "mcloving-controller-store",
  "mcloving-execution-spine",
+ "serde_json",
  "sha2",
  "sqlx",
  "tempfile",
@@ -1334,6 +1342,7 @@ version = "0.0.0"
 name = "mcloving-windows-job"
 version = "0.0.0"
 dependencies = [
+ "tempfile",
  "windows-sys 0.61.2",
 ]
 
