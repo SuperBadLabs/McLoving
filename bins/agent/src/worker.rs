@@ -231,21 +231,32 @@ pub(super) async fn recover_finalizations(
         lease_stop.cancel();
         let lease_result = lease_task.await;
         let terminal = replay_result?;
-        Journal::open(&config.journal_path)?.transition(
-            &attempt.organization_id,
-            &attempt.attempt_id,
-            attempt.fence_token,
-            attempt.session_epoch,
-            terminal,
-            attempt.process_id,
-        )?;
-        reclaim_attempt_spools(config, &attempt).await?;
+        commit_replayed_phase(config, &attempt, terminal).await?;
         // The controller's terminal acknowledgement is authoritative even
         // when a concurrent renewal observes that the terminal lease is no
         // longer renewable. Never strand an acknowledged replay locally.
         lease_result.map_err(|error| {
             AgentError::InvalidAssignment(format!("lease task failed: {error}"))
         })??;
+    }
+    Ok(())
+}
+
+async fn commit_replayed_phase(
+    config: &AgentConfig,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+    phase: AttemptPhase,
+) -> Result<(), AgentError> {
+    Journal::open(&config.journal_path)?.transition(
+        &attempt.organization_id,
+        &attempt.attempt_id,
+        attempt.fence_token,
+        attempt.session_epoch,
+        phase,
+        attempt.process_id,
+    )?;
+    if phase.is_terminal() {
+        reclaim_attempt_spools(config, attempt).await?;
     }
     Ok(())
 }
@@ -2334,7 +2345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acknowledged_terminal_spools_are_reclaimed_and_metadata_is_retired() {
+    async fn replayed_spools_are_preserved_until_terminal_and_then_reclaimed() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = config();
         config.workspace_root = directory.path().join("workspace");
@@ -2417,19 +2428,35 @@ mod tests {
                 result: &result,
             })
             .unwrap();
-        journal
-            .transition(
-                &acceptance.organization_id,
-                &acceptance.attempt_id,
-                acceptance.fence_token,
-                acceptance.session_epoch,
-                AttemptPhase::Succeeded,
-                Some(42),
-            )
-            .unwrap();
         drop(journal);
 
-        reclaim_terminal_spools(&config).await.unwrap();
+        let attempt = Journal::open(&config.journal_path)
+            .unwrap()
+            .reconcile()
+            .unwrap()
+            .attempts
+            .into_iter()
+            .next()
+            .unwrap();
+        commit_replayed_phase(&config, &attempt, AttemptPhase::ReconciliationRequired)
+            .await
+            .unwrap();
+
+        assert!(stdout_path.exists());
+        assert!(stderr_path.exists());
+        assert!(result_path.exists());
+        assert!(config.workspace_root.join(&workspace).exists());
+        let reconciled = Journal::open(&config.journal_path)
+            .unwrap()
+            .reconcile()
+            .unwrap()
+            .attempts;
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].phase, AttemptPhase::ReconciliationRequired);
+
+        commit_replayed_phase(&config, &attempt, AttemptPhase::Aborted)
+            .await
+            .unwrap();
 
         assert!(!stdout_path.exists());
         assert!(!stderr_path.exists());
