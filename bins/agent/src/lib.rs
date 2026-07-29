@@ -71,6 +71,12 @@ pub enum AgentError {
     UnverifiableRecoveredProcess(u32),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveredCancellation {
+    Completed,
+    ReconciliationRequired,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionReceipt {
     pub session_epoch: u64,
@@ -247,15 +253,11 @@ async fn send_reconciliation(
         let mut journal = Journal::open(&config.journal_path)?;
         for attempt in &report.attempts {
             if cancellation_targets(&cancelled, attempt) {
-                journal.transition(
-                    &attempt.organization_id,
-                    &attempt.attempt_id,
-                    attempt.fence_token,
-                    attempt.session_epoch,
-                    AttemptPhase::Cancelling,
-                    attempt.process_id,
-                )?;
-                terminate_recovered_process(attempt.process_id).await?;
+                if cancel_recovered_attempt(&mut journal, attempt).await?
+                    == RecoveredCancellation::ReconciliationRequired
+                {
+                    continue;
+                }
                 let request = CancellationCompletion {
                     agent_id: config.agent_id.clone(),
                     session_epoch,
@@ -294,6 +296,38 @@ async fn send_reconciliation(
         }
     }
     Ok(())
+}
+
+async fn cancel_recovered_attempt(
+    journal: &mut Journal,
+    attempt: &mcloving_agent_runtime::ReconciliationAttempt,
+) -> Result<RecoveredCancellation, AgentError> {
+    if attempt.phase == AttemptPhase::ReconciliationRequired {
+        return Ok(RecoveredCancellation::ReconciliationRequired);
+    }
+    journal.transition(
+        &attempt.organization_id,
+        &attempt.attempt_id,
+        attempt.fence_token,
+        attempt.session_epoch,
+        AttemptPhase::Cancelling,
+        attempt.process_id,
+    )?;
+    match terminate_recovered_process(attempt.process_id).await {
+        Ok(()) => Ok(RecoveredCancellation::Completed),
+        Err(AgentError::UnverifiableRecoveredProcess(_)) => {
+            journal.transition(
+                &attempt.organization_id,
+                &attempt.attempt_id,
+                attempt.fence_token,
+                attempt.session_epoch,
+                AttemptPhase::ReconciliationRequired,
+                attempt.process_id,
+            )?;
+            Ok(RecoveredCancellation::ReconciliationRequired)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn cancellation_targets(
@@ -535,6 +569,55 @@ mod tests {
             Err(AgentError::UnverifiableRecoveredProcess(id)) if id == process_id
         ));
         assert!(child.try_wait().unwrap().is_none());
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unverifiable_recovered_cancellation_is_retained_without_session_failure() {
+        use mcloving_agent_runtime::Acceptance;
+
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "exec sleep 30"]).process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_id = child.id().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(directory.path().join("agent.db")).unwrap();
+        let session_epoch = journal.reserve_session_epoch(0).unwrap();
+        let acceptance = Acceptance {
+            organization_id: "org".to_owned(),
+            attempt_id: "unverifiable".to_owned(),
+            fence_token: 7,
+            session_epoch,
+            payload_digest: [0x55; 32],
+            workspace: PathBuf::from("org/unverifiable"),
+        };
+        journal.accept(&acceptance).unwrap();
+        journal
+            .transition(
+                &acceptance.organization_id,
+                &acceptance.attempt_id,
+                acceptance.fence_token,
+                session_epoch,
+                AttemptPhase::Running,
+                Some(process_id),
+            )
+            .unwrap();
+        let attempt = journal.reconcile().unwrap().attempts.remove(0);
+
+        assert_eq!(
+            cancel_recovered_attempt(&mut journal, &attempt)
+                .await
+                .unwrap(),
+            RecoveredCancellation::ReconciliationRequired
+        );
+        assert_eq!(
+            journal.reconcile().unwrap().attempts[0].phase,
+            AttemptPhase::ReconciliationRequired
+        );
+        assert!(child.try_wait().unwrap().is_none());
+
         child.kill().await.unwrap();
         child.wait().await.unwrap();
     }
