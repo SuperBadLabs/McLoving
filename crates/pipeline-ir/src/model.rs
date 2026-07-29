@@ -251,6 +251,66 @@ pub fn compile_strict_yaml_with_parameters(
     Ok(pipeline)
 }
 
+/// Rebind a previously admitted parameterized pipeline without reparsing its
+/// source. The stored expression ASTs are evaluated again against only the
+/// explicit typed invocation inputs and every materialized field is replaced
+/// before the resulting IR is validated.
+pub fn instantiate_pipeline(
+    template: &PipelineIr,
+    inputs: BTreeMap<String, ParameterValue>,
+) -> Result<PipelineIr, CompileError> {
+    validate_pipeline(template)?;
+    let (parameter_values, context) = bind_parameter_values(&template.parameters, inputs)?;
+    let mut resolved = BTreeMap::new();
+    for binding in &template.expressions {
+        let value = evaluate_expression(&binding.expression, &context, ExpressionLimits::default())
+            .map_err(|error| CompileError::expression(&binding.path, error))?;
+        if value.secret {
+            return Err(CompileError::schema(
+                &binding.path,
+                "secret-tainted expression values cannot be materialized into Pipeline IR",
+            ));
+        }
+        let ParameterValue::String(value) = value.value else {
+            return Err(CompileError::schema(
+                &binding.path,
+                "process fields require an expression that evaluates to string",
+            ));
+        };
+        resolved.insert(binding.path.clone(), value);
+    }
+
+    let mut pipeline = template.clone();
+    pipeline.parameter_values = parameter_values;
+    for (stage_index, stage) in pipeline.stages.iter_mut().enumerate() {
+        for (step_index, step) in stage.steps.iter_mut().enumerate() {
+            let Step::Process(process) = step;
+            let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
+            if let Some(value) = resolved.remove(&format!("{base}.program")) {
+                process.program = value;
+            }
+            for (argument_index, argument) in process.args.iter_mut().enumerate() {
+                if let Some(value) = resolved.remove(&format!("{base}.args[{argument_index}]")) {
+                    *argument = value;
+                }
+            }
+            for (name, value) in &mut process.env {
+                if let Some(resolved_value) = resolved.remove(&format!("{base}.env.{name}")) {
+                    *value = resolved_value;
+                }
+            }
+        }
+    }
+    if let Some(path) = resolved.keys().next() {
+        return Err(CompileError::schema(
+            path,
+            "expression binding does not identify a materializable process field",
+        ));
+    }
+    validate_pipeline(&pipeline)?;
+    Ok(pipeline)
+}
+
 fn compile_parameter_definitions(
     node: Option<SpannedValue>,
 ) -> Result<BTreeMap<String, ParameterDefinition>, CompileError> {

@@ -1,11 +1,17 @@
 //! Strict YAML admission and the canonical McLoving Pipeline IR.
 
 mod canonical;
+mod components;
 mod expression;
 mod model;
 mod strict_yaml;
 
 pub use canonical::{CanonicalError, CanonicalSummary, validate_canonical_bytes};
+pub use components::{
+    COMPONENT_V1, ComponentCatalog, ComponentDigest, ComponentError, ComponentErrorCode,
+    ComponentInvocation, ComponentReceipt, ComponentVersion, ExpandedPipeline, ExpansionLimits,
+    VersionedComponent, expand_component,
+};
 pub use expression::{
     EvaluatedValue, Expression, ExpressionError, ExpressionErrorCode, ExpressionLimits,
     ParameterValue, evaluate_expression, parse_expression,
@@ -14,7 +20,7 @@ pub use model::{
     CompileError, CompileErrorCategory, CompilerIdentity, ExpressionBinding, IrValidationError,
     ParameterDefinition, ParameterType, PipelineIr, ProcessStep, Provenance, SchemaCompatibility,
     SchemaVersion, Stage, Step, compile_strict_yaml, compile_strict_yaml_with_parameters,
-    validate_pipeline,
+    instantiate_pipeline, validate_pipeline,
 };
 pub use strict_yaml::{
     AdmissionError, ErrorCode, MappingEntry, ParseLimits, SourceLocation, SourceSpan, SpannedValue,

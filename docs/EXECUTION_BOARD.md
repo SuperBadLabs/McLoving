@@ -79,8 +79,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | Ticket | Status | Depends on | Objective and acceptance |
 |---|---|---|---|
 | IR-003 | DONE | IR-002, ARCH-002 | Add typed pipeline parameters and a non-Turing-complete expression language with explicit contexts, stable diagnostics, canonical encoding, deterministic evaluation, secret-taint propagation, and independently enforced depth/node/string/operation limits; arbitrary-input and boundary properties must remain panic-free and bounded |
-| IR-004 | ACTIVE | IR-003 | Add versioned reusable components resolved by immutable digest; bind input/output types and provenance, reject cycles and floating references, cap expansion depth/count/bytes before scheduling, and prove presentation-independent canonical expansion plus component-substitution resistance |
-| CTRL-004 | PENDING | IR-004, CTRL-003 | Compile matrix axes deterministically into a bounded DAG; persist dependency, fan-out, join, fail-fast, retry, post, and cancellation truth transactionally; schedule ready nodes fairly across exact platform/trust-pool constraints and prove parallel races, restart recovery, terminal monotonicity, and one logical outcome per node in real PostgreSQL |
+| IR-004 | DONE | IR-003 | Add versioned reusable components resolved by immutable digest; bind input/output types and provenance, reject cycles and floating references, cap expansion depth/count/bytes before scheduling, and prove presentation-independent canonical expansion plus component-substitution resistance |
+| CTRL-004 | ACTIVE | IR-004, CTRL-003 | Compile matrix axes deterministically into a bounded DAG; persist dependency, fan-out, join, fail-fast, retry, post, and cancellation truth transactionally; schedule ready nodes fairly across exact platform/trust-pool constraints and prove parallel races, restart recovery, terminal monotonicity, and one logical outcome per node in real PostgreSQL |
 | SEC-003 | PENDING | SEC-002, CTRL-004 | Issue attempt-scoped credential grants and protected-environment approvals bound to organization, project, build, IR digest, environment, action, and expiry; deliver secrets only to the exact fenced attempt, redact every supported sink, reject stale/replayed approvals, and prove cross-tenant and cross-attempt denial |
 | AUDIT-001 | PENDING | SEC-003, OPS-002 | Persist an append-only tenant-keyed audit stream for identity, authorization, scheduling, grant, approval, artifact, and administrative actions; hash chained segments, externally verifiable export, retention/legal-hold integration, mutation denial, and gap/tamper detection are required |
 | OPS-003 | PENDING | OPS-001, CTRL-004 | Expose artifact upload, commit, list, metadata, and download journeys over staged immutable object truth; bind every artifact to tenant/build/node/attempt/name/digest/size/media type, enforce quotas and no-overwrite semantics, and prove partial upload, substitution, restore, and retention behavior |
@@ -140,7 +140,14 @@ legacy pipelines and adds typed public/secret parameters, explicit
 expression-backed string fields, deterministic checked evaluation, propagated
 secret taint, stable failures, independent parse/evaluation budgets, and an
 independent canonical-byte validator for the entire new representation.
-`IR-004` is the active ticket.
+`IR-004` is complete. Component v1 packages bind their admitted Pipeline IR,
+typed outputs, exact digest dependencies, and typed dependency inputs into an
+immutable package digest. The pre-scheduling expander rejects floating
+references, digest substitution, cycles, secret component parameters, input
+type mismatches, and independent depth/count/stage/step/byte limit breaches.
+Its canonical expansion binds exact component identities while excluding
+presentation-only provenance, and emits a concrete v1.0 scheduling pipeline
+plus an ordered provenance receipt ledger. `CTRL-004` is the active ticket.
 
 The still-active `WIN-001`, `WIN-002`, and `WIN-003` persistent-host closure is
 tracked independently and remains a release gate for Windows parity; it does

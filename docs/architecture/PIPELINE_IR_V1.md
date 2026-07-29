@@ -144,6 +144,56 @@ The independent byte validator rechecks type agreement, canonical ordering,
 secret-value absence, AST opcodes and bounds, parameter references, and
 complete input consumption without invoking YAML or the expression parser.
 
+## Reusable component v1
+
+Reusable components are admitted Pipeline IR templates packaged with a
+version, name, typed output contract, exact dependency invocations, and source
+provenance. Component identity is the SHA-256 of McLoving-owned canonical
+package bytes. Those bytes bind the canonical pipeline template, input
+definitions and defaults, output types, dependency order, exact dependency
+digests, and typed dependency inputs. Source paths, comments, YAML mapping
+order, spans, and compiler location do not affect the identity.
+
+Every reference has exactly the form `sha256:<64 lowercase hex>`. Names,
+branches, tags, `latest`, registries, network lookup, and other floating
+resolution are rejected at this boundary. A catalog recomputes the complete
+package digest before registration and again during expansion. It refuses a
+different package under an existing digest, so changing the component body,
+contract, or dependency graph is a detectable substitution.
+
+Expansion occurs completely before scheduling:
+
+1. resolve the exact package from the immutable catalog;
+2. type-check explicit invocation inputs and re-evaluate only the stored,
+   bounded expression ASTs;
+3. recursively expand exact dependencies in declared order;
+4. prefix concrete stage IDs with their deterministic invocation ordinal; and
+5. emit a concrete v1.0 scheduling pipeline plus an ordered component receipt
+   ledger.
+
+The expansion canonical digest binds the root digest, every invocation path,
+package digest and version, typed public inputs, declared output types, and
+the concrete scheduling pipeline. Source SHA-256 remains in the provenance
+receipt but is excluded from semantic bytes, just like pipeline provenance.
+Two distinct component
+identities therefore cannot collapse to one expansion digest even if their
+current concrete steps happen to be identical.
+
+Default expansion limits are independently enforced before scheduling:
+
+| Dimension | Limit |
+|---|---:|
+| Recursive depth | 8 |
+| Component invocations | 128 |
+| Expanded stages | 128 |
+| Expanded steps | 4,096 |
+| Expansion canonical bytes | 262,144 |
+
+Active-path cycles, missing packages, digest mismatches, zero limits, secret
+component inputs, type mismatches, and every limit violation fail closed with
+stable error codes. Component secrets remain attempt-scoped credential grants;
+they are never component parameters or expansion-receipt values.
+
 ## Verification contract
 
 - Negative fixtures cover every prohibited YAML feature.
