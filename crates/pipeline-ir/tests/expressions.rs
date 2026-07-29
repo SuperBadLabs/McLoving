@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use mcloving_pipeline_ir::{
     EvaluatedValue, ExpressionErrorCode, ExpressionLimits, IR_V1_1, ParameterValue, ParseLimits,
     compile_strict_yaml, compile_strict_yaml_with_parameters, evaluate_expression,
-    parse_expression, validate_canonical_bytes,
+    parse_expression, validate_canonical_bytes, validate_pipeline,
 };
 use proptest::prelude::*;
 
@@ -94,6 +94,38 @@ fn secret_taint_propagates_without_materializing_the_value() {
 
 #[test]
 fn parser_and_evaluator_enforce_independent_resource_limits() {
+    let grouped = parse_expression(
+        "((true))",
+        ExpressionLimits {
+            max_depth: 0,
+            ..ExpressionLimits::default()
+        },
+    )
+    .expect("parentheses do not add AST depth");
+    assert_eq!(
+        evaluate_expression(
+            &grouped,
+            &BTreeMap::new(),
+            ExpressionLimits {
+                max_depth: 0,
+                ..ExpressionLimits::default()
+            }
+        )
+        .unwrap()
+        .value,
+        ParameterValue::Bool(true)
+    );
+
+    let binary = parse_expression(
+        "true && true",
+        ExpressionLimits {
+            max_depth: 0,
+            ..ExpressionLimits::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(binary.code, ExpressionErrorCode::DepthLimit);
+
     let error = parse_expression(
         r#""12345""#,
         ExpressionLimits {
@@ -150,6 +182,31 @@ fn typed_parameters_resolve_into_canonical_pipeline_ir_v1_1() {
     assert_eq!(summary.schema, IR_V1_1);
     assert_eq!(summary.parameters, 4);
     assert_eq!(summary.expressions, 3);
+}
+
+#[test]
+fn dotted_parameter_names_are_rejected_by_yaml_and_ir_validation() {
+    let dotted = PARAMETER_PIPELINE.replacen("  tool:", "  tool.name:", 1);
+    let error = compile_strict_yaml(
+        "fixture://dotted-parameter",
+        &dotted,
+        ParseLimits::default(),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("must not contain dot"));
+
+    let mut pipeline = compile_strict_yaml(
+        "fixture://parameters",
+        PARAMETER_PIPELINE,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    let definition = pipeline.parameters.remove("tool").unwrap();
+    pipeline
+        .parameters
+        .insert("tool.name".to_owned(), definition);
+    let error = validate_pipeline(&pipeline).unwrap_err();
+    assert_eq!(error.path, "$.parameters.tool.name");
 }
 
 #[test]

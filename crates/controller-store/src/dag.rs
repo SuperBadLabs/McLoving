@@ -699,6 +699,9 @@ async fn derive_build_outcome(
              count(*) FILTER (WHERE logical_outcome = 'failed') AS failed,
              count(*) FILTER (WHERE logical_outcome = 'aborted') AS aborted,
              count(*) FILTER (WHERE status IN ('offered', 'running')) AS active,
+             count(*) FILTER (
+                 WHERE status = 'reconciliation_required'
+             ) AS reconciliation_required,
              bool_or(cancellation_requested_at IS NOT NULL) AS node_cancelled
          FROM nodes
          WHERE organization_id = $1 AND build_id = $2",
@@ -711,6 +714,7 @@ async fn derive_build_outcome(
     let failed: i64 = counts.try_get("failed")?;
     let aborted: i64 = counts.try_get("aborted")?;
     let active: i64 = counts.try_get("active")?;
+    let reconciliation_required: i64 = counts.try_get("reconciliation_required")?;
     let node_cancelled: Option<bool> = counts.try_get("node_cancelled")?;
     if pending == 0 {
         let owner_cancelled = sqlx::query_scalar::<_, bool>(
@@ -740,7 +744,9 @@ async fn derive_build_outcome(
         .execute(&mut **tx)
         .await?;
     } else {
-        let status = if active > 0 || node_cancelled.unwrap_or(false) {
+        let status = if reconciliation_required > 0 {
+            "reconciliation_required"
+        } else if active > 0 || node_cancelled.unwrap_or(false) {
             "running"
         } else {
             "queued"

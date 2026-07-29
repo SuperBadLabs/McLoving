@@ -489,6 +489,7 @@ impl Parser {
         if !matches!(self.current().kind, TokenKind::End) {
             return Err(self.error("unexpected trailing expression token"));
         }
+        validate_expression(&expression, self.limits)?;
         Ok(expression)
     }
 
@@ -556,22 +557,22 @@ impl Parser {
     }
 
     fn parse_or(&mut self, depth: usize) -> Result<Expression, ExpressionError> {
-        let mut expression = self.parse_and(depth + 1)?;
+        let mut expression = self.parse_and(depth)?;
         while matches!(self.current().kind, TokenKind::Or) {
             self.advance();
             self.operation()?;
-            let right = self.parse_and(depth + 1)?;
+            let right = self.parse_and(depth)?;
             expression = self.node(Expression::Or(Box::new(expression), Box::new(right)), depth)?;
         }
         Ok(expression)
     }
 
     fn parse_and(&mut self, depth: usize) -> Result<Expression, ExpressionError> {
-        let mut expression = self.parse_equality(depth + 1)?;
+        let mut expression = self.parse_equality(depth)?;
         while matches!(self.current().kind, TokenKind::And) {
             self.advance();
             self.operation()?;
-            let right = self.parse_equality(depth + 1)?;
+            let right = self.parse_equality(depth)?;
             expression = self.node(
                 Expression::And(Box::new(expression), Box::new(right)),
                 depth,
@@ -581,7 +582,7 @@ impl Parser {
     }
 
     fn parse_equality(&mut self, depth: usize) -> Result<Expression, ExpressionError> {
-        let mut expression = self.parse_add(depth + 1)?;
+        let mut expression = self.parse_add(depth)?;
         loop {
             let constructor = match self.current().kind {
                 TokenKind::Equal => Expression::Equal,
@@ -590,17 +591,17 @@ impl Parser {
             };
             self.advance();
             self.operation()?;
-            let right = self.parse_add(depth + 1)?;
+            let right = self.parse_add(depth)?;
             expression = self.node(constructor(Box::new(expression), Box::new(right)), depth)?;
         }
     }
 
     fn parse_add(&mut self, depth: usize) -> Result<Expression, ExpressionError> {
-        let mut expression = self.parse_unary(depth + 1)?;
+        let mut expression = self.parse_unary(depth)?;
         while matches!(self.current().kind, TokenKind::Add) {
             self.advance();
             self.operation()?;
-            let right = self.parse_unary(depth + 1)?;
+            let right = self.parse_unary(depth)?;
             expression = self.node(
                 Expression::Add(Box::new(expression), Box::new(right)),
                 depth,
@@ -617,7 +618,7 @@ impl Parser {
             let value = self.parse_unary(depth + 1)?;
             return self.node(Expression::Not(Box::new(value)), depth);
         }
-        self.parse_primary(depth + 1)
+        self.parse_primary(depth)
     }
 
     fn parse_primary(&mut self, depth: usize) -> Result<Expression, ExpressionError> {
@@ -629,7 +630,7 @@ impl Parser {
             TokenKind::String(value) => Expression::Literal(ParameterValue::String(value)),
             TokenKind::Parameter(name) => Expression::Parameter(name),
             TokenKind::LeftParen => {
-                let value = self.parse_or(depth + 1)?;
+                let value = self.parse_or(depth)?;
                 if !matches!(self.current().kind, TokenKind::RightParen) {
                     return Err(self.error("expected closing parenthesis"));
                 }

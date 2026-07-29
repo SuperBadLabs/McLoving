@@ -128,7 +128,9 @@ impl Store {
                    JOIN nodes AS parent
                      ON parent.id = dependency.parent_node_id
                     AND parent.organization_id = dependency.organization_id
+                    AND parent.build_id = dependency.build_id
                    WHERE dependency.organization_id = n.organization_id
+                     AND dependency.build_id = n.build_id
                      AND dependency.child_node_id = n.id
                      AND (
                          (
@@ -733,7 +735,9 @@ impl Store {
                        JOIN nodes AS parent
                          ON parent.id = dependency.parent_node_id
                         AND parent.organization_id = dependency.organization_id
+                        AND parent.build_id = dependency.build_id
                        WHERE dependency.organization_id = n.organization_id
+                         AND dependency.build_id = n.build_id
                          AND dependency.child_node_id = n.id
                          AND (
                              (

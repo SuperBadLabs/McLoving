@@ -4977,6 +4977,124 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
 }
 
 #[tokio::test]
+async fn dag_reconciliation_required_pauses_other_ready_work() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-reconciliation",
+        )
+        .await
+        .expect("create DAG reconciliation project");
+    let mut uncertain = dag_node("uncertain", DagNodeKind::Work, vec![], "linux", "build");
+    uncertain.priority = 20;
+    let mut peer = dag_node("peer", DagNodeKind::Work, vec![], "linux", "build");
+    peer.priority = 10;
+    let mut after = dag_node("after", DagNodeKind::Work, vec![], "linux", "build");
+    after.priority = 0;
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "reconciliation-pauses-dag".to_owned(),
+            pipeline_digest: [0xd5; 32],
+            priority: 0,
+            nodes: vec![uncertain, peer, after],
+        })
+        .await
+        .expect("admit reconciliation DAG");
+
+    let first = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-uncertain",
+            "linux",
+            "build",
+        ))
+        .await
+        .expect("claim uncertain node")
+        .expect("uncertain node ready");
+    let second = store
+        .claim_next(&dag_claim(organization_id, "agent-peer", "linux", "build"))
+        .await
+        .expect("claim peer node")
+        .expect("peer node ready");
+    run_dag_claim(&store, &first).await;
+    run_dag_claim(&store, &second).await;
+    assert_eq!(first.node_id, admission.nodes["uncertain"].node_id);
+    assert_eq!(second.node_id, admission.nodes["peer"].node_id);
+
+    sqlx::query(
+        "UPDATE attempts
+         SET status = 'reconciliation_required'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(first.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("mark attempt reconciliation required");
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'reconciliation_required'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(first.node_id)
+    .execute(store.pool())
+    .await
+    .expect("mark node reconciliation required");
+    sqlx::query(
+        "UPDATE builds
+         SET status = 'reconciliation_required'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .execute(store.pool())
+    .await
+    .expect("pause build for reconciliation");
+
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                second.attempt_id,
+                second.fence,
+                second.restore_epoch,
+                &second.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"peer": "complete"}),
+            )
+            .await
+            .expect("terminalize peer while reconciliation is pending")
+    );
+
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM builds WHERE organization_id = $1 AND id = $2")
+            .bind(organization_id)
+            .bind(admission.build_id)
+            .fetch_one(store.pool())
+            .await
+            .expect("read paused build");
+    assert_eq!(status, "reconciliation_required");
+    assert!(
+        store
+            .claim_next(&dag_claim(organization_id, "agent-after", "linux", "build",))
+            .await
+            .expect("poll paused DAG")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn dag_fail_fast_cancels_active_skips_queued_and_still_runs_post() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

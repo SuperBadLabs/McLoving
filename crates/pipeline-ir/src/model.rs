@@ -334,6 +334,12 @@ fn compile_parameter_definitions(
             let name = entry.key;
             validate_identifier(&format!("$.parameters.{name}"), &name)?;
             let path = format!("$.parameters.{name}");
+            if name.contains('.') {
+                return Err(CompileError::schema(
+                    &path,
+                    "parameter names must not contain dot",
+                ));
+            }
             let mut definition = MappingView::new(entry.value, &path)?;
             let parameter_type = match definition.required_string("type")?.as_str() {
                 "boolean" => ParameterType::Bool,
@@ -707,6 +713,12 @@ fn validate_parameters_and_expressions(pipeline: &PipelineIr) -> Result<(), IrVa
     for (name, definition) in &pipeline.parameters {
         let path = format!("$.parameters.{name}");
         validate_identifier(&path, name)?;
+        if name.contains('.') {
+            return Err(IrValidationError::new(
+                &path,
+                "parameter names must not contain dot",
+            ));
+        }
         if definition.secret && definition.default.is_some() {
             return Err(IrValidationError::new(
                 format!("{path}.default"),
