@@ -375,6 +375,7 @@ impl AgentIdentityBindings {
 
     fn parse(source: &str) -> Result<Self> {
         let mut by_certificate_sha256 = BTreeMap::new();
+        let mut trust_pool_by_agent = BTreeMap::new();
         for (index, raw_line) in source.lines().enumerate() {
             let line = raw_line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -400,12 +401,24 @@ impl AgentIdentityBindings {
                     index + 1
                 );
             }
-            if by_certificate_sha256.insert(digest, identity).is_some() {
+            if by_certificate_sha256.contains_key(&digest) {
                 bail!(
                     "identity binding line {} repeats a certificate digest",
                     index + 1
                 );
             }
+            if let Some(existing_trust_pool) = trust_pool_by_agent.get(&identity.agent_id) {
+                if existing_trust_pool != &identity.trust_pool {
+                    bail!(
+                        "identity binding line {} assigns agent {} to conflicting trust pools",
+                        index + 1,
+                        identity.agent_id
+                    );
+                }
+            } else {
+                trust_pool_by_agent.insert(identity.agent_id.clone(), identity.trust_pool.clone());
+            }
+            by_certificate_sha256.insert(digest, identity);
         }
         if by_certificate_sha256.is_empty() {
             bail!("at least one agent certificate identity binding is required");
@@ -573,6 +586,19 @@ mod tests {
         assert!(
             AgentIdentityBindings::parse(&format!(
                 "{digest} agent pool\n{digest} other other-pool\n"
+            ))
+            .is_err()
+        );
+        let rotated_digest = "22".repeat(32);
+        assert!(
+            AgentIdentityBindings::parse(&format!(
+                "{digest} agent pool\n{rotated_digest} agent pool\n"
+            ))
+            .is_ok()
+        );
+        assert!(
+            AgentIdentityBindings::parse(&format!(
+                "{digest} agent trusted\n{rotated_digest} agent untrusted\n"
             ))
             .is_err()
         );
