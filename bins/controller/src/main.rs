@@ -203,16 +203,8 @@ impl AgentControl for ControllerAgentService {
                     "reconciliation attempt metadata is invalid",
                 ));
             }
-            require_attempt_trust_pool(
-                &self.store,
-                identity,
-                organization_id,
-                attempt_id,
-                restore_epoch,
-                fence,
-                &request.agent_id,
-            )
-            .await?;
+            require_reconciliation_trust_pool(&self.store, identity, organization_id, attempt_id)
+                .await?;
             if matches!(attempt.phase.as_str(), "finalizing" | "cancelling")
                 && self
                     .store
@@ -707,6 +699,25 @@ async fn require_attempt_trust_pool(
     } else {
         Err(Status::permission_denied(
             "fenced work authority does not match the certificate trust pool",
+        ))
+    }
+}
+
+async fn require_reconciliation_trust_pool(
+    store: &Store,
+    identity: &AgentIdentity,
+    organization_id: Uuid,
+    attempt_id: Uuid,
+) -> Result<(), Status> {
+    if store
+        .authorize_reconciliation_trust_pool(organization_id, attempt_id, &identity.trust_pool)
+        .await
+        .map_err(internal_store_error)?
+    {
+        Ok(())
+    } else {
+        Err(Status::permission_denied(
+            "reconciliation attempt does not match the certificate trust pool",
         ))
     }
 }

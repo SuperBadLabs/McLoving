@@ -1123,7 +1123,7 @@ async fn remove_terminal_replacement_entry(
 ) -> Result<(), std::io::Error> {
     #[cfg(windows)]
     {
-        if metadata.is_dir() {
+        if windows_entry_is_directory(metadata) {
             // Windows removes directory junctions and directory symlinks with
             // RemoveDirectory; this deletes the reparse point, not its target.
             fs::remove_dir(path).await
@@ -1215,7 +1215,7 @@ fn remove_terminal_replacement_entry_sync(
 ) -> Result<(), std::io::Error> {
     #[cfg(windows)]
     {
-        if metadata.is_dir() {
+        if windows_entry_is_directory(metadata) {
             std::fs::remove_dir(path)
         } else {
             std::fs::remove_file(path)
@@ -1226,6 +1226,14 @@ fn remove_terminal_replacement_entry_sync(
         let _ = metadata;
         std::fs::remove_file(path)
     }
+}
+
+#[cfg(windows)]
+fn windows_entry_is_directory(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0
 }
 
 async fn prune_empty_spool_directories(
@@ -2428,6 +2436,9 @@ mod tests {
             .await
             .unwrap();
         create_windows_junction(&organization_path, &outside);
+        let junction_metadata = fs::symlink_metadata(&organization_path).await.unwrap();
+        assert!(is_link_or_reparse_point(&junction_metadata));
+        assert!(windows_entry_is_directory(&junction_metadata));
 
         remove_attempt_workspace(&workspace_root, &workspace)
             .await

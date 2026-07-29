@@ -1605,6 +1605,44 @@ async fn scheduler_requires_the_nodes_designated_trust_pool() {
             .await
             .expect("reject mismatched attempt pool")
     );
+    assert!(
+        store
+            .authorize_reconciliation_trust_pool(organization_id, claim.attempt_id, "release",)
+            .await
+            .expect("authorize matching reconciliation pool")
+    );
+    assert!(
+        !store
+            .authorize_reconciliation_trust_pool(organization_id, claim.attempt_id, "untrusted",)
+            .await
+            .expect("reject mismatched reconciliation pool")
+    );
+    assert!(
+        !store
+            .authorize_attempt_trust_pool(
+                organization_id,
+                claim.attempt_id,
+                claim.fence + 1,
+                claim.restore_epoch,
+                &claim.agent_id,
+                "release",
+            )
+            .await
+            .expect("reject stale attempt authority")
+    );
+    assert_eq!(
+        store
+            .agent_reconciliation_disposition(
+                organization_id,
+                claim.attempt_id,
+                claim.fence + 1,
+                claim.restore_epoch,
+                &claim.agent_id,
+            )
+            .await
+            .expect("cancel stale authority after pool authorization"),
+        AgentReconciliationDisposition::Cancel
+    );
 }
 
 #[tokio::test]

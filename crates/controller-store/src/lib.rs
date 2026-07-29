@@ -464,6 +464,39 @@ impl Store {
         Ok(authorized)
     }
 
+    /// Authorizes a journaled attempt to enter reconciliation using only its
+    /// immutable node trust pool. Live fence, restore epoch, and lease-owner
+    /// checks belong to the subsequent disposition/recovery transaction:
+    /// stale authority must be able to receive `Cancel`, but can never be
+    /// retained or recovered.
+    pub async fn authorize_reconciliation_trust_pool(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        trust_pool: &str,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let authorized = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM attempts AS a
+                 JOIN nodes AS n
+                   ON n.id = a.node_id
+                  AND n.organization_id = a.organization_id
+                 WHERE a.organization_id = $1
+                   AND a.id = $2
+                   AND n.required_trust_pool = $3
+             )",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(trust_pool)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(authorized)
+    }
+
     /// Returns only the capabilities durably bound to the exact current session.
     pub async fn agent_session_capabilities(
         &self,
