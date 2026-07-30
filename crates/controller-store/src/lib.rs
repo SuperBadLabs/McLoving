@@ -67,6 +67,9 @@ pub const TENANT_AUDIT_V11: &str = include_str!("../migrations/0011_tenant_audit
 pub const ARTIFACT_METADATA_V12: &str = include_str!("../migrations/0012_artifact_metadata.sql");
 /// Immutable, bounded, normalized test-result evidence.
 pub const NORMALIZED_TEST_RESULTS_V13: &str = include_str!("../migrations/0013_test_results.sql");
+/// Least-privilege deletion-claim probe for fenced artifact publication.
+pub const OBJECT_PUBLICATION_FENCE_V14: &str =
+    include_str!("../migrations/0014_object_publication_fence.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -435,6 +438,7 @@ impl Store {
         apply_migration(&mut tx, 11, TENANT_AUDIT_V11).await?;
         apply_migration(&mut tx, 12, ARTIFACT_METADATA_V12).await?;
         apply_migration(&mut tx, 13, NORMALIZED_TEST_RESULTS_V13).await?;
+        apply_migration(&mut tx, 14, OBJECT_PUBLICATION_FENCE_V14).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -2786,6 +2790,7 @@ impl Store {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_object_deletion_fence(&mut tx, &digest).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
                 "mcloving.artifact.{organization_id}.{attempt_id}.{fence}.{name}"
@@ -2811,6 +2816,7 @@ impl Store {
                AND o.object_digest = $7
                AND o.bytes = $8
                AND o.media_type = $9
+               AND NOT mcloving_object_deletion_claim_exists(o.object_digest)
              FOR UPDATE OF o",
         )
         .bind(organization_id)
@@ -3420,6 +3426,12 @@ impl Store {
              FROM attempt_objects AS candidate
              WHERE NOT EXISTS (
                    SELECT 1
+                   FROM attempt_objects AS pending
+                   WHERE pending.object_digest = candidate.object_digest
+                     AND pending.status = 'pending'
+               )
+               AND NOT EXISTS (
+                   SELECT 1
                    FROM attempt_objects AS referenced
                    LEFT JOIN object_retention AS r
                      ON r.organization_id = referenced.organization_id
@@ -3479,6 +3491,12 @@ impl Store {
                )
                AND NOT EXISTS (
                    SELECT 1
+                   FROM attempt_objects AS pending
+                   WHERE pending.object_digest = candidate.object_digest
+                     AND pending.status = 'pending'
+               )
+               AND NOT EXISTS (
+                   SELECT 1
                    FROM attempt_objects AS referenced
                    LEFT JOIN object_retention AS r
                      ON r.organization_id = referenced.organization_id
@@ -3519,6 +3537,12 @@ impl Store {
                        SELECT 1
                        FROM attempt_objects
                        WHERE object_digest = $1
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM attempt_objects AS pending
+                       WHERE pending.object_digest = $1
+                         AND pending.status = 'pending'
                    )
                    AND NOT EXISTS (
                        SELECT 1

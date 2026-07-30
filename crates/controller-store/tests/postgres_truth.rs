@@ -6566,6 +6566,68 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
             .await
             .expect("accept artifact work")
     );
+    let publication_fence_digest = [0x83; 32];
+    assert!(
+        store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/retained-publication.xml",
+                publication_fence_digest,
+                64,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("reserve retained artifact")
+    );
+    assert!(
+        !store
+            .objects_globally_eligible_for_deletion(10_000)
+            .await
+            .expect("inspect pending retained artifact")
+            .contains(&publication_fence_digest),
+        "pending publication must protect its digest from deletion eligibility"
+    );
+    assert!(
+        !store
+            .claim_objects_globally_for_deletion(10_000)
+            .await
+            .expect("try to claim pending retained artifact")
+            .iter()
+            .any(|claim| claim.digest == publication_fence_digest),
+        "pending publication must not receive a durable deletion claim"
+    );
+    assert!(
+        store
+            .mark_artifact_available(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                "reports/retained-publication.xml",
+                publication_fence_digest,
+                64,
+                "application/xml",
+                0,
+            )
+            .await
+            .expect("publish retained artifact")
+    );
+    assert!(
+        !store
+            .objects_globally_eligible_for_deletion(10_000)
+            .await
+            .expect("inspect published retained artifact")
+            .contains(&publication_fence_digest),
+        "publication must preserve the requested retention"
+    );
     let digest = [0x82; 32];
     assert!(
         !store
@@ -6591,7 +6653,8 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
             .build_artifacts(organization_id, project_id, admission.build_id)
             .await
             .expect("list artifacts after rejected retention")
-            .is_empty()
+            .iter()
+            .all(|artifact| artifact.name != "reports/overflow.xml")
     );
     assert!(
         store
@@ -6616,8 +6679,11 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
         .build_artifacts(organization_id, project_id, admission.build_id)
         .await
         .expect("list reserved artifact");
-    assert_eq!(reserved.len(), 1);
-    assert_eq!(reserved[0].status, ObjectStatus::Pending);
+    let reserved = reserved
+        .iter()
+        .find(|artifact| artifact.name == "reports/result.xml")
+        .expect("reserved exact artifact");
+    assert_eq!(reserved.status, ObjectStatus::Pending);
     sqlx::query(
         "UPDATE attempts
          SET lease_expires_at = clock_timestamp() - interval '1 second'
@@ -6742,16 +6808,18 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
         .build_artifacts(organization_id, project_id, admission.build_id)
         .await
         .expect("list build artifacts");
-    assert_eq!(artifacts.len(), 1);
-    assert_eq!(artifacts[0].build_id, admission.build_id);
-    assert_eq!(artifacts[0].node_id, admission.node_id);
-    assert_eq!(artifacts[0].attempt_id, claim.attempt_id);
-    assert_eq!(artifacts[0].fence, claim.fence);
-    assert_eq!(artifacts[0].name, "reports/result.xml");
-    assert_eq!(artifacts[0].digest, digest);
-    assert_eq!(artifacts[0].bytes, 4096);
-    assert_eq!(artifacts[0].media_type, "application/xml");
-    assert_eq!(artifacts[0].status, ObjectStatus::Available);
+    let artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.name == "reports/result.xml")
+        .expect("exact result artifact");
+    assert_eq!(artifact.build_id, admission.build_id);
+    assert_eq!(artifact.node_id, admission.node_id);
+    assert_eq!(artifact.attempt_id, claim.attempt_id);
+    assert_eq!(artifact.fence, claim.fence);
+    assert_eq!(artifact.digest, digest);
+    assert_eq!(artifact.bytes, 4096);
+    assert_eq!(artifact.media_type, "application/xml");
+    assert_eq!(artifact.status, ObjectStatus::Available);
     let retained: bool = sqlx::query_scalar(
         "SELECT retain_until >= clock_timestamp() + interval '47 hours'
          FROM object_retention
