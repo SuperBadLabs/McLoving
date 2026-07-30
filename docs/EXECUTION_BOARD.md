@@ -104,7 +104,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | MIG-006 | PENDING | MIG-003, MIG-004, MIG-005 | Run the same committed corpus through the pinned Jenkins oracle and McLoving, comparing stage order, step/effect arguments, post behavior, terminal outcome, and workspace artifact digests. Publish a stable mismatch taxonomy and regression budget while keeping parse reach, native runnable coverage, actionable migration, and certified equivalence as distinct metrics. |
 | MIG-007 | PENDING | MIG-006 | Generate a reviewable migration package containing canonical strict YAML, provenance, diagnostics, a mapping lock, and exact source/oracle/profile/compiler digests. The package must round-trip to identical IR, contain no credential material, and expose every substitution and unsupported boundary explicitly. |
 | MIG-008 | PENDING | MIG-007, OPS-003, AUDIT-001 | Prove shadow and graduated canary migration. Begin with mirrored triggers that cannot perform external effects, compare traces and artifacts, then admit explicitly approved effects under bounded quotas, retention, audit, and abort rules. Partial truth or an unclassified mismatch can never trigger automatic cutover. |
-| MIG-009 | PENDING | MIG-008, OPS-002 | Define and prove per-job cutover and rollback readiness: owner approval, eligibility evidence, a bounded dual-run window, state/artifact retention, exact Jenkins configuration and plugin rollback target, failure thresholds, and signed receipts. Cutover requires zero unclassified jobs and successful rollback rehearsal. |
+| MIG-009 | PENDING | MIG-008, OPS-002 | Define and prove per-job cutover, rollback, and explicit Jenkins decommissioning: owner approval, eligibility evidence, a bounded dual-run and rollback window, state/artifact retention, an exact Jenkins configuration and plugin rollback target, failure thresholds, and signed receipts. Cutover requires zero unclassified jobs and successful rollback rehearsal. After the rollback window and a separate owner-approved decommission gate, preserve and verify the final export, revoke Jenkins triggers, credentials, and network authority, retire its compute and secrets, and prove no production traffic or active Jenkins authority remains. |
 
 ## Wave 5 — Extensions and operations
 
@@ -127,7 +127,7 @@ checks. `W4-A` is the current next batch and `MIG-001` is the first active
 implementation target once this board change lands. W4-A must establish the
 pinned compiler/profile boundary first, the committed corpus/oracle second,
 and Declarative translation third. It does not authorize general Groovy
-execution, production cutover, or an undifferentiated “Jenkins compatible”
+execution, production cutover, or an undifferentiated "Jenkins compatible"
 claim. `WIN-001`, `WIN-002`, and `WIN-003` remain independently active for
 their explicit production and persistent-Windows-host gates; Wave 3 closure
 does not waive those gates.
