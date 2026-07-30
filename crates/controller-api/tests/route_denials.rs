@@ -160,6 +160,9 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(app_js.contains("after_created_micros"));
     assert!(app_js.contains("build pagination cursor did not advance"));
     assert!(app_js.contains("async function loadAllLogs(base)"));
+    assert!(app_js.contains("const liveLogState = { base: \"\", cursor: null, items: [] }"));
+    assert!(app_js.contains("let cursor = liveLogState.cursor"));
+    assert!(app_js.contains("liveLogState.cursor = cursorFromLog"));
     assert!(app_js.contains("if (!page.next_after) return"));
     assert!(app_js.contains("after_fence"));
     assert!(app_js.contains("entry.content_hex"));

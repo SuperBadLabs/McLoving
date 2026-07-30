@@ -488,7 +488,16 @@ impl Store {
         &self,
         input: &ComponentWrite,
     ) -> Result<ComponentPutOutcome, StoreError> {
+        self.register_component_as(input, "system:controller").await
+    }
+
+    pub async fn register_component_as(
+        &self,
+        input: &ComponentWrite,
+        actor_subject: &str,
+    ) -> Result<ComponentPutOutcome, StoreError> {
         validate_component_write(input)?;
+        crate::validate_audit_actor(actor_subject)?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         let inserted = sqlx::query_scalar::<_, Vec<u8>>(
             "INSERT INTO component_packages (
@@ -541,7 +550,7 @@ impl Store {
             &mut tx,
             input.organization_id,
             "component",
-            "system:controller",
+            actor_subject,
             "component.registered",
             &format!(
                 "project:{}:component:{}",

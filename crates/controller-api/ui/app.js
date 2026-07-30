@@ -2,6 +2,7 @@
 
 const context = { organization: "", project: "", token: "" };
 let liveTimer = null;
+const liveLogState = { base: "", cursor: null, items: [] };
 
 const byId = (id) => document.getElementById(id);
 const pretty = (value) => JSON.stringify(value, null, 2);
@@ -147,17 +148,37 @@ function logCursorQuery(cursor) {
   return query;
 }
 
+function cursorFromLog(entry) {
+  return {
+    attempt_id: entry.attempt_id,
+    fence: entry.fence,
+    sequence: entry.sequence,
+    stream: entry.stream
+  };
+}
+
 async function loadAllLogs(base) {
-  const items = [];
-  let cursor = null;
+  if (liveLogState.base !== base) {
+    liveLogState.base = base;
+    liveLogState.cursor = null;
+    liveLogState.items = [];
+  }
+  let cursor = liveLogState.cursor;
   for (;;) {
     const page = await api(`${base}/logs?${logCursorQuery(cursor)}`);
-    items.push(...(page.items || []));
-    if (!page.next_after) return { items, next_after: null };
+    const pageItems = page.items || [];
+    liveLogState.items.push(...pageItems);
+    if (!page.next_after) {
+      if (pageItems.length > 0) {
+        liveLogState.cursor = cursorFromLog(pageItems[pageItems.length - 1]);
+      }
+      return { items: [...liveLogState.items], next_after: liveLogState.cursor };
+    }
     if (cursor && pretty(page.next_after) === pretty(cursor)) {
       throw new Error("log pagination cursor did not advance");
     }
     cursor = page.next_after;
+    liveLogState.cursor = cursor;
   }
 }
 

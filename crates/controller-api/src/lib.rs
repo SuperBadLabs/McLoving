@@ -721,7 +721,19 @@ fn openapi_document() -> Value {
                 "ArtifactCommitRequest": {
                     "type": "object",
                     "required": ["attempt_id", "fence", "restore_epoch", "node_id", "agent_id", "name", "sha256", "bytes", "media_type", "retention_seconds"],
-                    "additionalProperties": true
+                    "properties": {
+                        "attempt_id": {"type": "string", "format": "uuid"},
+                        "fence": {"type": "integer", "format": "int64", "minimum": 1},
+                        "restore_epoch": {"type": "integer", "format": "int64", "minimum": 0},
+                        "node_id": {"type": "string", "format": "uuid"},
+                        "agent_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "name": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+                        "bytes": {"type": "integer", "format": "int64", "minimum": 0, "maximum": 9223372036854775807_i64},
+                        "media_type": {"type": "string", "minLength": 1, "maxLength": 255},
+                        "retention_seconds": {"type": "integer", "format": "int64", "minimum": 0, "maximum": MAX_OBJECT_RETENTION_SECONDS}
+                    },
+                    "additionalProperties": false
                 },
                 "BinaryArtifact": {"type": "string", "format": "binary"}
             }
@@ -1115,7 +1127,7 @@ async fn put_component(
     headers: HeaderMap,
     Json(request): Json<ComponentUpsertRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    authorize(
+    let principal = authorize(
         &state,
         &headers,
         organization_id,
@@ -1134,16 +1146,19 @@ async fn put_component(
     let source_sha256 = parse_hex_digest_named(&request.source_sha256, "component source")?;
     let outcome = state
         .store
-        .register_component(&ComponentWrite {
-            organization_id,
-            project_id,
-            digest,
-            name: request.name,
-            version_major: request.version_major,
-            version_minor: request.version_minor,
-            canonical_bytes,
-            source_sha256,
-        })
+        .register_component_as(
+            &ComponentWrite {
+                organization_id,
+                project_id,
+                digest,
+                name: request.name,
+                version_major: request.version_major,
+                version_minor: request.version_minor,
+                canonical_bytes,
+                source_sha256,
+            },
+            &principal.subject,
+        )
         .await
         .map_err(product_error)?;
     let status = match outcome {
@@ -2452,7 +2467,7 @@ async fn cancel(
     Path((organization_id, project_id, build_id)): Path<BuildPath>,
     headers: HeaderMap,
 ) -> Result<Json<CancellationResponse>, ApiError> {
-    authorize(
+    let principal = authorize(
         &state,
         &headers,
         organization_id,
@@ -2461,7 +2476,7 @@ async fn cancel(
     )?;
     let accepted = state
         .store
-        .request_cancellation(organization_id, project_id, build_id)
+        .request_cancellation_as(organization_id, project_id, build_id, &principal.subject)
         .await
         .map_err(internal)?;
     Ok(Json(CancellationResponse { accepted }))
@@ -2473,7 +2488,7 @@ async fn retry_attempt(
     headers: HeaderMap,
     Json(request): Json<RetryRequest>,
 ) -> Result<Json<RetryResponse>, ApiError> {
-    authorize(
+    let principal = authorize(
         &state,
         &headers,
         organization_id,
@@ -2495,11 +2510,12 @@ async fn retry_attempt(
     }
     let response = match state
         .store
-        .schedule_retry(
+        .schedule_retry_as(
             organization_id,
             attempt_id,
             request.max_attempts,
             &request.reason,
+            &principal.subject,
         )
         .await
         .map_err(product_error)?
@@ -3935,6 +3951,35 @@ mod tests {
             ["post"];
         assert!(commit["responses"]["201"].is_object());
         assert!(commit["responses"]["200"].is_null());
+        let artifact_commit = &document["components"]["schemas"]["ArtifactCommitRequest"];
+        assert_eq!(artifact_commit["additionalProperties"], false);
+        for property in [
+            "attempt_id",
+            "fence",
+            "restore_epoch",
+            "node_id",
+            "agent_id",
+            "name",
+            "sha256",
+            "bytes",
+            "media_type",
+            "retention_seconds",
+        ] {
+            assert!(
+                artifact_commit["properties"][property].is_object(),
+                "artifact commit property {property} must be typed"
+            );
+        }
+        assert_eq!(
+            artifact_commit["properties"]["attempt_id"]["format"],
+            "uuid"
+        );
+        assert_eq!(artifact_commit["properties"]["fence"]["type"], "integer");
+        assert_eq!(artifact_commit["properties"]["bytes"]["maximum"], i64::MAX);
+        assert_eq!(
+            artifact_commit["properties"]["retention_seconds"]["maximum"],
+            MAX_OBJECT_RETENTION_SECONDS
+        );
         let log_parameters = paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/logs"]
             ["get"]["parameters"]
             .as_array()

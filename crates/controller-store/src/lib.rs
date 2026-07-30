@@ -1324,6 +1324,18 @@ impl Store {
         project_id: Uuid,
         build_id: Uuid,
     ) -> Result<bool, StoreError> {
+        self.request_cancellation_as(organization_id, project_id, build_id, "system:controller")
+            .await
+    }
+
+    pub async fn request_cancellation_as(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        actor_subject: &str,
+    ) -> Result<bool, StoreError> {
+        validate_audit_actor(actor_subject)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.scheduler.{organization_id}"))
@@ -1348,10 +1360,11 @@ impl Store {
                 tx.rollback().await?;
                 return Ok(false);
             }
-            append_event_and_outbox(
+            append_event_and_outbox_as(
                 &mut tx,
                 organization_id,
                 build_id,
+                actor_subject,
                 "build.cancellation_requested",
                 json!({
                     "dag": true,
@@ -1454,10 +1467,11 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
-        append_event_and_outbox(
+        append_event_and_outbox_as(
             &mut tx,
             organization_id,
             build_id,
+            actor_subject,
             "build.cancellation_requested",
             json!({
                 "attempt_id": attempt_id,
@@ -2438,9 +2452,28 @@ impl Store {
         max_attempts: i32,
         reason: &str,
     ) -> Result<RetryDecision, StoreError> {
+        self.schedule_retry_as(
+            organization_id,
+            attempt_id,
+            max_attempts,
+            reason,
+            "system:controller",
+        )
+        .await
+    }
+
+    pub async fn schedule_retry_as(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        max_attempts: i32,
+        reason: &str,
+        actor_subject: &str,
+    ) -> Result<RetryDecision, StoreError> {
         if !(1..=16).contains(&max_attempts) || reason.is_empty() || reason.len() > 1024 {
             return Ok(RetryDecision::Ineligible);
         }
+        validate_audit_actor(actor_subject)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -2576,10 +2609,11 @@ impl Store {
             .execute(&mut *tx)
             .await?;
             if inserted.rows_affected() == 1 {
-                append_event_and_outbox(
+                append_event_and_outbox_as(
                     &mut tx,
                     organization_id,
                     build_id,
+                    actor_subject,
                     "attempt.dead_lettered",
                     payload,
                 )
@@ -2740,10 +2774,11 @@ impl Store {
         .bind(build_id)
         .execute(&mut *tx)
         .await?;
-        append_event_and_outbox(
+        append_event_and_outbox_as(
             &mut tx,
             organization_id,
             build_id,
+            actor_subject,
             "attempt.retry_scheduled",
             json!({
                 "attempt_id": child_id,
@@ -4376,6 +4411,26 @@ async fn append_event_and_outbox(
     kind: &str,
     payload: Value,
 ) -> Result<(), StoreError> {
+    append_event_and_outbox_as(
+        tx,
+        organization_id,
+        build_id,
+        "system:controller",
+        kind,
+        payload,
+    )
+    .await
+}
+
+async fn append_event_and_outbox_as(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+    actor_subject: &str,
+    kind: &str,
+    payload: Value,
+) -> Result<(), StoreError> {
+    validate_audit_actor(actor_subject)?;
     sqlx::query(
         "INSERT INTO build_events (organization_id, build_id, kind, payload)
          VALUES ($1, $2, $3, $4)",
@@ -4400,12 +4455,25 @@ async fn append_event_and_outbox(
         tx,
         organization_id,
         audit_category_for_event(kind),
-        "system:controller",
+        actor_subject,
         kind,
         &format!("build:{build_id}"),
         payload,
     )
     .await?;
+    Ok(())
+}
+
+pub(crate) fn validate_audit_actor(actor_subject: &str) -> Result<(), StoreError> {
+    if actor_subject.is_empty()
+        || actor_subject.len() > 512
+        || actor_subject.trim() != actor_subject
+        || actor_subject.chars().any(char::is_control)
+    {
+        return Err(StoreError::InvalidAuditOperation(
+            "audit actor subject must be non-empty, canonical, and bounded".to_owned(),
+        ));
+    }
     Ok(())
 }
 

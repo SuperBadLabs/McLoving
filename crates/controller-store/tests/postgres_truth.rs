@@ -1345,10 +1345,25 @@ async fn cancellation_targets_the_latest_retry_attempt() {
     };
     assert!(
         store
-            .request_cancellation(organization_id, project_id, admission.build_id)
+            .request_cancellation_as(
+                organization_id,
+                project_id,
+                admission.build_id,
+                "oidc:cancel-operator",
+            )
             .await
             .expect("cancel retry")
     );
+    let cancellation_audit = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify actor-attributed cancellation audit");
+    let cancellation_event = cancellation_audit
+        .events
+        .iter()
+        .find(|event| event.action == "build.cancellation_requested")
+        .expect("actor-attributed cancellation event");
+    assert_eq!(cancellation_event.actor_subject, "oidc:cancel-operator");
     let attempts = sqlx::query_as::<_, (Uuid, i32, String)>(
         "SELECT id, ordinal, status
          FROM attempts
@@ -3410,7 +3425,13 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
         RetryDecision::Ineligible
     );
     let scheduled = store
-        .schedule_retry(organization_id, first.attempt_id, 2, "transient")
+        .schedule_retry_as(
+            organization_id,
+            first.attempt_id,
+            2,
+            "transient",
+            "oidc:retry-operator",
+        )
         .await
         .expect("schedule retry");
     let RetryDecision::Scheduled {
@@ -3421,9 +3442,28 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
     else {
         panic!("expected new second attempt, got {scheduled:?}");
     };
+    let retry_audit = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify actor-attributed retry audit");
+    let retry_event = retry_audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "attempt.retry_scheduled"
+                && event.payload["attempt_id"] == second_id.to_string()
+        })
+        .expect("actor-attributed retry event");
+    assert_eq!(retry_event.actor_subject, "oidc:retry-operator");
     assert_eq!(
         store
-            .schedule_retry(organization_id, first.attempt_id, 2, "transient")
+            .schedule_retry_as(
+                organization_id,
+                first.attempt_id,
+                2,
+                "transient",
+                "oidc:retry-operator",
+            )
             .await
             .expect("replay retry decision"),
         RetryDecision::Scheduled {
@@ -7746,6 +7786,26 @@ async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() 
             .expect("create an actor-attributed pipeline"),
         PipelinePutOutcome::Created(_)
     ));
+    let attributed_component_digest = [0x40; 32];
+    assert_eq!(
+        store
+            .register_component_as(
+                &ComponentWrite {
+                    organization_id,
+                    project_id,
+                    digest: attributed_component_digest,
+                    name: "attributed-component".to_owned(),
+                    version_major: 1,
+                    version_minor: 0,
+                    canonical_bytes: attributed_component_digest.to_vec(),
+                    source_sha256: [0x50; 32],
+                },
+                "oidc:component-admin",
+            )
+            .await
+            .expect("create an actor-attributed component"),
+        ComponentPutOutcome::Created
+    );
     let audit = store
         .verify_audit_chain(organization_id)
         .await
@@ -7760,6 +7820,22 @@ async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() 
         })
         .expect("actor-attributed pipeline audit event");
     assert_eq!(attributed_event.actor_subject, "oidc:catalog-admin");
+    let attributed_component_event = audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "component.registered"
+                && event.subject
+                    == format!(
+                        "project:{project_id}:component:{}",
+                        hex::encode(attributed_component_digest)
+                    )
+        })
+        .expect("actor-attributed component audit event");
+    assert_eq!(
+        attributed_component_event.actor_subject,
+        "oidc:component-admin"
+    );
 
     for digest in [[0x41; 32], [0x42; 32]] {
         assert_eq!(
