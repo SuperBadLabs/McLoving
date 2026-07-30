@@ -2825,6 +2825,21 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             .await
             .expect("append first-fence log")
     );
+    let superseded_cursor = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            None,
+            None,
+            None,
+            None,
+            1,
+        )
+        .await
+        .expect("read first-fence cursor")
+        .pop()
+        .expect("first-fence log exists");
     sqlx::query(
         "UPDATE attempts SET lease_expires_at = clock_timestamp() - interval '1 second'
          WHERE id = $1",
@@ -2922,11 +2937,31 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
     assert_eq!(logs.len(), 3);
     assert_eq!(logs[0].fence, second.fence);
     assert_eq!(logs[0].content, b"current\n");
+    let resumed_after_refence = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            Some(superseded_cursor.attempt_id),
+            Some(superseded_cursor.fence),
+            Some(superseded_cursor.sequence),
+            Some(&superseded_cursor.stream),
+            10,
+        )
+        .await
+        .expect("resolve the saved cursor across a fence change");
+    assert_eq!(resumed_after_refence.len(), 3);
+    assert!(
+        resumed_after_refence
+            .iter()
+            .all(|entry| entry.fence == second.fence)
+    );
     let first_page = store
         .build_logs_page(
             organization_id,
             project_id,
             admission.build_id,
+            None,
             None,
             None,
             None,
@@ -2943,6 +2978,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             project_id,
             admission.build_id,
             Some(first_page[1].attempt_id),
+            Some(first_page[1].fence),
             Some(first_page[1].sequence),
             Some(&first_page[1].stream),
             2,
@@ -2958,6 +2994,7 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
                 project_id,
                 admission.build_id,
                 Some(first_page[1].attempt_id),
+                None,
                 None,
                 None,
                 2,
@@ -5390,6 +5427,7 @@ async fn dag_log_cursor_never_hides_later_node_output() {
             None,
             None,
             None,
+            None,
             1,
         )
         .await
@@ -5423,6 +5461,7 @@ async fn dag_log_cursor_never_hides_later_node_output() {
             project_id,
             admission.build_id,
             Some(first_page[0].attempt_id),
+            Some(first_page[0].fence),
             Some(first_page[0].sequence),
             Some(&first_page[0].stream),
             10,
@@ -5432,6 +5471,108 @@ async fn dag_log_cursor_never_hides_later_node_output() {
     assert_eq!(resumed.len(), 1);
     assert_eq!(resumed[0].attempt_id, second.attempt_id);
     assert_eq!(resumed[0].content, b"stage-b\n");
+}
+
+#[tokio::test]
+async fn operator_retry_reopens_fail_fast_skipped_independent_siblings() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-fail-fast-retry",
+        )
+        .await
+        .expect("create fail-fast retry project");
+    let mut failing = dag_node("failing", DagNodeKind::Work, vec![], "linux", "failing");
+    failing.fail_fast = true;
+    failing.priority = 20;
+    let mut sibling = dag_node("sibling", DagNodeKind::Work, vec![], "linux", "sibling");
+    sibling.priority = 10;
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "dag-fail-fast-retry".to_owned(),
+            pipeline_digest: [0xd4; 32],
+            priority: 0,
+            nodes: vec![failing, sibling],
+        })
+        .await
+        .expect("admit fail-fast retry DAG");
+    let first = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-first",
+            "linux",
+            "failing",
+        ))
+        .await
+        .expect("claim fail-fast attempt")
+        .expect("fail-fast attempt ready");
+    run_dag_claim(&store, &first).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                first.restore_epoch,
+                &first.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("fail fail-fast attempt")
+    );
+    let skipped: (Uuid, String, String) = sqlx::query_as(
+        "SELECT n.id, n.status, a.status
+         FROM nodes AS n
+         JOIN attempts AS a
+           ON a.organization_id = n.organization_id
+          AND a.node_id = n.id
+         WHERE n.organization_id = $1
+           AND n.build_id = $2
+           AND n.node_key = 'sibling'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read skipped sibling");
+    assert_eq!(skipped.1, "skipped");
+    assert_eq!(skipped.2, "aborted");
+
+    assert!(matches!(
+        store
+            .schedule_retry(organization_id, first.attempt_id, 2, "operator retry")
+            .await
+            .expect("schedule fail-fast retry"),
+        RetryDecision::Scheduled { created: true, .. }
+    ));
+    let sibling_retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-sibling",
+            "linux",
+            "sibling",
+        ))
+        .await
+        .expect("claim reopened sibling")
+        .expect("fail-fast-skipped sibling must reopen");
+    assert_eq!(sibling_retry.node_id, skipped.0);
+    let sibling_ordinal: i32 = sqlx::query_scalar("SELECT ordinal FROM attempts WHERE id = $1")
+        .bind(sibling_retry.attempt_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("read reopened sibling ordinal");
+    assert_eq!(sibling_ordinal, 2);
 }
 
 #[tokio::test]
@@ -7547,6 +7688,17 @@ async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() 
         panic!("first pipeline write must create");
     };
     assert_eq!(created.revision, 1);
+    let mut conflicting_pipeline = pipeline.clone();
+    conflicting_pipeline.pipeline_id = Uuid::new_v4();
+    conflicting_pipeline.source_sha256 = [0x23; 32];
+    conflicting_pipeline.semantic_digest = [0x24; 32];
+    let conflict = store
+        .put_pipeline(&conflicting_pipeline, Some(0))
+        .await
+        .expect_err("reject a duplicate project-local pipeline slug");
+    assert!(
+        matches!(conflict, StoreError::ProductConflict(message) if message.contains("compile"))
+    );
     assert!(matches!(
         store
             .put_pipeline(&pipeline, Some(1))

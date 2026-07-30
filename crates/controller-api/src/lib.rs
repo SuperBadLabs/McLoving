@@ -398,6 +398,7 @@ pub struct AuditQuery {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct LogQuery {
     pub after_attempt_id: Option<Uuid>,
+    pub after_fence: Option<i64>,
     pub after_sequence: Option<i64>,
     pub after_stream: Option<String>,
     pub limit: Option<u32>,
@@ -539,6 +540,7 @@ fn openapi_document() -> Value {
                     "listBuildLogs", "evidence", "Read fenced log chunks", "200",
                     vec![
                         query_parameter("after_attempt_id", "uuid"),
+                        query_parameter("after_fence", "integer"),
                         query_parameter("after_sequence", "integer"),
                         query_parameter("after_stream", "string"),
                         query_parameter("limit", "integer")
@@ -592,10 +594,9 @@ fn openapi_document() -> Value {
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads": {
                 "parameters": [organization.clone(), project.clone(), build.clone()],
-                "post": api_operation(
+                "post": binary_request_api_operation(
                     "stageArtifact", "evidence", "Stage bounded artifact bytes", "201",
-                    vec![header_parameter(ARTIFACT_NAME_HEADER, true)],
-                    Some("BinaryArtifact")
+                    vec![header_parameter(ARTIFACT_NAME_HEADER, true)]
                 )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads/{upload_token}/commit": {
@@ -801,6 +802,25 @@ fn binary_api_operation(
     );
     operation["responses"][success_status] = json!({
         "description": "Verified artifact bytes under the stored media type",
+        "content": {
+            "application/octet-stream": {
+                "schema": {"type": "string", "format": "binary"}
+            }
+        }
+    });
+    operation
+}
+
+fn binary_request_api_operation(
+    operation_id: &str,
+    tag: &str,
+    summary: &str,
+    success_status: &str,
+    parameters: Vec<Value>,
+) -> Value {
+    let mut operation = api_operation(operation_id, tag, summary, success_status, parameters, None);
+    operation["requestBody"] = json!({
+        "required": true,
         "content": {
             "application/octet-stream": {
                 "schema": {"type": "string", "format": "binary"}
@@ -1341,6 +1361,7 @@ pub struct LogResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LogCursor {
     pub attempt_id: Uuid,
+    pub fence: i64,
     pub sequence: i64,
     pub stream: String,
 }
@@ -1820,6 +1841,9 @@ fn product_error(error: StoreError) -> ApiError {
         ),
         StoreError::InvalidAuditOperation(message) => {
             ApiError::new(StatusCode::BAD_REQUEST, "invalid_audit_operation", message)
+        }
+        StoreError::ProductConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "product_conflict", message)
         }
         other => internal(other),
     }
@@ -2318,6 +2342,7 @@ async fn logs(
             project_id,
             build_id,
             query.after_attempt_id,
+            query.after_fence,
             query.after_sequence,
             query.after_stream.as_deref(),
             fetch_limit,
@@ -2328,6 +2353,7 @@ async fn logs(
         logs.truncate(limit as usize);
         logs.last().map(|entry| LogCursor {
             attempt_id: entry.attempt_id,
+            fence: entry.fence,
             sequence: entry.sequence,
             stream: entry.stream.clone(),
         })
@@ -3194,6 +3220,7 @@ impl Client {
         if let Some(after) = after {
             request = request.query(&[
                 ("after_attempt_id", after.attempt_id.to_string()),
+                ("after_fence", after.fence.to_string()),
                 ("after_sequence", after.sequence.to_string()),
                 ("after_stream", after.stream.clone()),
             ]);
@@ -3756,6 +3783,25 @@ mod tests {
             download["responses"]["200"]["content"]["application/json"].is_null(),
             "artifact downloads must not advertise JSON"
         );
+        let stage = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads"]
+            ["post"];
+        assert_eq!(
+            stage["requestBody"]["content"]["application/octet-stream"]["schema"]["format"],
+            "binary"
+        );
+        assert!(
+            stage["requestBody"]["content"]["application/json"].is_null(),
+            "artifact staging must not advertise JSON"
+        );
+        let log_parameters = paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/logs"]
+            ["get"]["parameters"]
+            .as_array()
+            .expect("log query parameters");
+        assert!(
+            log_parameters
+                .iter()
+                .any(|parameter| { parameter["name"] == "after_fence" })
+        );
     }
 
     #[test]
@@ -3772,6 +3818,15 @@ mod tests {
         let response = explain_error(StoreError::InvalidTrustPool);
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
         assert_eq!(response.code, "invalid_trust_pool");
+    }
+
+    #[test]
+    fn duplicate_pipeline_slug_is_a_stable_conflict() {
+        let response = product_error(StoreError::ProductConflict(
+            "pipeline slug 'release' is already in use in this project".to_owned(),
+        ));
+        assert_eq!(response.status, StatusCode::CONFLICT);
+        assert_eq!(response.code, "product_conflict");
     }
 
     #[test]

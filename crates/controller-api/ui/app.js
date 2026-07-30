@@ -118,6 +118,7 @@ function logCursorQuery(cursor) {
   const query = new URLSearchParams({ limit: "1000" });
   if (cursor) {
     query.set("after_attempt_id", cursor.attempt_id);
+    query.set("after_fence", String(cursor.fence));
     query.set("after_sequence", String(cursor.sequence));
     query.set("after_stream", cursor.stream);
   }

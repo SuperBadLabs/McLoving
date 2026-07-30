@@ -154,6 +154,7 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(app_js.contains("crypto.getRandomValues(new Uint8Array(16))"));
     assert!(app_js.contains("async function loadAllLogs(base)"));
     assert!(app_js.contains("if (!page.next_after) return"));
+    assert!(app_js.contains("after_fence"));
     assert!(app_js.contains("entry.content_hex"));
 }
 

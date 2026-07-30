@@ -81,6 +81,7 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
             interval_ms: 0,
             max_polls: Some(3),
             after_attempt: Some(attempt),
+            after_fence: Some(1),
             after_sequence: Some(0),
             after_stream: Some("stdout".to_owned()),
         },
@@ -92,6 +93,7 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
     assert_eq!(watched["polls"], 2);
     assert_eq!(watched["logs"].as_array().unwrap().len(), 3);
     assert_eq!(watched["resume_after"]["attempt_id"], attempt.to_string());
+    assert_eq!(watched["resume_after"]["fence"], 1);
     assert_eq!(watched["resume_after"]["sequence"], 3);
     assert_eq!(watched["resume_after"]["stream"], "stdout");
     assert_eq!(polls.load(Ordering::SeqCst), 2);
@@ -148,6 +150,7 @@ async fn logs(
     let next_after = (status_polls == 2 && after_sequence < 2).then(|| {
         json!({
             "attempt_id": state.attempt,
+            "fence": 1,
             "sequence": sequence,
             "stream": "stdout",
         })

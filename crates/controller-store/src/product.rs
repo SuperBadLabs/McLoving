@@ -219,6 +219,34 @@ impl Store {
             ))
             .execute(&mut *tx)
             .await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.pipeline.slug.{}.{}.{}",
+                input.organization_id, input.project_id, input.slug
+            ))
+            .execute(&mut *tx)
+            .await?;
+        let conflicting_pipeline = sqlx::query_scalar::<_, Uuid>(
+            "SELECT pipeline_id
+             FROM pipeline_definitions
+             WHERE organization_id = $1
+               AND project_id = $2
+               AND slug = $3
+               AND pipeline_id <> $4",
+        )
+        .bind(input.organization_id)
+        .bind(input.project_id)
+        .bind(&input.slug)
+        .bind(input.pipeline_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if conflicting_pipeline.is_some() {
+            tx.rollback().await?;
+            return Err(StoreError::ProductConflict(format!(
+                "pipeline slug '{}' is already in use in this project",
+                input.slug
+            )));
+        }
         let current = sqlx::query(
             "SELECT current_revision
              FROM pipeline_definitions

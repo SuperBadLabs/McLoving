@@ -403,6 +403,8 @@ pub enum StoreError {
     InvalidTestResult(String),
     #[error("invalid product operation: {0}")]
     InvalidProductOperation(String),
+    #[error("product catalog conflict: {0}")]
+    ProductConflict(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -1521,9 +1523,9 @@ impl Store {
 
     /// Returns one immutable, stable page of current-fence build logs.
     ///
-    /// The cursor is the exact last `(attempt, sequence, stream)` tuple from a
-    /// prior page. The tuple resolves to a database-issued monotonic cursor so
-    /// logs from later DAG nodes cannot sort behind an earlier node's cursor.
+    /// The cursor is the exact last `(attempt, fence, sequence, stream)` tuple
+    /// from a prior page. It resolves independently of the attempt's current
+    /// fence, while returned rows remain restricted to current-fence evidence.
     #[allow(clippy::too_many_arguments)]
     pub async fn build_logs_page(
         &self,
@@ -1531,16 +1533,23 @@ impl Store {
         project_id: Uuid,
         build_id: Uuid,
         after_attempt_id: Option<Uuid>,
+        after_fence: Option<i64>,
         after_sequence: Option<i64>,
         after_stream: Option<&str>,
         limit: u32,
     ) -> Result<Vec<CommittedLog>, StoreError> {
-        let cursor_is_complete =
-            after_attempt_id.is_some() && after_sequence.is_some() && after_stream.is_some();
+        let cursor_is_complete = after_attempt_id.is_some()
+            && after_fence.is_some()
+            && after_sequence.is_some()
+            && after_stream.is_some();
         if limit == 0
             || limit > 1_001
+            || after_fence.is_some_and(|fence| fence < 0)
             || after_sequence.is_some_and(|sequence| sequence < 0)
-            || (after_attempt_id.is_some() || after_sequence.is_some() || after_stream.is_some())
+            || (after_attempt_id.is_some()
+                || after_fence.is_some()
+                || after_sequence.is_some()
+                || after_stream.is_some())
                 != cursor_is_complete
         {
             return Err(StoreError::InvalidProductOperation(
@@ -1557,11 +1566,19 @@ impl Store {
                  JOIN attempts AS a
                    ON a.id = l.attempt_id
                   AND a.organization_id = l.organization_id
+                 JOIN nodes AS n
+                   ON n.id = a.node_id
+                  AND n.organization_id = a.organization_id
+                 JOIN builds AS b
+                   ON b.id = n.build_id
+                  AND b.organization_id = n.organization_id
                  WHERE l.organization_id = $1
+                   AND b.project_id = $2
+                   AND b.id = $3
                    AND l.attempt_id = $4
-                   AND l.fence = a.fence
-                   AND l.sequence = $5
-                   AND l.stream = $6
+                   AND l.fence = $5
+                   AND l.sequence = $6
+                   AND l.stream = $7
              )
              SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest
              FROM attempt_log_chunks AS l
@@ -1583,12 +1600,13 @@ impl Store {
                    )
                )
              ORDER BY l.cursor_id
-             LIMIT $7",
+             LIMIT $8",
         )
         .bind(organization_id)
         .bind(project_id)
         .bind(build_id)
         .bind(after_attempt_id)
+        .bind(after_fence)
         .bind(after_sequence)
         .bind(after_stream)
         .bind(i64::from(limit))
@@ -1653,6 +1671,24 @@ impl Store {
             ))
             .execute(&mut *tx)
             .await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+                 hashtextextended(
+                     'mcloving.log.build.' || n.organization_id::text || '.' || n.build_id::text,
+                     0
+                 )
+             )
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             WHERE a.organization_id = $1
+               AND a.id = $2",
+        )
+        .bind(chunk.organization_id)
+        .bind(chunk.attempt_id)
+        .execute(&mut *tx)
+        .await?;
         let redactions = sqlx::query_scalar::<_, Vec<u8>>(
             "SELECT secret_value
              FROM credential_grants
@@ -2584,7 +2620,7 @@ impl Store {
                 .bind(format!("mcloving.dag.retry.{build_id}"))
                 .execute(&mut *tx)
                 .await?;
-            let skipped_descendants = sqlx::query_as::<_, (Uuid, Uuid, i32)>(
+            let skipped_nodes = sqlx::query_as::<_, (Uuid, Uuid, i32)>(
                 "WITH RECURSIVE descendants(id) AS (
                      SELECT child_node_id
                      FROM node_dependencies
@@ -2598,21 +2634,26 @@ impl Store {
                      WHERE dependency.organization_id = $1
                  )
                  SELECT n.id, latest.id, latest.ordinal
-                 FROM descendants
-                 JOIN nodes AS n
-                   ON n.organization_id = $1
-                  AND n.build_id = $3
-                  AND n.id = descendants.id
+                 FROM nodes AS n
                  JOIN LATERAL (
-                     SELECT a.id, a.ordinal
+                     SELECT a.id, a.ordinal, a.status, a.terminal_summary
                      FROM attempts AS a
                      WHERE a.organization_id = n.organization_id
                        AND a.node_id = n.id
                      ORDER BY a.ordinal DESC
                      LIMIT 1
                  ) AS latest ON true
-                 WHERE n.status = 'skipped'
+                 WHERE n.organization_id = $1
+                   AND n.build_id = $3
+                   AND n.status = 'skipped'
                    AND n.logical_outcome = 'skipped'
+                   AND (
+                       n.id IN (SELECT id FROM descendants)
+                       OR (
+                           latest.status = 'aborted'
+                           AND latest.terminal_summary ->> 'reason' = 'fail_fast_skipped'
+                       )
+                   )
                  ORDER BY n.id
                  FOR UPDATE OF n",
             )
@@ -2621,7 +2662,7 @@ impl Store {
             .bind(build_id)
             .fetch_all(&mut *tx)
             .await?;
-            for (descendant_id, previous_attempt_id, previous_ordinal) in &skipped_descendants {
+            for (skipped_node_id, previous_attempt_id, previous_ordinal) in &skipped_nodes {
                 sqlx::query(
                     "INSERT INTO attempts (
                          id, organization_id, node_id, ordinal, status, retry_of,
@@ -2633,42 +2674,36 @@ impl Store {
                 )
                 .bind(Uuid::new_v4())
                 .bind(organization_id)
-                .bind(descendant_id)
+                .bind(skipped_node_id)
                 .bind(previous_ordinal + 1)
                 .bind(previous_attempt_id)
                 .execute(&mut *tx)
                 .await?;
+                sqlx::query(
+                    "UPDATE nodes AS n
+                     SET status = CASE
+                         WHEN EXISTS (
+                             SELECT 1
+                             FROM node_dependencies AS dependency
+                             WHERE dependency.organization_id = n.organization_id
+                               AND dependency.child_node_id = n.id
+                         )
+                         THEN 'blocked'
+                         ELSE 'queued'
+                     END,
+                         logical_outcome = NULL,
+                         cancellation_requested_at = NULL,
+                         queued_at = clock_timestamp()
+                     WHERE n.organization_id = $1
+                       AND n.id = $2
+                       AND n.status = 'skipped'
+                       AND n.logical_outcome = 'skipped'",
+                )
+                .bind(organization_id)
+                .bind(skipped_node_id)
+                .execute(&mut *tx)
+                .await?;
             }
-            sqlx::query(
-                "WITH RECURSIVE descendants(id) AS (
-                     SELECT child_node_id
-                     FROM node_dependencies
-                     WHERE organization_id = $1
-                       AND parent_node_id = $2
-                     UNION
-                     SELECT dependency.child_node_id
-                     FROM node_dependencies AS dependency
-                     JOIN descendants
-                       ON descendants.id = dependency.parent_node_id
-                     WHERE dependency.organization_id = $1
-                 )
-                 UPDATE nodes AS n
-                 SET status = 'blocked',
-                     logical_outcome = NULL,
-                     cancellation_requested_at = NULL,
-                     queued_at = clock_timestamp()
-                 FROM descendants
-                 WHERE n.organization_id = $1
-                   AND n.build_id = $3
-                   AND n.id = descendants.id
-                   AND n.status = 'skipped'
-                   AND n.logical_outcome = 'skipped'",
-            )
-            .bind(organization_id)
-            .bind(node_id)
-            .bind(build_id)
-            .execute(&mut *tx)
-            .await?;
             sqlx::query(
                 "UPDATE nodes
                  SET status = 'queued',

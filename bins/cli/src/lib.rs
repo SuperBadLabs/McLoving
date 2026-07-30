@@ -69,6 +69,8 @@ pub enum Command {
         #[arg(long)]
         after_attempt: Option<Uuid>,
         #[arg(long)]
+        after_fence: Option<i64>,
+        #[arg(long)]
         after_sequence: Option<i64>,
         #[arg(long)]
         after_stream: Option<String>,
@@ -83,6 +85,8 @@ pub enum Command {
         build: Uuid,
         #[arg(long)]
         after_attempt: Option<Uuid>,
+        #[arg(long)]
+        after_fence: Option<i64>,
         #[arg(long)]
         after_sequence: Option<i64>,
         #[arg(long)]
@@ -218,10 +222,16 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
             interval_ms,
             max_polls,
             after_attempt,
+            after_fence,
             after_sequence,
             after_stream,
         } => {
-            let cursor = cursor(*after_attempt, *after_sequence, after_stream.clone())?;
+            let cursor = cursor(
+                *after_attempt,
+                *after_fence,
+                *after_sequence,
+                after_stream.clone(),
+            )?;
             return watch(
                 &client,
                 arguments.organization,
@@ -255,6 +265,7 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
         Command::Logs {
             build,
             after_attempt,
+            after_fence,
             after_sequence,
             after_stream,
             limit,
@@ -264,7 +275,13 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
                     arguments.organization,
                     required_project(arguments.project)?,
                     *build,
-                    cursor(*after_attempt, *after_sequence, after_stream.clone())?.as_ref(),
+                    cursor(
+                        *after_attempt,
+                        *after_fence,
+                        *after_sequence,
+                        after_stream.clone(),
+                    )?
+                    .as_ref(),
                     Some(*limit),
                 )
                 .await?,
@@ -433,18 +450,22 @@ fn parse_parameters(parameters: &[String]) -> Result<BTreeMap<String, Value>> {
 
 fn cursor(
     attempt_id: Option<Uuid>,
+    fence: Option<i64>,
     sequence: Option<i64>,
     stream: Option<String>,
 ) -> Result<Option<LogCursor>> {
-    match (attempt_id, sequence, stream) {
-        (None, None, None) => Ok(None),
-        (Some(attempt_id), Some(sequence), Some(stream)) => Ok(Some(LogCursor {
+    match (attempt_id, fence, sequence, stream) {
+        (None, None, None, None) => Ok(None),
+        (Some(attempt_id), Some(fence), Some(sequence), Some(stream)) => Ok(Some(LogCursor {
             attempt_id,
+            fence,
             sequence,
             stream,
         })),
         _ => {
-            bail!("--after-attempt, --after-sequence, and --after-stream must be supplied together")
+            bail!(
+                "--after-attempt, --after-fence, --after-sequence, and --after-stream must be supplied together"
+            )
         }
     }
 }
@@ -515,6 +536,7 @@ async fn watch(
             };
             let latest = page.items.last().map(|item| LogCursor {
                 attempt_id: item.attempt_id,
+                fence: item.fence,
                 sequence: item.sequence,
                 stream: item.stream.clone(),
             });
@@ -632,12 +654,17 @@ mod tests {
 
     #[test]
     fn resume_cursor_is_all_or_nothing() {
-        assert!(cursor(None, None, None).unwrap().is_none());
-        assert!(cursor(Some(Uuid::nil()), Some(1), None).is_err());
+        assert!(cursor(None, None, None, None).unwrap().is_none());
+        assert!(cursor(Some(Uuid::nil()), Some(1), Some(1), None).is_err());
         assert!(
-            cursor(Some(Uuid::nil()), Some(1), Some("stdout".to_owned()))
-                .unwrap()
-                .is_some()
+            cursor(
+                Some(Uuid::nil()),
+                Some(1),
+                Some(1),
+                Some("stdout".to_owned())
+            )
+            .unwrap()
+            .is_some()
         );
     }
 

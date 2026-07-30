@@ -32,6 +32,8 @@ The versioned routes are:
 
 Artifact staging uses the public service credential, but immutable artifact
 commit additionally requires `McLoving-Agent-Authorization: Bearer <token>`.
+The staging request body is arbitrary binary bytes under
+`application/octet-stream`; it is never JSON encoded.
 The shipped controller requires `MCLOVING_ARTIFACT_AGENT_TOKEN` and binds that
 independent secret to the configured embedded agent ID; public API credentials
 alone can never impersonate the leased artifact publisher.
@@ -40,7 +42,10 @@ Cancellation is a durable request. Queued work becomes terminal immediately;
 owned work becomes `cancelling` until the fenced agent proves process-tree
 termination. Status reports both build and attempt state plus the cancellation
 flag. Logs are controller-committed, SHA-256-bound chunks ordered by a global
-cursor. Every item exposes exact `content_hex`; `text` is present only when the
+cursor. Continuation requires the complete
+`after_attempt_id`/`after_fence`/`after_sequence`/`after_stream` tuple so a
+saved cursor remains exact across attempt re-fencing. Every item exposes exact
+`content_hex`; `text` is present only when the
 whole chunk is valid UTF-8, so clients can always reproduce the digest without
 lossy replacement. Errors have stable `code` and `message` fields.
 
