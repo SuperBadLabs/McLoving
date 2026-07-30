@@ -85,6 +85,19 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   or rollback, re-read and match all observer identities and configuration,
   verify a fresh independent observation, and recertify on any drift before the
   receipt may authorize another effect or authority transition.
+- Every production external effect, regardless of how `MIG-004` classifies or
+  maps the originating Jenkins step, must execute through an exact certified
+  `EXT-001` out-of-process connector protocol. Native processes and reusable
+  components may perform only contained workspace/result transformations and
+  receive no production write-capable network path, destination credential,
+  deployment grant, or external-effect authority. A direct native/component
+  effect mapping is ineligible and must be remapped to a connector or rejected
+  fail-closed. Therefore every reference in this board to a "connector-backed"
+  effect or job includes every authoritative external effect; `MIG-006` must
+  certify the connector boundary, and `MIG-008`/`MIG-009` may grant or transfer
+  no such authority until `EXT-001` is `DONE` for the exact connector action,
+  identity, implementation, permission, fencing, deduplication, and
+  reconciliation contract.
 - Every effective Jenkins node/agent property consumed by an in-scope job is
   migration input, including node-scoped environment variables, tool-location
   overrides, labels, custom workspace/root paths, usage mode, retention,
