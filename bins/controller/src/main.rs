@@ -25,6 +25,7 @@ use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, NewLogChunk,
     ReconciliationTrustPoolAuthorization, Store, StoreError, TerminalOutcome,
+    authz::{Principal, PrincipalKind, ServiceScope},
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
@@ -88,11 +89,30 @@ async fn main() -> Result<()> {
         },
     )
     .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
-    let state = ApiState::new(store.clone(), &bearer_token)
-        .context("configure public API")?
-        .with_object_store(object_store)
-        .with_staged_upload_ttl(staged_upload_ttl);
     let worker = EmbeddedWorker::from_environment()?;
+    let state = ApiState::new(
+        store.clone(),
+        &bearer_token,
+        Principal {
+            subject: "service:public-api".to_owned(),
+            kind: PrincipalKind::Service,
+            organization_id: worker.organization_id,
+            project_roles: BTreeMap::new(),
+            service_scopes: [
+                ServiceScope::ProjectRead,
+                ServiceScope::BuildSubmit,
+                ServiceScope::BuildCancel,
+                ServiceScope::SecretUse,
+                ServiceScope::ProjectAdmin,
+                ServiceScope::AuditRead,
+                ServiceScope::SchedulerControl,
+            ]
+            .into(),
+        },
+    )
+    .context("configure public API")?
+    .with_object_store(object_store)
+    .with_staged_upload_ttl(staged_upload_ttl);
     tokio::fs::create_dir_all(&worker.config.workspace_root)
         .await
         .context("create embedded worker workspace root")?;

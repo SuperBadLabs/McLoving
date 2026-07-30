@@ -345,10 +345,7 @@ async fn open_session(
             ],
         }),
         trust_pool: config.trust_pool.clone(),
-        capabilities: vec![
-            std::env::consts::OS.to_owned(),
-            std::env::consts::ARCH.to_owned(),
-        ],
+        capabilities: session_capabilities(),
     };
     let response = tokio::select! {
         () = stop.cancelled() => return Err(AgentError::Stopped),
@@ -873,6 +870,14 @@ const fn platform_feature() -> &'static str {
     "unix-process-group-v1"
 }
 
+fn session_capabilities() -> Vec<String> {
+    vec![
+        std::env::consts::OS.to_owned(),
+        format!("platform:{}", std::env::consts::OS),
+        std::env::consts::ARCH.to_owned(),
+    ]
+}
+
 pub async fn run_service_smoke(
     journal_path: &Path,
     stop: CancellationToken,
@@ -1051,6 +1056,14 @@ mod tests {
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect()
+    }
+
+    #[test]
+    fn session_advertises_canonical_platform_and_legacy_os_capabilities() {
+        let capabilities = session_capabilities();
+        assert!(capabilities.contains(&std::env::consts::OS.to_owned()));
+        assert!(capabilities.contains(&format!("platform:{}", std::env::consts::OS)));
+        assert!(capabilities.contains(&std::env::consts::ARCH.to_owned()));
     }
 
     #[test]

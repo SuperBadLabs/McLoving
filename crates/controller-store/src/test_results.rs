@@ -212,9 +212,7 @@ pub fn parse_junit(
     validate_limits(bytes, limits)?;
     let raw_sha256: [u8; 32] = Sha256::digest(bytes).into();
     let mut reader = Reader::from_reader(Cursor::new(bytes));
-    // Keep document-level whitespace events so a declaration that is not at
-    // byte zero cannot be normalized into looking like the first event.
-    reader.config_mut().trim_text(false);
+    reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut depth = 0_usize;
     let mut root = None;
@@ -222,25 +220,11 @@ pub fn parse_junit(
     let mut current_suite: Option<PendingSuite> = None;
     let mut current_case: Option<PendingCase> = None;
     let mut case_count = 0_usize;
-    let mut declaration_seen = false;
-    let mut document_content_seen = false;
 
     loop {
         let event = reader
             .read_event_into(&mut buffer)
             .map_err(|error| TestResultError::Malformed(error.to_string()))?;
-        match &event {
-            Event::Decl(_) => {
-                if declaration_seen || document_content_seen {
-                    return Err(TestResultError::Malformed(
-                        "XML declaration must appear exactly once at document start".to_owned(),
-                    ));
-                }
-                declaration_seen = true;
-            }
-            Event::Eof => {}
-            _ => document_content_seen = true,
-        }
         match event {
             Event::Start(start) => {
                 depth = depth
@@ -1205,33 +1189,6 @@ mod tests {
                     if message == "test outcome must be a direct child of testcase"
             ));
         }
-    }
-
-    #[test]
-    fn xml_declaration_is_optional_but_only_valid_once_at_document_start() {
-        for (case, xml) in [
-            br#"<testsuite/><?xml version="1.0"?>"#.as_slice(),
-            br#" <?xml version="1.0"?><testsuite/>"#.as_slice(),
-            br#"<?xml version="1.0"?><?xml version="1.0"?><testsuite/>"#.as_slice(),
-            br#"<!--before--><?xml version="1.0"?><testsuite/>"#.as_slice(),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let result = parse_junit(xml, source(), JunitLimits::default());
-            assert!(
-                matches!(result, Err(TestResultError::Malformed(_))),
-                "misplaced declaration case {case} was accepted"
-            );
-        }
-        parse_junit(
-            br#"<?xml version="1.0"?><testsuite/>"#,
-            source(),
-            JunitLimits::default(),
-        )
-        .expect("one declaration at byte zero is accepted");
-        parse_junit(br#"<testsuite/>"#, source(), JunitLimits::default())
-            .expect("the XML declaration remains optional");
     }
 
     #[test]

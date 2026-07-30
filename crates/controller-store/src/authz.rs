@@ -25,6 +25,8 @@ pub enum ServiceScope {
     BuildSubmit,
     BuildCancel,
     SecretUse,
+    ProjectAdmin,
+    AuditRead,
     SchedulerControl,
 }
 
@@ -36,6 +38,7 @@ pub enum Action {
     BuildCancel,
     SecretUse,
     ProjectAdmin,
+    AuditRead,
     SchedulerControl,
 }
 
@@ -79,7 +82,9 @@ pub fn authorize(
     if principal.organization_id != resource_organization_id {
         return Err(AuthorizationDenied::TenantMismatch);
     }
-    if action != Action::SchedulerControl && resource_project_id.is_none() {
+    if !matches!(action, Action::SchedulerControl | Action::AuditRead)
+        && resource_project_id.is_none()
+    {
         return Err(AuthorizationDenied::ProjectRequired);
     }
 
@@ -105,8 +110,9 @@ fn service_allows(principal: &Principal, action: Action) -> bool {
         Action::BuildSubmit => ServiceScope::BuildSubmit,
         Action::BuildCancel => ServiceScope::BuildCancel,
         Action::SecretUse => ServiceScope::SecretUse,
+        Action::ProjectAdmin => ServiceScope::ProjectAdmin,
+        Action::AuditRead => ServiceScope::AuditRead,
         Action::SchedulerControl => ServiceScope::SchedulerControl,
-        Action::ProjectAdmin => return false,
     };
     principal.service_scopes.contains(&required)
 }
@@ -116,7 +122,7 @@ fn human_allows(
     project_id: Option<Uuid>,
     action: Action,
 ) -> Result<bool, AuthorizationDenied> {
-    if action == Action::SchedulerControl {
+    if matches!(action, Action::SchedulerControl | Action::AuditRead) {
         return Ok(false);
     }
     let project_id = project_id.ok_or(AuthorizationDenied::ProjectRequired)?;
@@ -127,7 +133,7 @@ fn human_allows(
         Action::ProjectRead => true,
         Action::BuildSubmit | Action::BuildCancel => *role >= ProjectRole::Developer,
         Action::SecretUse | Action::ProjectAdmin => *role >= ProjectRole::Admin,
-        Action::SchedulerControl => false,
+        Action::AuditRead | Action::SchedulerControl => false,
     })
 }
 
@@ -240,6 +246,7 @@ mod tests {
                 ServiceScope::BuildSubmit,
                 ServiceScope::BuildCancel,
                 ServiceScope::SecretUse,
+                ServiceScope::ProjectAdmin,
             ]
             .into(),
         };
@@ -248,6 +255,7 @@ mod tests {
             Action::BuildSubmit,
             Action::BuildCancel,
             Action::SecretUse,
+            Action::ProjectAdmin,
         ] {
             assert_eq!(
                 authorize(&principal, organization_id, None, action),

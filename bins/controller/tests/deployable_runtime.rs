@@ -69,7 +69,7 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .env("MCLOVING_LISTEN", format!("127.0.0.1:{port}"))
         .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
         .env("MCLOVING_AGENT_ID", "embedded-test-agent")
-        .env("MCLOVING_AGENT_CAPABILITIES", "windows")
+        .env("MCLOVING_AGENT_CAPABILITIES", "platform:windows")
         .env("MCLOVING_AGENT_TRUST_POOL", "trusted-windows")
         .env("MCLOVING_LEASE_SECONDS", "5")
         .env("MCLOVING_POLL_MILLISECONDS", "10")

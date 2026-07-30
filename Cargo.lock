@@ -1278,8 +1278,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "thiserror",
  "tokio",
+ "tower",
  "uuid",
 ]
 
@@ -1290,6 +1292,7 @@ dependencies = [
  "aho-corasick",
  "hex",
  "quick-xml",
+ "serde",
  "serde_json",
  "sha2",
  "sqlx",

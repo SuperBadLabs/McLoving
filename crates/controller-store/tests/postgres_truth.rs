@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, DagDependency, DagNodeKind, DependencyCondition,
-    EffectClass, EffectStatus, JunitLimits, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
-    NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
-    ObjectStatus, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
+    AgentReconciliationDisposition, ClaimRequest, ComponentPutOutcome, ComponentWrite,
+    DagDependency, DagNodeKind, DependencyCondition, EffectClass, EffectStatus, JunitLimits,
+    MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild, NewCredentialGrant, NewDagBuild,
+    NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus, PipelinePutOutcome,
+    PipelineWrite, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
     TerminalOutcome, TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
 use serde_json::json;
@@ -2879,6 +2880,26 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             .await
             .expect("append current-fence log")
     );
+    for (sequence, stream, content) in [
+        (1, "stderr", b"warning\n".as_slice()),
+        (2, "stdout", b"done\n".as_slice()),
+    ] {
+        assert!(
+            store
+                .append_log(&NewLogChunk {
+                    organization_id,
+                    attempt_id: second.attempt_id,
+                    fence: second.fence,
+                    restore_epoch: second.restore_epoch,
+                    agent_id: "agent-b",
+                    sequence,
+                    stream,
+                    content,
+                })
+                .await
+                .expect("append paginated current-fence log")
+        );
+    }
     assert!(
         !store
             .append_log(&NewLogChunk {
@@ -2898,9 +2919,53 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
         .build_logs(organization_id, project_id, admission.build_id)
         .await
         .expect("read build logs");
-    assert_eq!(logs.len(), 1);
+    assert_eq!(logs.len(), 3);
     assert_eq!(logs[0].fence, second.fence);
     assert_eq!(logs[0].content, b"current\n");
+    let first_page = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            None,
+            None,
+            None,
+            2,
+        )
+        .await
+        .expect("read first stable log page");
+    assert_eq!(first_page.len(), 2);
+    assert_eq!(first_page[0].content, b"current\n");
+    assert_eq!(first_page[1].content, b"warning\n");
+    let second_page = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            Some(first_page[1].attempt_id),
+            Some(first_page[1].sequence),
+            Some(&first_page[1].stream),
+            2,
+        )
+        .await
+        .expect("resume stable log page");
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0].content, b"done\n");
+    assert!(
+        store
+            .build_logs_page(
+                organization_id,
+                project_id,
+                admission.build_id,
+                Some(first_page[1].attempt_id),
+                None,
+                None,
+                2,
+            )
+            .await
+            .is_err(),
+        "partial cursors must fail closed"
+    );
 }
 
 #[tokio::test]
@@ -7140,5 +7205,134 @@ async fn junit_evidence_is_bounded_immutable_and_preserves_flaky_history() {
             .filter(|event| event.action == "test_report.ingested")
             .count(),
         2
+    );
+}
+
+#[tokio::test]
+async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let store = unprivileged_store(&admin).await;
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    admin
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "product-catalog",
+        )
+        .await
+        .expect("create product catalog project");
+    let pipeline_id = Uuid::new_v4();
+    let mut pipeline = PipelineWrite {
+        organization_id,
+        project_id,
+        pipeline_id,
+        slug: "compile".to_owned(),
+        source: "version: 1".to_owned(),
+        source_sha256: [0x11; 32],
+        semantic_digest: [0x22; 32],
+        schema_major: 1,
+        schema_minor: 0,
+        parameter_schema: json!({}),
+    };
+    let created = store
+        .put_pipeline(&pipeline, Some(0))
+        .await
+        .expect("create versioned pipeline");
+    let PipelinePutOutcome::Created(created) = created else {
+        panic!("first pipeline write must create");
+    };
+    assert_eq!(created.revision, 1);
+    assert!(matches!(
+        store
+            .put_pipeline(&pipeline, Some(1))
+            .await
+            .expect("replay exact pipeline"),
+        PipelinePutOutcome::Unchanged(record) if record.revision == 1
+    ));
+    pipeline.slug = "compile-renamed".to_owned();
+    pipeline.source = "version: 1\nname: renamed".to_owned();
+    pipeline.source_sha256 = [0x33; 32];
+    let updated = store
+        .put_pipeline(&pipeline, Some(1))
+        .await
+        .expect("advance pipeline revision");
+    assert!(matches!(
+        updated,
+        PipelinePutOutcome::Updated(record) if record.revision == 2
+    ));
+    assert!(matches!(
+        store
+            .put_pipeline(&pipeline, Some(1))
+            .await
+            .expect("report stale precondition"),
+        PipelinePutOutcome::PreconditionFailed {
+            current_revision: 2
+        }
+    ));
+    let page = store
+        .pipelines(organization_id, project_id, None, 1)
+        .await
+        .expect("list pipelines");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].revision, 2);
+
+    for digest in [[0x41; 32], [0x42; 32]] {
+        assert_eq!(
+            store
+                .register_component(&ComponentWrite {
+                    organization_id,
+                    project_id,
+                    digest,
+                    name: "shared-name".to_owned(),
+                    version_major: 1,
+                    version_minor: i32::from(digest[0] - 0x41),
+                    canonical_bytes: digest.to_vec(),
+                    source_sha256: [0x51; 32],
+                })
+                .await
+                .expect("register immutable component"),
+            ComponentPutOutcome::Created
+        );
+    }
+    let first = store
+        .components(organization_id, project_id, None, 1)
+        .await
+        .expect("read first component page");
+    assert_eq!(first.items.len(), 1);
+    let second = store
+        .components(organization_id, project_id, first.next_after.as_ref(), 1)
+        .await
+        .expect("read second component page");
+    assert_eq!(second.items.len(), 1);
+    assert_ne!(first.items[0].digest, second.items[0].digest);
+
+    let mutation = sqlx::query(
+        "UPDATE pipeline_revisions
+         SET source = 'mutated'
+         WHERE organization_id = $1 AND pipeline_id = $2",
+    )
+    .bind(organization_id)
+    .bind(pipeline_id)
+    .execute(admin.pool())
+    .await
+    .expect_err("pipeline revision history is immutable");
+    assert_eq!(
+        mutation
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    assert!(
+        store
+            .pipeline(Uuid::new_v4(), project_id, pipeline_id)
+            .await
+            .expect("cross-tenant read is safely empty")
+            .is_none()
     );
 }
