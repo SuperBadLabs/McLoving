@@ -212,6 +212,13 @@ impl Store {
             ));
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.pipeline.{}.{}.{}",
+                input.organization_id, input.project_id, input.pipeline_id
+            ))
+            .execute(&mut *tx)
+            .await?;
         let current = sqlx::query(
             "SELECT current_revision
              FROM pipeline_definitions
@@ -681,7 +688,17 @@ impl Store {
         };
         let nodes = sqlx::query(
             "SELECT id, node_key, node_kind, status, logical_outcome,
-                    fail_fast, max_attempts, required_platform,
+                    fail_fast, max_attempts,
+                    COALESCE(
+                        (
+                            SELECT substring(capability FROM 10)
+                            FROM unnest(required_capabilities) AS capability
+                            WHERE capability LIKE 'platform:%'
+                            ORDER BY capability
+                            LIMIT 1
+                        ),
+                        'linux'
+                    ) AS required_platform,
                     required_trust_pool, cancellation_requested_at IS NOT NULL AS cancelled
              FROM nodes
              WHERE organization_id = $1 AND build_id = $2

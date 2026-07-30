@@ -79,6 +79,8 @@ pub const OBJECT_PUBLICATION_FENCE_V14: &str =
     include_str!("../migrations/0014_object_publication_fence.sql");
 /// Versioned pipeline and immutable component catalog product surface.
 pub const PRODUCT_SURFACE_V15: &str = include_str!("../migrations/0015_product_surface.sql");
+/// Monotonic cross-node ordering for resumable build-log pages.
+pub const GLOBAL_LOG_ORDER_V16: &str = include_str!("../migrations/0016_global_log_order.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -451,6 +453,7 @@ impl Store {
         apply_migration(&mut tx, 13, NORMALIZED_TEST_RESULTS_V13).await?;
         apply_migration(&mut tx, 14, OBJECT_PUBLICATION_FENCE_V14).await?;
         apply_migration(&mut tx, 15, PRODUCT_SURFACE_V15).await?;
+        apply_migration(&mut tx, 16, GLOBAL_LOG_ORDER_V16).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1517,8 +1520,8 @@ impl Store {
     /// Returns one immutable, stable page of current-fence build logs.
     ///
     /// The cursor is the exact last `(attempt, sequence, stream)` tuple from a
-    /// prior page. Attempt ordinals make retries order after their parents,
-    /// while the remaining fields provide a deterministic total order.
+    /// prior page. The tuple resolves to a database-issued monotonic cursor so
+    /// logs from later DAG nodes cannot sort behind an earlier node's cursor.
     #[allow(clippy::too_many_arguments)]
     pub async fn build_logs_page(
         &self,
@@ -1547,10 +1550,16 @@ impl Store {
         let mut tx = self.tenant_transaction(organization_id).await?;
         let rows = sqlx::query_as::<_, LogRow>(
             "WITH cursor AS (
-                 SELECT ordinal
-                 FROM attempts
-                 WHERE organization_id = $1
-                   AND id = $4
+                 SELECT l.cursor_id
+                 FROM attempt_log_chunks AS l
+                 JOIN attempts AS a
+                   ON a.id = l.attempt_id
+                  AND a.organization_id = l.organization_id
+                 WHERE l.organization_id = $1
+                   AND l.attempt_id = $4
+                   AND l.fence = a.fence
+                   AND l.sequence = $5
+                   AND l.stream = $6
              )
              SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest
              FROM attempt_log_chunks AS l
@@ -1568,16 +1577,10 @@ impl Store {
                    $4::uuid IS NULL
                    OR (
                        EXISTS (SELECT 1 FROM cursor)
-                       AND (a.ordinal, l.sequence, l.stream, l.attempt_id)
-                           > (
-                               (SELECT ordinal FROM cursor),
-                               $5::bigint,
-                               $6::text,
-                               $4::uuid
-                           )
+                       AND l.cursor_id > (SELECT cursor_id FROM cursor)
                    )
                )
-             ORDER BY a.ordinal, l.sequence, l.stream, l.attempt_id
+             ORDER BY l.cursor_id
              LIMIT $7",
         )
         .bind(organization_id)
@@ -2397,7 +2400,7 @@ impl Store {
         max_attempts: i32,
         reason: &str,
     ) -> Result<RetryDecision, StoreError> {
-        if max_attempts < 1 || reason.is_empty() || reason.len() > 1024 {
+        if !(1..=16).contains(&max_attempts) || reason.is_empty() || reason.len() > 1024 {
             return Ok(RetryDecision::Ineligible);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
@@ -2443,8 +2446,7 @@ impl Store {
             tx.rollback().await?;
             return Ok(RetryDecision::Ineligible);
         };
-        if dag_mode
-            || cancelled
+        if cancelled
             || reconciliation_terminalized
             || !matches!(status.as_str(), "failed" | "reconciliation_required")
         {
@@ -2575,18 +2577,126 @@ impl Store {
         .bind(attempt_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "UPDATE nodes
-             SET status = 'queued', queued_at = clock_timestamp()
-             WHERE organization_id = $1 AND id = $2",
-        )
-        .bind(organization_id)
-        .bind(node_id)
-        .execute(&mut *tx)
-        .await?;
+        if dag_mode {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!("mcloving.dag.retry.{build_id}"))
+                .execute(&mut *tx)
+                .await?;
+            let skipped_descendants = sqlx::query_as::<_, (Uuid, Uuid, i32)>(
+                "WITH RECURSIVE descendants(id) AS (
+                     SELECT child_node_id
+                     FROM node_dependencies
+                     WHERE organization_id = $1
+                       AND parent_node_id = $2
+                     UNION
+                     SELECT dependency.child_node_id
+                     FROM node_dependencies AS dependency
+                     JOIN descendants
+                       ON descendants.id = dependency.parent_node_id
+                     WHERE dependency.organization_id = $1
+                 )
+                 SELECT n.id, latest.id, latest.ordinal
+                 FROM descendants
+                 JOIN nodes AS n
+                   ON n.organization_id = $1
+                  AND n.build_id = $3
+                  AND n.id = descendants.id
+                 JOIN LATERAL (
+                     SELECT a.id, a.ordinal
+                     FROM attempts AS a
+                     WHERE a.organization_id = n.organization_id
+                       AND a.node_id = n.id
+                     ORDER BY a.ordinal DESC
+                     LIMIT 1
+                 ) AS latest ON true
+                 WHERE n.status = 'skipped'
+                   AND n.logical_outcome = 'skipped'
+                 ORDER BY n.id
+                 FOR UPDATE OF n",
+            )
+            .bind(organization_id)
+            .bind(node_id)
+            .bind(build_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            for (descendant_id, previous_attempt_id, previous_ordinal) in &skipped_descendants {
+                sqlx::query(
+                    "INSERT INTO attempts (
+                         id, organization_id, node_id, ordinal, status, retry_of,
+                         restore_epoch
+                     )
+                     SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch
+                     FROM controller_metadata
+                     WHERE singleton",
+                )
+                .bind(Uuid::new_v4())
+                .bind(organization_id)
+                .bind(descendant_id)
+                .bind(previous_ordinal + 1)
+                .bind(previous_attempt_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            sqlx::query(
+                "WITH RECURSIVE descendants(id) AS (
+                     SELECT child_node_id
+                     FROM node_dependencies
+                     WHERE organization_id = $1
+                       AND parent_node_id = $2
+                     UNION
+                     SELECT dependency.child_node_id
+                     FROM node_dependencies AS dependency
+                     JOIN descendants
+                       ON descendants.id = dependency.parent_node_id
+                     WHERE dependency.organization_id = $1
+                 )
+                 UPDATE nodes AS n
+                 SET status = 'blocked',
+                     logical_outcome = NULL,
+                     cancellation_requested_at = NULL,
+                     queued_at = clock_timestamp()
+                 FROM descendants
+                 WHERE n.organization_id = $1
+                   AND n.build_id = $3
+                   AND n.id = descendants.id
+                   AND n.status = 'skipped'
+                   AND n.logical_outcome = 'skipped'",
+            )
+            .bind(organization_id)
+            .bind(node_id)
+            .bind(build_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'queued',
+                     logical_outcome = NULL,
+                     cancellation_requested_at = NULL,
+                     max_attempts = GREATEST(max_attempts, $3),
+                     queued_at = clock_timestamp()
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(node_id)
+            .bind(max_attempts)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'queued', queued_at = clock_timestamp()
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(node_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query(
             "UPDATE builds
-             SET status = 'queued', completed_at = NULL
+             SET status = 'queued',
+                 completed_at = NULL,
+                 cancellation_requested_at = NULL
              WHERE organization_id = $1 AND id = $2",
         )
         .bind(organization_id)
@@ -2603,6 +2713,7 @@ impl Store {
                 "retry_of": attempt_id,
                 "ordinal": child_ordinal,
                 "reason": reason,
+                "dag": dag_mode,
             }),
         )
         .await?;

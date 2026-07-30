@@ -140,8 +140,18 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(html.contains("role=\"status\""));
     assert!(html.contains("<script src=\"/app.js\" defer></script>"));
     assert!(html.contains("<option value=\"aborted\">cancelled</option>"));
+    assert!(html.contains("<input id=\"approval-id\" required"));
     assert!(!html.contains("<style"));
     assert_eq!(html.matches("<script").count(), 1);
+    let app_js = include_str!("../ui/app.js");
+    assert!(app_js.contains("byId(\"approval-id\").value = newUuid()"));
+    assert!(app_js.contains("approval_id: byId(\"approval-id\").value.trim()"));
+    assert_eq!(
+        app_js.matches("crypto.randomUUID()").count(),
+        1,
+        "one logical approval ID must survive uncertain retries"
+    );
+    assert!(app_js.contains("crypto.getRandomValues(new Uint8Array(16))"));
 }
 
 fn request(case: &RouteCase, token: Option<&str>) -> Request<Body> {

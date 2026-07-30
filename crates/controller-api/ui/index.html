@@ -99,11 +99,13 @@ stages: []</textarea>
           <h3>Approvals</h3>
           <pre id="build-approvals"></pre>
           <form id="approval-form">
+            <label>Approval ID <input id="approval-id" required autocomplete="off"></label>
             <label>Environment <input id="approval-environment" required value="production"></label>
             <label>Action <input id="approval-action" required value="deploy"></label>
             <label>TTL seconds <input id="approval-ttl" type="number" min="1" value="900"></label>
             <button type="submit">Approve</button>
           </form>
+          <p class="hint">Keep the same approval ID when retrying an uncertain request.</p>
         </article>
       </div>
     </section>

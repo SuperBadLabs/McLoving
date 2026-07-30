@@ -5291,6 +5291,223 @@ async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
 }
 
 #[tokio::test]
+async fn dag_log_cursor_never_hides_later_node_output() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-log-cursor",
+        )
+        .await
+        .expect("create DAG log project");
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "dag-log-cursor".to_owned(),
+            pipeline_digest: [0xd2; 32],
+            priority: 0,
+            nodes: vec![
+                dag_node("stage-a", DagNodeKind::Work, vec![], "linux", "stage-a"),
+                dag_node("stage-b", DagNodeKind::Work, vec![], "linux", "stage-b"),
+            ],
+        })
+        .await
+        .expect("admit parallel DAG");
+    let first = store
+        .claim_next(&dag_claim(organization_id, "agent-a", "linux", "stage-a"))
+        .await
+        .expect("claim stage A")
+        .expect("stage A is ready");
+    run_dag_claim(&store, &first).await;
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: first.attempt_id,
+                fence: first.fence,
+                restore_epoch: first.restore_epoch,
+                agent_id: &first.agent_id,
+                sequence: 20,
+                stream: "stdout",
+                content: b"stage-a\n",
+            })
+            .await
+            .expect("append stage A log")
+    );
+    let first_page = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            None,
+            None,
+            None,
+            1,
+        )
+        .await
+        .expect("read stage A page");
+    assert_eq!(first_page.len(), 1);
+
+    let second = store
+        .claim_next(&dag_claim(organization_id, "agent-b", "linux", "stage-b"))
+        .await
+        .expect("claim stage B")
+        .expect("stage B is ready");
+    run_dag_claim(&store, &second).await;
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: second.attempt_id,
+                fence: second.fence,
+                restore_epoch: second.restore_epoch,
+                agent_id: &second.agent_id,
+                sequence: 0,
+                stream: "stdout",
+                content: b"stage-b\n",
+            })
+            .await
+            .expect("append later stage B log")
+    );
+    let resumed = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            Some(first_page[0].attempt_id),
+            Some(first_page[0].sequence),
+            Some(&first_page[0].stream),
+            10,
+        )
+        .await
+        .expect("resume after stage A");
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].attempt_id, second.attempt_id);
+    assert_eq!(resumed[0].content, b"stage-b\n");
+}
+
+#[tokio::test]
+async fn operator_retry_reopens_a_terminal_dag_and_preserves_attempt_history() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-operator-retry",
+        )
+        .await
+        .expect("create DAG retry project");
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "dag-operator-retry".to_owned(),
+            pipeline_digest: [0xd3; 32],
+            priority: 0,
+            nodes: vec![dag_node(
+                "build",
+                DagNodeKind::Work,
+                vec![],
+                "linux",
+                "build",
+            )],
+        })
+        .await
+        .expect("admit one-stage DAG");
+    let first = store
+        .claim_next(&dag_claim(organization_id, "agent-first", "linux", "build"))
+        .await
+        .expect("claim first attempt")
+        .expect("first attempt is ready");
+    run_dag_claim(&store, &first).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                first.restore_epoch,
+                &first.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("terminalize first attempt")
+    );
+
+    let decision = store
+        .schedule_retry(organization_id, first.attempt_id, 2, "operator retry")
+        .await
+        .expect("schedule DAG retry");
+    let RetryDecision::Scheduled {
+        attempt_id,
+        ordinal,
+        created: true,
+    } = decision
+    else {
+        panic!("expected a new DAG retry, got {decision:?}");
+    };
+    assert_eq!(ordinal, 2);
+    let replay = store
+        .schedule_retry(organization_id, first.attempt_id, 2, "operator retry")
+        .await
+        .expect("replay DAG retry");
+    assert!(matches!(
+        replay,
+        RetryDecision::Scheduled {
+            attempt_id: replay_id,
+            ordinal: 2,
+            created: false
+        } if replay_id == attempt_id
+    ));
+
+    let retry = store
+        .claim_next(&dag_claim(organization_id, "agent-retry", "linux", "build"))
+        .await
+        .expect("claim operator retry")
+        .expect("operator retry is ready");
+    assert_eq!(retry.attempt_id, attempt_id);
+    run_dag_claim(&store, &retry).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                retry.attempt_id,
+                retry.fence,
+                retry.restore_epoch,
+                &retry.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"try": 2}),
+            )
+            .await
+            .expect("terminalize operator retry")
+    );
+    let graph = store
+        .build_graph(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read retried DAG")
+        .expect("retried DAG exists");
+    assert_eq!(graph.build.status, "succeeded");
+    assert_eq!(graph.attempts.len(), 2);
+    assert_eq!(graph.attempts[0].status, "failed");
+    assert_eq!(graph.attempts[1].status, "succeeded");
+}
+
+#[tokio::test]
 async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -7226,6 +7443,46 @@ async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() 
         )
         .await
         .expect("create product catalog project");
+    let raced_pipeline = PipelineWrite {
+        organization_id,
+        project_id,
+        pipeline_id: Uuid::new_v4(),
+        slug: "raced-create".to_owned(),
+        source: "version: 1".to_owned(),
+        source_sha256: [0x09; 32],
+        semantic_digest: [0x0a; 32],
+        schema_major: 1,
+        schema_minor: 0,
+        parameter_schema: json!({}),
+    };
+    let first_store = store.clone();
+    let second_store = store.clone();
+    let first_input = raced_pipeline.clone();
+    let second_input = raced_pipeline.clone();
+    let (first_create, second_create) = tokio::join!(
+        first_store.put_pipeline(&first_input, Some(0)),
+        second_store.put_pipeline(&second_input, Some(0))
+    );
+    let first_create = first_create.expect("first concurrent pipeline create");
+    let second_create = second_create.expect("second concurrent pipeline create");
+    assert!(
+        matches!(first_create, PipelinePutOutcome::Created(_))
+            ^ matches!(second_create, PipelinePutOutcome::Created(_))
+    );
+    assert!(
+        matches!(
+            first_create,
+            PipelinePutOutcome::PreconditionFailed {
+                current_revision: 1
+            }
+        ) || matches!(
+            second_create,
+            PipelinePutOutcome::PreconditionFailed {
+                current_revision: 1
+            }
+        )
+    );
+
     let pipeline_id = Uuid::new_v4();
     let mut pipeline = PipelineWrite {
         organization_id,

@@ -442,15 +442,7 @@ fn openapi_document() -> Value {
                     "listBuilds", "builds", "List builds with a stable cursor", "200",
                     build_page, None
                 ),
-                "post": api_operation(
-                    "submitBuild", "builds", "Submit strict YAML for idempotent admission", "202",
-                    vec![
-                        header_parameter(IDEMPOTENCY_HEADER, true),
-                        header_parameter(PLATFORM_HEADER, false),
-                        header_parameter(TRUST_POOL_HEADER, false)
-                    ],
-                    Some("SubmissionRequest")
-                )
+                "post": submit_build_operation()
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}": {
                 "parameters": [organization.clone(), project.clone(), build.clone()],
@@ -558,7 +550,7 @@ fn openapi_document() -> Value {
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts/content": {
                 "parameters": [organization.clone(), project.clone(), build],
-                "get": api_operation(
+                "get": binary_api_operation(
                     "downloadArtifact", "evidence", "Download verified artifact bytes", "200",
                     vec![
                         required_query_parameter("attempt_id", "uuid"),
@@ -645,7 +637,7 @@ fn openapi_document() -> Value {
                     "type": "object",
                     "required": ["max_attempts", "reason"],
                     "properties": {
-                        "max_attempts": {"type": "integer", "minimum": 1},
+                        "max_attempts": {"type": "integer", "minimum": 1, "maximum": 16},
                         "reason": {"type": "string", "minLength": 1, "maxLength": 1024}
                     },
                     "additionalProperties": false
@@ -692,6 +684,53 @@ fn api_operation(
             }
         });
     }
+    operation
+}
+
+fn submit_build_operation() -> Value {
+    let mut operation = api_operation(
+        "submitBuild",
+        "builds",
+        "Submit strict YAML for idempotent admission",
+        "201",
+        vec![
+            header_parameter(IDEMPOTENCY_HEADER, true),
+            header_parameter(PLATFORM_HEADER, false),
+            header_parameter(TRUST_POOL_HEADER, false),
+        ],
+        Some("SubmissionRequest"),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Idempotent replay of an existing build",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation
+}
+
+fn binary_api_operation(
+    operation_id: &str,
+    tag: &str,
+    summary: &str,
+    success_status: &str,
+    parameters: Vec<Value>,
+    request_schema: Option<&str>,
+) -> Value {
+    let mut operation = api_operation(
+        operation_id,
+        tag,
+        summary,
+        success_status,
+        parameters,
+        request_schema,
+    );
+    operation["responses"][success_status] = json!({
+        "description": "Verified artifact bytes under the stored media type",
+        "content": {
+            "application/octet-stream": {
+                "schema": {"type": "string", "format": "binary"}
+            }
+        }
+    });
     operation
 }
 
@@ -3424,6 +3463,23 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(component_parameter_names.contains("after"));
         assert!(component_parameter_names.contains("after_digest"));
+
+        let submission =
+            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds"]["post"];
+        assert!(submission["responses"]["200"].is_object());
+        assert!(submission["responses"]["201"].is_object());
+        assert!(submission["responses"]["202"].is_null());
+
+        let download = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts/content"]
+            ["get"];
+        assert_eq!(
+            download["responses"]["200"]["content"]["application/octet-stream"]["schema"]["format"],
+            "binary"
+        );
+        assert!(
+            download["responses"]["200"]["content"]["application/json"].is_null(),
+            "artifact downloads must not advertise JSON"
+        );
     }
 
     #[test]
