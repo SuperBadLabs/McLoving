@@ -71,6 +71,20 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   endpoint, live configuration digest, and policy digest. Matching logical
   requests, resolved outputs, or cache contents without the certified
   implementation identities is insufficient and forces recertification.
+- Every independently observed destination-state or reconciliation receipt used
+  by `MIG-006`, `MIG-008`, or `MIG-009` must bind an observer that is separate
+  from the effectful connector and runner. Inventory and certify its exact
+  implementation/image digest, protocol/version, deployment and operator trust
+  identity, endpoint/account/resource scope, live configuration/policy digest,
+  read-only credential or grant identity/version/scope, query and freshness
+  cursor, response digest/signature, and observation timestamp. Prove through
+  permission-negative tests that it cannot mutate the destination and that the
+  connector cannot control, impersonate, configure, credential, or fabricate
+  the observer; shared write credentials, process authority, or administrative
+  trust is ineligible. Before each production effect and at `MIG-009` cutover
+  or rollback, re-read and match all observer identities and configuration,
+  verify a fresh independent observation, and recertify on any drift before the
+  receipt may authorize another effect or authority transition.
 - Every effective Jenkins node/agent property consumed by an in-scope job is
   migration input, including node-scoped environment variables, tool-location
   overrides, labels, custom workspace/root paths, usage mode, retention,
