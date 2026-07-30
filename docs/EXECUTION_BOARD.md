@@ -67,6 +67,16 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   expiry, cancellation, restart, partition, stale-holder, and rollback proof;
   otherwise quiesce and migrate the entire cohort atomically. Reconciliation
   must prove one holder and one effect authority for every transition.
+- Before every `MIG-008` effect-authoritative canary action, atomically re-read
+  and match the complete live input and deployment set required by the
+  `MIG-009` cutover freeze against its certified receipt, including source and
+  shared libraries, Jenkins/controller inputs, compiler/mapping/components,
+  state transforms, release, platform/agent/toolchain, authorization, trigger
+  and discovery, connector and SCM acquisition, credential mapping and
+  rotation/revocation state, dependencies, cache, and destination identity.
+  Issue the fenced effect grant only after that match succeeds. Any drift,
+  missing identity, or partial comparison keeps the canary effect-free until
+  recertification; post-effect detection cannot satisfy this gate.
 - In `MIG-006`, "no database, agent, scheduler, or controller authority" means
   no production, staging, shared-service, or cross-fixture authority. The
   Jenkins oracle and McLoving runner each receive a separate disposable,
