@@ -223,9 +223,19 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   randomness must remain cryptographically strong and unseeded by test data;
   `MIG-008` and `MIG-009` freeze its exact provider/runtime, policy, and health
   configuration and audit the resulting decision/identifier provenance without
-  recording secret entropy. Any semantically relevant source that cannot be
-  controlled in differential fixtures or mapped to a certified production
-  policy is fail-closed and unsupported.
+  recording secret entropy. During every `MIG-008` shadow or canary comparison,
+  every semantically relevant non-security entropy source must instead be one
+  receipt-bound input stream whose exact bytes and consumption contract are
+  supplied identically to both runners and whose consumption traces and semantic
+  outputs are compared; independently generated streams or merely identical
+  provider policies are not equivalent. `MIG-009` freezes that certified
+  injection and mapping through cutover and the rollback window. A job is
+  ineligible if the shared stream cannot be injected safely, or if
+  security-classified entropy affects compared control flow, effect arguments,
+  retry timing, identifiers, or outputs beyond an approved normalization that
+  does not disclose or seed the secret entropy. Any semantically relevant source
+  that cannot be controlled in differential fixtures or mapped to this certified
+  production comparison contract is fail-closed and unsupported.
 - Jenkins decommissioning must quiesce before the final export: pause and
   verify all trigger ingress and administrative writes, freeze new scheduling
   and external-effect authority, drain or explicitly reconcile every accepted
