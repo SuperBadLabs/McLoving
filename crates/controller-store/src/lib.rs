@@ -264,6 +264,7 @@ impl ObjectKind {
 /// Explicit controller view of object-store availability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObjectStatus {
+    Pending,
     Available,
     Missing,
     Corrupt,
@@ -272,6 +273,7 @@ pub enum ObjectStatus {
 impl ObjectStatus {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Pending => "pending",
             Self::Available => "available",
             Self::Missing => "missing",
             Self::Corrupt => "corrupt",
@@ -1540,19 +1542,7 @@ impl Store {
         .bind(chunk.fence)
         .fetch_all(&mut *tx)
         .await?;
-        let content = if redactions.is_empty() {
-            chunk.content.to_vec()
-        } else {
-            let matcher = AhoCorasickBuilder::new()
-                .match_kind(MatchKind::LeftmostLongest)
-                .build(&redactions)
-                .map_err(|error| {
-                    StoreError::InvalidSecurityOperation(format!(
-                        "credential redaction set is invalid: {error}"
-                    ))
-                })?;
-            matcher.replace_all_bytes(chunk.content, &vec![Vec::<u8>::new(); redactions.len()])
-        };
+        let content = redact_to_fixed_point(chunk.content, &redactions)?;
         let digest: [u8; 32] = Sha256::digest(&content).into();
         let existing = sqlx::query_as::<_, (String, Vec<u8>)>(
             "SELECT l.stream, l.digest
@@ -2571,7 +2561,7 @@ impl Store {
         Ok(inserted.is_some())
     }
 
-    /// Commits one immutable artifact identity and its retention atomically.
+    /// Reserves one immutable artifact identity before object publication.
     #[allow(clippy::too_many_arguments)]
     pub async fn register_artifact(
         &self,
@@ -2603,12 +2593,61 @@ impl Store {
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         acquire_object_deletion_fence(&mut tx, &digest).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.artifact.{organization_id}.{attempt_id}.{fence}.{name}"
+            ))
+            .execute(&mut *tx)
+            .await?;
+        let existing = sqlx::query_scalar::<_, String>(
+            "SELECT o.name
+             FROM attempt_objects AS o
+             JOIN attempts AS a
+               ON a.organization_id = o.organization_id
+              AND a.id = o.attempt_id
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             WHERE o.organization_id = $1
+               AND n.build_id = $2
+               AND n.id = $3
+               AND o.attempt_id = $4
+               AND o.fence = $5
+               AND a.restore_epoch = $6
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $7
+               AND o.kind = 'artifact'
+               AND o.name = $8
+               AND o.object_digest = $9
+               AND o.bytes = $10
+               AND o.media_type = $11
+               AND o.status IN ('pending', 'available')",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(node_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .bind(name)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .bind(media_type)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing.is_some() {
+            tx.commit().await?;
+            return Ok(true);
+        }
         let inserted = match sqlx::query_scalar::<_, String>(
             "INSERT INTO attempt_objects (
                  organization_id, attempt_id, fence, kind, name,
-                 object_digest, bytes, media_type
+                 object_digest, bytes, media_type, status
              )
-             SELECT $1, a.id, $5, 'artifact', $8, $9, $10, $11
+             SELECT $1, a.id, $5, 'artifact', $8, $9, $10, $11, 'pending'
              FROM attempts AS a
              JOIN nodes AS n
                ON n.organization_id = a.organization_id
@@ -2633,6 +2672,7 @@ impl Store {
              WHERE attempt_objects.object_digest = EXCLUDED.object_digest
                AND attempt_objects.bytes = EXCLUDED.bytes
                AND attempt_objects.media_type = EXCLUDED.media_type
+               AND attempt_objects.status IN ('pending', 'available')
              RETURNING name",
         )
         .bind(organization_id)
@@ -2678,6 +2718,110 @@ impl Store {
         .bind(organization_id)
         .bind(digest.as_slice())
         .bind(retention_seconds as f64)
+        .execute(&mut *tx)
+        .await?;
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "artifact.reserved",
+            json!({
+                "node_id": node_id,
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "name": name,
+                "sha256": hex_digest(&digest),
+                "bytes": bytes,
+                "media_type": media_type,
+                "retention_seconds": retention_seconds,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Marks an exact reserved artifact available only after bytes are published.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mark_artifact_available(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.artifact.{organization_id}.{attempt_id}.{fence}.{name}"
+            ))
+            .execute(&mut *tx)
+            .await?;
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT o.status
+             FROM attempt_objects AS o
+             JOIN attempts AS a
+               ON a.organization_id = o.organization_id
+              AND a.id = o.attempt_id
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             WHERE o.organization_id = $1
+               AND n.build_id = $2
+               AND n.id = $3
+               AND o.attempt_id = $4
+               AND o.fence = $5
+               AND o.kind = 'artifact'
+               AND o.name = $6
+               AND o.object_digest = $7
+               AND o.bytes = $8
+               AND o.media_type = $9
+             FOR UPDATE OF o",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(node_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(name)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .bind(media_type)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match status.as_deref() {
+            Some("available") => {
+                tx.commit().await?;
+                return Ok(true);
+            }
+            Some("pending") => {}
+            _ => {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+        sqlx::query(
+            "UPDATE attempt_objects
+             SET status = 'available', checked_at = clock_timestamp()
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND kind = 'artifact'
+               AND name = $4
+               AND object_digest = $5
+               AND status = 'pending'",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(name)
+        .bind(digest.as_slice())
         .execute(&mut *tx)
         .await?;
         append_event_and_outbox(
@@ -4052,8 +4196,36 @@ fn hex_digest(digest: &[u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn redact_to_fixed_point(content: &[u8], redactions: &[Vec<u8>]) -> Result<Vec<u8>, StoreError> {
+    if !redactions.is_empty() {
+        AhoCorasickBuilder::new()
+            .match_kind(MatchKind::LeftmostLongest)
+            .build(redactions)
+            .map_err(|error| {
+                StoreError::InvalidSecurityOperation(format!(
+                    "credential redaction set is invalid: {error}"
+                ))
+            })?;
+    }
+    let mut secrets = redactions
+        .iter()
+        .map(Vec::as_slice)
+        .filter(|secret| !secret.is_empty())
+        .collect::<Vec<_>>();
+    secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
+    let mut output = Vec::with_capacity(content.len());
+    for byte in content {
+        output.push(*byte);
+        while let Some(secret) = secrets.iter().find(|secret| output.ends_with(secret)) {
+            output.truncate(output.len() - secret.len());
+        }
+    }
+    Ok(output)
+}
+
 fn parse_object_status(value: &str) -> Result<ObjectStatus, StoreError> {
     match value {
+        "pending" => Ok(ObjectStatus::Pending),
         "available" => Ok(ObjectStatus::Available),
         "missing" => Ok(ObjectStatus::Missing),
         "corrupt" => Ok(ObjectStatus::Corrupt),
@@ -4066,6 +4238,14 @@ fn parse_object_status(value: &str) -> Result<ObjectStatus, StoreError> {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn credential_redaction_reaches_a_fixed_point() {
+        assert_eq!(
+            redact_to_fixed_point(b"abc", &[b"b".to_vec(), b"ac".to_vec()]).unwrap(),
+            b""
+        );
+    }
 
     #[test]
     fn finalization_recovery_accepts_all_nonterminal_completion_races() {

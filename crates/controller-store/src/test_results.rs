@@ -198,6 +198,12 @@ struct PendingSuite {
     aggregate: TestAggregate,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JunitRoot {
+    Suite,
+    Suites,
+}
+
 pub fn parse_junit(
     bytes: &[u8],
     source: TestReportSource,
@@ -220,7 +226,7 @@ pub fn parse_junit(
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut depth = 0_usize;
-    let mut root_seen = false;
+    let mut root = None;
     let mut suites = Vec::new();
     let mut current_suite: Option<PendingSuite> = None;
     let mut current_case: Option<PendingCase> = None;
@@ -242,17 +248,25 @@ pub fn parse_junit(
                     &reader,
                     &start,
                     limits,
-                    &mut root_seen,
+                    depth,
+                    &mut root,
                     &mut current_suite,
                     &mut current_case,
                 )?;
             }
             Event::Empty(start) => {
+                let event_depth = depth
+                    .checked_add(1)
+                    .ok_or(TestResultError::LimitExceeded("XML depth"))?;
+                if event_depth > limits.max_depth {
+                    return Err(TestResultError::LimitExceeded("XML depth"));
+                }
                 on_empty(
                     &reader,
                     &start,
                     limits,
-                    &mut root_seen,
+                    event_depth,
+                    &mut root,
                     &mut suites,
                     &mut current_suite,
                     &mut current_case,
@@ -297,7 +311,7 @@ pub fn parse_junit(
         buffer.clear();
     }
 
-    if !root_seen {
+    if root.is_none() {
         return Err(TestResultError::Malformed(
             "missing testsuite or testsuites root".to_owned(),
         ));
@@ -348,26 +362,39 @@ fn on_start(
     reader: &Reader<Cursor<&[u8]>>,
     start: &BytesStart<'_>,
     limits: JunitLimits,
-    root_seen: &mut bool,
+    depth: usize,
+    root: &mut Option<JunitRoot>,
     suite: &mut Option<PendingSuite>,
     case: &mut Option<PendingCase>,
 ) -> Result<(), TestResultError> {
     match start.name().as_ref() {
         b"testsuites" => {
-            if *root_seen {
+            if depth != 1 || root.is_some() {
                 return Err(TestResultError::Malformed(
-                    "multiple JUnit roots".to_owned(),
+                    "testsuites must be the single document root".to_owned(),
                 ));
             }
-            *root_seen = true;
+            *root = Some(JunitRoot::Suites);
         }
         b"testsuite" => {
+            let valid_position = match (*root, depth) {
+                (None, 1) => {
+                    *root = Some(JunitRoot::Suite);
+                    true
+                }
+                (Some(JunitRoot::Suites), 2) => true,
+                _ => false,
+            };
+            if !valid_position {
+                return Err(TestResultError::Malformed(
+                    "testsuite must be the root or a direct child of testsuites".to_owned(),
+                ));
+            }
             if suite.is_some() || case.is_some() {
                 return Err(TestResultError::Malformed(
                     "nested test suites are not supported".to_owned(),
                 ));
             }
-            *root_seen = true;
             *suite = Some(PendingSuite {
                 name: attribute(reader, start, b"name", limits)?.unwrap_or_default(),
                 cases: Vec::new(),
@@ -376,6 +403,15 @@ fn on_start(
             });
         }
         b"testcase" => {
+            let valid_position = matches!(
+                (*root, depth),
+                (Some(JunitRoot::Suite), 2) | (Some(JunitRoot::Suites), 3)
+            );
+            if !valid_position {
+                return Err(TestResultError::Malformed(
+                    "testcase must be a direct child of testsuite".to_owned(),
+                ));
+            }
             if case.is_some() {
                 return Err(TestResultError::Malformed(
                     "nested test cases are not supported".to_owned(),
@@ -391,6 +427,11 @@ fn on_start(
         b"failure" => mark_case(reader, start, limits, case, TestOutcome::Failed)?,
         b"error" => mark_case(reader, start, limits, case, TestOutcome::Error)?,
         b"skipped" => mark_case(reader, start, limits, case, TestOutcome::Skipped)?,
+        _ if depth == 1 => {
+            return Err(TestResultError::Malformed(
+                "unsupported JUnit document root".to_owned(),
+            ));
+        }
         _ => {}
     }
     Ok(())
@@ -401,7 +442,8 @@ fn on_empty(
     reader: &Reader<Cursor<&[u8]>>,
     start: &BytesStart<'_>,
     limits: JunitLimits,
-    root_seen: &mut bool,
+    depth: usize,
+    root: &mut Option<JunitRoot>,
     suites: &mut Vec<NormalizedTestSuite>,
     suite: &mut Option<PendingSuite>,
     case: &mut Option<PendingCase>,
@@ -409,15 +451,23 @@ fn on_empty(
 ) -> Result<(), TestResultError> {
     match start.name().as_ref() {
         b"testcase" => {
-            on_start(reader, start, limits, root_seen, suite, case)?;
+            on_start(reader, start, limits, depth, root, suite, case)?;
             finish_case(suite, case, case_count, limits)?;
         }
         b"failure" => mark_case(reader, start, limits, case, TestOutcome::Failed)?,
         b"error" => mark_case(reader, start, limits, case, TestOutcome::Error)?,
         b"skipped" => mark_case(reader, start, limits, case, TestOutcome::Skipped)?,
         b"testsuite" => {
-            on_start(reader, start, limits, root_seen, suite, case)?;
+            on_start(reader, start, limits, depth, root, suite, case)?;
             finish_suite(suites, suite, limits)?;
+        }
+        b"testsuites" => {
+            on_start(reader, start, limits, depth, root, suite, case)?;
+        }
+        _ if depth == 1 => {
+            return Err(TestResultError::Malformed(
+                "unsupported JUnit document root".to_owned(),
+            ));
         }
         _ => {}
     }
@@ -1024,6 +1074,22 @@ mod tests {
                 limits
             ),
             Err(TestResultError::LimitExceeded("test case limit"))
+        ));
+        assert!(matches!(
+            parse_junit(
+                b"<wrapper><testsuite><testcase name=\"hidden\"/></testsuite></wrapper>",
+                source(),
+                JunitLimits::default()
+            ),
+            Err(TestResultError::Malformed(_))
+        ));
+        assert!(matches!(
+            parse_junit(
+                b"<testsuite name=\"one\"/><testsuite name=\"two\"/>",
+                source(),
+                JunitLimits::default()
+            ),
+            Err(TestResultError::Malformed(_))
         ));
     }
 }

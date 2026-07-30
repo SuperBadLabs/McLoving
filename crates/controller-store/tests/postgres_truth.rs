@@ -6262,6 +6262,38 @@ async fn tenant_audit_is_hash_chained_exportable_immutable_and_retained() {
         10_000
     );
 
+    let writer_store = store.clone();
+    let reader_store = store.clone();
+    let writer = async move {
+        for index in 0..32 {
+            let subject = format!("concurrency:{index}");
+            writer_store
+                .append_audit_event(&NewAuditEvent {
+                    organization_id,
+                    category: "admin",
+                    actor_subject: "system:concurrency-test",
+                    action: "audit.concurrent.appended",
+                    subject: &subject,
+                    payload: json!({"index": index}),
+                })
+                .await?;
+        }
+        Ok::<(), StoreError>(())
+    };
+    let reader = async move {
+        for _ in 0..32 {
+            reader_store.verify_audit_chain(organization_id).await?;
+        }
+        Ok::<(), StoreError>(())
+    };
+    let (writer_result, reader_result) = tokio::join!(writer, reader);
+    writer_result.expect("append while exports hold consistent snapshots");
+    reader_result.expect("concurrent audit exports never mix chain versions");
+    let retained = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify the post-concurrency tenant chain");
+
     let mutation = sqlx::query(
         "UPDATE audit_events
          SET payload = '{\"rewritten\":true}'::jsonb
@@ -6398,6 +6430,75 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
             )
             .await
             .expect("register exact artifact")
+    );
+    let reserved = store
+        .build_artifacts(organization_id, project_id, admission.build_id)
+        .await
+        .expect("list reserved artifact");
+    assert_eq!(reserved.len(), 1);
+    assert_eq!(reserved[0].status, ObjectStatus::Pending);
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire the publishing lease after metadata reservation");
+    assert!(
+        store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/result.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("resume exact reservation after lease expiry")
+    );
+    assert!(
+        store
+            .mark_artifact_available(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                "reports/result.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("publish exact artifact")
+    );
+    assert!(
+        store
+            .mark_artifact_available(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                "reports/result.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("idempotently replay artifact publication")
     );
     assert!(
         !store
@@ -6574,6 +6675,23 @@ async fn junit_evidence_is_bounded_immutable_and_preserves_flaky_history() {
                 )
                 .await
                 .expect("register raw immutable JUnit artifact")
+        );
+        assert!(
+            store
+                .mark_artifact_available(
+                    organization_id,
+                    admission.build_id,
+                    admission.node_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    name,
+                    digest,
+                    i64::try_from(bytes.len()).expect("small report"),
+                    "application/junit+xml",
+                    86_400,
+                )
+                .await
+                .expect("publish raw immutable JUnit artifact")
         );
         let report = parse_junit(
             bytes,

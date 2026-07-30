@@ -535,6 +535,29 @@ async fn commit_artifact(
             "published artifact identity differs from its verified reservation",
         ));
     }
+    let available = state
+        .store
+        .mark_artifact_available(
+            organization_id,
+            build_id,
+            request.node_id,
+            request.attempt_id,
+            request.fence,
+            &request.name,
+            digest,
+            bytes,
+            &request.media_type,
+            request.retention_seconds,
+        )
+        .await
+        .map_err(internal)?;
+    if !available {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "artifact_publication_rejected",
+            "published artifact does not match its reserved metadata",
+        ));
+    }
     let artifact = find_artifact(
         &state,
         organization_id,
@@ -602,6 +625,13 @@ async fn download_artifact(
         &query.name,
     )
     .await?;
+    if artifact.status != ObjectStatus::Available {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "artifact_not_available",
+            "artifact publication has not completed",
+        ));
+    }
     let reference = ObjectRef {
         sha256: artifact.digest,
         bytes: u64::try_from(artifact.bytes).map_err(|_| {
@@ -843,6 +873,7 @@ fn artifact_response(artifact: ArtifactMetadata) -> Result<ArtifactResponse, Api
         })?,
         media_type: artifact.media_type,
         status: match artifact.status {
+            ObjectStatus::Pending => "pending",
             ObjectStatus::Available => "available",
             ObjectStatus::Missing => "missing",
             ObjectStatus::Corrupt => "corrupt",

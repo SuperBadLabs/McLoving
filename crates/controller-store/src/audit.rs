@@ -75,6 +75,26 @@ impl Store {
         organization_id: Uuid,
     ) -> Result<AuditExport, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        sqlx::query(
+            "INSERT INTO audit_chain_heads (organization_id)
+             VALUES ($1)
+             ON CONFLICT (organization_id) DO NOTHING",
+        )
+        .bind(organization_id)
+        .execute(&mut *tx)
+        .await?;
+        // Hold the tenant head stable before reading events. Appenders take an
+        // exclusive row lock on the same head, so the rows and terminal hash
+        // below necessarily describe one committed chain version.
+        let head = sqlx::query_as::<_, (i64, Vec<u8>)>(
+            "SELECT next_sequence, last_hash
+             FROM audit_chain_heads
+             WHERE organization_id = $1
+             FOR SHARE",
+        )
+        .bind(organization_id)
+        .fetch_one(&mut *tx)
+        .await?;
         let rows = sqlx::query_as::<
             _,
             (
@@ -106,14 +126,6 @@ impl Store {
                 "audit export exceeds its bounded event limit".to_owned(),
             ));
         }
-        let head = sqlx::query_as::<_, (i64, Vec<u8>)>(
-            "SELECT next_sequence, last_hash
-             FROM audit_chain_heads
-             WHERE organization_id = $1",
-        )
-        .bind(organization_id)
-        .fetch_optional(&mut *tx)
-        .await?;
         let retention = sqlx::query_as::<_, (i64, bool)>(
             "SELECT retain_until_unix_ms, legal_hold
              FROM audit_retention_policies
@@ -158,10 +170,7 @@ impl Store {
                 },
             )
             .collect::<Result<Vec<_>, StoreError>>()?;
-        let (next_sequence, head_hash) = match head {
-            Some((next_sequence, hash)) => (next_sequence, digest_array(&hash)?),
-            None => (1, ZERO_HASH),
-        };
+        let (next_sequence, head_hash) = (head.0, digest_array(&head.1)?);
         Ok(AuditExport {
             organization_id,
             events,

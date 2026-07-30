@@ -56,6 +56,7 @@ pub struct StagedObject {
     path: PathBuf,
     reference: ObjectRef,
     active: bool,
+    preserve_on_drop: bool,
 }
 
 impl StagedObject {
@@ -99,7 +100,7 @@ impl StagedObject {
 
 impl Drop for StagedObject {
     fn drop(&mut self) {
-        if self.active {
+        if self.active && !self.preserve_on_drop {
             let _ = fs::remove_file(&self.path);
             if let Some(parent) = self.path.parent() {
                 let _ = sync_directory(parent);
@@ -250,6 +251,7 @@ impl FilesystemObjectStore {
                 bytes,
             },
             active: true,
+            preserve_on_drop: false,
         };
         let write_result = (|| -> Result<(), ObjectStoreError> {
             file.write_all(content)?;
@@ -311,7 +313,13 @@ impl FilesystemObjectStore {
                 staged.discard()?;
                 false
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                // Publication did not create a destination name. Preserve the
+                // already-synced staging name so the exact reservation can be
+                // retried after transient filesystem failure.
+                staged.active = false;
+                return Err(error.into());
+            }
         };
         let committed = inspect(&path)?;
         if committed != reference {
@@ -327,15 +335,35 @@ impl FilesystemObjectStore {
 
     /// Resumes and publishes a complete staged upload by its opaque token.
     pub fn commit_pending(&self, pending: PendingObject) -> Result<ObjectRef, ObjectStoreError> {
-        let staged = self.resume_pending(&pending)?;
-        self.commit(staged)
+        match self.resume_pending(&pending) {
+            Ok(mut staged) => {
+                staged.preserve_on_drop = true;
+                self.commit(staged)
+            }
+            Err(ObjectStoreError::ForeignStagingPath) => {
+                let committed = inspect(&self.object_path(&pending.reference.sha256))?;
+                if committed == pending.reference {
+                    Ok(committed)
+                } else {
+                    Err(ObjectStoreError::ForeignStagingPath)
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Verifies a durable staged upload without publishing or consuming it.
     pub fn verify_pending(&self, pending: &PendingObject) -> Result<ObjectRef, ObjectStoreError> {
         validate_pending_token(&pending.token)?;
         let path = self.staging.join(&pending.token);
-        if path.parent() != Some(self.staging.as_path()) || !path.is_file() {
+        if path.parent() != Some(self.staging.as_path()) {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        if !path.is_file() {
+            let committed = inspect(&self.object_path(&pending.reference.sha256))?;
+            if committed == pending.reference {
+                return Ok(committed);
+            }
             return Err(ObjectStoreError::ForeignStagingPath);
         }
         if inspect(&path)? != pending.reference {
@@ -488,6 +516,7 @@ impl FilesystemObjectStore {
             path,
             reference: pending.reference.clone(),
             active: true,
+            preserve_on_drop: false,
         })
     }
 
@@ -534,7 +563,7 @@ fn redact(content: &[u8], redactions: &[&[u8]]) -> Vec<u8> {
     let mut output = Vec::with_capacity(content.len());
     for byte in content {
         output.push(*byte);
-        if let Some(secret) = secrets.iter().find(|secret| output.ends_with(secret)) {
+        while let Some(secret) = secrets.iter().find(|secret| output.ends_with(secret)) {
             output.truncate(output.len() - secret.len());
         }
     }
@@ -780,6 +809,10 @@ mod tests {
         for secret in [b"REDACTED".as_slice(), b"X", b"secret"] {
             assert!(!content.windows(secret.len()).any(|window| window == secret));
         }
+
+        let staged = store.stage_log("tenant-a", b"abc", &[b"b", b"ac"]).unwrap();
+        let reference = store.commit(staged).unwrap();
+        assert_eq!(store.read_verified(&reference).unwrap(), b"");
     }
 
     #[test]
@@ -892,11 +925,36 @@ mod tests {
             Err(ObjectGap::Missing { .. })
         ));
         let reopened = store(root.path(), 1024, 4096);
+        let pending_for_replay = pending.clone();
         let committed = reopened.commit_pending(pending).unwrap();
         assert_eq!(
             reopened.read_verified(&committed).unwrap(),
             b"complete-upload"
         );
+        assert_eq!(
+            reopened.verify_pending(&pending_for_replay).unwrap(),
+            committed
+        );
+        assert_eq!(
+            reopened.commit_pending(pending_for_replay).unwrap(),
+            committed
+        );
+
+        let retryable = reopened
+            .stage_artifact("tenant-a", b"retry-after-quota-failure")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let constrained = store(root.path(), 1024, 1);
+        assert!(matches!(
+            constrained.commit_pending(retryable.clone()),
+            Err(ObjectStoreError::TotalQuotaExceeded)
+        ));
+        assert_eq!(
+            reopened.verify_pending(&retryable).unwrap(),
+            retryable.reference
+        );
+        reopened.commit_pending(retryable).unwrap();
 
         let substituted = reopened
             .stage_artifact("tenant-a", b"declared")

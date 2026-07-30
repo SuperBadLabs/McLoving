@@ -228,13 +228,32 @@ fn write_redacted_output(
     captured: &[u8],
     redactions: &[Vec<u8>],
 ) -> Result<(), ExecutionError> {
-    let matcher = redaction_matcher(redactions)?;
-    let replacements = vec![Vec::<u8>::new(); redactions.len()];
-    let redacted = matcher.replace_all_bytes(captured, &replacements);
+    let redacted = redact_to_fixed_point(captured, redactions)?;
     file.set_len(0)?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&redacted)?;
     Ok(())
+}
+
+fn redact_to_fixed_point(
+    content: &[u8],
+    redactions: &[Vec<u8>],
+) -> Result<Vec<u8>, ExecutionError> {
+    validate_redactions(redactions)?;
+    let mut secrets = redactions
+        .iter()
+        .map(Vec::as_slice)
+        .filter(|secret| !secret.is_empty())
+        .collect::<Vec<_>>();
+    secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
+    let mut output = Vec::with_capacity(content.len());
+    for byte in content {
+        output.push(*byte);
+        while let Some(secret) = secrets.iter().find(|secret| output.ends_with(secret)) {
+            output.truncate(output.len() - secret.len());
+        }
+    }
+    Ok(output)
 }
 
 fn redaction_overlap(redactions: &[Vec<u8>]) -> u64 {
@@ -377,5 +396,18 @@ pub fn sync_directory(path: &Path) -> Result<(), io::Error> {
                 "directory durability boundary is not a plain directory",
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_to_fixed_point;
+
+    #[test]
+    fn redaction_removes_matches_exposed_by_prior_deletions() {
+        assert_eq!(
+            redact_to_fixed_point(b"abc", &[b"b".to_vec(), b"ac".to_vec()]).unwrap(),
+            b""
+        );
     }
 }
