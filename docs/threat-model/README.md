@@ -100,6 +100,7 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 | TM-022 | Audit history is silently altered | Append-only API, hash segments, external export | Mutation denial and export verification | SEC/OPS | DB and external sink collusion |
 | TM-023 | Unauthorized tool version enters validation or release | Versioned downloads, SHA-256 verification, OCI digests | Empty-cache validation and manifest check | FOUND/REL | Compromised upstream plus digest update |
 | TM-024 | UI or CLI hides uncertain or degraded state | Server-authoritative typed states and explicit gaps | User-journey and API contract tests | UX/CTRL | Client compromise |
+| TM-025 | Mixed-epoch, tampered, incomplete, or secret-bearing Jenkins inventory is admitted as migration truth | Four typed strict-YAML families, byte-identical snapshot binding, detached SHA-256 sealing, referential and coverage reconciliation, typed secret/redaction references, create-new publication, and no execution authority | Digest tamper, strict-YAML alias, mixed-epoch, unknown identity, duplicate reference, incomplete coverage, unclassified behavior, and secret-reference negative tests | COMPAT/SEC/OPS | Compromised Jenkins administrator/exporter or false owner attestation |
 
 ## Data-flow rules
 
@@ -125,6 +126,7 @@ resource controls. They are not treated as hostile multi-tenant isolation.
 | Artifact integrity, retention, and restore | OPS-001 / OPS-002 |
 | Windows service, journal, and Job Object containment | WIN-001 / WIN-002 |
 | Supply-chain release evidence | REL-001 |
+| Jenkins inventory integrity and reconciliation | INV-001 / INV-002 / INV-003 / INV-004 / MIG-000 |
 
 ## Residual-risk policy
 

@@ -1,0 +1,85 @@
+# Jenkins inventory contract v1
+
+Wave 4 begins with four independently collected, immutable source-truth
+manifests. McLoving does not compile or execute a Jenkins definition merely
+because it appears in an inventory.
+
+## Files
+
+An inventory root contains exactly:
+
+```text
+job-graph.yaml
+identity-clients.yaml
+runtime-dependencies.yaml
+persistent-state.yaml
+SHA256SUMS
+```
+
+`mcloving-inventory seal --root ROOT` creates `SHA256SUMS` with
+create-new semantics. It refuses an already sealed root. Every manifest is
+strict YAML: aliases, anchors, tags, directives, duplicate keys, multiple
+documents, and resource-limit violations fail before typed deserialization.
+Unknown typed fields also fail.
+
+The manifests share one byte-identical `binding`. It identifies the controller,
+Jenkins core and plugin profile, effective global configuration, exporter,
+provenance, source generation, and collection epoch. A mixed epoch is rejected.
+If Jenkins cannot provide a coherent snapshot, collection must quiesce all
+configuration, identity, client, runtime-dependency, job-state, retention, hold,
+and persistent-state mutation for one bounded export epoch.
+
+## Families
+
+- `job-graph.yaml` owns controller and job structure, canonical definition
+  sources and digests, operational state, triggers, platform/agent/toolchain
+  requirements, publication behavior, ownership, and reviewed scope.
+- `identity-clients.yaml` owns the security realm, immutable principals and
+  lifecycle evidence, effective ACLs, and every read-side or write-side client.
+- `runtime-dependencies.yaml` owns per-job parameters, credentials by typed
+  reference, source and package resolution, approvals, triggers, live reads,
+  mutable inputs, agents, caches, effects, provisioners, locks, global values,
+  and built-in environment dependencies. The generic typed record uses `kind`
+  for the dependency family and requires an explicit compatibility disposition.
+- `persistent-state.yaml` owns each per-job record class, counts and source
+  digest, retention deadline, legal holds and release authority, restore target,
+  conflict policy, external consumers, ownership, confidentiality, and
+  provenance.
+
+Secret values are never inventory fields. A dependency classified `secret`
+must carry a typed `credential_reference` or `redaction_reference`; the
+reconciler rejects an unbound secret dependency.
+
+## Reconciliation
+
+`mcloving-inventory reconcile --root ROOT` verifies the detached hashes,
+strictly parses all four manifests, checks epoch identity and referential
+integrity, requires exactly one runtime and state record group for every
+in-scope job, and rejects:
+
+- duplicate or ambiguous identities;
+- unknown job, parent, ACL principal, or client principal references;
+- exclusions without owner approval;
+- unclassified runtime behavior;
+- secret dependencies without typed references;
+- malformed digests, missing ownership, duplicate state/hold identities, or
+  incomplete per-job coverage.
+
+The resulting `eligibility-ledger.yaml` is published with create-new semantics.
+Eligibility is conservative: the least-compatible dependency determines a
+job's `native`, `mappable`, `scripted`, or `unsupported` class. The ledger
+separately reports population denominators, parity-substrate demand by
+dependency kind, and state-transform record demand. It grants no compiler,
+scheduler, credential, agent, trigger, connector, effect, canary, or cutover
+authority.
+
+`mcloving-inventory verify --root ROOT` performs the same validation without
+writing an output.
+
+## Closure boundary
+
+This contract and its contained fixtures implement the W4-A evidence machinery.
+The four `INV-*` tickets and `MIG-000` close only after the owner-selected
+controller population is exported under one coherent epoch, secret-scanned,
+reviewed, sealed, and reconciled. Contained fixtures are verification evidence,
+not production inventory.

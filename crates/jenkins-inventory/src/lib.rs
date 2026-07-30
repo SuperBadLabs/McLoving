@@ -1,0 +1,965 @@
+//! Fail-closed Jenkins source inventory and reconciliation.
+//!
+//! The four inventory families are deliberately separate evidence producers.
+//! Reconciliation accepts them only when their detached digests verify and all
+//! four bind the same controller snapshot.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use mcloving_pipeline_ir::{ParseLimits, parse_strict};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
+
+pub const SCHEMA_VERSION: &str = "mcloving.jenkins.inventory/v1";
+pub const LEDGER_SCHEMA_VERSION: &str = "mcloving.jenkins.eligibility/v1";
+pub const JOB_GRAPH_FILE: &str = "job-graph.yaml";
+pub const IDENTITY_CLIENT_FILE: &str = "identity-clients.yaml";
+pub const RUNTIME_DEPENDENCY_FILE: &str = "runtime-dependencies.yaml";
+pub const PERSISTENT_STATE_FILE: &str = "persistent-state.yaml";
+pub const CHECKSUM_FILE: &str = "SHA256SUMS";
+pub const LEDGER_FILE: &str = "eligibility-ledger.yaml";
+
+const MANIFEST_FILES: [&str; 4] = [
+    JOB_GRAPH_FILE,
+    IDENTITY_CLIENT_FILE,
+    RUNTIME_DEPENDENCY_FILE,
+    PERSISTENT_STATE_FILE,
+];
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotBinding {
+    pub schema: String,
+    pub controller_id: String,
+    pub controller_url: String,
+    pub controller_core_version: String,
+    pub plugin_profile_sha256: String,
+    pub global_config_sha256: String,
+    pub epoch_id: String,
+    pub source_generation: String,
+    pub collected_at: String,
+    pub exporter_id: String,
+    pub exporter_version: String,
+    pub exporter_sha256: String,
+    pub provenance: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ScopeDisposition {
+    InScope,
+    Retired,
+    OutOfScope,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovedDisposition {
+    pub disposition: ScopeDisposition,
+    #[serde(default)]
+    pub approval: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobGraphManifest {
+    pub binding: SnapshotBinding,
+    pub jobs: Vec<JobRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobRecord {
+    pub id: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    pub kind: String,
+    pub owner: String,
+    pub canonical_source: String,
+    pub source_sha256: String,
+    pub config_sha256: String,
+    pub definition_kind: String,
+    pub operational_state: OperationalState,
+    #[serde(default)]
+    pub shared_library_refs: Vec<String>,
+    #[serde(default)]
+    pub triggers: Vec<String>,
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    #[serde(default)]
+    pub agent_labels: Vec<String>,
+    #[serde(default)]
+    pub toolchains: Vec<String>,
+    pub node_authority: String,
+    pub publishes_artifacts: bool,
+    pub publishes_tests: bool,
+    pub scope: ApprovedDisposition,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationalState {
+    pub enabled: bool,
+    pub generation: String,
+    pub reason: String,
+    pub actor: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityClientManifest {
+    pub binding: SnapshotBinding,
+    pub security_realm: SecurityRealm,
+    pub principals: Vec<Principal>,
+    pub acl_entries: Vec<AclEntry>,
+    pub clients: Vec<ClientRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecurityRealm {
+    pub implementation: String,
+    pub config_sha256: String,
+    pub identity_provider_generation: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Principal {
+    pub id: String,
+    pub kind: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    pub membership_generation: String,
+    pub lifecycle: String,
+    pub provenance: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AclEntry {
+    pub job_id: String,
+    pub principal_id: String,
+    pub scope: String,
+    pub permissions: Vec<String>,
+    pub generation: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClientDirection {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientRecord {
+    pub id: String,
+    pub direction: ClientDirection,
+    pub caller_identity: String,
+    pub authentication: String,
+    pub endpoint: String,
+    pub actions: Vec<String>,
+    pub scope: String,
+    pub owner: String,
+    pub observed_use: String,
+    pub generation: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDependencyManifest {
+    pub binding: SnapshotBinding,
+    pub jobs: Vec<JobDependencies>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobDependencies {
+    pub job_id: String,
+    pub dependencies: Vec<RuntimeDependency>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompatibilityDisposition {
+    Native,
+    Mappable,
+    Scripted,
+    Unsupported,
+    Unclassified,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeDependency {
+    pub id: String,
+    pub kind: String,
+    pub owner: String,
+    pub implementation_sha256: String,
+    pub config_sha256: String,
+    pub resource_scope: String,
+    pub mutability: String,
+    pub provenance: String,
+    pub confidentiality: String,
+    #[serde(default)]
+    pub credential_reference: Option<String>,
+    #[serde(default)]
+    pub redaction_reference: Option<String>,
+    pub disposition: CompatibilityDisposition,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersistentStateManifest {
+    pub binding: SnapshotBinding,
+    pub jobs: Vec<JobStateRecords>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobStateRecords {
+    pub job_id: String,
+    pub records: Vec<StateRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateRecord {
+    pub id: String,
+    pub kind: String,
+    pub owner: String,
+    pub record_count: u64,
+    pub source_sha256: String,
+    pub confidentiality: String,
+    pub restore_target: String,
+    pub conflict_policy: String,
+    pub retention_deadline: String,
+    #[serde(default)]
+    pub legal_holds: Vec<LegalHold>,
+    #[serde(default)]
+    pub external_consumers: Vec<String>,
+    pub provenance: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegalHold {
+    pub id: String,
+    pub scope: String,
+    pub reason: String,
+    pub generation: String,
+    pub release_authority: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InventoryBundle {
+    pub job_graph: JobGraphManifest,
+    pub identity_clients: IdentityClientManifest,
+    pub runtime_dependencies: RuntimeDependencyManifest,
+    pub persistent_state: PersistentStateManifest,
+    pub file_digests: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EligibilityLedger {
+    pub schema: String,
+    pub binding: SnapshotBinding,
+    pub manifest_sha256: BTreeMap<String, String>,
+    pub population: PopulationCounts,
+    pub jobs: Vec<JobEligibility>,
+    pub parity_demands: BTreeMap<String, u64>,
+    pub state_transform_records: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PopulationCounts {
+    pub controllers: u64,
+    pub jobs_total: u64,
+    pub jobs_in_scope: u64,
+    pub principals: u64,
+    pub acl_entries: u64,
+    pub read_clients: u64,
+    pub write_clients: u64,
+    pub runtime_dependencies: u64,
+    pub persistent_record_classes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct JobEligibility {
+    pub job_id: String,
+    pub owner: String,
+    pub operational_state: OperationalState,
+    pub disposition: CompatibilityDisposition,
+    pub runtime_dependency_ids: Vec<String>,
+    pub persistent_state_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InventoryError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl InventoryError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for InventoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for InventoryError {}
+
+pub fn load_bundle(root: &Path) -> Result<InventoryBundle, InventoryError> {
+    let expected = load_checksums(root)?;
+    let job_graph = load_manifest(root, JOB_GRAPH_FILE, &expected)?;
+    let identity_clients = load_manifest(root, IDENTITY_CLIENT_FILE, &expected)?;
+    let runtime_dependencies = load_manifest(root, RUNTIME_DEPENDENCY_FILE, &expected)?;
+    let persistent_state = load_manifest(root, PERSISTENT_STATE_FILE, &expected)?;
+    Ok(InventoryBundle {
+        job_graph,
+        identity_clients,
+        runtime_dependencies,
+        persistent_state,
+        file_digests: expected,
+    })
+}
+
+pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, InventoryError> {
+    validate_bindings(bundle)?;
+    validate_binding(&bundle.job_graph.binding)?;
+
+    let mut job_ids = BTreeSet::new();
+    let mut in_scope = BTreeSet::new();
+    for job in &bundle.job_graph.jobs {
+        validate_identifier("job", &job.id)?;
+        validate_nonempty("job owner", &job.owner)?;
+        validate_digest("job source", &job.source_sha256)?;
+        validate_digest("job configuration", &job.config_sha256)?;
+        if !job_ids.insert(job.id.clone()) {
+            return Err(InventoryError::new(
+                "INV_DUPLICATE_JOB",
+                format!("job {} appears more than once", job.id),
+            ));
+        }
+        if job.scope.disposition != ScopeDisposition::InScope
+            && job.scope.approval.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(InventoryError::new(
+                "INV_MISSING_APPROVAL",
+                format!("job {} is excluded without owner approval", job.id),
+            ));
+        }
+        if job.scope.disposition == ScopeDisposition::InScope {
+            in_scope.insert(job.id.clone());
+        }
+    }
+    for job in &bundle.job_graph.jobs {
+        if let Some(parent) = &job.parent_id
+            && !job_ids.contains(parent)
+        {
+            return Err(InventoryError::new(
+                "INV_UNKNOWN_PARENT",
+                format!("job {} references unknown parent {parent}", job.id),
+            ));
+        }
+    }
+
+    let principal_ids = unique_ids(
+        "principal",
+        bundle
+            .identity_clients
+            .principals
+            .iter()
+            .map(|principal| principal.id.as_str()),
+    )?;
+    let principal_kinds = bundle
+        .identity_clients
+        .principals
+        .iter()
+        .map(|principal| (principal.id.as_str(), principal.kind.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for principal in &bundle.identity_clients.principals {
+        for group in &principal.groups {
+            match principal_kinds.get(group.as_str()) {
+                Some(&"group") => {}
+                Some(_) => {
+                    return Err(InventoryError::new(
+                        "INV_GROUP_KIND",
+                        format!(
+                            "principal {} references non-group principal {group}",
+                            principal.id
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(InventoryError::new(
+                        "INV_UNKNOWN_GROUP",
+                        format!(
+                            "principal {} references unknown group {group}",
+                            principal.id
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    let client_ids = unique_ids(
+        "client",
+        bundle
+            .identity_clients
+            .clients
+            .iter()
+            .map(|client| client.id.as_str()),
+    )?;
+    for client in &bundle.identity_clients.clients {
+        validate_nonempty("client owner", &client.owner)?;
+        if !principal_ids.contains(&client.caller_identity) {
+            return Err(InventoryError::new(
+                "INV_UNKNOWN_CLIENT_PRINCIPAL",
+                format!(
+                    "client {} references unknown principal {}",
+                    client.id, client.caller_identity
+                ),
+            ));
+        }
+    }
+    let mut acl_keys = BTreeSet::new();
+    for acl in &bundle.identity_clients.acl_entries {
+        if !job_ids.contains(&acl.job_id) {
+            return Err(InventoryError::new(
+                "INV_UNKNOWN_ACL_JOB",
+                format!("ACL references unknown job {}", acl.job_id),
+            ));
+        }
+        if !principal_ids.contains(&acl.principal_id) {
+            return Err(InventoryError::new(
+                "INV_UNKNOWN_ACL_PRINCIPAL",
+                format!("ACL references unknown principal {}", acl.principal_id),
+            ));
+        }
+        if !acl_keys.insert((
+            acl.job_id.as_str(),
+            acl.principal_id.as_str(),
+            acl.scope.as_str(),
+        )) {
+            return Err(InventoryError::new(
+                "INV_DUPLICATE_ACL",
+                format!(
+                    "ACL for job {}, principal {}, scope {} appears more than once",
+                    acl.job_id, acl.principal_id, acl.scope
+                ),
+            ));
+        }
+    }
+
+    let runtime = index_runtime(&bundle.runtime_dependencies.jobs, &in_scope)?;
+    let state = index_state(&bundle.persistent_state.jobs, &in_scope)?;
+    if runtime.keys().collect::<BTreeSet<_>>() != in_scope.iter().collect::<BTreeSet<_>>() {
+        return Err(InventoryError::new(
+            "INV_RUNTIME_COVERAGE",
+            "every in-scope job must have exactly one runtime-dependency record",
+        ));
+    }
+    if state.keys().collect::<BTreeSet<_>>() != in_scope.iter().collect::<BTreeSet<_>>() {
+        return Err(InventoryError::new(
+            "INV_STATE_COVERAGE",
+            "every in-scope job must have exactly one persistent-state record",
+        ));
+    }
+
+    let mut parity_demands = BTreeMap::new();
+    let mut jobs = Vec::new();
+    let mut state_transform_records = 0_u64;
+    for job in bundle
+        .job_graph
+        .jobs
+        .iter()
+        .filter(|job| job.scope.disposition == ScopeDisposition::InScope)
+    {
+        let dependencies = *runtime.get(&job.id).expect("coverage checked");
+        let records = *state.get(&job.id).expect("coverage checked");
+        let disposition = classify(dependencies)?;
+        for dependency in dependencies {
+            validate_nonempty("runtime dependency owner", &dependency.owner)?;
+            validate_digest(
+                "runtime dependency implementation",
+                &dependency.implementation_sha256,
+            )?;
+            validate_digest(
+                "runtime dependency configuration",
+                &dependency.config_sha256,
+            )?;
+            if dependency.confidentiality == "secret"
+                && dependency.credential_reference.is_none()
+                && dependency.redaction_reference.is_none()
+            {
+                return Err(InventoryError::new(
+                    "INV_SECRET_REFERENCE_REQUIRED",
+                    format!(
+                        "secret dependency {} for job {} has no typed reference",
+                        dependency.id, job.id
+                    ),
+                ));
+            }
+            *parity_demands.entry(dependency.kind.clone()).or_insert(0) += 1;
+        }
+        for record in records {
+            validate_nonempty("state owner", &record.owner)?;
+            validate_digest("state source", &record.source_sha256)?;
+            for consumer in &record.external_consumers {
+                if !client_ids.contains(consumer) {
+                    return Err(InventoryError::new(
+                        "INV_UNKNOWN_STATE_CONSUMER",
+                        format!(
+                            "state record {} for job {} references unknown client {consumer}",
+                            record.id, job.id
+                        ),
+                    ));
+                }
+            }
+            state_transform_records = state_transform_records.saturating_add(record.record_count);
+            let mut hold_ids = BTreeSet::new();
+            for hold in &record.legal_holds {
+                if !hold_ids.insert(&hold.id) {
+                    return Err(InventoryError::new(
+                        "INV_DUPLICATE_HOLD",
+                        format!(
+                            "state record {} for job {} repeats legal hold {}",
+                            record.id, job.id, hold.id
+                        ),
+                    ));
+                }
+                validate_nonempty("legal-hold release authority", &hold.release_authority)?;
+            }
+        }
+        jobs.push(JobEligibility {
+            job_id: job.id.clone(),
+            owner: job.owner.clone(),
+            operational_state: job.operational_state.clone(),
+            disposition,
+            runtime_dependency_ids: dependencies
+                .iter()
+                .map(|dependency| dependency.id.clone())
+                .collect(),
+            persistent_state_ids: records.iter().map(|record| record.id.clone()).collect(),
+        });
+    }
+    jobs.sort_by(|left, right| left.job_id.cmp(&right.job_id));
+
+    let read_clients = bundle
+        .identity_clients
+        .clients
+        .iter()
+        .filter(|client| {
+            matches!(
+                client.direction,
+                ClientDirection::Read | ClientDirection::ReadWrite
+            )
+        })
+        .count();
+    let write_clients = bundle
+        .identity_clients
+        .clients
+        .iter()
+        .filter(|client| {
+            matches!(
+                client.direction,
+                ClientDirection::Write | ClientDirection::ReadWrite
+            )
+        })
+        .count();
+    let runtime_dependencies = runtime.values().map(|records| records.len()).sum::<usize>();
+    let persistent_record_classes = state.values().map(|records| records.len()).sum::<usize>();
+
+    Ok(EligibilityLedger {
+        schema: LEDGER_SCHEMA_VERSION.to_owned(),
+        binding: bundle.job_graph.binding.clone(),
+        manifest_sha256: bundle.file_digests.clone(),
+        population: PopulationCounts {
+            controllers: 1,
+            jobs_total: u64_count(job_ids.len())?,
+            jobs_in_scope: u64_count(in_scope.len())?,
+            principals: u64_count(principal_ids.len())?,
+            acl_entries: u64_count(bundle.identity_clients.acl_entries.len())?,
+            read_clients: u64_count(read_clients)?,
+            write_clients: u64_count(write_clients)?,
+            runtime_dependencies: u64_count(runtime_dependencies)?,
+            persistent_record_classes: u64_count(persistent_record_classes)?,
+        },
+        jobs,
+        parity_demands,
+        state_transform_records,
+    })
+}
+
+pub fn render_ledger(ledger: &EligibilityLedger) -> Result<String, InventoryError> {
+    serde_saphyr::to_string(ledger)
+        .map_err(|error| InventoryError::new("INV_RENDER", error.to_string()))
+}
+
+pub fn seal_manifest_directory(root: &Path) -> Result<(), InventoryError> {
+    let checksum_path = root.join(CHECKSUM_FILE);
+    if checksum_path.exists() {
+        return Err(InventoryError::new(
+            "INV_IMMUTABLE",
+            format!("{} already exists", checksum_path.display()),
+        ));
+    }
+    let mut lines = String::new();
+    for filename in MANIFEST_FILES {
+        let path = root.join(filename);
+        let bytes = read_regular_file(&path)?;
+        lines.push_str(&sha256_hex(&bytes));
+        lines.push_str("  ");
+        lines.push_str(filename);
+        lines.push('\n');
+    }
+    write_new(&checksum_path, lines.as_bytes())
+}
+
+pub fn write_ledger(output: &Path, ledger: &EligibilityLedger) -> Result<(), InventoryError> {
+    if output.exists() {
+        return Err(InventoryError::new(
+            "INV_IMMUTABLE",
+            format!("{} already exists", output.display()),
+        ));
+    }
+    let rendered = render_ledger(ledger)?;
+    parse_strict(&rendered, inventory_limits())
+        .map_err(|error| InventoryError::new("INV_RENDER_STRICT", error.to_string()))?;
+    write_new(output, rendered.as_bytes())
+}
+
+fn load_manifest<T: DeserializeOwned>(
+    root: &Path,
+    filename: &str,
+    expected: &BTreeMap<String, String>,
+) -> Result<T, InventoryError> {
+    let path = root.join(filename);
+    let bytes = read_regular_file(&path)?;
+    let digest = sha256_hex(&bytes);
+    if expected.get(filename) != Some(&digest) {
+        return Err(InventoryError::new(
+            "INV_DIGEST_MISMATCH",
+            format!("{filename} does not match {CHECKSUM_FILE}"),
+        ));
+    }
+    let source = std::str::from_utf8(&bytes).map_err(|error| {
+        InventoryError::new(
+            "INV_UTF8",
+            format!("{} is not UTF-8: {error}", path.display()),
+        )
+    })?;
+    parse_strict(source, inventory_limits())
+        .map_err(|error| InventoryError::new("INV_STRICT_YAML", error.to_string()))?;
+    serde_saphyr::from_str(source)
+        .map_err(|error| InventoryError::new("INV_SCHEMA", format!("{}: {error}", path.display())))
+}
+
+fn load_checksums(root: &Path) -> Result<BTreeMap<String, String>, InventoryError> {
+    let path = root.join(CHECKSUM_FILE);
+    let source = fs::read_to_string(&path).map_err(|error| {
+        InventoryError::new(
+            "INV_READ",
+            format!("failed to read {}: {error}", path.display()),
+        )
+    })?;
+    let mut checksums = BTreeMap::new();
+    for (line_number, line) in source.lines().enumerate() {
+        let Some((digest, filename)) = line.split_once("  ") else {
+            return Err(InventoryError::new(
+                "INV_CHECKSUM_FORMAT",
+                format!("{}:{} is malformed", path.display(), line_number + 1),
+            ));
+        };
+        validate_digest("manifest", digest)?;
+        if !MANIFEST_FILES.contains(&filename) {
+            return Err(InventoryError::new(
+                "INV_CHECKSUM_FILE",
+                format!("unexpected manifest filename {filename}"),
+            ));
+        }
+        if checksums
+            .insert(filename.to_owned(), digest.to_owned())
+            .is_some()
+        {
+            return Err(InventoryError::new(
+                "INV_CHECKSUM_DUPLICATE",
+                format!("duplicate checksum for {filename}"),
+            ));
+        }
+    }
+    if checksums.len() != MANIFEST_FILES.len() {
+        return Err(InventoryError::new(
+            "INV_CHECKSUM_COVERAGE",
+            "checksum file must cover exactly the four inventory manifests",
+        ));
+    }
+    Ok(checksums)
+}
+
+fn validate_bindings(bundle: &InventoryBundle) -> Result<(), InventoryError> {
+    let expected = &bundle.job_graph.binding;
+    for (family, binding) in [
+        ("identity-clients", &bundle.identity_clients.binding),
+        ("runtime-dependencies", &bundle.runtime_dependencies.binding),
+        ("persistent-state", &bundle.persistent_state.binding),
+    ] {
+        if binding != expected {
+            return Err(InventoryError::new(
+                "INV_MIXED_EPOCH",
+                format!("{family} does not bind the same controller snapshot"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_binding(binding: &SnapshotBinding) -> Result<(), InventoryError> {
+    if binding.schema != SCHEMA_VERSION {
+        return Err(InventoryError::new(
+            "INV_SCHEMA_VERSION",
+            format!("unsupported inventory schema {}", binding.schema),
+        ));
+    }
+    for (name, value) in [
+        ("controller id", &binding.controller_id),
+        ("controller URL", &binding.controller_url),
+        ("controller core version", &binding.controller_core_version),
+        ("epoch id", &binding.epoch_id),
+        ("source generation", &binding.source_generation),
+        ("collection time", &binding.collected_at),
+        ("exporter id", &binding.exporter_id),
+        ("exporter version", &binding.exporter_version),
+        ("provenance", &binding.provenance),
+    ] {
+        validate_nonempty(name, value)?;
+    }
+    validate_digest("plugin profile", &binding.plugin_profile_sha256)?;
+    validate_digest("global configuration", &binding.global_config_sha256)?;
+    validate_digest("exporter", &binding.exporter_sha256)
+}
+
+fn index_runtime<'a>(
+    jobs: &'a [JobDependencies],
+    known_jobs: &BTreeSet<String>,
+) -> Result<BTreeMap<String, &'a [RuntimeDependency]>, InventoryError> {
+    let mut indexed = BTreeMap::new();
+    for job in jobs {
+        if !known_jobs.contains(&job.job_id) {
+            return Err(InventoryError::new(
+                "INV_UNKNOWN_RUNTIME_JOB",
+                format!("runtime inventory references unknown job {}", job.job_id),
+            ));
+        }
+        if indexed
+            .insert(job.job_id.clone(), job.dependencies.as_slice())
+            .is_some()
+        {
+            return Err(InventoryError::new(
+                "INV_DUPLICATE_RUNTIME_JOB",
+                format!("runtime inventory repeats job {}", job.job_id),
+            ));
+        }
+        unique_ids(
+            "runtime dependency",
+            job.dependencies
+                .iter()
+                .map(|dependency| dependency.id.as_str()),
+        )?;
+    }
+    Ok(indexed)
+}
+
+fn index_state<'a>(
+    jobs: &'a [JobStateRecords],
+    known_jobs: &BTreeSet<String>,
+) -> Result<BTreeMap<String, &'a [StateRecord]>, InventoryError> {
+    let mut indexed = BTreeMap::new();
+    for job in jobs {
+        if !known_jobs.contains(&job.job_id) {
+            return Err(InventoryError::new(
+                "INV_UNKNOWN_STATE_JOB",
+                format!("state inventory references unknown job {}", job.job_id),
+            ));
+        }
+        if indexed
+            .insert(job.job_id.clone(), job.records.as_slice())
+            .is_some()
+        {
+            return Err(InventoryError::new(
+                "INV_DUPLICATE_STATE_JOB",
+                format!("state inventory repeats job {}", job.job_id),
+            ));
+        }
+        unique_ids(
+            "state record",
+            job.records.iter().map(|record| record.id.as_str()),
+        )?;
+    }
+    Ok(indexed)
+}
+
+fn classify(
+    dependencies: &[RuntimeDependency],
+) -> Result<CompatibilityDisposition, InventoryError> {
+    let mut disposition = CompatibilityDisposition::Native;
+    for dependency in dependencies {
+        if dependency.disposition == CompatibilityDisposition::Unclassified {
+            return Err(InventoryError::new(
+                "INV_UNCLASSIFIED",
+                format!("runtime dependency {} is unclassified", dependency.id),
+            ));
+        }
+        disposition = disposition.max(dependency.disposition);
+    }
+    Ok(disposition)
+}
+
+fn unique_ids<'a>(
+    kind: &str,
+    values: impl Iterator<Item = &'a str>,
+) -> Result<BTreeSet<String>, InventoryError> {
+    let mut unique = BTreeSet::new();
+    for value in values {
+        validate_identifier(kind, value)?;
+        if !unique.insert(value.to_owned()) {
+            return Err(InventoryError::new(
+                "INV_DUPLICATE_ID",
+                format!("{kind} {value} appears more than once"),
+            ));
+        }
+    }
+    Ok(unique)
+}
+
+fn validate_identifier(kind: &str, value: &str) -> Result<(), InventoryError> {
+    validate_nonempty(kind, value)?;
+    if value.len() > 256
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+    {
+        return Err(InventoryError::new(
+            "INV_IDENTIFIER",
+            format!("{kind} identifier {value:?} is invalid"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_nonempty(name: &str, value: &str) -> Result<(), InventoryError> {
+    if value.trim().is_empty() {
+        return Err(InventoryError::new(
+            "INV_REQUIRED",
+            format!("{name} must not be empty"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_digest(name: &str, value: &str) -> Result<(), InventoryError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(InventoryError::new(
+            "INV_DIGEST",
+            format!("{name} digest must be 64 lowercase hexadecimal characters"),
+        ));
+    }
+    Ok(())
+}
+
+fn inventory_limits() -> ParseLimits {
+    ParseLimits {
+        max_source_bytes: 16 * 1024 * 1024,
+        max_nodes: 250_000,
+        max_depth: 32,
+        max_scalar_bytes: 256 * 1024,
+        max_mapping_entries: 256,
+        max_sequence_items: 100_000,
+    }
+}
+
+fn read_regular_file(path: &Path) -> Result<Vec<u8>, InventoryError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        InventoryError::new(
+            "INV_READ",
+            format!("failed to inspect {}: {error}", path.display()),
+        )
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(InventoryError::new(
+            "INV_FILE_TYPE",
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    fs::read(path).map_err(|error| {
+        InventoryError::new(
+            "INV_READ",
+            format!("failed to read {}: {error}", path.display()),
+        )
+    })
+}
+
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), InventoryError> {
+    use std::io::Write;
+
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options.open(path).map_err(|error| {
+        InventoryError::new(
+            "INV_WRITE",
+            format!("failed to create {}: {error}", path.display()),
+        )
+    })?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(InventoryError::new(
+            "INV_WRITE",
+            format!("failed to write {}: {error}", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut rendered = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        write!(&mut rendered, "{byte:02x}").expect("writing into String cannot fail");
+    }
+    rendered
+}
+
+fn u64_count(count: usize) -> Result<u64, InventoryError> {
+    u64::try_from(count)
+        .map_err(|_| InventoryError::new("INV_COUNT_OVERFLOW", "inventory count exceeds u64"))
+}
+
+pub fn inventory_paths(root: &Path) -> [PathBuf; 4] {
+    MANIFEST_FILES.map(|filename| root.join(filename))
+}

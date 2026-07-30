@@ -772,6 +772,14 @@ compatible” claim. `WIN-001`, `WIN-002`, and `WIN-003` remain independently
 active for their explicit production and persistent-Windows-host gates; Wave 3
 closure does not waive those gates.
 
+The W4-A implementation gate now has one strict typed inventory contract,
+detached create-new sealing, mixed-epoch and tamper rejection, cross-family
+identity/coverage reconciliation, conservative per-job eligibility, and a
+no-write verifier. Contained fixtures prove the machinery but are not production
+inventory. `INV-001` through `INV-004` remain `ACTIVE`, and `MIG-000` remains
+`PENDING`, until the owner-selected Jenkins population is exported under one
+coherent source epoch, secret-scanned, reviewed, sealed, and reconciled.
+
 `W2-C` is complete on `codex/wave2-agent-completion`. Production agents
 negotiate `work-delivery-v1`, cancel execution on lease-renewal loss, commit
 terminal replay authority and complete spool descriptors atomically before
