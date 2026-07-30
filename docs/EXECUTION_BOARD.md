@@ -98,6 +98,22 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   no such authority until `EXT-001` is `DONE` for the exact connector action,
   identity, implementation, permission, fencing, deduplication, and
   reconciliation contract.
+- Every live external read whose response can influence pipeline control flow,
+  effect arguments, result, or published output—including feature flags,
+  deployment metadata, databases, configuration/secret stores, and arbitrary
+  remote APIs—requires a typed `INPUT-001` contract. `MIG-000` must inventory
+  endpoint/data-source identity, implementation/protocol/schema version,
+  authenticated read-only caller/grant, query and scope, consistency/freshness
+  cursor, response provenance/signature, confidentiality/taint, size/rate
+  bounds, owner, and failure/default policy. `MIG-002` must define bounded
+  success, branch, stale, missing, malformed, oversized, unauthorized,
+  substituted, outage, replay, and secret-marker fixtures; `MIG-006` must use
+  only exact fixture-local implementations and compare response-consumption and
+  non-disclosure. `MIG-008` and `MIG-009` must keep the job ineligible until
+  `INPUT-001` is `DONE`, then freeze the exact deployed adapter, endpoint,
+  schema, grant, policy, and freshness/provenance contract before every effect
+  or authority transfer. An untyped, mutable, unverifiable, overprivileged, or
+  confidentiality-unsafe read is fail-closed and unsupported.
 - During every shadow, dual-run, canary, cutover, and rollback window, exactly
   one fenced runner may possess a production write-capable connector path or
   destination credential. The other runner must emit a canonical signed
@@ -490,6 +506,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | Ticket | Status | Depends on | Objective and acceptance |
 |---|---|---|---|
 | EXT-001 | PENDING | SEC-003, CTRL-003 | Define the scoped out-of-process connector identity and versioned protocol for external effects. A connector has no scheduler, database, agent, controller-filesystem, or unrelated-secret authority; each action binds tenant/project/build/attempt/fence, exact connector and request digests, idempotency class, expiry, and audit provenance. Permission-negative integration, stale/replay denial, bounded retry, exact deduplication, and ambiguous-effect reconciliation gates are required before any connector-backed canary or cutover. |
+| INPUT-001 | PENDING | SEC-003, AUDIT-001 | Implement isolated typed read-only adapters for every live external runtime input discovered by MIG-000. Bind tenant/project/build/attempt, exact adapter implementation and protocol/schema, endpoint/data-source identity, scoped short-lived read grant, canonical query, consistency/freshness cursor, response digest/signature/provenance, confidentiality/taint, bounded size/rate/timeout, and audit lineage. The adapter has no write, scheduler, database, agent, controller-filesystem, unrelated-secret, or effect authority. Prove permission-negative behavior plus valid, branch-varying, stale, missing, malformed, oversized, unauthorized, endpoint/schema/identity substitution, replay, outage, retry, secret-marker non-disclosure, adapter restart, cutover, and rollback cases against exact contained fixtures before any dependent canary or cutover. |
 | TRIG-001 | PENDING | API-002, AUDIT-001 | Implement typed authenticated replacement ingress for every trigger class discovered by MIG-000, including SCM webhooks, schedules, upstream jobs, remote-build HTTP/API tokens, and admitted plugin-specific event sources; an unimplemented class remains explicitly ineligible. Bind tenant/project/pipeline, trigger type and implementation digest, event-source or caller identity, configuration/filter digest, delivery/event ID, schedule timezone/calendar, upstream build identity, idempotency key, expiry, and audit provenance; enforce bounded deduplication and replay windows. Prove valid and invalid authentication, branch/path/event and request filtering, duplicate/reordered/delayed delivery, outage retry and dead-letter recovery, schedule skew and restart behavior, upstream success/failure filtering, remote caller revocation, plugin-source substitution, pause/resume, cutover handoff, and rollback restoration before any trigger-dependent canary or cutover. |
 | DISC-001 | PENDING | TRIG-001, SCM-001, AUTHZ-001 | Implement Multibranch Pipeline and Organization Folder indexing/discovery. Bind the exact deployed discovery implementation binary or image digest and protocol/version, live parent-configuration digest, provider/organization/repository identities, branch/PR discovery and trust/filter strategies, Jenkinsfile path and selection policy, exact discovered revision and provenance, child identity/configuration policy, orphan policy, and audit lineage. Prove new/updated/deleted branch and PR discovery, trusted and untrusted forks, filtering, parent reconfiguration, implementation or configuration substitution denial, duplicate/reordered webhook plus periodic reindex, restart/outage catch-up, child authorization, orphan retirement, and rollback restoration before any parent or child canary or cutover. |
 | SCM-001 | PENDING | SEC-003, AGENT-004 | Implement isolated live source acquisition for checkout, Git, submodule, and credentialed repository steps. Bind provider, repository identity, authenticated ref and exact revision, fork and trust policy, submodule graph, sparse/depth options, checkout implementation, scoped short-lived credential grant, and resulting content/provenance digests. Prove later-commit delivery, ref substitution and untrusted-fork denial, credential non-disclosure, replay resistance, bounded network/filesystem authority, cleanup, and differential checkout truth before any source-dependent canary or cutover. |
