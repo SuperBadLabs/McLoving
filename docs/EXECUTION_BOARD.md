@@ -146,6 +146,22 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   timezone, tzdata/runtime, and synchronization configuration. Any uncontrolled
   time dependency, drift, or unsupported clock injection is fail-closed and
   ineligible rather than assumed equivalent.
+- Jobs whose control flow, effect arguments, identifiers, retry timing, or
+  outputs consume randomness or entropy—including shell RNGs, random devices,
+  UUID APIs, language runtimes, and plugins—must inventory each source,
+  algorithm/provider/runtime identity, consumption point, semantic use, and
+  security classification. `MIG-002` must define bounded deterministic seed or
+  byte-stream fixtures that force every relevant branch/outcome; `MIG-006` must
+  give both deny-authority oracles the same receipt-bound test stream, compare
+  consumption traces and semantic outputs, and repeat seeds to prove
+  determinism. Non-semantic random identifiers require an explicit normalization
+  rule that preserves uniqueness/correlation truth. Production security
+  randomness must remain cryptographically strong and unseeded by test data;
+  `MIG-008` and `MIG-009` freeze its exact provider/runtime, policy, and health
+  configuration and audit the resulting decision/identifier provenance without
+  recording secret entropy. Any semantically relevant source that cannot be
+  controlled in differential fixtures or mapped to a certified production
+  policy is fail-closed and unsupported.
 - Jenkins decommissioning must quiesce before the final export: pause and
   verify all trigger ingress and administrative writes, freeze new scheduling
   and external-effect authority, drain or explicitly reconcile every accepted
