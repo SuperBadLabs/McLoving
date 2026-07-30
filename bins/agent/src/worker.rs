@@ -11,12 +11,13 @@ use std::time::Duration;
 use mcloving_agent_protocol::RECOVERED_FINALIZATION_LEASE_SECONDS;
 use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
-    CancellationCompletion, CancellationDisposition, CancellationOutcome, WorkAssignment,
-    WorkAuthority, WorkCompletion, WorkLeaseRenewal, WorkLogChunk, WorkOutcome, WorkPoll,
+    CancellationCompletion, CancellationDisposition, CancellationOutcome, CredentialBinding,
+    CredentialRequest, WorkAssignment, WorkAuthority, WorkCompletion, WorkLeaseRenewal,
+    WorkLogChunk, WorkOutcome, WorkPoll, WorkReceipt,
 };
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
-    execute_with_spawn_hook, is_link_or_reparse_point, sync_directory,
+    execute_with_spawn_hook_and_redactions, is_link_or_reparse_point, sync_directory,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Finalization, Journal, ProcessIdentity, SpoolEntry,
@@ -57,7 +58,14 @@ struct ProcessSpec {
     args: Vec<String>,
     #[serde(default)]
     env: BTreeMap<String, String>,
+    #[serde(default)]
+    credentials: Vec<String>,
     timeout_seconds: Option<u64>,
+}
+
+struct ExecutionEnvironment {
+    values: BTreeMap<String, String>,
+    redactions: Vec<Vec<u8>>,
 }
 
 #[derive(Deserialize)]
@@ -436,6 +444,14 @@ fn validate_assignment(
             "process timeout must be between 1 and {MAX_EXECUTION_TIMEOUT_SECONDS} seconds"
         )));
     }
+    let credential_targets = &spec.steps[0].credentials;
+    if credential_targets.len() > 8
+        || !credential_targets_are_valid(&spec.steps[0].env, credential_targets)
+    {
+        return Err(AgentError::InvalidAssignment(
+            "credential targets must be unique bounded environment names and must not collide with pipeline environment".to_owned(),
+        ));
+    }
     let workspace = PathBuf::from(format!(
         "{}/{}/{}",
         assignment.organization_id, assignment.attempt_id, assignment.fence_token
@@ -549,15 +565,6 @@ async fn run_assignment(
         completion_result?;
         return lease_result;
     }
-    require_work_receipt(
-        lease_deadline_rpc(
-            lease_started_at + lease_rpc_budget(lease_window),
-            client.start_work(assignment.authority.clone()),
-        )
-        .await?,
-        session_epoch,
-    )?;
-
     let execution_cancellation = stop.child_token();
     let authority_lost = CancellationToken::new();
     let lease_stop = CancellationToken::new();
@@ -575,6 +582,107 @@ async fn run_assignment(
         },
     ));
     let process = assignment.process;
+    let credentials = if process.credentials.is_empty() {
+        Vec::new()
+    } else {
+        match wait_for_credentials(
+            client,
+            &assignment.authority,
+            &process.credentials,
+            session_epoch,
+            lease_window,
+            &execution_cancellation,
+            &authority_lost,
+        )
+        .await
+        {
+            Ok(Some(credentials)) => credentials,
+            Ok(None) => {
+                let completion_result = finalize_without_process(
+                    config,
+                    client,
+                    &mut journal,
+                    ProcesslessCompletion {
+                        authority: &assignment.authority,
+                        workspace: &assignment.workspace,
+                        session_epoch,
+                        outcome: WorkOutcome::Aborted,
+                        reason: "cancelled_while_waiting_for_credentials".to_owned(),
+                    },
+                    AuthorityRpcControl {
+                        authority_lost: &authority_lost,
+                        stop: &stop,
+                        lease_window,
+                    },
+                )
+                .await;
+                lease_stop.cancel();
+                let lease_result = lease_task.await.map_err(|error| {
+                    AgentError::InvalidAssignment(format!("lease task failed: {error}"))
+                })?;
+                completion_result?;
+                return lease_result;
+            }
+            Err(error) => {
+                lease_stop.cancel();
+                let _ = lease_task.await;
+                return Err(error);
+            }
+        }
+    };
+    let start_receipt = match start_work_with_retry(
+        client,
+        &assignment.authority,
+        session_epoch,
+        lease_window,
+        &execution_cancellation,
+        &authority_lost,
+        &stop,
+    )
+    .await
+    {
+        Ok(Some(receipt)) => receipt,
+        Ok(None) => {
+            let completion_result = finalize_without_process(
+                config,
+                client,
+                &mut journal,
+                ProcesslessCompletion {
+                    authority: &assignment.authority,
+                    workspace: &assignment.workspace,
+                    session_epoch,
+                    outcome: WorkOutcome::Aborted,
+                    reason: "cancelled_while_starting_work".to_owned(),
+                },
+                AuthorityRpcControl {
+                    authority_lost: &authority_lost,
+                    stop: &stop,
+                    lease_window,
+                },
+            )
+            .await;
+            lease_stop.cancel();
+            let lease_result = lease_task.await.map_err(|error| {
+                AgentError::InvalidAssignment(format!("lease task failed: {error}"))
+            })?;
+            completion_result?;
+            return lease_result;
+        }
+        Err(error) => {
+            lease_stop.cancel();
+            let _ = lease_task.await;
+            return Err(error);
+        }
+    };
+    require_work_receipt(start_receipt, session_epoch)?;
+    let execution_environment = match execution_environment(process.env, credentials) {
+        Ok(environment) => environment,
+        Err(error) => {
+            lease_stop.cancel();
+            let _ = lease_task.await;
+            return Err(error);
+        }
+    };
     let request = ExecutionRequest {
         workspace_root: config.workspace_root.clone(),
         workspace: assignment.workspace.clone(),
@@ -585,8 +693,8 @@ async fn run_assignment(
         },
         program: PathBuf::from(process.program),
         arguments: process.args.into_iter().map(OsString::from).collect(),
-        environment: process
-            .env
+        environment: execution_environment
+            .values
             .into_iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect(),
@@ -594,8 +702,11 @@ async fn run_assignment(
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
-    let execution =
-        execute_with_spawn_hook(&request, execution_cancellation.clone(), |process_id| {
+    let execution = execute_with_spawn_hook_and_redactions(
+        &request,
+        execution_cancellation.clone(),
+        &execution_environment.redactions,
+        |process_id| {
             let process_birth_identity = process_birth_identity_for(process_id)
                 .map_err(|error| ExecutionError::SpawnHook(error.to_string()))?;
             match process_birth_identity {
@@ -620,8 +731,9 @@ async fn run_assignment(
                 ),
             }
             .map_err(|error| ExecutionError::SpawnHook(error.to_string()))
-        })
-        .await;
+        },
+    )
+    .await;
     let completion_result: Result<(), AgentError> = async {
         let outcome = match execution {
             Ok(outcome) => outcome,
@@ -779,6 +891,225 @@ async fn run_assignment(
         .map_err(|error| AgentError::InvalidAssignment(format!("lease task failed: {error}")))?;
     completion_result?;
     lease_result
+}
+
+fn execution_environment(
+    mut environment: BTreeMap<String, String>,
+    credentials: Vec<CredentialBinding>,
+) -> Result<ExecutionEnvironment, AgentError> {
+    if credentials.len() > 8 {
+        return Err(AgentError::InvalidAssignment(
+            "credential count exceeds the per-attempt bound".to_owned(),
+        ));
+    }
+    let target_names = credentials
+        .iter()
+        .map(|credential| credential.target_name.clone())
+        .collect::<Vec<_>>();
+    if !credential_targets_are_valid(&environment, &target_names) {
+        return Err(AgentError::InvalidAssignment(
+            "credential targets must be unique bounded environment names and must not collide with pipeline environment".to_owned(),
+        ));
+    }
+    let mut grant_ids = std::collections::BTreeSet::new();
+    let mut redactions = Vec::with_capacity(credentials.len());
+    let mut total_secret_bytes = 0_usize;
+    for credential in credentials {
+        let grant_id = Uuid::parse_str(&credential.grant_id).map_err(|_| {
+            AgentError::InvalidAssignment("credential grant ID is invalid".to_owned())
+        })?;
+        if !grant_ids.insert(grant_id) {
+            return Err(AgentError::InvalidAssignment(
+                "credential grant IDs must be unique".to_owned(),
+            ));
+        }
+        if !valid_environment_name(&credential.target_name)
+            || credential.secret_value.is_empty()
+            || credential.secret_value.len() > 65_536
+            || credential.secret_value.contains(&0)
+        {
+            return Err(AgentError::InvalidAssignment(
+                "credential binding is outside its bounds".to_owned(),
+            ));
+        }
+        total_secret_bytes = total_secret_bytes
+            .checked_add(credential.secret_value.len())
+            .ok_or_else(|| {
+                AgentError::InvalidAssignment("credential redaction set is too large".to_owned())
+            })?;
+        if total_secret_bytes > 65_536 {
+            return Err(AgentError::InvalidAssignment(
+                "credential redaction set is too large".to_owned(),
+            ));
+        }
+        let secret = String::from_utf8(credential.secret_value.clone()).map_err(|_| {
+            AgentError::InvalidAssignment("credential value must be valid UTF-8".to_owned())
+        })?;
+        if environment.insert(credential.target_name, secret).is_some() {
+            return Err(AgentError::InvalidAssignment(
+                "credential target collides with the pipeline environment".to_owned(),
+            ));
+        }
+        redactions.push(credential.secret_value);
+    }
+    Ok(ExecutionEnvironment {
+        values: environment,
+        redactions,
+    })
+}
+
+fn valid_environment_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(byte) if byte.is_ascii_alphabetic() || byte == b'_')
+        && value.len() <= 128
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn credential_targets_are_valid(
+    environment: &BTreeMap<String, String>,
+    target_names: &[String],
+) -> bool {
+    let environment_names = environment
+        .keys()
+        .map(|name| environment_name_key(name))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut targets = std::collections::BTreeSet::new();
+    target_names.iter().all(|name| {
+        valid_environment_name(name)
+            && !reserved_credential_environment_name(name)
+            && !environment_names.contains(&environment_name_key(name))
+            && targets.insert(environment_name_key(name))
+    })
+}
+
+#[cfg(windows)]
+fn environment_name_key(value: &str) -> String {
+    value.to_ascii_uppercase()
+}
+
+#[cfg(not(windows))]
+fn environment_name_key(value: &str) -> String {
+    value.to_owned()
+}
+
+#[cfg(windows)]
+fn reserved_credential_environment_name(value: &str) -> bool {
+    matches!(value.to_ascii_uppercase().as_str(), "TEMP" | "TMP")
+}
+
+#[cfg(not(windows))]
+fn reserved_credential_environment_name(_value: &str) -> bool {
+    false
+}
+
+async fn wait_for_credentials(
+    client: &mut AgentControlClient<Channel>,
+    authority: &WorkAuthority,
+    target_names: &[String],
+    session_epoch: u64,
+    lease_window: Duration,
+    execution_cancellation: &CancellationToken,
+    authority_lost: &CancellationToken,
+) -> Result<Option<Vec<CredentialBinding>>, AgentError> {
+    loop {
+        let response = tokio::select! {
+            () = execution_cancellation.cancelled() => return Ok(None),
+            () = authority_lost.cancelled() => return Err(AgentError::StaleAuthority),
+            response = tokio::time::timeout(
+                lease_rpc_budget(lease_window),
+                client.fetch_credentials(CredentialRequest {
+                    authority: Some(authority.clone()),
+                    target_names: target_names.to_vec(),
+                }),
+            ) => match response {
+                Ok(Ok(response)) => response.into_inner(),
+                Err(_) => {
+                    if !wait_for_authority_retry(execution_cancellation, authority_lost).await? {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                Ok(Err(status)) if retryable_authority_transition(&status) => {
+                    if !wait_for_authority_retry(execution_cancellation, authority_lost).await? {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                Ok(Err(status)) => return Err(AgentError::Rpc(status)),
+            },
+        };
+        ensure_session(response.session_epoch, session_epoch)?;
+        if response.ready {
+            return Ok(Some(response.credentials));
+        }
+        if !wait_for_authority_retry(execution_cancellation, authority_lost).await? {
+            return Ok(None);
+        }
+    }
+}
+
+async fn start_work_with_retry(
+    client: &mut AgentControlClient<Channel>,
+    authority: &WorkAuthority,
+    session_epoch: u64,
+    lease_window: Duration,
+    execution_cancellation: &CancellationToken,
+    authority_lost: &CancellationToken,
+    stop: &CancellationToken,
+) -> Result<Option<WorkReceipt>, AgentError> {
+    loop {
+        let response = tokio::select! {
+            biased;
+            () = execution_cancellation.cancelled() => return Ok(None),
+            () = authority_lost.cancelled() => return Err(AgentError::StaleAuthority),
+            () = stop.cancelled() => return Err(AgentError::Stopped),
+            response = tokio::time::timeout(
+                lease_rpc_budget(lease_window),
+                client.start_work(authority.clone()),
+            ) => match response {
+                Ok(Ok(response)) => response.into_inner(),
+                Err(_) => {
+                    if !wait_for_authority_retry(execution_cancellation, authority_lost).await? {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                Ok(Err(status)) if retryable_authority_transition(&status) => {
+                    if !wait_for_authority_retry(execution_cancellation, authority_lost).await? {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                Ok(Err(status)) => return Err(AgentError::Rpc(status)),
+            },
+        };
+        require_work_receipt(response, session_epoch)?;
+        return Ok(Some(response));
+    }
+}
+
+async fn wait_for_authority_retry(
+    execution_cancellation: &CancellationToken,
+    authority_lost: &CancellationToken,
+) -> Result<bool, AgentError> {
+    tokio::select! {
+        () = execution_cancellation.cancelled() => Ok(false),
+        () = authority_lost.cancelled() => Err(AgentError::StaleAuthority),
+        () = tokio::time::sleep(Duration::from_millis(250)) => Ok(true),
+    }
+}
+
+fn retryable_authority_transition(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Cancelled
+            | tonic::Code::Unknown
+            | tonic::Code::DeadlineExceeded
+            | tonic::Code::ResourceExhausted
+            | tonic::Code::Aborted
+            | tonic::Code::Internal
+            | tonic::Code::Unavailable
+    )
 }
 
 fn unverified_containment_process_id(error: &ExecutionError) -> Option<u32> {
@@ -1829,6 +2160,120 @@ mod tests {
             fence_token: (7_u64 << 32) | 9,
             execution_spec_json: spec.to_vec(),
             payload_digest: Sha256::digest(spec).to_vec(),
+        }
+    }
+
+    #[test]
+    fn credential_bindings_are_bounded_unique_and_collision_free() {
+        let grant_id = Uuid::new_v4();
+        let execution = execution_environment(
+            BTreeMap::from([("SAFE".to_owned(), "value".to_owned())]),
+            vec![CredentialBinding {
+                grant_id: grant_id.to_string(),
+                target_name: "DEPLOY_TOKEN".to_owned(),
+                secret_value: b"marker-secret".to_vec(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(execution.values["SAFE"], "value");
+        assert_eq!(execution.values["DEPLOY_TOKEN"], "marker-secret");
+        assert_eq!(execution.redactions, vec![b"marker-secret".to_vec()]);
+
+        assert!(
+            execution_environment(
+                BTreeMap::from([("DEPLOY_TOKEN".to_owned(), "pipeline".to_owned())]),
+                vec![CredentialBinding {
+                    grant_id: grant_id.to_string(),
+                    target_name: "DEPLOY_TOKEN".to_owned(),
+                    secret_value: b"marker-secret".to_vec(),
+                }],
+            )
+            .is_err()
+        );
+        assert!(
+            execution_environment(
+                BTreeMap::new(),
+                vec![CredentialBinding {
+                    grant_id: grant_id.to_string(),
+                    target_name: "invalid-name".to_owned(),
+                    secret_value: b"marker-secret".to_vec(),
+                }],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn ambiguous_authority_transition_statuses_are_retryable() {
+        for code in [
+            tonic::Code::Cancelled,
+            tonic::Code::Unknown,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::ResourceExhausted,
+            tonic::Code::Aborted,
+            tonic::Code::Internal,
+            tonic::Code::Unavailable,
+        ] {
+            assert!(
+                retryable_authority_transition(&tonic::Status::new(code, "ambiguous")),
+                "{code:?} must be safe to replay"
+            );
+        }
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+            tonic::Code::AlreadyExists,
+            tonic::Code::PermissionDenied,
+            tonic::Code::FailedPrecondition,
+            tonic::Code::OutOfRange,
+            tonic::Code::Unimplemented,
+            tonic::Code::Unauthenticated,
+            tonic::Code::DataLoss,
+        ] {
+            assert!(
+                !retryable_authority_transition(&tonic::Status::new(code, "definitive")),
+                "{code:?} must fail closed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authority_retry_wait_preserves_cancellation_and_authority_loss() {
+        let cancellation = CancellationToken::new();
+        let authority_lost = CancellationToken::new();
+        cancellation.cancel();
+        assert!(
+            !wait_for_authority_retry(&cancellation, &authority_lost)
+                .await
+                .unwrap()
+        );
+
+        let cancellation = CancellationToken::new();
+        let authority_lost = CancellationToken::new();
+        authority_lost.cancel();
+        assert!(matches!(
+            wait_for_authority_retry(&cancellation, &authority_lost).await,
+            Err(AgentError::StaleAuthority)
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_credential_targets_are_case_insensitive_and_reserve_temp() {
+        let environment = BTreeMap::from([("deploy_token".to_owned(), "pipeline".to_owned())]);
+        assert!(!credential_targets_are_valid(
+            &environment,
+            &["DEPLOY_TOKEN".to_owned()]
+        ));
+        assert!(!credential_targets_are_valid(
+            &BTreeMap::new(),
+            &["TOKEN".to_owned(), "token".to_owned()]
+        ));
+        for reserved in ["TEMP", "temp", "TMP", "tmp"] {
+            assert!(!credential_targets_are_valid(
+                &BTreeMap::new(),
+                &[reserved.to_owned()]
+            ));
         }
     }
 

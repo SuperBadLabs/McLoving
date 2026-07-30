@@ -10,6 +10,7 @@ service AgentControl {
   rpc PollWork(WorkPoll) returns (WorkOffer);
   rpc AcceptWork(WorkAuthority) returns (WorkReceipt);
   rpc StartWork(WorkAuthority) returns (WorkReceipt);
+  rpc FetchCredentials(CredentialRequest) returns (CredentialEnvelope);
   rpc RenewWorkLease(WorkLeaseRenewal) returns (WorkLeaseReceipt);
   rpc PublishLog(WorkLogChunk) returns (WorkReceipt);
   rpc CompleteWork(WorkCompletion) returns (WorkReceipt);
@@ -146,6 +147,23 @@ message WorkAuthority {
   string organization_id = 3;
   string attempt_id = 4;
   uint64 fence_token = 5;
+}
+
+message CredentialBinding {
+  string grant_id = 1;
+  string target_name = 2;
+  bytes secret_value = 3;
+}
+
+message CredentialRequest {
+  WorkAuthority authority = 1;
+  repeated string target_names = 2;
+}
+
+message CredentialEnvelope {
+  uint64 session_epoch = 1;
+  repeated CredentialBinding credentials = 2;
+  bool ready = 3;
 }
 
 message WorkLeaseRenewal {

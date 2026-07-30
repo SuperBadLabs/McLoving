@@ -1,24 +1,44 @@
 //! PostgreSQL-backed controller truth and transaction boundaries.
 
+use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+mod audit;
 pub mod authz;
 mod dag;
 mod scheduler;
+mod security;
+mod test_results;
 
+pub use audit::{
+    AuditEvent, AuditExport, AuditPage, AuditRetentionPolicy, MAX_AUDIT_PAGE, NewAuditEvent,
+    verify_audit_export, verify_audit_page,
+};
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
     DagNodeKind, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode, compile_matrix,
     validate_dag_contract,
 };
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
+pub use security::{CredentialDelivery, NewCredentialGrant, NewEnvironmentApproval};
+pub use test_results::{
+    DEFAULT_MAX_JUNIT_BYTES, DEFAULT_MAX_JUNIT_CASES, DEFAULT_MAX_JUNIT_SUITES, JunitLimits,
+    NormalizedTestCase, NormalizedTestReport, NormalizedTestSuite,
+    TEST_RESULT_RAW_RETENTION_SECONDS, TEST_RESULT_SCHEMA_VERSION, TestAggregate, TestCaseHistory,
+    TestCaseObservation, TestOutcome, TestReportSource, TestResultError, parse_junit,
+};
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
 const MAX_ATTEMPT_LOG_BYTES: i64 = 64 * 1_048_576;
 const MAX_ATTEMPT_LOG_CHUNKS: i64 = 66;
+/// Largest caller-selected object-retention interval accepted by the controller.
+///
+/// This keeps PostgreSQL interval arithmetic comfortably inside its timestamp
+/// range before any staged object is claimed for publication.
+pub const MAX_OBJECT_RETENTION_SECONDS: i64 = 100 * 365 * 24 * 60 * 60;
 
 /// Schema installed by [`Store::migrate`].
 pub const CONTROLLER_SCHEMA_V1: &str = include_str!("../migrations/0001_controller_truth.sql");
@@ -38,6 +58,18 @@ pub const AGENT_SESSIONS_V7: &str = include_str!("../migrations/0007_agent_sessi
 pub const NODE_TRUST_POOL_V8: &str = include_str!("../migrations/0008_node_trust_pool.sql");
 /// Durable bounded pipeline-DAG scheduling truth.
 pub const PIPELINE_DAG_V9: &str = include_str!("../migrations/0009_pipeline_dag.sql");
+/// Attempt-scoped credentials and protected-environment approvals.
+pub const ATTEMPT_CREDENTIALS_V10: &str =
+    include_str!("../migrations/0010_attempt_credentials.sql");
+/// Tenant-scoped, hash-chained append-only audit truth.
+pub const TENANT_AUDIT_V11: &str = include_str!("../migrations/0011_tenant_audit.sql");
+/// Product-facing immutable artifact metadata.
+pub const ARTIFACT_METADATA_V12: &str = include_str!("../migrations/0012_artifact_metadata.sql");
+/// Immutable, bounded, normalized test-result evidence.
+pub const NORMALIZED_TEST_RESULTS_V13: &str = include_str!("../migrations/0013_test_results.sql");
+/// Least-privilege deletion-claim probe for fenced artifact publication.
+pub const OBJECT_PUBLICATION_FENCE_V14: &str =
+    include_str!("../migrations/0014_object_publication_fence.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -241,6 +273,7 @@ impl ObjectKind {
 /// Explicit controller view of object-store availability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ObjectStatus {
+    Pending,
     Available,
     Missing,
     Corrupt,
@@ -249,6 +282,7 @@ pub enum ObjectStatus {
 impl ObjectStatus {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Pending => "pending",
             Self::Available => "available",
             Self::Missing => "missing",
             Self::Corrupt => "corrupt",
@@ -265,6 +299,20 @@ pub struct StoredObject {
     pub name: String,
     pub digest: [u8; 32],
     pub bytes: i64,
+    pub status: ObjectStatus,
+}
+
+/// Product-facing artifact identity joined to its execution hierarchy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactMetadata {
+    pub build_id: Uuid,
+    pub node_id: Uuid,
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub name: String,
+    pub digest: [u8; 32],
+    pub bytes: i64,
+    pub media_type: String,
     pub status: ObjectStatus,
 }
 
@@ -334,6 +382,17 @@ pub enum StoreError {
     InvalidTrustPool,
     #[error("invalid pipeline DAG: {0}")]
     InvalidDag(String),
+    #[error("invalid security operation: {0}")]
+    InvalidSecurityOperation(String),
+    #[error("invalid audit operation: {0}")]
+    InvalidAuditOperation(String),
+    #[error("invalid normalized test result: {0}")]
+    InvalidTestResult(String),
+    #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
+    CorruptAuditChain {
+        organization_id: Uuid,
+        sequence: i64,
+    },
 }
 
 /// PostgreSQL source-of-truth facade.
@@ -375,6 +434,11 @@ impl Store {
         apply_migration(&mut tx, 7, AGENT_SESSIONS_V7).await?;
         apply_migration(&mut tx, 8, NODE_TRUST_POOL_V8).await?;
         apply_migration(&mut tx, 9, PIPELINE_DAG_V9).await?;
+        apply_migration(&mut tx, 10, ATTEMPT_CREDENTIALS_V10).await?;
+        apply_migration(&mut tx, 11, TENANT_AUDIT_V11).await?;
+        apply_migration(&mut tx, 12, ARTIFACT_METADATA_V12).await?;
+        apply_migration(&mut tx, 13, NORMALIZED_TEST_RESULTS_V13).await?;
+        apply_migration(&mut tx, 14, OBJECT_PUBLICATION_FENCE_V14).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1460,7 +1524,6 @@ impl Store {
         if !log_sequence_is_bounded(chunk.sequence) {
             return Ok(false);
         }
-        let digest: [u8; 32] = Sha256::digest(chunk.content).into();
         let mut tx = self.tenant_transaction(chunk.organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         if let Some(session_epoch) = session_epoch
@@ -1476,6 +1539,21 @@ impl Store {
             ))
             .execute(&mut *tx)
             .await?;
+        let redactions = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT secret_value
+             FROM credential_grants
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+             ORDER BY id",
+        )
+        .bind(chunk.organization_id)
+        .bind(chunk.attempt_id)
+        .bind(chunk.fence)
+        .fetch_all(&mut *tx)
+        .await?;
+        let content = redact_to_fixed_point(chunk.content, &redactions)?;
+        let digest: [u8; 32] = Sha256::digest(&content).into();
         let existing = sqlx::query_as::<_, (String, Vec<u8>)>(
             "SELECT l.stream, l.digest
              FROM attempt_log_chunks AS l
@@ -1522,7 +1600,7 @@ impl Store {
         .bind(chunk.fence)
         .fetch_one(&mut *tx)
         .await?;
-        let incoming = i64::try_from(chunk.content.len()).unwrap_or(i64::MAX);
+        let incoming = i64::try_from(content.len()).unwrap_or(i64::MAX);
         if !log_quota_allows(committed, incoming) {
             tx.rollback().await?;
             return Ok(false);
@@ -1557,7 +1635,7 @@ impl Store {
         .bind(chunk.agent_id)
         .bind(chunk.sequence)
         .bind(chunk.stream)
-        .bind(chunk.content)
+        .bind(&content)
         .bind(digest.as_slice())
         .fetch_optional(&mut *tx)
         .await?;
@@ -2493,6 +2571,429 @@ impl Store {
         Ok(inserted.is_some())
     }
 
+    /// Reserves one immutable artifact identity before object publication.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn register_artifact(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        restore_epoch: i64,
+        agent_id: &str,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+    ) -> Result<bool, StoreError> {
+        if name.is_empty()
+            || name.len() > 512
+            || name.chars().any(char::is_control)
+            || bytes < 0
+            || media_type.is_empty()
+            || media_type.len() > 255
+            || media_type.trim() != media_type
+            || media_type.chars().any(char::is_control)
+            || !(0..=MAX_OBJECT_RETENTION_SECONDS).contains(&retention_seconds)
+        {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_restore_fence_shared(&mut tx).await?;
+        acquire_object_deletion_fence(&mut tx, &digest).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.artifact.{organization_id}.{attempt_id}.{fence}.{name}"
+            ))
+            .execute(&mut *tx)
+            .await?;
+        let existing = sqlx::query_scalar::<_, String>(
+            "SELECT o.name
+             FROM attempt_objects AS o
+             JOIN attempts AS a
+               ON a.organization_id = o.organization_id
+              AND a.id = o.attempt_id
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             WHERE o.organization_id = $1
+               AND n.build_id = $2
+               AND n.id = $3
+               AND o.attempt_id = $4
+               AND o.fence = $5
+               AND a.restore_epoch = $6
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $7
+               AND o.kind = 'artifact'
+               AND o.name = $8
+               AND o.object_digest = $9
+               AND o.bytes = $10
+               AND o.media_type = $11
+               AND o.status IN ('pending', 'available')",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(node_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .bind(name)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .bind(media_type)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing.is_some() {
+            sqlx::query(
+                "INSERT INTO object_retention (
+                     organization_id, object_digest, retain_until
+                 )
+                 VALUES (
+                     $1, $2,
+                     clock_timestamp() + ($3::double precision * interval '1 second')
+                 )
+                 ON CONFLICT (organization_id, object_digest) DO UPDATE
+                 SET retain_until = GREATEST(
+                         object_retention.retain_until,
+                         EXCLUDED.retain_until
+                     ),
+                     updated_at = clock_timestamp()",
+            )
+            .bind(organization_id)
+            .bind(digest.as_slice())
+            .bind(retention_seconds as f64)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(true);
+        }
+        let inserted = match sqlx::query_scalar::<_, String>(
+            "INSERT INTO attempt_objects (
+                 organization_id, attempt_id, fence, kind, name,
+                 object_digest, bytes, media_type, status
+             )
+             SELECT $1, a.id, $5, 'artifact', $8, $9, $10, $11, 'pending'
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             JOIN builds AS b
+               ON b.organization_id = n.organization_id
+              AND b.id = n.build_id
+             WHERE a.organization_id = $1
+               AND b.id = $2
+               AND n.id = $3
+               AND a.id = $4
+               AND a.fence = $5
+               AND a.restore_epoch = $6
+               AND a.restore_epoch = (
+                   SELECT restore_epoch FROM controller_metadata WHERE singleton
+               )
+               AND a.lease_owner = $7
+               AND a.lease_expires_at > clock_timestamp()
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+             ON CONFLICT (organization_id, attempt_id, fence, kind, name)
+             DO UPDATE SET checked_at = clock_timestamp()
+             WHERE attempt_objects.object_digest = EXCLUDED.object_digest
+               AND attempt_objects.bytes = EXCLUDED.bytes
+               AND attempt_objects.media_type = EXCLUDED.media_type
+               AND attempt_objects.status IN ('pending', 'available')
+             RETURNING name",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(node_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .bind(name)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .bind(media_type)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(inserted) => inserted,
+            Err(error) if is_object_deletion_fence_violation(&error) => {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if inserted.is_none() {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        sqlx::query(
+            "INSERT INTO object_retention (
+                 organization_id, object_digest, retain_until
+             )
+             VALUES (
+                 $1, $2,
+                 clock_timestamp() + ($3::double precision * interval '1 second')
+             )
+             ON CONFLICT (organization_id, object_digest) DO UPDATE
+             SET retain_until = GREATEST(
+                     object_retention.retain_until,
+                     EXCLUDED.retain_until
+                 ),
+                 updated_at = clock_timestamp()",
+        )
+        .bind(organization_id)
+        .bind(digest.as_slice())
+        .bind(retention_seconds as f64)
+        .execute(&mut *tx)
+        .await?;
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "artifact.reserved",
+            json!({
+                "node_id": node_id,
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "name": name,
+                "sha256": hex_digest(&digest),
+                "bytes": bytes,
+                "media_type": media_type,
+                "retention_seconds": retention_seconds,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Reports whether an old filesystem publication claim still belongs to a
+    /// recoverable, current-restore artifact reservation.
+    pub async fn artifact_publication_claim_active(
+        &self,
+        organization_id: Uuid,
+        digest: [u8; 32],
+        bytes: i64,
+    ) -> Result<bool, StoreError> {
+        if bytes < 0 {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let active = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM attempt_objects AS o
+                 JOIN attempts AS a
+                   ON a.organization_id = o.organization_id
+                  AND a.id = o.attempt_id
+                 WHERE o.organization_id = $1
+                   AND o.kind = 'artifact'
+                   AND o.object_digest = $2
+                   AND o.bytes = $3
+                   AND o.status = 'pending'
+                   AND a.restore_epoch = (
+                       SELECT restore_epoch FROM controller_metadata WHERE singleton
+                   )
+                   AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+                   AND a.lease_owner IS NOT NULL
+             )",
+        )
+        .bind(organization_id)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(active)
+    }
+
+    /// Marks an exact reserved artifact available only after bytes are published.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mark_artifact_available(
+        &self,
+        organization_id: Uuid,
+        build_id: Uuid,
+        node_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        name: &str,
+        digest: [u8; 32],
+        bytes: i64,
+        media_type: &str,
+        retention_seconds: i64,
+    ) -> Result<bool, StoreError> {
+        if !(0..=MAX_OBJECT_RETENTION_SECONDS).contains(&retention_seconds) {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_object_deletion_fence(&mut tx, &digest).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.artifact.{organization_id}.{attempt_id}.{fence}.{name}"
+            ))
+            .execute(&mut *tx)
+            .await?;
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT o.status
+             FROM attempt_objects AS o
+             JOIN attempts AS a
+               ON a.organization_id = o.organization_id
+              AND a.id = o.attempt_id
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             WHERE o.organization_id = $1
+               AND n.build_id = $2
+               AND n.id = $3
+               AND o.attempt_id = $4
+               AND o.fence = $5
+               AND o.kind = 'artifact'
+               AND o.name = $6
+               AND o.object_digest = $7
+               AND o.bytes = $8
+               AND o.media_type = $9
+               AND mcloving_owned_object_publication_allowed(
+                     o.organization_id,
+                     o.attempt_id,
+                     o.fence,
+                     o.kind,
+                     o.name,
+                     o.object_digest
+                   )
+             FOR UPDATE OF o",
+        )
+        .bind(organization_id)
+        .bind(build_id)
+        .bind(node_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(name)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .bind(media_type)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match status.as_deref() {
+            Some("available") => {
+                tx.commit().await?;
+                return Ok(true);
+            }
+            Some("pending") => {}
+            _ => {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+        }
+        sqlx::query(
+            "UPDATE attempt_objects
+             SET status = 'available', checked_at = clock_timestamp()
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND kind = 'artifact'
+               AND name = $4
+               AND object_digest = $5
+               AND status = 'pending'",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(name)
+        .bind(digest.as_slice())
+        .execute(&mut *tx)
+        .await?;
+        append_event_and_outbox(
+            &mut tx,
+            organization_id,
+            build_id,
+            "artifact.committed",
+            json!({
+                "node_id": node_id,
+                "attempt_id": attempt_id,
+                "fence": fence,
+                "name": name,
+                "sha256": hex_digest(&digest),
+                "bytes": bytes,
+                "media_type": media_type,
+                "retention_seconds": retention_seconds,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Lists product-facing artifact metadata in stable execution/name order.
+    pub async fn build_artifacts(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+    ) -> Result<Vec<ArtifactMetadata>, StoreError> {
+        type ArtifactRow = (Uuid, Uuid, Uuid, i64, String, Vec<u8>, i64, String, String);
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, ArtifactRow>(
+            "SELECT b.id, n.id, a.id, o.fence, o.name, o.object_digest,
+                    o.bytes, o.media_type, o.status
+             FROM attempt_objects AS o
+             JOIN attempts AS a
+               ON a.organization_id = o.organization_id
+              AND a.id = o.attempt_id
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             JOIN builds AS b
+               ON b.organization_id = n.organization_id
+              AND b.id = n.build_id
+             WHERE o.organization_id = $1
+               AND b.project_id = $2
+               AND b.id = $3
+               AND o.kind = 'artifact'
+             ORDER BY n.node_key, a.ordinal, o.name",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(
+                |(
+                    build_id,
+                    node_id,
+                    attempt_id,
+                    fence,
+                    name,
+                    digest,
+                    bytes,
+                    media_type,
+                    status,
+                )| {
+                    Ok(ArtifactMetadata {
+                        build_id,
+                        node_id,
+                        attempt_id,
+                        fence,
+                        name,
+                        digest: digest.try_into().map_err(|_| {
+                            StoreError::InvalidObjectRecord(
+                                "artifact digest is not 32 bytes".to_owned(),
+                            )
+                        })?,
+                        bytes,
+                        media_type,
+                        status: parse_object_status(&status)?,
+                    })
+                },
+            )
+            .collect()
+    }
+
     /// Records a verified availability result without changing object identity.
     #[allow(clippy::too_many_arguments)]
     pub async fn set_object_status(
@@ -2506,6 +3007,9 @@ impl Store {
         status: ObjectStatus,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if status == ObjectStatus::Available {
+            acquire_object_deletion_fence(&mut tx, &digest).await?;
+        }
         let updated = sqlx::query_scalar::<_, String>(
             "UPDATE attempt_objects
              SET status = $7, checked_at = clock_timestamp()
@@ -2515,6 +3019,17 @@ impl Store {
                AND kind = $4
                AND name = $5
                AND object_digest = $6
+               AND (
+                 $7 <> 'available'
+                 OR mcloving_owned_object_publication_allowed(
+                      organization_id,
+                      attempt_id,
+                      fence,
+                      kind,
+                      name,
+                      object_digest
+                    )
+               )
              RETURNING name",
         )
         .bind(organization_id)
@@ -2836,7 +3351,7 @@ impl Store {
         digest: [u8; 32],
         retention_seconds: i64,
     ) -> Result<bool, StoreError> {
-        if retention_seconds < 0 {
+        if !(0..=MAX_OBJECT_RETENTION_SECONDS).contains(&retention_seconds) {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
@@ -2972,6 +3487,12 @@ impl Store {
              FROM attempt_objects AS candidate
              WHERE NOT EXISTS (
                    SELECT 1
+                   FROM attempt_objects AS pending
+                   WHERE pending.object_digest = candidate.object_digest
+                     AND pending.status = 'pending'
+               )
+               AND NOT EXISTS (
+                   SELECT 1
                    FROM attempt_objects AS referenced
                    LEFT JOIN object_retention AS r
                      ON r.organization_id = referenced.organization_id
@@ -3031,6 +3552,12 @@ impl Store {
                )
                AND NOT EXISTS (
                    SELECT 1
+                   FROM attempt_objects AS pending
+                   WHERE pending.object_digest = candidate.object_digest
+                     AND pending.status = 'pending'
+               )
+               AND NOT EXISTS (
+                   SELECT 1
                    FROM attempt_objects AS referenced
                    LEFT JOIN object_retention AS r
                      ON r.organization_id = referenced.organization_id
@@ -3071,6 +3598,12 @@ impl Store {
                        SELECT 1
                        FROM attempt_objects
                        WHERE object_digest = $1
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM attempt_objects AS pending
+                       WHERE pending.object_digest = $1
+                         AND pending.status = 'pending'
                    )
                    AND NOT EXISTS (
                        SELECT 1
@@ -3585,7 +4118,7 @@ async fn append_event_and_outbox(
     build_id: Uuid,
     kind: &str,
     payload: Value,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), StoreError> {
     sqlx::query(
         "INSERT INTO build_events (organization_id, build_id, kind, payload)
          VALUES ($1, $2, $3, $4)",
@@ -3603,10 +4136,32 @@ async fn append_event_and_outbox(
     .bind(organization_id)
     .bind(kind)
     .bind(build_id)
-    .bind(payload)
+    .bind(&payload)
     .execute(&mut **tx)
     .await?;
+    audit::append_audit_record(
+        tx,
+        organization_id,
+        audit_category_for_event(kind),
+        "system:controller",
+        kind,
+        &format!("build:{build_id}"),
+        payload,
+    )
+    .await?;
     Ok(())
+}
+
+fn audit_category_for_event(kind: &str) -> &'static str {
+    if kind.contains("credential") {
+        "credential_grant"
+    } else if kind.contains("approval") || kind.contains("approved") {
+        "approval"
+    } else if kind.contains("artifact") || kind.contains("object") {
+        "artifact"
+    } else {
+        "scheduling"
+    }
 }
 
 async fn terminalize_dead_lettered_reconciliation(
@@ -3751,8 +4306,40 @@ fn parse_object_kind(value: &str) -> Result<ObjectKind, StoreError> {
     }
 }
 
+fn hex_digest(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn redact_to_fixed_point(content: &[u8], redactions: &[Vec<u8>]) -> Result<Vec<u8>, StoreError> {
+    if !redactions.is_empty() {
+        AhoCorasickBuilder::new()
+            .match_kind(MatchKind::LeftmostLongest)
+            .build(redactions)
+            .map_err(|error| {
+                StoreError::InvalidSecurityOperation(format!(
+                    "credential redaction set is invalid: {error}"
+                ))
+            })?;
+    }
+    let mut secrets = redactions
+        .iter()
+        .map(Vec::as_slice)
+        .filter(|secret| !secret.is_empty())
+        .collect::<Vec<_>>();
+    secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
+    let mut output = Vec::with_capacity(content.len());
+    for byte in content {
+        output.push(*byte);
+        while let Some(secret) = secrets.iter().find(|secret| output.ends_with(secret)) {
+            output.truncate(output.len() - secret.len());
+        }
+    }
+    Ok(output)
+}
+
 fn parse_object_status(value: &str) -> Result<ObjectStatus, StoreError> {
     match value {
+        "pending" => Ok(ObjectStatus::Pending),
         "available" => Ok(ObjectStatus::Available),
         "missing" => Ok(ObjectStatus::Missing),
         "corrupt" => Ok(ObjectStatus::Corrupt),
@@ -3765,6 +4352,14 @@ fn parse_object_status(value: &str) -> Result<ObjectStatus, StoreError> {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn credential_redaction_reaches_a_fixed_point() {
+        assert_eq!(
+            redact_to_fixed_point(b"abc", &[b"b".to_vec(), b"ac".to_vec()]).unwrap(),
+            b""
+        );
+    }
 
     #[test]
     fn finalization_recovery_accepts_all_nonterminal_completion_races() {
@@ -3794,5 +4389,11 @@ mod unit_tests {
         assert!(log_sequence_is_bounded(MAX_ATTEMPT_LOG_CHUNKS - 1));
         assert!(!log_sequence_is_bounded(MAX_ATTEMPT_LOG_CHUNKS));
         assert!(!log_sequence_is_bounded(-1));
+    }
+
+    #[test]
+    fn protected_environment_approval_events_use_the_approval_category() {
+        assert_eq!(audit_category_for_event("environment.approved"), "approval");
+        assert_eq!(audit_category_for_event("approval.requested"), "approval");
     }
 }

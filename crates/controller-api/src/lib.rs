@@ -1,14 +1,22 @@
 //! Versioned public HTTP API and its Rust client.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Bytes;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use mcloving_controller_store::{NewBuild, Store, StoreError, WaitReason};
+use mcloving_controller_store::{
+    ArtifactMetadata, MAX_OBJECT_RETENTION_SECONDS, NewBuild, ObjectKind, ObjectStatus, Store,
+    StoreError, WaitReason,
+};
+use mcloving_object_store::{
+    FilesystemObjectStore, ObjectGap, ObjectRef, ObjectStoreError, PendingObject,
+};
 use mcloving_pipeline_ir::{ParseLimits, Step, compile_strict_yaml};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -18,13 +26,19 @@ use uuid::Uuid;
 pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 pub const TRUST_POOL_HEADER: &str = "mcloving-trust-pool";
 pub const PLATFORM_HEADER: &str = "mcloving-platform";
+pub const ARTIFACT_NAME_HEADER: &str = "mcloving-artifact-name";
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
 const DEFAULT_PLATFORM: &str = "linux";
+const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
 
 #[derive(Clone)]
 pub struct ApiState {
     store: Store,
     token_digest: [u8; 32],
+    object_store: Option<FilesystemObjectStore>,
+    artifact_body_limit: usize,
+    staged_upload_ttl: Duration,
+    publication_claim_cursor: Arc<Mutex<Option<String>>>,
 }
 
 impl ApiState {
@@ -37,11 +51,37 @@ impl ApiState {
         Ok(Self {
             store,
             token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
+            object_store: None,
+            artifact_body_limit: 2 * 1024 * 1024,
+            staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
+            publication_claim_cursor: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn with_object_store(mut self, object_store: FilesystemObjectStore) -> Self {
+        self.artifact_body_limit =
+            usize::try_from(object_store.quota().max_object_bytes).unwrap_or(usize::MAX);
+        self.object_store = Some(object_store);
+        self
+    }
+
+    /// Sets the maximum age of a durable but unpublished artifact upload.
+    ///
+    /// Reclamation runs before each new upload, so abandoned reservations
+    /// cannot permanently consume the tenant's object-store quota.
+    pub fn with_staged_upload_ttl(mut self, staged_upload_ttl: Duration) -> Self {
+        self.staged_upload_ttl = staged_upload_ttl;
+        self
     }
 }
 
 pub fn router(state: ApiState) -> Router {
+    let artifact_upload = Router::new()
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads",
+            post(stage_artifact),
+        )
+        .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
     Router::new()
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds",
@@ -58,6 +98,23 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/cancel",
             post(cancel),
+        )
+        .merge(artifact_upload)
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads/{upload_token}/commit",
+            post(commit_artifact),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts",
+            get(list_artifacts),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts/metadata",
+            get(artifact_metadata),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts/content",
+            get(download_artifact),
         )
         .route(
             "/api/v1/organizations/{organization_id}/scheduler/explain",
@@ -101,6 +158,48 @@ pub struct LogResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CancellationResponse {
     pub accepted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StagedArtifactResponse {
+    pub upload_token: String,
+    pub name: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ArtifactCommitRequest {
+    pub node_id: Uuid,
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub restore_epoch: i64,
+    pub agent_id: String,
+    pub name: String,
+    pub media_type: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub retention_seconds: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ArtifactResponse {
+    pub build_id: Uuid,
+    pub node_id: Uuid,
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub name: String,
+    pub sha256: String,
+    pub bytes: u64,
+    pub media_type: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ArtifactQuery {
+    pub attempt_id: Uuid,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -331,6 +430,366 @@ async fn status(
     }))
 }
 
+async fn stage_artifact(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, build_id)): Path<BuildPath>,
+    headers: HeaderMap,
+    content: Bytes,
+) -> Result<(StatusCode, Json<StagedArtifactResponse>), ApiError> {
+    authorize(&state, &headers)?;
+    require_build(&state, organization_id, project_id, build_id).await?;
+    let name = bounded_header(
+        &headers,
+        ARTIFACT_NAME_HEADER,
+        512,
+        "artifact_name_required",
+    )?;
+    let media_type = bounded_header(
+        &headers,
+        header::CONTENT_TYPE.as_str(),
+        255,
+        "media_type_required",
+    )?;
+    if let Some(length) = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        && length != content.len() as u64
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "partial_upload",
+            "received artifact bytes do not match Content-Length",
+        ));
+    }
+    let object_store = object_store(&state)?;
+    reap_abandoned_artifact_uploads(&state).await?;
+    let staged = object_store
+        .stage_artifact(&organization_id.to_string(), &content)
+        .map_err(object_store_error)?
+        .persist()
+        .map_err(object_store_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(StagedArtifactResponse {
+            upload_token: staged.token().to_owned(),
+            name,
+            media_type,
+            sha256: hex(&staged.object_ref().sha256),
+            bytes: staged.object_ref().bytes,
+        }),
+    ))
+}
+
+async fn reap_abandoned_artifact_uploads(state: &ApiState) -> Result<(), ApiError> {
+    let object_store = object_store(state)?;
+    let claims = {
+        let mut cursor = state
+            .publication_claim_cursor
+            .lock()
+            .map_err(|_| internal("publication-claim cursor lock is poisoned"))?;
+        let claims = object_store
+            .publication_claims_older_than(
+                state.staged_upload_ttl,
+                MAX_PUBLICATION_CLAIM_RECONCILIATION,
+                cursor.as_deref(),
+            )
+            .map_err(object_store_error)?;
+        if let Some(last) = claims.last() {
+            *cursor = Some(last.token().to_owned());
+        }
+        claims
+    };
+    for claim in claims {
+        let Some(organization_id) = publication_claim_organization_id(claim.token()) else {
+            object_store
+                .release_publication_claim(&claim, state.staged_upload_ttl)
+                .map_err(object_store_error)?;
+            continue;
+        };
+        let bytes = i64::try_from(claim.object_ref().bytes).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "artifact_reconciliation_failed",
+                "publication claim exceeds controller metadata bounds",
+            )
+        })?;
+        if state
+            .store
+            .artifact_publication_claim_active(organization_id, claim.object_ref().sha256, bytes)
+            .await
+            .map_err(internal)?
+        {
+            continue;
+        }
+        object_store
+            .release_publication_claim(&claim, state.staged_upload_ttl)
+            .map_err(object_store_error)?;
+    }
+    object_store
+        .reap_staged_older_than(state.staged_upload_ttl)
+        .map_err(object_store_error)?;
+    Ok(())
+}
+
+fn publication_claim_organization_id(token: &str) -> Option<Uuid> {
+    let prefix = token.get(..36)?;
+    if token.as_bytes().get(36) != Some(&b'-') {
+        return None;
+    }
+    Uuid::parse_str(prefix).ok()
+}
+
+async fn commit_artifact(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, build_id, upload_token)): Path<(Uuid, Uuid, Uuid, String)>,
+    headers: HeaderMap,
+    Json(request): Json<ArtifactCommitRequest>,
+) -> Result<(StatusCode, Json<ArtifactResponse>), ApiError> {
+    authorize(&state, &headers)?;
+    require_build(&state, organization_id, project_id, build_id).await?;
+    if !upload_token.starts_with(&format!("{organization_id}-")) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "upload_tenant_mismatch",
+            "artifact upload token does not belong to this tenant",
+        ));
+    }
+    validate_artifact_retention(request.retention_seconds)?;
+    let digest = parse_hex_digest(&request.sha256)?;
+    let pending = PendingObject::from_parts(
+        upload_token,
+        ObjectRef {
+            sha256: digest,
+            bytes: request.bytes,
+        },
+    )
+    .map_err(object_store_error)?;
+    let pending = object_store(&state)?
+        .claim_pending(&pending)
+        .map_err(object_store_error)?;
+    object_store(&state)?
+        .verify_pending(&pending)
+        .map_err(object_store_error)?;
+    let bytes = i64::try_from(request.bytes).map_err(|_| {
+        ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "artifact_too_large",
+            "artifact byte count exceeds controller metadata bounds",
+        )
+    })?;
+    let registered = state
+        .store
+        .register_artifact(
+            organization_id,
+            build_id,
+            request.node_id,
+            request.attempt_id,
+            request.fence,
+            request.restore_epoch,
+            &request.agent_id,
+            &request.name,
+            digest,
+            bytes,
+            &request.media_type,
+            request.retention_seconds,
+        )
+        .await
+        .map_err(internal)?;
+    if !registered {
+        object_store(&state)?
+            .abort_pending(&pending)
+            .map_err(object_store_error)?;
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "artifact_authority_rejected",
+            "artifact metadata did not match live fenced execution authority",
+        ));
+    }
+    let committed = object_store(&state)?
+        .commit_pending(pending)
+        .map_err(object_store_error)?;
+    if committed.sha256 != digest || committed.bytes != request.bytes {
+        return Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "artifact_publication_mismatch",
+            "published artifact identity differs from its verified reservation",
+        ));
+    }
+    let available = state
+        .store
+        .mark_artifact_available(
+            organization_id,
+            build_id,
+            request.node_id,
+            request.attempt_id,
+            request.fence,
+            &request.name,
+            digest,
+            bytes,
+            &request.media_type,
+            request.retention_seconds,
+        )
+        .await
+        .map_err(internal)?;
+    if !available {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "artifact_publication_rejected",
+            "published artifact does not match its reserved metadata",
+        ));
+    }
+    let artifact = find_artifact(
+        &state,
+        organization_id,
+        project_id,
+        build_id,
+        request.attempt_id,
+        &request.name,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(artifact_response(artifact)?)))
+}
+
+async fn list_artifacts(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, build_id)): Path<BuildPath>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ArtifactResponse>>, ApiError> {
+    authorize(&state, &headers)?;
+    require_build(&state, organization_id, project_id, build_id).await?;
+    let artifacts = state
+        .store
+        .build_artifacts(organization_id, project_id, build_id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(artifact_response)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(artifacts))
+}
+
+async fn artifact_metadata(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, build_id)): Path<BuildPath>,
+    Query(query): Query<ArtifactQuery>,
+    headers: HeaderMap,
+) -> Result<Json<ArtifactResponse>, ApiError> {
+    authorize(&state, &headers)?;
+    require_build(&state, organization_id, project_id, build_id).await?;
+    let artifact = find_artifact(
+        &state,
+        organization_id,
+        project_id,
+        build_id,
+        query.attempt_id,
+        &query.name,
+    )
+    .await?;
+    Ok(Json(artifact_response(artifact)?))
+}
+
+async fn download_artifact(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, build_id)): Path<BuildPath>,
+    Query(query): Query<ArtifactQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers)?;
+    require_build(&state, organization_id, project_id, build_id).await?;
+    let artifact = find_artifact(
+        &state,
+        organization_id,
+        project_id,
+        build_id,
+        query.attempt_id,
+        &query.name,
+    )
+    .await?;
+    if artifact.status == ObjectStatus::Pending {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "artifact_not_available",
+            "artifact publication has not completed",
+        ));
+    }
+    let reference = ObjectRef {
+        sha256: artifact.digest,
+        bytes: u64::try_from(artifact.bytes).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_artifact_metadata",
+                "stored artifact byte count is invalid",
+            )
+        })?,
+    };
+    let content = match object_store(&state)?.read_verified(&reference) {
+        Ok(content) => content,
+        Err(gap) => {
+            let status = match gap {
+                ObjectGap::Missing { .. } => ObjectStatus::Missing,
+                ObjectGap::Corrupt { .. } => ObjectStatus::Corrupt,
+            };
+            state
+                .store
+                .set_object_status(
+                    organization_id,
+                    artifact.attempt_id,
+                    artifact.fence,
+                    ObjectKind::Artifact,
+                    &artifact.name,
+                    artifact.digest,
+                    status,
+                )
+                .await
+                .map_err(internal)?;
+            return Err(ApiError::new(
+                StatusCode::GONE,
+                "artifact_gap",
+                "artifact bytes are missing or corrupt",
+            ));
+        }
+    };
+    if artifact.status != ObjectStatus::Available {
+        let restored = state
+            .store
+            .set_object_status(
+                organization_id,
+                artifact.attempt_id,
+                artifact.fence,
+                ObjectKind::Artifact,
+                &artifact.name,
+                artifact.digest,
+                ObjectStatus::Available,
+            )
+            .await
+            .map_err(internal)?;
+        if !restored {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "artifact_restore_raced",
+                "restored artifact metadata changed during verification",
+            ));
+        }
+    }
+    let mut response = Response::new(content.into());
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&artifact.media_type).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_artifact_metadata",
+                "stored media type is not a valid HTTP header",
+            )
+        })?,
+    );
+    response.headers_mut().insert(
+        "mcloving-artifact-sha256",
+        HeaderValue::from_str(&hex(&artifact.digest)).expect("hex digest is a valid header"),
+    );
+    Ok(response)
+}
+
 async fn logs(
     State(state): State<Arc<ApiState>>,
     Path((organization_id, project_id, build_id)): Path<BuildPath>,
@@ -427,6 +886,166 @@ async fn explain(
         }
     };
     Ok(Json(response))
+}
+
+async fn require_build(
+    state: &ApiState,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+) -> Result<(), ApiError> {
+    if state
+        .store
+        .build_snapshot(organization_id, project_id, build_id)
+        .await
+        .map_err(internal)?
+        .is_none()
+    {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
+fn object_store(state: &ApiState) -> Result<&FilesystemObjectStore, ApiError> {
+    state.object_store.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "artifact_store_unavailable",
+            "artifact storage is not configured",
+        )
+    })
+}
+
+fn bounded_header(
+    headers: &HeaderMap,
+    name: &str,
+    max_bytes: usize,
+    code: &'static str,
+) -> Result<String, ApiError> {
+    let value = headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= max_bytes
+                && value.trim() == *value
+                && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                code,
+                format!("{name} must be non-empty, canonical, and bounded"),
+            )
+        })?;
+    Ok(value.to_owned())
+}
+
+async fn find_artifact(
+    state: &ApiState,
+    organization_id: Uuid,
+    project_id: Uuid,
+    build_id: Uuid,
+    attempt_id: Uuid,
+    name: &str,
+) -> Result<ArtifactMetadata, ApiError> {
+    state
+        .store
+        .build_artifacts(organization_id, project_id, build_id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .find(|artifact| artifact.attempt_id == attempt_id && artifact.name == name)
+        .ok_or_else(not_found)
+}
+
+fn artifact_response(artifact: ArtifactMetadata) -> Result<ArtifactResponse, ApiError> {
+    Ok(ArtifactResponse {
+        build_id: artifact.build_id,
+        node_id: artifact.node_id,
+        attempt_id: artifact.attempt_id,
+        fence: artifact.fence,
+        name: artifact.name,
+        sha256: hex(&artifact.digest),
+        bytes: u64::try_from(artifact.bytes).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_artifact_metadata",
+                "stored artifact byte count is invalid",
+            )
+        })?,
+        media_type: artifact.media_type,
+        status: match artifact.status {
+            ObjectStatus::Pending => "pending",
+            ObjectStatus::Available => "available",
+            ObjectStatus::Missing => "missing",
+            ObjectStatus::Corrupt => "corrupt",
+        }
+        .to_owned(),
+    })
+}
+
+fn parse_hex_digest(value: &str) -> Result<[u8; 32], ApiError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_artifact_digest",
+            "artifact SHA-256 must contain exactly 64 hexadecimal characters",
+        ));
+    }
+    let mut digest = [0_u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_artifact_digest",
+                "artifact SHA-256 is invalid",
+            )
+        })?;
+    }
+    Ok(digest)
+}
+
+fn validate_artifact_retention(retention_seconds: i64) -> Result<(), ApiError> {
+    if !(0..=MAX_OBJECT_RETENTION_SECONDS).contains(&retention_seconds) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "artifact_retention_out_of_range",
+            format!(
+                "artifact retention must be between zero and \
+                 {MAX_OBJECT_RETENTION_SECONDS} seconds"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn object_store_error(error: ObjectStoreError) -> ApiError {
+    match error {
+        ObjectStoreError::ObjectQuotaExceeded => ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "artifact_object_quota",
+            error.to_string(),
+        ),
+        ObjectStoreError::TotalQuotaExceeded => ApiError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "artifact_total_quota",
+            error.to_string(),
+        ),
+        ObjectStoreError::StagedObjectQuotaExceeded => ApiError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "artifact_staged_object_quota",
+            error.to_string(),
+        ),
+        ObjectStoreError::ForeignStagingPath
+        | ObjectStoreError::CorruptStagedObject
+        | ObjectStoreError::ImmutableObjectConflict => ApiError::new(
+            StatusCode::CONFLICT,
+            "artifact_integrity",
+            error.to_string(),
+        ),
+        _ => internal(error),
+    }
 }
 
 fn authorize(state: &ApiState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -622,6 +1241,113 @@ impl Client {
         .await
     }
 
+    pub async fn stage_artifact(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        name: &str,
+        media_type: &str,
+        content: Vec<u8>,
+    ) -> Result<StagedArtifactResponse, ClientError> {
+        self.send(
+            self.inner
+                .post(format!(
+                    "{}/artifact-uploads",
+                    self.build_url(organization_id, project_id, build_id)
+                ))
+                .header(ARTIFACT_NAME_HEADER, name)
+                .header(header::CONTENT_TYPE, media_type)
+                .body(content),
+        )
+        .await
+    }
+
+    pub async fn commit_artifact(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        upload_token: &str,
+        request: &ArtifactCommitRequest,
+    ) -> Result<ArtifactResponse, ClientError> {
+        self.send(
+            self.inner
+                .post(format!(
+                    "{}/artifact-uploads/{upload_token}/commit",
+                    self.build_url(organization_id, project_id, build_id)
+                ))
+                .json(request),
+        )
+        .await
+    }
+
+    pub async fn artifacts(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+    ) -> Result<Vec<ArtifactResponse>, ClientError> {
+        self.send(self.inner.get(format!(
+            "{}/artifacts",
+            self.build_url(organization_id, project_id, build_id)
+        )))
+        .await
+    }
+
+    pub async fn artifact_metadata(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        attempt_id: Uuid,
+        name: &str,
+    ) -> Result<ArtifactResponse, ClientError> {
+        self.send(
+            self.inner
+                .get(format!(
+                    "{}/artifacts/metadata",
+                    self.build_url(organization_id, project_id, build_id)
+                ))
+                .query(&[
+                    ("attempt_id", attempt_id.to_string()),
+                    ("name", name.to_owned()),
+                ]),
+        )
+        .await
+    }
+
+    pub async fn download_artifact(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        attempt_id: Uuid,
+        name: &str,
+    ) -> Result<Vec<u8>, ClientError> {
+        let response = self
+            .inner
+            .get(format!(
+                "{}/artifacts/content",
+                self.build_url(organization_id, project_id, build_id)
+            ))
+            .query(&[
+                ("attempt_id", attempt_id.to_string()),
+                ("name", name.to_owned()),
+            ])
+            .bearer_auth(&self.bearer_token)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ClientError::Response {
+                status,
+                body: response.text().await?,
+            });
+        }
+        Ok(response.bytes().await?.to_vec())
+    }
+
     pub async fn explain(
         &self,
         organization_id: Uuid,
@@ -681,6 +1407,36 @@ mod tests {
         assert!(constant_time_eq(&[1, 2, 3], &[1, 2, 3]));
         assert!(!constant_time_eq(&[1, 2, 3], &[1, 2, 4]));
         assert!(!constant_time_eq(&[1, 2], &[1, 2, 0]));
+    }
+
+    #[test]
+    fn artifact_retention_is_bounded_before_publication_claim() {
+        for seconds in [0, MAX_OBJECT_RETENTION_SECONDS] {
+            validate_artifact_retention(seconds).expect("retention boundary accepted");
+        }
+        for seconds in [-1, MAX_OBJECT_RETENTION_SECONDS + 1, i64::MAX] {
+            let error = validate_artifact_retention(seconds).expect_err("retention rejected");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "artifact_retention_out_of_range");
+        }
+    }
+
+    #[test]
+    fn publication_claim_owner_is_extracted_only_from_controller_tokens() {
+        let organization_id = Uuid::from_u128(7);
+        let token = format!("{organization_id}-123-9.staged");
+        assert_eq!(
+            publication_claim_organization_id(&token),
+            Some(organization_id)
+        );
+        assert_eq!(
+            publication_claim_organization_id("tenant-a-123-9.staged"),
+            None
+        );
+        assert_eq!(
+            publication_claim_organization_id(&format!("{organization_id}.123-9.staged")),
+            None
+        );
     }
 
     #[test]

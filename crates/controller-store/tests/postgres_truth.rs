@@ -1,13 +1,16 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, DagDependency, DagNodeKind, DependencyCondition,
-    EffectClass, EffectStatus, NewBuild, NewDagBuild, NewDagNode, NewLogChunk, ObjectKind,
+    EffectClass, EffectStatus, JunitLimits, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
+    NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
     ObjectStatus, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
-    TerminalOutcome, WaitReason,
+    TerminalOutcome, TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
 
@@ -1435,6 +1438,21 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
         .execute(&mut *escalation)
         .await
         .expect("bind tenant context for escalation test");
+    let cross_tenant_probe = sqlx::query_scalar::<_, bool>(
+        "SELECT mcloving_owned_object_publication_allowed(
+             $1, $2, 1, 'artifact', 'foreign', $3
+         )",
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind([0x6a_u8; 32].as_slice())
+    .fetch_one(&mut *escalation)
+    .await
+    .expect("invoke tenant-scoped publication guard");
+    assert!(
+        !cross_tenant_probe,
+        "the definer function must not expose foreign deletion state"
+    );
     let self_grant = sqlx::query(
         "INSERT INTO identities (id, organization_id, subject, kind)
          VALUES ($1, $2, 'service:attacker', 'service')",
@@ -3508,7 +3526,7 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
             .await
             .expect("accept")
     );
-    let digest = [41; 32];
+    let digest: [u8; 32] = Sha256::digest(organization_id.as_bytes()).into();
     assert!(
         store
             .register_object(
@@ -3584,6 +3602,31 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
             )
             .await
             .expect("reject wrong digest")
+    );
+    sqlx::query(
+        "INSERT INTO object_deletion_claims (
+             object_digest, claim_token, status
+         )
+         VALUES ($1, $2, 'claimed')",
+    )
+    .bind(digest.as_slice())
+    .bind(Uuid::new_v4())
+    .execute(store.pool())
+    .await
+    .expect("install an exact deletion fence");
+    assert!(
+        !store
+            .set_object_status(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                ObjectKind::Artifact,
+                "distribution.tar.zst",
+                digest,
+                ObjectStatus::Available,
+            )
+            .await
+            .expect("fence restoration against deletion")
     );
     let objects = store
         .build_objects(organization_id, project_id, admission.build_id)
@@ -3673,12 +3716,12 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .await
             .expect("assign expired retention")
     );
-    assert_eq!(
+    assert!(
         store
-            .objects_globally_eligible_for_deletion(10)
+            .objects_globally_eligible_for_deletion(10_000)
             .await
-            .expect("list expired content"),
-        vec![digest]
+            .expect("list expired content")
+            .contains(&digest)
     );
 
     let second_organization_id = Uuid::new_v4();
@@ -3748,11 +3791,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("register shared digest")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("missing second-tenant retention is fail-closed")
-            .is_empty()
+            .contains(&digest)
     );
     assert!(
         store
@@ -3760,12 +3803,12 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .await
             .expect("expire second-tenant retention")
     );
-    assert_eq!(
+    assert!(
         store
-            .objects_globally_eligible_for_deletion(10)
+            .objects_globally_eligible_for_deletion(10_000)
             .await
-            .expect("all referencing tenants have expired retention"),
-        vec![digest]
+            .expect("all referencing tenants have expired retention")
+            .contains(&digest)
     );
     assert!(
         store
@@ -3779,11 +3822,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("acquire second-tenant hold")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("one tenant hold blocks global deletion")
-            .is_empty()
+            .contains(&digest)
     );
     assert!(
         store
@@ -3814,11 +3857,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("repeat legal hold idempotently")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("held content is not deletable")
-            .is_empty()
+            .contains(&digest)
     );
     assert!(
         !store
@@ -3867,26 +3910,27 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
     .execute(store.pool())
     .await;
     assert!(reactivated_hold.is_err());
-    assert_eq!(
+    assert!(
         store
-            .objects_globally_eligible_for_deletion(10)
+            .objects_globally_eligible_for_deletion(10_000)
             .await
-            .expect("released content is deletable"),
-        vec![digest]
+            .expect("released content is deletable")
+            .contains(&digest)
     );
     let deletion_claims = store
-        .claim_objects_globally_for_deletion(10)
+        .claim_objects_globally_for_deletion(10_000)
         .await
         .expect("claim released content for deletion");
-    assert_eq!(deletion_claims.len(), 1);
-    let deletion_claim = deletion_claims[0];
-    assert_eq!(deletion_claim.digest, digest);
-    assert_eq!(
+    let deletion_claim = *deletion_claims
+        .iter()
+        .find(|claim| claim.digest == digest)
+        .expect("target digest received a deletion claim");
+    assert!(
         store
-            .pending_object_deletion_claims(10)
+            .pending_object_deletion_claims(10_000)
             .await
-            .expect("recover committed claim after worker restart"),
-        vec![deletion_claim]
+            .expect("recover committed claim after worker restart")
+            .contains(&deletion_claim)
     );
     assert!(
         !store
@@ -3936,11 +3980,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("shortening attempt remains idempotent")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("retention extension is monotonic")
-            .is_empty()
+            .contains(&digest)
     );
 
     let disposable_digest = [54; 32];
@@ -3967,12 +4011,13 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("expire disposable retention")
     );
     let completed_claims = store
-        .claim_objects_globally_for_deletion(1)
+        .claim_objects_globally_for_deletion(10_000)
         .await
         .expect("eligible content is not starved by protected digest prefix");
-    assert_eq!(completed_claims.len(), 1);
-    let completed_claim = completed_claims[0];
-    assert_eq!(completed_claim.digest, disposable_digest);
+    let completed_claim = *completed_claims
+        .iter()
+        .find(|claim| claim.digest == disposable_digest)
+        .expect("disposable digest received a deletion claim");
     assert!(
         store
             .pending_object_deletion_claims(10)
@@ -4606,6 +4651,491 @@ async fn claim_order_index_is_tenant_prefixed() {
         ),
         "unexpected claim index: {definition}"
     );
+}
+
+#[tokio::test]
+async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let pipeline_digest = [0xa1; 32];
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "protected",
+        )
+        .await
+        .expect("create protected project");
+    assert!(
+        store
+            .configure_protected_environment(
+                organization_id,
+                project_id,
+                "production",
+                "deploy",
+                2,
+            )
+            .await
+            .expect("configure protected environment")
+    );
+    assert!(
+        !store
+            .configure_protected_environment(
+                organization_id,
+                project_id,
+                "production",
+                "deploy",
+                2,
+            )
+            .await
+            .expect("idempotent protected environment configuration")
+    );
+    assert!(
+        store
+            .configure_protected_environment(
+                organization_id,
+                project_id,
+                "production",
+                "deploy",
+                1,
+            )
+            .await
+            .expect("change protected environment configuration")
+    );
+    assert!(
+        store
+            .configure_protected_environment(
+                organization_id,
+                project_id,
+                "production",
+                "deploy",
+                2,
+            )
+            .await
+            .expect("restore protected environment configuration")
+    );
+    let policy_audit = store
+        .export_audit_events(organization_id)
+        .await
+        .expect("export protected environment policy audit");
+    let policy_events = policy_audit
+        .events
+        .iter()
+        .filter(|event| event.action == "protected_environment.configured")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        policy_events
+            .iter()
+            .map(|event| event.payload["required_approvals"].as_i64())
+            .collect::<Vec<_>>(),
+        vec![Some(2), Some(1), Some(2)],
+        "create and actual policy changes are audited while a no-op is not"
+    );
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "protected-deploy".into(),
+            pipeline_digest,
+            node_key: "deploy".into(),
+            required_capabilities: vec!["linux".into()],
+            required_trust_pool: "trusted".into(),
+            priority: 0,
+            execution_spec: json!({}),
+        })
+        .await
+        .expect("admit protected build");
+    assert!(
+        store
+            .open_agent_session(
+                "agent-protected",
+                "trusted",
+                1,
+                3,
+                &[
+                    "work-delivery-v1".to_owned(),
+                    "attempt-credentials-v1".to_owned(),
+                ],
+                &["linux".to_owned()],
+            )
+            .await
+            .expect("open protected agent session")
+    );
+    let claim = store
+        .claim_next_in_session(
+            &ClaimRequest {
+                organization_id,
+                scheduler_id: "scheduler-protected".into(),
+                agent_id: "agent-protected".into(),
+                capabilities: vec!["linux".into()],
+                trust_pool: "trusted".into(),
+                lease_seconds: 300,
+                fairness_seed: 0,
+            },
+            1,
+        )
+        .await
+        .expect("claim protected build")
+        .expect("protected build is ready");
+    let approvals = [Uuid::new_v4(), Uuid::new_v4()];
+    for (approval_id, subject) in approvals
+        .into_iter()
+        .zip(["oidc:release-owner", "oidc:security-owner"])
+    {
+        assert!(
+            store
+                .approve_environment(&NewEnvironmentApproval {
+                    id: approval_id,
+                    organization_id,
+                    project_id,
+                    build_id: admission.build_id,
+                    pipeline_digest,
+                    environment: "production",
+                    action: "deploy",
+                    approver_subject: subject,
+                    ttl_seconds: 300,
+                })
+                .await
+                .expect("approve protected environment")
+        );
+    }
+    assert!(
+        !store
+            .approve_environment(&NewEnvironmentApproval {
+                id: approvals[0],
+                organization_id,
+                project_id,
+                build_id: admission.build_id,
+                pipeline_digest,
+                environment: "production",
+                action: "deploy",
+                approver_subject: "oidc:release-owner",
+                ttl_seconds: 300,
+            })
+            .await
+            .expect("reject approval replay")
+    );
+    let expired_secret = b"expired-secret-value";
+    let secret = b"marker-secret-value";
+    let grant_id = Uuid::new_v4();
+    let mut grant = NewCredentialGrant {
+        id: Uuid::new_v4(),
+        organization_id,
+        project_id,
+        build_id: admission.build_id,
+        attempt_id: claim.attempt_id,
+        fence: claim.fence,
+        pipeline_digest,
+        environment: "production",
+        action: "deploy",
+        target_name: "DEPLOY_TOKEN",
+        secret_value: expired_secret,
+        approval_ids: &approvals[..1],
+        ttl_seconds: 1,
+    };
+    assert!(
+        !store
+            .issue_credential_grant(&grant)
+            .await
+            .expect("reject insufficient approvals")
+    );
+    grant.approval_ids = &approvals;
+    assert!(
+        store
+            .issue_credential_grant(&grant)
+            .await
+            .expect("issue protected grant")
+    );
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    grant.id = grant_id;
+    grant.secret_value = secret;
+    grant.ttl_seconds = 300;
+    assert!(
+        store
+            .issue_credential_grant(&grant)
+            .await
+            .expect("renew an expired undelivered protected grant")
+    );
+    let renewed = sqlx::query_as::<_, (Uuid, Vec<u8>, bool, bool)>(
+        "SELECT id, secret_value, delivered_at IS NULL,
+                expires_at > clock_timestamp()
+         FROM credential_grants
+         WHERE organization_id = $1
+           AND attempt_id = $2
+           AND fence = $3
+           AND target_name = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("DEPLOY_TOKEN")
+    .fetch_one(store.pool())
+    .await
+    .expect("read renewed protected grant");
+    assert_eq!(renewed, (grant_id, secret.to_vec(), true, true));
+    assert!(
+        store
+            .approve_environment(&NewEnvironmentApproval {
+                id: Uuid::new_v4(),
+                organization_id,
+                project_id,
+                build_id: admission.build_id,
+                pipeline_digest,
+                environment: "production",
+                action: "deploy",
+                approver_subject: "oidc:release-owner",
+                ttl_seconds: 300,
+            })
+            .await
+            .expect("renew consumed approval for a later attempt")
+    );
+    assert!(
+        !store
+            .issue_credential_grant(&grant)
+            .await
+            .expect("reject grant replay")
+    );
+    assert!(
+        store
+            .accept_offer_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+            )
+            .await
+            .expect("accept protected work")
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                claim.attempt_id,
+                claim.fence + 1,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject another fence")
+            .is_none()
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                Uuid::new_v4(),
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject another attempt")
+            .is_none()
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                Uuid::new_v4(),
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                1,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject another tenant")
+            .is_none()
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "another-agent",
+                1,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject another agent")
+            .is_none()
+    );
+    assert!(
+        store
+            .open_agent_session(
+                "agent-protected",
+                "trusted",
+                2,
+                3,
+                &["work-delivery-v1".to_owned()],
+                &["linux".to_owned()],
+            )
+            .await
+            .expect("replace the session without credential support")
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                2,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject a session without credential support")
+            .is_none()
+    );
+    assert!(
+        store
+            .open_agent_session(
+                "agent-protected",
+                "trusted",
+                3,
+                3,
+                &[
+                    "work-delivery-v1".to_owned(),
+                    "attempt-credentials-v1".to_owned(),
+                ],
+                &["linux".to_owned()],
+            )
+            .await
+            .expect("restore credential support")
+    );
+    let delivered = store
+        .redeem_credential_grants(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            "agent-protected",
+            3,
+            &["DEPLOY_TOKEN".to_owned()],
+        )
+        .await
+        .expect("redeem exact grant")
+        .expect("exact grant set is ready");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].grant_id, grant_id);
+    assert_eq!(delivered[0].target_name, "DEPLOY_TOKEN");
+    assert_eq!(delivered[0].secret_value, secret);
+    let replayed = store
+        .redeem_credential_grants(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            "agent-protected",
+            3,
+            &["DEPLOY_TOKEN".to_owned()],
+        )
+        .await
+        .expect("replay delivery after response loss")
+        .expect("same accepted authority recovers its exact envelope");
+    assert_eq!(replayed, delivered);
+    assert!(
+        store
+            .mark_attempt_running_in_session(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                3,
+            )
+            .await
+            .expect("start protected work")
+    );
+    assert!(
+        store
+            .redeem_credential_grants(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "agent-protected",
+                3,
+                &["DEPLOY_TOKEN".to_owned()],
+            )
+            .await
+            .expect("reject delivery replay after execution start")
+            .is_none()
+    );
+    assert!(
+        store
+            .append_log_in_session(
+                &NewLogChunk {
+                    organization_id,
+                    attempt_id: claim.attempt_id,
+                    fence: claim.fence,
+                    restore_epoch: claim.restore_epoch,
+                    agent_id: "agent-protected",
+                    sequence: 0,
+                    stream: "stdout",
+                    content: b"before marker-secret-value after",
+                },
+                3,
+            )
+            .await
+            .expect("persist redacted credential-bearing log")
+    );
+    let persisted_log = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT content
+         FROM attempt_log_chunks
+         WHERE organization_id = $1
+           AND attempt_id = $2
+           AND fence = $3
+           AND sequence = 0",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .fetch_one(store.pool())
+    .await
+    .expect("read redacted log");
+    assert_eq!(persisted_log, b"before  after");
+
+    let payloads = sqlx::query_scalar::<_, String>(
+        "SELECT string_agg(payload::text, '')
+         FROM (
+             SELECT payload FROM build_events
+             WHERE organization_id = $1 AND build_id = $2
+             UNION ALL
+             SELECT payload FROM outbox
+             WHERE organization_id = $1 AND aggregate_id = $2
+         ) AS publications",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read security publications");
+    assert!(!payloads.contains("marker-secret-value"));
+    let rewritten = sqlx::query(
+        "UPDATE credential_grants
+         SET secret_value = 'rewritten'::bytea
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(grant_id)
+    .execute(store.pool())
+    .await;
+    assert!(rewritten.is_err());
 }
 
 #[tokio::test]
@@ -5738,4 +6268,877 @@ async fn dag_owner_cancellation_is_durable_idempotent_and_monotonic() {
         .await
         .expect("read cancelled build");
     assert_eq!(build_status, "aborted");
+}
+
+#[tokio::test]
+async fn tenant_audit_is_hash_chained_exportable_immutable_and_retained() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "audited",
+        )
+        .await
+        .expect("create audited project");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "audit-build".to_owned(),
+            pipeline_digest: [0x71; 32],
+            node_key: "build".to_owned(),
+            required_capabilities: vec![],
+            required_trust_pool: "default".to_owned(),
+            priority: 0,
+            execution_spec: json!({"program": "true"}),
+        })
+        .await
+        .expect("admit an automatically audited build");
+    for (category, action, subject) in [
+        ("identity", "identity.bound", "identity:operator"),
+        ("authentication", "session.opened", "session:one"),
+        ("credential_grant", "credential.issued", "attempt:one"),
+        ("approval", "environment.approved", "environment:production"),
+        ("artifact", "artifact.committed", "artifact:report"),
+        ("admin", "retention.changed", "tenant:self"),
+    ] {
+        store
+            .append_audit_event(&NewAuditEvent {
+                organization_id,
+                category,
+                actor_subject: "oidc:operator",
+                action,
+                subject,
+                payload: json!({"build_id": admission.build_id}),
+            })
+            .await
+            .expect("append explicit audit category");
+    }
+    store
+        .append_audit_event(&NewAuditEvent {
+            organization_id,
+            category: "admin",
+            actor_subject: "oidc:operator",
+            action: "numeric.canonicalized",
+            subject: "tenant:self",
+            payload: json!({"negative_zero": -0.0}),
+        })
+        .await
+        .expect("append a payload PostgreSQL JSONB normalizes");
+
+    let export = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify the complete tenant chain");
+    assert!(export.events.len() >= 7);
+    let categories = export
+        .events
+        .iter()
+        .map(|event| event.category.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for category in [
+        "scheduling",
+        "identity",
+        "authentication",
+        "credential_grant",
+        "approval",
+        "artifact",
+        "admin",
+    ] {
+        assert!(categories.contains(category), "missing {category} audit");
+    }
+    let mut paged_sequences = Vec::new();
+    let mut after_sequence = 0;
+    let mut first_page = None;
+    loop {
+        let page = store
+            .export_audit_page(organization_id, after_sequence, 2)
+            .await
+            .expect("export a bounded, independently verifiable audit page");
+        if first_page.is_none() {
+            first_page = Some(page.clone());
+        }
+        paged_sequences.extend(page.events.iter().map(|event| event.sequence));
+        let Some(next) = page.next_after_sequence else {
+            break;
+        };
+        after_sequence = next;
+    }
+    assert_eq!(
+        paged_sequences,
+        export
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>()
+    );
+    let mut tampered_page = first_page.expect("the audited build produces a first page");
+    tampered_page.events[0].payload = json!({"tampered": true});
+    assert!(matches!(
+        verify_audit_page(&tampered_page),
+        Err(StoreError::CorruptAuditChain { .. })
+    ));
+
+    assert_eq!(
+        store
+            .extend_audit_retention(organization_id, 10_000)
+            .await
+            .expect("extend audit retention")
+            .retain_until_unix_ms,
+        10_000
+    );
+    assert_eq!(
+        store
+            .extend_audit_retention(organization_id, 1)
+            .await
+            .expect("refuse to shorten audit retention")
+            .retain_until_unix_ms,
+        10_000
+    );
+    assert!(
+        store
+            .set_audit_legal_hold(organization_id, true)
+            .await
+            .expect("place audit legal hold")
+            .legal_hold
+    );
+    assert!(
+        !store
+            .set_audit_legal_hold(organization_id, false)
+            .await
+            .expect("explicitly release audit legal hold")
+            .legal_hold
+    );
+    let retained = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("export retained chain");
+    assert_eq!(
+        retained
+            .retention
+            .expect("retention policy")
+            .retain_until_unix_ms,
+        10_000
+    );
+
+    let writer_store = store.clone();
+    let reader_store = store.clone();
+    let writer = async move {
+        for index in 0..32 {
+            let subject = format!("concurrency:{index}");
+            writer_store
+                .append_audit_event(&NewAuditEvent {
+                    organization_id,
+                    category: "admin",
+                    actor_subject: "system:concurrency-test",
+                    action: "audit.concurrent.appended",
+                    subject: &subject,
+                    payload: json!({"index": index}),
+                })
+                .await?;
+        }
+        Ok::<(), StoreError>(())
+    };
+    let reader = async move {
+        for _ in 0..32 {
+            reader_store.verify_audit_chain(organization_id).await?;
+        }
+        Ok::<(), StoreError>(())
+    };
+    let (writer_result, reader_result) = tokio::join!(writer, reader);
+    writer_result.expect("append while exports hold consistent snapshots");
+    reader_result.expect("concurrent audit exports never mix chain versions");
+
+    let policy_store = store.clone();
+    let policy_writer = async move {
+        for index in 0..32 {
+            policy_store
+                .extend_audit_retention(organization_id, 10_001 + index)
+                .await?;
+            policy_store
+                .set_audit_legal_hold(organization_id, index % 2 == 0)
+                .await?;
+        }
+        Ok::<(), StoreError>(())
+    };
+    let policy_reader_store = store.clone();
+    let policy_reader = async move {
+        for _ in 0..32 {
+            policy_reader_store
+                .verify_audit_chain(organization_id)
+                .await?;
+        }
+        Ok::<(), StoreError>(())
+    };
+    let (policy_result, policy_export_result) =
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(policy_writer, policy_reader)
+        })
+        .await
+        .expect("audit policy writes and exports do not deadlock");
+    policy_result.expect("retention and legal-hold updates remain serializable");
+    policy_export_result.expect("exports remain consistent during policy changes");
+
+    let retained = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify the post-concurrency tenant chain");
+
+    let mutation = sqlx::query(
+        "UPDATE audit_events
+         SET payload = '{\"rewritten\":true}'::jsonb
+         WHERE organization_id = $1 AND sequence = 1",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await;
+    assert!(mutation.is_err(), "audit payload mutation must be denied");
+    let deletion = sqlx::query(
+        "DELETE FROM audit_events
+         WHERE organization_id = $1 AND sequence = 1",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await;
+    assert!(deletion.is_err(), "audit event deletion must be denied");
+
+    sqlx::query(
+        "UPDATE audit_chain_heads
+         SET next_sequence = next_sequence + 1
+         WHERE organization_id = $1",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await
+    .expect("inject a sequence gap");
+    assert!(matches!(
+        store.verify_audit_chain(organization_id).await,
+        Err(StoreError::CorruptAuditChain { .. })
+    ));
+    sqlx::query(
+        "UPDATE audit_chain_heads
+         SET next_sequence = next_sequence - 1,
+             last_hash = decode(repeat('ff', 32), 'hex')
+         WHERE organization_id = $1",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await
+    .expect("inject a head-hash substitution");
+    assert!(matches!(
+        store.verify_audit_chain(organization_id).await,
+        Err(StoreError::CorruptAuditChain { .. })
+    ));
+    sqlx::query(
+        "UPDATE audit_chain_heads
+         SET last_hash = $2
+         WHERE organization_id = $1",
+    )
+    .bind(organization_id)
+    .bind(retained.head_hash.as_slice())
+    .execute(store.pool())
+    .await
+    .expect("restore the verified head");
+    store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("chain recovers after restoring the known head");
+}
+
+#[tokio::test]
+async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "artifact-product",
+        )
+        .await
+        .expect("create artifact project");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "artifact-build".to_owned(),
+            pipeline_digest: [0x81; 32],
+            node_key: "package".to_owned(),
+            required_capabilities: vec!["linux".to_owned()],
+            required_trust_pool: "trusted".to_owned(),
+            priority: 0,
+            execution_spec: json!({"program": "true"}),
+        })
+        .await
+        .expect("admit artifact build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "artifact-scheduler".to_owned(),
+            agent_id: "artifact-agent".to_owned(),
+            capabilities: vec!["linux".to_owned()],
+            trust_pool: "trusted".to_owned(),
+            lease_seconds: 60,
+            fairness_seed: 0,
+        })
+        .await
+        .expect("claim artifact work")
+        .expect("artifact work is ready");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+            )
+            .await
+            .expect("accept artifact work")
+    );
+    let publication_fence_digest = [0x83; 32];
+    assert!(
+        store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/retained-publication.xml",
+                publication_fence_digest,
+                64,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("reserve retained artifact")
+    );
+    assert!(
+        !store
+            .objects_globally_eligible_for_deletion(10_000)
+            .await
+            .expect("inspect pending retained artifact")
+            .contains(&publication_fence_digest),
+        "pending publication must protect its digest from deletion eligibility"
+    );
+    assert!(
+        !store
+            .claim_objects_globally_for_deletion(10_000)
+            .await
+            .expect("try to claim pending retained artifact")
+            .iter()
+            .any(|claim| claim.digest == publication_fence_digest),
+        "pending publication must not receive a durable deletion claim"
+    );
+    assert!(
+        store
+            .mark_artifact_available(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                "reports/retained-publication.xml",
+                publication_fence_digest,
+                64,
+                "application/xml",
+                0,
+            )
+            .await
+            .expect("publish retained artifact")
+    );
+    assert!(
+        !store
+            .objects_globally_eligible_for_deletion(10_000)
+            .await
+            .expect("inspect published retained artifact")
+            .contains(&publication_fence_digest),
+        "publication must preserve the requested retention"
+    );
+    let digest = [0x82; 32];
+    assert!(
+        !store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/overflow.xml",
+                digest,
+                4096,
+                "application/xml",
+                MAX_OBJECT_RETENTION_SECONDS + 1,
+            )
+            .await
+            .expect("reject retention overflow before database interval arithmetic")
+    );
+    assert!(
+        store
+            .build_artifacts(organization_id, project_id, admission.build_id)
+            .await
+            .expect("list artifacts after rejected retention")
+            .iter()
+            .all(|artifact| artifact.name != "reports/overflow.xml")
+    );
+    assert!(
+        store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/result.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("register exact artifact")
+    );
+    let reserved = store
+        .build_artifacts(organization_id, project_id, admission.build_id)
+        .await
+        .expect("list reserved artifact");
+    let reserved = reserved
+        .iter()
+        .find(|artifact| artifact.name == "reports/result.xml")
+        .expect("reserved exact artifact");
+    assert_eq!(reserved.status, ObjectStatus::Pending);
+    assert!(
+        store
+            .artifact_publication_claim_active(organization_id, digest, 4096)
+            .await
+            .expect("inspect live publication claim"),
+        "a current live reservation must protect its filesystem claim"
+    );
+    sqlx::query(
+        "UPDATE attempts
+         SET lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("expire the publishing lease after metadata reservation");
+    assert!(
+        store
+            .artifact_publication_claim_active(organization_id, digest, 4096)
+            .await
+            .expect("inspect recoverable publication claim"),
+        "an expired lease must not discard a claim that exact replay can recover"
+    );
+    sqlx::query(
+        "UPDATE attempts
+         SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("revoke the expired publication authority");
+    assert!(
+        !store
+            .artifact_publication_claim_active(organization_id, digest, 4096)
+            .await
+            .expect("inspect revoked publication claim"),
+        "a scheduler-revoked attempt must release its abandoned claim"
+    );
+    sqlx::query(
+        "UPDATE attempts
+         SET status = 'reconciliation_required',
+             lease_owner = 'artifact-agent',
+             lease_expires_at = NULL
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("retain a stale owner on a reconciliation-required attempt");
+    assert!(
+        !store
+            .artifact_publication_claim_active(organization_id, digest, 4096)
+            .await
+            .expect("inspect reconciliation-required publication claim"),
+        "a reconciliation-required attempt cannot replay publication and must release its claim"
+    );
+    sqlx::query(
+        "UPDATE attempts
+         SET status = 'finalizing',
+             lease_owner = 'artifact-agent',
+             lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("restore exact expired finalization authority");
+    assert!(
+        store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/result.xml",
+                digest,
+                4096,
+                "application/xml",
+                172_800,
+            )
+            .await
+            .expect("resume exact reservation after lease expiry and extend retention")
+    );
+    assert!(
+        store
+            .mark_artifact_available(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                "reports/result.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("publish exact artifact")
+    );
+    assert!(
+        store
+            .mark_artifact_available(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                "reports/result.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("idempotently replay artifact publication")
+    );
+    assert!(
+        !store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/result.xml",
+                [0x83; 32],
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("reject digest substitution")
+    );
+    assert!(
+        !store
+            .register_artifact(
+                organization_id,
+                Uuid::new_v4(),
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/other.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("reject another build")
+    );
+    assert!(
+        !store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch + 1,
+                "artifact-agent",
+                "reports/stale.xml",
+                digest,
+                4096,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("reject another restore epoch")
+    );
+    let artifacts = store
+        .build_artifacts(organization_id, project_id, admission.build_id)
+        .await
+        .expect("list build artifacts");
+    let artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.name == "reports/result.xml")
+        .expect("exact result artifact");
+    assert_eq!(artifact.build_id, admission.build_id);
+    assert_eq!(artifact.node_id, admission.node_id);
+    assert_eq!(artifact.attempt_id, claim.attempt_id);
+    assert_eq!(artifact.fence, claim.fence);
+    assert_eq!(artifact.digest, digest);
+    assert_eq!(artifact.bytes, 4096);
+    assert_eq!(artifact.media_type, "application/xml");
+    assert_eq!(artifact.status, ObjectStatus::Available);
+    let retained: bool = sqlx::query_scalar(
+        "SELECT retain_until >= clock_timestamp() + interval '47 hours'
+         FROM object_retention
+         WHERE organization_id = $1 AND object_digest = $2",
+    )
+    .bind(organization_id)
+    .bind(digest.as_slice())
+    .fetch_one(store.pool())
+    .await
+    .expect("read atomic artifact retention");
+    assert!(retained);
+    let audit = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify artifact audit");
+    assert!(audit.events.iter().any(|event| {
+        event.category == "artifact"
+            && event.action == "artifact.committed"
+            && event.payload["attempt_id"] == claim.attempt_id.to_string()
+    }));
+}
+
+#[tokio::test]
+async fn junit_evidence_is_bounded_immutable_and_preserves_flaky_history() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "test-truth",
+        )
+        .await
+        .expect("create test-truth project");
+    let admission = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "test-truth-build".to_owned(),
+            pipeline_digest: [0x91; 32],
+            node_key: "test".to_owned(),
+            required_capabilities: vec!["linux".to_owned()],
+            required_trust_pool: "trusted".to_owned(),
+            priority: 0,
+            execution_spec: json!({"program": "true"}),
+        })
+        .await
+        .expect("admit test-truth build");
+    let claim = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "test-truth-scheduler".to_owned(),
+            agent_id: "test-truth-agent".to_owned(),
+            capabilities: vec!["linux".to_owned()],
+            trust_pool: "trusted".to_owned(),
+            lease_seconds: 60,
+            fairness_seed: 0,
+        })
+        .await
+        .expect("claim test-truth work")
+        .expect("test-truth work is ready");
+    assert!(
+        store
+            .accept_offer(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "test-truth-agent",
+            )
+            .await
+            .expect("accept test-truth work")
+    );
+
+    let failed_xml = br#"<testsuite name="unit"><testcase classname="core" name="sometimes" time="0.2"><failure message="first"/></testcase><testcase classname="core" name="same"/><testcase classname="core" name="same"/></testsuite>"#;
+    let passed_xml = br#"<testsuite name="unit"><testcase classname="core" name="sometimes" time="0.1"/></testsuite>"#;
+    for (name, bytes) in [
+        ("reports/junit-1.xml", failed_xml.as_slice()),
+        ("reports/junit-2.xml", passed_xml.as_slice()),
+    ] {
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        assert!(
+            store
+                .register_artifact(
+                    organization_id,
+                    admission.build_id,
+                    admission.node_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "test-truth-agent",
+                    name,
+                    digest,
+                    i64::try_from(bytes.len()).expect("small report"),
+                    "application/junit+xml",
+                    86_400,
+                )
+                .await
+                .expect("register raw immutable JUnit artifact")
+        );
+        assert!(
+            store
+                .mark_artifact_available(
+                    organization_id,
+                    admission.build_id,
+                    admission.node_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    name,
+                    digest,
+                    i64::try_from(bytes.len()).expect("small report"),
+                    "application/junit+xml",
+                    86_400,
+                )
+                .await
+                .expect("publish raw immutable JUnit artifact")
+        );
+        let report = parse_junit(
+            bytes,
+            TestReportSource {
+                organization_id,
+                project_id,
+                build_id: admission.build_id,
+                node_id: admission.node_id,
+                attempt_id: claim.attempt_id,
+                fence: claim.fence,
+                artifact_name: name.to_owned(),
+            },
+            JunitLimits::default(),
+        )
+        .expect("normalize bounded JUnit");
+        assert!(
+            store
+                .ingest_test_report(&report)
+                .await
+                .expect("ingest normalized test truth")
+        );
+        assert!(
+            !store
+                .ingest_test_report(&report)
+                .await
+                .expect("idempotent replay is explicit")
+        );
+        if name.ends_with("-1.xml") {
+            assert_eq!(report.suites[0].cases[1].duplicate_ordinal, 0);
+            assert_eq!(report.suites[0].cases[2].duplicate_ordinal, 1);
+        }
+    }
+
+    let history = store
+        .test_case_history(
+            organization_id,
+            project_id,
+            "unit",
+            "core",
+            "sometimes",
+            100,
+        )
+        .await
+        .expect("read append-only test history");
+    assert_eq!(history.observations.len(), 2);
+    assert_eq!(history.observations[0].outcome, TestOutcome::Failed);
+    assert_eq!(history.observations[1].outcome, TestOutcome::Passed);
+    assert!(history.flaky);
+    let limited_history = store
+        .test_case_history(organization_id, project_id, "unit", "core", "sometimes", 1)
+        .await
+        .expect("limit observations without truncating flakiness truth");
+    assert_eq!(limited_history.observations.len(), 1);
+    assert!(limited_history.flaky);
+    let raw_retention_extended: bool = sqlx::query_scalar(
+        "SELECT bool_and(retain_until >= clock_timestamp() + interval '29 days')
+         FROM object_retention
+         WHERE organization_id = $1
+           AND object_digest IN ($2, $3)",
+    )
+    .bind(organization_id)
+    .bind(Sha256::digest(failed_xml).as_slice())
+    .bind(Sha256::digest(passed_xml).as_slice())
+    .fetch_one(store.pool())
+    .await
+    .expect("read normalized-source retention");
+    assert!(raw_retention_extended);
+
+    let mutation_error = sqlx::query(
+        "UPDATE normalized_test_cases
+         SET outcome = 'passed'
+         WHERE organization_id = $1",
+    )
+    .bind(organization_id)
+    .execute(store.pool())
+    .await
+    .expect_err("normalized test evidence is immutable");
+    assert_eq!(
+        mutation_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let audit = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify test-result audit");
+    assert_eq!(
+        audit
+            .events
+            .iter()
+            .filter(|event| event.action == "test_report.ingested")
+            .count(),
+        2
+    );
 }

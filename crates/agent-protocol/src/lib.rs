@@ -19,6 +19,7 @@ pub mod wire {
 pub const PROTOCOL_MAJOR: u16 = 1;
 pub const PROTOCOL_MINOR: u16 = 0;
 pub const WORK_DELIVERY_FEATURE: &str = "work-delivery-v1";
+pub const ATTEMPT_CREDENTIALS_FEATURE: &str = "attempt-credentials-v1";
 /// Controller lease granted while a retained terminal attempt is replayed.
 pub const RECOVERED_FINALIZATION_LEASE_SECONDS: u64 = 30;
 

@@ -1,7 +1,7 @@
 //! Staged, immutable, content-addressed storage for compact deployments.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,12 +13,14 @@ static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_REDACTION_PATTERNS: usize = 256;
 const MAX_REDACTION_BYTES: usize = 64 * 1024;
 const MAX_REDACTION_WORK: usize = 64 * 1024 * 1024;
+const MAX_PUBLICATION_CLAIM_SCAN: usize = 1_024;
 
 /// Storage quota enforced before bytes enter the durable object namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Quota {
     pub max_object_bytes: u64,
     pub max_total_bytes: u64,
+    pub max_staged_objects: u64,
 }
 
 /// Stable reference to one committed immutable object.
@@ -28,17 +30,62 @@ pub struct ObjectRef {
     pub bytes: u64,
 }
 
+/// Durable handle for a fully received object that has not been published.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingObject {
+    token: String,
+    reference: ObjectRef,
+    claimed: bool,
+}
+
+impl PendingObject {
+    pub fn from_parts(token: String, reference: ObjectRef) -> Result<Self, ObjectStoreError> {
+        validate_pending_token(&token)?;
+        Ok(Self {
+            token,
+            reference,
+            claimed: false,
+        })
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    pub fn object_ref(&self) -> &ObjectRef {
+        &self.reference
+    }
+}
+
 /// A staged object that has not yet entered the immutable namespace.
 #[derive(Debug)]
 pub struct StagedObject {
     path: PathBuf,
     reference: ObjectRef,
     active: bool,
+    preserve_on_drop: bool,
 }
 
 impl StagedObject {
     pub fn object_ref(&self) -> &ObjectRef {
         &self.reference
+    }
+
+    /// Persists the staged upload so another controller process can commit it.
+    pub fn persist(mut self) -> Result<PendingObject, ObjectStoreError> {
+        let token = self
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or(ObjectStoreError::ForeignStagingPath)?
+            .to_owned();
+        validate_pending_token(&token)?;
+        self.active = false;
+        Ok(PendingObject {
+            token,
+            reference: self.reference.clone(),
+            claimed: false,
+        })
     }
 
     /// Releases one staging reservation without publishing it.
@@ -61,7 +108,7 @@ impl StagedObject {
 
 impl Drop for StagedObject {
     fn drop(&mut self) {
-        if self.active {
+        if self.active && !self.preserve_on_drop {
             let _ = fs::remove_file(&self.path);
             if let Some(parent) = self.path.parent() {
                 let _ = sync_directory(parent);
@@ -102,6 +149,10 @@ pub enum ObjectStoreError {
     RedactionWorkExceeded,
     #[error("object store exceeds the total-byte quota")]
     TotalQuotaExceeded,
+    #[error("object store exceeds the staged-object count quota")]
+    StagedObjectQuotaExceeded,
+    #[error("publication-claim scan limit must be between 1 and 1024")]
+    InvalidPublicationClaimScan,
     #[error("staged object does not belong to this store")]
     ForeignStagingPath,
     #[error("staged object content no longer matches its declared digest")]
@@ -156,6 +207,10 @@ impl FilesystemObjectStore {
         })
     }
 
+    pub fn quota(&self) -> Quota {
+        self.quota
+    }
+
     /// Stages binary bytes without transformation.
     pub fn stage_artifact(
         &self,
@@ -190,6 +245,9 @@ impl FilesystemObjectStore {
             return Err(ObjectStoreError::ObjectQuotaExceeded);
         }
         let quota_lock = self.lock_quota()?;
+        if staged_object_count(&self.staging)? >= self.quota.max_staged_objects {
+            return Err(ObjectStoreError::StagedObjectQuotaExceeded);
+        }
         let used = committed_bytes(&self.objects)?
             .checked_add(staged_bytes(&self.staging)?)
             .ok_or(ObjectStoreError::TotalQuotaExceeded)?;
@@ -208,6 +266,7 @@ impl FilesystemObjectStore {
                 bytes,
             },
             active: true,
+            preserve_on_drop: false,
         };
         let write_result = (|| -> Result<(), ObjectStoreError> {
             file.write_all(content)?;
@@ -269,7 +328,13 @@ impl FilesystemObjectStore {
                 staged.discard()?;
                 false
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                // Publication did not create a destination name. Preserve the
+                // already-synced staging name so the exact reservation can be
+                // retried after transient filesystem failure.
+                staged.active = false;
+                return Err(error.into());
+            }
         };
         let committed = inspect(&path)?;
         if committed != reference {
@@ -281,6 +346,114 @@ impl FilesystemObjectStore {
         }
         drop(quota_lock);
         Ok(reference)
+    }
+
+    /// Resumes and publishes a complete staged upload by its opaque token.
+    pub fn commit_pending(&self, pending: PendingObject) -> Result<ObjectRef, ObjectStoreError> {
+        match self.resume_pending(&pending) {
+            Ok(mut staged) => {
+                staged.preserve_on_drop = true;
+                self.commit(staged)
+            }
+            Err(ObjectStoreError::ForeignStagingPath) => {
+                let committed = inspect(&self.object_path(&pending.reference.sha256))?;
+                if committed == pending.reference {
+                    Ok(committed)
+                } else {
+                    Err(ObjectStoreError::ForeignStagingPath)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Atomically removes a durable upload from staging reclamation.
+    ///
+    /// The claimed name is stable across controller crashes, so an exact retry
+    /// can resume publication while the TTL reaper skips in-flight uploads.
+    pub fn claim_pending(
+        &self,
+        pending: &PendingObject,
+    ) -> Result<PendingObject, ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let quota_lock = self.lock_quota()?;
+        let staged_path = self.staging.join(&pending.token);
+        let claimed_path = self.claimed_path(&pending.token);
+        if staged_path.parent() != Some(self.staging.as_path())
+            || claimed_path.parent() != Some(self.staging.as_path())
+        {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        if staged_path.is_file() && claimed_path.is_file() {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        if staged_path.is_file() {
+            // Validate the client's declaration while the upload still has a
+            // reapable staging name. A corrupt declaration must not be able
+            // to strand a non-reapable publication claim and permanently
+            // consume one staged-object reservation.
+            if inspect(&staged_path)? != pending.reference {
+                return Err(ObjectStoreError::CorruptStagedObject);
+            }
+            fs::rename(&staged_path, &claimed_path)?;
+            sync_directory(&self.staging)?;
+        } else if !claimed_path.is_file() {
+            let committed = inspect(&self.object_path(&pending.reference.sha256))?;
+            if committed != pending.reference {
+                return Err(ObjectStoreError::ForeignStagingPath);
+            }
+        }
+        if claimed_path.is_file() && inspect(&claimed_path)? != pending.reference {
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
+        if claimed_path.is_file() {
+            let claimed = OpenOptions::new().write(true).open(&claimed_path)?;
+            claimed.set_times(FileTimes::new().set_modified(SystemTime::now()))?;
+            claimed.sync_all()?;
+        }
+        drop(quota_lock);
+        Ok(PendingObject {
+            token: pending.token.clone(),
+            reference: pending.reference.clone(),
+            claimed: true,
+        })
+    }
+
+    /// Verifies a durable staged upload without publishing or consuming it.
+    pub fn verify_pending(&self, pending: &PendingObject) -> Result<ObjectRef, ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let path = self.pending_path(pending);
+        if path.parent() != Some(self.staging.as_path()) {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        if !path.is_file() {
+            let committed = inspect(&self.object_path(&pending.reference.sha256))?;
+            if committed == pending.reference {
+                return Ok(committed);
+            }
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        if inspect(&path)? != pending.reference {
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
+        Ok(pending.reference.clone())
+    }
+
+    /// Removes an unpublished upload without admitting its bytes.
+    pub fn abort_pending(&self, pending: &PendingObject) -> Result<(), ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let path = self.pending_path(pending);
+        if path.parent() != Some(self.staging.as_path()) {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        let quota_lock = self.lock_quota()?;
+        match fs::remove_file(path) {
+            Ok(()) => sync_directory(&self.staging)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        drop(quota_lock);
+        Ok(())
     }
 
     /// Reclaims crash-abandoned staging reservations older than `minimum_age`.
@@ -319,6 +492,115 @@ impl FilesystemObjectStore {
         }
         drop(quota_lock);
         Ok(removed)
+    }
+
+    /// Lists a bounded set of old crash-recoverable publication claims across
+    /// all namespaces sharing this store.
+    ///
+    /// Listing never mutates storage. The controller must independently prove
+    /// that no live database reservation owns each claim before releasing it.
+    /// `after` is an exclusive lexicographic cursor; the page wraps at the end
+    /// so repeated bounded scans cannot starve claims behind protected entries.
+    pub fn publication_claims_older_than(
+        &self,
+        minimum_age: Duration,
+        limit: usize,
+        after: Option<&str>,
+    ) -> Result<Vec<PendingObject>, ObjectStoreError> {
+        if limit == 0 || limit > MAX_PUBLICATION_CLAIM_SCAN {
+            return Err(ObjectStoreError::InvalidPublicationClaimScan);
+        }
+        if let Some(after) = after {
+            validate_pending_token(after)?;
+        }
+        let now = SystemTime::now();
+        let mut candidates = Vec::new();
+        for entry in directory_entries(&self.staging)? {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("publishing") {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let Ok(age) = now.duration_since(metadata.modified()?) else {
+                continue;
+            };
+            if age < minimum_age {
+                continue;
+            }
+            let Some(token) = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.strip_suffix(".publishing"))
+            else {
+                continue;
+            };
+            validate_pending_token(token)?;
+            candidates.push((token.to_owned(), path));
+        }
+        candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let start = after.map_or(0, |cursor| {
+            candidates.partition_point(|(token, _)| token.as_str() <= cursor)
+        });
+        let candidate_count = candidates.len();
+        let mut claims = Vec::with_capacity(limit.min(candidate_count));
+        for index in (start..candidate_count)
+            .chain(0..start)
+            .take(limit.min(candidate_count))
+        {
+            let (token, path) = &candidates[index];
+            claims.push(PendingObject {
+                token: token.to_owned(),
+                reference: inspect(path)?,
+                claimed: true,
+            });
+        }
+        Ok(claims)
+    }
+
+    /// Moves one old publication claim back into ordinary staged reclamation.
+    ///
+    /// The age is rechecked under the same quota lock used by `claim_pending`.
+    /// An exact retry refreshes the claim timestamp while holding that lock, so
+    /// a stale observation cannot race an active publication.
+    pub fn release_publication_claim(
+        &self,
+        pending: &PendingObject,
+        minimum_age: Duration,
+    ) -> Result<bool, ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let quota_lock = self.lock_quota()?;
+        let claimed_path = self.claimed_path(&pending.token);
+        let staged_path = self.staging.join(&pending.token);
+        if claimed_path.parent() != Some(self.staging.as_path())
+            || staged_path.parent() != Some(self.staging.as_path())
+        {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        let metadata = match claimed_path.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let Ok(age) = SystemTime::now().duration_since(metadata.modified()?) else {
+            return Ok(false);
+        };
+        if age < minimum_age {
+            return Ok(false);
+        }
+        if staged_path.exists() || inspect(&claimed_path)? != pending.reference {
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
+        fs::rename(&claimed_path, &staged_path)?;
+        sync_directory(&self.staging)?;
+        drop(quota_lock);
+        Ok(true)
     }
 
     /// Reads and verifies one object, returning an explicit gap on failure.
@@ -397,6 +679,23 @@ impl FilesystemObjectStore {
         self.objects.join(&digest[..2]).join(digest)
     }
 
+    fn resume_pending(&self, pending: &PendingObject) -> Result<StagedObject, ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let path = self.pending_path(pending);
+        if path.parent() != Some(self.staging.as_path()) || !path.is_file() {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        if inspect(&path)? != pending.reference {
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
+        Ok(StagedObject {
+            path,
+            reference: pending.reference.clone(),
+            active: true,
+            preserve_on_drop: false,
+        })
+    }
+
     fn lock_quota(&self) -> Result<File, ObjectStoreError> {
         let lock = OpenOptions::new()
             .read(true)
@@ -404,6 +703,18 @@ impl FilesystemObjectStore {
             .open(&self.quota_lock)?;
         lock.lock()?;
         Ok(lock)
+    }
+
+    fn claimed_path(&self, token: &str) -> PathBuf {
+        self.staging.join(format!("{token}.publishing"))
+    }
+
+    fn pending_path(&self, pending: &PendingObject) -> PathBuf {
+        if pending.claimed {
+            self.claimed_path(&pending.token)
+        } else {
+            self.staging.join(&pending.token)
+        }
     }
 }
 
@@ -418,6 +729,19 @@ fn validate_namespace(value: &str) -> Result<(), ObjectStoreError> {
     Ok(())
 }
 
+fn validate_pending_token(value: &str) -> Result<(), ObjectStoreError> {
+    if value.is_empty()
+        || value.len() > 256
+        || !value.ends_with(".staged")
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(ObjectStoreError::ForeignStagingPath);
+    }
+    Ok(())
+}
+
 fn redact(content: &[u8], redactions: &[&[u8]]) -> Vec<u8> {
     let secrets = redactions
         .iter()
@@ -427,7 +751,7 @@ fn redact(content: &[u8], redactions: &[&[u8]]) -> Vec<u8> {
     let mut output = Vec::with_capacity(content.len());
     for byte in content {
         output.push(*byte);
-        if let Some(secret) = secrets.iter().find(|secret| output.ends_with(secret)) {
+        while let Some(secret) = secrets.iter().find(|secret| output.ends_with(secret)) {
             output.truncate(output.len() - secret.len());
         }
     }
@@ -473,6 +797,15 @@ fn create_staging_file(
             "{namespace}-{}-{sequence}.staged",
             std::process::id()
         ));
+        if staging
+            .join(format!(
+                "{namespace}-{}-{sequence}.staged.publishing",
+                std::process::id()
+            ))
+            .exists()
+        {
+            continue;
+        }
         match OpenOptions::new().create_new(true).write(true).open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -534,6 +867,25 @@ fn staged_bytes(root: &Path) -> Result<u64, ObjectStoreError> {
         }
     }
     Ok(total)
+}
+
+fn staged_object_count(root: &Path) -> Result<u64, ObjectStoreError> {
+    directory_entries(root)?
+        .into_iter()
+        .try_fold(0_u64, |count, entry| {
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(count),
+                Err(error) => return Err(error.into()),
+            };
+            if metadata.is_file() {
+                count
+                    .checked_add(1)
+                    .ok_or(ObjectStoreError::StagedObjectQuotaExceeded)
+            } else {
+                Ok(count)
+            }
+        })
 }
 
 fn directory_entries(path: &Path) -> Result<Vec<fs::DirEntry>, ObjectStoreError> {
@@ -607,6 +959,7 @@ mod tests {
             Quota {
                 max_object_bytes,
                 max_total_bytes,
+                max_staged_objects: 4_096,
             },
         )
         .unwrap()
@@ -673,6 +1026,10 @@ mod tests {
         for secret in [b"REDACTED".as_slice(), b"X", b"secret"] {
             assert!(!content.windows(secret.len()).any(|window| window == secret));
         }
+
+        let staged = store.stage_log("tenant-a", b"abc", &[b"b", b"ac"]).unwrap();
+        let reference = store.commit(staged).unwrap();
+        assert_eq!(store.read_verified(&reference).unwrap(), b"");
     }
 
     #[test]
@@ -702,19 +1059,102 @@ mod tests {
         let staging = root.path().join("staging");
         fs::create_dir(&staging).unwrap();
         let sequence = AtomicU64::new(7);
-        for value in [7, 8] {
-            fs::write(
-                staging.join(format!("tenant-a-{}-{value}.staged", std::process::id())),
-                b"abandoned",
-            )
-            .unwrap();
-        }
+        fs::write(
+            staging.join(format!("tenant-a-{}-7.staged", std::process::id())),
+            b"abandoned",
+        )
+        .unwrap();
+        fs::write(
+            staging.join(format!(
+                "tenant-a-{}-8.staged.publishing",
+                std::process::id()
+            )),
+            b"claimed",
+        )
+        .unwrap();
 
         let (path, _file) = create_staging_file(&staging, "tenant-a", &sequence).unwrap();
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
             Some(format!("tenant-a-{}-9.staged", std::process::id()).as_str())
         );
+    }
+
+    #[test]
+    fn abandoned_publication_claims_are_bounded_reapable_and_retry_safe() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store(root.path(), 1024, 4096);
+        let pending = store
+            .stage_artifact("tenant-a", b"claimed")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let claimed = store.claim_pending(&pending).unwrap();
+        let claimed_path = store.claimed_path(pending.token());
+        File::options()
+            .write(true)
+            .open(&claimed_path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        let other = store
+            .stage_artifact("tenant-b", b"other-claim")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let other_claim = store.claim_pending(&other).unwrap();
+        File::options()
+            .write(true)
+            .open(store.claimed_path(other.token()))
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+
+        let candidates = store
+            .publication_claims_older_than(Duration::from_secs(1), 8, None)
+            .unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.contains(&claimed));
+        assert!(candidates.contains(&other_claim));
+        let first_page = store
+            .publication_claims_older_than(Duration::from_secs(1), 1, None)
+            .unwrap();
+        let second_page = store
+            .publication_claims_older_than(Duration::from_secs(1), 1, Some(first_page[0].token()))
+            .unwrap();
+        let wrapped_page = store
+            .publication_claims_older_than(Duration::from_secs(1), 1, Some(second_page[0].token()))
+            .unwrap();
+        assert_ne!(
+            first_page, second_page,
+            "the cursor must advance past protected claims"
+        );
+        assert_eq!(
+            wrapped_page, first_page,
+            "the cursor must wrap after the final claim"
+        );
+
+        store.claim_pending(&pending).unwrap();
+        assert!(
+            !store
+                .release_publication_claim(&claimed, Duration::from_secs(1))
+                .unwrap(),
+            "an exact retry refreshes the claim under the quota lock"
+        );
+
+        File::options()
+            .write(true)
+            .open(&claimed_path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        assert!(
+            store
+                .release_publication_claim(&claimed, Duration::from_secs(1))
+                .unwrap()
+        );
+        assert_eq!(store.verify_pending(&pending).unwrap(), pending.reference);
+        assert_eq!(store.reap_staged_older_than(Duration::ZERO).unwrap(), 1);
     }
 
     #[test]
@@ -751,6 +1191,90 @@ mod tests {
     }
 
     #[test]
+    fn staged_count_quota_bounds_zero_byte_reservations() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemObjectStore::open(
+            root.path(),
+            Quota {
+                max_object_bytes: 4,
+                max_total_bytes: 4,
+                max_staged_objects: 1,
+            },
+        )
+        .unwrap();
+        let first = store
+            .stage_artifact("tenant-a", b"")
+            .unwrap()
+            .persist()
+            .unwrap();
+        assert!(matches!(
+            store.stage_artifact("tenant-a", b""),
+            Err(ObjectStoreError::StagedObjectQuotaExceeded)
+        ));
+        store.abort_pending(&first).unwrap();
+        assert!(store.stage_artifact("tenant-a", b"").is_ok());
+    }
+
+    #[test]
+    fn publication_claim_is_resumable_and_excluded_from_reaping() {
+        let root = tempfile::tempdir().unwrap();
+        let first_store = store(root.path(), 1024, 4096);
+        let pending = first_store
+            .stage_artifact("tenant-a", b"claimed")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let claimed = first_store.claim_pending(&pending).unwrap();
+        assert!(!first_store.staging.join(pending.token()).exists());
+        assert_eq!(
+            first_store.reap_staged_older_than(Duration::ZERO).unwrap(),
+            0
+        );
+
+        let reopened = store(root.path(), 1024, 4096);
+        let resumed = reopened.claim_pending(&pending).unwrap();
+        assert_eq!(resumed, claimed);
+        let committed = reopened.commit_pending(resumed).unwrap();
+        assert_eq!(reopened.read_verified(&committed).unwrap(), b"claimed");
+    }
+
+    #[test]
+    fn corrupt_publication_declaration_remains_reapable() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemObjectStore::open(
+            root.path(),
+            Quota {
+                max_object_bytes: 1024,
+                max_total_bytes: 4096,
+                max_staged_objects: 1,
+            },
+        )
+        .unwrap();
+        let pending = store
+            .stage_artifact("tenant-a", b"declared")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let corrupt = PendingObject::from_parts(
+            pending.token().to_owned(),
+            ObjectRef {
+                sha256: Sha256::digest(b"substitute").into(),
+                bytes: b"substitute".len() as u64,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            store.claim_pending(&corrupt),
+            Err(ObjectStoreError::CorruptStagedObject)
+        ));
+        assert!(store.staging.join(pending.token()).is_file());
+        assert!(!store.claimed_path(pending.token()).exists());
+        assert_eq!(store.reap_staged_older_than(Duration::ZERO).unwrap(), 1);
+        assert!(store.stage_artifact("tenant-a", b"replacement").is_ok());
+    }
+
+    #[test]
     fn corrupt_staged_content_cannot_poison_a_digest() {
         let root = tempfile::tempdir().unwrap();
         let store = store(root.path(), 1024, 4096);
@@ -769,6 +1293,74 @@ mod tests {
         let valid = store.stage_artifact("tenant-a", b"original").unwrap();
         assert_eq!(store.commit(valid).unwrap(), reference);
         assert_eq!(store.read_verified(&reference).unwrap(), b"original");
+    }
+
+    #[test]
+    fn pending_upload_is_resumable_unpublished_and_substitution_safe() {
+        let root = tempfile::tempdir().unwrap();
+        let first_store = store(root.path(), 1024, 4096);
+        let pending = first_store
+            .stage_artifact("tenant-a", b"complete-upload")
+            .unwrap()
+            .persist()
+            .unwrap();
+        assert!(matches!(
+            first_store.read_verified(pending.object_ref()),
+            Err(ObjectGap::Missing { .. })
+        ));
+        let reopened = store(root.path(), 1024, 4096);
+        let pending_for_replay = pending.clone();
+        let committed = reopened.commit_pending(pending).unwrap();
+        assert_eq!(
+            reopened.read_verified(&committed).unwrap(),
+            b"complete-upload"
+        );
+        assert_eq!(
+            reopened.verify_pending(&pending_for_replay).unwrap(),
+            committed
+        );
+        assert_eq!(
+            reopened.commit_pending(pending_for_replay).unwrap(),
+            committed
+        );
+
+        let retryable = reopened
+            .stage_artifact("tenant-a", b"retry-after-quota-failure")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let constrained = store(root.path(), 1024, 1);
+        assert!(matches!(
+            constrained.commit_pending(retryable.clone()),
+            Err(ObjectStoreError::TotalQuotaExceeded)
+        ));
+        assert_eq!(
+            reopened.verify_pending(&retryable).unwrap(),
+            retryable.reference
+        );
+        reopened.commit_pending(retryable).unwrap();
+
+        let substituted = reopened
+            .stage_artifact("tenant-a", b"declared")
+            .unwrap()
+            .persist()
+            .unwrap();
+        fs::write(reopened.staging.join(substituted.token()), b"substitute").unwrap();
+        assert!(matches!(
+            reopened.commit_pending(substituted.clone()),
+            Err(ObjectStoreError::CorruptStagedObject)
+        ));
+        assert!(matches!(
+            reopened.read_verified(substituted.object_ref()),
+            Err(ObjectGap::Missing { .. })
+        ));
+        reopened.abort_pending(&substituted).unwrap();
+        assert!(!reopened.staging.join(substituted.token()).exists());
+
+        assert!(matches!(
+            PendingObject::from_parts("../escape.staged".to_owned(), committed),
+            Err(ObjectStoreError::ForeignStagingPath)
+        ));
     }
 
     #[test]

@@ -2,27 +2,32 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
 use mcloving_agent_protocol::wire::{
     AttemptAuthority, CancellationCompletion, CancellationDisposition, CancellationOutcome,
-    CancellationReceipt, OpenSessionRequest, OpenSessionResponse, ReconciliationDirective,
-    ReconciliationReport, RotateCertificateRequest, RotateCertificateResponse, WorkAssignment,
-    WorkAuthority, WorkCompletion, WorkLeaseReceipt, WorkLeaseRenewal, WorkLogChunk, WorkOffer,
-    WorkOutcome, WorkPoll, WorkReceipt,
+    CancellationReceipt, CredentialBinding, CredentialEnvelope, CredentialRequest,
+    OpenSessionRequest, OpenSessionResponse, ReconciliationDirective, ReconciliationReport,
+    RotateCertificateRequest, RotateCertificateResponse, WorkAssignment, WorkAuthority,
+    WorkCompletion, WorkLeaseReceipt, WorkLeaseRenewal, WorkLogChunk, WorkOffer, WorkOutcome,
+    WorkPoll, WorkReceipt,
 };
 use mcloving_agent_protocol::{
-    ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS, WORK_DELIVERY_FEATURE, negotiate,
+    ATTEMPT_CREDENTIALS_FEATURE, ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS,
+    WORK_DELIVERY_FEATURE, negotiate,
 };
 use mcloving_controller_api::{ApiState, router};
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, NewLogChunk,
-    ReconciliationTrustPoolAuthorization, Store, TerminalOutcome,
+    ReconciliationTrustPoolAuthorization, Store, StoreError, TerminalOutcome,
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
+use mcloving_object_store::{FilesystemObjectStore, Quota};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
@@ -60,7 +65,33 @@ async fn main() -> Result<()> {
         .await
         .context("connect to PostgreSQL runtime role")?;
     let store = Store::new(runtime_pool);
-    let state = ApiState::new(store.clone(), &bearer_token).context("configure public API")?;
+    let object_root = PathBuf::from(
+        std::env::var("MCLOVING_OBJECT_ROOT").unwrap_or_else(|_| "./data/objects".to_owned()),
+    );
+    let max_object_bytes = bounded_u64_environment("MCLOVING_MAX_OBJECT_BYTES", 64 * 1024 * 1024)?;
+    let max_total_bytes =
+        bounded_u64_environment("MCLOVING_MAX_TOTAL_OBJECT_BYTES", 10 * 1024 * 1024 * 1024)?;
+    let max_staged_objects = bounded_u64_environment("MCLOVING_MAX_STAGED_OBJECTS", 4_096)?;
+    let staged_upload_ttl = Duration::from_secs(bounded_u64_environment(
+        "MCLOVING_STAGED_UPLOAD_TTL_SECONDS",
+        24 * 60 * 60,
+    )?);
+    if max_total_bytes < max_object_bytes {
+        bail!("MCLOVING_MAX_TOTAL_OBJECT_BYTES must be at least MCLOVING_MAX_OBJECT_BYTES");
+    }
+    let object_store = FilesystemObjectStore::open(
+        &object_root,
+        Quota {
+            max_object_bytes,
+            max_total_bytes,
+            max_staged_objects,
+        },
+    )
+    .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
+    let state = ApiState::new(store.clone(), &bearer_token)
+        .context("configure public API")?
+        .with_object_store(object_store)
+        .with_staged_upload_ttl(staged_upload_ttl);
     let worker = EmbeddedWorker::from_environment()?;
     tokio::fs::create_dir_all(&worker.config.workspace_root)
         .await
@@ -90,10 +121,28 @@ async fn main() -> Result<()> {
     }
 }
 
+fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
+    match std::env::var(name) {
+        Ok(value) => {
+            let parsed = value
+                .parse::<u64>()
+                .with_context(|| format!("{name} must be an unsigned integer"))?;
+            if parsed == 0 {
+                bail!("{name} must be greater than zero");
+            }
+            Ok(parsed)
+        }
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error).with_context(|| format!("read {name}")),
+    }
+}
+
 #[derive(Clone)]
 struct ControllerAgentService {
     store: Store,
     identities: Arc<AgentIdentityBindings>,
+    #[cfg(debug_assertions)]
+    drop_start_response_once: Arc<AtomicBool>,
 }
 
 #[tonic::async_trait]
@@ -125,6 +174,7 @@ impl AgentControl for ControllerAgentService {
             "unix-process-group-v1".to_owned(),
             "windows-job-object-v1".to_owned(),
             WORK_DELIVERY_FEATURE.to_owned(),
+            ATTEMPT_CREDENTIALS_FEATURE.to_owned(),
         ]);
         let negotiated = negotiate(&local, &remote)
             .map_err(|error| Status::failed_precondition(error.to_string()))?;
@@ -473,9 +523,55 @@ impl AgentControl for ControllerAgentService {
             )
             .await
             .map_err(internal_store_error)?;
+        #[cfg(debug_assertions)]
+        if accepted && self.drop_start_response_once.swap(false, Ordering::SeqCst) {
+            return Err(Status::unavailable(
+                "test-only injected start acknowledgement loss",
+            ));
+        }
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
+        }))
+    }
+
+    async fn fetch_credentials(
+        &self,
+        request: Request<CredentialRequest>,
+    ) -> Result<Response<CredentialEnvelope>, Status> {
+        let identity = self.identities.authenticate(&request)?.clone();
+        let request = request.into_inner();
+        let authority = request
+            .authority
+            .ok_or_else(|| Status::invalid_argument("work authority is required"))?;
+        let context = authorize_work_authority(&self.store, &identity, &authority).await?;
+        let deliveries = self
+            .store
+            .redeem_credential_grants(
+                context.organization_id,
+                context.attempt_id,
+                context.fence,
+                context.restore_epoch,
+                &authority.agent_id,
+                authority.session_epoch,
+                &request.target_names,
+            )
+            .await
+            .map_err(credential_store_error)?;
+        let ready = deliveries.is_some();
+        let credentials = deliveries
+            .unwrap_or_default()
+            .into_iter()
+            .map(|credential| CredentialBinding {
+                grant_id: credential.grant_id.to_string(),
+                target_name: credential.target_name,
+                secret_value: credential.secret_value,
+            })
+            .collect();
+        Ok(Response::new(CredentialEnvelope {
+            session_epoch: authority.session_epoch,
+            credentials,
+            ready,
         }))
     }
 
@@ -742,6 +838,15 @@ fn internal_store_error(error: mcloving_controller_store::StoreError) -> Status 
     Status::internal(format!("controller store failed: {error}"))
 }
 
+fn credential_store_error(error: StoreError) -> Status {
+    match error {
+        StoreError::InvalidSecurityOperation(_) | StoreError::InvalidAgentSession => {
+            Status::failed_precondition(format!("credential delivery rejected: {error}"))
+        }
+        other => internal_store_error(other),
+    }
+}
+
 async fn run_agent_control_server(store: Store) -> Result<()> {
     let Some(listen) = std::env::var("MCLOVING_AGENT_LISTEN").ok() else {
         std::future::pending::<()>().await;
@@ -766,6 +871,10 @@ async fn run_agent_control_server(store: Store) -> Result<()> {
     let service = ControllerAgentService {
         store,
         identities: Arc::new(identities),
+        #[cfg(debug_assertions)]
+        drop_start_response_once: Arc::new(AtomicBool::new(
+            std::env::var_os("MCLOVING_TEST_DROP_START_RESPONSE_ONCE").is_some(),
+        )),
     };
     Server::builder()
         .tls_config(tls)
@@ -1020,6 +1129,20 @@ mod tests {
     fn composite_authority_token_preserves_restore_epoch_and_fence() {
         let token = (u64::from(17_u32) << 32) | u64::from(23_u32);
         assert_eq!(decode_authority_token(token), (17, 23));
+    }
+
+    #[test]
+    fn permanent_credential_contract_errors_are_not_retried_as_internal_failures() {
+        let invalid_grants =
+            StoreError::InvalidSecurityOperation("unrequested credential target".to_owned());
+        assert_eq!(
+            credential_store_error(invalid_grants).code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            credential_store_error(StoreError::InvalidAgentSession).code(),
+            tonic::Code::FailedPrecondition
+        );
     }
 
     #[test]

@@ -5,7 +5,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use mcloving_controller_api::Client;
-use mcloving_controller_store::Store;
+use mcloving_controller_store::{NewBuild, NewCredentialGrant, NewEnvironmentApproval, Store};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::process::{Child, Command};
@@ -86,6 +87,7 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .env("MCLOVING_POLL_MILLISECONDS", "10")
         .env("MCLOVING_CANCELLATION_POLL_MILLISECONDS", "50")
         .env("MCLOVING_TERMINATION_GRACE_MILLISECONDS", "100")
+        .env("MCLOVING_TEST_DROP_START_RESPONSE_ONCE", "1")
         .env("MCLOVING_SESSION_EPOCH", "1")
         .env(
             "MCLOVING_WORKSPACE_ROOT",
@@ -94,6 +96,10 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .env(
             "MCLOVING_AGENT_JOURNAL",
             directory.path().join("embedded-agent.db"),
+        )
+        .env(
+            "MCLOVING_OBJECT_ROOT",
+            directory.path().join("embedded-objects"),
         )
         .kill_on_drop(true)
         .spawn()
@@ -207,7 +213,202 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
     assert_eq!(terminal_events, 1, "response-loss replay is idempotent");
 
     stop(&mut agent).await;
+
+    store
+        .configure_protected_environment(organization_id, project_id, "production", "deploy", 2)
+        .await
+        .expect("configure protected environment");
+    let protected_digest = [0xc3; 32];
+    let secret = ["mcloving", "e2e", "redaction", "probe"].join("-");
+    let protected = store
+        .admit_build(&NewBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "remote-agent-protected-e2e".to_owned(),
+            pipeline_digest: protected_digest,
+            node_key: "protected-deploy".to_owned(),
+            required_capabilities: vec!["linux".to_owned()],
+            required_trust_pool: "trusted-linux".to_owned(),
+            priority: 100,
+            execution_spec: json!({
+                "version": 1,
+                "steps": [{
+                    "kind": "process",
+                    "program": "/bin/sh",
+                    "args": [
+                        "-c",
+                        "printf 'stdout:%s\\n' \"$DEPLOY_TOKEN\"; printf 'stderr:%s\\n' \"$DEPLOY_TOKEN\" >&2"
+                    ],
+                    "credentials": ["DEPLOY_TOKEN"],
+                    "timeout_seconds": 10
+                }]
+            }),
+        })
+        .await
+        .expect("admit protected remote work");
+    let approval_ids = [Uuid::new_v4(), Uuid::new_v4()];
+    for (id, subject) in approval_ids
+        .into_iter()
+        .zip(["oidc:release-owner", "oidc:security-owner"])
+    {
+        assert!(
+            store
+                .approve_environment(&NewEnvironmentApproval {
+                    id,
+                    organization_id,
+                    project_id,
+                    build_id: protected.build_id,
+                    pipeline_digest: protected_digest,
+                    environment: "production",
+                    action: "deploy",
+                    approver_subject: subject,
+                    ttl_seconds: 300,
+                })
+                .await
+                .expect("approve protected remote work")
+        );
+    }
+    let mut agent = agent_command(organization_id, agent_port, &tls, &journal, &workspace)
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start protected remote agent");
+    let accepted = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot = store
+                .build_snapshot(organization_id, project_id, protected.build_id)
+                .await
+                .expect("read protected build")
+                .expect("protected build exists");
+            if snapshot.attempt_status == "accepted" {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let accepted = match accepted {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            let snapshot = store
+                .build_snapshot(organization_id, project_id, protected.build_id)
+                .await
+                .expect("read timed-out protected build");
+            let process_status = agent.try_wait().expect("inspect protected agent");
+            let wait_reason = store
+                .explain_wait(organization_id, &[], "trusted-linux")
+                .await
+                .expect("explain protected scheduling wait");
+            panic!(
+                "protected attempt was not accepted: snapshot={snapshot:?} process={process_status:?} wait={wait_reason:?}"
+            );
+        }
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let still_waiting = store
+        .build_snapshot(organization_id, project_id, protected.build_id)
+        .await
+        .expect("read waiting protected build")
+        .expect("protected build exists");
+    assert_eq!(
+        still_waiting.attempt_status, "accepted",
+        "the process must not start before its exact grants are ready"
+    );
+    assert!(
+        store
+            .build_logs(organization_id, project_id, protected.build_id)
+            .await
+            .expect("read pre-grant logs")
+            .is_empty()
+    );
+    assert!(
+        store
+            .issue_credential_grant(&NewCredentialGrant {
+                id: Uuid::new_v4(),
+                organization_id,
+                project_id,
+                build_id: protected.build_id,
+                attempt_id: accepted.attempt_id,
+                fence: accepted.fence,
+                pipeline_digest: protected_digest,
+                environment: "production",
+                action: "deploy",
+                target_name: "DEPLOY_TOKEN",
+                secret_value: secret.as_bytes(),
+                approval_ids: &approval_ids,
+                ttl_seconds: 300,
+            })
+            .await
+            .expect("issue protected remote grant")
+    );
+    let protected_status = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let snapshot = store
+                .build_snapshot(organization_id, project_id, protected.build_id)
+                .await
+                .expect("read protected result")
+                .expect("protected build exists");
+            if matches!(
+                snapshot.attempt_status.as_str(),
+                "succeeded" | "failed" | "aborted"
+            ) {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("protected remote work completes within bound");
+    assert_eq!(protected_status.attempt_status, "succeeded");
+    let protected_logs = store
+        .build_logs(organization_id, project_id, protected.build_id)
+        .await
+        .expect("read protected logs");
+    assert_eq!(protected_logs.len(), 2);
+    for log in &protected_logs {
+        let text = String::from_utf8_lossy(&log.content);
+        assert!(
+            !text.contains(&secret),
+            "published log retained a credential"
+        );
+    }
+    assert_eq!(protected_logs[0].content, b"stdout:\n");
+    assert_eq!(protected_logs[1].content, b"stderr:\n");
+    let credential_events = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*)
+         FROM build_events
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND kind = 'credential.grants_delivered'",
+    )
+    .bind(organization_id)
+    .bind(protected.build_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count credential delivery events");
+    assert_eq!(credential_events, 1);
+    stop(&mut agent).await;
+    assert!(
+        !directory_contains(directory.path(), secret.as_bytes()),
+        "credential escaped into the agent workspace, journal, or result files"
+    );
     stop(&mut controller).await;
+}
+
+fn directory_contains(root: &Path, needle: &[u8]) -> bool {
+    let entries = std::fs::read_dir(root).expect("read test directory");
+    for entry in entries {
+        let path = entry.expect("read test entry").path();
+        if path.is_dir() {
+            if directory_contains(&path, needle) {
+                return true;
+            }
+        } else if std::fs::read(&path)
+            .is_ok_and(|content| content.windows(needle.len()).any(|window| window == needle))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn agent_command(

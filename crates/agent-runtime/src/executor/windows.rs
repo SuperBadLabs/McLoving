@@ -12,7 +12,7 @@ use std::process::Command;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use mcloving_windows_job::{JobProcess, SpawnSpec, file_identity};
+use mcloving_windows_job::{JobProcess, SpawnSpec, anonymous_pipe, file_identity};
 use sha2::{Digest, Sha256};
 use tokio::time::{Instant, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
@@ -20,8 +20,9 @@ use tokio_util::sync::CancellationToken;
 use crate::SpoolEntry;
 
 use super::{
-    Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, Termination,
-    create_workspace, is_link_or_reparse_point, sync_directory,
+    Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, OutputCapture,
+    Termination, create_workspace, is_link_or_reparse_point, sync_directory, validate_redactions,
+    write_redacted_output,
 };
 
 const TERMINATED_EXIT_CODE: u32 = 0xC000_013A;
@@ -46,6 +47,30 @@ pub async fn execute_with_spawn_hook<F>(
 where
     F: FnOnce(u32) -> Result<(), ExecutionError>,
 {
+    execute_with_spawn_hook_and_redactions(request, cancellation, &[], on_spawn).await
+}
+
+/// Executes one process while keeping credential-bearing output in bounded
+/// memory until exact secret values have been removed.
+pub async fn execute_with_spawn_hook_and_redactions<F>(
+    request: &ExecutionRequest,
+    cancellation: CancellationToken,
+    redactions: &[Vec<u8>],
+    on_spawn: F,
+) -> Result<ExecutionOutcome, ExecutionError>
+where
+    F: FnOnce(u32) -> Result<(), ExecutionError>,
+{
+    validate_redactions(redactions)?;
+    let capture_limit = if redactions.is_empty() {
+        None
+    } else {
+        Some(
+            request
+                .output_limit_bytes
+                .ok_or(ExecutionError::UnboundedCredentialOutput)?,
+        )
+    };
     let workspace_root_control = open_workspace_root(&request.workspace_root)?;
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
 
@@ -66,8 +91,22 @@ where
         .read(true)
         .write(true)
         .open(&stderr_path)?;
-    let stdout_control = stdout.try_clone()?;
-    let stderr_control = stderr.try_clone()?;
+    let mut stdout_control = stdout.try_clone()?;
+    let mut stderr_control = stderr.try_clone()?;
+    let (stdout_destination, stdout_reader) = if capture_limit.is_some() {
+        let (reader, writer) =
+            anonymous_pipe().map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
+        (writer, Some(reader))
+    } else {
+        (stdout, None)
+    };
+    let (stderr_destination, stderr_reader) = if capture_limit.is_some() {
+        let (reader, writer) =
+            anonymous_pipe().map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
+        (writer, Some(reader))
+    } else {
+        (stderr, None)
+    };
 
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
     let command = windows_command(request)?;
@@ -78,10 +117,19 @@ where
         environment: &request.environment,
         current_directory: &workspace,
         stdin: &stdin,
-        stdout: &stdout,
-        stderr: &stderr,
+        stdout: &stdout_destination,
+        stderr: &stderr_destination,
     })
     .map_err(|error| ExecutionError::WindowsJob(error.to_string()))?;
+    drop(stdout_destination);
+    drop(stderr_destination);
+    let mut capture = match (stdout_reader, stderr_reader, capture_limit) {
+        (Some(stdout), Some(stderr), Some(limit)) => {
+            Some(OutputCapture::start(stdout, stderr, limit, redactions))
+        }
+        (None, None, None) => None,
+        _ => unreachable!("capture configuration is internally consistent"),
+    };
     let process_id = child.process_id();
     if let Err(error) = on_spawn(process_id) {
         terminate_job(&child, process_id).await?;
@@ -99,8 +147,14 @@ where
         })? {
             break (Termination::Exited, status);
         }
-        if output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)
-            .map_err(|error| containment_unverified(process_id, ExecutionError::Io(error)))?
+        if capture.as_ref().is_some_and(OutputCapture::was_exceeded)
+            || (capture.is_none()
+                && output_limit_exceeded(
+                    &stdout_control,
+                    &stderr_control,
+                    request.output_limit_bytes,
+                )
+                .map_err(|error| containment_unverified(process_id, ExecutionError::Io(error)))?)
         {
             break (
                 Termination::OutputLimitExceeded,
@@ -129,10 +183,20 @@ where
     // syncing or hashing either log.
     terminate_job(&child, process_id).await?;
     drop(child);
-    if output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)? {
+    let exceeded = capture.as_ref().is_some_and(OutputCapture::was_exceeded)
+        || output_limit_exceeded(&stdout_control, &stderr_control, request.output_limit_bytes)?;
+    if exceeded {
         termination = Termination::OutputLimitExceeded;
     }
-    if termination == Termination::OutputLimitExceeded {
+    if let Some(capture) = capture.take() {
+        let captured = capture.finish().await?;
+        if captured.exceeded {
+            termination = Termination::OutputLimitExceeded;
+        }
+        write_redacted_output(&mut stdout_control, &captured.stdout, redactions)?;
+        write_redacted_output(&mut stderr_control, &captured.stderr, redactions)?;
+        truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
+    } else if termination == Termination::OutputLimitExceeded {
         truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     }
     ensure_original_workspace_root(&workspace_root_control, &request.workspace_root)?;
@@ -438,7 +502,12 @@ mod tests {
             arguments,
             environment: BTreeMap::new(),
             output_limit_bytes: None,
-            timeout: Duration::from_secs(10),
+            // Hosted Windows runners can spend well over ten seconds starting
+            // PowerShell while the test binary is exercising several Job
+            // Objects concurrently. Keep the execution deadline above the
+            // test-specific observation window so startup contention is not
+            // misreported as an executor failure.
+            timeout: Duration::from_secs(30),
             termination_grace: Duration::from_millis(100),
         }
     }
@@ -457,6 +526,162 @@ mod tests {
                 reason
             } if reason.contains("QueryInformationJobObject")
         ));
+    }
+
+    #[tokio::test]
+    async fn credential_output_is_redacted_before_any_spool_write() {
+        let root = tempfile::tempdir().unwrap();
+        let mut request = request(
+            root.path(),
+            "credential-redaction",
+            ExecutionMode::Direct,
+            "cmd.exe",
+            vec![
+                OsString::from("/D"),
+                OsString::from("/S"),
+                OsString::from("/C"),
+                OsString::from("echo before marker-secret after & echo err marker-secret 1>&2"),
+            ],
+        );
+        request.output_limit_bytes = Some(65_536);
+
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &request,
+            CancellationToken::new(),
+            &[b"marker-secret".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path)).unwrap();
+        let stderr = fs::read(root.path().join(&outcome.stderr.relative_path)).unwrap();
+        assert!(
+            !stdout
+                .windows(b"marker-secret".len())
+                .any(|value| value == b"marker-secret")
+        );
+        assert!(
+            !stderr
+                .windows(b"marker-secret".len())
+                .any(|value| value == b"marker-secret")
+        );
+        assert!(
+            stdout
+                .windows(b"before".len())
+                .any(|value| value == b"before")
+        );
+        assert!(stderr.windows(b"err".len()).any(|value| value == b"err"));
+    }
+
+    #[tokio::test]
+    async fn credential_crossing_output_limit_is_redacted_before_truncation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut boundary_request = request(
+            root.path(),
+            "credential-limit-boundary",
+            ExecutionMode::Direct,
+            "powershell.exe",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-NonInteractive"),
+                OsString::from("-Command"),
+                OsString::from("[Console]::Out.Write('123456789012345marker-secret')"),
+            ],
+        );
+        boundary_request.output_limit_bytes = Some(16);
+
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &boundary_request,
+            CancellationToken::new(),
+            &[b"marker-secret".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path)).unwrap();
+        assert_eq!(stdout, b"123456789012345");
+        assert!(outcome.stdout.bytes <= 16);
+        assert!(!stdout.ends_with(b"m"));
+
+        let mut repeated_request = request(
+            root.path(),
+            "credential-repeated-deletion-boundary",
+            ExecutionMode::Direct,
+            "powershell.exe",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-NonInteractive"),
+                OsString::from("-Command"),
+                OsString::from("[Console]::Out.Write('AAAAAAAAAAAAAAAASECRZ')"),
+            ],
+        );
+        repeated_request.output_limit_bytes = Some(16);
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &repeated_request,
+            CancellationToken::new(),
+            &[b"AAAA".to_vec(), b"SECR".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path)).unwrap();
+        assert_eq!(stdout, b"Z");
+
+        let mut cascading_request = request(
+            root.path(),
+            "credential-cascading-deletion-boundary",
+            ExecutionMode::Direct,
+            "powershell.exe",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-NonInteractive"),
+                OsString::from("-Command"),
+                OsString::from("[Console]::Out.Write('Zaxxbaxxbaxxbaxxbaxxbaxxbaxxbaxxb')"),
+            ],
+        );
+        cascading_request.output_limit_bytes = Some(1);
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &cascading_request,
+            CancellationToken::new(),
+            &[b"xx".to_vec(), b"ab".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path)).unwrap();
+        assert_eq!(stdout, b"Z");
+        assert_eq!(outcome.termination, Termination::Exited);
+
+        let mut split_stream_request = request(
+            root.path(),
+            "credential-split-stream-boundary",
+            ExecutionMode::Direct,
+            "powershell.exe",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-NonInteractive"),
+                OsString::from("-Command"),
+                OsString::from(
+                    "[Console]::Out.Write('safe-cred'); [Console]::Error.Write('12345678901234567890123456'); Start-Sleep -Seconds 1; [Console]::Out.Write('ential')",
+                ),
+            ],
+        );
+        split_stream_request.output_limit_bytes = Some(16);
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &split_stream_request,
+            CancellationToken::new(),
+            &[b"credential".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path)).unwrap();
+        let stderr = fs::read(root.path().join(&outcome.stderr.relative_path)).unwrap();
+        assert_eq!(outcome.termination, Termination::OutputLimitExceeded);
+        assert_eq!(stdout, b"safe-");
+        assert_eq!(stderr, b"12345678901");
     }
 
     #[tokio::test]
@@ -628,14 +853,14 @@ Wait-Process -Id $child.Id
         let cancel = token.clone();
         let cancellation_pid_path = pid_path.clone();
         let cancellation = tokio::spawn(async move {
-            for _ in 0..1_500 {
+            for _ in 0..2_500 {
                 if cancellation_pid_path.exists() {
                     cancel.cancel();
                     return;
                 }
                 sleep(Duration::from_millis(10)).await;
             }
-            panic!("descendant PID was not written within 15 seconds");
+            panic!("descendant PID was not written within 25 seconds");
         });
 
         let outcome = execute(&request, token).await.unwrap();
