@@ -397,9 +397,11 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   created since the prior transfer: trigger/cause identity, build number,
   invocation parameter schema, resolved public values and protected
   secret-reference/taint provenance without secret material, queue/start/end
-  time, terminal result, stage/node/attempt lineage, approvals, normalized
-  tests, logs, artifacts and retrieval metadata, audit linkage, record-level
-  provenance, and destination digests. Stateful jobs additionally
+  time, terminal result, each checkout's provider/repository/ref/revision,
+  previous-revision baseline, canonical change entries and changelog provenance,
+  stage/node/attempt lineage, approvals, normalized tests, logs, artifacts and
+  retrieval metadata, audit linkage, record-level provenance, and destination
+  digests. Stateful jobs additionally
   transfer and verify previous-result mappings, cross-build artifacts, retained
   workspace, and every persistent dependency through the exact `MIG-005A`
   transform. An actual `MIG-009` rollback therefore imports every McLoving build
@@ -498,8 +500,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W3-B | SEC-003, AUDIT-001, OPS-003, TEST-001 | DONE | Fenced grants and protected environments, tenant hash-chain audit, staged artifact product journeys, and immutable normalized test truth |
 | W3-C | API-002, UX-002, UI-001 | DONE | Documented REST surface, end-to-end CLI journeys, and an API-only CSP-locked static UI |
 | W4-A | MIG-000, MIG-001, MIG-002, MIG-003 | ACTIVE | Owner-scoped production inventory, isolated compiler boundary, pinned Jenkins corpus/oracle, and deterministic Declarative translation |
-| W4-B | MIG-004, MIG-005A, MIG-005, IDP-001, AUTHZ-001, OBS-001, MIG-006 | PENDING | Versioned step and state mappings, shared-library/scripted boundaries, production identity lifecycle, migrated-job action-scoped authorization parity, independent destination observation, and differential certification |
-| W4-C | MIG-007, REL-001, MIG-008, MIG-009 | PENDING | Generated migration packages, trusted release provenance, shadow/canary proof, and cutover/rollback readiness |
+| W4-B | MIG-004, MIG-005A, MIG-005 | PENDING | Versioned step and bidirectional state mappings plus shared-library/scripted boundaries |
+| W4-C | IDP-001, AUTHZ-001, OBS-001, MIG-006 | PENDING | Production identity lifecycle, migrated-job action-scoped authorization parity, independent destination observation, and differential certification |
+| W4-D | MIG-007, REL-001, MIG-008, MIG-009 | PENDING | Generated migration packages, trusted release provenance, shadow/canary proof, and cutover/rollback readiness |
 
 ## Wave 0 — Architecture and foundation
 
