@@ -991,21 +991,55 @@ async fn wait_for_credentials(
                     authority: Some(authority.clone()),
                     target_names: target_names.to_vec(),
                 }),
-            ) => response
-                .map_err(|_| AgentError::AuthorityRpcTimeout)?
-                .map(tonic::Response::into_inner)
-                .map_err(AgentError::from)?,
+            ) => match response {
+                Ok(Ok(response)) => response.into_inner(),
+                Err(_) => {
+                    if !wait_for_credential_retry(execution_cancellation, authority_lost).await? {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                Ok(Err(status)) if retryable_credential_fetch(&status) => {
+                    if !wait_for_credential_retry(execution_cancellation, authority_lost).await? {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                Ok(Err(status)) => return Err(AgentError::Rpc(status)),
+            },
         };
         ensure_session(response.session_epoch, session_epoch)?;
         if response.ready {
             return Ok(Some(response.credentials));
         }
-        tokio::select! {
-            () = execution_cancellation.cancelled() => return Ok(None),
-            () = authority_lost.cancelled() => return Err(AgentError::StaleAuthority),
-            () = tokio::time::sleep(Duration::from_millis(250)) => {}
+        if !wait_for_credential_retry(execution_cancellation, authority_lost).await? {
+            return Ok(None);
         }
     }
+}
+
+async fn wait_for_credential_retry(
+    execution_cancellation: &CancellationToken,
+    authority_lost: &CancellationToken,
+) -> Result<bool, AgentError> {
+    tokio::select! {
+        () = execution_cancellation.cancelled() => Ok(false),
+        () = authority_lost.cancelled() => Err(AgentError::StaleAuthority),
+        () = tokio::time::sleep(Duration::from_millis(250)) => Ok(true),
+    }
+}
+
+fn retryable_credential_fetch(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Cancelled
+            | tonic::Code::Unknown
+            | tonic::Code::DeadlineExceeded
+            | tonic::Code::ResourceExhausted
+            | tonic::Code::Aborted
+            | tonic::Code::Internal
+            | tonic::Code::Unavailable
+    )
 }
 
 fn unverified_containment_process_id(error: &ExecutionError) -> Option<u32> {
@@ -2097,6 +2131,60 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn ambiguous_credential_fetch_statuses_are_retryable() {
+        for code in [
+            tonic::Code::Cancelled,
+            tonic::Code::Unknown,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::ResourceExhausted,
+            tonic::Code::Aborted,
+            tonic::Code::Internal,
+            tonic::Code::Unavailable,
+        ] {
+            assert!(
+                retryable_credential_fetch(&tonic::Status::new(code, "ambiguous")),
+                "{code:?} must be safe to replay"
+            );
+        }
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+            tonic::Code::AlreadyExists,
+            tonic::Code::PermissionDenied,
+            tonic::Code::FailedPrecondition,
+            tonic::Code::OutOfRange,
+            tonic::Code::Unimplemented,
+            tonic::Code::Unauthenticated,
+            tonic::Code::DataLoss,
+        ] {
+            assert!(
+                !retryable_credential_fetch(&tonic::Status::new(code, "definitive")),
+                "{code:?} must fail closed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_retry_wait_preserves_cancellation_and_authority_loss() {
+        let cancellation = CancellationToken::new();
+        let authority_lost = CancellationToken::new();
+        cancellation.cancel();
+        assert!(
+            !wait_for_credential_retry(&cancellation, &authority_lost)
+                .await
+                .unwrap()
+        );
+
+        let cancellation = CancellationToken::new();
+        let authority_lost = CancellationToken::new();
+        authority_lost.cancel();
+        assert!(matches!(
+            wait_for_credential_retry(&cancellation, &authority_lost).await,
+            Err(AgentError::StaleAuthority)
+        ));
     }
 
     #[cfg(windows)]
