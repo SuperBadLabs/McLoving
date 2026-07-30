@@ -502,7 +502,12 @@ mod tests {
             arguments,
             environment: BTreeMap::new(),
             output_limit_bytes: None,
-            timeout: Duration::from_secs(10),
+            // Hosted Windows runners can spend well over ten seconds starting
+            // PowerShell while the test binary is exercising several Job
+            // Objects concurrently. Keep the execution deadline above the
+            // test-specific observation window so startup contention is not
+            // misreported as an executor failure.
+            timeout: Duration::from_secs(30),
             termination_grace: Duration::from_millis(100),
         }
     }
@@ -848,14 +853,14 @@ Wait-Process -Id $child.Id
         let cancel = token.clone();
         let cancellation_pid_path = pid_path.clone();
         let cancellation = tokio::spawn(async move {
-            for _ in 0..1_500 {
+            for _ in 0..2_500 {
                 if cancellation_pid_path.exists() {
                     cancel.cancel();
                     return;
                 }
                 sleep(Duration::from_millis(10)).await;
             }
-            panic!("descendant PID was not written within 15 seconds");
+            panic!("descendant PID was not written within 25 seconds");
         });
 
         let outcome = execute(&request, token).await.unwrap();
