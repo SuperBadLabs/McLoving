@@ -78,20 +78,24 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   missing identity, or partial comparison keeps the canary effect-free until
   recertification; post-effect detection cannot satisfy this gate.
 - Before the first `MIG-008` production effect grant and every later transfer
-  of effect authority, pause and verify Jenkins ingress for the affected job,
-  freeze new Jenkins scheduling and grants, then drain, revoke, or explicitly
-  reconcile all queued/running work, issued credentials/grants, leases, locks,
-  retries, and uncertain effects. Prove no prior Jenkins execution retains
-  effect authority before issuing McLoving's fenced canary grant; input receipt
-  matching alone cannot replace this quiescence.
-- For a stateful `MIG-008` canary, after that quiescence and before the first
-  production effect grant, take a fresh content-hashed live Jenkins export,
-  apply the exact certified `MIG-005A` forward transform, import it into the
-  designated McLoving canary state, and verify record-level provenance,
-  build-number/previous-result mappings, cross-build artifacts, retained
-  workspace/state, and destination digests against the receipt. Empty, stale,
-  partial, conflicting, or unverifiable state keeps McLoving effect-free and
-  restores Jenkins ingress/authority; a rehearsal receipt alone is insufficient.
+  or rollback of effect authority, quiesce the runner relinquishing authority:
+  pause and verify its ingress, freeze its new scheduling and grants, then drain,
+  revoke, or explicitly reconcile all queued/running work, issued
+  credentials/grants, connector authority, leases, locks, retries, and uncertain
+  effects. Prove no execution from the relinquishing runner retains effect
+  authority before issuing the gaining runner's fenced grant; this applies
+  Jenkins-to-McLoving and McLoving-to-Jenkins, and input receipt matching alone
+  cannot replace quiescence.
+- For every stateful `MIG-008` authority transfer or rollback, after quiescing
+  the relinquishing runner and before granting the gaining runner, take a fresh
+  content-hashed live export from the relinquishing side, apply the exact
+  certified direction-specific `MIG-005A` transform, import it into the gaining
+  side, and verify record-level provenance, build-number/previous-result
+  mappings, cross-build artifacts, retained workspace/state, audit linkage, and
+  destination digests. Empty, stale, partial, conflicting, or unverifiable
+  state keeps the gaining runner effect-free; the prior runner resumes only
+  after its authority and state remain or are restored consistently. A rehearsal
+  receipt alone is insufficient.
 - In `MIG-006`, "no network or host mounts" means no external, host,
   production, staging, shared-service, or cross-fixture network or mounts; the
   private network contained wholly inside one disposable fixture is permitted.
