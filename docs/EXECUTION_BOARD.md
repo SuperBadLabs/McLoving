@@ -245,12 +245,16 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   exactly one discovery generation/owner before resuming ingress. Apply the
   same protocol in reverse and prove duplicate/reordered event, restart,
   partition, rollback, missing-child, duplicate-child, and orphan outcomes.
-- After a Multibranch Pipeline or Organization Folder becomes authoritative in
-  McLoving, every newly discovered child and every changed Jenkinsfile,
-  shared-library, job, parent, or effective-property revision is created only as
-  a quarantined candidate with no scheduling, trigger, credential/grant,
-  connector, production network, or external-effect authority. It may become
-  runnable only by matching an existing `MIG-007` package whose complete exact
+- After any migrated standalone Pipeline, SCM-backed Pipeline, Multibranch
+  Pipeline, Organization Folder, or discovered child becomes authoritative in
+  McLoving, every later source revision, newly discovered child, or changed
+  Jenkinsfile, inline script, shared library, job, parent, or effective-property
+  revision is created only as a quarantined candidate with no scheduling,
+  trigger, credential/grant, connector, production network, or external-effect
+  authority. The previously certified package may continue only for its exact
+  frozen source revision and may not silently consume the later commit. A
+  candidate may become runnable only by matching an existing `MIG-007` package
+  whose complete exact
   source/profile/dependency/mapping/runtime and effective-input digests still
   match, or by completing its own current `MIG-002` through `MIG-007`
   classification, differential certification, authorization, state, and
