@@ -313,6 +313,48 @@ fn reconciliation_rejects_in_scope_jobs_with_excluded_parents() {
 }
 
 #[test]
+fn reconciliation_preserves_excluded_job_obligations_without_counting_them_as_eligible() {
+    let directory = TestDirectory::new("excluded-obligations");
+    let mut bundle = fixture();
+    add_excluded_obligations(&mut bundle);
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let ledger = reconcile(&loaded).expect("excluded evidence must remain admissible");
+    assert_eq!(ledger.jobs.len(), 2);
+    assert_eq!(ledger.population.runtime_dependencies, 2);
+    assert_eq!(ledger.population.persistent_record_classes, 2);
+    assert_eq!(ledger.parity_demands["source-checkout"], 1);
+    assert_eq!(ledger.state_transform_records, 8);
+}
+
+#[test]
+fn reconciliation_validates_excluded_job_obligations() {
+    let directory = TestDirectory::new("excluded-invalid-state");
+    let mut bundle = fixture();
+    add_excluded_obligations(&mut bundle);
+    bundle.persistent_state.jobs[2].records[0].restore_target = " ".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("invalid excluded state must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+
+    let directory = TestDirectory::new("excluded-unclassified-runtime");
+    let mut bundle = fixture();
+    add_excluded_obligations(&mut bundle);
+    bundle.runtime_dependencies.jobs[2].dependencies[0].disposition =
+        CompatibilityDisposition::Unclassified;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("unclassified excluded dependency must fail");
+    assert_eq!(error.code, "INV_UNCLASSIFIED");
+}
+
+#[test]
 fn reconciliation_rejects_principal_alias_collisions() {
     let directory = TestDirectory::new("principal-alias");
     let mut bundle = fixture();
@@ -667,6 +709,27 @@ fn fixture() -> Fixture {
             ],
         },
     }
+}
+
+fn add_excluded_obligations(fixture: &mut Fixture) {
+    let mut dependency = fixture.runtime_dependencies.jobs[1].dependencies[0].clone();
+    dependency.id = "credential/legacy".to_owned();
+    dependency.provenance = "jenkins/credentials/legacy".to_owned();
+    fixture.runtime_dependencies.jobs.push(JobDependencies {
+        job_id: "legacy".to_owned(),
+        dependencies: vec![dependency],
+    });
+
+    let mut state = fixture.persistent_state.jobs[1].records[0].clone();
+    state.id = "legacy-history".to_owned();
+    state.record_count = 13;
+    state.restore_target = "retention-vault/legacy".to_owned();
+    state.external_consumers.clear();
+    state.provenance = "jenkins/build-history/legacy".to_owned();
+    fixture.persistent_state.jobs.push(JobStateRecords {
+        job_id: "legacy".to_owned(),
+        records: vec![state],
+    });
 }
 
 fn binding() -> SnapshotBinding {

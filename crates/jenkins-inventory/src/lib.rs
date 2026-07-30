@@ -546,19 +546,30 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         }
     }
 
-    let runtime = index_runtime(&bundle.runtime_dependencies.jobs, &in_scope)?;
-    let state = index_state(&bundle.persistent_state.jobs, &in_scope)?;
-    if runtime.keys().collect::<BTreeSet<_>>() != in_scope.iter().collect::<BTreeSet<_>>() {
+    let runtime = index_runtime(&bundle.runtime_dependencies.jobs, &job_ids)?;
+    let state = index_state(&bundle.persistent_state.jobs, &job_ids)?;
+    if !in_scope.iter().all(|job_id| runtime.contains_key(job_id)) {
         return Err(InventoryError::new(
             "INV_RUNTIME_COVERAGE",
             "every in-scope job must have exactly one runtime-dependency record",
         ));
     }
-    if state.keys().collect::<BTreeSet<_>>() != in_scope.iter().collect::<BTreeSet<_>>() {
+    if !in_scope.iter().all(|job_id| state.contains_key(job_id)) {
         return Err(InventoryError::new(
             "INV_STATE_COVERAGE",
             "every in-scope job must have exactly one persistent-state record",
         ));
+    }
+
+    let mut runtime_dispositions = BTreeMap::new();
+    for (job_id, dependencies) in &runtime {
+        runtime_dispositions.insert(
+            job_id.as_str(),
+            validate_runtime_dependencies(job_id, dependencies)?,
+        );
+    }
+    for (job_id, records) in &state {
+        validate_state_records(job_id, records, &client_ids)?;
     }
 
     let mut parity_demands = BTreeMap::new();
@@ -572,76 +583,13 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     {
         let dependencies = *runtime.get(&job.id).expect("coverage checked");
         let records = *state.get(&job.id).expect("coverage checked");
-        let disposition = classify(dependencies)?;
+        let disposition = *runtime_dispositions
+            .get(job.id.as_str())
+            .expect("validated coverage");
         for dependency in dependencies {
-            validate_nonempty("runtime dependency kind", &dependency.kind)?;
-            validate_nonempty("runtime dependency owner", &dependency.owner)?;
-            validate_nonempty(
-                "runtime dependency resource scope",
-                &dependency.resource_scope,
-            )?;
-            validate_nonempty("runtime dependency mutability", &dependency.mutability)?;
-            validate_nonempty("runtime dependency provenance", &dependency.provenance)?;
-            if dependency.confidentiality == "secret"
-                && ![
-                    dependency.credential_reference.as_deref(),
-                    dependency.redaction_reference.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|reference| !reference.trim().is_empty())
-            {
-                return Err(InventoryError::new(
-                    "INV_SECRET_REFERENCE_REQUIRED",
-                    format!(
-                        "secret dependency {} for job {} has no typed reference",
-                        dependency.id, job.id
-                    ),
-                ));
-            }
-            for reference in [
-                dependency.credential_reference.as_deref(),
-                dependency.redaction_reference.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                validate_nonempty("runtime dependency typed reference", reference)?;
-            }
-            validate_confidentiality(
-                "runtime dependency confidentiality",
-                &dependency.confidentiality,
-            )?;
-            validate_digest(
-                "runtime dependency implementation",
-                &dependency.implementation_sha256,
-            )?;
-            validate_digest(
-                "runtime dependency configuration",
-                &dependency.config_sha256,
-            )?;
             *parity_demands.entry(dependency.kind.clone()).or_insert(0) += 1;
         }
         for record in records {
-            validate_nonempty("state kind", &record.kind)?;
-            validate_nonempty("state owner", &record.owner)?;
-            validate_confidentiality("state confidentiality", &record.confidentiality)?;
-            validate_nonempty("state restore target", &record.restore_target)?;
-            validate_nonempty("state conflict policy", &record.conflict_policy)?;
-            validate_nonempty("state retention deadline", &record.retention_deadline)?;
-            validate_nonempty("state provenance", &record.provenance)?;
-            validate_digest("state source", &record.source_sha256)?;
-            for consumer in &record.external_consumers {
-                if !client_ids.contains(consumer) {
-                    return Err(InventoryError::new(
-                        "INV_UNKNOWN_STATE_CONSUMER",
-                        format!(
-                            "state record {} for job {} references unknown client {consumer}",
-                            record.id, job.id
-                        ),
-                    ));
-                }
-            }
             state_transform_records = state_transform_records
                 .checked_add(record.record_count)
                 .ok_or_else(|| {
@@ -653,23 +601,6 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
                         ),
                     )
                 })?;
-            let mut hold_ids = BTreeSet::new();
-            for hold in &record.legal_holds {
-                validate_identifier("legal hold", &hold.id)?;
-                if !hold_ids.insert(&hold.id) {
-                    return Err(InventoryError::new(
-                        "INV_DUPLICATE_HOLD",
-                        format!(
-                            "state record {} for job {} repeats legal hold {}",
-                            record.id, job.id, hold.id
-                        ),
-                    ));
-                }
-                validate_nonempty("legal-hold scope", &hold.scope)?;
-                validate_nonempty("legal-hold reason", &hold.reason)?;
-                validate_nonempty("legal-hold generation", &hold.generation)?;
-                validate_nonempty("legal-hold release authority", &hold.release_authority)?;
-            }
         }
         jobs.push(JobEligibility {
             job_id: job.id.clone(),
@@ -938,6 +869,108 @@ fn index_state<'a>(
         )?;
     }
     Ok(indexed)
+}
+
+fn validate_runtime_dependencies(
+    job_id: &str,
+    dependencies: &[RuntimeDependency],
+) -> Result<CompatibilityDisposition, InventoryError> {
+    let disposition = classify(dependencies)?;
+    for dependency in dependencies {
+        validate_nonempty("runtime dependency kind", &dependency.kind)?;
+        validate_nonempty("runtime dependency owner", &dependency.owner)?;
+        validate_nonempty(
+            "runtime dependency resource scope",
+            &dependency.resource_scope,
+        )?;
+        validate_nonempty("runtime dependency mutability", &dependency.mutability)?;
+        validate_nonempty("runtime dependency provenance", &dependency.provenance)?;
+        if dependency.confidentiality == "secret"
+            && ![
+                dependency.credential_reference.as_deref(),
+                dependency.redaction_reference.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|reference| !reference.trim().is_empty())
+        {
+            return Err(InventoryError::new(
+                "INV_SECRET_REFERENCE_REQUIRED",
+                format!(
+                    "secret dependency {} for job {job_id} has no typed reference",
+                    dependency.id
+                ),
+            ));
+        }
+        for reference in [
+            dependency.credential_reference.as_deref(),
+            dependency.redaction_reference.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            validate_nonempty("runtime dependency typed reference", reference)?;
+        }
+        validate_confidentiality(
+            "runtime dependency confidentiality",
+            &dependency.confidentiality,
+        )?;
+        validate_digest(
+            "runtime dependency implementation",
+            &dependency.implementation_sha256,
+        )?;
+        validate_digest(
+            "runtime dependency configuration",
+            &dependency.config_sha256,
+        )?;
+    }
+    Ok(disposition)
+}
+
+fn validate_state_records(
+    job_id: &str,
+    records: &[StateRecord],
+    client_ids: &BTreeSet<String>,
+) -> Result<(), InventoryError> {
+    for record in records {
+        validate_nonempty("state kind", &record.kind)?;
+        validate_nonempty("state owner", &record.owner)?;
+        validate_confidentiality("state confidentiality", &record.confidentiality)?;
+        validate_nonempty("state restore target", &record.restore_target)?;
+        validate_nonempty("state conflict policy", &record.conflict_policy)?;
+        validate_nonempty("state retention deadline", &record.retention_deadline)?;
+        validate_nonempty("state provenance", &record.provenance)?;
+        validate_digest("state source", &record.source_sha256)?;
+        for consumer in &record.external_consumers {
+            if !client_ids.contains(consumer) {
+                return Err(InventoryError::new(
+                    "INV_UNKNOWN_STATE_CONSUMER",
+                    format!(
+                        "state record {} for job {job_id} references unknown client {consumer}",
+                        record.id
+                    ),
+                ));
+            }
+        }
+        let mut hold_ids = BTreeSet::new();
+        for hold in &record.legal_holds {
+            validate_identifier("legal hold", &hold.id)?;
+            if !hold_ids.insert(&hold.id) {
+                return Err(InventoryError::new(
+                    "INV_DUPLICATE_HOLD",
+                    format!(
+                        "state record {} for job {job_id} repeats legal hold {}",
+                        record.id, hold.id
+                    ),
+                ));
+            }
+            validate_nonempty("legal-hold scope", &hold.scope)?;
+            validate_nonempty("legal-hold reason", &hold.reason)?;
+            validate_nonempty("legal-hold generation", &hold.generation)?;
+            validate_nonempty("legal-hold release authority", &hold.release_authority)?;
+        }
+    }
+    Ok(())
 }
 
 fn classify(

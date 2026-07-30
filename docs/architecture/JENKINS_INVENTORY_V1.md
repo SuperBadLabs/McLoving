@@ -59,7 +59,9 @@ Unknown or case-variant labels fail closed.
 `mcloving-inventory reconcile --root ROOT` verifies the detached hashes,
 strictly parses all four manifests, checks epoch identity and referential
 integrity, requires exactly one runtime and state record group for every
-in-scope job, and rejects:
+in-scope job, permits retained obligation groups for approved retired or
+out-of-scope jobs, validates every supplied group regardless of scope, and
+rejects:
 
 - duplicate or ambiguous identities;
 - unknown job, parent, ACL principal, or client principal references;
@@ -75,10 +77,12 @@ inventory root after the five source-evidence files above; it is not an input
 to `SHA256SUMS` or to source-snapshot verification.
 Eligibility is conservative: the least-compatible dependency determines a
 job's `native`, `mappable`, `scripted`, or `unsupported` class. The ledger
-separately reports population denominators, parity-substrate demand by
-dependency kind, and state-transform record demand. It grants no compiler,
-scheduler, credential, agent, trigger, connector, effect, canary, or cutover
-authority.
+reports whole-inventory population denominators, while eligibility rows,
+parity-substrate demand by dependency kind, and state-transform record demand
+cover only the approved in-scope population. Excluded-job retention and
+legal-hold evidence remains sealed in the source manifests without inflating
+migration eligibility or demand. The ledger grants no compiler, scheduler,
+credential, agent, trigger, connector, effect, canary, or cutover authority.
 
 `mcloving-inventory verify --root ROOT` performs the same validation without
 writing an output.
