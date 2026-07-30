@@ -652,7 +652,7 @@ fn openapi_document() -> Value {
                 },
                 "ArtifactCommitRequest": {
                     "type": "object",
-                    "required": ["attempt_id", "fence", "restore_epoch", "node_id", "agent_id", "sha256", "bytes", "media_type", "retention_seconds"],
+                    "required": ["attempt_id", "fence", "restore_epoch", "node_id", "agent_id", "name", "sha256", "bytes", "media_type", "retention_seconds"],
                     "additionalProperties": true
                 },
                 "BinaryArtifact": {"type": "string", "format": "binary"}

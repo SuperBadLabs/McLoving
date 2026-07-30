@@ -32,8 +32,8 @@ async function api(path, options = {}) {
   const type = response.headers.get("content-type") || "";
   const body = type.includes("json") ? await response.json() : await response.text();
   if (!response.ok) {
-    const code = body && body.error && body.error.code ? body.error.code : `http_${response.status}`;
-    throw new Error(`${code}: ${body.error?.message || body}`);
+    const code = body && body.code ? body.code : `http_${response.status}`;
+    throw new Error(`${code}: ${body.message || body}`);
   }
   return body;
 }
@@ -47,7 +47,6 @@ async function action(operation) {
   } catch (error) {
     byId("operation-result").classList.add("error");
     byId("operation-result").textContent = error.message;
-    throw error;
   }
 }
 
