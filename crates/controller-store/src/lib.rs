@@ -2640,6 +2640,26 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
         if existing.is_some() {
+            sqlx::query(
+                "INSERT INTO object_retention (
+                     organization_id, object_digest, retain_until
+                 )
+                 VALUES (
+                     $1, $2,
+                     clock_timestamp() + ($3::double precision * interval '1 second')
+                 )
+                 ON CONFLICT (organization_id, object_digest) DO UPDATE
+                 SET retain_until = GREATEST(
+                         object_retention.retain_until,
+                         EXCLUDED.retain_until
+                     ),
+                     updated_at = clock_timestamp()",
+            )
+            .bind(organization_id)
+            .bind(digest.as_slice())
+            .bind(retention_seconds as f64)
+            .execute(&mut *tx)
+            .await?;
             tx.commit().await?;
             return Ok(true);
         }

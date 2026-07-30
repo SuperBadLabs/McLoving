@@ -69,6 +69,7 @@ async fn main() -> Result<()> {
     let max_object_bytes = bounded_u64_environment("MCLOVING_MAX_OBJECT_BYTES", 64 * 1024 * 1024)?;
     let max_total_bytes =
         bounded_u64_environment("MCLOVING_MAX_TOTAL_OBJECT_BYTES", 10 * 1024 * 1024 * 1024)?;
+    let max_staged_objects = bounded_u64_environment("MCLOVING_MAX_STAGED_OBJECTS", 4_096)?;
     let staged_upload_ttl = Duration::from_secs(bounded_u64_environment(
         "MCLOVING_STAGED_UPLOAD_TTL_SECONDS",
         24 * 60 * 60,
@@ -81,6 +82,7 @@ async fn main() -> Result<()> {
         Quota {
             max_object_bytes,
             max_total_bytes,
+            max_staged_objects,
         },
     )
     .with_context(|| format!("open artifact object store at {}", object_root.display()))?;

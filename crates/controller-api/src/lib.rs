@@ -503,6 +503,9 @@ async fn commit_artifact(
         },
     )
     .map_err(object_store_error)?;
+    let pending = object_store(&state)?
+        .claim_pending(&pending)
+        .map_err(object_store_error)?;
     object_store(&state)?
         .verify_pending(&pending)
         .map_err(object_store_error)?;
@@ -951,6 +954,11 @@ fn object_store_error(error: ObjectStoreError) -> ApiError {
         ObjectStoreError::TotalQuotaExceeded => ApiError::new(
             StatusCode::INSUFFICIENT_STORAGE,
             "artifact_total_quota",
+            error.to_string(),
+        ),
+        ObjectStoreError::StagedObjectQuotaExceeded => ApiError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "artifact_staged_object_quota",
             error.to_string(),
         ),
         ObjectStoreError::ForeignStagingPath

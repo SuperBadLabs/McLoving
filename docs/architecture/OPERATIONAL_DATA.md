@@ -27,8 +27,12 @@ restore epoch, and an existing logical object cannot change identity.
 
 Compact deployments enforce both per-object and total reserved-byte quotas.
 An exclusive filesystem lock serializes reservation and commitment across
-processes; outstanding staged objects consume quota before publication. Quota
-exhaustion is explicit backpressure rather than silent truncation.
+processes; outstanding staged objects consume quota before publication. A
+separate staged-object count quota also charges zero-byte uploads, bounding
+inode use and staging-directory scan work. Before PostgreSQL metadata
+reservation, publication atomically renames an upload into a crash-resumable
+claimed name that the TTL reaper skips; exact retries resume that claim.
+Quota exhaustion is explicit backpressure rather than silent truncation.
 
 Reads verify both SHA-256 and byte count. Missing and corrupt objects are typed
 gaps. Reconciliation compares the PostgreSQL-declared set with committed

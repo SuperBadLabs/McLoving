@@ -446,14 +446,7 @@ fn validate_assignment(
     }
     let credential_targets = &spec.steps[0].credentials;
     if credential_targets.len() > 8
-        || credential_targets
-            .iter()
-            .any(|name| !valid_environment_name(name) || spec.steps[0].env.contains_key(name))
-        || credential_targets
-            .iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-            != credential_targets.len()
+        || !credential_targets_are_valid(&spec.steps[0].env, credential_targets)
     {
         return Err(AgentError::InvalidAssignment(
             "credential targets must be unique bounded environment names and must not collide with pipeline environment".to_owned(),
@@ -879,6 +872,15 @@ fn execution_environment(
             "credential count exceeds the per-attempt bound".to_owned(),
         ));
     }
+    let target_names = credentials
+        .iter()
+        .map(|credential| credential.target_name.clone())
+        .collect::<Vec<_>>();
+    if !credential_targets_are_valid(&environment, &target_names) {
+        return Err(AgentError::InvalidAssignment(
+            "credential targets must be unique bounded environment names and must not collide with pipeline environment".to_owned(),
+        ));
+    }
     let mut grant_ids = std::collections::BTreeSet::new();
     let mut redactions = Vec::with_capacity(credentials.len());
     let mut total_secret_bytes = 0_usize;
@@ -931,6 +933,43 @@ fn valid_environment_name(value: &str) -> bool {
     matches!(bytes.next(), Some(byte) if byte.is_ascii_alphabetic() || byte == b'_')
         && value.len() <= 128
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn credential_targets_are_valid(
+    environment: &BTreeMap<String, String>,
+    target_names: &[String],
+) -> bool {
+    let environment_names = environment
+        .keys()
+        .map(|name| environment_name_key(name))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut targets = std::collections::BTreeSet::new();
+    target_names.iter().all(|name| {
+        valid_environment_name(name)
+            && !reserved_credential_environment_name(name)
+            && !environment_names.contains(&environment_name_key(name))
+            && targets.insert(environment_name_key(name))
+    })
+}
+
+#[cfg(windows)]
+fn environment_name_key(value: &str) -> String {
+    value.to_ascii_uppercase()
+}
+
+#[cfg(not(windows))]
+fn environment_name_key(value: &str) -> String {
+    value.to_owned()
+}
+
+#[cfg(windows)]
+fn reserved_credential_environment_name(value: &str) -> bool {
+    matches!(value.to_ascii_uppercase().as_str(), "TEMP" | "TMP")
+}
+
+#[cfg(not(windows))]
+fn reserved_credential_environment_name(_value: &str) -> bool {
+    false
 }
 
 async fn wait_for_credentials(
@@ -2058,6 +2097,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_credential_targets_are_case_insensitive_and_reserve_temp() {
+        let environment = BTreeMap::from([("deploy_token".to_owned(), "pipeline".to_owned())]);
+        assert!(!credential_targets_are_valid(
+            &environment,
+            &["DEPLOY_TOKEN".to_owned()]
+        ));
+        assert!(!credential_targets_are_valid(
+            &BTreeMap::new(),
+            &["TOKEN".to_owned(), "token".to_owned()]
+        ));
+        for reserved in ["TEMP", "temp", "TMP", "tmp"] {
+            assert!(!credential_targets_are_valid(
+                &BTreeMap::new(),
+                &[reserved.to_owned()]
+            ));
+        }
     }
 
     #[test]

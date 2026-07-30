@@ -19,6 +19,7 @@ const MAX_REDACTION_WORK: usize = 64 * 1024 * 1024;
 pub struct Quota {
     pub max_object_bytes: u64,
     pub max_total_bytes: u64,
+    pub max_staged_objects: u64,
 }
 
 /// Stable reference to one committed immutable object.
@@ -33,12 +34,17 @@ pub struct ObjectRef {
 pub struct PendingObject {
     token: String,
     reference: ObjectRef,
+    claimed: bool,
 }
 
 impl PendingObject {
     pub fn from_parts(token: String, reference: ObjectRef) -> Result<Self, ObjectStoreError> {
         validate_pending_token(&token)?;
-        Ok(Self { token, reference })
+        Ok(Self {
+            token,
+            reference,
+            claimed: false,
+        })
     }
 
     pub fn token(&self) -> &str {
@@ -77,6 +83,7 @@ impl StagedObject {
         Ok(PendingObject {
             token,
             reference: self.reference.clone(),
+            claimed: false,
         })
     }
 
@@ -141,6 +148,8 @@ pub enum ObjectStoreError {
     RedactionWorkExceeded,
     #[error("object store exceeds the total-byte quota")]
     TotalQuotaExceeded,
+    #[error("object store exceeds the staged-object count quota")]
+    StagedObjectQuotaExceeded,
     #[error("staged object does not belong to this store")]
     ForeignStagingPath,
     #[error("staged object content no longer matches its declared digest")]
@@ -233,6 +242,9 @@ impl FilesystemObjectStore {
             return Err(ObjectStoreError::ObjectQuotaExceeded);
         }
         let quota_lock = self.lock_quota()?;
+        if staged_object_count(&self.staging)? >= self.quota.max_staged_objects {
+            return Err(ObjectStoreError::StagedObjectQuotaExceeded);
+        }
         let used = committed_bytes(&self.objects)?
             .checked_add(staged_bytes(&self.staging)?)
             .ok_or(ObjectStoreError::TotalQuotaExceeded)?;
@@ -352,10 +364,50 @@ impl FilesystemObjectStore {
         }
     }
 
+    /// Atomically removes a durable upload from staging reclamation.
+    ///
+    /// The claimed name is stable across controller crashes, so an exact retry
+    /// can resume publication while the TTL reaper skips in-flight uploads.
+    pub fn claim_pending(
+        &self,
+        pending: &PendingObject,
+    ) -> Result<PendingObject, ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let quota_lock = self.lock_quota()?;
+        let staged_path = self.staging.join(&pending.token);
+        let claimed_path = self.claimed_path(&pending.token);
+        if staged_path.parent() != Some(self.staging.as_path())
+            || claimed_path.parent() != Some(self.staging.as_path())
+        {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        if staged_path.is_file() && claimed_path.is_file() {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        if staged_path.is_file() {
+            fs::rename(&staged_path, &claimed_path)?;
+            sync_directory(&self.staging)?;
+        } else if !claimed_path.is_file() {
+            let committed = inspect(&self.object_path(&pending.reference.sha256))?;
+            if committed != pending.reference {
+                return Err(ObjectStoreError::ForeignStagingPath);
+            }
+        }
+        if claimed_path.is_file() && inspect(&claimed_path)? != pending.reference {
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
+        drop(quota_lock);
+        Ok(PendingObject {
+            token: pending.token.clone(),
+            reference: pending.reference.clone(),
+            claimed: true,
+        })
+    }
+
     /// Verifies a durable staged upload without publishing or consuming it.
     pub fn verify_pending(&self, pending: &PendingObject) -> Result<ObjectRef, ObjectStoreError> {
         validate_pending_token(&pending.token)?;
-        let path = self.staging.join(&pending.token);
+        let path = self.pending_path(pending);
         if path.parent() != Some(self.staging.as_path()) {
             return Err(ObjectStoreError::ForeignStagingPath);
         }
@@ -375,7 +427,7 @@ impl FilesystemObjectStore {
     /// Removes an unpublished upload without admitting its bytes.
     pub fn abort_pending(&self, pending: &PendingObject) -> Result<(), ObjectStoreError> {
         validate_pending_token(&pending.token)?;
-        let path = self.staging.join(&pending.token);
+        let path = self.pending_path(pending);
         if path.parent() != Some(self.staging.as_path()) {
             return Err(ObjectStoreError::ForeignStagingPath);
         }
@@ -505,7 +557,7 @@ impl FilesystemObjectStore {
 
     fn resume_pending(&self, pending: &PendingObject) -> Result<StagedObject, ObjectStoreError> {
         validate_pending_token(&pending.token)?;
-        let path = self.staging.join(&pending.token);
+        let path = self.pending_path(pending);
         if path.parent() != Some(self.staging.as_path()) || !path.is_file() {
             return Err(ObjectStoreError::ForeignStagingPath);
         }
@@ -527,6 +579,18 @@ impl FilesystemObjectStore {
             .open(&self.quota_lock)?;
         lock.lock()?;
         Ok(lock)
+    }
+
+    fn claimed_path(&self, token: &str) -> PathBuf {
+        self.staging.join(format!("{token}.publishing"))
+    }
+
+    fn pending_path(&self, pending: &PendingObject) -> PathBuf {
+        if pending.claimed {
+            self.claimed_path(&pending.token)
+        } else {
+            self.staging.join(&pending.token)
+        }
     }
 }
 
@@ -609,6 +673,15 @@ fn create_staging_file(
             "{namespace}-{}-{sequence}.staged",
             std::process::id()
         ));
+        if staging
+            .join(format!(
+                "{namespace}-{}-{sequence}.staged.publishing",
+                std::process::id()
+            ))
+            .exists()
+        {
+            continue;
+        }
         match OpenOptions::new().create_new(true).write(true).open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -670,6 +743,25 @@ fn staged_bytes(root: &Path) -> Result<u64, ObjectStoreError> {
         }
     }
     Ok(total)
+}
+
+fn staged_object_count(root: &Path) -> Result<u64, ObjectStoreError> {
+    directory_entries(root)?
+        .into_iter()
+        .try_fold(0_u64, |count, entry| {
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(count),
+                Err(error) => return Err(error.into()),
+            };
+            if metadata.is_file() {
+                count
+                    .checked_add(1)
+                    .ok_or(ObjectStoreError::StagedObjectQuotaExceeded)
+            } else {
+                Ok(count)
+            }
+        })
 }
 
 fn directory_entries(path: &Path) -> Result<Vec<fs::DirEntry>, ObjectStoreError> {
@@ -743,6 +835,7 @@ mod tests {
             Quota {
                 max_object_bytes,
                 max_total_bytes,
+                max_staged_objects: 4_096,
             },
         )
         .unwrap()
@@ -842,13 +935,19 @@ mod tests {
         let staging = root.path().join("staging");
         fs::create_dir(&staging).unwrap();
         let sequence = AtomicU64::new(7);
-        for value in [7, 8] {
-            fs::write(
-                staging.join(format!("tenant-a-{}-{value}.staged", std::process::id())),
-                b"abandoned",
-            )
-            .unwrap();
-        }
+        fs::write(
+            staging.join(format!("tenant-a-{}-7.staged", std::process::id())),
+            b"abandoned",
+        )
+        .unwrap();
+        fs::write(
+            staging.join(format!(
+                "tenant-a-{}-8.staged.publishing",
+                std::process::id()
+            )),
+            b"claimed",
+        )
+        .unwrap();
 
         let (path, _file) = create_staging_file(&staging, "tenant-a", &sequence).unwrap();
         assert_eq!(
@@ -888,6 +987,54 @@ mod tests {
         fs::write(store.staging.join("crashed-1-1.staged"), b"xxxx").unwrap();
         assert_eq!(store.reap_staged_older_than(Duration::ZERO).unwrap(), 1);
         assert_eq!(staged_bytes(&store.staging).unwrap(), 0);
+    }
+
+    #[test]
+    fn staged_count_quota_bounds_zero_byte_reservations() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemObjectStore::open(
+            root.path(),
+            Quota {
+                max_object_bytes: 4,
+                max_total_bytes: 4,
+                max_staged_objects: 1,
+            },
+        )
+        .unwrap();
+        let first = store
+            .stage_artifact("tenant-a", b"")
+            .unwrap()
+            .persist()
+            .unwrap();
+        assert!(matches!(
+            store.stage_artifact("tenant-a", b""),
+            Err(ObjectStoreError::StagedObjectQuotaExceeded)
+        ));
+        store.abort_pending(&first).unwrap();
+        assert!(store.stage_artifact("tenant-a", b"").is_ok());
+    }
+
+    #[test]
+    fn publication_claim_is_resumable_and_excluded_from_reaping() {
+        let root = tempfile::tempdir().unwrap();
+        let first_store = store(root.path(), 1024, 4096);
+        let pending = first_store
+            .stage_artifact("tenant-a", b"claimed")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let claimed = first_store.claim_pending(&pending).unwrap();
+        assert!(!first_store.staging.join(pending.token()).exists());
+        assert_eq!(
+            first_store.reap_staged_older_than(Duration::ZERO).unwrap(),
+            0
+        );
+
+        let reopened = store(root.path(), 1024, 4096);
+        let resumed = reopened.claim_pending(&pending).unwrap();
+        assert_eq!(resumed, claimed);
+        let committed = reopened.commit_pending(resumed).unwrap();
+        assert_eq!(reopened.read_verified(&committed).unwrap(), b"claimed");
     }
 
     #[test]

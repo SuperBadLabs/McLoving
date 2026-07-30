@@ -453,9 +453,33 @@ fn on_start(
             }
             *case = Some(parse_case(reader, start, limits)?);
         }
-        b"failure" => mark_case(reader, start, limits, case, TestOutcome::Failed)?,
-        b"error" => mark_case(reader, start, limits, case, TestOutcome::Error)?,
-        b"skipped" => mark_case(reader, start, limits, case, TestOutcome::Skipped)?,
+        b"failure" => mark_case_at_depth(
+            *root,
+            depth,
+            reader,
+            start,
+            limits,
+            case,
+            TestOutcome::Failed,
+        )?,
+        b"error" => mark_case_at_depth(
+            *root,
+            depth,
+            reader,
+            start,
+            limits,
+            case,
+            TestOutcome::Error,
+        )?,
+        b"skipped" => mark_case_at_depth(
+            *root,
+            depth,
+            reader,
+            start,
+            limits,
+            case,
+            TestOutcome::Skipped,
+        )?,
         _ if depth == 1 => {
             return Err(TestResultError::Malformed(
                 "unsupported JUnit document root".to_owned(),
@@ -483,9 +507,33 @@ fn on_empty(
             on_start(reader, start, limits, depth, root, suite, case)?;
             finish_case(suite, case, case_count, limits)?;
         }
-        b"failure" => mark_case(reader, start, limits, case, TestOutcome::Failed)?,
-        b"error" => mark_case(reader, start, limits, case, TestOutcome::Error)?,
-        b"skipped" => mark_case(reader, start, limits, case, TestOutcome::Skipped)?,
+        b"failure" => mark_case_at_depth(
+            *root,
+            depth,
+            reader,
+            start,
+            limits,
+            case,
+            TestOutcome::Failed,
+        )?,
+        b"error" => mark_case_at_depth(
+            *root,
+            depth,
+            reader,
+            start,
+            limits,
+            case,
+            TestOutcome::Error,
+        )?,
+        b"skipped" => mark_case_at_depth(
+            *root,
+            depth,
+            reader,
+            start,
+            limits,
+            case,
+            TestOutcome::Skipped,
+        )?,
         b"testsuite" => {
             on_start(reader, start, limits, depth, root, suite, case)?;
             finish_suite(suites, suite, limits)?;
@@ -544,6 +592,28 @@ fn mark_case(
     current.outcome = outcome;
     current.message = attribute(reader, start, b"message", limits)?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mark_case_at_depth(
+    root: Option<JunitRoot>,
+    depth: usize,
+    reader: &Reader<Cursor<&[u8]>>,
+    start: &BytesStart<'_>,
+    limits: JunitLimits,
+    case: &mut Option<PendingCase>,
+    outcome: TestOutcome,
+) -> Result<(), TestResultError> {
+    let direct_child = matches!(
+        (root, depth),
+        (Some(JunitRoot::Suite), 3) | (Some(JunitRoot::Suites), 4)
+    );
+    if !direct_child {
+        return Err(TestResultError::Malformed(
+            "test outcome must be a direct child of testcase".to_owned(),
+        ));
+    }
+    mark_case(reader, start, limits, case, outcome)
 }
 
 fn finish_case(
@@ -917,13 +987,34 @@ impl Store {
         .bind(i64::from(limit))
         .fetch_all(&mut *tx)
         .await?;
+        let distinct_outcomes = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(DISTINCT c.outcome)
+             FROM normalized_test_cases AS c
+             JOIN normalized_test_suites AS s
+               ON s.organization_id = c.organization_id
+              AND s.report_id = c.report_id
+              AND s.suite_ordinal = c.suite_ordinal
+             JOIN normalized_test_reports AS r
+               ON r.organization_id = c.organization_id
+              AND r.report_id = c.report_id
+             WHERE c.organization_id = $1
+               AND r.project_id = $2
+               AND s.name = $3
+               AND c.classname = $4
+               AND c.name = $5",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(suite_name)
+        .bind(classname)
+        .bind(case_name)
+        .fetch_one(&mut *tx)
+        .await?;
         tx.commit().await?;
-        let mut outcomes = std::collections::HashSet::new();
         let mut observations = rows
             .into_iter()
             .map(|row| {
                 let outcome = TestOutcome::parse(row.get("outcome"))?;
-                outcomes.insert(outcome);
                 Ok(TestCaseObservation {
                     report_id: row.get("report_id"),
                     build_id: row.get("build_id"),
@@ -951,7 +1042,7 @@ impl Store {
             suite_name: suite_name.to_owned(),
             classname: classname.to_owned(),
             case_name: case_name.to_owned(),
-            flaky: outcomes.len() > 1,
+            flaky: distinct_outcomes > 1,
             observations,
         })
     }
@@ -1067,6 +1158,20 @@ mod tests {
         assert_eq!(report.suites[0].cases[1].duplicate_ordinal, 1);
         assert_eq!(report.raw_sha256, Sha256::digest(xml).as_slice());
         validate_report(&report).expect("self-consistent normalized report");
+    }
+
+    #[test]
+    fn outcomes_must_be_direct_testcase_children() {
+        for xml in [
+            br#"<testsuite name="unit"><testcase name="nested"><system-out><failure/></system-out></testcase></testsuite>"#.as_slice(),
+            br#"<testsuites><testsuite name="unit"><testcase name="nested"><wrapper><skipped/></wrapper></testcase></testsuite></testsuites>"#.as_slice(),
+        ] {
+            assert!(matches!(
+                parse_junit(xml, source(), JunitLimits::default()),
+                Err(TestResultError::Malformed(message))
+                    if message == "test outcome must be a direct child of testcase"
+            ));
+        }
     }
 
     #[test]

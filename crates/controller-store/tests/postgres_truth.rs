@@ -6585,10 +6585,10 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
                 digest,
                 4096,
                 "application/xml",
-                86_400,
+                172_800,
             )
             .await
-            .expect("resume exact reservation after lease expiry")
+            .expect("resume exact reservation after lease expiry and extend retention")
     );
     assert!(
         store
@@ -6696,7 +6696,7 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
     assert_eq!(artifacts[0].media_type, "application/xml");
     assert_eq!(artifacts[0].status, ObjectStatus::Available);
     let retained: bool = sqlx::query_scalar(
-        "SELECT retain_until > clock_timestamp()
+        "SELECT retain_until >= clock_timestamp() + interval '47 hours'
          FROM object_retention
          WHERE organization_id = $1 AND object_digest = $2",
     )
@@ -6864,6 +6864,12 @@ async fn junit_evidence_is_bounded_immutable_and_preserves_flaky_history() {
     assert_eq!(history.observations[0].outcome, TestOutcome::Failed);
     assert_eq!(history.observations[1].outcome, TestOutcome::Passed);
     assert!(history.flaky);
+    let limited_history = store
+        .test_case_history(organization_id, project_id, "unit", "core", "sometimes", 1)
+        .await
+        .expect("limit observations without truncating flakiness truth");
+    assert_eq!(limited_history.observations.len(), 1);
+    assert!(limited_history.flaky);
     let raw_retention_extended: bool = sqlx::query_scalar(
         "SELECT bool_and(retain_until >= clock_timestamp() + interval '29 days')
          FROM object_retention
