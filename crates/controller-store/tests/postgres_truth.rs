@@ -6769,6 +6769,25 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
     );
     sqlx::query(
         "UPDATE attempts
+         SET status = 'reconciliation_required',
+             lease_owner = 'artifact-agent',
+             lease_expires_at = NULL
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("retain a stale owner on a reconciliation-required attempt");
+    assert!(
+        !store
+            .artifact_publication_claim_active(organization_id, digest, 4096)
+            .await
+            .expect("inspect reconciliation-required publication claim"),
+        "a reconciliation-required attempt cannot replay publication and must release its claim"
+    );
+    sqlx::query(
+        "UPDATE attempts
          SET status = 'finalizing',
              lease_owner = 'artifact-agent',
              lease_expires_at = clock_timestamp() - interval '1 second'
