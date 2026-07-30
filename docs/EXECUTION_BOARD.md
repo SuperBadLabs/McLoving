@@ -183,12 +183,23 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   idempotency/fencing identity. Only a successful comparison receipt may issue
   the one narrowly scoped connector grant and release the authoritative intent;
   missing, late, ambiguous, or mismatched intent comparison freezes the grant
-  and produces zero production request. The shadow may never submit to the
+  and produces zero production request. After the authoritative connector
+  returns, `EXT-001` must emit one bounded signed outcome receipt binding the
+  compared request, connector/destination identity, response schema and status,
+  canonical public return values, confidentiality-safe tainted secret
+  references/digests, external identifiers, retry/ambiguity truth, and
+  independently observed destination-state receipt. A deny-authority outcome
+  replay adapter validates the certified mapping and injects that receipt
+  exactly once as the shadow step result before either execution continues to
+  downstream control flow; it has no production endpoint, credential, connector
+  grant, or effect authority. Compare receipt consumption, later branches,
+  outputs, and subsequent intents. The shadow may never submit to the
   production effect endpoint, even with a shared idempotency key, because
   request ordering could commit the wrong payload. Idempotency is required only
   for retries and reconciliation by the single authoritative runner. Any
   external system or migration design that cannot buffer and compare before
-  submission, or that requires both runners to submit production writes, is
+  submission, cannot safely replay the authoritative outcome without secret
+  disclosure, or requires both runners to submit production writes, is
   ineligible until redesigned; request acceptance, deduplication, or later
   reconciliation cannot retroactively satisfy the effect-free-shadow gate.
 - Every effective Jenkins node/agent property consumed by an in-scope job is
@@ -495,8 +506,21 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   digests in protected evidence. Required credentials must be freshly
   rebrokered through the mapped `SECRET-001` provider and scoped grant; stale,
   revoked, unclassified, or undecipherable secret-bearing state fails closed.
-  Prove injected markers never enter destination state, logs, artifacts,
-  backups, receipts, APIs, or the reverse transform.
+  An active legal hold changes preservation, not runtime exposure: if a held
+  log, artifact, workspace, or state record contains secret material,
+  `MIG-005A` must either seal the original bytes in a separately encrypted,
+  immutable, tenant/case-bound held-evidence store governed by the original hold
+  and custodian/release authority, with separate keys, least-access retrieval,
+  complete access audit, backup/restore, and digest verification, or execute an
+  explicit signed custodian-approved legal-redaction workflow before removing
+  any bytes. The portable operational copy contains only the approved redaction
+  reference and keyed digest; no workload, runner, connector, or ordinary
+  service principal can read the held original. Prove held-evidence retrieval,
+  hold continuity, release denial, and restoration before reader/execution
+  authority transfer or Jenkins decommissioning. Injected markers may exist
+  only inside that explicitly held evidence; prove they never enter destination
+  operational state, logs, artifacts, ordinary backups, receipts, APIs, or the
+  reverse transform.
 - Treat every retained workspace/state filesystem import in either direction as
   hostile input. Parse a canonical manifest inside an isolated staging root;
   enforce bounded entries, total/apparent/extracted bytes, depth, path and name
@@ -641,7 +665,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
 | Ticket | Status | Depends on | Objective and acceptance |
 |---|---|---|---|
-| EXT-001 | PENDING | SEC-003, CTRL-003 | Define the scoped out-of-process connector identity and versioned protocol for external effects. A connector has no scheduler, database, agent, controller-filesystem, or unrelated-secret authority; each action binds tenant/project/build/attempt/fence, exact connector and request digests, idempotency class, expiry, and audit provenance. Permission-negative integration, stale/replay denial, bounded retry, exact deduplication, and ambiguous-effect reconciliation gates are required before any connector-backed canary or cutover. |
+| EXT-001 | PENDING | SEC-003, CTRL-003 | Define the scoped out-of-process connector identity and versioned protocol for external effects. A connector has no scheduler, database, agent, controller-filesystem, or unrelated-secret authority; each action binds tenant/project/build/attempt/fence, exact connector and request digests, idempotency class, expiry, and audit provenance. Define a bounded signed authoritative-outcome receipt with typed response schema/status, canonical public values, protected secret references/taint, external identifiers, retry/ambiguity truth, and `OBS-001` destination-state linkage plus a deny-authority exactly-once shadow replay protocol that cannot reach the production endpoint. Prove downstream control-flow and later-intent equivalence after success, failure, retry, timeout, ambiguous completion, public/secret-bearing result, malformed/substituted/replayed outcome, and replay-adapter restart. Permission-negative integration, stale/replay denial, bounded retry, exact deduplication, and ambiguous-effect reconciliation gates are required before any connector-backed canary or cutover. |
 | OBS-001 | PENDING | SEC-003, AUDIT-001 | Implement typed independently deployed read-only destination observers for every authoritative effect class discovered by MIG-000. Bind the exact observer implementation/image, protocol, deployment and operator trust identity, tenant/project/build/attempt/effect fence, destination endpoint/account/resource scope, canonical query, freshness cursor, response digest/signature, observation time, scoped credential grant, and audit provenance into a versioned receipt. The observer must use a separate service identity, credential-issuance path, configuration authority, and runtime boundary from every runner and effectful connector; it has no write, scheduler, controller database/filesystem, agent, workload-secret, connector-control, or effect authority. Prove valid pre/post/reconciliation reads, stale/missing/malformed/oversized/substituted/replayed responses, timeout/outage/restart, cursor rollback, observer/configuration/credential substitution denial, read-grant expiry and rotation, destination permission-negative behavior, and compromised-runner/connector attempts to control, impersonate, configure, credential, suppress, reorder, or fabricate observations against exact contained destination fixtures. Certify receipt verification and non-collusion before any effectful `MIG-006` differential, `MIG-008` canary, `MIG-009` cutover, or rollback. |
 | INPUT-001 | PENDING | SEC-003, AUDIT-001 | Implement isolated typed read-only adapters for every live external runtime input discovered by MIG-000. Bind tenant/project/build/attempt, exact adapter implementation and protocol/schema, endpoint/data-source identity, scoped short-lived read grant, canonical query, consistency/freshness cursor, response digest/signature/provenance, confidentiality/taint, bounded size/rate/timeout, and audit lineage. The adapter has no write, scheduler, database, agent, controller-filesystem, unrelated-secret, or effect authority. Prove permission-negative behavior plus valid, branch-varying, stale, missing, malformed, oversized, unauthorized, endpoint/schema/identity substitution, replay, outage, retry, secret-marker non-disclosure, adapter restart, cutover, and rollback cases against exact contained fixtures before any dependent canary or cutover. |
 | PROV-001 | PENDING | SEC-003, AGENT-004, OPS-001 | Implement a scoped out-of-process provisioner identity and versioned protocol for every dynamic agent class discovered by MIG-000. Bind tenant/project/build/attempt/fence, provider/account/region, exact provisioner implementation and request, immutable template/image/bootstrap/toolchain, requested platform/capabilities/trust pool, network/volume/workspace/cache policy, short-lived instance identity/IAM grant, quotas, expiry, and audit provenance. The provisioner has no scheduler, controller database/filesystem, unrelated-secret, workload credential, or external-effect authority. Prove template/image/provider/identity substitution denial, least-authority networking and volumes, capacity/exhaustion, duplicate/reordered/stale request fencing, startup failure, timeout/cancel, controller/agent/provisioner crash, partition, orphan detection and cleanup, scale-down, retained evidence, no escaped compute, cutover, and rollback against exact contained provider fixtures before any dynamic-agent canary or cutover. |
