@@ -1,7 +1,7 @@
 //! Versioned public HTTP API and its Rust client.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -47,6 +47,7 @@ pub struct ApiState {
     object_store: Option<FilesystemObjectStore>,
     artifact_body_limit: usize,
     staged_upload_ttl: Duration,
+    publication_claim_cursor: Arc<Mutex<Option<String>>>,
 }
 
 impl ApiState {
@@ -63,6 +64,7 @@ impl ApiState {
             object_store: None,
             artifact_body_limit: 2 * 1024 * 1024,
             staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
+            publication_claim_cursor: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1815,12 +1817,23 @@ async fn stage_artifact(
 
 async fn reap_abandoned_artifact_uploads(state: &ApiState) -> Result<(), ApiError> {
     let object_store = object_store(state)?;
-    let claims = object_store
-        .publication_claims_older_than(
-            state.staged_upload_ttl,
-            MAX_PUBLICATION_CLAIM_RECONCILIATION,
-        )
-        .map_err(object_store_error)?;
+    let claims = {
+        let mut cursor = state
+            .publication_claim_cursor
+            .lock()
+            .map_err(|_| internal("publication-claim cursor lock is poisoned"))?;
+        let claims = object_store
+            .publication_claims_older_than(
+                state.staged_upload_ttl,
+                MAX_PUBLICATION_CLAIM_RECONCILIATION,
+                cursor.as_deref(),
+            )
+            .map_err(object_store_error)?;
+        if let Some(last) = claims.last() {
+            *cursor = Some(last.token().to_owned());
+        }
+        claims
+    };
     for claim in claims {
         let Some(organization_id) = publication_claim_organization_id(claim.token()) else {
             object_store

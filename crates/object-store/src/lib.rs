@@ -499,20 +499,23 @@ impl FilesystemObjectStore {
     ///
     /// Listing never mutates storage. The controller must independently prove
     /// that no live database reservation owns each claim before releasing it.
+    /// `after` is an exclusive lexicographic cursor; the page wraps at the end
+    /// so repeated bounded scans cannot starve claims behind protected entries.
     pub fn publication_claims_older_than(
         &self,
         minimum_age: Duration,
         limit: usize,
+        after: Option<&str>,
     ) -> Result<Vec<PendingObject>, ObjectStoreError> {
         if limit == 0 || limit > MAX_PUBLICATION_CLAIM_SCAN {
             return Err(ObjectStoreError::InvalidPublicationClaimScan);
         }
+        if let Some(after) = after {
+            validate_pending_token(after)?;
+        }
         let now = SystemTime::now();
-        let mut claims = Vec::new();
+        let mut candidates = Vec::new();
         for entry in directory_entries(&self.staging)? {
-            if claims.len() == limit {
-                break;
-            }
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) != Some("publishing") {
                 continue;
@@ -539,9 +542,22 @@ impl FilesystemObjectStore {
                 continue;
             };
             validate_pending_token(token)?;
+            candidates.push((token.to_owned(), path));
+        }
+        candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let start = after.map_or(0, |cursor| {
+            candidates.partition_point(|(token, _)| token.as_str() <= cursor)
+        });
+        let candidate_count = candidates.len();
+        let mut claims = Vec::with_capacity(limit.min(candidate_count));
+        for index in (start..candidate_count)
+            .chain(0..start)
+            .take(limit.min(candidate_count))
+        {
+            let (token, path) = &candidates[index];
             claims.push(PendingObject {
                 token: token.to_owned(),
-                reference: inspect(&path)?,
+                reference: inspect(path)?,
                 claimed: true,
             });
         }
@@ -1095,11 +1111,28 @@ mod tests {
             .unwrap();
 
         let candidates = store
-            .publication_claims_older_than(Duration::from_secs(1), 8)
+            .publication_claims_older_than(Duration::from_secs(1), 8, None)
             .unwrap();
         assert_eq!(candidates.len(), 2);
         assert!(candidates.contains(&claimed));
         assert!(candidates.contains(&other_claim));
+        let first_page = store
+            .publication_claims_older_than(Duration::from_secs(1), 1, None)
+            .unwrap();
+        let second_page = store
+            .publication_claims_older_than(Duration::from_secs(1), 1, Some(first_page[0].token()))
+            .unwrap();
+        let wrapped_page = store
+            .publication_claims_older_than(Duration::from_secs(1), 1, Some(second_page[0].token()))
+            .unwrap();
+        assert_ne!(
+            first_page, second_page,
+            "the cursor must advance past protected claims"
+        );
+        assert_eq!(
+            wrapped_page, first_page,
+            "the cursor must wrap after the final claim"
+        );
 
         store.claim_pending(&pending).unwrap();
         assert!(
