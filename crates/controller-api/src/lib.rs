@@ -90,7 +90,7 @@ pub fn router(state: ApiState) -> Router {
             post(stage_artifact),
         )
         .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
-    Router::new()
+    static_ui_router()
         .route("/openapi.json", get(openapi))
         .route(
             "/api/v1/organizations/{organization_id}/audit",
@@ -178,6 +178,56 @@ pub fn router(state: ApiState) -> Router {
             get(explain),
         )
         .with_state(Arc::new(state))
+}
+
+pub fn static_ui_router<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/", get(ui_index))
+        .route("/app.js", get(ui_javascript))
+        .route("/app.css", get(ui_stylesheet))
+}
+
+const UI_INDEX: &str = include_str!("../ui/index.html");
+const UI_JAVASCRIPT: &str = include_str!("../ui/app.js");
+const UI_STYLESHEET: &str = include_str!("../ui/app.css");
+const UI_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+
+async fn ui_index() -> Response {
+    static_ui_response("text/html; charset=utf-8", UI_INDEX)
+}
+
+async fn ui_javascript() -> Response {
+    static_ui_response("text/javascript; charset=utf-8", UI_JAVASCRIPT)
+}
+
+async fn ui_stylesheet() -> Response {
+    static_ui_response("text/css; charset=utf-8", UI_STYLESHEET)
+}
+
+fn static_ui_response(content_type: &'static str, body: &'static str) -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(UI_CSP),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    (headers, body).into_response()
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

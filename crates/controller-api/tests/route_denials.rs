@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use axum::body::Body;
+use axum::body::to_bytes;
 use axum::http::{Method, Request, StatusCode, header};
 use mcloving_controller_api::{
     ARTIFACT_NAME_HEADER, ApiState, IDEMPOTENCY_HEADER, PLATFORM_HEADER, TRUST_POOL_HEADER, router,
@@ -97,6 +98,49 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
             case.path
         );
     }
+}
+
+#[tokio::test]
+async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .expect("construct lazy pool");
+    let principal = Principal {
+        subject: "service:ui-contract".to_owned(),
+        kind: PrincipalKind::Service,
+        organization_id: Uuid::new_v4(),
+        project_roles: BTreeMap::new(),
+        service_scopes: BTreeSet::new(),
+    };
+    let app = router(ApiState::new(Store::new(pool), TOKEN, principal).expect("UI API state"));
+
+    let response = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .expect("UI response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let csp = response
+        .headers()
+        .get(header::CONTENT_SECURITY_POLICY)
+        .and_then(|value| value.to_str().ok())
+        .expect("CSP header");
+    assert!(csp.contains("default-src 'none'"));
+    assert!(csp.contains("script-src 'self'"));
+    assert!(csp.contains("style-src 'self'"));
+    assert!(!csp.contains("'unsafe-inline'"));
+    let html = String::from_utf8(
+        to_bytes(response.into_body(), 256 * 1024)
+            .await
+            .expect("bounded HTML")
+            .to_vec(),
+    )
+    .expect("HTML UTF-8");
+    assert!(html.contains("<main>"));
+    assert!(html.contains("<nav aria-label=\"Product journeys\">"));
+    assert!(html.contains("role=\"status\""));
+    assert!(html.contains("<script src=\"/app.js\" defer></script>"));
+    assert!(!html.contains("<style"));
+    assert_eq!(html.matches("<script").count(), 1);
 }
 
 fn request(case: &RouteCase, token: Option<&str>) -> Request<Body> {
