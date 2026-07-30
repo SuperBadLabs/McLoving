@@ -71,6 +71,19 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   endpoint, live configuration digest, and policy digest. Matching logical
   requests, resolved outputs, or cache contents without the certified
   implementation identities is insufficient and forces recertification.
+- Every effective Jenkins node/agent property consumed by an in-scope job is
+  migration input, including node-scoped environment variables, tool-location
+  overrides, labels, custom workspace/root paths, usage mode, retention,
+  launcher/remoting settings, and plugin-defined properties. `MIG-000` must
+  inventory the property source, resolution/override order, effective value or
+  protected redaction digest, node/label scope, owner, and configuration digest;
+  `MIG-002` must bind it into the corpus profile and equivalence cases; and
+  `MIG-006` must certify the resulting environment, tool identity, scheduling,
+  and authority behavior. The `MIG-008` pre-effect and `MIG-009` atomic cutover
+  freezes must re-read the live effective-property set and exact configuration
+  digest for every eligible agent target. Missing, changed, newly effective, or
+  secret-bearing unredacted properties invalidate certification and block
+  authority transfer until recertified.
 - Jenkins decommissioning must quiesce before the final export: pause and
   verify all trigger ingress and administrative writes, freeze new scheduling
   and external-effect authority, drain or explicitly reconcile every accepted
