@@ -114,6 +114,26 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   receipts; ad hoc import/export logic cannot earn equivalence. `MIG-007`
   packages the already-certified mapping and receipts rather than defining a
   downstream replacement.
+- Every `MIG-005A`, `MIG-007`, `MIG-008`, and `MIG-009` workspace/state export,
+  transform, backup, receipt, and reverse import is secret-aware. Classify and
+  scan every record before and after transformation; omit credential files,
+  tokens, keys, encrypted Jenkins secrets, and other secret material from
+  portable state, retaining only reviewed typed redaction references and keyed
+  digests in protected evidence. Required credentials must be freshly
+  rebrokered through the mapped `SECRET-001` provider and scoped grant; stale,
+  revoked, unclassified, or undecipherable secret-bearing state fails closed.
+  Prove injected markers never enter destination state, logs, artifacts,
+  backups, receipts, APIs, or the reverse transform.
+- A corpus case whose production semantics depend on an implementation not yet
+  complete at its first `MIG-006` run—including `DEP-001` dependency resolution
+  or `CACHE-001` cache behavior—cannot count as native, mappable, runnable, or
+  certified through fixture/ad hoc behavior. After the required implementation
+  is complete, rerun every affected `MIG-006` scenario against its exact
+  deployed binary/image, configuration, policy, and provenance identities,
+  regenerate the `MIG-007` package and receipts, and pass exact-head review
+  before `MIG-008` effect authority. This recertification rule applies to any
+  later trigger, discovery, connector, SCM, secret, dependency, cache, agent,
+  or other runtime implementation that changes certified behavior.
 - Stop only for an owner-level decision, new authority, or genuine blocker.
 
 ## Batch ledger
