@@ -41,6 +41,15 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   work or ambiguous destination state. Only then capture and verify the final
   configuration/build/artifact/audit export, revoke remaining read and write
   authority, credentials, and network paths, and retire compute and secrets.
+- In `MIG-006`, "no database, agent, scheduler, or controller authority" means
+  no production, staging, shared-service, or cross-fixture authority. The
+  Jenkins oracle and McLoving runner each receive a separate disposable,
+  exact-profile test stack containing only the controller, PostgreSQL or other
+  required state store, scheduler, bounded agent pool, object store, and API
+  endpoints needed for that side's declared scenarios. Use synthetic
+  short-lived credentials, a private deny-by-default test fabric, no external
+  effects, immutable outputs, negative production/cross-fixture reachability
+  tests, and complete teardown after receipt sealing.
 - Stop only for an owner-level decision, new authority, or genuine blocker.
 
 ## Batch ledger
