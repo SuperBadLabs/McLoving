@@ -31,10 +31,11 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 - No job may enter `MIG-008` effect-authoritative canary or `MIG-009`
   authoritative cutover while an inventoried external reader still consumes
   that job's effect-free or stale Jenkins-side truth or an inventoried
-  administrative writer still targets only that job's Jenkins definition or
-  enclosing folder/controller configuration. Each affected caller must first pass
-  `CONSUMER-001` or `ADMIN-001`, respectively, or have explicit owner-approved
-  retirement, with tested caller cutover and rollback evidence.
+  administrative writer still targets only that job's Jenkins definition,
+  enclosing folder/controller configuration, queue, live execution, approval,
+  or input state. Each affected caller must first pass `CONSUMER-001` or
+  `ADMIN-001`, respectively, or have explicit owner-approved retirement, with
+  tested caller cutover and rollback evidence.
 - Every reference to an administrative writer in `MIG-000`, `ADMIN-001`,
   canary/cutover gates, and decommissioning includes every effective Jenkins
   write path regardless of authentication mode: named clients, service
@@ -44,6 +45,16 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   use; migrate it to an authenticated least-authority McLoving path or obtain
   explicit owner-approved retirement. Prove anonymous/unauthenticated write
   denial in the replacement and zero residual Jenkins writes.
+- Administrative writers include operational run-control paths, not only
+  configuration writers: build trigger/replay/retry, queue cancel/reorder,
+  running-build stop/terminate/kill, input or protected-environment approval,
+  submitted parameter/value, and resume/pause actions. `MIG-000` must inventory
+  every such effective path and its observed caller or source; `ADMIN-001` must
+  migrate its semantics, authorization, idempotency/fencing, audit, failure,
+  cutover, and rollback behavior or obtain explicit owner-approved retirement.
+  Before `MIG-008`, `MIG-009`, or decommissioning, prove the replacement
+  operation affects the authoritative execution exactly once, a stale Jenkins
+  shadow cannot accept it, and no residual Jenkins operational write remains.
 - The `MIG-009` atomic cutover freeze must re-read and match each deployed
   replacement trigger's implementation digest in addition to its class and
   configuration, and each deployed Multibranch Pipeline or Organization Folder
