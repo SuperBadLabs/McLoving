@@ -50,15 +50,23 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   metadata plus immutable provenance, prove deletion remains blocked, and
   verify indexed retrieval and backup restore. Missing records, weaker policy,
   untested restore, or an unapproved hold release blocks retirement.
-- Every stateful `MIG-009` per-job cutover must similarly quiesce before its
-  cutover snapshot: pause and verify scheduled, webhook, upstream, remote,
-  manual, and API build ingress plus administrative writers for the job and
-  affected enclosing scope; freeze new scheduling and effect-authority
-  transfers; drain or reconcile all queued/running builds, retries, leases,
-  locks, and uncertain effects; and prove zero mutable source work. Only then
-  re-export, transform, import, and verify state before atomically switching
-  trigger, reader, writer, and effect authority. Failure restores the frozen
-  Jenkins authorities without skipped/duplicated state or effects.
+- Every effectful or stateful `MIG-009` per-job cutover must quiesce first:
+  pause and verify scheduled, webhook, upstream, remote, manual, and API build
+  ingress plus administrative writers for the job and affected enclosing scope;
+  freeze new scheduling and effect-authority transfers; drain or reconcile all
+  queued/running builds, retries, issued grants, leases, locks, and uncertain
+  effects; and prove zero active source work or authority. For stateful jobs,
+  only then re-export, transform, import, and verify state. Atomically switch
+  trigger, reader, writer, and effect authority afterward; failure restores the
+  frozen Jenkins authorities without skipped/duplicated state or effects.
+- A job using a shared lock, throttle, or resource cohort cannot enter
+  `MIG-008` effect-authoritative canary or `MIG-009` cutover while any cohort
+  member can execute under an independent platform-local lock. During dual-run
+  and rollback, both Jenkins and McLoving must acquire the same external
+  lease/fence identity through one tested coordinator with atomic ownership,
+  expiry, cancellation, restart, partition, stale-holder, and rollback proof;
+  otherwise quiesce and migrate the entire cohort atomically. Reconciliation
+  must prove one holder and one effect authority for every transition.
 - In `MIG-006`, "no database, agent, scheduler, or controller authority" means
   no production, staging, shared-service, or cross-fixture authority. The
   Jenkins oracle and McLoving runner each receive a separate disposable,
