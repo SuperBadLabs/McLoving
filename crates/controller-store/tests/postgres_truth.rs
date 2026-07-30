@@ -6726,6 +6726,13 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
         .find(|artifact| artifact.name == "reports/result.xml")
         .expect("reserved exact artifact");
     assert_eq!(reserved.status, ObjectStatus::Pending);
+    assert!(
+        store
+            .artifact_publication_claim_active(organization_id, digest, 4096)
+            .await
+            .expect("inspect live publication claim"),
+        "a current live reservation must protect its filesystem claim"
+    );
     sqlx::query(
         "UPDATE attempts
          SET lease_expires_at = clock_timestamp() - interval '1 second'
@@ -6736,6 +6743,13 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
     .execute(store.pool())
     .await
     .expect("expire the publishing lease after metadata reservation");
+    assert!(
+        !store
+            .artifact_publication_claim_active(organization_id, digest, 4096)
+            .await
+            .expect("inspect abandoned publication claim"),
+        "an expired reservation must become reclaimable"
+    );
     assert!(
         store
             .register_artifact(

@@ -2771,6 +2771,46 @@ impl Store {
         Ok(true)
     }
 
+    /// Reports whether an old filesystem publication claim still belongs to a
+    /// live, current-restore artifact reservation.
+    pub async fn artifact_publication_claim_active(
+        &self,
+        organization_id: Uuid,
+        digest: [u8; 32],
+        bytes: i64,
+    ) -> Result<bool, StoreError> {
+        if bytes < 0 {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let active = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM attempt_objects AS o
+                 JOIN attempts AS a
+                   ON a.organization_id = o.organization_id
+                  AND a.id = o.attempt_id
+                 WHERE o.organization_id = $1
+                   AND o.kind = 'artifact'
+                   AND o.object_digest = $2
+                   AND o.bytes = $3
+                   AND o.status = 'pending'
+                   AND a.restore_epoch = (
+                       SELECT restore_epoch FROM controller_metadata WHERE singleton
+                   )
+                   AND a.lease_expires_at > clock_timestamp()
+                   AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+             )",
+        )
+        .bind(organization_id)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(active)
+    }
+
     /// Marks an exact reserved artifact available only after bytes are published.
     #[allow(clippy::too_many_arguments)]
     pub async fn mark_artifact_available(

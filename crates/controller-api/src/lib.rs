@@ -29,6 +29,7 @@ pub const PLATFORM_HEADER: &str = "mcloving-platform";
 pub const ARTIFACT_NAME_HEADER: &str = "mcloving-artifact-name";
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
 const DEFAULT_PLATFORM: &str = "linux";
+const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -460,9 +461,7 @@ async fn stage_artifact(
         ));
     }
     let object_store = object_store(&state)?;
-    object_store
-        .reap_staged_older_than(state.staged_upload_ttl)
-        .map_err(object_store_error)?;
+    reap_abandoned_artifact_uploads(&state, organization_id).await?;
     let staged = object_store
         .stage_artifact(&organization_id.to_string(), &content)
         .map_err(object_store_error)?
@@ -478,6 +477,45 @@ async fn stage_artifact(
             bytes: staged.object_ref().bytes,
         }),
     ))
+}
+
+async fn reap_abandoned_artifact_uploads(
+    state: &ApiState,
+    organization_id: Uuid,
+) -> Result<(), ApiError> {
+    let object_store = object_store(state)?;
+    let namespace = organization_id.to_string();
+    let claims = object_store
+        .publication_claims_older_than(
+            &namespace,
+            state.staged_upload_ttl,
+            MAX_PUBLICATION_CLAIM_RECONCILIATION,
+        )
+        .map_err(object_store_error)?;
+    for claim in claims {
+        let bytes = i64::try_from(claim.object_ref().bytes).map_err(|_| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "artifact_reconciliation_failed",
+                "publication claim exceeds controller metadata bounds",
+            )
+        })?;
+        if state
+            .store
+            .artifact_publication_claim_active(organization_id, claim.object_ref().sha256, bytes)
+            .await
+            .map_err(internal)?
+        {
+            continue;
+        }
+        object_store
+            .release_publication_claim(&claim, state.staged_upload_ttl)
+            .map_err(object_store_error)?;
+    }
+    object_store
+        .reap_staged_older_than(state.staged_upload_ttl)
+        .map_err(object_store_error)?;
+    Ok(())
 }
 
 async fn commit_artifact(
