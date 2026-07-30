@@ -84,6 +84,14 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   retries, and uncertain effects. Prove no prior Jenkins execution retains
   effect authority before issuing McLoving's fenced canary grant; input receipt
   matching alone cannot replace this quiescence.
+- For a stateful `MIG-008` canary, after that quiescence and before the first
+  production effect grant, take a fresh content-hashed live Jenkins export,
+  apply the exact certified `MIG-005A` forward transform, import it into the
+  designated McLoving canary state, and verify record-level provenance,
+  build-number/previous-result mappings, cross-build artifacts, retained
+  workspace/state, and destination digests against the receipt. Empty, stale,
+  partial, conflicting, or unverifiable state keeps McLoving effect-free and
+  restores Jenkins ingress/authority; a rehearsal receipt alone is insufficient.
 - In `MIG-006`, "no network or host mounts" means no external, host,
   production, staging, shared-service, or cross-fixture network or mounts; the
   private network contained wholly inside one disposable fixture is permitted.
