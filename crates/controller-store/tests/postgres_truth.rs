@@ -4641,6 +4641,59 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             .await
             .expect("configure protected environment")
     );
+    assert!(
+        !store
+            .configure_protected_environment(
+                organization_id,
+                project_id,
+                "production",
+                "deploy",
+                2,
+            )
+            .await
+            .expect("idempotent protected environment configuration")
+    );
+    assert!(
+        store
+            .configure_protected_environment(
+                organization_id,
+                project_id,
+                "production",
+                "deploy",
+                1,
+            )
+            .await
+            .expect("change protected environment configuration")
+    );
+    assert!(
+        store
+            .configure_protected_environment(
+                organization_id,
+                project_id,
+                "production",
+                "deploy",
+                2,
+            )
+            .await
+            .expect("restore protected environment configuration")
+    );
+    let policy_audit = store
+        .export_audit_events(organization_id)
+        .await
+        .expect("export protected environment policy audit");
+    let policy_events = policy_audit
+        .events
+        .iter()
+        .filter(|event| event.action == "protected_environment.configured")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        policy_events
+            .iter()
+            .map(|event| event.payload["required_approvals"].as_i64())
+            .collect::<Vec<_>>(),
+        vec![Some(2), Some(1), Some(2)],
+        "create and actual policy changes are audited while a no-op is not"
+    );
     let admission = store
         .admit_build(&NewBuild {
             organization_id,

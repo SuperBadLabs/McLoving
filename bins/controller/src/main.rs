@@ -69,6 +69,10 @@ async fn main() -> Result<()> {
     let max_object_bytes = bounded_u64_environment("MCLOVING_MAX_OBJECT_BYTES", 64 * 1024 * 1024)?;
     let max_total_bytes =
         bounded_u64_environment("MCLOVING_MAX_TOTAL_OBJECT_BYTES", 10 * 1024 * 1024 * 1024)?;
+    let staged_upload_ttl = Duration::from_secs(bounded_u64_environment(
+        "MCLOVING_STAGED_UPLOAD_TTL_SECONDS",
+        24 * 60 * 60,
+    )?);
     if max_total_bytes < max_object_bytes {
         bail!("MCLOVING_MAX_TOTAL_OBJECT_BYTES must be at least MCLOVING_MAX_OBJECT_BYTES");
     }
@@ -82,7 +86,8 @@ async fn main() -> Result<()> {
     .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
     let state = ApiState::new(store.clone(), &bearer_token)
         .context("configure public API")?
-        .with_object_store(object_store);
+        .with_object_store(object_store)
+        .with_staged_upload_ttl(staged_upload_ttl);
     let worker = EmbeddedWorker::from_environment()?;
     tokio::fs::create_dir_all(&worker.config.workspace_root)
         .await

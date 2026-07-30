@@ -2,7 +2,7 @@ use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
 
-use super::{Store, StoreError, append_event_and_outbox};
+use super::{Store, StoreError, append_event_and_outbox, audit};
 
 const MAX_SECURITY_LABEL_BYTES: usize = 128;
 const MAX_APPROVER_SUBJECT_BYTES: usize = 256;
@@ -67,7 +67,7 @@ impl Store {
             ));
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let configured = sqlx::query_scalar::<_, String>(
+        let configured = sqlx::query_scalar::<_, i16>(
             "INSERT INTO protected_environments (
                  organization_id, project_id, environment, action,
                  required_approvals
@@ -78,13 +78,10 @@ impl Store {
              ON CONFLICT (organization_id, project_id, environment, action)
              DO UPDATE SET
                  required_approvals = EXCLUDED.required_approvals,
-                 updated_at = CASE
-                     WHEN protected_environments.required_approvals
-                          IS DISTINCT FROM EXCLUDED.required_approvals
-                     THEN clock_timestamp()
-                     ELSE protected_environments.updated_at
-                 END
-             RETURNING environment",
+                 updated_at = clock_timestamp()
+             WHERE protected_environments.required_approvals
+                   IS DISTINCT FROM EXCLUDED.required_approvals
+             RETURNING required_approvals",
         )
         .bind(organization_id)
         .bind(project_id)
@@ -93,6 +90,23 @@ impl Store {
         .bind(required_approvals)
         .fetch_optional(&mut *tx)
         .await?;
+        if configured.is_some() {
+            audit::append_audit_record(
+                &mut tx,
+                organization_id,
+                "authorization",
+                "system:controller",
+                "protected_environment.configured",
+                &format!("project:{project_id}:environment:{environment}:action:{action}"),
+                json!({
+                    "project_id": project_id,
+                    "environment": environment,
+                    "action": action,
+                    "required_approvals": required_approvals,
+                }),
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(configured.is_some())
     }

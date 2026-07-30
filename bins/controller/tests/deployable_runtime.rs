@@ -79,6 +79,7 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .env("MCLOVING_WORKSPACE_ROOT", root.path().join("workspace"))
         .env("MCLOVING_AGENT_JOURNAL", root.path().join("agent.db"))
         .env("MCLOVING_OBJECT_ROOT", root.path().join("objects"))
+        .env("MCLOVING_STAGED_UPLOAD_TTL_SECONDS", "1")
         .kill_on_drop(true)
         .spawn()
         .expect("start shipped controller");
@@ -110,6 +111,24 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
     })
     .await
     .expect("embedded worker enters running state");
+    let abandoned = client
+        .stage_artifact(
+            organization_id,
+            project_id,
+            admission.build_id,
+            "reports/abandoned.bin",
+            "application/octet-stream",
+            b"abandoned".to_vec(),
+        )
+        .await
+        .expect("stage abandoned artifact through shipped controller");
+    let abandoned_path = root
+        .path()
+        .join("objects")
+        .join("staging")
+        .join(&abandoned.upload_token);
+    assert!(abandoned_path.exists(), "staged upload is durable");
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
     let rejected = client
         .stage_artifact(
             organization_id,
@@ -121,6 +140,10 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         )
         .await
         .expect("stage rejected artifact through shipped controller");
+    assert!(
+        !abandoned_path.exists(),
+        "a later upload must reclaim an expired abandoned reservation"
+    );
     let rejected_commit = ArtifactCommitRequest {
         node_id: admission.node_id,
         attempt_id: admission.attempt_id,

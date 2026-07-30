@@ -210,17 +210,6 @@ pub fn parse_junit(
     limits: JunitLimits,
 ) -> Result<NormalizedTestReport, TestResultError> {
     validate_limits(bytes, limits)?;
-    let lowered = bytes.iter().map(u8::to_ascii_lowercase).collect::<Vec<_>>();
-    if lowered
-        .windows(b"<!doctype".len())
-        .any(|window| window == b"<!doctype")
-        || lowered
-            .windows(b"<!entity".len())
-            .any(|window| window == b"<!entity")
-    {
-        return Err(TestResultError::EntityDeclaration);
-    }
-
     let raw_sha256: [u8; 32] = Sha256::digest(bytes).into();
     let mut reader = Reader::from_reader(Cursor::new(bytes));
     reader.config_mut().trim_text(true);
@@ -1172,5 +1161,19 @@ mod tests {
                 Err(TestResultError::Malformed(_))
             ));
         }
+    }
+
+    #[test]
+    fn declaration_text_inside_comments_and_cdata_is_not_a_doctype() {
+        let xml = br#"<testsuite name="suite">
+          <!-- captured text: <!ENTITY harmless "text"> -->
+          <testcase name="case">
+            <system-out><![CDATA[<!DOCTYPE html><p>captured output</p>]]></system-out>
+          </testcase>
+        </testsuite>"#;
+        let report =
+            parse_junit(xml, source(), JunitLimits::default()).expect("parse literal text");
+        assert_eq!(report.suites.len(), 1);
+        assert_eq!(report.suites[0].cases.len(), 1);
     }
 }

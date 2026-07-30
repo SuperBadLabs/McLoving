@@ -1,6 +1,7 @@
 //! Versioned public HTTP API and its Rust client.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
@@ -34,6 +35,7 @@ pub struct ApiState {
     token_digest: [u8; 32],
     object_store: Option<FilesystemObjectStore>,
     artifact_body_limit: usize,
+    staged_upload_ttl: Duration,
 }
 
 impl ApiState {
@@ -48,6 +50,7 @@ impl ApiState {
             token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
             object_store: None,
             artifact_body_limit: 2 * 1024 * 1024,
+            staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
         })
     }
 
@@ -55,6 +58,15 @@ impl ApiState {
         self.artifact_body_limit =
             usize::try_from(object_store.quota().max_object_bytes).unwrap_or(usize::MAX);
         self.object_store = Some(object_store);
+        self
+    }
+
+    /// Sets the maximum age of a durable but unpublished artifact upload.
+    ///
+    /// Reclamation runs before each new upload, so abandoned reservations
+    /// cannot permanently consume the tenant's object-store quota.
+    pub fn with_staged_upload_ttl(mut self, staged_upload_ttl: Duration) -> Self {
+        self.staged_upload_ttl = staged_upload_ttl;
         self
     }
 }
@@ -446,7 +458,11 @@ async fn stage_artifact(
             "received artifact bytes do not match Content-Length",
         ));
     }
-    let staged = object_store(&state)?
+    let object_store = object_store(&state)?;
+    object_store
+        .reap_staged_older_than(state.staged_upload_ttl)
+        .map_err(object_store_error)?;
+    let staged = object_store
         .stage_artifact(&organization_id.to_string(), &content)
         .map_err(object_store_error)?
         .persist()
