@@ -55,6 +55,16 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   Before `MIG-008`, `MIG-009`, or decommissioning, prove the replacement
   operation affects the authoritative execution exactly once, a stale Jenkins
   shadow cannot accept it, and no residual Jenkins operational write remains.
+- `AUTHZ-001` must represent the effective Jenkins permission matrix with
+  versioned action-scoped custom roles or grants when the built-in McLoving role
+  lattice couples independent actions. Preserve separate view, trigger, cancel,
+  configure, approve/input, retry/replay, artifact/test/log, audit, and
+  administrative permissions at the narrowest folder/job/project scope; deny
+  broadening a principal merely to fit an existing role. Prove grant creation,
+  update, revocation, group/lifecycle changes, conflict resolution, stale-token
+  denial, positive/negative action decisions, and rollback. A policy that
+  cannot be represented exactly or more restrictively with owner approval is
+  explicitly ineligible for canary/cutover, never silently widened.
 - The `MIG-009` atomic cutover freeze must re-read and match each deployed
   replacement trigger's implementation digest in addition to its class and
   configuration, and each deployed Multibranch Pipeline or Organization Folder
@@ -288,7 +298,12 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   source/profile/dependency/mapping/runtime and effective-input digests still
   match, or by completing its own current `MIG-002` through `MIG-007`
   classification, differential certification, authorization, state, and
-  release gates. A separately submitted native strict-YAML definition may use
+  release gates. It remains quarantined and effect-free after `MIG-007` until
+  that exact revision completes its own `MIG-008` production shadow and
+  graduated canary against the current trigger, connector, observer, input,
+  provisioner, runtime, authorization, rollback, and threat-model gates; parent
+  authority or an earlier revision's canary cannot substitute. A separately
+  submitted native strict-YAML definition may use
   the normal reviewed native admission path but cannot inherit migration
   certification from the parent. `DISC-001` must prove quarantine survives
   webhook/reindex races, duplicate/reordered events, restart, rollback,
@@ -439,7 +454,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W3-B | SEC-003, AUDIT-001, OPS-003, TEST-001 | DONE | Fenced grants and protected environments, tenant hash-chain audit, staged artifact product journeys, and immutable normalized test truth |
 | W3-C | API-002, UX-002, UI-001 | DONE | Documented REST surface, end-to-end CLI journeys, and an API-only CSP-locked static UI |
 | W4-A | MIG-000, MIG-001, MIG-002, MIG-003 | ACTIVE | Owner-scoped production inventory, isolated compiler boundary, pinned Jenkins corpus/oracle, and deterministic Declarative translation |
-| W4-B | MIG-004, MIG-005A, MIG-005, AUTHZ-001, MIG-006 | PENDING | Versioned step and state mappings, shared-library/scripted boundaries, migrated-job authorization parity, and differential certification |
+| W4-B | MIG-004, MIG-005A, MIG-005, IDP-001, AUTHZ-001, MIG-006 | PENDING | Versioned step and state mappings, shared-library/scripted boundaries, production identity lifecycle, migrated-job action-scoped authorization parity, and differential certification |
 | W4-C | MIG-007, REL-001, MIG-008, MIG-009 | PENDING | Generated migration packages, trusted release provenance, shadow/canary proof, and cutover/rollback readiness |
 
 ## Wave 0 — Architecture and foundation
