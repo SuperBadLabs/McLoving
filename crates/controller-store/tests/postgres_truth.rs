@@ -7733,6 +7733,34 @@ async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() 
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].revision, 2);
 
+    let attributed_pipeline_id = Uuid::new_v4();
+    let attributed_pipeline = PipelineWrite {
+        pipeline_id: attributed_pipeline_id,
+        slug: "attributed-create".to_owned(),
+        ..pipeline.clone()
+    };
+    assert!(matches!(
+        store
+            .put_pipeline_as(&attributed_pipeline, Some(0), "oidc:catalog-admin")
+            .await
+            .expect("create an actor-attributed pipeline"),
+        PipelinePutOutcome::Created(_)
+    ));
+    let audit = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify product catalog audit chain");
+    let attributed_event = audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "pipeline.created"
+                && event.subject
+                    == format!("project:{project_id}:pipeline:{attributed_pipeline_id}")
+        })
+        .expect("actor-attributed pipeline audit event");
+    assert_eq!(attributed_event.actor_subject, "oidc:catalog-admin");
+
     for digest in [[0x41; 32], [0x42; 32]] {
         assert_eq!(
             store

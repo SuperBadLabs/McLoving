@@ -100,9 +100,13 @@ impl ApiState {
             .credentials
             .iter()
             .any(|credential| constant_time_eq(&credential.token_digest, &token_digest))
+            || self
+                .artifact_agents
+                .iter()
+                .any(|credential| constant_time_eq(&credential.token_digest, &token_digest))
         {
             return Err(ApiError::configuration(
-                "each API principal must have a unique bearer token",
+                "API and artifact-agent bearer tokens must be globally unique",
             ));
         }
         self.credentials.push(ApiCredential {
@@ -128,12 +132,17 @@ impl ApiState {
             ));
         }
         let token_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
-        if self.artifact_agents.iter().any(|credential| {
-            credential.agent_id == agent_id
-                || constant_time_eq(&credential.token_digest, &token_digest)
-        }) {
+        if self
+            .credentials
+            .iter()
+            .any(|credential| constant_time_eq(&credential.token_digest, &token_digest))
+            || self.artifact_agents.iter().any(|credential| {
+                credential.agent_id == agent_id
+                    || constant_time_eq(&credential.token_digest, &token_digest)
+            })
+        {
             return Err(ApiError::configuration(
-                "artifact agent IDs and bearer tokens must be unique",
+                "artifact agent IDs must be unique and bearer tokens must be globally unique",
             ));
         }
         self.artifact_agents.push(ArtifactAgentCredential {
@@ -488,11 +497,7 @@ fn openapi_document() -> Value {
                     "getPipeline", "pipelines", "Read one pipeline revision", "200",
                     Vec::new(), None
                 ),
-                "put": api_operation(
-                    "putPipeline", "pipelines", "Create or revise a pipeline", "200",
-                    vec![header_parameter("if-match", true)],
-                    Some("PipelineUpsertRequest")
-                )
+                "put": put_pipeline_operation()
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/components": {
                 "parameters": [organization.clone(), project.clone()],
@@ -550,25 +555,22 @@ fn openapi_document() -> Value {
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/approvals": {
                 "parameters": [organization.clone(), project.clone(), build.clone()],
-                "get": api_operation(
+                "get": array_api_operation(
                     "listApprovals", "security", "List build approvals", "200",
                     Vec::new(), None
                 ),
-                "post": api_operation(
-                    "createApproval", "security", "Create an expiring approval", "201",
-                    Vec::new(), Some("ApprovalRequest")
-                )
+                "post": create_approval_operation()
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/credential-grants": {
                 "parameters": [organization.clone(), project.clone(), build.clone()],
-                "get": api_operation(
+                "get": array_api_operation(
                     "listCredentialGrants", "security", "List credential-grant metadata", "200",
                     Vec::new(), None
                 )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/tests": {
                 "parameters": [organization.clone(), project.clone(), build.clone()],
-                "get": api_operation(
+                "get": array_api_operation(
                     "listTestReports", "evidence", "List normalized test evidence", "200",
                     Vec::new(), None
                 )
@@ -609,7 +611,7 @@ fn openapi_document() -> Value {
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts": {
                 "parameters": [organization.clone(), project.clone(), build.clone()],
-                "get": api_operation(
+                "get": array_api_operation(
                     "listArtifacts", "evidence", "List immutable artifact metadata", "200",
                     Vec::new(), None
                 )
@@ -761,6 +763,59 @@ fn api_operation(
             }
         });
     }
+    operation
+}
+
+fn array_api_operation(
+    operation_id: &str,
+    tag: &str,
+    summary: &str,
+    success_status: &str,
+    parameters: Vec<Value>,
+    request_schema: Option<&str>,
+) -> Value {
+    let mut operation = api_operation(
+        operation_id,
+        tag,
+        summary,
+        success_status,
+        parameters,
+        request_schema,
+    );
+    operation["responses"][success_status]["content"]["application/json"]["schema"] =
+        json!({"type": "array", "items": {"type": "object"}});
+    operation
+}
+
+fn put_pipeline_operation() -> Value {
+    let mut operation = api_operation(
+        "putPipeline",
+        "pipelines",
+        "Create or revise a pipeline",
+        "201",
+        vec![header_parameter("if-match", true)],
+        Some("PipelineUpsertRequest"),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Updated pipeline revision or idempotent replay",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation
+}
+
+fn create_approval_operation() -> Value {
+    let mut operation = api_operation(
+        "createApproval",
+        "security",
+        "Create an expiring approval",
+        "201",
+        Vec::new(),
+        Some("ApprovalRequest"),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Idempotent replay of an active approval",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
     operation
 }
 
@@ -934,7 +989,7 @@ async fn put_pipeline(
     headers: HeaderMap,
     Json(request): Json<PipelineUpsertRequest>,
 ) -> Result<Response, ApiError> {
-    authorize(
+    let principal = authorize(
         &state,
         &headers,
         organization_id,
@@ -949,7 +1004,7 @@ async fn put_pipeline(
     let parameter_schema = parameter_schema(&pipeline);
     let outcome = state
         .store
-        .put_pipeline(
+        .put_pipeline_as(
             &PipelineWrite {
                 organization_id,
                 project_id,
@@ -963,6 +1018,7 @@ async fn put_pipeline(
                 parameter_schema,
             },
             Some(expected_revision),
+            &principal.subject,
         )
         .await
         .map_err(product_error)?;
@@ -3543,6 +3599,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn credential_namespaces_reject_token_reuse_in_either_order() {
+        let organization_id = Uuid::new_v4();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("construct lazy pool");
+        let principal = Principal {
+            subject: "service:api".to_owned(),
+            kind: mcloving_controller_store::authz::PrincipalKind::Service,
+            organization_id,
+            project_roles: BTreeMap::new(),
+            service_scopes: BTreeSet::new(),
+        };
+        let shared = "shared-cross-namespace-secret-token-32-bytes";
+        let api_first = ApiState::new(Store::new(pool.clone()), shared, principal.clone()).unwrap();
+        assert!(
+            api_first
+                .with_artifact_agent_token(shared, "agent-1")
+                .is_err(),
+            "an API bearer cannot also authenticate an artifact agent"
+        );
+
+        let agent_first = ApiState::new(
+            Store::new(pool),
+            "independent-service-principal-token-32-bytes",
+            principal.clone(),
+        )
+        .unwrap()
+        .with_artifact_agent_token(shared, "agent-1")
+        .unwrap();
+        assert!(
+            agent_first
+                .with_bearer_principal(shared, principal)
+                .is_err(),
+            "an artifact-agent bearer cannot also authenticate an API principal"
+        );
+    }
+
     #[test]
     fn log_transport_preserves_exact_non_utf8_bytes() {
         let content = [0xf0, 0x9f, 0x92];
@@ -3772,6 +3866,33 @@ mod tests {
         assert!(submission["responses"]["200"].is_object());
         assert!(submission["responses"]["201"].is_object());
         assert!(submission["responses"]["202"].is_null());
+
+        let pipeline = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}"]
+            ["put"];
+        assert!(pipeline["responses"]["200"].is_object());
+        assert!(pipeline["responses"]["201"].is_object());
+
+        let approvals = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/approvals"];
+        assert!(approvals["post"]["responses"]["200"].is_object());
+        assert!(approvals["post"]["responses"]["201"].is_object());
+        for operation in [
+            &approvals["get"],
+            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/credential-grants"]
+                ["get"],
+            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/tests"]
+                ["get"],
+            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts"]
+                ["get"],
+        ] {
+            assert_eq!(
+                operation["responses"]["200"]["content"]["application/json"]["schema"]["type"],
+                "array"
+            );
+            assert_eq!(
+                operation["responses"]["200"]["content"]["application/json"]["schema"]["items"]["type"],
+                "object"
+            );
+        }
 
         let download = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts/content"]
             ["get"];

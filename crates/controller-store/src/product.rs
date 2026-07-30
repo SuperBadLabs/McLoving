@@ -205,7 +205,22 @@ impl Store {
         input: &PipelineWrite,
         expected_revision: Option<i64>,
     ) -> Result<PipelinePutOutcome, StoreError> {
+        self.put_pipeline_as(input, expected_revision, "system:controller")
+            .await
+    }
+
+    pub async fn put_pipeline_as(
+        &self,
+        input: &PipelineWrite,
+        expected_revision: Option<i64>,
+        actor_subject: &str,
+    ) -> Result<PipelinePutOutcome, StoreError> {
         validate_pipeline_write(input)?;
+        if actor_subject.is_empty() || actor_subject.trim() != actor_subject {
+            return Err(StoreError::InvalidProductOperation(
+                "pipeline audit actor must be non-empty and canonical".to_owned(),
+            ));
+        }
         if expected_revision.is_some_and(|revision| revision < 0) {
             return Err(StoreError::InvalidProductOperation(
                 "pipeline revision precondition must be non-negative".to_owned(),
@@ -371,7 +386,7 @@ impl Store {
             &mut tx,
             input.organization_id,
             "pipeline",
-            "system:controller",
+            actor_subject,
             if outcome_kind == 0 {
                 "pipeline.created"
             } else {
