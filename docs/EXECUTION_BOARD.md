@@ -217,6 +217,22 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   exactly one discovery generation/owner before resuming ingress. Apply the
   same protocol in reverse and prove duplicate/reordered event, restart,
   partition, rollback, missing-child, duplicate-child, and orphan outcomes.
+- After a Multibranch Pipeline or Organization Folder becomes authoritative in
+  McLoving, every newly discovered child and every changed Jenkinsfile,
+  shared-library, job, parent, or effective-property revision is created only as
+  a quarantined candidate with no scheduling, trigger, credential/grant,
+  connector, production network, or external-effect authority. It may become
+  runnable only by matching an existing `MIG-007` package whose complete exact
+  source/profile/dependency/mapping/runtime and effective-input digests still
+  match, or by completing its own current `MIG-002` through `MIG-007`
+  classification, differential certification, authorization, state, and
+  release gates. A separately submitted native strict-YAML definition may use
+  the normal reviewed native admission path but cannot inherit migration
+  certification from the parent. `DISC-001` must prove quarantine survives
+  webhook/reindex races, duplicate/reordered events, restart, rollback,
+  parent-policy drift, and simultaneous revision discovery; absence of a
+  certified package is an explicit disabled/effect-free outcome, never implicit
+  parent authorization.
 - Before every `MIG-008` effect-authoritative canary action, atomically re-read
   and match the complete live input and deployment set required by the
   `MIG-009` cutover freeze against its certified receipt, including source and
