@@ -67,6 +67,16 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   expiry, cancellation, restart, partition, stale-holder, and rollback proof;
   otherwise quiesce and migrate the entire cohort atomically. Reconciliation
   must prove one holder and one effect authority for every transition.
+- Jobs connected by previous/last-result, upstream/downstream build identity,
+  cross-job artifact, retained-workspace, or other cross-job state edges cannot
+  enter `MIG-008` effect-authoritative canary or `MIG-009` cutover independently
+  while producers and consumers would read different platform-local truth.
+  Either provide one receipt-bound continuous bridge with a single authoritative
+  source, monotonic sequence/build mapping, immutable content/provenance
+  digests, exact deduplication, bounded lag, restart/replay, partition and
+  failure-freeze, and bidirectional rollback proof, or quiesce, snapshot,
+  transform, import, verify, and switch the entire dependency cohort atomically.
+  Any stale, missing, divergent, or ambiguous edge blocks effects and cutover.
 - Before every `MIG-008` effect-authoritative canary action, atomically re-read
   and match the complete live input and deployment set required by the
   `MIG-009` cutover freeze against its certified receipt, including source and
