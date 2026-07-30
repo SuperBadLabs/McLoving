@@ -14,7 +14,8 @@ mod security;
 mod test_results;
 
 pub use audit::{
-    AuditEvent, AuditExport, AuditRetentionPolicy, NewAuditEvent, verify_audit_export,
+    AuditEvent, AuditExport, AuditPage, AuditRetentionPolicy, MAX_AUDIT_PAGE, NewAuditEvent,
+    verify_audit_export, verify_audit_page,
 };
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,

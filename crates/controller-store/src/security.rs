@@ -222,7 +222,11 @@ impl Store {
              FROM credential_grants
              WHERE organization_id = $1
                AND attempt_id = $2
-               AND fence = $3",
+               AND fence = $3
+               AND (
+                   delivered_at IS NOT NULL
+                   OR expires_at > clock_timestamp()
+               )",
         )
         .bind(grant.organization_id)
         .bind(grant.attempt_id)
@@ -297,7 +301,19 @@ impl Store {
                  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
                  clock_timestamp() + make_interval(secs => $12)
              )
-             ON CONFLICT DO NOTHING
+             ON CONFLICT (organization_id, attempt_id, fence, target_name)
+             DO UPDATE SET
+                 id = EXCLUDED.id,
+                 project_id = EXCLUDED.project_id,
+                 build_id = EXCLUDED.build_id,
+                 pipeline_digest = EXCLUDED.pipeline_digest,
+                 environment = EXCLUDED.environment,
+                 action = EXCLUDED.action,
+                 secret_value = EXCLUDED.secret_value,
+                 expires_at = EXCLUDED.expires_at,
+                 created_at = clock_timestamp()
+             WHERE credential_grants.delivered_at IS NULL
+               AND credential_grants.expires_at <= clock_timestamp()
              RETURNING id",
         )
         .bind(grant.id)

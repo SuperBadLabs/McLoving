@@ -125,28 +125,47 @@ struct OutputCapture {
     stdout: Option<JoinHandle<Result<Vec<u8>, io::Error>>>,
     stderr: Option<JoinHandle<Result<Vec<u8>, io::Error>>>,
     limit_exceeded: CancellationToken,
+    limit: u64,
+}
+
+struct CapturedOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exceeded: bool,
 }
 
 impl OutputCapture {
     fn start(stdout: File, stderr: File, limit: u64, redactions: &[Vec<u8>]) -> Self {
         let total = Arc::new(AtomicU64::new(0));
         let limit_exceeded = CancellationToken::new();
+        let overlap = redactions
+            .iter()
+            .map(Vec::len)
+            .max()
+            .and_then(|length| length.checked_sub(1))
+            .and_then(|length| u64::try_from(length).ok())
+            .unwrap_or(0);
+        // A complete secret prefix may be present independently on stdout and
+        // stderr. Keep both provisional suffixes beyond the durable quota so
+        // a later byte can finish a secret before fail-closed cancellation.
+        let provisional_limit = limit.saturating_add(overlap.saturating_mul(2));
         Self {
             stdout: Some(tokio::spawn(capture_pipe(
                 stdout,
-                limit,
+                provisional_limit,
                 redactions.to_vec(),
                 Arc::clone(&total),
                 limit_exceeded.clone(),
             ))),
             stderr: Some(tokio::spawn(capture_pipe(
                 stderr,
-                limit,
+                provisional_limit,
                 redactions.to_vec(),
                 total,
                 limit_exceeded.clone(),
             ))),
             limit_exceeded,
+            limit,
         }
     }
 
@@ -159,7 +178,7 @@ impl OutputCapture {
         self.limit_exceeded.is_cancelled()
     }
 
-    async fn finish(mut self) -> Result<(Vec<u8>, Vec<u8>), ExecutionError> {
+    async fn finish(mut self) -> Result<CapturedOutput, ExecutionError> {
         let stdout = self
             .stdout
             .take()
@@ -172,7 +191,14 @@ impl OutputCapture {
             .expect("stderr capture handle exists")
             .await
             .map_err(|error| ExecutionError::OutputCapture(error.to_string()))??;
-        Ok((stdout, stderr))
+        let final_bytes = u64::try_from(stdout.len())
+            .expect("captured stdout length fits u64")
+            .saturating_add(u64::try_from(stderr.len()).expect("captured stderr length fits u64"));
+        Ok(CapturedOutput {
+            stdout,
+            stderr,
+            exceeded: self.limit_exceeded.is_cancelled() || final_bytes > self.limit,
+        })
     }
 }
 
@@ -189,13 +215,13 @@ impl Drop for OutputCapture {
 
 async fn capture_pipe(
     reader: File,
-    limit: u64,
+    provisional_limit: u64,
     redactions: Vec<Vec<u8>>,
     total: Arc<AtomicU64>,
     limit_exceeded: CancellationToken,
 ) -> Result<Vec<u8>, io::Error> {
     let mut reader = tokio::fs::File::from_std(reader);
-    let capacity = usize::try_from(limit.min(1024 * 1024)).unwrap_or(1024 * 1024);
+    let capacity = usize::try_from(provisional_limit.min(1024 * 1024)).unwrap_or(1024 * 1024);
     let mut captured = Vec::with_capacity(capacity);
     let mut secrets = redactions
         .iter()
@@ -203,64 +229,40 @@ async fn capture_pipe(
         .filter(|secret| !secret.is_empty())
         .collect::<Vec<_>>();
     secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
-    let tail_limit = secrets
-        .iter()
-        .map(|secret| secret.len())
-        .max()
-        .and_then(|length| length.checked_sub(1))
-        .unwrap_or(0);
-    let mut pending = Vec::with_capacity(tail_limit.saturating_add(1));
-    let mut ready = Vec::with_capacity(8192);
     let mut buffer = [0_u8; 8192];
     loop {
         let bytes = reader.read(&mut buffer).await?;
         if bytes == 0 {
-            retain_redacted_bytes(&mut captured, &pending, limit, &total, &limit_exceeded);
             return Ok(captured);
         }
-        if secrets.is_empty() {
-            retain_redacted_bytes(
-                &mut captured,
-                &buffer[..bytes],
-                limit,
-                &total,
-                &limit_exceeded,
-            );
-            continue;
-        }
         for byte in &buffer[..bytes] {
-            pending.push(*byte);
-            while let Some(secret) = secrets.iter().find(|secret| pending.ends_with(secret)) {
-                pending.truncate(pending.len() - secret.len());
+            let previous_len = captured.len();
+            captured.push(*byte);
+            while let Some(secret) = secrets.iter().find(|secret| captured.ends_with(secret)) {
+                captured.truncate(captured.len() - secret.len());
             }
-            if pending.len() > tail_limit {
-                let stable = pending.len() - tail_limit;
-                ready.extend(pending.drain(..stable));
+            let current_len = captured.len();
+            let current_total = if current_len >= previous_len {
+                let added =
+                    u64::try_from(current_len - previous_len).expect("captured growth fits u64");
+                total
+                    .fetch_add(added, Ordering::AcqRel)
+                    .saturating_add(added)
+            } else {
+                let removed =
+                    u64::try_from(previous_len - current_len).expect("captured shrinkage fits u64");
+                total
+                    .fetch_sub(removed, Ordering::AcqRel)
+                    .saturating_sub(removed)
+            };
+            if current_total > provisional_limit {
+                limit_exceeded.cancel();
+                return Ok(captured);
+            }
+            if limit_exceeded.is_cancelled() {
+                return Ok(captured);
             }
         }
-        retain_redacted_bytes(&mut captured, &ready, limit, &total, &limit_exceeded);
-        ready.clear();
-    }
-}
-
-fn retain_redacted_bytes(
-    captured: &mut Vec<u8>,
-    bytes: &[u8],
-    limit: u64,
-    total: &AtomicU64,
-    limit_exceeded: &CancellationToken,
-) {
-    let bytes_len = u64::try_from(bytes.len()).expect("captured read size fits u64");
-    let previous = total
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-            Some(value.saturating_add(bytes_len))
-        })
-        .unwrap_or_else(|value| value);
-    let retained = bytes_len.min(limit.saturating_sub(previous));
-    captured
-        .extend_from_slice(&bytes[..usize::try_from(retained).expect("retained bytes fit usize")]);
-    if previous.saturating_add(bytes_len) > limit {
-        limit_exceeded.cancel();
     }
 }
 

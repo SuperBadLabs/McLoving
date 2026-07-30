@@ -220,9 +220,12 @@ where
         termination.0 = Termination::OutputLimitExceeded;
     }
     if let Some(capture) = capture.take() {
-        let (captured_stdout, captured_stderr) = capture.finish().await?;
-        write_redacted_output(&mut stdout_control, &captured_stdout, redactions)?;
-        write_redacted_output(&mut stderr_control, &captured_stderr, redactions)?;
+        let captured = capture.finish().await?;
+        if captured.exceeded {
+            termination.0 = Termination::OutputLimitExceeded;
+        }
+        write_redacted_output(&mut stdout_control, &captured.stdout, redactions)?;
+        write_redacted_output(&mut stderr_control, &captured.stderr, redactions)?;
         truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     } else if termination.0 == Termination::OutputLimitExceeded || exceeded {
         truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
@@ -871,6 +874,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stdout, b"Z");
+
+        let mut cascading_request = request(
+            root.path(),
+            "credential-cascading-deletion-boundary",
+            Duration::from_secs(5),
+        );
+        cascading_request.arguments = vec![
+            OsString::from("-c"),
+            OsString::from("printf 'Zaxxbaxxbaxxbaxxbaxxbaxxbaxxbaxxb'"),
+        ];
+        cascading_request.output_limit_bytes = Some(1);
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &cascading_request,
+            CancellationToken::new(),
+            &[b"xx".to_vec(), b"ab".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path))
+            .await
+            .unwrap();
+        assert_eq!(stdout, b"Z");
+        assert_eq!(outcome.termination, Termination::Exited);
     }
 
     #[tokio::test]

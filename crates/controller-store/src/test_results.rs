@@ -302,7 +302,27 @@ pub fn parse_junit(
                 ));
             }
             Event::Eof => break,
-            Event::Decl(_) | Event::Text(_) | Event::CData(_) | Event::Comment(_) => {}
+            Event::Decl(_) | Event::Comment(_) => {}
+            Event::Text(text) if depth == 0 => {
+                if text.as_ref().iter().any(|byte| !byte.is_ascii_whitespace()) {
+                    return Err(TestResultError::Malformed(
+                        "character data outside the document element".to_owned(),
+                    ));
+                }
+            }
+            Event::CData(text) if depth == 0 => {
+                if text.as_ref().iter().any(|byte| !byte.is_ascii_whitespace()) {
+                    return Err(TestResultError::Malformed(
+                        "character data outside the document element".to_owned(),
+                    ));
+                }
+            }
+            Event::GeneralRef(_) if depth == 0 => {
+                return Err(TestResultError::Malformed(
+                    "character reference outside the document element".to_owned(),
+                ));
+            }
+            Event::Text(_) | Event::CData(_) => {}
             Event::GeneralRef(reference) => match reference.as_ref() {
                 b"amp" | b"lt" | b"gt" | b"apos" | b"quot" => {}
                 _ => {
@@ -1109,5 +1129,16 @@ mod tests {
             JunitLimits::default(),
         )
         .expect("predefined XML references remain valid");
+        for malformed in [
+            b"garbage<testsuite/>".as_slice(),
+            b"<testsuite/>garbage".as_slice(),
+            b"<![CDATA[garbage]]><testsuite/>".as_slice(),
+            b"<testsuite/>&amp;".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_junit(malformed, source(), JunitLimits::default()),
+                Err(TestResultError::Malformed(_))
+            ));
+        }
     }
 }

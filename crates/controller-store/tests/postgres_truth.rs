@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
@@ -6,7 +7,7 @@ use mcloving_controller_store::{
     EffectClass, EffectStatus, JunitLimits, NewAuditEvent, NewBuild, NewCredentialGrant,
     NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus,
     ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
-    TestOutcome, TestReportSource, WaitReason, parse_junit,
+    TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -4724,10 +4725,11 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             .await
             .expect("reject approval replay")
     );
+    let expired_secret = b"expired-secret-value";
     let secret = b"marker-secret-value";
     let grant_id = Uuid::new_v4();
     let mut grant = NewCredentialGrant {
-        id: grant_id,
+        id: Uuid::new_v4(),
         organization_id,
         project_id,
         build_id: admission.build_id,
@@ -4737,9 +4739,9 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
         environment: "production",
         action: "deploy",
         target_name: "DEPLOY_TOKEN",
-        secret_value: secret,
+        secret_value: expired_secret,
         approval_ids: &approvals[..1],
-        ttl_seconds: 300,
+        ttl_seconds: 1,
     };
     assert!(
         !store
@@ -4754,6 +4756,33 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             .await
             .expect("issue protected grant")
     );
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    grant.id = grant_id;
+    grant.secret_value = secret;
+    grant.ttl_seconds = 300;
+    assert!(
+        store
+            .issue_credential_grant(&grant)
+            .await
+            .expect("renew an expired undelivered protected grant")
+    );
+    let renewed = sqlx::query_as::<_, (Uuid, Vec<u8>, bool, bool)>(
+        "SELECT id, secret_value, delivered_at IS NULL,
+                expires_at > clock_timestamp()
+         FROM credential_grants
+         WHERE organization_id = $1
+           AND attempt_id = $2
+           AND fence = $3
+           AND target_name = $4",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .bind(claim.fence)
+    .bind("DEPLOY_TOKEN")
+    .fetch_one(store.pool())
+    .await
+    .expect("read renewed protected grant");
+    assert_eq!(renewed, (grant_id, secret.to_vec(), true, true));
     assert!(
         store
             .approve_environment(&NewEnvironmentApproval {
@@ -6230,6 +6259,37 @@ async fn tenant_audit_is_hash_chained_exportable_immutable_and_retained() {
     ] {
         assert!(categories.contains(category), "missing {category} audit");
     }
+    let mut paged_sequences = Vec::new();
+    let mut after_sequence = 0;
+    let mut first_page = None;
+    loop {
+        let page = store
+            .export_audit_page(organization_id, after_sequence, 2)
+            .await
+            .expect("export a bounded, independently verifiable audit page");
+        if first_page.is_none() {
+            first_page = Some(page.clone());
+        }
+        paged_sequences.extend(page.events.iter().map(|event| event.sequence));
+        let Some(next) = page.next_after_sequence else {
+            break;
+        };
+        after_sequence = next;
+    }
+    assert_eq!(
+        paged_sequences,
+        export
+            .events
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>()
+    );
+    let mut tampered_page = first_page.expect("the audited build produces a first page");
+    tampered_page.events[0].payload = json!({"tampered": true});
+    assert!(matches!(
+        verify_audit_page(&tampered_page),
+        Err(StoreError::CorruptAuditChain { .. })
+    ));
 
     assert_eq!(
         store

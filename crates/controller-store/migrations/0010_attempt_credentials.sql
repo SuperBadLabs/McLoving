@@ -123,6 +123,12 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF OLD.delivered_at IS NULL
+       AND OLD.expires_at <= clock_timestamp()
+       AND NEW.delivered_at IS NULL
+    THEN
+        RETURN NEW;
+    END IF;
     IF NEW.id IS DISTINCT FROM OLD.id
        OR NEW.organization_id IS DISTINCT FROM OLD.organization_id
        OR NEW.project_id IS DISTINCT FROM OLD.project_id
