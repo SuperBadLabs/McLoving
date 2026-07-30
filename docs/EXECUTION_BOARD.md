@@ -1,6 +1,6 @@
 # McLoving execution board
 
-Updated: 2026-07-29
+Updated: 2026-07-30
 
 Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
@@ -31,6 +31,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W3-A | IR-003, IR-004, CTRL-004 | DONE | Native pipeline semantics: typed parameters and bounded expressions, digest-pinned reusable components, deterministic matrix expansion, and durable parallel DAG execution |
 | W3-B | SEC-003, AUDIT-001, OPS-003, TEST-001 | DONE | Fenced grants and protected environments, tenant hash-chain audit, staged artifact product journeys, and immutable normalized test truth |
 | W3-C | API-002, UX-002, UI-001 | DONE | Documented REST surface, end-to-end CLI journeys, and an API-only CSP-locked static UI |
+| W4-A | MIG-001, MIG-002, MIG-003 | ACTIVE | Isolated compiler boundary, pinned Jenkins corpus/oracle, and deterministic Declarative translation |
+| W4-B | MIG-004, MIG-005, MIG-006 | PENDING | Versioned mappings, shared-library/scripted boundaries, and differential certification |
+| W4-C | MIG-007, MIG-008, MIG-009 | PENDING | Generated migration packages, shadow/canary proof, and cutover/rollback readiness |
 
 ## Wave 0 — Architecture and foundation
 
@@ -91,9 +94,17 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
 ## Wave 4 — Jenkins migration
 
-Pinned isolated compiler, exact target profiles, Declarative compilation,
-Scripted classification, mapping catalog, shared-library inventory,
-differential traces, generated strict YAML, shadow, canary, and cutover.
+| Ticket | Status | Depends on | Objective and acceptance |
+|---|---|---|---|
+| MIG-001 | ACTIVE | API-002, SEC-003 | Build an isolated Jenkins import/compiler worker with exact JDK, Groovy, Jenkins core, and plugin-profile versions plus content hashes. It receives read-only corpus input, has no network, bounded CPU/memory/time/output, a versioned protocol, complete provenance, an explicit target profile, and fail-closed results. Reproducibility and hostile-input containment must be proven independently. |
+| MIG-002 | PENDING | MIG-001 | Commit the exact Jenkins migration corpus and oracle manifest with source hashes, licenses, provenance, Jenkins/plugin target profile, and expected parse, validation, and execution traces. Classify every case as native, mappable, scripted, or unsupported; preserve immutable result deltas; and report parse reach, native runnable coverage, actionable migration, and certified equivalence separately. |
+| MIG-003 | PENDING | MIG-001, MIG-002, IR-004 | Compile the admitted Jenkins Declarative subset into versioned McLoving IR and canonical strict YAML. Preserve stage order, conditions, environment, parameters, matrices, post behavior, agent selection, and admitted options; emit stable diagnostics for everything else; bind exact source/profile/compiler digests; and prove deterministic output with differential compiler fixtures. |
+| MIG-004 | PENDING | MIG-003 | Ship a versioned step and plugin mapping catalog to native processes, reusable components, and connectors. Every mapping declares schema, types, effects, trust requirements, supported target profiles, and provenance; floating mappings and silent fallback are forbidden; substitution resistance and corpus-earned coverage are gated. |
+| MIG-005 | PENDING | MIG-002, MIG-003 | Inventory and resolve Jenkins shared libraries by pinned SCM reference and content digest, including `vars`, `src`, and `resources`, while classifying load-time, runtime, sandbox, CPS, plugin, and credential dependencies. Arbitrary Groovy never runs in the controller; any future bounded isolated evaluation is owner-approved and produces explicit unsupported receipts outside its admitted subset. |
+| MIG-006 | PENDING | MIG-003, MIG-004, MIG-005 | Run the same committed corpus through the pinned Jenkins oracle and McLoving, comparing stage order, step/effect arguments, post behavior, terminal outcome, and workspace artifact digests. Publish a stable mismatch taxonomy and regression budget while keeping parse reach, native runnable coverage, actionable migration, and certified equivalence as distinct metrics. |
+| MIG-007 | PENDING | MIG-006 | Generate a reviewable migration package containing canonical strict YAML, provenance, diagnostics, a mapping lock, and exact source/oracle/profile/compiler digests. The package must round-trip to identical IR, contain no credential material, and expose every substitution and unsupported boundary explicitly. |
+| MIG-008 | PENDING | MIG-007, OPS-003, AUDIT-001 | Prove shadow and graduated canary migration. Begin with mirrored triggers that cannot perform external effects, compare traces and artifacts, then admit explicitly approved effects under bounded quotas, retention, audit, and abort rules. Partial truth or an unclassified mismatch can never trigger automatic cutover. |
+| MIG-009 | PENDING | MIG-008, OPS-002 | Define and prove per-job cutover and rollback readiness: owner approval, eligibility evidence, a bounded dual-run window, state/artifact retention, exact Jenkins configuration and plugin rollback target, failure thresholds, and signed receipts. Cutover requires zero unclassified jobs and successful rollback rehearsal. |
 
 ## Wave 5 — Extensions and operations
 
@@ -108,12 +119,18 @@ canary, and release-readiness assessment.
 
 ## Current next batch
 
-`W3-C` closes the Wave 3 native product surface through PR #12 after exact-head
-review, complete foundation validation, real-PostgreSQL execution, deployable
-embedded/remote-agent proof, and backup/restore verification. The next
-sequenced product batch is Wave 4 Jenkins migration. `WIN-001`, `WIN-002`, and
-`WIN-003` remain independently active for their explicit production and
-persistent-Windows-host gates; Wave 3 closure does not waive those gates.
+Wave 3 is merged through PR #12 at protected-main commit
+`3756c2f0a15ad2c9ba1a9b96464b852a85f4ae1c` after exact-head review,
+complete foundation validation, real-PostgreSQL execution, deployable
+embedded/remote-agent proof, backup/restore verification, and all required
+checks. `W4-A` is the current next batch and `MIG-001` is the first active
+implementation target once this board change lands. W4-A must establish the
+pinned compiler/profile boundary first, the committed corpus/oracle second,
+and Declarative translation third. It does not authorize general Groovy
+execution, production cutover, or an undifferentiated “Jenkins compatible”
+claim. `WIN-001`, `WIN-002`, and `WIN-003` remain independently active for
+their explicit production and persistent-Windows-host gates; Wave 3 closure
+does not waive those gates.
 
 `W2-C` is complete on `codex/wave2-agent-completion`. Production agents
 negotiate `work-delivery-v1`, cancel execution on lease-renewal loss, commit
