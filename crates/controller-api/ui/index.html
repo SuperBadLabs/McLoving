@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>McLoving</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">BETTER AND FASTER JENKINS</p>
+      <h1>McLoving</h1>
+    </div>
+    <p id="connection-state" role="status" aria-live="polite">Context not connected</p>
+  </header>
+
+  <main>
+    <section aria-labelledby="context-heading" class="panel">
+      <h2 id="context-heading">Controller context</h2>
+      <form id="context-form">
+        <label>Organization ID <input id="organization" required autocomplete="off"></label>
+        <label>Project ID <input id="project" required autocomplete="off"></label>
+        <label>API token <input id="token" type="password" required autocomplete="off"></label>
+        <button type="submit">Use context</button>
+      </form>
+      <p class="hint">The token stays in this page’s memory. The controller remains the authorization authority.</p>
+    </section>
+
+    <nav aria-label="Product journeys">
+      <button data-view="dashboard">Dashboard</button>
+      <button data-view="pipeline">Pipeline</button>
+      <button data-view="build">Build</button>
+      <button data-view="audit">Audit</button>
+      <button data-view="explain">Explain</button>
+    </nav>
+
+    <section id="dashboard-view" class="view panel" aria-labelledby="dashboard-heading">
+      <div class="section-heading">
+        <h2 id="dashboard-heading">Build dashboard</h2>
+        <button id="refresh-builds">Refresh</button>
+      </div>
+      <label>Status filter
+        <select id="build-status">
+          <option value="">All</option>
+          <option>queued</option>
+          <option>running</option>
+          <option>succeeded</option>
+          <option>failed</option>
+          <option>cancelled</option>
+        </select>
+      </label>
+      <table>
+        <caption>Recent builds</caption>
+        <thead><tr><th>Build</th><th>Status</th><th>Created</th><th>Open</th></tr></thead>
+        <tbody id="build-list"></tbody>
+      </table>
+    </section>
+
+    <section id="pipeline-view" class="view panel hidden" aria-labelledby="pipeline-heading">
+      <h2 id="pipeline-heading">Strict YAML pipeline</h2>
+      <form id="pipeline-form">
+        <label>Pipeline source
+          <textarea id="pipeline-source" rows="14" required>version: 1
+name: hello
+stages: []</textarea>
+        </label>
+        <label>Parameters (JSON object)
+          <textarea id="pipeline-parameters" rows="3">{}</textarea>
+        </label>
+        <div class="actions">
+          <button type="button" id="validate-pipeline">Validate</button>
+          <button type="button" id="plan-pipeline">Plan</button>
+          <button type="submit">Submit</button>
+        </div>
+        <label>Idempotency key <input id="idempotency-key" required value="browser-submit"></label>
+        <label>Platform
+          <select id="platform"><option>linux</option><option>windows</option></select>
+        </label>
+        <label>Trust pool <input id="trust-pool" value="trusted-linux" required></label>
+      </form>
+    </section>
+
+    <section id="build-view" class="view panel hidden" aria-labelledby="build-heading">
+      <h2 id="build-heading">Build truth</h2>
+      <form id="build-form">
+        <label>Build ID <input id="build-id" required autocomplete="off"></label>
+        <button type="submit">Load build</button>
+        <button type="button" id="cancel-build">Cancel</button>
+        <button type="button" id="toggle-live">Start live refresh</button>
+      </form>
+      <div class="grid">
+        <article><h3>Status</h3><pre id="build-summary"></pre></article>
+        <article><h3>Graph</h3><pre id="build-graph"></pre></article>
+        <article><h3>Live logs</h3><pre id="build-logs" aria-live="polite"></pre></article>
+        <article><h3>Tests</h3><pre id="build-tests"></pre></article>
+        <article><h3>Artifacts</h3><div id="build-artifacts"></div></article>
+        <article>
+          <h3>Approvals</h3>
+          <pre id="build-approvals"></pre>
+          <form id="approval-form">
+            <label>Environment <input id="approval-environment" required value="production"></label>
+            <label>Action <input id="approval-action" required value="deploy"></label>
+            <label>TTL seconds <input id="approval-ttl" type="number" min="1" value="900"></label>
+            <button type="submit">Approve</button>
+          </form>
+        </article>
+      </div>
+    </section>
+
+    <section id="audit-view" class="view panel hidden" aria-labelledby="audit-heading">
+      <div class="section-heading"><h2 id="audit-heading">Audit stream</h2><button id="load-audit">Load</button></div>
+      <pre id="audit-output"></pre>
+    </section>
+
+    <section id="explain-view" class="view panel hidden" aria-labelledby="explain-heading">
+      <h2 id="explain-heading">Scheduling explanation</h2>
+      <form id="explain-form">
+        <label>Capabilities (comma separated) <input id="capabilities" value="platform:linux"></label>
+        <label>Trust pool <input id="explain-pool" value="trusted-linux"></label>
+        <button type="submit">Explain</button>
+      </form>
+      <pre id="explain-output"></pre>
+    </section>
+
+    <section class="panel result-panel" aria-labelledby="result-heading">
+      <h2 id="result-heading">Operation result</h2>
+      <pre id="operation-result" role="status" aria-live="polite">Ready</pre>
+    </section>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
