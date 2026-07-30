@@ -625,7 +625,7 @@ async fn download_artifact(
         &query.name,
     )
     .await?;
-    if artifact.status != ObjectStatus::Available {
+    if artifact.status == ObjectStatus::Pending {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "artifact_not_available",
@@ -669,6 +669,28 @@ async fn download_artifact(
             ));
         }
     };
+    if artifact.status != ObjectStatus::Available {
+        let restored = state
+            .store
+            .set_object_status(
+                organization_id,
+                artifact.attempt_id,
+                artifact.fence,
+                ObjectKind::Artifact,
+                &artifact.name,
+                artifact.digest,
+                ObjectStatus::Available,
+            )
+            .await
+            .map_err(internal)?;
+        if !restored {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "artifact_restore_raced",
+                "restored artifact metadata changed during verification",
+            ));
+        }
+    }
     let mut response = Response::new(content.into());
     response.headers_mut().insert(
         header::CONTENT_TYPE,

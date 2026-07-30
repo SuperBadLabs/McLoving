@@ -6,8 +6,6 @@ use std::fs::File;
 use std::io;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
@@ -126,6 +124,7 @@ struct OutputCapture {
     stderr: Option<JoinHandle<Result<Vec<u8>, io::Error>>>,
     limit_exceeded: CancellationToken,
     limit: u64,
+    redactions: Vec<Vec<u8>>,
 }
 
 struct CapturedOutput {
@@ -136,36 +135,32 @@ struct CapturedOutput {
 
 impl OutputCapture {
     fn start(stdout: File, stderr: File, limit: u64, redactions: &[Vec<u8>]) -> Self {
-        let total = Arc::new(AtomicU64::new(0));
         let limit_exceeded = CancellationToken::new();
         let overlap = redactions
             .iter()
-            .map(Vec::len)
-            .max()
-            .and_then(|length| length.checked_sub(1))
-            .and_then(|length| u64::try_from(length).ok())
-            .unwrap_or(0);
-        // A complete secret prefix may be present independently on stdout and
-        // stderr. Keep both provisional suffixes beyond the durable quota so
-        // a later byte can finish a secret before fail-closed cancellation.
-        let provisional_limit = limit.saturating_add(overlap.saturating_mul(2));
+            .map(|secret| secret.len().saturating_sub(1))
+            .filter_map(|length| u64::try_from(length).ok())
+            .fold(0_u64, u64::saturating_add);
+        // Each pipe owns an independent provisional suffix. A noisy stderr
+        // stream must not consume the overlap needed to finish redacting a
+        // credential prefix already captured on stdout, or vice versa.
+        let provisional_limit = limit.saturating_add(overlap);
         Self {
             stdout: Some(tokio::spawn(capture_pipe(
                 stdout,
                 provisional_limit,
                 redactions.to_vec(),
-                Arc::clone(&total),
                 limit_exceeded.clone(),
             ))),
             stderr: Some(tokio::spawn(capture_pipe(
                 stderr,
                 provisional_limit,
                 redactions.to_vec(),
-                total,
                 limit_exceeded.clone(),
             ))),
             limit_exceeded,
             limit,
+            redactions: redactions.to_vec(),
         }
     }
 
@@ -194,6 +189,8 @@ impl OutputCapture {
         let final_bytes = u64::try_from(stdout.len())
             .expect("captured stdout length fits u64")
             .saturating_add(u64::try_from(stderr.len()).expect("captured stderr length fits u64"));
+        let (stdout, stderr) =
+            bound_redacted_output(&stdout, &stderr, self.limit, &self.redactions)?;
         Ok(CapturedOutput {
             stdout,
             stderr,
@@ -217,7 +214,6 @@ async fn capture_pipe(
     reader: File,
     provisional_limit: u64,
     redactions: Vec<Vec<u8>>,
-    total: Arc<AtomicU64>,
     limit_exceeded: CancellationToken,
 ) -> Result<Vec<u8>, io::Error> {
     let mut reader = tokio::fs::File::from_std(reader);
@@ -236,32 +232,54 @@ async fn capture_pipe(
             return Ok(captured);
         }
         for byte in &buffer[..bytes] {
-            let previous_len = captured.len();
             captured.push(*byte);
             while let Some(secret) = secrets.iter().find(|secret| captured.ends_with(secret)) {
                 captured.truncate(captured.len() - secret.len());
             }
-            let current_len = captured.len();
-            let current_total = if current_len >= previous_len {
-                let added =
-                    u64::try_from(current_len - previous_len).expect("captured growth fits u64");
-                total
-                    .fetch_add(added, Ordering::AcqRel)
-                    .saturating_add(added)
-            } else {
-                let removed =
-                    u64::try_from(previous_len - current_len).expect("captured shrinkage fits u64");
-                total
-                    .fetch_sub(removed, Ordering::AcqRel)
-                    .saturating_sub(removed)
-            };
-            if current_total > provisional_limit {
+            if u64::try_from(captured.len()).expect("captured length fits u64") > provisional_limit
+            {
                 limit_exceeded.cancel();
                 return Ok(captured);
             }
-            if limit_exceeded.is_cancelled() {
-                return Ok(captured);
+        }
+    }
+}
+
+fn bound_redacted_output(
+    stdout: &[u8],
+    stderr: &[u8],
+    limit: u64,
+    redactions: &[Vec<u8>],
+) -> Result<(Vec<u8>, Vec<u8>), ExecutionError> {
+    let mut stdout = redact_to_fixed_point(stdout, redactions)?;
+    let mut stderr = redact_to_fixed_point(stderr, redactions)?;
+    let stdout_limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    stdout.truncate(stdout_limit);
+    strip_partial_secret_suffixes(&mut stdout, redactions);
+    let remaining = limit.saturating_sub(
+        u64::try_from(stdout.len()).expect("bounded captured stdout length fits u64"),
+    );
+    stderr.truncate(usize::try_from(remaining).unwrap_or(usize::MAX));
+    strip_partial_secret_suffixes(&mut stderr, redactions);
+    Ok((stdout, stderr))
+}
+
+fn strip_partial_secret_suffixes(output: &mut Vec<u8>, redactions: &[Vec<u8>]) {
+    loop {
+        let mut removed = false;
+        for secret in redactions.iter().filter(|secret| !secret.is_empty()) {
+            let maximum = output.len().min(secret.len().saturating_sub(1));
+            if let Some(length) = (1..=maximum)
+                .rev()
+                .find(|length| output.ends_with(&secret[..*length]))
+            {
+                output.truncate(output.len() - length);
+                removed = true;
+                break;
             }
+        }
+        if !removed {
+            return;
         }
     }
 }
@@ -434,7 +452,7 @@ pub fn sync_directory(path: &Path) -> Result<(), io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_to_fixed_point;
+    use super::{bound_redacted_output, redact_to_fixed_point};
 
     #[test]
     fn redaction_removes_matches_exposed_by_prior_deletions() {
@@ -442,5 +460,16 @@ mod tests {
             redact_to_fixed_point(b"abc", &[b"b".to_vec(), b"ac".to_vec()]).unwrap(),
             b""
         );
+    }
+
+    #[test]
+    fn bounded_streams_never_retain_a_partial_secret_suffix() {
+        let secret = b"credential".to_vec();
+        let (stdout, stderr) =
+            bound_redacted_output(b"safe-cred", b"1234567890123456", 16, &[secret])
+                .expect("bound redacted streams");
+        assert_eq!(stdout, b"safe-");
+        assert_eq!(stderr, b"12345678901");
+        assert_eq!(stdout.len() + stderr.len(), 16);
     }
 }

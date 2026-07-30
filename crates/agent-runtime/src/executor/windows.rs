@@ -648,6 +648,35 @@ mod tests {
         let stdout = fs::read(root.path().join(&outcome.stdout.relative_path)).unwrap();
         assert_eq!(stdout, b"Z");
         assert_eq!(outcome.termination, Termination::Exited);
+
+        let mut split_stream_request = request(
+            root.path(),
+            "credential-split-stream-boundary",
+            ExecutionMode::Direct,
+            "powershell.exe",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-NonInteractive"),
+                OsString::from("-Command"),
+                OsString::from(
+                    "[Console]::Out.Write('safe-cred'); [Console]::Error.Write('12345678901234567890123456'); Start-Sleep -Seconds 1; [Console]::Out.Write('ential')",
+                ),
+            ],
+        );
+        split_stream_request.output_limit_bytes = Some(16);
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &split_stream_request,
+            CancellationToken::new(),
+            &[b"credential".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path)).unwrap();
+        let stderr = fs::read(root.path().join(&outcome.stderr.relative_path)).unwrap();
+        assert_eq!(outcome.termination, Termination::OutputLimitExceeded);
+        assert_eq!(stdout, b"safe-");
+        assert_eq!(stderr, b"12345678901");
     }
 
     #[tokio::test]

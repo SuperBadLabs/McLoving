@@ -249,6 +249,79 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
             .expect("download verified artifact"),
         artifact_content
     );
+    let object_path = root
+        .path()
+        .join("objects")
+        .join("objects")
+        .join("sha256")
+        .join(&staged.sha256[..2])
+        .join(&staged.sha256);
+    tokio::fs::remove_file(&object_path)
+        .await
+        .expect("remove immutable object for restore drill");
+    tokio::fs::write(&object_path, b"corrupt")
+        .await
+        .expect("install corrupt object for restore drill");
+    assert!(
+        client
+            .download_artifact(
+                organization_id,
+                project_id,
+                admission.build_id,
+                admission.attempt_id,
+                "reports/result.bin",
+            )
+            .await
+            .is_err(),
+        "verified download must record corrupt restored bytes"
+    );
+    assert_eq!(
+        client
+            .artifact_metadata(
+                organization_id,
+                project_id,
+                admission.build_id,
+                admission.attempt_id,
+                "reports/result.bin",
+            )
+            .await
+            .expect("read corrupt artifact metadata")
+            .status,
+        "corrupt"
+    );
+    tokio::fs::remove_file(&object_path)
+        .await
+        .expect("remove corrupt object");
+    tokio::fs::write(&object_path, &artifact_content)
+        .await
+        .expect("restore exact immutable object bytes");
+    assert_eq!(
+        client
+            .download_artifact(
+                organization_id,
+                project_id,
+                admission.build_id,
+                admission.attempt_id,
+                "reports/result.bin",
+            )
+            .await
+            .expect("download restored artifact"),
+        artifact_content
+    );
+    assert_eq!(
+        client
+            .artifact_metadata(
+                organization_id,
+                project_id,
+                admission.build_id,
+                admission.attempt_id,
+                "reports/result.bin",
+            )
+            .await
+            .expect("read restored artifact metadata")
+            .status,
+        "available"
+    );
 
     let status = tokio::time::timeout(Duration::from_secs(10), async {
         loop {

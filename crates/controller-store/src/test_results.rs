@@ -323,14 +323,23 @@ pub fn parse_junit(
                 ));
             }
             Event::Text(_) | Event::CData(_) => {}
-            Event::GeneralRef(reference) => match reference.as_ref() {
-                b"amp" | b"lt" | b"gt" | b"apos" | b"quot" => {}
-                _ => {
+            Event::GeneralRef(reference) => {
+                let predefined = matches!(
+                    reference.as_ref(),
+                    b"amp" | b"lt" | b"gt" | b"apos" | b"quot"
+                );
+                let numeric = reference
+                    .resolve_char_ref()
+                    .map_err(|error| TestResultError::Malformed(error.to_string()))?;
+                if !predefined
+                    && !numeric
+                        .is_some_and(|character| is_legal_xml_1_0_character(character as u32))
+                {
                     return Err(TestResultError::Malformed(
-                        "undefined XML general reference".to_owned(),
+                        "undefined or illegal XML reference".to_owned(),
                     ));
                 }
-            },
+            }
         }
         buffer.clear();
     }
@@ -363,6 +372,13 @@ pub fn parse_junit(
         aggregate,
         suites,
     })
+}
+
+fn is_legal_xml_1_0_character(codepoint: u32) -> bool {
+    matches!(
+        codepoint,
+        0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+    )
 }
 
 fn validate_limits(bytes: &[u8], limits: JunitLimits) -> Result<(), TestResultError> {
@@ -1129,6 +1145,22 @@ mod tests {
             JunitLimits::default(),
         )
         .expect("predefined XML references remain valid");
+        parse_junit(
+            b"<testsuite><testcase name=\"newline\">&#10;&#xA;</testcase></testsuite>",
+            source(),
+            JunitLimits::default(),
+        )
+        .expect("legal decimal and hexadecimal character references remain valid");
+        for illegal in [
+            b"<testsuite><testcase name=\"case\">&#1;</testcase></testsuite>".as_slice(),
+            b"<testsuite><testcase name=\"case\">&#xB;</testcase></testsuite>".as_slice(),
+            b"<testsuite><testcase name=\"case\">&undeclared;</testcase></testsuite>".as_slice(),
+        ] {
+            assert!(matches!(
+                parse_junit(illegal, source(), JunitLimits::default()),
+                Err(TestResultError::Malformed(_))
+            ));
+        }
         for malformed in [
             b"garbage<testsuite/>".as_slice(),
             b"<testsuite/>garbage".as_slice(),
