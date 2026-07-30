@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal};
 use mcloving_controller_api::{ApiState, Client, ExplainResponse, router};
-use mcloving_controller_store::{ClaimRequest, NewBuild, NewLogChunk, Store, TerminalOutcome};
+use mcloving_controller_store::{
+    ClaimRequest, NewBuild, NewLogChunk, Store, TerminalOutcome,
+    authz::{Principal, PrincipalKind, ServiceScope},
+};
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -11,6 +14,27 @@ use tokio::net::TcpListener;
 use uuid::Uuid;
 
 const TOKEN: &str = "mcloving-e2e-token-exactly-32-bytes-or-more";
+
+fn api_state(store: Store, organization_id: Uuid) -> ApiState {
+    ApiState::new(
+        store,
+        TOKEN,
+        Principal {
+            subject: "service:test-client".to_owned(),
+            kind: PrincipalKind::Service,
+            organization_id,
+            project_roles: Default::default(),
+            service_scopes: [
+                ServiceScope::ProjectRead,
+                ServiceScope::BuildSubmit,
+                ServiceScope::BuildCancel,
+                ServiceScope::SchedulerControl,
+            ]
+            .into(),
+        },
+    )
+    .expect("configure API")
+}
 const PIPELINE: &str = r#"
 version: 1
 name: wave1
@@ -71,11 +95,7 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind API");
     let address = listener.local_addr().expect("read API address");
     let server = tokio::spawn(
-        axum::serve(
-            listener,
-            router(ApiState::new(store.clone(), TOKEN).expect("configure API")),
-        )
-        .into_future(),
+        axum::serve(listener, router(api_state(store.clone(), organization_id))).into_future(),
     );
     let client = Client::new(&format!("http://{address}"), TOKEN);
     let admission = client
@@ -91,7 +111,7 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
     assert_eq!(replay.build_id, admission.build_id);
     assert!(matches!(
         client
-            .explain(organization_id, &["linux".to_owned()])
+            .explain(organization_id, &["platform:linux".to_owned()])
             .await
             .expect("explain ready work"),
         ExplainResponse::Ready
@@ -102,7 +122,7 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
             organization_id,
             scheduler_id: "scheduler-e2e".to_owned(),
             agent_id: "agent-e2e".to_owned(),
-            capabilities: vec!["linux".to_owned()],
+            capabilities: vec!["platform:linux".to_owned()],
             trust_pool: "trusted-linux".into(),
             lease_seconds: 60,
             fairness_seed: 1,
@@ -139,8 +159,13 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
         .await
         .expect("read committed logs through HTTP");
     assert_eq!(logs.len(), 2);
-    assert_eq!(logs[0].text, "hello-from-mcloving\n");
-    assert_eq!(logs[1].text, "diagnostic\n");
+    assert_eq!(logs[0].text.as_deref(), Some("hello-from-mcloving\n"));
+    assert_eq!(
+        logs[0].content_hex,
+        "68656c6c6f2d66726f6d2d6d636c6f76696e670a"
+    );
+    assert_eq!(logs[1].text.as_deref(), Some("diagnostic\n"));
+    assert_eq!(logs[1].content_hex, "646961676e6f737469630a");
     assert!(logs.iter().all(|log| log.sha256.len() == 64));
 
     let events = store
@@ -151,7 +176,7 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
         .iter()
         .map(|event| event.topic.as_str())
         .collect::<Vec<_>>();
-    assert!(topics.contains(&"build.admitted"));
+    assert!(topics.contains(&"dag.admitted"));
     assert!(topics.contains(&"attempt.offered"));
     assert!(topics.contains(&"attempt.accepted"));
     assert!(topics.contains(&"attempt.running"));
@@ -461,11 +486,7 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind API");
     let address = listener.local_addr().expect("API address");
     let server = tokio::spawn(
-        axum::serve(
-            listener,
-            router(ApiState::new(store.clone(), TOKEN).expect("API state")),
-        )
-        .into_future(),
+        axum::serve(listener, router(api_state(store.clone(), organization_id))).into_future(),
     );
     let client = Client::new(&format!("http://{address}"), TOKEN);
     let admission = client
@@ -482,7 +503,7 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
             organization_id,
             scheduler_id: "scheduler-recovery".to_owned(),
             agent_id: "agent-recovery".to_owned(),
-            capabilities: vec!["linux".to_owned()],
+            capabilities: vec!["platform:linux".to_owned()],
             trust_pool: "trusted-linux".into(),
             lease_seconds: 60,
             fairness_seed: 3,

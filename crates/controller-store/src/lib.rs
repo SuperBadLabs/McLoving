@@ -9,6 +9,7 @@ use uuid::Uuid;
 mod audit;
 pub mod authz;
 mod dag;
+mod product;
 mod scheduler;
 mod security;
 mod test_results;
@@ -21,6 +22,12 @@ pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
     DagNodeKind, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode, compile_matrix,
     validate_dag_contract,
+};
+pub use product::{
+    ApprovalView, AttemptView, BuildCursor, BuildGraph, BuildListItem, BuildPage, ComponentCursor,
+    ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
+    DependencyView, MAX_PRODUCT_PAGE, NodeView, PipelinePage, PipelinePutOutcome, PipelineRecord,
+    PipelineWrite, TestReportView,
 };
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 pub use security::{CredentialDelivery, NewCredentialGrant, NewEnvironmentApproval};
@@ -70,6 +77,10 @@ pub const NORMALIZED_TEST_RESULTS_V13: &str = include_str!("../migrations/0013_t
 /// Least-privilege deletion-claim probe for fenced artifact publication.
 pub const OBJECT_PUBLICATION_FENCE_V14: &str =
     include_str!("../migrations/0014_object_publication_fence.sql");
+/// Versioned pipeline and immutable component catalog product surface.
+pub const PRODUCT_SURFACE_V15: &str = include_str!("../migrations/0015_product_surface.sql");
+/// Monotonic cross-node ordering for resumable build-log pages.
+pub const GLOBAL_LOG_ORDER_V16: &str = include_str!("../migrations/0016_global_log_order.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -382,12 +393,20 @@ pub enum StoreError {
     InvalidTrustPool,
     #[error("invalid pipeline DAG: {0}")]
     InvalidDag(String),
+    #[error("idempotency key conflict: {0}")]
+    IdempotencyConflict(String),
     #[error("invalid security operation: {0}")]
     InvalidSecurityOperation(String),
+    #[error("security operation conflict: {0}")]
+    SecurityConflict(String),
     #[error("invalid audit operation: {0}")]
     InvalidAuditOperation(String),
     #[error("invalid normalized test result: {0}")]
     InvalidTestResult(String),
+    #[error("invalid product operation: {0}")]
+    InvalidProductOperation(String),
+    #[error("product catalog conflict: {0}")]
+    ProductConflict(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -439,6 +458,8 @@ impl Store {
         apply_migration(&mut tx, 12, ARTIFACT_METADATA_V12).await?;
         apply_migration(&mut tx, 13, NORMALIZED_TEST_RESULTS_V13).await?;
         apply_migration(&mut tx, 14, OBJECT_PUBLICATION_FENCE_V14).await?;
+        apply_migration(&mut tx, 15, PRODUCT_SURFACE_V15).await?;
+        apply_migration(&mut tx, 16, GLOBAL_LOG_ORDER_V16).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1305,6 +1326,18 @@ impl Store {
         project_id: Uuid,
         build_id: Uuid,
     ) -> Result<bool, StoreError> {
+        self.request_cancellation_as(organization_id, project_id, build_id, "system:controller")
+            .await
+    }
+
+    pub async fn request_cancellation_as(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        actor_subject: &str,
+    ) -> Result<bool, StoreError> {
+        validate_audit_actor(actor_subject)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!("mcloving.scheduler.{organization_id}"))
@@ -1329,10 +1362,11 @@ impl Store {
                 tx.rollback().await?;
                 return Ok(false);
             }
-            append_event_and_outbox(
+            append_event_and_outbox_as(
                 &mut tx,
                 organization_id,
                 build_id,
+                actor_subject,
                 "build.cancellation_requested",
                 json!({
                     "dag": true,
@@ -1435,10 +1469,11 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
-        append_event_and_outbox(
+        append_event_and_outbox_as(
             &mut tx,
             organization_id,
             build_id,
+            actor_subject,
             "build.cancellation_requested",
             json!({
                 "attempt_id": attempt_id,
@@ -1502,6 +1537,119 @@ impl Store {
             .collect()
     }
 
+    /// Returns one immutable, stable page of current-fence build logs.
+    ///
+    /// The cursor is the exact last `(attempt, fence, sequence, stream)` tuple
+    /// from a prior page. It resolves independently of the attempt's current
+    /// fence, while returned rows remain restricted to current-fence evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_logs_page(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        after_attempt_id: Option<Uuid>,
+        after_fence: Option<i64>,
+        after_sequence: Option<i64>,
+        after_stream: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<CommittedLog>, StoreError> {
+        let cursor_is_complete = after_attempt_id.is_some()
+            && after_fence.is_some()
+            && after_sequence.is_some()
+            && after_stream.is_some();
+        if limit == 0
+            || limit > 1_001
+            || after_fence.is_some_and(|fence| fence < 0)
+            || after_sequence.is_some_and(|sequence| sequence < 0)
+            || (after_attempt_id.is_some()
+                || after_fence.is_some()
+                || after_sequence.is_some()
+                || after_stream.is_some())
+                != cursor_is_complete
+        {
+            return Err(StoreError::InvalidProductOperation(
+                "log page requires a complete non-negative cursor and limit between 1 and 1001"
+                    .to_owned(),
+            ));
+        }
+        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>);
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, LogRow>(
+            "WITH cursor AS (
+                 SELECT l.cursor_id
+                 FROM attempt_log_chunks AS l
+                 JOIN attempts AS a
+                   ON a.id = l.attempt_id
+                  AND a.organization_id = l.organization_id
+                 JOIN nodes AS n
+                   ON n.id = a.node_id
+                  AND n.organization_id = a.organization_id
+                 JOIN builds AS b
+                   ON b.id = n.build_id
+                  AND b.organization_id = n.organization_id
+                 WHERE l.organization_id = $1
+                   AND b.project_id = $2
+                   AND b.id = $3
+                   AND l.attempt_id = $4
+                   AND l.fence = $5
+                   AND l.sequence = $6
+                   AND l.stream = $7
+             )
+             SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest
+             FROM attempt_log_chunks AS l
+             JOIN attempts AS a
+               ON a.id = l.attempt_id AND a.organization_id = l.organization_id
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE l.organization_id = $1
+               AND b.project_id = $2
+               AND b.id = $3
+               AND l.fence = a.fence
+               AND (
+                   $4::uuid IS NULL
+                   OR (
+                       EXISTS (SELECT 1 FROM cursor)
+                       AND l.cursor_id > (SELECT cursor_id FROM cursor)
+                   )
+               )
+             ORDER BY l.cursor_id
+             LIMIT $8",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .bind(after_attempt_id)
+        .bind(after_fence)
+        .bind(after_sequence)
+        .bind(after_stream)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(|(attempt_id, fence, sequence, stream, content, digest)| {
+                let digest: [u8; 32] =
+                    digest
+                        .try_into()
+                        .map_err(|_| StoreError::CorruptLogDigest {
+                            attempt_id,
+                            sequence,
+                        })?;
+                Ok(CommittedLog {
+                    attempt_id,
+                    fence,
+                    sequence,
+                    stream,
+                    content,
+                    digest,
+                })
+            })
+            .collect()
+    }
+
     /// Commits a log chunk only for the exact live fenced attempt.
     pub async fn append_log(&self, chunk: &NewLogChunk<'_>) -> Result<bool, StoreError> {
         self.append_log_with_session(chunk, None).await
@@ -1539,6 +1687,24 @@ impl Store {
             ))
             .execute(&mut *tx)
             .await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(
+                 hashtextextended(
+                     'mcloving.log.build.' || n.organization_id::text || '.' || n.build_id::text,
+                     0
+                 )
+             )
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             WHERE a.organization_id = $1
+               AND a.id = $2",
+        )
+        .bind(chunk.organization_id)
+        .bind(chunk.attempt_id)
+        .execute(&mut *tx)
+        .await?;
         let redactions = sqlx::query_scalar::<_, Vec<u8>>(
             "SELECT secret_value
              FROM credential_grants
@@ -2288,9 +2454,28 @@ impl Store {
         max_attempts: i32,
         reason: &str,
     ) -> Result<RetryDecision, StoreError> {
-        if max_attempts < 1 || reason.is_empty() || reason.len() > 1024 {
+        self.schedule_retry_as(
+            organization_id,
+            attempt_id,
+            max_attempts,
+            reason,
+            "system:controller",
+        )
+        .await
+    }
+
+    pub async fn schedule_retry_as(
+        &self,
+        organization_id: Uuid,
+        attempt_id: Uuid,
+        max_attempts: i32,
+        reason: &str,
+        actor_subject: &str,
+    ) -> Result<RetryDecision, StoreError> {
+        if !(1..=16).contains(&max_attempts) || reason.is_empty() || reason.len() > 1024 {
             return Ok(RetryDecision::Ineligible);
         }
+        validate_audit_actor(actor_subject)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -2334,8 +2519,7 @@ impl Store {
             tx.rollback().await?;
             return Ok(RetryDecision::Ineligible);
         };
-        if dag_mode
-            || cancelled
+        if cancelled
             || reconciliation_terminalized
             || !matches!(status.as_str(), "failed" | "reconciliation_required")
         {
@@ -2427,10 +2611,11 @@ impl Store {
             .execute(&mut *tx)
             .await?;
             if inserted.rows_affected() == 1 {
-                append_event_and_outbox(
+                append_event_and_outbox_as(
                     &mut tx,
                     organization_id,
                     build_id,
+                    actor_subject,
                     "attempt.dead_lettered",
                     payload,
                 )
@@ -2466,34 +2651,143 @@ impl Store {
         .bind(attempt_id)
         .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "UPDATE nodes
-             SET status = 'queued', queued_at = clock_timestamp()
-             WHERE organization_id = $1 AND id = $2",
-        )
-        .bind(organization_id)
-        .bind(node_id)
-        .execute(&mut *tx)
-        .await?;
+        if dag_mode {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!("mcloving.dag.retry.{build_id}"))
+                .execute(&mut *tx)
+                .await?;
+            let skipped_nodes = sqlx::query_as::<_, (Uuid, Uuid, i32)>(
+                "WITH RECURSIVE descendants(id) AS (
+                     SELECT child_node_id
+                     FROM node_dependencies
+                     WHERE organization_id = $1
+                       AND parent_node_id = $2
+                     UNION
+                     SELECT dependency.child_node_id
+                     FROM node_dependencies AS dependency
+                     JOIN descendants
+                       ON descendants.id = dependency.parent_node_id
+                     WHERE dependency.organization_id = $1
+                 )
+                 SELECT n.id, latest.id, latest.ordinal
+                 FROM nodes AS n
+                 JOIN LATERAL (
+                     SELECT a.id, a.ordinal, a.status, a.terminal_summary
+                     FROM attempts AS a
+                     WHERE a.organization_id = n.organization_id
+                       AND a.node_id = n.id
+                     ORDER BY a.ordinal DESC
+                     LIMIT 1
+                 ) AS latest ON true
+                 WHERE n.organization_id = $1
+                   AND n.build_id = $3
+                   AND n.status = 'skipped'
+                   AND n.logical_outcome = 'skipped'
+                   AND (
+                       n.id IN (SELECT id FROM descendants)
+                       OR (
+                           latest.status = 'aborted'
+                           AND latest.terminal_summary ->> 'reason' = 'fail_fast_skipped'
+                       )
+                   )
+                 ORDER BY n.id
+                 FOR UPDATE OF n",
+            )
+            .bind(organization_id)
+            .bind(node_id)
+            .bind(build_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            for (skipped_node_id, previous_attempt_id, previous_ordinal) in &skipped_nodes {
+                sqlx::query(
+                    "INSERT INTO attempts (
+                         id, organization_id, node_id, ordinal, status, retry_of,
+                         restore_epoch
+                     )
+                     SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch
+                     FROM controller_metadata
+                     WHERE singleton",
+                )
+                .bind(Uuid::new_v4())
+                .bind(organization_id)
+                .bind(skipped_node_id)
+                .bind(previous_ordinal + 1)
+                .bind(previous_attempt_id)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    "UPDATE nodes AS n
+                     SET status = CASE
+                         WHEN EXISTS (
+                             SELECT 1
+                             FROM node_dependencies AS dependency
+                             WHERE dependency.organization_id = n.organization_id
+                               AND dependency.child_node_id = n.id
+                         )
+                         THEN 'blocked'
+                         ELSE 'queued'
+                     END,
+                         logical_outcome = NULL,
+                         cancellation_requested_at = NULL,
+                         queued_at = clock_timestamp()
+                     WHERE n.organization_id = $1
+                       AND n.id = $2
+                       AND n.status = 'skipped'
+                       AND n.logical_outcome = 'skipped'",
+                )
+                .bind(organization_id)
+                .bind(skipped_node_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'queued',
+                     logical_outcome = NULL,
+                     cancellation_requested_at = NULL,
+                     max_attempts = GREATEST(max_attempts, $3),
+                     queued_at = clock_timestamp()
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(node_id)
+            .bind(max_attempts)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE nodes
+                 SET status = 'queued', queued_at = clock_timestamp()
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(organization_id)
+            .bind(node_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         sqlx::query(
             "UPDATE builds
-             SET status = 'queued', completed_at = NULL
+             SET status = 'queued',
+                 completed_at = NULL,
+                 cancellation_requested_at = NULL
              WHERE organization_id = $1 AND id = $2",
         )
         .bind(organization_id)
         .bind(build_id)
         .execute(&mut *tx)
         .await?;
-        append_event_and_outbox(
+        append_event_and_outbox_as(
             &mut tx,
             organization_id,
             build_id,
+            actor_subject,
             "attempt.retry_scheduled",
             json!({
                 "attempt_id": child_id,
                 "retry_of": attempt_id,
                 "ordinal": child_ordinal,
                 "reason": reason,
+                "dag": dag_mode,
             }),
         )
         .await?;
@@ -4119,6 +4413,26 @@ async fn append_event_and_outbox(
     kind: &str,
     payload: Value,
 ) -> Result<(), StoreError> {
+    append_event_and_outbox_as(
+        tx,
+        organization_id,
+        build_id,
+        "system:controller",
+        kind,
+        payload,
+    )
+    .await
+}
+
+async fn append_event_and_outbox_as(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+    actor_subject: &str,
+    kind: &str,
+    payload: Value,
+) -> Result<(), StoreError> {
+    validate_audit_actor(actor_subject)?;
     sqlx::query(
         "INSERT INTO build_events (organization_id, build_id, kind, payload)
          VALUES ($1, $2, $3, $4)",
@@ -4143,12 +4457,25 @@ async fn append_event_and_outbox(
         tx,
         organization_id,
         audit_category_for_event(kind),
-        "system:controller",
+        actor_subject,
         kind,
         &format!("build:{build_id}"),
         payload,
     )
     .await?;
+    Ok(())
+}
+
+pub(crate) fn validate_audit_actor(actor_subject: &str) -> Result<(), StoreError> {
+    if actor_subject.is_empty()
+        || actor_subject.len() > 512
+        || actor_subject.trim() != actor_subject
+        || actor_subject.chars().any(char::is_control)
+    {
+        return Err(StoreError::InvalidAuditOperation(
+            "audit actor subject must be non-empty, canonical, and bounded".to_owned(),
+        ));
+    }
     Ok(())
 }
 

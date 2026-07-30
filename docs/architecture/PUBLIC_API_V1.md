@@ -5,7 +5,12 @@ Status: implemented by UX-001.
 The Rust CLI is an HTTP client and has no privileged database or controller
 shortcut. Every request requires `Authorization: Bearer <token>`. The initial
 deployment token is an operator-provisioned service credential of at least 32
-bytes; OIDC and scoped service-identity issuance remain later product surface.
+bytes. Distinct human principals can be loaded from
+`MCLOVING_API_PRINCIPALS_PATH`; each tab-separated line is
+`token<TAB>subject<TAB>project UUID<TAB>role`, where the role is `viewer`,
+`developer`, `admin`, or `owner`. Each token resolves to that per-request
+principal, so multi-party approval policy counts distinct authenticated
+subjects rather than a controller-wide service identity.
 
 Pipeline submission sends strict YAML as `application/yaml` and requires an
 `Idempotency-Key` header. The key is scoped to the project and returns the
@@ -25,11 +30,24 @@ The versioned routes are:
 - `POST /api/v1/organizations/{organization}/projects/{project}/builds/{build}/cancel`
 - `GET /api/v1/organizations/{organization}/scheduler/explain?capability=linux`
 
+Artifact staging uses the public service credential, but immutable artifact
+commit additionally requires `McLoving-Agent-Authorization: Bearer <token>`.
+The staging request body is arbitrary binary bytes under
+`application/octet-stream`; it is never JSON encoded.
+The shipped controller requires `MCLOVING_ARTIFACT_AGENT_TOKEN` and binds that
+independent secret to the configured embedded agent ID; public API credentials
+alone can never impersonate the leased artifact publisher.
+
 Cancellation is a durable request. Queued work becomes terminal immediately;
 owned work becomes `cancelling` until the fenced agent proves process-tree
 termination. Status reports both build and attempt state plus the cancellation
-flag. Logs are controller-committed, SHA-256-bound chunks ordered by sequence.
-Errors have stable `code` and `message` fields.
+flag. Logs are controller-committed, SHA-256-bound chunks ordered by a global
+cursor. Continuation requires the complete
+`after_attempt_id`/`after_fence`/`after_sequence`/`after_stream` tuple so a
+saved cursor remains exact across attempt re-fencing. Every item exposes exact
+`content_hex`; `text` is present only when the
+whole chunk is valid UTF-8, so clients can always reproduce the digest without
+lossy replacement. Errors have stable `code` and `message` fields.
 
 The Wave 1 deployable profile runs one embedded Linux worker for exactly one
 configured organization. It requires separate

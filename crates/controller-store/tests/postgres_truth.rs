@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, DagDependency, DagNodeKind, DependencyCondition,
-    EffectClass, EffectStatus, JunitLimits, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
-    NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
-    ObjectStatus, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
+    AgentReconciliationDisposition, ClaimRequest, ComponentPutOutcome, ComponentWrite,
+    DagDependency, DagNodeKind, DependencyCondition, EffectClass, EffectStatus, JunitLimits,
+    MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild, NewCredentialGrant, NewDagBuild,
+    NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus, PipelinePutOutcome,
+    PipelineWrite, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
     TerminalOutcome, TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
 use serde_json::json;
@@ -1344,10 +1345,25 @@ async fn cancellation_targets_the_latest_retry_attempt() {
     };
     assert!(
         store
-            .request_cancellation(organization_id, project_id, admission.build_id)
+            .request_cancellation_as(
+                organization_id,
+                project_id,
+                admission.build_id,
+                "oidc:cancel-operator",
+            )
             .await
             .expect("cancel retry")
     );
+    let cancellation_audit = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify actor-attributed cancellation audit");
+    let cancellation_event = cancellation_audit
+        .events
+        .iter()
+        .find(|event| event.action == "build.cancellation_requested")
+        .expect("actor-attributed cancellation event");
+    assert_eq!(cancellation_event.actor_subject, "oidc:cancel-operator");
     let attempts = sqlx::query_as::<_, (Uuid, i32, String)>(
         "SELECT id, ordinal, status
          FROM attempts
@@ -1403,6 +1419,20 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
         .await
         .expect("bootstrap through privileged connection");
     let store = unprivileged_store(&admin).await;
+    let can_use_log_cursor_sequence = sqlx::query_scalar::<_, bool>(
+        "SELECT has_sequence_privilege(
+             'mcloving_tenant',
+             'attempt_log_chunks_cursor_id_seq',
+             'USAGE'
+         )",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("inspect log cursor sequence privilege");
+    assert!(
+        can_use_log_cursor_sequence,
+        "runtime role must be able to allocate globally ordered log cursors"
+    );
     let can_mutate_grants = sqlx::query_scalar::<_, bool>(
         "SELECT
            has_table_privilege('mcloving_tenant', 'identities', 'INSERT')
@@ -2824,6 +2854,21 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             .await
             .expect("append first-fence log")
     );
+    let superseded_cursor = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            None,
+            None,
+            None,
+            None,
+            1,
+        )
+        .await
+        .expect("read first-fence cursor")
+        .pop()
+        .expect("first-fence log exists");
     sqlx::query(
         "UPDATE attempts SET lease_expires_at = clock_timestamp() - interval '1 second'
          WHERE id = $1",
@@ -2879,6 +2924,26 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             .await
             .expect("append current-fence log")
     );
+    for (sequence, stream, content) in [
+        (1, "stderr", b"warning\n".as_slice()),
+        (2, "stdout", b"done\n".as_slice()),
+    ] {
+        assert!(
+            store
+                .append_log(&NewLogChunk {
+                    organization_id,
+                    attempt_id: second.attempt_id,
+                    fence: second.fence,
+                    restore_epoch: second.restore_epoch,
+                    agent_id: "agent-b",
+                    sequence,
+                    stream,
+                    content,
+                })
+                .await
+                .expect("append paginated current-fence log")
+        );
+    }
     assert!(
         !store
             .append_log(&NewLogChunk {
@@ -2898,9 +2963,75 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
         .build_logs(organization_id, project_id, admission.build_id)
         .await
         .expect("read build logs");
-    assert_eq!(logs.len(), 1);
+    assert_eq!(logs.len(), 3);
     assert_eq!(logs[0].fence, second.fence);
     assert_eq!(logs[0].content, b"current\n");
+    let resumed_after_refence = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            Some(superseded_cursor.attempt_id),
+            Some(superseded_cursor.fence),
+            Some(superseded_cursor.sequence),
+            Some(&superseded_cursor.stream),
+            10,
+        )
+        .await
+        .expect("resolve the saved cursor across a fence change");
+    assert_eq!(resumed_after_refence.len(), 3);
+    assert!(
+        resumed_after_refence
+            .iter()
+            .all(|entry| entry.fence == second.fence)
+    );
+    let first_page = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            None,
+            None,
+            None,
+            None,
+            2,
+        )
+        .await
+        .expect("read first stable log page");
+    assert_eq!(first_page.len(), 2);
+    assert_eq!(first_page[0].content, b"current\n");
+    assert_eq!(first_page[1].content, b"warning\n");
+    let second_page = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            Some(first_page[1].attempt_id),
+            Some(first_page[1].fence),
+            Some(first_page[1].sequence),
+            Some(&first_page[1].stream),
+            2,
+        )
+        .await
+        .expect("resume stable log page");
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0].content, b"done\n");
+    assert!(
+        store
+            .build_logs_page(
+                organization_id,
+                project_id,
+                admission.build_id,
+                Some(first_page[1].attempt_id),
+                None,
+                None,
+                None,
+                2,
+            )
+            .await
+            .is_err(),
+        "partial cursors must fail closed"
+    );
 }
 
 #[tokio::test]
@@ -3308,7 +3439,13 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
         RetryDecision::Ineligible
     );
     let scheduled = store
-        .schedule_retry(organization_id, first.attempt_id, 2, "transient")
+        .schedule_retry_as(
+            organization_id,
+            first.attempt_id,
+            2,
+            "transient",
+            "oidc:retry-operator",
+        )
         .await
         .expect("schedule retry");
     let RetryDecision::Scheduled {
@@ -3319,9 +3456,28 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
     else {
         panic!("expected new second attempt, got {scheduled:?}");
     };
+    let retry_audit = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify actor-attributed retry audit");
+    let retry_event = retry_audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "attempt.retry_scheduled"
+                && event.payload["attempt_id"] == second_id.to_string()
+        })
+        .expect("actor-attributed retry event");
+    assert_eq!(retry_event.actor_subject, "oidc:retry-operator");
     assert_eq!(
         store
-            .schedule_retry(organization_id, first.attempt_id, 2, "transient")
+            .schedule_retry_as(
+                organization_id,
+                first.attempt_id,
+                2,
+                "transient",
+                "oidc:retry-operator",
+            )
             .await
             .expect("replay retry decision"),
         RetryDecision::Scheduled {
@@ -4820,6 +4976,42 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             .await
             .expect("reject approval replay")
     );
+    let mismatched_id_replay = store
+        .approve_environment(&NewEnvironmentApproval {
+            id: approvals[0],
+            organization_id,
+            project_id,
+            build_id: admission.build_id,
+            pipeline_digest,
+            environment: "production",
+            action: "rollback",
+            approver_subject: "oidc:release-owner",
+            ttl_seconds: 300,
+        })
+        .await
+        .expect_err("same approval id cannot name a different contract");
+    assert!(matches!(
+        mismatched_id_replay,
+        StoreError::SecurityConflict(_)
+    ));
+    let duplicate_subject_new_id = store
+        .approve_environment(&NewEnvironmentApproval {
+            id: Uuid::new_v4(),
+            organization_id,
+            project_id,
+            build_id: admission.build_id,
+            pipeline_digest,
+            environment: "production",
+            action: "deploy",
+            approver_subject: "oidc:release-owner",
+            ttl_seconds: 300,
+        })
+        .await
+        .expect_err("a different id cannot masquerade as an approval replay");
+    assert!(matches!(
+        duplicate_subject_new_id,
+        StoreError::SecurityConflict(_)
+    ));
     let expired_secret = b"expired-secret-value";
     let secret = b"marker-secret-value";
     let grant_id = Uuid::new_v4();
@@ -5226,6 +5418,367 @@ async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
 }
 
 #[tokio::test]
+async fn dag_idempotency_mismatch_is_an_explicit_conflict() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-idempotency-conflict",
+        )
+        .await
+        .expect("create conflict project");
+    let input = NewDagBuild {
+        organization_id,
+        project_id,
+        idempotency_key: "stable-key".to_owned(),
+        pipeline_digest: [0x91; 32],
+        priority: 0,
+        nodes: vec![dag_node(
+            "build",
+            DagNodeKind::Work,
+            Vec::new(),
+            "linux",
+            "build",
+        )],
+    };
+    store.admit_dag(&input).await.expect("admit original DAG");
+    let mut conflicting = input.clone();
+    conflicting.pipeline_digest = [0x92; 32];
+    assert!(matches!(
+        store.admit_dag(&conflicting).await,
+        Err(StoreError::IdempotencyConflict(_))
+    ));
+}
+
+#[tokio::test]
+async fn dag_log_cursor_never_hides_later_node_output() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-log-cursor",
+        )
+        .await
+        .expect("create DAG log project");
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "dag-log-cursor".to_owned(),
+            pipeline_digest: [0xd2; 32],
+            priority: 0,
+            nodes: vec![
+                dag_node("stage-a", DagNodeKind::Work, vec![], "linux", "stage-a"),
+                dag_node("stage-b", DagNodeKind::Work, vec![], "linux", "stage-b"),
+            ],
+        })
+        .await
+        .expect("admit parallel DAG");
+    let first = store
+        .claim_next(&dag_claim(organization_id, "agent-a", "linux", "stage-a"))
+        .await
+        .expect("claim stage A")
+        .expect("stage A is ready");
+    run_dag_claim(&store, &first).await;
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: first.attempt_id,
+                fence: first.fence,
+                restore_epoch: first.restore_epoch,
+                agent_id: &first.agent_id,
+                sequence: 20,
+                stream: "stdout",
+                content: b"stage-a\n",
+            })
+            .await
+            .expect("append stage A log")
+    );
+    let first_page = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            None,
+            None,
+            None,
+            None,
+            1,
+        )
+        .await
+        .expect("read stage A page");
+    assert_eq!(first_page.len(), 1);
+
+    let second = store
+        .claim_next(&dag_claim(organization_id, "agent-b", "linux", "stage-b"))
+        .await
+        .expect("claim stage B")
+        .expect("stage B is ready");
+    run_dag_claim(&store, &second).await;
+    assert!(
+        store
+            .append_log(&NewLogChunk {
+                organization_id,
+                attempt_id: second.attempt_id,
+                fence: second.fence,
+                restore_epoch: second.restore_epoch,
+                agent_id: &second.agent_id,
+                sequence: 0,
+                stream: "stdout",
+                content: b"stage-b\n",
+            })
+            .await
+            .expect("append later stage B log")
+    );
+    let resumed = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            Some(first_page[0].attempt_id),
+            Some(first_page[0].fence),
+            Some(first_page[0].sequence),
+            Some(&first_page[0].stream),
+            10,
+        )
+        .await
+        .expect("resume after stage A");
+    assert_eq!(resumed.len(), 1);
+    assert_eq!(resumed[0].attempt_id, second.attempt_id);
+    assert_eq!(resumed[0].content, b"stage-b\n");
+}
+
+#[tokio::test]
+async fn operator_retry_reopens_fail_fast_skipped_independent_siblings() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-fail-fast-retry",
+        )
+        .await
+        .expect("create fail-fast retry project");
+    let mut failing = dag_node("failing", DagNodeKind::Work, vec![], "linux", "failing");
+    failing.fail_fast = true;
+    failing.priority = 20;
+    let mut sibling = dag_node("sibling", DagNodeKind::Work, vec![], "linux", "sibling");
+    sibling.priority = 10;
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "dag-fail-fast-retry".to_owned(),
+            pipeline_digest: [0xd4; 32],
+            priority: 0,
+            nodes: vec![failing, sibling],
+        })
+        .await
+        .expect("admit fail-fast retry DAG");
+    let first = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-first",
+            "linux",
+            "failing",
+        ))
+        .await
+        .expect("claim fail-fast attempt")
+        .expect("fail-fast attempt ready");
+    run_dag_claim(&store, &first).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                first.restore_epoch,
+                &first.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("fail fail-fast attempt")
+    );
+    let skipped: (Uuid, String, String) = sqlx::query_as(
+        "SELECT n.id, n.status, a.status
+         FROM nodes AS n
+         JOIN attempts AS a
+           ON a.organization_id = n.organization_id
+          AND a.node_id = n.id
+         WHERE n.organization_id = $1
+           AND n.build_id = $2
+           AND n.node_key = 'sibling'",
+    )
+    .bind(organization_id)
+    .bind(admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read skipped sibling");
+    assert_eq!(skipped.1, "skipped");
+    assert_eq!(skipped.2, "aborted");
+
+    assert!(matches!(
+        store
+            .schedule_retry(organization_id, first.attempt_id, 2, "operator retry")
+            .await
+            .expect("schedule fail-fast retry"),
+        RetryDecision::Scheduled { created: true, .. }
+    ));
+    let sibling_retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-sibling",
+            "linux",
+            "sibling",
+        ))
+        .await
+        .expect("claim reopened sibling")
+        .expect("fail-fast-skipped sibling must reopen");
+    assert_eq!(sibling_retry.node_id, skipped.0);
+    let sibling_ordinal: i32 = sqlx::query_scalar("SELECT ordinal FROM attempts WHERE id = $1")
+        .bind(sibling_retry.attempt_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("read reopened sibling ordinal");
+    assert_eq!(sibling_ordinal, 2);
+}
+
+#[tokio::test]
+async fn operator_retry_reopens_a_terminal_dag_and_preserves_attempt_history() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-operator-retry",
+        )
+        .await
+        .expect("create DAG retry project");
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "dag-operator-retry".to_owned(),
+            pipeline_digest: [0xd3; 32],
+            priority: 0,
+            nodes: vec![dag_node(
+                "build",
+                DagNodeKind::Work,
+                vec![],
+                "linux",
+                "build",
+            )],
+        })
+        .await
+        .expect("admit one-stage DAG");
+    let first = store
+        .claim_next(&dag_claim(organization_id, "agent-first", "linux", "build"))
+        .await
+        .expect("claim first attempt")
+        .expect("first attempt is ready");
+    run_dag_claim(&store, &first).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                first.attempt_id,
+                first.fence,
+                first.restore_epoch,
+                &first.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("terminalize first attempt")
+    );
+
+    let decision = store
+        .schedule_retry(organization_id, first.attempt_id, 2, "operator retry")
+        .await
+        .expect("schedule DAG retry");
+    let RetryDecision::Scheduled {
+        attempt_id,
+        ordinal,
+        created: true,
+    } = decision
+    else {
+        panic!("expected a new DAG retry, got {decision:?}");
+    };
+    assert_eq!(ordinal, 2);
+    let replay = store
+        .schedule_retry(organization_id, first.attempt_id, 2, "operator retry")
+        .await
+        .expect("replay DAG retry");
+    assert!(matches!(
+        replay,
+        RetryDecision::Scheduled {
+            attempt_id: replay_id,
+            ordinal: 2,
+            created: false
+        } if replay_id == attempt_id
+    ));
+
+    let retry = store
+        .claim_next(&dag_claim(organization_id, "agent-retry", "linux", "build"))
+        .await
+        .expect("claim operator retry")
+        .expect("operator retry is ready");
+    assert_eq!(retry.attempt_id, attempt_id);
+    run_dag_claim(&store, &retry).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                retry.attempt_id,
+                retry.fence,
+                retry.restore_epoch,
+                &retry.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"try": 2}),
+            )
+            .await
+            .expect("terminalize operator retry")
+    );
+    let graph = store
+        .build_graph(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read retried DAG")
+        .expect("retried DAG exists");
+    assert_eq!(graph.build.status, "succeeded");
+    assert_eq!(graph.attempts.len(), 2);
+    assert_eq!(graph.attempts[0].status, "failed");
+    assert_eq!(graph.attempts[1].status, "succeeded");
+}
+
+#[tokio::test]
 async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -5371,7 +5924,10 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
             ],
         })
         .await;
-    assert!(matches!(changed_replay, Err(StoreError::InvalidDag(_))));
+    assert!(matches!(
+        changed_replay,
+        Err(StoreError::IdempotencyConflict(_))
+    ));
 
     let linux_store = store.clone();
     let windows_store = store.clone();
@@ -7140,5 +7696,271 @@ async fn junit_evidence_is_bounded_immutable_and_preserves_flaky_history() {
             .filter(|event| event.action == "test_report.ingested")
             .count(),
         2
+    );
+}
+
+#[tokio::test]
+async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let store = unprivileged_store(&admin).await;
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    admin
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "product-catalog",
+        )
+        .await
+        .expect("create product catalog project");
+    let raced_pipeline = PipelineWrite {
+        organization_id,
+        project_id,
+        pipeline_id: Uuid::new_v4(),
+        slug: "raced-create".to_owned(),
+        source: "version: 1".to_owned(),
+        source_sha256: [0x09; 32],
+        semantic_digest: [0x0a; 32],
+        schema_major: 1,
+        schema_minor: 0,
+        parameter_schema: json!({}),
+    };
+    let first_store = store.clone();
+    let second_store = store.clone();
+    let first_input = raced_pipeline.clone();
+    let second_input = raced_pipeline.clone();
+    let (first_create, second_create) = tokio::join!(
+        first_store.put_pipeline(&first_input, Some(0)),
+        second_store.put_pipeline(&second_input, Some(0))
+    );
+    let first_create = first_create.expect("first concurrent pipeline create");
+    let second_create = second_create.expect("second concurrent pipeline create");
+    assert!(
+        matches!(first_create, PipelinePutOutcome::Created(_))
+            ^ matches!(second_create, PipelinePutOutcome::Created(_))
+    );
+    assert!(
+        matches!(
+            first_create,
+            PipelinePutOutcome::PreconditionFailed {
+                current_revision: 1
+            }
+        ) || matches!(
+            second_create,
+            PipelinePutOutcome::PreconditionFailed {
+                current_revision: 1
+            }
+        )
+    );
+
+    let pipeline_id = Uuid::new_v4();
+    let mut pipeline = PipelineWrite {
+        organization_id,
+        project_id,
+        pipeline_id,
+        slug: "compile".to_owned(),
+        source: "version: 1".to_owned(),
+        source_sha256: [0x11; 32],
+        semantic_digest: [0x22; 32],
+        schema_major: 1,
+        schema_minor: 0,
+        parameter_schema: json!({}),
+    };
+    let created = store
+        .put_pipeline(&pipeline, Some(0))
+        .await
+        .expect("create versioned pipeline");
+    let PipelinePutOutcome::Created(created) = created else {
+        panic!("first pipeline write must create");
+    };
+    assert_eq!(created.revision, 1);
+    let other_project_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO projects (id, organization_id, slug)
+         VALUES ($1, $2, 'other-product-catalog')",
+    )
+    .bind(other_project_id)
+    .bind(organization_id)
+    .execute(admin.pool())
+    .await
+    .expect("create second product catalog project");
+    let cross_project_id_reuse = PipelineWrite {
+        project_id: other_project_id,
+        slug: "cross-project-id-reuse".to_owned(),
+        ..pipeline.clone()
+    };
+    let conflict = store
+        .put_pipeline(&cross_project_id_reuse, Some(0))
+        .await
+        .expect_err("reject an organization-wide pipeline id collision");
+    assert!(matches!(conflict, StoreError::ProductConflict(message)
+            if message.contains(&pipeline_id.to_string())
+                && message.contains("another project")));
+    let mut conflicting_pipeline = pipeline.clone();
+    conflicting_pipeline.pipeline_id = Uuid::new_v4();
+    conflicting_pipeline.source_sha256 = [0x23; 32];
+    conflicting_pipeline.semantic_digest = [0x24; 32];
+    let conflict = store
+        .put_pipeline(&conflicting_pipeline, Some(0))
+        .await
+        .expect_err("reject a duplicate project-local pipeline slug");
+    assert!(
+        matches!(conflict, StoreError::ProductConflict(message) if message.contains("compile"))
+    );
+    assert!(matches!(
+        store
+            .put_pipeline(&pipeline, Some(1))
+            .await
+            .expect("replay exact pipeline"),
+        PipelinePutOutcome::Unchanged(record) if record.revision == 1
+    ));
+    pipeline.slug = "compile-renamed".to_owned();
+    pipeline.source = "version: 1\nname: renamed".to_owned();
+    pipeline.source_sha256 = [0x33; 32];
+    let updated = store
+        .put_pipeline(&pipeline, Some(1))
+        .await
+        .expect("advance pipeline revision");
+    assert!(matches!(
+        updated,
+        PipelinePutOutcome::Updated(record) if record.revision == 2
+    ));
+    assert!(matches!(
+        store
+            .put_pipeline(&pipeline, Some(1))
+            .await
+            .expect("report stale precondition"),
+        PipelinePutOutcome::PreconditionFailed {
+            current_revision: 2
+        }
+    ));
+    let page = store
+        .pipelines(organization_id, project_id, None, 1)
+        .await
+        .expect("list pipelines");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].revision, 2);
+
+    let attributed_pipeline_id = Uuid::new_v4();
+    let attributed_pipeline = PipelineWrite {
+        pipeline_id: attributed_pipeline_id,
+        slug: "attributed-create".to_owned(),
+        ..pipeline.clone()
+    };
+    assert!(matches!(
+        store
+            .put_pipeline_as(&attributed_pipeline, Some(0), "oidc:catalog-admin")
+            .await
+            .expect("create an actor-attributed pipeline"),
+        PipelinePutOutcome::Created(_)
+    ));
+    let attributed_component_digest = [0x40; 32];
+    assert_eq!(
+        store
+            .register_component_as(
+                &ComponentWrite {
+                    organization_id,
+                    project_id,
+                    digest: attributed_component_digest,
+                    name: "attributed-component".to_owned(),
+                    version_major: 1,
+                    version_minor: 0,
+                    canonical_bytes: attributed_component_digest.to_vec(),
+                    source_sha256: [0x50; 32],
+                },
+                "oidc:component-admin",
+            )
+            .await
+            .expect("create an actor-attributed component"),
+        ComponentPutOutcome::Created
+    );
+    let audit = store
+        .verify_audit_chain(organization_id)
+        .await
+        .expect("verify product catalog audit chain");
+    let attributed_event = audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "pipeline.created"
+                && event.subject
+                    == format!("project:{project_id}:pipeline:{attributed_pipeline_id}")
+        })
+        .expect("actor-attributed pipeline audit event");
+    assert_eq!(attributed_event.actor_subject, "oidc:catalog-admin");
+    let attributed_component_event = audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "component.registered"
+                && event.subject
+                    == format!(
+                        "project:{project_id}:component:{}",
+                        hex::encode(attributed_component_digest)
+                    )
+        })
+        .expect("actor-attributed component audit event");
+    assert_eq!(
+        attributed_component_event.actor_subject,
+        "oidc:component-admin"
+    );
+
+    for digest in [[0x41; 32], [0x42; 32]] {
+        assert_eq!(
+            store
+                .register_component(&ComponentWrite {
+                    organization_id,
+                    project_id,
+                    digest,
+                    name: "shared-name".to_owned(),
+                    version_major: 1,
+                    version_minor: i32::from(digest[0] - 0x41),
+                    canonical_bytes: digest.to_vec(),
+                    source_sha256: [0x51; 32],
+                })
+                .await
+                .expect("register immutable component"),
+            ComponentPutOutcome::Created
+        );
+    }
+    let first = store
+        .components(organization_id, project_id, None, 1)
+        .await
+        .expect("read first component page");
+    assert_eq!(first.items.len(), 1);
+    let second = store
+        .components(organization_id, project_id, first.next_after.as_ref(), 1)
+        .await
+        .expect("read second component page");
+    assert_eq!(second.items.len(), 1);
+    assert_ne!(first.items[0].digest, second.items[0].digest);
+
+    let mutation = sqlx::query(
+        "UPDATE pipeline_revisions
+         SET source = 'mutated'
+         WHERE organization_id = $1 AND pipeline_id = $2",
+    )
+    .bind(organization_id)
+    .bind(pipeline_id)
+    .execute(admin.pool())
+    .await
+    .expect_err("pipeline revision history is immutable");
+    assert_eq!(
+        mutation
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    assert!(
+        store
+            .pipeline(Uuid::new_v4(), project_id, pipeline_id)
+            .await
+            .expect("cross-tenant read is safely empty")
+            .is_none()
     );
 }

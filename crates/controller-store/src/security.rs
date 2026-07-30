@@ -182,6 +182,45 @@ impl Store {
                 }),
             )
             .await?;
+        } else {
+            let existing = sqlx::query(
+                "SELECT project_id, build_id, pipeline_digest, environment, action,
+                        approver_subject,
+                        round(EXTRACT(EPOCH FROM (expires_at - created_at)))::bigint
+                            AS ttl_seconds,
+                        consumed_at IS NULL AND expires_at > clock_timestamp() AS active
+                 FROM environment_approvals
+                 WHERE organization_id = $1 AND id = $2",
+            )
+            .bind(approval.organization_id)
+            .bind(approval.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(existing) = existing else {
+                return Err(StoreError::SecurityConflict(
+                    "approval was not created because the target is unavailable or another active approval already exists"
+                        .to_owned(),
+                ));
+            };
+            let matches_contract = existing.try_get::<Uuid, _>("project_id")?
+                == approval.project_id
+                && existing.try_get::<Uuid, _>("build_id")? == approval.build_id
+                && existing.try_get::<Vec<u8>, _>("pipeline_digest")?
+                    == approval.pipeline_digest.as_slice()
+                && existing.try_get::<String, _>("environment")? == approval.environment
+                && existing.try_get::<String, _>("action")? == approval.action
+                && existing.try_get::<String, _>("approver_subject")? == approval.approver_subject
+                && existing.try_get::<i64, _>("ttl_seconds")? == i64::from(approval.ttl_seconds);
+            if !matches_contract {
+                return Err(StoreError::SecurityConflict(
+                    "approval id already belongs to a different approval contract".to_owned(),
+                ));
+            }
+            if !existing.try_get::<bool, _>("active")? {
+                return Err(StoreError::SecurityConflict(
+                    "approval replay is no longer active".to_owned(),
+                ));
+            }
         }
         tx.commit().await?;
         Ok(inserted.is_some())

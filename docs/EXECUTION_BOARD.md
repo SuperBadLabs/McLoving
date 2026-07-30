@@ -30,7 +30,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W2-C | AGENT-004, AGENT-005, AGENT-006, WIN-004 | DONE | PR #9 closes production remote work, atomic/replay-safe finalization, non-reusable Linux containment identity, and atomic Windows Job membership |
 | W3-A | IR-003, IR-004, CTRL-004 | DONE | Native pipeline semantics: typed parameters and bounded expressions, digest-pinned reusable components, deterministic matrix expansion, and durable parallel DAG execution |
 | W3-B | SEC-003, AUDIT-001, OPS-003, TEST-001 | DONE | Fenced grants and protected environments, tenant hash-chain audit, staged artifact product journeys, and immutable normalized test truth |
-| W3-C | API-002, UX-002, UI-001 | ACTIVE | Complete documented REST surface, end-to-end CLI journeys, and an API-only initial static UI |
+| W3-C | API-002, UX-002, UI-001 | DONE | Documented REST surface, end-to-end CLI journeys, and an API-only CSP-locked static UI |
 
 ## Wave 0 — Architecture and foundation
 
@@ -85,9 +85,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | AUDIT-001 | DONE | SEC-003, OPS-002 | Persist an append-only tenant-keyed audit stream for identity, authorization, scheduling, grant, approval, artifact, and administrative actions; hash chained segments, externally verifiable export, retention/legal-hold integration, mutation denial, and gap/tamper detection are required |
 | OPS-003 | DONE | OPS-001, CTRL-004 | Expose artifact upload, commit, list, metadata, and download journeys over staged immutable object truth; bind every artifact to tenant/build/node/attempt/name/digest/size/media type, enforce quotas and no-overwrite semantics, and prove partial upload, substitution, restore, and retention behavior |
 | TEST-001 | DONE | OPS-003 | Normalize bounded JUnit-style test reports into versioned suite/case outcomes with provenance and raw immutable source retention; reject entity expansion and malformed/oversized input, preserve duplicate-name identity explicitly, aggregate deterministically, and expose flaky/retry history without rewriting prior outcomes |
-| API-002 | ACTIVE | CTRL-004, SEC-003, AUDIT-001, OPS-003, TEST-001 | Complete the documented REST API for pipelines/components, parameters, builds/nodes/attempts, approvals/grants, logs/artifacts/tests/audit, pagination/filtering, idempotency, optimistic concurrency, stable errors, OpenAPI, and tenant-scoped authorization; contract and real-PostgreSQL tests must cover every route and deny path |
-| UX-002 | PENDING | API-002 | Complete Rust CLI journeys for validate/plan/submit/watch/explain/cancel/retry/approve, logs, artifacts, tests, and audit; support machine-stable JSON plus human output, resumable watch, explicit uncertain states, shell completion, and API-only end-to-end tests |
-| UI-001 | PENDING | API-002 | Ship a content-security-policy-locked static web UI that uses only the public API for dashboard, pipeline/build graph, live logs, approvals, artifacts, tests, audit, and explainability; no privileged backend path, embedded secret, or client-side authorization claim is allowed, with accessibility and browser journey gates |
+| API-002 | DONE | CTRL-004, SEC-003, AUDIT-001, OPS-003, TEST-001 | Complete the documented REST API for pipelines/components, parameters, builds/nodes/attempts, approvals/grants, logs/artifacts/tests/audit, pagination/filtering, idempotency, optimistic concurrency, stable errors, OpenAPI, and tenant-scoped authorization; contract and real-PostgreSQL tests must cover every route and deny path |
+| UX-002 | DONE | API-002 | Complete Rust CLI journeys for validate/plan/submit/watch/explain/cancel/retry/approve, logs, artifacts, tests, and audit; support machine-stable JSON plus human output, resumable watch, explicit uncertain states, shell completion, and API-only end-to-end tests |
+| UI-001 | DONE | API-002 | Ship a content-security-policy-locked static web UI that uses only the public API for dashboard, pipeline/build graph, live logs, approvals, artifacts, tests, audit, and explainability; no privileged backend path, embedded secret, or client-side authorization claim is allowed, with accessibility and browser journey gates |
 
 ## Wave 4 — Jenkins migration
 
@@ -108,10 +108,12 @@ canary, and release-readiness assessment.
 
 ## Current next batch
 
-`W2-B` merged through PR #8 at protected-main commit `776d842`. It is a
-completed foundation batch, not closure of `WIN-001`, `WIN-002`, or `WIN-003`;
-those tickets remain active for the explicit production and persistent-host
-gates above.
+`W3-C` closes the Wave 3 native product surface through PR #12 after exact-head
+review, complete foundation validation, real-PostgreSQL execution, deployable
+embedded/remote-agent proof, and backup/restore verification. The next
+sequenced product batch is Wave 4 Jenkins migration. `WIN-001`, `WIN-002`, and
+`WIN-003` remain independently active for their explicit production and
+persistent-Windows-host gates; Wave 3 closure does not waive those gates.
 
 `W2-C` is complete on `codex/wave2-agent-completion`. Production agents
 negotiate `work-delivery-v1`, cancel execution on lease-renewal loss, commit
@@ -129,11 +131,11 @@ persistent Windows host through controller/network interruption and machine
 reboot. Cross-compilation, a test-only service fixture, or hosted CI alone
 cannot waive either boundary.
 
-Wave 3 is loaded as three dependency-ordered batches. `W3-A` and `W3-B` are
-complete. They establish the native authoring, durable execution, security,
-audit, artifact, and normalized-test contracts that the product consumes.
-`W3-C` is now active and exposes those completed contracts without creating a
-privileged product path.
+Wave 3 is complete in three dependency-ordered batches. `W3-A` and `W3-B`
+establish the native authoring, durable execution, security, audit, artifact,
+and normalized-test contracts. `W3-C` exposes those contracts through one
+documented public API used by both the CLI and the static UI; neither product
+surface creates a privileged controller path.
 
 `IR-003` is complete. Pipeline IR v1.1 preserves v1.0 canonical bytes for
 legacy pipelines and adds typed public/secret parameters, explicit
@@ -193,7 +195,33 @@ and explicit duplicate ordinals, deterministic aggregates, exact raw artifact
 provenance, automatic 30-day source retention, immutable history, and a
 bounded flaky-outcome query. PostgreSQL mutation denial, idempotent ingestion,
 audit publication, and the shipped controller/agent execution journeys pass.
-W3-B is closed and `API-002` begins W3-C.
+W3-B is closed. `API-002` is complete: the versioned public surface now
+documents and serves pipeline validation/planning and optimistic-concurrency
+catalogs, immutable components, parameterized DAG submission, resumable build
+and log pagination, graph/status/cancel/retry, approvals, credential grants,
+artifacts, normalized tests, audit, and scheduler explainability. Stable error
+envelopes and unique OpenAPI operation identifiers cover every route. A
+database-free contract matrix proves all 26 tenant routes reject both missing
+authority and cross-tenant path substitution; real PostgreSQL and shipped
+controller/agent gates prove the positive journeys.
+
+`UX-002` is complete. The Rust CLI covers validation, planning, typed
+parameter submission, resumable watch and logs, status and graph inspection,
+cancel and safe retry, approvals, explainability, artifacts, normalized
+tests, and audit. Human output and stable JSON share the same public API
+client; bounded watch failures return explicit uncertain-state receipts,
+artifact downloads refuse overwrite, shell completions are generated, and a
+mock-controller end-to-end gate proves API-only operation.
+
+`UI-001` is complete. The controller serves a static dashboard and pipeline,
+build-graph, log, test, artifact, approval, audit, and explainability views
+that call only documented public routes. The controller remains the sole
+authorization authority and the browser keeps the optional API token in
+memory. A restrictive self-only CSP forbids inline script and style,
+accessibility contracts cover landmarks, labels, keyboard-visible focus, and
+live status, and the browser journey gate proves the full desktop flow,
+strict-YAML validation, audit/explainability views, clean console, and a
+390-pixel viewport without page overflow. W3-C and Wave 3 are closed.
 
 The still-active `WIN-001`, `WIN-002`, and `WIN-003` persistent-host closure is
 tracked independently and remains a release gate for Windows parity; it does
