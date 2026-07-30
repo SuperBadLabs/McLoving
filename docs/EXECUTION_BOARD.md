@@ -41,6 +41,15 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   work or ambiguous destination state. Only then capture and verify the final
   configuration/build/artifact/audit export, revoke remaining read and write
   authority, credentials, and network paths, and retire compute and secrets.
+- Every stateful `MIG-009` per-job cutover must similarly quiesce before its
+  cutover snapshot: pause and verify scheduled, webhook, upstream, remote,
+  manual, and API build ingress plus administrative writers for the job and
+  affected enclosing scope; freeze new scheduling and effect-authority
+  transfers; drain or reconcile all queued/running builds, retries, leases,
+  locks, and uncertain effects; and prove zero mutable source work. Only then
+  re-export, transform, import, and verify state before atomically switching
+  trigger, reader, writer, and effect authority. Failure restores the frozen
+  Jenkins authorities without skipped/duplicated state or effects.
 - In `MIG-006`, "no database, agent, scheduler, or controller authority" means
   no production, staging, shared-service, or cross-fixture authority. The
   Jenkins oracle and McLoving runner each receive a separate disposable,
