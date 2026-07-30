@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -23,6 +25,7 @@ use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, NewLogChunk,
     ReconciliationTrustPoolAuthorization, Store, StoreError, TerminalOutcome,
+    authz::{Principal, PrincipalKind, ServiceScope},
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
@@ -86,11 +89,30 @@ async fn main() -> Result<()> {
         },
     )
     .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
-    let state = ApiState::new(store.clone(), &bearer_token)
-        .context("configure public API")?
-        .with_object_store(object_store)
-        .with_staged_upload_ttl(staged_upload_ttl);
     let worker = EmbeddedWorker::from_environment()?;
+    let state = ApiState::new(
+        store.clone(),
+        &bearer_token,
+        Principal {
+            subject: "service:public-api".to_owned(),
+            kind: PrincipalKind::Service,
+            organization_id: worker.organization_id,
+            project_roles: BTreeMap::new(),
+            service_scopes: [
+                ServiceScope::ProjectRead,
+                ServiceScope::BuildSubmit,
+                ServiceScope::BuildCancel,
+                ServiceScope::SecretUse,
+                ServiceScope::ProjectAdmin,
+                ServiceScope::AuditRead,
+                ServiceScope::SchedulerControl,
+            ]
+            .into(),
+        },
+    )
+    .context("configure public API")?
+    .with_object_store(object_store)
+    .with_staged_upload_ttl(staged_upload_ttl);
     tokio::fs::create_dir_all(&worker.config.workspace_root)
         .await
         .context("create embedded worker workspace root")?;
@@ -139,6 +161,8 @@ fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
 struct ControllerAgentService {
     store: Store,
     identities: Arc<AgentIdentityBindings>,
+    #[cfg(debug_assertions)]
+    drop_start_response_once: Arc<AtomicBool>,
 }
 
 #[tonic::async_trait]
@@ -519,6 +543,12 @@ impl AgentControl for ControllerAgentService {
             )
             .await
             .map_err(internal_store_error)?;
+        #[cfg(debug_assertions)]
+        if accepted && self.drop_start_response_once.swap(false, Ordering::SeqCst) {
+            return Err(Status::unavailable(
+                "test-only injected start acknowledgement loss",
+            ));
+        }
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
@@ -861,6 +891,10 @@ async fn run_agent_control_server(store: Store) -> Result<()> {
     let service = ControllerAgentService {
         store,
         identities: Arc::new(identities),
+        #[cfg(debug_assertions)]
+        drop_start_response_once: Arc::new(AtomicBool::new(
+            std::env::var_os("MCLOVING_TEST_DROP_START_RESPONSE_ONCE").is_some(),
+        )),
     };
     Server::builder()
         .tls_config(tls)

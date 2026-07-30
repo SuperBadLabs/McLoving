@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Postgres, Transaction};
@@ -21,7 +22,7 @@ pub struct NewAuditEvent<'a> {
     pub payload: Value,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditEvent {
     pub sequence: i64,
     pub event_id: Uuid,
@@ -35,13 +36,13 @@ pub struct AuditEvent {
     pub event_hash: [u8; 32],
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditRetentionPolicy {
     pub retain_until_unix_ms: i64,
     pub legal_hold: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditExport {
     pub organization_id: Uuid,
     pub events: Vec<AuditEvent>,
@@ -50,7 +51,7 @@ pub struct AuditExport {
     pub retention: Option<AuditRetentionPolicy>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AuditPage {
     pub organization_id: Uuid,
     pub after_sequence: i64,

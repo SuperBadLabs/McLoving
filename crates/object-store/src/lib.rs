@@ -1,7 +1,7 @@
 //! Staged, immutable, content-addressed storage for compact deployments.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,6 +13,7 @@ static STAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_REDACTION_PATTERNS: usize = 256;
 const MAX_REDACTION_BYTES: usize = 64 * 1024;
 const MAX_REDACTION_WORK: usize = 64 * 1024 * 1024;
+const MAX_PUBLICATION_CLAIM_SCAN: usize = 1_024;
 
 /// Storage quota enforced before bytes enter the durable object namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,6 +151,8 @@ pub enum ObjectStoreError {
     TotalQuotaExceeded,
     #[error("object store exceeds the staged-object count quota")]
     StagedObjectQuotaExceeded,
+    #[error("publication-claim scan limit must be between 1 and 1024")]
+    InvalidPublicationClaimScan,
     #[error("staged object does not belong to this store")]
     ForeignStagingPath,
     #[error("staged object content no longer matches its declared digest")]
@@ -403,6 +406,11 @@ impl FilesystemObjectStore {
         if claimed_path.is_file() && inspect(&claimed_path)? != pending.reference {
             return Err(ObjectStoreError::CorruptStagedObject);
         }
+        if claimed_path.is_file() {
+            let claimed = OpenOptions::new().write(true).open(&claimed_path)?;
+            claimed.set_times(FileTimes::new().set_modified(SystemTime::now()))?;
+            claimed.sync_all()?;
+        }
         drop(quota_lock);
         Ok(PendingObject {
             token: pending.token.clone(),
@@ -484,6 +492,103 @@ impl FilesystemObjectStore {
         }
         drop(quota_lock);
         Ok(removed)
+    }
+
+    /// Lists a bounded set of old crash-recoverable publication claims.
+    ///
+    /// Listing never mutates storage. The controller must independently prove
+    /// that no live database reservation owns each claim before releasing it.
+    pub fn publication_claims_older_than(
+        &self,
+        namespace: &str,
+        minimum_age: Duration,
+        limit: usize,
+    ) -> Result<Vec<PendingObject>, ObjectStoreError> {
+        validate_namespace(namespace)?;
+        if limit == 0 || limit > MAX_PUBLICATION_CLAIM_SCAN {
+            return Err(ObjectStoreError::InvalidPublicationClaimScan);
+        }
+        let now = SystemTime::now();
+        let mut claims = Vec::new();
+        for entry in directory_entries(&self.staging)? {
+            if claims.len() == limit {
+                break;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("publishing") {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let Ok(age) = now.duration_since(metadata.modified()?) else {
+                continue;
+            };
+            if age < minimum_age {
+                continue;
+            }
+            let Some(token) = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.strip_suffix(".publishing"))
+            else {
+                continue;
+            };
+            if !token.starts_with(&format!("{namespace}-")) {
+                continue;
+            }
+            validate_pending_token(token)?;
+            claims.push(PendingObject {
+                token: token.to_owned(),
+                reference: inspect(&path)?,
+                claimed: true,
+            });
+        }
+        Ok(claims)
+    }
+
+    /// Moves one old publication claim back into ordinary staged reclamation.
+    ///
+    /// The age is rechecked under the same quota lock used by `claim_pending`.
+    /// An exact retry refreshes the claim timestamp while holding that lock, so
+    /// a stale observation cannot race an active publication.
+    pub fn release_publication_claim(
+        &self,
+        pending: &PendingObject,
+        minimum_age: Duration,
+    ) -> Result<bool, ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let quota_lock = self.lock_quota()?;
+        let claimed_path = self.claimed_path(&pending.token);
+        let staged_path = self.staging.join(&pending.token);
+        if claimed_path.parent() != Some(self.staging.as_path())
+            || staged_path.parent() != Some(self.staging.as_path())
+        {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        let metadata = match claimed_path.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let Ok(age) = SystemTime::now().duration_since(metadata.modified()?) else {
+            return Ok(false);
+        };
+        if age < minimum_age {
+            return Ok(false);
+        }
+        if staged_path.exists() || inspect(&claimed_path)? != pending.reference {
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
+        fs::rename(&claimed_path, &staged_path)?;
+        sync_directory(&self.staging)?;
+        drop(quota_lock);
+        Ok(true)
     }
 
     /// Reads and verifies one object, returning an explicit gap on failure.
@@ -961,6 +1066,59 @@ mod tests {
             path.file_name().and_then(|name| name.to_str()),
             Some(format!("tenant-a-{}-9.staged", std::process::id()).as_str())
         );
+    }
+
+    #[test]
+    fn abandoned_publication_claims_are_bounded_reapable_and_retry_safe() {
+        let root = tempfile::tempdir().unwrap();
+        let store = store(root.path(), 1024, 4096);
+        let pending = store
+            .stage_artifact("tenant-a", b"claimed")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let claimed = store.claim_pending(&pending).unwrap();
+        let claimed_path = store.claimed_path(pending.token());
+        File::options()
+            .write(true)
+            .open(&claimed_path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+
+        assert!(
+            store
+                .publication_claims_older_than("tenant-b", Duration::from_secs(1), 8)
+                .unwrap()
+                .is_empty(),
+            "tenant scans must not inspect another namespace"
+        );
+        let candidates = store
+            .publication_claims_older_than("tenant-a", Duration::from_secs(1), 8)
+            .unwrap();
+        assert_eq!(candidates, vec![claimed.clone()]);
+
+        store.claim_pending(&pending).unwrap();
+        assert!(
+            !store
+                .release_publication_claim(&candidates[0], Duration::from_secs(1))
+                .unwrap(),
+            "an exact retry refreshes the claim under the quota lock"
+        );
+
+        File::options()
+            .write(true)
+            .open(&claimed_path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+        assert!(
+            store
+                .release_publication_claim(&candidates[0], Duration::from_secs(1))
+                .unwrap()
+        );
+        assert_eq!(store.verify_pending(&pending).unwrap(), pending.reference);
+        assert_eq!(store.reap_staged_older_than(Duration::ZERO).unwrap(), 1);
     }
 
     #[test]

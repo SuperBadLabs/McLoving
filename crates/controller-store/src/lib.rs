@@ -9,6 +9,7 @@ use uuid::Uuid;
 mod audit;
 pub mod authz;
 mod dag;
+mod product;
 mod scheduler;
 mod security;
 mod test_results;
@@ -21,6 +22,12 @@ pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
     DagNodeKind, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode, compile_matrix,
     validate_dag_contract,
+};
+pub use product::{
+    ApprovalView, AttemptView, BuildCursor, BuildGraph, BuildListItem, BuildPage, ComponentCursor,
+    ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
+    DependencyView, MAX_PRODUCT_PAGE, NodeView, PipelinePage, PipelinePutOutcome, PipelineRecord,
+    PipelineWrite, TestReportView,
 };
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 pub use security::{CredentialDelivery, NewCredentialGrant, NewEnvironmentApproval};
@@ -67,6 +74,11 @@ pub const TENANT_AUDIT_V11: &str = include_str!("../migrations/0011_tenant_audit
 pub const ARTIFACT_METADATA_V12: &str = include_str!("../migrations/0012_artifact_metadata.sql");
 /// Immutable, bounded, normalized test-result evidence.
 pub const NORMALIZED_TEST_RESULTS_V13: &str = include_str!("../migrations/0013_test_results.sql");
+/// Least-privilege deletion-claim probe for fenced artifact publication.
+pub const OBJECT_PUBLICATION_FENCE_V14: &str =
+    include_str!("../migrations/0014_object_publication_fence.sql");
+/// Versioned pipeline and immutable component catalog product surface.
+pub const PRODUCT_SURFACE_V15: &str = include_str!("../migrations/0015_product_surface.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -385,6 +397,8 @@ pub enum StoreError {
     InvalidAuditOperation(String),
     #[error("invalid normalized test result: {0}")]
     InvalidTestResult(String),
+    #[error("invalid product operation: {0}")]
+    InvalidProductOperation(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -435,6 +449,8 @@ impl Store {
         apply_migration(&mut tx, 11, TENANT_AUDIT_V11).await?;
         apply_migration(&mut tx, 12, ARTIFACT_METADATA_V12).await?;
         apply_migration(&mut tx, 13, NORMALIZED_TEST_RESULTS_V13).await?;
+        apply_migration(&mut tx, 14, OBJECT_PUBLICATION_FENCE_V14).await?;
+        apply_migration(&mut tx, 15, PRODUCT_SURFACE_V15).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1474,6 +1490,103 @@ impl Store {
         .bind(organization_id)
         .bind(project_id)
         .bind(build_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        rows.into_iter()
+            .map(|(attempt_id, fence, sequence, stream, content, digest)| {
+                let digest: [u8; 32] =
+                    digest
+                        .try_into()
+                        .map_err(|_| StoreError::CorruptLogDigest {
+                            attempt_id,
+                            sequence,
+                        })?;
+                Ok(CommittedLog {
+                    attempt_id,
+                    fence,
+                    sequence,
+                    stream,
+                    content,
+                    digest,
+                })
+            })
+            .collect()
+    }
+
+    /// Returns one immutable, stable page of current-fence build logs.
+    ///
+    /// The cursor is the exact last `(attempt, sequence, stream)` tuple from a
+    /// prior page. Attempt ordinals make retries order after their parents,
+    /// while the remaining fields provide a deterministic total order.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn build_logs_page(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        after_attempt_id: Option<Uuid>,
+        after_sequence: Option<i64>,
+        after_stream: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<CommittedLog>, StoreError> {
+        let cursor_is_complete =
+            after_attempt_id.is_some() && after_sequence.is_some() && after_stream.is_some();
+        if limit == 0
+            || limit > 1_001
+            || after_sequence.is_some_and(|sequence| sequence < 0)
+            || (after_attempt_id.is_some() || after_sequence.is_some() || after_stream.is_some())
+                != cursor_is_complete
+        {
+            return Err(StoreError::InvalidProductOperation(
+                "log page requires a complete non-negative cursor and limit between 1 and 1001"
+                    .to_owned(),
+            ));
+        }
+        type LogRow = (Uuid, i64, i64, String, Vec<u8>, Vec<u8>);
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query_as::<_, LogRow>(
+            "WITH cursor AS (
+                 SELECT ordinal
+                 FROM attempts
+                 WHERE organization_id = $1
+                   AND id = $4
+             )
+             SELECT l.attempt_id, l.fence, l.sequence, l.stream, l.content, l.digest
+             FROM attempt_log_chunks AS l
+             JOIN attempts AS a
+               ON a.id = l.attempt_id AND a.organization_id = l.organization_id
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             JOIN builds AS b
+               ON b.id = n.build_id AND b.organization_id = n.organization_id
+             WHERE l.organization_id = $1
+               AND b.project_id = $2
+               AND b.id = $3
+               AND l.fence = a.fence
+               AND (
+                   $4::uuid IS NULL
+                   OR (
+                       EXISTS (SELECT 1 FROM cursor)
+                       AND (a.ordinal, l.sequence, l.stream, l.attempt_id)
+                           > (
+                               (SELECT ordinal FROM cursor),
+                               $5::bigint,
+                               $6::text,
+                               $4::uuid
+                           )
+                   )
+               )
+             ORDER BY a.ordinal, l.sequence, l.stream, l.attempt_id
+             LIMIT $7",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .bind(after_attempt_id)
+        .bind(after_sequence)
+        .bind(after_stream)
+        .bind(i64::from(limit))
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -2767,6 +2880,46 @@ impl Store {
         Ok(true)
     }
 
+    /// Reports whether an old filesystem publication claim still belongs to a
+    /// live, current-restore artifact reservation.
+    pub async fn artifact_publication_claim_active(
+        &self,
+        organization_id: Uuid,
+        digest: [u8; 32],
+        bytes: i64,
+    ) -> Result<bool, StoreError> {
+        if bytes < 0 {
+            return Ok(false);
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let active = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM attempt_objects AS o
+                 JOIN attempts AS a
+                   ON a.organization_id = o.organization_id
+                  AND a.id = o.attempt_id
+                 WHERE o.organization_id = $1
+                   AND o.kind = 'artifact'
+                   AND o.object_digest = $2
+                   AND o.bytes = $3
+                   AND o.status = 'pending'
+                   AND a.restore_epoch = (
+                       SELECT restore_epoch FROM controller_metadata WHERE singleton
+                   )
+                   AND a.lease_expires_at > clock_timestamp()
+                   AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
+             )",
+        )
+        .bind(organization_id)
+        .bind(digest.as_slice())
+        .bind(bytes)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(active)
+    }
+
     /// Marks an exact reserved artifact available only after bytes are published.
     #[allow(clippy::too_many_arguments)]
     pub async fn mark_artifact_available(
@@ -2786,6 +2939,7 @@ impl Store {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        acquire_object_deletion_fence(&mut tx, &digest).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
                 "mcloving.artifact.{organization_id}.{attempt_id}.{fence}.{name}"
@@ -2811,6 +2965,14 @@ impl Store {
                AND o.object_digest = $7
                AND o.bytes = $8
                AND o.media_type = $9
+               AND mcloving_owned_object_publication_allowed(
+                     o.organization_id,
+                     o.attempt_id,
+                     o.fence,
+                     o.kind,
+                     o.name,
+                     o.object_digest
+                   )
              FOR UPDATE OF o",
         )
         .bind(organization_id)
@@ -2954,6 +3116,9 @@ impl Store {
         status: ObjectStatus,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if status == ObjectStatus::Available {
+            acquire_object_deletion_fence(&mut tx, &digest).await?;
+        }
         let updated = sqlx::query_scalar::<_, String>(
             "UPDATE attempt_objects
              SET status = $7, checked_at = clock_timestamp()
@@ -2963,6 +3128,17 @@ impl Store {
                AND kind = $4
                AND name = $5
                AND object_digest = $6
+               AND (
+                 $7 <> 'available'
+                 OR mcloving_owned_object_publication_allowed(
+                      organization_id,
+                      attempt_id,
+                      fence,
+                      kind,
+                      name,
+                      object_digest
+                    )
+               )
              RETURNING name",
         )
         .bind(organization_id)
@@ -3420,6 +3596,12 @@ impl Store {
              FROM attempt_objects AS candidate
              WHERE NOT EXISTS (
                    SELECT 1
+                   FROM attempt_objects AS pending
+                   WHERE pending.object_digest = candidate.object_digest
+                     AND pending.status = 'pending'
+               )
+               AND NOT EXISTS (
+                   SELECT 1
                    FROM attempt_objects AS referenced
                    LEFT JOIN object_retention AS r
                      ON r.organization_id = referenced.organization_id
@@ -3479,6 +3661,12 @@ impl Store {
                )
                AND NOT EXISTS (
                    SELECT 1
+                   FROM attempt_objects AS pending
+                   WHERE pending.object_digest = candidate.object_digest
+                     AND pending.status = 'pending'
+               )
+               AND NOT EXISTS (
+                   SELECT 1
                    FROM attempt_objects AS referenced
                    LEFT JOIN object_retention AS r
                      ON r.organization_id = referenced.organization_id
@@ -3519,6 +3707,12 @@ impl Store {
                        SELECT 1
                        FROM attempt_objects
                        WHERE object_digest = $1
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM attempt_objects AS pending
+                       WHERE pending.object_digest = $1
+                         AND pending.status = 'pending'
                    )
                    AND NOT EXISTS (
                        SELECT 1

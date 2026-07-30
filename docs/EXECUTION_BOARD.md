@@ -85,8 +85,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | AUDIT-001 | DONE | SEC-003, OPS-002 | Persist an append-only tenant-keyed audit stream for identity, authorization, scheduling, grant, approval, artifact, and administrative actions; hash chained segments, externally verifiable export, retention/legal-hold integration, mutation denial, and gap/tamper detection are required |
 | OPS-003 | DONE | OPS-001, CTRL-004 | Expose artifact upload, commit, list, metadata, and download journeys over staged immutable object truth; bind every artifact to tenant/build/node/attempt/name/digest/size/media type, enforce quotas and no-overwrite semantics, and prove partial upload, substitution, restore, and retention behavior |
 | TEST-001 | DONE | OPS-003 | Normalize bounded JUnit-style test reports into versioned suite/case outcomes with provenance and raw immutable source retention; reject entity expansion and malformed/oversized input, preserve duplicate-name identity explicitly, aggregate deterministically, and expose flaky/retry history without rewriting prior outcomes |
-| API-002 | ACTIVE | CTRL-004, SEC-003, AUDIT-001, OPS-003, TEST-001 | Complete the documented REST API for pipelines/components, parameters, builds/nodes/attempts, approvals/grants, logs/artifacts/tests/audit, pagination/filtering, idempotency, optimistic concurrency, stable errors, OpenAPI, and tenant-scoped authorization; contract and real-PostgreSQL tests must cover every route and deny path |
-| UX-002 | PENDING | API-002 | Complete Rust CLI journeys for validate/plan/submit/watch/explain/cancel/retry/approve, logs, artifacts, tests, and audit; support machine-stable JSON plus human output, resumable watch, explicit uncertain states, shell completion, and API-only end-to-end tests |
+| API-002 | DONE | CTRL-004, SEC-003, AUDIT-001, OPS-003, TEST-001 | Complete the documented REST API for pipelines/components, parameters, builds/nodes/attempts, approvals/grants, logs/artifacts/tests/audit, pagination/filtering, idempotency, optimistic concurrency, stable errors, OpenAPI, and tenant-scoped authorization; contract and real-PostgreSQL tests must cover every route and deny path |
+| UX-002 | ACTIVE | API-002 | Complete Rust CLI journeys for validate/plan/submit/watch/explain/cancel/retry/approve, logs, artifacts, tests, and audit; support machine-stable JSON plus human output, resumable watch, explicit uncertain states, shell completion, and API-only end-to-end tests |
 | UI-001 | PENDING | API-002 | Ship a content-security-policy-locked static web UI that uses only the public API for dashboard, pipeline/build graph, live logs, approvals, artifacts, tests, audit, and explainability; no privileged backend path, embedded secret, or client-side authorization claim is allowed, with accessibility and browser journey gates |
 
 ## Wave 4 — Jenkins migration
@@ -193,7 +193,15 @@ and explicit duplicate ordinals, deterministic aggregates, exact raw artifact
 provenance, automatic 30-day source retention, immutable history, and a
 bounded flaky-outcome query. PostgreSQL mutation denial, idempotent ingestion,
 audit publication, and the shipped controller/agent execution journeys pass.
-W3-B is closed and `API-002` begins W3-C.
+W3-B is closed. `API-002` is complete: the versioned public surface now
+documents and serves pipeline validation/planning and optimistic-concurrency
+catalogs, immutable components, parameterized DAG submission, resumable build
+and log pagination, graph/status/cancel/retry, approvals, credential grants,
+artifacts, normalized tests, audit, and scheduler explainability. Stable error
+envelopes and unique OpenAPI operation identifiers cover every route. A
+database-free contract matrix proves all 26 tenant routes reject both missing
+authority and cross-tenant path substitution; real PostgreSQL and shipped
+controller/agent gates prove the positive journeys. `UX-002` is now active.
 
 The still-active `WIN-001`, `WIN-002`, and `WIN-003` persistent-host closure is
 tracked independently and remains a release gate for Windows parity; it does

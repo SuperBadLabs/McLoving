@@ -69,7 +69,7 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .env("MCLOVING_LISTEN", format!("127.0.0.1:{port}"))
         .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
         .env("MCLOVING_AGENT_ID", "embedded-test-agent")
-        .env("MCLOVING_AGENT_CAPABILITIES", "windows")
+        .env("MCLOVING_AGENT_CAPABILITIES", "platform:windows")
         .env("MCLOVING_AGENT_TRUST_POOL", "trusted-windows")
         .env("MCLOVING_LEASE_SECONDS", "5")
         .env("MCLOVING_POLL_MILLISECONDS", "10")
@@ -128,6 +128,11 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .join("staging")
         .join(&abandoned.upload_token);
     assert!(abandoned_path.exists(), "staged upload is durable");
+    let abandoned_claim_path =
+        abandoned_path.with_file_name(format!("{}.publishing", abandoned.upload_token));
+    tokio::fs::rename(&abandoned_path, &abandoned_claim_path)
+        .await
+        .expect("simulate a crash after publication claim");
     tokio::time::sleep(Duration::from_millis(1_100)).await;
     let rejected = client
         .stage_artifact(
@@ -141,8 +146,8 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .await
         .expect("stage rejected artifact through shipped controller");
     assert!(
-        !abandoned_path.exists(),
-        "a later upload must reclaim an expired abandoned reservation"
+        !abandoned_path.exists() && !abandoned_claim_path.exists(),
+        "a later upload must reclaim an expired abandoned publication claim"
     );
     let rejected_commit = ArtifactCommitRequest {
         node_id: admission.node_id,

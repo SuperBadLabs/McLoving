@@ -13,7 +13,7 @@ use mcloving_agent_protocol::wire::agent_control_client::AgentControlClient;
 use mcloving_agent_protocol::wire::{
     CancellationCompletion, CancellationDisposition, CancellationOutcome, CredentialBinding,
     CredentialRequest, WorkAssignment, WorkAuthority, WorkCompletion, WorkLeaseRenewal,
-    WorkLogChunk, WorkOutcome, WorkPoll,
+    WorkLogChunk, WorkOutcome, WorkPoll, WorkReceipt,
 };
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
@@ -630,21 +630,51 @@ async fn run_assignment(
             }
         }
     };
-    let start_result = authority_rpc(
-        AuthorityRpcControl {
-            authority_lost: &authority_lost,
-            stop: &stop,
-            lease_window,
-        },
-        client.start_work(assignment.authority.clone()),
+    let start_receipt = match start_work_with_retry(
+        client,
+        &assignment.authority,
+        session_epoch,
+        lease_window,
+        &execution_cancellation,
+        &authority_lost,
+        &stop,
     )
     .await
-    .and_then(|receipt| require_work_receipt(receipt, session_epoch));
-    if let Err(error) = start_result {
-        lease_stop.cancel();
-        let _ = lease_task.await;
-        return Err(error);
-    }
+    {
+        Ok(Some(receipt)) => receipt,
+        Ok(None) => {
+            let completion_result = finalize_without_process(
+                config,
+                client,
+                &mut journal,
+                ProcesslessCompletion {
+                    authority: &assignment.authority,
+                    workspace: &assignment.workspace,
+                    session_epoch,
+                    outcome: WorkOutcome::Aborted,
+                    reason: "cancelled_while_starting_work".to_owned(),
+                },
+                AuthorityRpcControl {
+                    authority_lost: &authority_lost,
+                    stop: &stop,
+                    lease_window,
+                },
+            )
+            .await;
+            lease_stop.cancel();
+            let lease_result = lease_task.await.map_err(|error| {
+                AgentError::InvalidAssignment(format!("lease task failed: {error}"))
+            })?;
+            completion_result?;
+            return lease_result;
+        }
+        Err(error) => {
+            lease_stop.cancel();
+            let _ = lease_task.await;
+            return Err(error);
+        }
+    };
+    require_work_receipt(start_receipt, session_epoch)?;
     let execution_environment = match execution_environment(process.env, credentials) {
         Ok(environment) => environment,
         Err(error) => {
@@ -994,13 +1024,13 @@ async fn wait_for_credentials(
             ) => match response {
                 Ok(Ok(response)) => response.into_inner(),
                 Err(_) => {
-                    if !wait_for_credential_retry(execution_cancellation, authority_lost).await? {
+                    if !wait_for_authority_retry(execution_cancellation, authority_lost).await? {
                         return Ok(None);
                     }
                     continue;
                 }
-                Ok(Err(status)) if retryable_credential_fetch(&status) => {
-                    if !wait_for_credential_retry(execution_cancellation, authority_lost).await? {
+                Ok(Err(status)) if retryable_authority_transition(&status) => {
+                    if !wait_for_authority_retry(execution_cancellation, authority_lost).await? {
                         return Ok(None);
                     }
                     continue;
@@ -1012,13 +1042,53 @@ async fn wait_for_credentials(
         if response.ready {
             return Ok(Some(response.credentials));
         }
-        if !wait_for_credential_retry(execution_cancellation, authority_lost).await? {
+        if !wait_for_authority_retry(execution_cancellation, authority_lost).await? {
             return Ok(None);
         }
     }
 }
 
-async fn wait_for_credential_retry(
+async fn start_work_with_retry(
+    client: &mut AgentControlClient<Channel>,
+    authority: &WorkAuthority,
+    session_epoch: u64,
+    lease_window: Duration,
+    execution_cancellation: &CancellationToken,
+    authority_lost: &CancellationToken,
+    stop: &CancellationToken,
+) -> Result<Option<WorkReceipt>, AgentError> {
+    loop {
+        let response = tokio::select! {
+            biased;
+            () = execution_cancellation.cancelled() => return Ok(None),
+            () = authority_lost.cancelled() => return Err(AgentError::StaleAuthority),
+            () = stop.cancelled() => return Err(AgentError::Stopped),
+            response = tokio::time::timeout(
+                lease_rpc_budget(lease_window),
+                client.start_work(authority.clone()),
+            ) => match response {
+                Ok(Ok(response)) => response.into_inner(),
+                Err(_) => {
+                    if !wait_for_authority_retry(execution_cancellation, authority_lost).await? {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                Ok(Err(status)) if retryable_authority_transition(&status) => {
+                    if !wait_for_authority_retry(execution_cancellation, authority_lost).await? {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+                Ok(Err(status)) => return Err(AgentError::Rpc(status)),
+            },
+        };
+        require_work_receipt(response, session_epoch)?;
+        return Ok(Some(response));
+    }
+}
+
+async fn wait_for_authority_retry(
     execution_cancellation: &CancellationToken,
     authority_lost: &CancellationToken,
 ) -> Result<bool, AgentError> {
@@ -1029,7 +1099,7 @@ async fn wait_for_credential_retry(
     }
 }
 
-fn retryable_credential_fetch(status: &tonic::Status) -> bool {
+fn retryable_authority_transition(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::Cancelled
@@ -2134,7 +2204,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_credential_fetch_statuses_are_retryable() {
+    fn ambiguous_authority_transition_statuses_are_retryable() {
         for code in [
             tonic::Code::Cancelled,
             tonic::Code::Unknown,
@@ -2145,7 +2215,7 @@ mod tests {
             tonic::Code::Unavailable,
         ] {
             assert!(
-                retryable_credential_fetch(&tonic::Status::new(code, "ambiguous")),
+                retryable_authority_transition(&tonic::Status::new(code, "ambiguous")),
                 "{code:?} must be safe to replay"
             );
         }
@@ -2161,19 +2231,19 @@ mod tests {
             tonic::Code::DataLoss,
         ] {
             assert!(
-                !retryable_credential_fetch(&tonic::Status::new(code, "definitive")),
+                !retryable_authority_transition(&tonic::Status::new(code, "definitive")),
                 "{code:?} must fail closed"
             );
         }
     }
 
     #[tokio::test]
-    async fn credential_retry_wait_preserves_cancellation_and_authority_loss() {
+    async fn authority_retry_wait_preserves_cancellation_and_authority_loss() {
         let cancellation = CancellationToken::new();
         let authority_lost = CancellationToken::new();
         cancellation.cancel();
         assert!(
-            !wait_for_credential_retry(&cancellation, &authority_lost)
+            !wait_for_authority_retry(&cancellation, &authority_lost)
                 .await
                 .unwrap()
         );
@@ -2182,7 +2252,7 @@ mod tests {
         let authority_lost = CancellationToken::new();
         authority_lost.cancel();
         assert!(matches!(
-            wait_for_credential_retry(&cancellation, &authority_lost).await,
+            wait_for_authority_retry(&cancellation, &authority_lost).await,
             Err(AgentError::StaleAuthority)
         ));
     }

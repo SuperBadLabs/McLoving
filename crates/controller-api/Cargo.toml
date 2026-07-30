@@ -22,7 +22,12 @@ thiserror = "=2.0.17"
 uuid = { version = "=1.18.1", features = ["serde", "v4"] }
 
 [dev-dependencies]
+sqlx = { version = "=0.8.6", default-features = false, features = [
+  "postgres",
+  "runtime-tokio",
+] }
 tokio = { version = "=1.47.1", features = ["macros", "rt-multi-thread"] }
+tower = "=0.5.3"
 
 [lints]
 workspace = true

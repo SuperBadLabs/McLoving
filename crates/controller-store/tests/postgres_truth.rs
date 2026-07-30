@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, DagDependency, DagNodeKind, DependencyCondition,
-    EffectClass, EffectStatus, JunitLimits, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
-    NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
-    ObjectStatus, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
+    AgentReconciliationDisposition, ClaimRequest, ComponentPutOutcome, ComponentWrite,
+    DagDependency, DagNodeKind, DependencyCondition, EffectClass, EffectStatus, JunitLimits,
+    MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild, NewCredentialGrant, NewDagBuild,
+    NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus, PipelinePutOutcome,
+    PipelineWrite, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
     TerminalOutcome, TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
 use serde_json::json;
@@ -1438,6 +1439,21 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
         .execute(&mut *escalation)
         .await
         .expect("bind tenant context for escalation test");
+    let cross_tenant_probe = sqlx::query_scalar::<_, bool>(
+        "SELECT mcloving_owned_object_publication_allowed(
+             $1, $2, 1, 'artifact', 'foreign', $3
+         )",
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind([0x6a_u8; 32].as_slice())
+    .fetch_one(&mut *escalation)
+    .await
+    .expect("invoke tenant-scoped publication guard");
+    assert!(
+        !cross_tenant_probe,
+        "the definer function must not expose foreign deletion state"
+    );
     let self_grant = sqlx::query(
         "INSERT INTO identities (id, organization_id, subject, kind)
          VALUES ($1, $2, 'service:attacker', 'service')",
@@ -2864,6 +2880,26 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
             .await
             .expect("append current-fence log")
     );
+    for (sequence, stream, content) in [
+        (1, "stderr", b"warning\n".as_slice()),
+        (2, "stdout", b"done\n".as_slice()),
+    ] {
+        assert!(
+            store
+                .append_log(&NewLogChunk {
+                    organization_id,
+                    attempt_id: second.attempt_id,
+                    fence: second.fence,
+                    restore_epoch: second.restore_epoch,
+                    agent_id: "agent-b",
+                    sequence,
+                    stream,
+                    content,
+                })
+                .await
+                .expect("append paginated current-fence log")
+        );
+    }
     assert!(
         !store
             .append_log(&NewLogChunk {
@@ -2883,9 +2919,53 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
         .build_logs(organization_id, project_id, admission.build_id)
         .await
         .expect("read build logs");
-    assert_eq!(logs.len(), 1);
+    assert_eq!(logs.len(), 3);
     assert_eq!(logs[0].fence, second.fence);
     assert_eq!(logs[0].content, b"current\n");
+    let first_page = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            None,
+            None,
+            None,
+            2,
+        )
+        .await
+        .expect("read first stable log page");
+    assert_eq!(first_page.len(), 2);
+    assert_eq!(first_page[0].content, b"current\n");
+    assert_eq!(first_page[1].content, b"warning\n");
+    let second_page = store
+        .build_logs_page(
+            organization_id,
+            project_id,
+            admission.build_id,
+            Some(first_page[1].attempt_id),
+            Some(first_page[1].sequence),
+            Some(&first_page[1].stream),
+            2,
+        )
+        .await
+        .expect("resume stable log page");
+    assert_eq!(second_page.len(), 1);
+    assert_eq!(second_page[0].content, b"done\n");
+    assert!(
+        store
+            .build_logs_page(
+                organization_id,
+                project_id,
+                admission.build_id,
+                Some(first_page[1].attempt_id),
+                None,
+                None,
+                2,
+            )
+            .await
+            .is_err(),
+        "partial cursors must fail closed"
+    );
 }
 
 #[tokio::test]
@@ -3511,7 +3591,7 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
             .await
             .expect("accept")
     );
-    let digest = [41; 32];
+    let digest: [u8; 32] = Sha256::digest(organization_id.as_bytes()).into();
     assert!(
         store
             .register_object(
@@ -3587,6 +3667,31 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
             )
             .await
             .expect("reject wrong digest")
+    );
+    sqlx::query(
+        "INSERT INTO object_deletion_claims (
+             object_digest, claim_token, status
+         )
+         VALUES ($1, $2, 'claimed')",
+    )
+    .bind(digest.as_slice())
+    .bind(Uuid::new_v4())
+    .execute(store.pool())
+    .await
+    .expect("install an exact deletion fence");
+    assert!(
+        !store
+            .set_object_status(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                ObjectKind::Artifact,
+                "distribution.tar.zst",
+                digest,
+                ObjectStatus::Available,
+            )
+            .await
+            .expect("fence restoration against deletion")
     );
     let objects = store
         .build_objects(organization_id, project_id, admission.build_id)
@@ -3676,12 +3781,12 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .await
             .expect("assign expired retention")
     );
-    assert_eq!(
+    assert!(
         store
-            .objects_globally_eligible_for_deletion(10)
+            .objects_globally_eligible_for_deletion(10_000)
             .await
-            .expect("list expired content"),
-        vec![digest]
+            .expect("list expired content")
+            .contains(&digest)
     );
 
     let second_organization_id = Uuid::new_v4();
@@ -3751,11 +3856,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("register shared digest")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("missing second-tenant retention is fail-closed")
-            .is_empty()
+            .contains(&digest)
     );
     assert!(
         store
@@ -3763,12 +3868,12 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .await
             .expect("expire second-tenant retention")
     );
-    assert_eq!(
+    assert!(
         store
-            .objects_globally_eligible_for_deletion(10)
+            .objects_globally_eligible_for_deletion(10_000)
             .await
-            .expect("all referencing tenants have expired retention"),
-        vec![digest]
+            .expect("all referencing tenants have expired retention")
+            .contains(&digest)
     );
     assert!(
         store
@@ -3782,11 +3887,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("acquire second-tenant hold")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("one tenant hold blocks global deletion")
-            .is_empty()
+            .contains(&digest)
     );
     assert!(
         store
@@ -3817,11 +3922,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("repeat legal hold idempotently")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("held content is not deletable")
-            .is_empty()
+            .contains(&digest)
     );
     assert!(
         !store
@@ -3870,26 +3975,27 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
     .execute(store.pool())
     .await;
     assert!(reactivated_hold.is_err());
-    assert_eq!(
+    assert!(
         store
-            .objects_globally_eligible_for_deletion(10)
+            .objects_globally_eligible_for_deletion(10_000)
             .await
-            .expect("released content is deletable"),
-        vec![digest]
+            .expect("released content is deletable")
+            .contains(&digest)
     );
     let deletion_claims = store
-        .claim_objects_globally_for_deletion(10)
+        .claim_objects_globally_for_deletion(10_000)
         .await
         .expect("claim released content for deletion");
-    assert_eq!(deletion_claims.len(), 1);
-    let deletion_claim = deletion_claims[0];
-    assert_eq!(deletion_claim.digest, digest);
-    assert_eq!(
+    let deletion_claim = *deletion_claims
+        .iter()
+        .find(|claim| claim.digest == digest)
+        .expect("target digest received a deletion claim");
+    assert!(
         store
-            .pending_object_deletion_claims(10)
+            .pending_object_deletion_claims(10_000)
             .await
-            .expect("recover committed claim after worker restart"),
-        vec![deletion_claim]
+            .expect("recover committed claim after worker restart")
+            .contains(&deletion_claim)
     );
     assert!(
         !store
@@ -3939,11 +4045,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("shortening attempt remains idempotent")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("retention extension is monotonic")
-            .is_empty()
+            .contains(&digest)
     );
 
     let disposable_digest = [54; 32];
@@ -3970,12 +4076,13 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("expire disposable retention")
     );
     let completed_claims = store
-        .claim_objects_globally_for_deletion(1)
+        .claim_objects_globally_for_deletion(10_000)
         .await
         .expect("eligible content is not starved by protected digest prefix");
-    assert_eq!(completed_claims.len(), 1);
-    let completed_claim = completed_claims[0];
-    assert_eq!(completed_claim.digest, disposable_digest);
+    let completed_claim = *completed_claims
+        .iter()
+        .find(|claim| claim.digest == disposable_digest)
+        .expect("disposable digest received a deletion claim");
     assert!(
         store
             .pending_object_deletion_claims(10)
@@ -6566,6 +6673,68 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
             .await
             .expect("accept artifact work")
     );
+    let publication_fence_digest = [0x83; 32];
+    assert!(
+        store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/retained-publication.xml",
+                publication_fence_digest,
+                64,
+                "application/xml",
+                86_400,
+            )
+            .await
+            .expect("reserve retained artifact")
+    );
+    assert!(
+        !store
+            .objects_globally_eligible_for_deletion(10_000)
+            .await
+            .expect("inspect pending retained artifact")
+            .contains(&publication_fence_digest),
+        "pending publication must protect its digest from deletion eligibility"
+    );
+    assert!(
+        !store
+            .claim_objects_globally_for_deletion(10_000)
+            .await
+            .expect("try to claim pending retained artifact")
+            .iter()
+            .any(|claim| claim.digest == publication_fence_digest),
+        "pending publication must not receive a durable deletion claim"
+    );
+    assert!(
+        store
+            .mark_artifact_available(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                "reports/retained-publication.xml",
+                publication_fence_digest,
+                64,
+                "application/xml",
+                0,
+            )
+            .await
+            .expect("publish retained artifact")
+    );
+    assert!(
+        !store
+            .objects_globally_eligible_for_deletion(10_000)
+            .await
+            .expect("inspect published retained artifact")
+            .contains(&publication_fence_digest),
+        "publication must preserve the requested retention"
+    );
     let digest = [0x82; 32];
     assert!(
         !store
@@ -6591,7 +6760,8 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
             .build_artifacts(organization_id, project_id, admission.build_id)
             .await
             .expect("list artifacts after rejected retention")
-            .is_empty()
+            .iter()
+            .all(|artifact| artifact.name != "reports/overflow.xml")
     );
     assert!(
         store
@@ -6616,8 +6786,18 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
         .build_artifacts(organization_id, project_id, admission.build_id)
         .await
         .expect("list reserved artifact");
-    assert_eq!(reserved.len(), 1);
-    assert_eq!(reserved[0].status, ObjectStatus::Pending);
+    let reserved = reserved
+        .iter()
+        .find(|artifact| artifact.name == "reports/result.xml")
+        .expect("reserved exact artifact");
+    assert_eq!(reserved.status, ObjectStatus::Pending);
+    assert!(
+        store
+            .artifact_publication_claim_active(organization_id, digest, 4096)
+            .await
+            .expect("inspect live publication claim"),
+        "a current live reservation must protect its filesystem claim"
+    );
     sqlx::query(
         "UPDATE attempts
          SET lease_expires_at = clock_timestamp() - interval '1 second'
@@ -6628,6 +6808,13 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
     .execute(store.pool())
     .await
     .expect("expire the publishing lease after metadata reservation");
+    assert!(
+        !store
+            .artifact_publication_claim_active(organization_id, digest, 4096)
+            .await
+            .expect("inspect abandoned publication claim"),
+        "an expired reservation must become reclaimable"
+    );
     assert!(
         store
             .register_artifact(
@@ -6742,16 +6929,18 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
         .build_artifacts(organization_id, project_id, admission.build_id)
         .await
         .expect("list build artifacts");
-    assert_eq!(artifacts.len(), 1);
-    assert_eq!(artifacts[0].build_id, admission.build_id);
-    assert_eq!(artifacts[0].node_id, admission.node_id);
-    assert_eq!(artifacts[0].attempt_id, claim.attempt_id);
-    assert_eq!(artifacts[0].fence, claim.fence);
-    assert_eq!(artifacts[0].name, "reports/result.xml");
-    assert_eq!(artifacts[0].digest, digest);
-    assert_eq!(artifacts[0].bytes, 4096);
-    assert_eq!(artifacts[0].media_type, "application/xml");
-    assert_eq!(artifacts[0].status, ObjectStatus::Available);
+    let artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.name == "reports/result.xml")
+        .expect("exact result artifact");
+    assert_eq!(artifact.build_id, admission.build_id);
+    assert_eq!(artifact.node_id, admission.node_id);
+    assert_eq!(artifact.attempt_id, claim.attempt_id);
+    assert_eq!(artifact.fence, claim.fence);
+    assert_eq!(artifact.digest, digest);
+    assert_eq!(artifact.bytes, 4096);
+    assert_eq!(artifact.media_type, "application/xml");
+    assert_eq!(artifact.status, ObjectStatus::Available);
     let retained: bool = sqlx::query_scalar(
         "SELECT retain_until >= clock_timestamp() + interval '47 hours'
          FROM object_retention
@@ -6968,5 +7157,134 @@ async fn junit_evidence_is_bounded_immutable_and_preserves_flaky_history() {
             .filter(|event| event.action == "test_report.ingested")
             .count(),
         2
+    );
+}
+
+#[tokio::test]
+async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let store = unprivileged_store(&admin).await;
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    admin
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "product-catalog",
+        )
+        .await
+        .expect("create product catalog project");
+    let pipeline_id = Uuid::new_v4();
+    let mut pipeline = PipelineWrite {
+        organization_id,
+        project_id,
+        pipeline_id,
+        slug: "compile".to_owned(),
+        source: "version: 1".to_owned(),
+        source_sha256: [0x11; 32],
+        semantic_digest: [0x22; 32],
+        schema_major: 1,
+        schema_minor: 0,
+        parameter_schema: json!({}),
+    };
+    let created = store
+        .put_pipeline(&pipeline, Some(0))
+        .await
+        .expect("create versioned pipeline");
+    let PipelinePutOutcome::Created(created) = created else {
+        panic!("first pipeline write must create");
+    };
+    assert_eq!(created.revision, 1);
+    assert!(matches!(
+        store
+            .put_pipeline(&pipeline, Some(1))
+            .await
+            .expect("replay exact pipeline"),
+        PipelinePutOutcome::Unchanged(record) if record.revision == 1
+    ));
+    pipeline.slug = "compile-renamed".to_owned();
+    pipeline.source = "version: 1\nname: renamed".to_owned();
+    pipeline.source_sha256 = [0x33; 32];
+    let updated = store
+        .put_pipeline(&pipeline, Some(1))
+        .await
+        .expect("advance pipeline revision");
+    assert!(matches!(
+        updated,
+        PipelinePutOutcome::Updated(record) if record.revision == 2
+    ));
+    assert!(matches!(
+        store
+            .put_pipeline(&pipeline, Some(1))
+            .await
+            .expect("report stale precondition"),
+        PipelinePutOutcome::PreconditionFailed {
+            current_revision: 2
+        }
+    ));
+    let page = store
+        .pipelines(organization_id, project_id, None, 1)
+        .await
+        .expect("list pipelines");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].revision, 2);
+
+    for digest in [[0x41; 32], [0x42; 32]] {
+        assert_eq!(
+            store
+                .register_component(&ComponentWrite {
+                    organization_id,
+                    project_id,
+                    digest,
+                    name: "shared-name".to_owned(),
+                    version_major: 1,
+                    version_minor: i32::from(digest[0] - 0x41),
+                    canonical_bytes: digest.to_vec(),
+                    source_sha256: [0x51; 32],
+                })
+                .await
+                .expect("register immutable component"),
+            ComponentPutOutcome::Created
+        );
+    }
+    let first = store
+        .components(organization_id, project_id, None, 1)
+        .await
+        .expect("read first component page");
+    assert_eq!(first.items.len(), 1);
+    let second = store
+        .components(organization_id, project_id, first.next_after.as_ref(), 1)
+        .await
+        .expect("read second component page");
+    assert_eq!(second.items.len(), 1);
+    assert_ne!(first.items[0].digest, second.items[0].digest);
+
+    let mutation = sqlx::query(
+        "UPDATE pipeline_revisions
+         SET source = 'mutated'
+         WHERE organization_id = $1 AND pipeline_id = $2",
+    )
+    .bind(organization_id)
+    .bind(pipeline_id)
+    .execute(admin.pool())
+    .await
+    .expect_err("pipeline revision history is immutable");
+    assert_eq!(
+        mutation
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    assert!(
+        store
+            .pipeline(Uuid::new_v4(), project_id, pipeline_id)
+            .await
+            .expect("cross-tenant read is safely empty")
+            .is_none()
     );
 }
