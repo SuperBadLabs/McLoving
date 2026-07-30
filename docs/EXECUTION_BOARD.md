@@ -120,10 +120,19 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   substituted, outage, replay, and secret-marker fixtures; `MIG-006` must use
   only exact fixture-local implementations and compare response-consumption and
   non-disclosure. `MIG-008` and `MIG-009` must keep the job ineligible until
-  `INPUT-001` is `DONE`, then freeze the exact deployed adapter, endpoint,
-  schema, grant, policy, and freshness/provenance contract before every effect
-  or authority transfer. An untyped, mutable, unverifiable, overprivileged, or
-  confidentiality-unsafe read is fail-closed and unsupported.
+  `INPUT-001` is `DONE`. During every `MIG-008` shadow or canary comparison, the
+  authorized adapter must capture one bounded response at one exact
+  cursor/snapshot, bind its canonical value digest and non-secret provenance to
+  a receipt, and supply that identical response and cursor receipt to both
+  runners under the declared confidentiality/taint policy; neither runner may
+  independently sample the mutable production source for a compared decision.
+  Compare the response-consumption trace, resulting control flow, effect intent,
+  result, and published output. Then freeze the exact deployed adapter,
+  endpoint, schema, grant, policy, and freshness/provenance contract before
+  every `MIG-008` effect or `MIG-009` authority transfer. A read that cannot be
+  safely captured and identically supplied, or that is untyped, mutable,
+  unverifiable, overprivileged, or confidentiality-unsafe, is fail-closed and
+  unsupported.
 - Every job that relies on Jenkins cloud agents, Kubernetes pod templates,
   EC2/VM/container provisioning, or another dynamically created execution
   target requires `PROV-001`. `MIG-000` must inventory provider/account/region,
