@@ -4962,6 +4962,42 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             .await
             .expect("reject approval replay")
     );
+    let mismatched_id_replay = store
+        .approve_environment(&NewEnvironmentApproval {
+            id: approvals[0],
+            organization_id,
+            project_id,
+            build_id: admission.build_id,
+            pipeline_digest,
+            environment: "production",
+            action: "rollback",
+            approver_subject: "oidc:release-owner",
+            ttl_seconds: 300,
+        })
+        .await
+        .expect_err("same approval id cannot name a different contract");
+    assert!(matches!(
+        mismatched_id_replay,
+        StoreError::SecurityConflict(_)
+    ));
+    let duplicate_subject_new_id = store
+        .approve_environment(&NewEnvironmentApproval {
+            id: Uuid::new_v4(),
+            organization_id,
+            project_id,
+            build_id: admission.build_id,
+            pipeline_digest,
+            environment: "production",
+            action: "deploy",
+            approver_subject: "oidc:release-owner",
+            ttl_seconds: 300,
+        })
+        .await
+        .expect_err("a different id cannot masquerade as an approval replay");
+    assert!(matches!(
+        duplicate_subject_new_id,
+        StoreError::SecurityConflict(_)
+    ));
     let expired_secret = b"expired-secret-value";
     let secret = b"marker-secret-value";
     let grant_id = Uuid::new_v4();

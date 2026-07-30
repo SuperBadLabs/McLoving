@@ -1949,6 +1949,9 @@ fn admission_error(error: StoreError) -> ApiError {
 
 fn security_error(error: StoreError) -> ApiError {
     match error {
+        StoreError::SecurityConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "security_conflict", message)
+        }
         StoreError::InvalidSecurityOperation(message) => ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_security_operation",
@@ -4014,6 +4017,15 @@ mod tests {
         ));
         assert_eq!(response.status, StatusCode::CONFLICT);
         assert_eq!(response.code, "product_conflict");
+    }
+
+    #[test]
+    fn mismatched_approval_replay_is_a_stable_conflict() {
+        let response = security_error(StoreError::SecurityConflict(
+            "approval id already belongs to a different approval contract".to_owned(),
+        ));
+        assert_eq!(response.status, StatusCode::CONFLICT);
+        assert_eq!(response.code, "security_conflict");
     }
 
     #[test]

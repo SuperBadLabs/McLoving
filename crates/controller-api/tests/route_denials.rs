@@ -141,10 +141,15 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(html.contains("<script src=\"/app.js\" defer></script>"));
     assert!(html.contains("<option value=\"aborted\">cancelled</option>"));
     assert!(html.contains("<input id=\"approval-id\" required"));
+    assert!(html.contains("<input id=\"idempotency-key\" required>"));
+    assert!(!html.contains("browser-submit"));
     assert!(!html.contains("<style"));
     assert_eq!(html.matches("<script").count(), 1);
     let app_js = include_str!("../ui/app.js");
     assert!(app_js.contains("byId(\"approval-id\").value = newUuid()"));
+    assert!(app_js.contains("byId(\"idempotency-key\").value = newUuid()"));
+    assert!(app_js.contains("const idempotencyKey = byId(\"idempotency-key\").value.trim()"));
+    assert!(app_js.contains("\"idempotency-key\": idempotencyKey"));
     assert!(app_js.contains("const approvalId = byId(\"approval-id\").value.trim()"));
     assert!(app_js.contains("approval_id: approvalId"));
     assert_eq!(
@@ -163,6 +168,9 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(app_js.contains("const liveLogState = { base: \"\", cursor: null, items: [] }"));
     assert!(app_js.contains("let cursor = liveLogState.cursor"));
     assert!(app_js.contains("liveLogState.cursor = cursorFromLog"));
+    assert!(app_js.contains("let loadBuildInFlight = null"));
+    assert!(app_js.contains("if (loadBuildInFlight) return loadBuildInFlight"));
+    assert!(app_js.contains("if (loadBuildInFlight === operation) loadBuildInFlight = null"));
     assert!(app_js.contains("if (!page.next_after) return"));
     assert!(app_js.contains("after_fence"));
     assert!(app_js.contains("entry.content_hex"));

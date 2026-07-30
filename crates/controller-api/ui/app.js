@@ -2,6 +2,7 @@
 
 const context = { organization: "", project: "", token: "" };
 let liveTimer = null;
+let loadBuildInFlight = null;
 const liveLogState = { base: "", cursor: null, items: [] };
 
 const byId = (id) => document.getElementById(id);
@@ -17,6 +18,7 @@ function newUuid() {
 }
 
 byId("approval-id").value = newUuid();
+byId("idempotency-key").value = newUuid();
 
 function projectPath() {
   requireContext();
@@ -188,7 +190,7 @@ function displayLog(entry) {
   return `[${entry.stream}] ${content}`;
 }
 
-async function loadBuild() {
+async function loadBuildOnce() {
   const base = buildPath();
   const [status, graph, logs, tests, artifacts, approvals] = await Promise.all([
     api(base), api(`${base}/graph`), loadAllLogs(base),
@@ -201,6 +203,17 @@ async function loadBuild() {
   byId("build-approvals").textContent = pretty(approvals);
   renderArtifacts(artifacts);
   return { status, graph, logs: logs.items?.length || 0, tests, artifacts, approvals };
+}
+
+async function loadBuild() {
+  if (loadBuildInFlight) return loadBuildInFlight;
+  const operation = loadBuildOnce();
+  loadBuildInFlight = operation;
+  try {
+    return await operation;
+  } finally {
+    if (loadBuildInFlight === operation) loadBuildInFlight = null;
+  }
 }
 
 function renderArtifacts(artifacts) {
@@ -253,15 +266,20 @@ byId("plan-pipeline").addEventListener("click", () =>
   action(() => api(`${projectPath()}/pipelines/plan`, { method: "POST", body: pretty(submission()) })));
 byId("pipeline-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  action(() => api(`${projectPath()}/builds`, {
-    method: "POST",
-    headers: {
-      "idempotency-key": byId("idempotency-key").value,
-      "mcloving-platform": byId("platform").value,
-      "mcloving-trust-pool": byId("trust-pool").value
-    },
-    body: pretty(submission())
-  }));
+  const idempotencyKey = byId("idempotency-key").value.trim();
+  action(async () => {
+    const result = await api(`${projectPath()}/builds`, {
+      method: "POST",
+      headers: {
+        "idempotency-key": idempotencyKey,
+        "mcloving-platform": byId("platform").value,
+        "mcloving-trust-pool": byId("trust-pool").value
+      },
+      body: pretty(submission())
+    });
+    byId("idempotency-key").value = newUuid();
+    return result;
+  });
 });
 
 byId("build-form").addEventListener("submit", (event) => {

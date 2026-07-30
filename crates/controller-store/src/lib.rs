@@ -397,6 +397,8 @@ pub enum StoreError {
     IdempotencyConflict(String),
     #[error("invalid security operation: {0}")]
     InvalidSecurityOperation(String),
+    #[error("security operation conflict: {0}")]
+    SecurityConflict(String),
     #[error("invalid audit operation: {0}")]
     InvalidAuditOperation(String),
     #[error("invalid normalized test result: {0}")]
