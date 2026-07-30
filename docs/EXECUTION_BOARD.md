@@ -237,20 +237,24 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   runner's fenced grant; this applies Jenkins-to-McLoving and
   McLoving-to-Jenkins, and input receipt matching alone cannot replace
   quiescence.
-- For every stateful `MIG-008` or `MIG-009` authority transfer or rollback,
-  after quiescing the relinquishing runner and before granting the gaining
-  runner, take a fresh content-hashed live export from the currently
-  authoritative side, apply the exact certified direction-specific `MIG-005A`
-  transform, import it into the gaining side, and verify record-level
-  provenance, build-number/previous-result mappings, cross-build artifacts,
-  retained workspace/state, audit linkage, and destination digests. An actual
-  `MIG-009` rollback therefore imports every McLoving build and state change
-  produced since cutover into Jenkins before Jenkins regains any trigger,
-  reader, writer, scheduling, or effect authority. Empty, stale, partial,
-  conflicting, or unverifiable state keeps the gaining runner effect-free; the
-  prior runner resumes only after its authority and state remain or are restored
-  consistently. A pre-cutover snapshot or rehearsal receipt alone is
-  insufficient.
+- For every `MIG-008` or `MIG-009` authority transfer or rollback, regardless of
+  whether the job is classified as stateless, after quiescing the relinquishing
+  runner and before granting the gaining runner, take a fresh content-hashed
+  live export from the currently authoritative side. Apply the exact certified
+  direction-specific transform and import and verify every execution record
+  created since the prior transfer: trigger/cause identity, build number,
+  queue/start/end time, terminal result, stage/node/attempt lineage, approvals,
+  normalized tests, logs, artifacts and retrieval metadata, audit linkage,
+  record-level provenance, and destination digests. Stateful jobs additionally
+  transfer and verify previous-result mappings, cross-build artifacts, retained
+  workspace, and every persistent dependency through the exact `MIG-005A`
+  transform. An actual `MIG-009` rollback therefore imports every McLoving build
+  and state change produced since cutover into Jenkins before Jenkins regains
+  any trigger, reader, writer, scheduling, or effect authority. Empty, stale,
+  partial, conflicting, duplicate, or unverifiable execution/state history
+  keeps the gaining runner effect-free; the prior runner resumes only after its
+  authority and history remain or are restored consistently. A pre-cutover
+  snapshot or rehearsal receipt alone is insufficient.
 - In `MIG-006`, "no network or host mounts" means no external, host,
   production, staging, shared-service, or cross-fixture network or mounts; the
   private network contained wholly inside one disposable fixture is permitted.
