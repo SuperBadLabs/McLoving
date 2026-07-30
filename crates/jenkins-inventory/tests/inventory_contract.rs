@@ -246,6 +246,22 @@ fn reconciliation_rejects_invalid_security_realm_digest() {
 }
 
 #[test]
+fn reconciliation_requires_complete_security_realm_identity() {
+    let directory = TestDirectory::new("realm-identity");
+    let mut bundle = fixture();
+    bundle
+        .identity_clients
+        .security_realm
+        .identity_provider_generation = "  ".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("blank realm generation must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+}
+
+#[test]
 fn reconciliation_rejects_empty_in_scope_population() {
     let directory = TestDirectory::new("empty-population");
     let mut bundle = fixture();
@@ -266,6 +282,37 @@ fn reconciliation_rejects_empty_in_scope_population() {
 }
 
 #[test]
+fn reconciliation_requires_operational_state_evidence() {
+    let directory = TestDirectory::new("operational-state");
+    let mut bundle = fixture();
+    bundle.job_graph.jobs[0].operational_state.actor = "\t".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("blank operational actor must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+}
+
+#[test]
+fn reconciliation_rejects_in_scope_jobs_with_excluded_parents() {
+    let directory = TestDirectory::new("excluded-parent");
+    let mut bundle = fixture();
+    bundle.job_graph.jobs[0].scope = ApprovedDisposition {
+        disposition: ScopeDisposition::Retired,
+        approval: Some("owner-approval/retire-folder".to_owned()),
+    };
+    bundle.runtime_dependencies.jobs.remove(0);
+    bundle.persistent_state.jobs.remove(0);
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("excluded parent must fail");
+    assert_eq!(error.code, "INV_EXCLUDED_PARENT");
+}
+
+#[test]
 fn reconciliation_rejects_principal_alias_collisions() {
     let directory = TestDirectory::new("principal-alias");
     let mut bundle = fixture();
@@ -277,6 +324,37 @@ fn reconciliation_rejects_principal_alias_collisions() {
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("alias collision must fail");
     assert_eq!(error.code, "INV_PRINCIPAL_NAME_COLLISION");
+}
+
+#[test]
+fn reconciliation_requires_principal_client_and_acl_evidence() {
+    let directory = TestDirectory::new("identity-required");
+    let mut bundle = fixture();
+    bundle.identity_clients.principals[0].provenance = " ".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("blank principal provenance must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+
+    let directory = TestDirectory::new("client-required");
+    let mut bundle = fixture();
+    bundle.identity_clients.clients[0].actions.clear();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("empty client actions must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+
+    let directory = TestDirectory::new("acl-required");
+    let mut bundle = fixture();
+    bundle.identity_clients.acl_entries[0].permissions.clear();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("empty ACL permissions must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
 }
 
 #[test]
@@ -320,6 +398,19 @@ fn reconciliation_rejects_unknown_confidentiality_labels() {
 }
 
 #[test]
+fn reconciliation_requires_runtime_dependency_metadata() {
+    let directory = TestDirectory::new("runtime-required");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1].dependencies[0].resource_scope = " ".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("blank runtime scope must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+}
+
+#[test]
 fn reconciliation_rejects_blank_retention_deadline() {
     let directory = TestDirectory::new("blank-retention");
     let mut bundle = fixture();
@@ -329,6 +420,32 @@ fn reconciliation_rejects_blank_retention_deadline() {
 
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("blank retention deadline must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+}
+
+#[test]
+fn reconciliation_requires_state_restoration_metadata() {
+    let directory = TestDirectory::new("state-restore");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0].restore_target = "\n".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("blank restore target must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+}
+
+#[test]
+fn reconciliation_requires_legal_hold_identity() {
+    let directory = TestDirectory::new("hold-identity");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0].legal_holds[0].id = " ".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("blank hold identity must fail");
     assert_eq!(error.code, "INV_REQUIRED");
 }
 

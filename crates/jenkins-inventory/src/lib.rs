@@ -346,6 +346,17 @@ pub fn load_bundle(root: &Path) -> Result<InventoryBundle, InventoryError> {
 pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, InventoryError> {
     validate_bindings(bundle)?;
     validate_binding(&bundle.job_graph.binding)?;
+    validate_nonempty(
+        "security-realm implementation",
+        &bundle.identity_clients.security_realm.implementation,
+    )?;
+    validate_nonempty(
+        "security-realm identity-provider generation",
+        &bundle
+            .identity_clients
+            .security_realm
+            .identity_provider_generation,
+    )?;
     validate_digest(
         "security-realm configuration",
         &bundle.identity_clients.security_realm.config_sha256,
@@ -356,6 +367,29 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     for job in &bundle.job_graph.jobs {
         validate_identifier("job", &job.id)?;
         validate_nonempty("job owner", &job.owner)?;
+        validate_nonempty("job kind", &job.kind)?;
+        validate_nonempty("job canonical source", &job.canonical_source)?;
+        validate_nonempty("job definition kind", &job.definition_kind)?;
+        validate_nonempty("job node authority", &job.node_authority)?;
+        validate_nonempty(
+            "job operational-state generation",
+            &job.operational_state.generation,
+        )?;
+        validate_nonempty(
+            "job operational-state reason",
+            &job.operational_state.reason,
+        )?;
+        validate_nonempty("job operational-state actor", &job.operational_state.actor)?;
+        for value in job
+            .shared_library_refs
+            .iter()
+            .chain(&job.triggers)
+            .chain(&job.platforms)
+            .chain(&job.agent_labels)
+            .chain(&job.toolchains)
+        {
+            validate_nonempty("job list value", value)?;
+        }
         validate_digest("job source", &job.source_sha256)?;
         validate_digest("job configuration", &job.config_sha256)?;
         if !job_ids.insert(job.id.clone()) {
@@ -389,6 +423,15 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
                 format!("job {} references unknown parent {parent}", job.id),
             ));
         }
+        if job.scope.disposition == ScopeDisposition::InScope
+            && let Some(parent) = &job.parent_id
+            && !in_scope.contains(parent)
+        {
+            return Err(InventoryError::new(
+                "INV_EXCLUDED_PARENT",
+                format!("in-scope job {} has excluded parent {parent}", job.id),
+            ));
+        }
     }
     validate_job_graph_acyclic(&bundle.job_graph.jobs)?;
     if in_scope.is_empty() {
@@ -414,6 +457,13 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         .map(|principal| (principal.id.as_str(), principal.kind.as_str()))
         .collect::<BTreeMap<_, _>>();
     for principal in &bundle.identity_clients.principals {
+        validate_nonempty("principal kind", &principal.kind)?;
+        validate_nonempty(
+            "principal membership generation",
+            &principal.membership_generation,
+        )?;
+        validate_nonempty("principal lifecycle", &principal.lifecycle)?;
+        validate_nonempty("principal provenance", &principal.provenance)?;
         for group in &principal.groups {
             match principal_kinds.get(group.as_str()) {
                 Some(&"group") => {}
@@ -448,6 +498,12 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     )?;
     for client in &bundle.identity_clients.clients {
         validate_nonempty("client owner", &client.owner)?;
+        validate_nonempty("client authentication", &client.authentication)?;
+        validate_nonempty("client endpoint", &client.endpoint)?;
+        validate_nonempty("client scope", &client.scope)?;
+        validate_nonempty("client observed use", &client.observed_use)?;
+        validate_nonempty("client generation", &client.generation)?;
+        validate_nonempty_collection("client action", &client.actions)?;
         if !principal_ids.contains(&client.caller_identity) {
             return Err(InventoryError::new(
                 "INV_UNKNOWN_CLIENT_PRINCIPAL",
@@ -460,6 +516,9 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     }
     let mut acl_keys = BTreeSet::new();
     for acl in &bundle.identity_clients.acl_entries {
+        validate_nonempty("ACL scope", &acl.scope)?;
+        validate_nonempty("ACL generation", &acl.generation)?;
+        validate_nonempty_collection("ACL permission", &acl.permissions)?;
         if !job_ids.contains(&acl.job_id) {
             return Err(InventoryError::new(
                 "INV_UNKNOWN_ACL_JOB",
@@ -515,19 +574,14 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         let records = *state.get(&job.id).expect("coverage checked");
         let disposition = classify(dependencies)?;
         for dependency in dependencies {
+            validate_nonempty("runtime dependency kind", &dependency.kind)?;
             validate_nonempty("runtime dependency owner", &dependency.owner)?;
-            validate_confidentiality(
-                "runtime dependency confidentiality",
-                &dependency.confidentiality,
+            validate_nonempty(
+                "runtime dependency resource scope",
+                &dependency.resource_scope,
             )?;
-            validate_digest(
-                "runtime dependency implementation",
-                &dependency.implementation_sha256,
-            )?;
-            validate_digest(
-                "runtime dependency configuration",
-                &dependency.config_sha256,
-            )?;
+            validate_nonempty("runtime dependency mutability", &dependency.mutability)?;
+            validate_nonempty("runtime dependency provenance", &dependency.provenance)?;
             if dependency.confidentiality == "secret"
                 && ![
                     dependency.credential_reference.as_deref(),
@@ -545,12 +599,37 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
                     ),
                 ));
             }
+            for reference in [
+                dependency.credential_reference.as_deref(),
+                dependency.redaction_reference.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                validate_nonempty("runtime dependency typed reference", reference)?;
+            }
+            validate_confidentiality(
+                "runtime dependency confidentiality",
+                &dependency.confidentiality,
+            )?;
+            validate_digest(
+                "runtime dependency implementation",
+                &dependency.implementation_sha256,
+            )?;
+            validate_digest(
+                "runtime dependency configuration",
+                &dependency.config_sha256,
+            )?;
             *parity_demands.entry(dependency.kind.clone()).or_insert(0) += 1;
         }
         for record in records {
+            validate_nonempty("state kind", &record.kind)?;
             validate_nonempty("state owner", &record.owner)?;
             validate_confidentiality("state confidentiality", &record.confidentiality)?;
+            validate_nonempty("state restore target", &record.restore_target)?;
+            validate_nonempty("state conflict policy", &record.conflict_policy)?;
             validate_nonempty("state retention deadline", &record.retention_deadline)?;
+            validate_nonempty("state provenance", &record.provenance)?;
             validate_digest("state source", &record.source_sha256)?;
             for consumer in &record.external_consumers {
                 if !client_ids.contains(consumer) {
@@ -576,6 +655,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
                 })?;
             let mut hold_ids = BTreeSet::new();
             for hold in &record.legal_holds {
+                validate_identifier("legal hold", &hold.id)?;
                 if !hold_ids.insert(&hold.id) {
                     return Err(InventoryError::new(
                         "INV_DUPLICATE_HOLD",
@@ -585,6 +665,9 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
                         ),
                     ));
                 }
+                validate_nonempty("legal-hold scope", &hold.scope)?;
+                validate_nonempty("legal-hold reason", &hold.reason)?;
+                validate_nonempty("legal-hold generation", &hold.generation)?;
                 validate_nonempty("legal-hold release authority", &hold.release_authority)?;
             }
         }
@@ -911,6 +994,26 @@ fn validate_nonempty(name: &str, value: &str) -> Result<(), InventoryError> {
             "INV_REQUIRED",
             format!("{name} must not be empty"),
         ));
+    }
+    Ok(())
+}
+
+fn validate_nonempty_collection(name: &str, values: &[String]) -> Result<(), InventoryError> {
+    if values.is_empty() {
+        return Err(InventoryError::new(
+            "INV_REQUIRED",
+            format!("{name} collection must not be empty"),
+        ));
+    }
+    let mut unique = BTreeSet::new();
+    for value in values {
+        validate_nonempty(name, value)?;
+        if !unique.insert(value) {
+            return Err(InventoryError::new(
+                "INV_DUPLICATE_VALUE",
+                format!("{name} {value:?} appears more than once"),
+            ));
+        }
     }
     Ok(())
 }
