@@ -461,7 +461,7 @@ async fn stage_artifact(
         ));
     }
     let object_store = object_store(&state)?;
-    reap_abandoned_artifact_uploads(&state, organization_id).await?;
+    reap_abandoned_artifact_uploads(&state).await?;
     let staged = object_store
         .stage_artifact(&organization_id.to_string(), &content)
         .map_err(object_store_error)?
@@ -479,20 +479,21 @@ async fn stage_artifact(
     ))
 }
 
-async fn reap_abandoned_artifact_uploads(
-    state: &ApiState,
-    organization_id: Uuid,
-) -> Result<(), ApiError> {
+async fn reap_abandoned_artifact_uploads(state: &ApiState) -> Result<(), ApiError> {
     let object_store = object_store(state)?;
-    let namespace = organization_id.to_string();
     let claims = object_store
         .publication_claims_older_than(
-            &namespace,
             state.staged_upload_ttl,
             MAX_PUBLICATION_CLAIM_RECONCILIATION,
         )
         .map_err(object_store_error)?;
     for claim in claims {
+        let Some(organization_id) = publication_claim_organization_id(claim.token()) else {
+            object_store
+                .release_publication_claim(&claim, state.staged_upload_ttl)
+                .map_err(object_store_error)?;
+            continue;
+        };
         let bytes = i64::try_from(claim.object_ref().bytes).map_err(|_| {
             ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -516,6 +517,14 @@ async fn reap_abandoned_artifact_uploads(
         .reap_staged_older_than(state.staged_upload_ttl)
         .map_err(object_store_error)?;
     Ok(())
+}
+
+fn publication_claim_organization_id(token: &str) -> Option<Uuid> {
+    let prefix = token.get(..36)?;
+    if token.as_bytes().get(36) != Some(&b'-') {
+        return None;
+    }
+    Uuid::parse_str(prefix).ok()
 }
 
 async fn commit_artifact(
@@ -1397,6 +1406,24 @@ mod tests {
             assert_eq!(error.status, StatusCode::BAD_REQUEST);
             assert_eq!(error.code, "artifact_retention_out_of_range");
         }
+    }
+
+    #[test]
+    fn publication_claim_owner_is_extracted_only_from_controller_tokens() {
+        let organization_id = Uuid::from_u128(7);
+        let token = format!("{organization_id}-123-9.staged");
+        assert_eq!(
+            publication_claim_organization_id(&token),
+            Some(organization_id)
+        );
+        assert_eq!(
+            publication_claim_organization_id("tenant-a-123-9.staged"),
+            None
+        );
+        assert_eq!(
+            publication_claim_organization_id(&format!("{organization_id}.123-9.staged")),
+            None
+        );
     }
 
     #[test]
