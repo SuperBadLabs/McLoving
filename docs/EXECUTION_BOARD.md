@@ -19,16 +19,23 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   deployment, migration, and decommissioning, and updated with the affected
   threats, mitigations, verification evidence, and residual risks; unchanged
   sections require an explicit reviewed no-change receipt.
-- Independently of ticket status, before the first `MIG-008` production
-  authority/effect grant, each `MIG-009` authoritative cutover, and every
-  irreversible Jenkins decommissioning action, review the current threat model
+- Independently of ticket status, before the first `CANARY-001` production
+  authority/effect grant, each `CUTOVER-001` authoritative cutover, every
+  `ROLLBACK-001` authority reversal, and every `DECOM-001` irreversible Jenkins
+  decommissioning action, review the current threat model
   for all affected boundaries and bind its content digest, mitigations,
   verification evidence, residual-risk acceptance, reviewers, and timestamp to
   the signed transition receipt. Any relevant implementation/configuration,
   threat, mitigation, or evidence change invalidates the receipt and blocks the
   action until re-review; post-action review cannot satisfy this gate.
+- Action ownership is explicit: `SHADOW-001` owns effect-free paired execution,
+  `CANARY-001` owns every graduated production effect grant, `CUTOVER-001` owns
+  each authoritative cutover transaction, `ROLLBACK-001` owns each authority
+  reversal, and `DECOM-001` owns each irreversible Jenkins retirement.
+  `MIG-008` and `MIG-009` are receipt-verification closure gates only; neither
+  may grant authority or retroactively satisfy a pre-action gate.
 - After merge, select the next unblocked batch without waiting for ceremony.
-- No job may enter `MIG-008` effect-authoritative canary or `MIG-009`
+- No job may enter `CANARY-001` effect-authoritative canary or `CUTOVER-001`
   authoritative cutover while an inventoried external reader still consumes
   that job's effect-free or stale Jenkins-side truth or an inventoried
   administrative writer still targets only that job's Jenkins definition,
@@ -52,8 +59,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   every such effective path and its observed caller or source; `ADMIN-001` must
   migrate its semantics, authorization, idempotency/fencing, audit, failure,
   cutover, and rollback behavior or obtain explicit owner-approved retirement.
-  During every `MIG-008` paired execution, only the authoritative control
-  endpoint may accept the external operation. `ADMIN-001` must atomically bind
+  During every `SHADOW-001` or `CANARY-001` paired execution, only the
+  authoritative control endpoint may accept the external operation. `ADMIN-001`
+  must atomically bind
   that accepted operation to its mapped execution and logical event cursor and
   emit one immutable signed replay receipt containing operation type, canonical
   caller/decision identity, authorization decision, idempotency/fence, sequence
@@ -66,8 +74,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   consumption, approval/input/cancel/retry behavior, audit provenance, terminal
   outcome, and resulting effect intent. If secret-dependent semantics cannot be
   reproduced from an approved protected reference or normalized surrogate
-  without disclosing the secret, the job is ineligible. Before `MIG-009` or
-  decommissioning, also prove the replacement operation affects the
+  without disclosing the secret, the job is ineligible. Before `CUTOVER-001` or
+  `DECOM-001`, also prove the replacement operation affects the
   authoritative execution exactly once, a non-authoritative runner accepts only
   the bound replay receipt, and no residual Jenkins operational write remains.
 - `AUTHZ-001` must represent the effective Jenkins permission matrix with
@@ -80,7 +88,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   denial, positive/negative action decisions, and rollback. A policy that
   cannot be represented exactly or more restrictively with owner approval is
   explicitly ineligible for canary/cutover, never silently widened.
-- The `MIG-009` atomic cutover freeze must re-read and match each deployed
+- The `CUTOVER-001` atomic cutover freeze must re-read and match each deployed
   replacement trigger's implementation digest in addition to its class and
   configuration, and each deployed Multibranch Pipeline or Organization Folder
   discovery implementation's binary or image digest, protocol/version, live
@@ -88,7 +96,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   trust/filter strategy, Jenkinsfile selection policy, child identity policy,
   and orphan policy. Any change invalidates prior proof and requires
   recertification before authoritative cutover.
-- The `MIG-008` pre-effect and `MIG-009` cutover freezes, and every
+- The `CANARY-001` pre-effect and `CUTOVER-001` cutover freezes, and every
   post-cutover build admission, scheduling decision, and effect grant, must
   re-read and match the packaged certified McLoving controller/release identity
   plus every separately deployed runtime implementation used by the job,
@@ -101,11 +109,12 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   insufficient. Any runtime drift atomically quarantines the job, pauses new
   trigger admission and scheduling, withholds all effect grants, and reconciles
   already accepted work until the exact changed runtime completes every affected
-  `MIG-006` differential and `MIG-008` canary gate and a new package receipt is
+  `MIG-006` differential and `CANARY-001` canary gate and a new package receipt is
   approved; prior authority is never grandfathered across an upgrade.
 - Every independently observed destination-state or reconciliation receipt used
-  by `MIG-006`, `MIG-008`, or `MIG-009` must bind an observer that is separate
-  from the effectful connector and runner. `OBS-001` owns its implementation,
+  by `MIG-006`, `CANARY-001`, `CUTOVER-001`, or `ROLLBACK-001` must bind an
+  observer that is separate from the effectful connector and runner. `OBS-001`
+  owns its implementation,
   deployment, identity and grant separation, certification, and receipt
   protocol; no dependent differential, canary, cutover, or rollback gate may
   pass until that ticket is `DONE`. Inventory and certify its exact
@@ -116,8 +125,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   permission-negative tests that it cannot mutate the destination and that the
   connector cannot control, impersonate, configure, credential, or fabricate
   the observer; shared write credentials, process authority, or administrative
-  trust is ineligible. Before each production effect and at `MIG-009` cutover
-  or rollback, re-read and match all observer identities and configuration,
+  trust is ineligible. Before each production effect, at `CUTOVER-001` cutover,
+  and at `ROLLBACK-001` rollback, re-read and match all observer identities and
+  configuration,
   verify a fresh independent observation, and recertify on any drift before the
   receipt may authorize another effect or authority transition.
 - Every production external effect, regardless of how `MIG-004` classifies or
@@ -129,7 +139,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   effect mapping is ineligible and must be remapped to a connector or rejected
   fail-closed. Therefore every reference in this board to a "connector-backed"
   effect or job includes every authoritative external effect; `MIG-006` must
-  certify the connector boundary, and `MIG-008`/`MIG-009` may grant or transfer
+  certify the connector boundary, and `CANARY-001`/`CUTOVER-001` may grant or transfer
   no such authority until `EXT-001` is `DONE` for the exact connector action,
   identity, implementation, permission, fencing, deduplication, and
   reconciliation contract.
@@ -144,8 +154,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   success, branch, stale, missing, malformed, oversized, unauthorized,
   substituted, outage, replay, and secret-marker fixtures; `MIG-006` must use
   only exact fixture-local implementations and compare response-consumption and
-  non-disclosure. `MIG-008` and `MIG-009` must keep the job ineligible until
-  `INPUT-001` is `DONE`. During every `MIG-008` shadow or canary comparison, the
+  non-disclosure. `CANARY-001` and `CUTOVER-001` must keep the job ineligible until
+  `INPUT-001` is `DONE`. During every `SHADOW-001` or `CANARY-001` comparison, the
   authorized adapter must capture one bounded response at one exact
   cursor/snapshot, bind its canonical value digest and non-secret provenance to
   a receipt, and supply that identical response and cursor receipt to both
@@ -154,8 +164,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   Compare the response-consumption trace, resulting control flow, effect intent,
   result, and published output. Then freeze the exact deployed adapter,
   endpoint, schema, grant, policy, and freshness/provenance contract before
-  every `MIG-008` effect or `MIG-009` authority transfer. A read that cannot be
-  safely captured and identically supplied, or that is untyped, mutable,
+  every `CANARY-001` effect, `CUTOVER-001` authority transfer, or `ROLLBACK-001`
+  authority reversal. A read that cannot be safely captured and identically
+  supplied, or that is untyped, mutable,
   unverifiable, overprivileged, or confidentiality-unsafe, is fail-closed and
   unsupported.
 - Every job that relies on Jenkins cloud agents, Kubernetes pod templates,
@@ -166,8 +177,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   network/volume/workspace/cache policy, identity/IAM grants, labels, quotas,
   lifecycle/retention, owner, and cleanup/rollback contract. `MIG-002` and
   `MIG-006` must certify exact contained fixtures plus substitution, exhaustion,
-  interruption, orphan, stale-instance, and cleanup cases. `MIG-008` and
-  `MIG-009` must keep every dependent job ineligible until `PROV-001` is `DONE`
+  interruption, orphan, stale-instance, and cleanup cases. `CANARY-001` and
+  `CUTOVER-001` must keep every dependent job ineligible until `PROV-001` is `DONE`
   and freeze the exact deployed provisioner, template, image, policy, identity,
   and health/configuration digests before scheduling or authority transfer.
   Static fixture-agent proof cannot certify a live dynamic provisioner;
@@ -210,7 +221,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   protected redaction digest, node/label scope, owner, and configuration digest;
   `MIG-002` must bind it into the corpus profile and equivalence cases; and
   `MIG-006` must certify the resulting environment, tool identity, scheduling,
-  and authority behavior. The `MIG-008` pre-effect and `MIG-009` atomic cutover
+  and authority behavior. The `CANARY-001` pre-effect and `CUTOVER-001` atomic cutover
   freezes must re-read the live effective-property set and exact configuration
   digest for every eligible agent target. Missing, changed, newly effective, or
   secret-bearing unredacted properties invalidate certification and block
@@ -233,7 +244,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   `MIG-006` must inject the receipt-bound per-run values into both exact-profile
   executions and compare their consumption, shell/process environments,
   normalized outputs, artifact tags/links/paths, and effect arguments across
-  those cases. `MIG-008` and `MIG-009` must derive and freeze each live per-run
+  those cases. `CANARY-001` and `CUTOVER-001` must derive and freeze each live per-run
   value from the certified identity, history, route, agent, and workspace
   receipts before comparison or authority transfer. An unknown, ambient,
   confidentiality-unsafe, or semantically unmapped built-in variable is
@@ -244,14 +255,15 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   resolution order, including inherited environment, tools, shared libraries,
   credential references without secret material, authorization, and
   plugin-defined properties. `MIG-002` and `MIG-006` must bind and certify the
-  resulting effective values and precedence. The `MIG-008` pre-effect and
-  `MIG-009` cutover freezes must re-read every ancestor and the effective
+  resulting effective values and precedence. The `CANARY-001` pre-effect and
+  `CUTOVER-001` cutover freezes must re-read every ancestor and the effective
   property-set digest; any changed, inserted, removed, newly effective, or
   unredacted secret-bearing property invalidates certification.
 - A completed `MIG-000` export is a versioned inventory epoch, not permanent
-  proof of population completeness. Before every `MIG-008` production effect
-  grant, `MIG-009` authority transfer or rollback, and Jenkins decommissioning
-  action, quiesce mutations to the affected scope and reconcile a fresh live
+  proof of population completeness. Before every `CANARY-001` production effect
+  grant, `CUTOVER-001` authority transfer, `ROLLBACK-001` authority reversal, or
+  `DECOM-001` Jenkins decommissioning action, quiesce mutations to the affected
+  scope and reconcile a fresh live
   export against the latest signed epoch. Reconcile all jobs and parent chains,
   triggers and pending deliveries, readers, configuration and run-control
   writers, identities/authorization, agents/properties, runtime dependencies,
@@ -269,12 +281,12 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   boundaries, including DST gaps/folds, date rollover, leap-day, skew, and
   restart; `MIG-006` must run both oracles against the same receipt-bound virtual
   clock and compare all time-derived arguments, state, logs, artifacts, and
-  outcomes. During every `MIG-008` shadow or canary comparison, capture one
+  outcomes. During every `SHADOW-001` or `CANARY-001` comparison, capture one
   receipt-bound wall-clock instant and, where the job observes elapsed time, one
   bounded clock stream; supply the identical values and consumption contract to
   both runners and compare their clock-consumption traces and all time-derived
-  semantics. Independently sampled live clocks are not equivalent. `MIG-008`
-  and `MIG-009` must freeze the production clock injection, policy, timezone,
+  semantics. Independently sampled live clocks are not equivalent. `CANARY-001`
+  and `CUTOVER-001` must freeze the production clock injection, policy, timezone,
   tzdata/runtime, and synchronization configuration through cutover and the
   rollback window. Any uncontrolled time dependency, drift, or unsupported
   clock injection is fail-closed and ineligible rather than assumed equivalent.
@@ -286,7 +298,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   reproduce and differentially prove the exact slots across restart, controller
   migration, cutover, rollback, job/folder rename, clone, daylight-saving
   transition, and hash-boundary cases; a new stable-but-different hash is not
-  equivalent. `MIG-008` and `MIG-009` freeze all hash inputs, implementation,
+  equivalent. `CANARY-001` and `CUTOVER-001` freeze all hash inputs, implementation,
   configuration, and resolved-slot digests and reconcile the schedule watermark
   before authority transfer. Any unresolvable or drifting hashed schedule is
   ineligible until explicitly remapped with owner-approved timing delta.
@@ -301,15 +313,16 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   determinism. Non-semantic random identifiers require an explicit normalization
   rule that preserves uniqueness/correlation truth. Production security
   randomness must remain cryptographically strong and unseeded by test data;
-  `MIG-008` and `MIG-009` freeze its exact provider/runtime, policy, and health
+  `CANARY-001` and `CUTOVER-001` freeze its exact provider/runtime, policy, and health
   configuration and audit the resulting decision/identifier provenance without
-  recording secret entropy. During every `MIG-008` shadow or canary comparison,
-  every semantically relevant non-security entropy source must instead be one
+  recording secret entropy. During every `SHADOW-001` or `CANARY-001`
+  comparison, every semantically relevant non-security entropy source must be one
   receipt-bound input stream whose exact bytes and consumption contract are
   supplied identically to both runners and whose consumption traces and semantic
   outputs are compared; independently generated streams or merely identical
-  provider policies are not equivalent. `MIG-009` freezes that certified
-  injection and mapping through cutover and the rollback window. A job is
+  provider policies are not equivalent. `CUTOVER-001` freezes that certified
+  injection and mapping through cutover, and `ROLLBACK-001` preserves it through
+  the rollback window. A job is
   ineligible if the shared stream cannot be injected safely, or if
   security-classified entropy affects compared control flow, effect arguments,
   retry timing, identifiers, or outputs beyond an approved normalization that
@@ -328,13 +341,13 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 - `MIG-000` must inventory every Jenkins retention schedule and active legal
   hold covering configuration, build history, console logs, tests, artifacts,
   workspaces/state, and audit evidence, including record scope, policy digest,
-  owner/custodian, expiry, and hold/release authority. Before `MIG-009` retires
+  owner/custodian, expiry, and hold/release authority. Before `DECOM-001` retires
   any affected scope, reconcile every protected record against the final
   export, import it with equivalent or stronger `OPS-002` retention and hold
   metadata plus immutable provenance, prove deletion remains blocked, and
   verify indexed retrieval and backup restore. Missing records, weaker policy,
   untested restore, or an unapproved hold release blocks retirement.
-- Every `MIG-009` per-job authoritative cutover must quiesce first, including
+- Every `CUTOVER-001` per-job authoritative cutover must quiesce first, including
   stateless and effect-free jobs:
   pause and verify scheduled, webhook, upstream, remote, manual, and API build
   ingress plus administrative writers for the job and affected enclosing scope;
@@ -350,8 +363,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   writer, and effect authority afterward; failure restores the frozen Jenkins
   authorities and original trigger state without skipped or duplicated
   deliveries, builds, state, or effects.
-- Every later `MIG-009` rollback repeats that entire protocol with McLoving as
-  the relinquishing side and Jenkins as the gaining side. Quiesce both ingress
+- Every later `ROLLBACK-001` rollback repeats that entire protocol with McLoving
+  as the relinquishing side and Jenkins as the gaining side. Quiesce both ingress
   and authority transitions; export the current McLoving delivery cursor,
   event/deduplication ledger, pending deliveries, retry/dead-letter state, and
   schedule timezone/calendar watermark; transform and import them through the
@@ -361,7 +374,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   stale, missing, duplicated, or ambiguous delivery keeps both sides frozen
   until reconciled without skipped or duplicated deliveries, builds, or effects.
 - A job using a shared lock, throttle, or resource cohort cannot enter
-  `MIG-008` effect-authoritative canary or `MIG-009` cutover while any cohort
+  `CANARY-001` effect-authoritative canary or `CUTOVER-001` cutover while any cohort
   member can execute under an independent platform-local lock. During dual-run
   and rollback, both Jenkins and McLoving must acquire the same external
   lease/fence identity through one tested coordinator with atomic ownership,
@@ -370,7 +383,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   must prove one holder and one effect authority for every transition.
 - Jobs connected by previous/last-result, upstream/downstream build identity,
   cross-job artifact, retained-workspace, or other cross-job state edges cannot
-  enter `MIG-008` effect-authoritative canary or `MIG-009` cutover independently
+  enter `CANARY-001` effect-authoritative canary or `CUTOVER-001` cutover independently
   while producers and consumers would read different platform-local truth.
   Either provide one receipt-bound continuous bridge with a single authoritative
   source, monotonic sequence/build mapping, immutable content/provenance
@@ -379,7 +392,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   transform, import, verify, and switch the entire dependency cohort atomically.
   Any stale, missing, divergent, or ambiguous edge blocks effects and cutover.
 - A Multibranch Pipeline or Organization Folder cannot transfer parent
-  `MIG-008` or `MIG-009` authority until the relinquishing discovery/indexing
+  `CANARY-001` or `CUTOVER-001` authority until the relinquishing discovery/indexing
   owner has paused webhook, periodic, and manual indexing ingress; drained or
   reconciled in-flight scans/events; exported the content-hashed discovery
   cursor, repository/branch/PR set, child identities/configurations, and orphan
@@ -401,8 +414,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   match, or by completing its own current `MIG-002` through `MIG-007`
   classification, differential certification, authorization, state, and
   release gates. It remains quarantined and effect-free after `MIG-007` until
-  that exact revision completes its own `MIG-008` production shadow and
-  graduated canary against the current trigger, connector, observer, input,
+  that exact revision completes its own `SHADOW-001` production shadow and
+  `CANARY-001` graduated canary against the current trigger, connector, observer,
+  input,
   provisioner, runtime, authorization, rollback, and threat-model gates; parent
   authority or an earlier revision's canary cannot substitute. A separately
   submitted native strict-YAML definition may use
@@ -412,9 +426,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   parent-policy drift, and simultaneous revision discovery; absence of a
   certified package is an explicit disabled/effect-free outcome, never implicit
   parent authorization.
-- Before every `MIG-008` effect-authoritative canary action, atomically re-read
+- Before every `CANARY-001` effect-authoritative canary action, atomically re-read
   and match the complete live input and deployment set required by the
-  `MIG-009` cutover freeze against its certified receipt, including source and
+  `CUTOVER-001` cutover freeze against its certified receipt, including source and
   shared libraries, Jenkins/controller inputs, compiler/mapping/components,
   state transforms, release, platform/agent/toolchain, authorization, trigger
   and discovery, connector and SCM acquisition, credential mapping and
@@ -422,8 +436,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   Issue the fenced effect grant only after that match succeeds. Any drift,
   missing identity, or partial comparison keeps the canary effect-free until
   recertification; post-effect detection cannot satisfy this gate.
-- Before the first `MIG-008` production effect grant and every later `MIG-008`
-  or `MIG-009` transfer or rollback of effect authority, quiesce the runner
+- Before the first `CANARY-001` production effect grant and every later
+  `CANARY-001` grant, `CUTOVER-001` transfer, or `ROLLBACK-001` reversal of
+  effect authority, quiesce the runner
   relinquishing authority: pause and verify its ingress, freeze its new
   scheduling and grants, then drain, revoke, or explicitly reconcile all
   queued/running work, issued credentials/grants, connector authority, leases,
@@ -451,10 +466,12 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   idempotent replay, gaps/conflicts/duplicate denial, and exact-profile
   destination retrieval before `DONE`; `MIG-006` must certify these mappings,
   and `MIG-007` must package their exact implementation/configuration digests
-  and receipts. `MIG-008` and `MIG-009` may use only those packaged certified
-  transforms—never ad hoc handoff or rollback import logic.
-- For every `MIG-008` or `MIG-009` authority transfer or rollback, regardless of
-  whether the job is classified as stateless, after quiescing the relinquishing
+  and receipts. `CANARY-001`, `CUTOVER-001`, and `ROLLBACK-001` may use only
+  those packaged certified transforms—never ad hoc handoff or rollback import
+  logic.
+- For every `CANARY-001` grant, `CUTOVER-001` authority transfer, or
+  `ROLLBACK-001` authority reversal, regardless of whether the job is classified
+  as stateless, after quiescing the relinquishing
   runner and before granting the gaining runner, take a fresh content-hashed
   live export from the currently authoritative side. Apply the exact certified
   direction-specific transform and import and verify every execution record
@@ -473,8 +490,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   unapproved release keeps the gaining side quarantined. Stateful jobs additionally
   transfer and verify previous-result mappings, cross-build artifacts, retained
   workspace, and every persistent dependency through the exact `MIG-005A`
-  transform. An actual `MIG-009` rollback therefore imports every McLoving build
-  and state change produced since cutover into Jenkins before Jenkins regains
+  transform. An actual `ROLLBACK-001` rollback therefore imports every McLoving
+  build and state change produced since cutover into Jenkins before Jenkins regains
   any trigger, reader, writer, scheduling, or effect authority. Empty, stale,
   partial, conflicting, duplicate, or unverifiable execution/state history
   keeps the gaining runner effect-free; the prior runner resumes only after its
@@ -498,8 +515,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   receipts; ad hoc import/export logic cannot earn equivalence. `MIG-007`
   packages the already-certified mapping and receipts rather than defining a
   downstream replacement.
-- Every `MIG-005A`, `MIG-007`, `MIG-008`, and `MIG-009` workspace/state export,
-  transform, backup, receipt, and reverse import is secret-aware. Classify and
+- Every `MIG-005A`, `MIG-007`, `SHADOW-001`, `CANARY-001`, `CUTOVER-001`, and
+  `ROLLBACK-001` workspace/state export, transform, backup, receipt, and reverse
+  import is secret-aware. Classify and
   scan every record before and after transformation; omit credential files,
   tokens, keys, encrypted Jenkins secrets, and other secret material from
   portable state, retaining only reviewed typed redaction references and keyed
@@ -539,7 +557,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   is complete, rerun every affected `MIG-006` scenario against its exact
   deployed binary/image, configuration, policy, and provenance identities,
   regenerate the `MIG-007` package and receipts, and pass exact-head review
-  before `MIG-008` effect authority. This recertification rule applies to any
+  before `CANARY-001` effect authority. This recertification rule applies to any
   later trigger, discovery, connector, SCM, secret, dependency, cache, agent,
   or other runtime implementation that changes certified behavior.
 - `MIG-000` must inventory every Jenkins Pipeline durability/resume setting and
@@ -661,7 +679,7 @@ lane.
 | Ticket | Status | Depends on | Objective and acceptance |
 |---|---|---|---|
 | INV-001 | ACTIVE | API-002, AUDIT-001 | Produce an immutable controller/job-graph manifest for every in-scope Jenkins controller: core and plugin profiles, controller-global environment/tool/managed-file/plugin settings, folders, matrix jobs, Multibranch Pipeline and Organization Folder parents/children and discovery configuration, job definitions, Jenkinsfile or inline source, shared-library references, enabled/disabled operational state with generation/reason/actor, trigger declarations, platform/agent label/toolchain requirements, effective node authority, artifact/test publication, and owner. Bind canonical source location, content digest, export implementation/version, controller identity, collection time, and provenance; reconcile parent/child counts and live configuration digests; secret-scan before persistence; and record retired or out-of-scope objects only with owner approval. |
-| INV-002 | ACTIVE | API-002, AUDIT-001 | Produce an immutable identity-and-client manifest: exact Jenkins security-realm implementation/configuration and upstream identity-provider generation; immutable user/group identifiers, aliases and rename history, membership provenance/generation, lifecycle state and collision rules; effective folder/matrix/job ACL entries; every external read-side consumer; and every authenticated administrative writer including Jenkins Job Builder, JCasC/Terraform, seed services, CLI, and REST clients. Bind endpoint/action/query contracts, caller identities, authorization scopes, owners, observed use, and live generations. Reconcile every ACL principal and client, reject name-only or ambiguous identity, and preserve disabled/deleted and deleted-name-reuse evidence. |
+| INV-002 | ACTIVE | API-002, AUDIT-001 | Produce an immutable identity-and-client manifest: exact Jenkins security-realm implementation/configuration and upstream identity-provider generation; immutable user/group identifiers, aliases and rename history, membership provenance/generation, lifecycle state and collision rules; effective folder/matrix/job ACL entries; every external read-side consumer; and every effective administrative writer regardless of authentication mode. Include named clients and service identities, anonymous/public principals, unauthenticated endpoints, legacy tokens, seed execution, Jenkins Job Builder, JCasC/Terraform, CLI, REST, and direct/plugin APIs. Bind endpoint/action/query contracts, canonical caller identity or observed source, authentication and authorization behavior, scope, owner, observed use, and live generation. Reconcile every ACL principal, reader, and writer, reject name-only or ambiguous identity, and preserve disabled/deleted and deleted-name-reuse evidence. |
 | INV-003 | ACTIVE | API-002, AUDIT-001 | Produce an immutable runtime-dependency manifest per job: public/secret parameters and confidentiality, credential references and exact consumer/taint classification without secret material, source checkout, workload dependency repository/lock policy, approval/input policy, every trigger class, live external read, mutable agent-local file/mount/host input with canonical path/origin/content digest/refresh policy, agent image/capability/trust pool, cache mapping, external effect, dynamic provisioner, shared lock/throttle, controller-global runtime value, and Jenkins built-in environment dependency. Bind owner, implementation/configuration identity, endpoint/account/resource scope, mutability, provenance, and supported/unsupported disposition. Replace embedded or encrypted values with reviewed typed redaction references and protected-evidence keyed digests. |
 | INV-004 | ACTIVE | OPS-002, OPS-003, AUDIT-001 | Produce an immutable persistent-state-and-evidence manifest per job: build-number and previous-result dependencies, per-build SCM revision/previous-revision/changelog baselines, cross-build artifact lookups, retained workspaces and mutable state, build/log/artifact/test/audit history, retention policy/deadline, legal holds with identity/scope/reason/generation/release authority, and external consumers of that history. Bind record counts, source export and content digests, ownership, confidentiality, restore/rollback target, conflict policy, and provenance; reconcile live state and prove protected evidence retains every required original without leaking secret material into the repository. |
 | MIG-000 | PENDING | INV-001, INV-002, INV-003, INV-004 | Reconcile the four immutable inventory manifests into one owner-reviewed production population and eligibility ledger before compiler or corpus design. Every controller, parent/child job, operational state, source principal/ACL, read/write client, runtime dependency, persistent-state record class, retention/hold obligation, and owner must resolve exactly once or carry explicit owner-approved retirement. Cross-manifest references and counts must agree; source/export/manifests are content-hashed and provenance-bound; secret scans pass; missing stable identity, mutable or unresolved dependency, unclassified state/effect/input/credential consumer, unsupported rollback obligation, or manifest conflict is an explicit blocker. Publish immutable coverage denominators, corpus strata, state-transform demand, parity-substrate demand, and per-job native/mappable/scripted/unsupported eligibility without granting execution or effect authority. |
@@ -677,9 +695,9 @@ lane.
 | MIG-006 | PENDING | DIFF-001, DIFF-002, DIFF-003 | Close the exact committed-corpus differential gate by verifying and aggregating all three immutable evidence sets without rerunning alternative logic. Require complete per-case coverage, matching source/profile/package/release identities, zero unclassified jobs or mismatches for certified cases, deterministic fail-closed receipts for scripted/unsupported cases, and stable mismatch/regression taxonomies. Report production-population coverage, parse reach, native runnable coverage, actionable migration, deterministic rejection coverage, and certified equivalence separately; no metric can borrow another metric's denominator or imply production authority. |
 | MIG-007 | PENDING | MIG-005A, MIG-006 | Generate a reviewable migration package containing canonical strict YAML, the exact reviewed `JOBSTATE-001` operational-state record, provenance, diagnostics, a mapping lock, exact source/oracle/profile/compiler digests, and the exact already-certified `MIG-005A` bidirectional state transforms plus `MIG-006` seeded-history differential and rehearsal receipts for every admitted state dependency. The package must round-trip to identical IR and operational state, contain no credential material, expose every substitution and unsupported boundary explicitly, bind immutable source export, forward/reverse transform, destination state, and verification digests for cutover and rollback, and reproduce the packaged receipt verification without invoking alternative transform logic. |
 | SHADOW-001 | PENDING | MIG-007, JOBSTATE-001, AUTHZ-001, TRIG-001, SCM-001, SECRET-001, INPUT-001 | Prove deny-authority shadow execution before any production effect. Atomically freeze source/target enabled state, package/release/runtime identities, source revision, authz generation, agent-local inputs, clock/elapsed-time and non-security entropy streams. Capture each authenticated trigger, external read, approval/input/cancel/retry action, connector outcome, and other behavior-changing event once as a bounded receipt and replay it at the same state-machine point to both runners. The shadow has no production credentials, connector/deployment grants, scheduler/database/controller authority, host mounts, or write-capable network path; secret-dependent logic is admitted only through confidentiality-safe source/outcome receipts. Require exact MIG-006 trace comparison, isolated outputs, zero production request, and quarantine on drift, missing receipt, mismatch, or ambiguous authority. |
-| CANARY-001 | PENDING | SHADOW-001, REL-001, EXT-001, OBS-001, DISC-001, DEP-001, CACHE-001, PROV-001 | Prove graduated per-job effect authority one action at a time under bounded quotas, retention, audit, failure thresholds, and abort rules. Buffer both canonical intents and require exact match before granting the authoritative runner a production connector; the shadow remains effect-free and can never reach a production endpoint. Replay the authoritative bounded outcome into the shadow before downstream control flow, and require an independently observed destination-state/reconciliation receipt binding account/resource, precondition, request, result, freshness, and observer provenance. Ambiguity freezes new effects until reconciliation. Windows jobs require completed persistent-host interruption/reboot proof; unimplemented trigger, discovery, source, secret, dependency, cache, provisioner, observer, or connector classes remain ineligible. |
+| CANARY-001 | PENDING | SHADOW-001, REL-001, EXT-001, OBS-001, DISC-001, DEP-001, CACHE-001, PROV-001 | Prove graduated per-job effect authority one action at a time under bounded quotas, retention, audit, failure thresholds, and abort rules. Before each grant, satisfy and bind the current pre-action threat-model receipt, live inventory reconciliation, quiescence proof, and complete runtime/input/authority freeze required by the Working rules; post-effect review or drift detection cannot satisfy the gate. Buffer both canonical intents and require exact match before granting the authoritative runner a production connector; the shadow remains effect-free and can never reach a production endpoint. Replay the authoritative bounded outcome into the shadow before downstream control flow, and require an independently observed destination-state/reconciliation receipt binding account/resource, precondition, request, result, freshness, and observer provenance. Ambiguity freezes new effects until reconciliation. Windows jobs require completed persistent-host interruption/reboot proof; unimplemented trigger, discovery, source, secret, dependency, cache, provisioner, observer, or connector classes remain ineligible. |
 | MIG-008 | PENDING | SHADOW-001, CANARY-001 | Close shadow and graduated-canary readiness by verifying every per-job receipt against the exact MIG-007 package and MIG-006 certified case. Require zero unclassified mismatch, zero duplicate or shadow production effect, stable source/target/package/runtime identities, exact operational-state and authorization parity, complete trigger/input/outcome replay, successful abort/freeze behavior, independently observed effects, and explicit ineligibility for scripted/unsupported or workload-visible secret-dependent jobs. Partial truth or a regression budget can never trigger automatic cutover. |
-| CUTOVER-001 | PENDING | MIG-008, MIG-007, REL-001, AUTHZ-001, JOBSTATE-001 | Define and prove the per-job cutover freeze and switch. Under owner approval and one signed transaction, atomically re-read every certified source and target identity: Jenkinsfile/library/job/core/plugin/global settings; source/target operational state and authz; trigger/discovery/source/secret/input/dependency/cache/provisioner/connector/observer configurations and generations; platform/agent/toolchain/local-input digests; migration package/YAML/IR/mapping/component/state transforms; McLoving release/SBOM/signature; and authoritative destination-state receipts. Any drift aborts without transferring trigger, scheduler, credential, or effect authority. Disabled, scripted, unsupported, unresolved, or uncertified jobs remain ineligible. |
+| CUTOVER-001 | PENDING | MIG-008, MIG-007, REL-001, AUTHZ-001, JOBSTATE-001 | Define and prove the per-job cutover freeze and switch. Before the transaction, satisfy and bind the current pre-action threat-model receipt, live inventory reconciliation, quiescence proof, and complete runtime/input/authority freeze required by the Working rules; post-cutover review cannot satisfy the gate. Under owner approval and one signed transaction, atomically re-read every certified source and target identity: Jenkinsfile/library/job/core/plugin/global settings; source/target operational state and authz; trigger/discovery/source/secret/input/dependency/cache/provisioner/connector/observer configurations and generations; platform/agent/toolchain/local-input digests; migration package/YAML/IR/mapping/component/state transforms; McLoving release/SBOM/signature; and authoritative destination-state receipts. Any drift aborts without transferring trigger, scheduler, credential, or effect authority. Disabled, scripted, unsupported, unresolved, or uncertified jobs remain ineligible. |
 | ROLLBACK-001 | PENDING | CUTOVER-001, MIG-005A, OPS-002 | Prove bounded per-job rollback after at least one authoritative McLoving build plus denial-only disabled-job probes. Freeze new triggers/effects, reconcile build number/result/SCM baseline/changelog, artifacts, retained workspace/state, retention/legal holds, audit linkage, operational state, agent-local inputs, and external outcomes through the exact MIG-005A reverse transform; restore the pinned Jenkins core/plugin/configuration, trigger/discovery/client authority, identity/authz and dependency/cache/source/secret mappings; then deliver a later revision/event and prove Jenkins resumes without stale lookup, missing evidence, unintended enablement, duplicate mapping, work, or effect. |
 | DECOM-001 | PENDING | CUTOVER-001, ROLLBACK-001, CONSUMER-001, ADMIN-001 | Prove explicit owner-approved Jenkins scope decommissioning only after the rollback window. Every production job must be cut over or owner-retired, every read-side consumer and administrative writer migrated or owner-retired, and no ineligible dependency may remain. Preserve and verify the final export and legal-hold evidence, then revoke Jenkins triggers, credentials, network, read APIs, administrative write APIs and compute; prove zero production traffic, caller, scheduled work, valid credential, live agent, or remaining Jenkins authority. Decommissioning is separately authorized from cutover. |
 | MIG-009 | PENDING | CUTOVER-001, ROLLBACK-001, DECOM-001 | Close authority transfer by verifying signed cutover, rollback, and decommission evidence without invoking alternative migration logic. Require per-job eligibility, exact freeze identities, bounded dual-run and rollback windows, successful seeded-history transition, no residual reader/writer/trigger/credential/compute authority, preserved retention/legal holds and final export, and zero duplicate work or effect. Publish the immutable disposition of every inventoried job, client, state class, and Jenkins scope; an unresolved item blocks closure. |
