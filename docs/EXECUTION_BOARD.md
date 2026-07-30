@@ -20,10 +20,11 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   threats, mitigations, verification evidence, and residual risks; unchanged
   sections require an explicit reviewed no-change receipt.
 - After merge, select the next unblocked batch without waiting for ceremony.
-- No job may enter authoritative cutover while an inventoried external reader
-  still consumes that job's Jenkins-side truth or an inventoried administrative
-  writer still targets that job's Jenkins definition or enclosing folder or
-  controller configuration. Each affected caller must first pass
+- No job may enter `MIG-008` effect-authoritative canary or `MIG-009`
+  authoritative cutover while an inventoried external reader still consumes
+  that job's effect-free or stale Jenkins-side truth or an inventoried
+  administrative writer still targets only that job's Jenkins definition or
+  enclosing folder/controller configuration. Each affected caller must first pass
   `CONSUMER-001` or `ADMIN-001`, respectively, or have explicit owner-approved
   retirement, with tested caller cutover and rollback evidence.
 - The `MIG-009` atomic cutover freeze must re-read and match each deployed
@@ -77,6 +78,15 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   failure-freeze, and bidirectional rollback proof, or quiesce, snapshot,
   transform, import, verify, and switch the entire dependency cohort atomically.
   Any stale, missing, divergent, or ambiguous edge blocks effects and cutover.
+- A Multibranch Pipeline or Organization Folder cannot transfer parent
+  `MIG-008` or `MIG-009` authority until the relinquishing discovery/indexing
+  owner has paused webhook, periodic, and manual indexing ingress; drained or
+  reconciled in-flight scans/events; exported the content-hashed discovery
+  cursor, repository/branch/PR set, child identities/configurations, and orphan
+  timers; and imported and verified them on the gaining side. Atomically fence
+  exactly one discovery generation/owner before resuming ingress. Apply the
+  same protocol in reverse and prove duplicate/reordered event, restart,
+  partition, rollback, missing-child, duplicate-child, and orphan outcomes.
 - Before every `MIG-008` effect-authoritative canary action, atomically re-read
   and match the complete live input and deployment set required by the
   `MIG-009` cutover freeze against its certified receipt, including source and
@@ -144,6 +154,16 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   before `MIG-008` effect authority. This recertification rule applies to any
   later trigger, discovery, connector, SCM, secret, dependency, cache, agent,
   or other runtime implementation that changes certified behavior.
+- `MIG-000` must inventory every Jenkins Pipeline durability/resume setting and
+  dependency, including durability hints, disabled resume, durable tasks,
+  preserved stashes, controller checkpoints, and agent reconnect/loss behavior.
+  `MIG-002` defines bounded controller restart/crash, agent disconnect/reconnect
+  and loss, executor/container kill, network partition, checkpoint replay,
+  preserved-stash recovery, retry, cancellation, and duplicate-effect scenarios;
+  `MIG-006` runs them through both exact-profile systems and compares resumed
+  node/attempt lineage, state, logs, artifacts, results, effects, and audit.
+  Unimplemented or uncertified durability semantics are explicit unsupported
+  classifications and make affected jobs ineligible for canary or cutover.
 - Stop only for an owner-level decision, new authority, or genuine blocker.
 
 ## Batch ledger
