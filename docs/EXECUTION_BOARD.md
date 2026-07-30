@@ -189,6 +189,29 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   digest for every eligible agent target. Missing, changed, newly effective, or
   secret-bearing unredacted properties invalidate certification and block
   authority transfer until recertified.
+- The Jenkins-provided built-in environment namespace is explicit migration
+  input, not ambient process state. `MIG-000` must inventory every referenced
+  built-in variable—including `BUILD_NUMBER`, `BUILD_ID`, `BUILD_TAG`,
+  `BUILD_URL`, `JOB_NAME`, `JOB_BASE_NAME`, `JENKINS_URL`, `NODE_NAME`,
+  `NODE_LABELS`, `EXECUTOR_NUMBER`, and `WORKSPACE`—with its exact
+  Jenkins-core/plugin-profile derivation, scope and evaluation phase, type,
+  confidentiality, stability, downstream semantic use, and owner. `MIG-002`
+  must define single- and multi-build, multi-job/folder, rename, parallel-agent,
+  restart, forward-handoff, cutover, and rollback cases. `MIG-003` emits typed
+  references rather than host environment lookups, and `MIG-004` owns a
+  versioned mapping that classifies each value as exact-equality,
+  deterministic translation/normalization, or unsupported: preserve transferred
+  build numbers and canonical job identity, bind URL values to the certified
+  route/consumer mapping, bind node values to the certified agent mapping, and
+  normalize workspace roots while preserving relative-path and isolation truth.
+  `MIG-006` must inject the receipt-bound per-run values into both exact-profile
+  executions and compare their consumption, shell/process environments,
+  normalized outputs, artifact tags/links/paths, and effect arguments across
+  those cases. `MIG-008` and `MIG-009` must derive and freeze each live per-run
+  value from the certified identity, history, route, agent, and workspace
+  receipts before comparison or authority transfer. An unknown, ambient,
+  confidentiality-unsafe, or semantically unmapped built-in variable is
+  fail-closed and makes the job ineligible.
 - Every in-scope job must also bind its complete enclosing regular-folder chain,
   not only Organization Folder or job configuration. `MIG-000` must inventory
   each ancestor's identity, configuration digest, property source and
