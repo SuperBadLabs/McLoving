@@ -73,11 +73,13 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   implementation identities is insufficient and forces recertification.
 - Jenkins decommissioning must quiesce before the final export: pause and
   verify all trigger ingress and administrative writes, freeze new scheduling
-  and external-effect authority, drain or explicitly reconcile every queued or
-  running build, lease, lock, retry, and uncertain effect, and prove zero active
-  work or ambiguous destination state. Only then capture and verify the final
-  configuration/build/artifact/audit export, revoke remaining read and write
-  authority, credentials, and network paths, and retire compute and secrets.
+  and external-effect authority, drain or explicitly reconcile every accepted
+  but not yet materialized trigger delivery, delayed/retry/dead-letter delivery,
+  queued or running build, lease, lock, retry, and uncertain effect, and prove
+  zero active work, unaccounted trigger input, or ambiguous destination state.
+  Only then capture and verify the final configuration/build/artifact/audit
+  export, revoke remaining read and write authority, credentials, and network
+  paths, and retire compute and secrets.
 - `MIG-000` must inventory every Jenkins retention schedule and active legal
   hold covering configuration, build history, console logs, tests, artifacts,
   workspaces/state, and audit evidence, including record scope, policy digest,
@@ -91,12 +93,18 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   stateless and effect-free jobs:
   pause and verify scheduled, webhook, upstream, remote, manual, and API build
   ingress plus administrative writers for the job and affected enclosing scope;
-  freeze new scheduling and effect-authority transfers; drain or reconcile all
-  queued/running builds, retries, issued grants, leases, locks, and uncertain
-  effects; and prove zero active source work or authority. For stateful jobs,
-  only then re-export, transform, import, and verify state. Atomically switch
-  trigger, reader, writer, and effect authority afterward; failure restores the
-  frozen Jenkins authorities without skipped/duplicated state or effects.
+  freeze new scheduling and effect-authority transfers; drain or reconcile
+  every accepted but not yet materialized trigger delivery, delivery retry or
+  dead letter, queued/running build, build retry, issued grant, lease, lock, and
+  uncertain effect; and prove zero active source work or authority. Bind and
+  transfer each trigger's delivery cursor, event/deduplication ledger, pending
+  delivery set, retry/dead-letter state, and schedule timezone/calendar
+  watermark under the exact `TRIG-001` implementation and configuration
+  digests. For stateful jobs, only then re-export, transform, import, and verify
+  state. Atomically import that trigger state and switch trigger, reader,
+  writer, and effect authority afterward; failure restores the frozen Jenkins
+  authorities and original trigger state without skipped or duplicated
+  deliveries, builds, state, or effects.
 - A job using a shared lock, throttle, or resource cohort cannot enter
   `MIG-008` effect-authoritative canary or `MIG-009` cutover while any cohort
   member can execute under an independent platform-local lock. During dual-run
