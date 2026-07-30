@@ -288,9 +288,11 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 - `MIG-005A` owns versioned deterministic forward and reverse transforms for
   the complete execution-history record of every job, regardless of
   stateless/stateful classification: trigger/cause, build and queue identity,
-  timing, result, graph/stage/node/attempt lineage, approvals and submitted
-  values, normalized tests, logs, artifacts and retrieval metadata, audit
-  linkage, and record provenance. Its existing build-number, previous-result,
+  invocation parameter names/types plus resolved public values and
+  confidentiality-safe secret-reference/taint provenance without secret
+  material, timing, result, graph/stage/node/attempt lineage, approvals and
+  submitted values, normalized tests, logs, artifacts and retrieval metadata,
+  audit linkage, and record provenance. Its existing build-number, previous-result,
   cross-build artifact, workspace, and persistent-state requirements are
   additive for jobs that use them. `MIG-005A` must prove both directions,
   idempotent replay, gaps/conflicts/duplicate denial, and exact-profile
@@ -304,9 +306,11 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   live export from the currently authoritative side. Apply the exact certified
   direction-specific transform and import and verify every execution record
   created since the prior transfer: trigger/cause identity, build number,
-  queue/start/end time, terminal result, stage/node/attempt lineage, approvals,
-  normalized tests, logs, artifacts and retrieval metadata, audit linkage,
-  record-level provenance, and destination digests. Stateful jobs additionally
+  invocation parameter schema, resolved public values and protected
+  secret-reference/taint provenance without secret material, queue/start/end
+  time, terminal result, stage/node/attempt lineage, approvals, normalized
+  tests, logs, artifacts and retrieval metadata, audit linkage, record-level
+  provenance, and destination digests. Stateful jobs additionally
   transfer and verify previous-result mappings, cross-build artifacts, retained
   workspace, and every persistent dependency through the exact `MIG-005A`
   transform. An actual `MIG-009` rollback therefore imports every McLoving build
