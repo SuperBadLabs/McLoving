@@ -220,6 +220,93 @@ fn reconciliation_rejects_unknown_acl_principal() {
 }
 
 #[test]
+fn reconciliation_rejects_blank_exclusion_approval() {
+    let directory = TestDirectory::new("blank-approval");
+    let mut bundle = fixture();
+    bundle.job_graph.jobs[2].scope.approval = Some(" \t ".to_owned());
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("blank approval must fail");
+    assert_eq!(error.code, "INV_MISSING_APPROVAL");
+}
+
+#[test]
+fn reconciliation_rejects_invalid_security_realm_digest() {
+    let directory = TestDirectory::new("realm-digest");
+    let mut bundle = fixture();
+    bundle.identity_clients.security_realm.config_sha256 = "not-a-digest".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("invalid realm digest must fail");
+    assert_eq!(error.code, "INV_DIGEST");
+}
+
+#[test]
+fn reconciliation_rejects_parent_cycles() {
+    let directory = TestDirectory::new("parent-cycle");
+    let mut bundle = fixture();
+    bundle.job_graph.jobs[0].parent_id = Some("folder/build".to_owned());
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("parent cycle must fail");
+    assert_eq!(error.code, "INV_JOB_GRAPH_CYCLE");
+}
+
+#[test]
+fn reconciliation_rejects_blank_secret_references() {
+    let directory = TestDirectory::new("blank-secret-reference");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1].dependencies[0].credential_reference =
+        Some("   ".to_owned());
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("blank secret reference must fail");
+    assert_eq!(error.code, "INV_SECRET_REFERENCE_REQUIRED");
+}
+
+#[test]
+fn reconciliation_rejects_blank_retention_deadline() {
+    let directory = TestDirectory::new("blank-retention");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0].retention_deadline = " \n ".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("blank retention deadline must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+}
+
+#[test]
+fn reconciliation_rejects_state_record_count_overflow() {
+    let directory = TestDirectory::new("state-count-overflow");
+    let mut bundle = fixture();
+    let records = &mut bundle.persistent_state.jobs[1].records;
+    records[0].record_count = i64::MAX as u64;
+    let mut second = records[0].clone();
+    second.id = "state/folder/overflow".to_owned();
+    records.push(second);
+    let mut third = records[0].clone();
+    third.id = "state/folder/overflow-final".to_owned();
+    third.record_count = 2;
+    records.push(third);
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("state record count overflow must fail");
+    assert_eq!(error.code, "INV_COUNT_OVERFLOW");
+}
+
+#[test]
 fn reconciliation_rejects_unknown_group_membership() {
     let directory = TestDirectory::new("group");
     let mut bundle = fixture();

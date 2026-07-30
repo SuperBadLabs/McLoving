@@ -346,6 +346,10 @@ pub fn load_bundle(root: &Path) -> Result<InventoryBundle, InventoryError> {
 pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, InventoryError> {
     validate_bindings(bundle)?;
     validate_binding(&bundle.job_graph.binding)?;
+    validate_digest(
+        "security-realm configuration",
+        &bundle.identity_clients.security_realm.config_sha256,
+    )?;
 
     let mut job_ids = BTreeSet::new();
     let mut in_scope = BTreeSet::new();
@@ -361,7 +365,11 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             ));
         }
         if job.scope.disposition != ScopeDisposition::InScope
-            && job.scope.approval.as_deref().is_none_or(str::is_empty)
+            && job
+                .scope
+                .approval
+                .as_deref()
+                .is_none_or(|approval| approval.trim().is_empty())
         {
             return Err(InventoryError::new(
                 "INV_MISSING_APPROVAL",
@@ -382,6 +390,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             ));
         }
     }
+    validate_job_graph_acyclic(&bundle.job_graph.jobs)?;
 
     let principal_ids = unique_ids(
         "principal",
@@ -509,8 +518,13 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
                 &dependency.config_sha256,
             )?;
             if dependency.confidentiality == "secret"
-                && dependency.credential_reference.is_none()
-                && dependency.redaction_reference.is_none()
+                && ![
+                    dependency.credential_reference.as_deref(),
+                    dependency.redaction_reference.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|reference| !reference.trim().is_empty())
             {
                 return Err(InventoryError::new(
                     "INV_SECRET_REFERENCE_REQUIRED",
@@ -524,6 +538,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         }
         for record in records {
             validate_nonempty("state owner", &record.owner)?;
+            validate_nonempty("state retention deadline", &record.retention_deadline)?;
             validate_digest("state source", &record.source_sha256)?;
             for consumer in &record.external_consumers {
                 if !client_ids.contains(consumer) {
@@ -536,7 +551,17 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
                     ));
                 }
             }
-            state_transform_records = state_transform_records.saturating_add(record.record_count);
+            state_transform_records = state_transform_records
+                .checked_add(record.record_count)
+                .ok_or_else(|| {
+                    InventoryError::new(
+                        "INV_COUNT_OVERFLOW",
+                        format!(
+                            "state-record demand overflows u64 at record {} for job {}",
+                            record.id, job.id
+                        ),
+                    )
+                })?;
             let mut hold_ids = BTreeSet::new();
             for hold in &record.legal_holds {
                 if !hold_ids.insert(&hold.id) {
@@ -888,6 +913,40 @@ fn validate_digest(name: &str, value: &str) -> Result<(), InventoryError> {
             "INV_DIGEST",
             format!("{name} digest must be 64 lowercase hexadecimal characters"),
         ));
+    }
+    Ok(())
+}
+
+fn validate_job_graph_acyclic(jobs: &[JobRecord]) -> Result<(), InventoryError> {
+    let parents = jobs
+        .iter()
+        .map(|job| (job.id.as_str(), job.parent_id.as_deref()))
+        .collect::<BTreeMap<_, _>>();
+    let mut complete = BTreeSet::new();
+
+    for start in parents.keys().copied() {
+        if complete.contains(start) {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut positions = BTreeMap::new();
+        let mut current = Some(start);
+        while let Some(job_id) = current {
+            if complete.contains(job_id) {
+                break;
+            }
+            if let Some(position) = positions.insert(job_id, path.len()) {
+                let mut cycle = path[position..].to_vec();
+                cycle.push(job_id);
+                return Err(InventoryError::new(
+                    "INV_JOB_GRAPH_CYCLE",
+                    format!("job parent graph contains cycle {}", cycle.join(" -> ")),
+                ));
+            }
+            path.push(job_id);
+            current = parents.get(job_id).copied().flatten();
+        }
+        complete.extend(path);
     }
     Ok(())
 }
