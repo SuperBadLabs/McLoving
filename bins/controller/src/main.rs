@@ -22,7 +22,7 @@ use mcloving_controller_api::{ApiState, router};
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, NewLogChunk,
-    ReconciliationTrustPoolAuthorization, Store, TerminalOutcome,
+    ReconciliationTrustPoolAuthorization, Store, StoreError, TerminalOutcome,
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
@@ -547,7 +547,7 @@ impl AgentControl for ControllerAgentService {
                 &request.target_names,
             )
             .await
-            .map_err(internal_store_error)?;
+            .map_err(credential_store_error)?;
         let ready = deliveries.is_some();
         let credentials = deliveries
             .unwrap_or_default()
@@ -828,6 +828,15 @@ fn internal_store_error(error: mcloving_controller_store::StoreError) -> Status 
     Status::internal(format!("controller store failed: {error}"))
 }
 
+fn credential_store_error(error: StoreError) -> Status {
+    match error {
+        StoreError::InvalidSecurityOperation(_) | StoreError::InvalidAgentSession => {
+            Status::failed_precondition(format!("credential delivery rejected: {error}"))
+        }
+        other => internal_store_error(other),
+    }
+}
+
 async fn run_agent_control_server(store: Store) -> Result<()> {
     let Some(listen) = std::env::var("MCLOVING_AGENT_LISTEN").ok() else {
         std::future::pending::<()>().await;
@@ -1106,6 +1115,20 @@ mod tests {
     fn composite_authority_token_preserves_restore_epoch_and_fence() {
         let token = (u64::from(17_u32) << 32) | u64::from(23_u32);
         assert_eq!(decode_authority_token(token), (17, 23));
+    }
+
+    #[test]
+    fn permanent_credential_contract_errors_are_not_retried_as_internal_failures() {
+        let invalid_grants =
+            StoreError::InvalidSecurityOperation("unrequested credential target".to_owned());
+        assert_eq!(
+            credential_store_error(invalid_grants).code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            credential_store_error(StoreError::InvalidAgentSession).code(),
+            tonic::Code::FailedPrecondition
+        );
     }
 
     #[test]

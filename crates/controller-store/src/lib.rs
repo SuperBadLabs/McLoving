@@ -34,6 +34,11 @@ pub use test_results::{
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
 const MAX_ATTEMPT_LOG_BYTES: i64 = 64 * 1_048_576;
 const MAX_ATTEMPT_LOG_CHUNKS: i64 = 66;
+/// Largest caller-selected object-retention interval accepted by the controller.
+///
+/// This keeps PostgreSQL interval arithmetic comfortably inside its timestamp
+/// range before any staged object is claimed for publication.
+pub const MAX_OBJECT_RETENTION_SECONDS: i64 = 100 * 365 * 24 * 60 * 60;
 
 /// Schema installed by [`Store::migrate`].
 pub const CONTROLLER_SCHEMA_V1: &str = include_str!("../migrations/0001_controller_truth.sql");
@@ -2587,7 +2592,7 @@ impl Store {
             || media_type.len() > 255
             || media_type.trim() != media_type
             || media_type.chars().any(char::is_control)
-            || retention_seconds < 0
+            || !(0..=MAX_OBJECT_RETENTION_SECONDS).contains(&retention_seconds)
         {
             return Ok(false);
         }
@@ -2777,6 +2782,9 @@ impl Store {
         media_type: &str,
         retention_seconds: i64,
     ) -> Result<bool, StoreError> {
+        if !(0..=MAX_OBJECT_RETENTION_SECONDS).contains(&retention_seconds) {
+            return Ok(false);
+        }
         let mut tx = self.tenant_transaction(organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
@@ -3276,7 +3284,7 @@ impl Store {
         digest: [u8; 32],
         retention_seconds: i64,
     ) -> Result<bool, StoreError> {
-        if retention_seconds < 0 {
+        if !(0..=MAX_OBJECT_RETENTION_SECONDS).contains(&retention_seconds) {
             return Ok(false);
         }
         let mut tx = self.tenant_transaction(organization_id).await?;

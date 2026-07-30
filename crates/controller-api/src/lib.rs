@@ -11,7 +11,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mcloving_controller_store::{
-    ArtifactMetadata, NewBuild, ObjectKind, ObjectStatus, Store, StoreError, WaitReason,
+    ArtifactMetadata, MAX_OBJECT_RETENTION_SECONDS, NewBuild, ObjectKind, ObjectStatus, Store,
+    StoreError, WaitReason,
 };
 use mcloving_object_store::{
     FilesystemObjectStore, ObjectGap, ObjectRef, ObjectStoreError, PendingObject,
@@ -494,6 +495,7 @@ async fn commit_artifact(
             "artifact upload token does not belong to this tenant",
         ));
     }
+    validate_artifact_retention(request.retention_seconds)?;
     let digest = parse_hex_digest(&request.sha256)?;
     let pending = PendingObject::from_parts(
         upload_token,
@@ -944,6 +946,20 @@ fn parse_hex_digest(value: &str) -> Result<[u8; 32], ApiError> {
     Ok(digest)
 }
 
+fn validate_artifact_retention(retention_seconds: i64) -> Result<(), ApiError> {
+    if !(0..=MAX_OBJECT_RETENTION_SECONDS).contains(&retention_seconds) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "artifact_retention_out_of_range",
+            format!(
+                "artifact retention must be between zero and \
+                 {MAX_OBJECT_RETENTION_SECONDS} seconds"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn object_store_error(error: ObjectStoreError) -> ApiError {
     match error {
         ObjectStoreError::ObjectQuotaExceeded => ApiError::new(
@@ -1331,6 +1347,18 @@ mod tests {
         assert!(constant_time_eq(&[1, 2, 3], &[1, 2, 3]));
         assert!(!constant_time_eq(&[1, 2, 3], &[1, 2, 4]));
         assert!(!constant_time_eq(&[1, 2], &[1, 2, 0]));
+    }
+
+    #[test]
+    fn artifact_retention_is_bounded_before_publication_claim() {
+        for seconds in [0, MAX_OBJECT_RETENTION_SECONDS] {
+            validate_artifact_retention(seconds).expect("retention boundary accepted");
+        }
+        for seconds in [-1, MAX_OBJECT_RETENTION_SECONDS + 1, i64::MAX] {
+            let error = validate_artifact_retention(seconds).expect_err("retention rejected");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "artifact_retention_out_of_range");
+        }
     }
 
     #[test]

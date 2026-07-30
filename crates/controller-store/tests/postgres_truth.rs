@@ -4,10 +4,10 @@ use std::time::Duration;
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, DagDependency, DagNodeKind, DependencyCondition,
-    EffectClass, EffectStatus, JunitLimits, NewAuditEvent, NewBuild, NewCredentialGrant,
-    NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus,
-    ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
-    TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
+    EffectClass, EffectStatus, JunitLimits, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
+    NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
+    ObjectStatus, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
+    TerminalOutcome, TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -6413,6 +6413,37 @@ async fn tenant_audit_is_hash_chained_exportable_immutable_and_retained() {
     let (writer_result, reader_result) = tokio::join!(writer, reader);
     writer_result.expect("append while exports hold consistent snapshots");
     reader_result.expect("concurrent audit exports never mix chain versions");
+
+    let policy_store = store.clone();
+    let policy_writer = async move {
+        for index in 0..32 {
+            policy_store
+                .extend_audit_retention(organization_id, 10_001 + index)
+                .await?;
+            policy_store
+                .set_audit_legal_hold(organization_id, index % 2 == 0)
+                .await?;
+        }
+        Ok::<(), StoreError>(())
+    };
+    let policy_reader_store = store.clone();
+    let policy_reader = async move {
+        for _ in 0..32 {
+            policy_reader_store
+                .verify_audit_chain(organization_id)
+                .await?;
+        }
+        Ok::<(), StoreError>(())
+    };
+    let (policy_result, policy_export_result) =
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(policy_writer, policy_reader)
+        })
+        .await
+        .expect("audit policy writes and exports do not deadlock");
+    policy_result.expect("retention and legal-hold updates remain serializable");
+    policy_export_result.expect("exports remain consistent during policy changes");
+
     let retained = store
         .verify_audit_chain(organization_id)
         .await
@@ -6536,6 +6567,32 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
             .expect("accept artifact work")
     );
     let digest = [0x82; 32];
+    assert!(
+        !store
+            .register_artifact(
+                organization_id,
+                admission.build_id,
+                admission.node_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "artifact-agent",
+                "reports/overflow.xml",
+                digest,
+                4096,
+                "application/xml",
+                MAX_OBJECT_RETENTION_SECONDS + 1,
+            )
+            .await
+            .expect("reject retention overflow before database interval arithmetic")
+    );
+    assert!(
+        store
+            .build_artifacts(organization_id, project_id, admission.build_id)
+            .await
+            .expect("list artifacts after rejected retention")
+            .is_empty()
+    );
     assert!(
         store
             .register_artifact(

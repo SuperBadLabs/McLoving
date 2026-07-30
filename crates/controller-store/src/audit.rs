@@ -334,6 +334,10 @@ impl Store {
             ));
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        // Every audit writer takes the chain-head lock before any secondary
+        // audit row. Exporters already take the head before reading policy,
+        // so this single order cannot deadlock with concurrent exports.
+        lock_audit_head(&mut tx, organization_id).await?;
         let row = sqlx::query_as::<_, (i64, bool)>(
             "INSERT INTO audit_retention_policies (
                  organization_id, retain_until_unix_ms
@@ -374,6 +378,7 @@ impl Store {
         legal_hold: bool,
     ) -> Result<AuditRetentionPolicy, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        lock_audit_head(&mut tx, organization_id).await?;
         let row = sqlx::query_as::<_, (i64, bool)>(
             "INSERT INTO audit_retention_policies (
                  organization_id, retain_until_unix_ms, legal_hold
@@ -567,23 +572,7 @@ pub(crate) async fn append_audit_record(
         .bind(&payload)
         .fetch_one(&mut **tx)
         .await?;
-    sqlx::query(
-        "INSERT INTO audit_chain_heads (organization_id)
-         VALUES ($1)
-         ON CONFLICT (organization_id) DO NOTHING",
-    )
-    .bind(organization_id)
-    .execute(&mut **tx)
-    .await?;
-    let (sequence, previous_hash) = sqlx::query_as::<_, (i64, Vec<u8>)>(
-        "SELECT next_sequence, last_hash
-         FROM audit_chain_heads
-         WHERE organization_id = $1
-         FOR UPDATE",
-    )
-    .bind(organization_id)
-    .fetch_one(&mut **tx)
-    .await?;
+    let (sequence, previous_hash) = lock_audit_head(tx, organization_id).await?;
     let previous_hash = digest_array(&previous_hash)?;
     let event_id = Uuid::new_v4();
     let occurred_at_unix_ms = i64::try_from(
@@ -652,6 +641,29 @@ pub(crate) async fn append_audit_record(
         previous_hash,
         event_hash,
     })
+}
+
+async fn lock_audit_head(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+) -> Result<(i64, Vec<u8>), StoreError> {
+    sqlx::query(
+        "INSERT INTO audit_chain_heads (organization_id)
+         VALUES ($1)
+         ON CONFLICT (organization_id) DO NOTHING",
+    )
+    .bind(organization_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(sqlx::query_as::<_, (i64, Vec<u8>)>(
+        "SELECT next_sequence, last_hash
+         FROM audit_chain_heads
+         WHERE organization_id = $1
+         FOR UPDATE",
+    )
+    .bind(organization_id)
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 fn validate_event(event: &NewAuditEvent<'_>) -> Result<(), StoreError> {
