@@ -251,9 +251,29 @@ byId("approval-form").addEventListener("submit", (event) => {
   }));
 });
 
+async function loadAllAudit() {
+  const events = [];
+  let after = 0;
+  for (;;) {
+    const query = new URLSearchParams({
+      limit: "100",
+      after_sequence: String(after)
+    });
+    const page = await api(`/api/v1/organizations/${encodeURIComponent(context.organization)}/audit?${query}`);
+    events.push(...page.events);
+    if (page.next_after_sequence == null) {
+      return { ...page, events, next_after_sequence: null };
+    }
+    if (page.next_after_sequence <= after) {
+      throw new Error("audit cursor did not advance");
+    }
+    after = page.next_after_sequence;
+  }
+}
+
 byId("load-audit").addEventListener("click", () =>
   action(async () => {
-    const result = await api(`/api/v1/organizations/${encodeURIComponent(context.organization)}/audit?limit=100`);
+    const result = await loadAllAudit();
     byId("audit-output").textContent = pretty(result);
     return result;
   }));

@@ -156,6 +156,8 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(app_js.contains("if (!page.next_after) return"));
     assert!(app_js.contains("after_fence"));
     assert!(app_js.contains("entry.content_hex"));
+    assert!(app_js.contains("async function loadAllAudit()"));
+    assert!(app_js.contains("page.next_after_sequence"));
 }
 
 fn request(case: &RouteCase, token: Option<&str>) -> Request<Body> {

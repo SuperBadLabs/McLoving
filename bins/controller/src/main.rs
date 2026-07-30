@@ -159,8 +159,8 @@ fn parse_human_api_principals(
     value: &str,
     organization_id: Uuid,
 ) -> Result<Vec<(String, Principal)>> {
-    let mut subjects = BTreeSet::new();
-    let mut bindings = Vec::new();
+    let mut subject_tokens = BTreeMap::new();
+    let mut bindings = BTreeMap::<String, Principal>::new();
     for (index, line) in value.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -185,9 +185,6 @@ fn parse_human_api_principals(
                 index + 1
             );
         }
-        if !subjects.insert(subject.to_owned()) {
-            bail!("API principal subject {subject} appears more than once");
-        }
         let project_id = fields[2]
             .parse::<Uuid>()
             .with_context(|| format!("parse project UUID on API principal line {}", index + 1))?;
@@ -201,18 +198,30 @@ fn parse_human_api_principals(
                 index + 1
             ),
         };
-        bindings.push((
-            token.to_owned(),
-            Principal {
+        if let Some(bound_token) = subject_tokens.get(subject) {
+            if bound_token != token {
+                bail!("API principal subject {subject} is bound to multiple credentials");
+            }
+        } else {
+            subject_tokens.insert(subject.to_owned(), token.to_owned());
+        }
+        let principal = bindings
+            .entry(token.to_owned())
+            .or_insert_with(|| Principal {
                 subject: subject.to_owned(),
                 kind: PrincipalKind::Human,
                 organization_id,
-                project_roles: [(project_id, role)].into(),
+                project_roles: BTreeMap::new(),
                 service_scopes: BTreeSet::new(),
-            },
-        ));
+            });
+        if principal.subject != subject {
+            bail!("API credential is bound to multiple subjects");
+        }
+        if principal.project_roles.insert(project_id, role).is_some() {
+            bail!("API principal subject {subject} repeats project {project_id}");
+        }
     }
-    Ok(bindings)
+    Ok(bindings.into_iter().collect())
 }
 
 fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
@@ -1229,9 +1238,10 @@ mod tests {
     fn human_api_principal_file_binds_distinct_subject_and_project_role() {
         let organization_id = Uuid::new_v4();
         let project_id = Uuid::new_v4();
+        let second_project_id = Uuid::new_v4();
         let bindings = parse_human_api_principals(
             &format!(
-                "human-approval-token-that-is-32-bytes\talice@example.test\t{project_id}\tadmin\n"
+                "human-approval-token-that-is-32-bytes\talice@example.test\t{project_id}\tadmin\nhuman-approval-token-that-is-32-bytes\talice@example.test\t{second_project_id}\tviewer\n"
             ),
             organization_id,
         )
@@ -1244,6 +1254,10 @@ mod tests {
         assert_eq!(
             principal.project_roles.get(&project_id),
             Some(&ProjectRole::Admin)
+        );
+        assert_eq!(
+            principal.project_roles.get(&second_project_id),
+            Some(&ProjectRole::Viewer)
         );
         assert!(
             parse_human_api_principals(

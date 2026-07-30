@@ -602,7 +602,7 @@ fn openapi_document() -> Value {
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads/{upload_token}/commit": {
                 "parameters": [organization.clone(), project.clone(), build.clone(), upload],
                 "post": api_operation(
-                    "commitArtifact", "evidence", "Commit an exact fenced artifact upload", "200",
+                    "commitArtifact", "evidence", "Commit an exact fenced artifact upload", "201",
                     vec![header_parameter(ARTIFACT_AGENT_AUTHORIZATION_HEADER, true)],
                     Some("ArtifactCommitRequest")
                 )
@@ -1757,7 +1757,7 @@ fn parameter_schema(pipeline: &PipelineIr) -> Value {
 
 fn expected_revision(headers: &HeaderMap) -> Result<i64, ApiError> {
     let Some(value) = headers.get(header::IF_MATCH) else {
-        return Ok(0);
+        return Err(invalid_revision_precondition());
     };
     let value = value
         .to_str()
@@ -1777,7 +1777,7 @@ fn invalid_revision_precondition() -> ApiError {
     ApiError::new(
         StatusCode::BAD_REQUEST,
         "invalid_revision_precondition",
-        "If-Match must be a quoted non-negative pipeline revision",
+        "If-Match is required and must be a quoted non-negative pipeline revision",
     )
 }
 
@@ -3793,6 +3793,10 @@ mod tests {
             stage["requestBody"]["content"]["application/json"].is_null(),
             "artifact staging must not advertise JSON"
         );
+        let commit = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads/{upload_token}/commit"]
+            ["post"];
+        assert!(commit["responses"]["201"].is_object());
+        assert!(commit["responses"]["200"].is_null());
         let log_parameters = paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/logs"]
             ["get"]["parameters"]
             .as_array()
@@ -3827,6 +3831,18 @@ mod tests {
         ));
         assert_eq!(response.status, StatusCode::CONFLICT);
         assert_eq!(response.code, "product_conflict");
+    }
+
+    #[test]
+    fn pipeline_revision_precondition_is_explicit_and_strict() {
+        let headers = HeaderMap::new();
+        let missing = expected_revision(&headers).expect_err("missing If-Match must fail");
+        assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+        assert_eq!(missing.code, "invalid_revision_precondition");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_MATCH, HeaderValue::from_static("\"0\""));
+        assert_eq!(expected_revision(&headers).expect("parse revision zero"), 0);
     }
 
     #[test]
