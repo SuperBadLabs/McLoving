@@ -52,9 +52,24 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   every such effective path and its observed caller or source; `ADMIN-001` must
   migrate its semantics, authorization, idempotency/fencing, audit, failure,
   cutover, and rollback behavior or obtain explicit owner-approved retirement.
-  Before `MIG-008`, `MIG-009`, or decommissioning, prove the replacement
-  operation affects the authoritative execution exactly once, a stale Jenkins
-  shadow cannot accept it, and no residual Jenkins operational write remains.
+  During every `MIG-008` paired execution, only the authoritative control
+  endpoint may accept the external operation. `ADMIN-001` must atomically bind
+  that accepted operation to its mapped execution and logical event cursor and
+  emit one immutable signed replay receipt containing operation type, canonical
+  caller/decision identity, authorization decision, idempotency/fence, sequence
+  and timing, and either canonical public submitted values or
+  confidentiality-safe tainted secret references/digests without raw secret
+  material. A deny-authority replay adapter injects that receipt exactly once at
+  the corresponding shadow state-machine point; it carries no principal,
+  credential, connector, scheduling, or external run-control authority, and the
+  shadow cannot accept the original operation directly. Compare receipt
+  consumption, approval/input/cancel/retry behavior, audit provenance, terminal
+  outcome, and resulting effect intent. If secret-dependent semantics cannot be
+  reproduced from an approved protected reference or normalized surrogate
+  without disclosing the secret, the job is ineligible. Before `MIG-009` or
+  decommissioning, also prove the replacement operation affects the
+  authoritative execution exactly once, a non-authoritative runner accepts only
+  the bound replay receipt, and no residual Jenkins operational write remains.
 - `AUTHZ-001` must represent the effective Jenkins permission matrix with
   versioned action-scoped custom roles or grants when the built-in McLoving role
   lattice couples independent actions. Preserve separate view, trigger, cancel,
