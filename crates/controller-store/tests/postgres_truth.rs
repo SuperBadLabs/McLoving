@@ -6744,11 +6744,11 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
     .await
     .expect("expire the publishing lease after metadata reservation");
     assert!(
-        !store
+        store
             .artifact_publication_claim_active(organization_id, digest, 4096)
             .await
-            .expect("inspect abandoned publication claim"),
-        "an expired reservation must become reclaimable"
+            .expect("inspect recoverable publication claim"),
+        "an expired lease must not discard a claim that exact replay can recover"
     );
     assert!(
         store

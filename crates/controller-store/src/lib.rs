@@ -2772,7 +2772,7 @@ impl Store {
     }
 
     /// Reports whether an old filesystem publication claim still belongs to a
-    /// live, current-restore artifact reservation.
+    /// recoverable, current-restore artifact reservation.
     pub async fn artifact_publication_claim_active(
         &self,
         organization_id: Uuid,
@@ -2798,8 +2798,6 @@ impl Store {
                    AND a.restore_epoch = (
                        SELECT restore_epoch FROM controller_metadata WHERE singleton
                    )
-                   AND a.lease_expires_at > clock_timestamp()
-                   AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
              )",
         )
         .bind(organization_id)
