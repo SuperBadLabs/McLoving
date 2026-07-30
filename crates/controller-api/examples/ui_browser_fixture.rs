@@ -176,7 +176,7 @@ fn authorized(headers: &HeaderMap, value: Value) -> (StatusCode, Json<Value>) {
     } else {
         (
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error": {"code": "unauthorized", "message": "token required"}})),
+            Json(json!({"code": "unauthorized", "message": "token required"})),
         )
     }
 }

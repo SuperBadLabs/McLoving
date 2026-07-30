@@ -32,8 +32,14 @@ async function api(path, options = {}) {
   const type = response.headers.get("content-type") || "";
   const body = type.includes("json") ? await response.json() : await response.text();
   if (!response.ok) {
-    const code = body && body.code ? body.code : `http_${response.status}`;
-    throw new Error(`${code}: ${body.message || body}`);
+    const envelope = body && typeof body === "object" && body.error &&
+      typeof body.error === "object" ? body.error : body;
+    const code = envelope && typeof envelope.code === "string" ?
+      envelope.code : `http_${response.status}`;
+    const message = envelope && typeof envelope.message === "string" ?
+      envelope.message :
+      (typeof body === "string" && body ? body : `request failed with status ${response.status}`);
+    throw new Error(`${code}: ${message}`);
   }
   return body;
 }
