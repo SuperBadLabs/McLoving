@@ -77,9 +77,19 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   Issue the fenced effect grant only after that match succeeds. Any drift,
   missing identity, or partial comparison keeps the canary effect-free until
   recertification; post-effect detection cannot satisfy this gate.
-- In `MIG-006`, "no database, agent, scheduler, or controller authority" means
-  no production, staging, shared-service, or cross-fixture authority. The
-  Jenkins oracle and McLoving runner each receive a separate disposable,
+- Before the first `MIG-008` production effect grant and every later transfer
+  of effect authority, pause and verify Jenkins ingress for the affected job,
+  freeze new Jenkins scheduling and grants, then drain, revoke, or explicitly
+  reconcile all queued/running work, issued credentials/grants, leases, locks,
+  retries, and uncertain effects. Prove no prior Jenkins execution retains
+  effect authority before issuing McLoving's fenced canary grant; input receipt
+  matching alone cannot replace this quiescence.
+- In `MIG-006`, "no network or host mounts" means no external, host,
+  production, staging, shared-service, or cross-fixture network or mounts; the
+  private network contained wholly inside one disposable fixture is permitted.
+  "No secrets, database, agent, scheduler, or controller authority" means no
+  production, staging, shared-service, or cross-fixture authority or secrets.
+  The Jenkins oracle and McLoving runner each receive a separate disposable,
   exact-profile test stack containing only the controller, PostgreSQL or other
   required state store, scheduler, bounded agent pool, object store, and API
   endpoints needed for that side's declared scenarios. Use synthetic
