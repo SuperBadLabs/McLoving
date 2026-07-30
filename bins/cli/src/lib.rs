@@ -110,7 +110,7 @@ pub enum Command {
         #[arg(long, default_value_t = 900)]
         ttl_seconds: i32,
         #[arg(long)]
-        approval_id: Option<Uuid>,
+        approval_id: Uuid,
     },
     Approvals {
         build: Uuid,
@@ -310,7 +310,7 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
                     required_project(arguments.project)?,
                     *build,
                     &ApprovalRequest {
-                        approval_id: approval_id.unwrap_or_else(Uuid::new_v4),
+                        approval_id: *approval_id,
                         environment: environment.clone(),
                         action: action.clone(),
                         ttl_seconds: *ttl_seconds,
@@ -487,7 +487,7 @@ async fn watch(
                 }));
             }
         };
-        let terminal = terminal_status(&status.status) || terminal_status(&status.attempt_status);
+        let terminal = terminal_status(&status.status);
         last_status = Some(to_value(status)?);
         match client
             .logs_page(
@@ -500,9 +500,14 @@ async fn watch(
             .await
         {
             Ok(page) => {
+                let latest = page.items.last().map(|item| LogCursor {
+                    attempt_id: item.attempt_id,
+                    sequence: item.sequence,
+                    stream: item.stream.clone(),
+                });
                 logs.extend(page.items);
-                if page.next_after.is_some() {
-                    after = page.next_after;
+                if let Some(cursor) = page.next_after.or(latest) {
+                    after = Some(cursor);
                 }
             }
             Err(error) => {
@@ -647,6 +652,39 @@ mod tests {
         assert!(matches!(
             args.command,
             Command::Completions { shell: Shell::Bash }
+        ));
+    }
+
+    #[test]
+    fn approval_requires_a_caller_stable_id() {
+        let common = [
+            "mcloving",
+            "--server",
+            "https://controller.example",
+            "--token",
+            "secret",
+            "--organization",
+            "00000000-0000-0000-0000-000000000000",
+            "--project",
+            "00000000-0000-0000-0000-000000000001",
+            "approve",
+            "00000000-0000-0000-0000-000000000002",
+            "--environment",
+            "production",
+            "--action",
+            "deploy",
+        ];
+        assert!(Arguments::try_parse_from(common).is_err());
+
+        let mut with_id = common.to_vec();
+        with_id.extend(["--approval-id", "00000000-0000-0000-0000-000000000003"]);
+        let args = Arguments::try_parse_from(with_id).expect("stable approval ID");
+        assert!(matches!(
+            args.command,
+            Command::Approve {
+                approval_id,
+                ..
+            } if approval_id == Uuid::from_u128(3)
         ));
     }
 }

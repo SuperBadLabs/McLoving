@@ -90,6 +90,9 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
     assert_eq!(watched["state"], "terminal");
     assert_eq!(watched["polls"], 2);
     assert_eq!(watched["logs"].as_array().unwrap().len(), 2);
+    assert_eq!(watched["resume_after"]["attempt_id"], attempt.to_string());
+    assert_eq!(watched["resume_after"]["sequence"], 2);
+    assert_eq!(watched["resume_after"]["stream"], "stdout");
     assert_eq!(polls.load(Ordering::SeqCst), 2);
 
     tokio::fs::remove_file(pipeline).await.unwrap();
@@ -117,7 +120,7 @@ async fn status(State(state): State<MockState>, headers: HeaderMap) -> Json<Valu
         "node_id": Uuid::nil(),
         "attempt_id": state.attempt,
         "status": if terminal { "succeeded" } else { "running" },
-        "attempt_status": if terminal { "succeeded" } else { "running" },
+        "attempt_status": "succeeded",
         "fence": 1,
         "lease_owner": null,
         "cancellation_requested": false,
@@ -137,11 +140,7 @@ async fn logs(State(state): State<MockState>, headers: HeaderMap) -> Json<Value>
             "text": format!("line-{sequence}"),
             "sha256": "00".repeat(32),
         }],
-        "next_after": {
-            "attempt_id": state.attempt,
-            "sequence": sequence,
-            "stream": "stdout",
-        },
+        "next_after": null,
     }))
 }
 

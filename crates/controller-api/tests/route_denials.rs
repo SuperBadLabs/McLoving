@@ -139,6 +139,7 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(html.contains("<nav aria-label=\"Product journeys\">"));
     assert!(html.contains("role=\"status\""));
     assert!(html.contains("<script src=\"/app.js\" defer></script>"));
+    assert!(html.contains("<option value=\"aborted\">cancelled</option>"));
     assert!(!html.contains("<style"));
     assert_eq!(html.matches("<script").count(), 1);
 }

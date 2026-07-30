@@ -352,6 +352,7 @@ fn openapi_document() -> Value {
     ];
     let component_page = vec![
         query_parameter("limit", "integer"),
+        query_parameter("after", "string"),
         query_parameter("after_digest", "sha256"),
     ];
     json!({
@@ -3411,6 +3412,18 @@ mod tests {
             })
             .sum::<usize>();
         assert_eq!(documented_methods, expected.len());
+
+        let component_parameters = paths
+            ["/api/v1/organizations/{organization_id}/projects/{project_id}/components"]["get"]
+            ["parameters"]
+            .as_array()
+            .expect("component-list query parameters");
+        let component_parameter_names = component_parameters
+            .iter()
+            .filter_map(|parameter| parameter["name"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(component_parameter_names.contains("after"));
+        assert!(component_parameter_names.contains("after_digest"));
     }
 
     #[test]
