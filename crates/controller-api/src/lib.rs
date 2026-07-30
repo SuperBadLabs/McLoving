@@ -512,10 +512,7 @@ fn openapi_document() -> Value {
                     "getComponent", "components", "Read one immutable component", "200",
                     Vec::new(), None
                 ),
-                "put": api_operation(
-                    "putComponent", "components", "Publish an immutable component", "200",
-                    Vec::new(), Some("ComponentUpsertRequest")
-                )
+                "put": put_component_operation()
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds": {
                 "parameters": [organization.clone(), project.clone()],
@@ -814,6 +811,22 @@ fn create_approval_operation() -> Value {
     );
     operation["responses"]["200"] = json!({
         "description": "Idempotent replay of an active approval",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation
+}
+
+fn put_component_operation() -> Value {
+    let mut operation = api_operation(
+        "putComponent",
+        "components",
+        "Publish an immutable component",
+        "201",
+        Vec::new(),
+        Some("ComponentUpsertRequest"),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Idempotent replay of an existing component",
         "content": {"application/json": {"schema": {"type": "object"}}}
     });
     operation
@@ -3860,6 +3873,10 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(component_parameter_names.contains("after"));
         assert!(component_parameter_names.contains("after_digest"));
+        let component = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/components/{digest}"]
+            ["put"];
+        assert!(component["responses"]["200"].is_object());
+        assert!(component["responses"]["201"].is_object());
 
         let submission =
             &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds"]["post"];

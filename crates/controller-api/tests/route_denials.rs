@@ -145,13 +145,20 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert_eq!(html.matches("<script").count(), 1);
     let app_js = include_str!("../ui/app.js");
     assert!(app_js.contains("byId(\"approval-id\").value = newUuid()"));
-    assert!(app_js.contains("approval_id: byId(\"approval-id\").value.trim()"));
+    assert!(app_js.contains("const approvalId = byId(\"approval-id\").value.trim()"));
+    assert!(app_js.contains("approval_id: approvalId"));
     assert_eq!(
         app_js.matches("crypto.randomUUID()").count(),
         1,
         "one logical approval ID must survive uncertain retries"
     );
+    assert!(
+        app_js.contains("if (result.created === true) byId(\"approval-id\").value = newUuid()")
+    );
     assert!(app_js.contains("crypto.getRandomValues(new Uint8Array(16))"));
+    assert!(app_js.contains("async function loadAllBuilds(status)"));
+    assert!(app_js.contains("after_created_micros"));
+    assert!(app_js.contains("build pagination cursor did not advance"));
     assert!(app_js.contains("async function loadAllLogs(base)"));
     assert!(app_js.contains("if (!page.next_after) return"));
     assert!(app_js.contains("after_fence"));

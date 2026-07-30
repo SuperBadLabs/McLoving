@@ -85,13 +85,35 @@ function showView(name) {
   byId(`${name}-view`).classList.remove("hidden");
 }
 
+function buildPageQuery(status, cursor) {
+  const query = new URLSearchParams({ limit: "100" });
+  if (status) query.set("status", status);
+  if (cursor) {
+    query.set("after_created_micros", String(cursor.created_at_unix_micros));
+    query.set("after_id", cursor.build_id);
+  }
+  return query;
+}
+
+async function loadAllBuilds(status) {
+  const items = [];
+  let cursor = null;
+  for (;;) {
+    const page = await api(`${projectPath()}/builds?${buildPageQuery(status, cursor)}`);
+    items.push(...(page.items || []));
+    if (!page.next_after) return items;
+    if (cursor && pretty(page.next_after) === pretty(cursor)) {
+      throw new Error("build pagination cursor did not advance");
+    }
+    cursor = page.next_after;
+  }
+}
+
 async function refreshBuilds() {
-  const status = byId("build-status").value;
-  const query = status ? `?status=${encodeURIComponent(status)}&limit=100` : "?limit=100";
-  const page = await api(`${projectPath()}/builds${query}`);
+  const builds = await loadAllBuilds(byId("build-status").value);
   const body = byId("build-list");
   body.replaceChildren();
-  for (const build of page.items || []) {
+  for (const build of builds) {
     const row = document.createElement("tr");
     const id = document.createElement("td");
     id.textContent = build.build_id;
@@ -111,7 +133,7 @@ async function refreshBuilds() {
     row.append(id, state, created, open);
     body.append(row);
   }
-  return page;
+  return { items: builds, next_after: null };
 }
 
 function logCursorQuery(cursor) {
@@ -240,15 +262,20 @@ byId("toggle-live").addEventListener("click", () => {
 });
 byId("approval-form").addEventListener("submit", (event) => {
   event.preventDefault();
-  action(() => api(`${buildPath()}/approvals`, {
-    method: "POST",
-    body: pretty({
-      approval_id: byId("approval-id").value.trim(),
-      environment: byId("approval-environment").value,
-      action: byId("approval-action").value,
-      ttl_seconds: Number(byId("approval-ttl").value)
-    })
-  }));
+  const approvalId = byId("approval-id").value.trim();
+  action(async () => {
+    const result = await api(`${buildPath()}/approvals`, {
+      method: "POST",
+      body: pretty({
+        approval_id: approvalId,
+        environment: byId("approval-environment").value,
+        action: byId("approval-action").value,
+        ttl_seconds: Number(byId("approval-ttl").value)
+      })
+    });
+    if (result.created === true) byId("approval-id").value = newUuid();
+    return result;
+  });
 });
 
 async function loadAllAudit() {
