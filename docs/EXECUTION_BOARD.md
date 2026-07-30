@@ -35,6 +35,15 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   enclosing folder/controller configuration. Each affected caller must first pass
   `CONSUMER-001` or `ADMIN-001`, respectively, or have explicit owner-approved
   retirement, with tested caller cutover and rollback evidence.
+- Every reference to an administrative writer in `MIG-000`, `ADMIN-001`,
+  canary/cutover gates, and decommissioning includes every effective Jenkins
+  write path regardless of authentication mode: named clients, service
+  identities, anonymous/public principals, unauthenticated endpoints, legacy
+  tokens, seed execution, CLI, and direct/plugin APIs. Inventory caller or
+  observed source, endpoint/action, authorization behavior, scope, owner, and
+  use; migrate it to an authenticated least-authority McLoving path or obtain
+  explicit owner-approved retirement. Prove anonymous/unauthenticated write
+  denial in the replacement and zero residual Jenkins writes.
 - The `MIG-009` atomic cutover freeze must re-read and match each deployed
   replacement trigger's implementation digest in addition to its class and
   configuration, and each deployed Multibranch Pipeline or Organization Folder
