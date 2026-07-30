@@ -2816,7 +2816,14 @@ impl Store {
                AND o.object_digest = $7
                AND o.bytes = $8
                AND o.media_type = $9
-               AND NOT mcloving_object_deletion_claim_exists(o.object_digest)
+               AND mcloving_owned_object_publication_allowed(
+                     o.organization_id,
+                     o.attempt_id,
+                     o.fence,
+                     o.kind,
+                     o.name,
+                     o.object_digest
+                   )
              FOR UPDATE OF o",
         )
         .bind(organization_id)
@@ -2960,6 +2967,9 @@ impl Store {
         status: ObjectStatus,
     ) -> Result<bool, StoreError> {
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if status == ObjectStatus::Available {
+            acquire_object_deletion_fence(&mut tx, &digest).await?;
+        }
         let updated = sqlx::query_scalar::<_, String>(
             "UPDATE attempt_objects
              SET status = $7, checked_at = clock_timestamp()
@@ -2969,6 +2979,17 @@ impl Store {
                AND kind = $4
                AND name = $5
                AND object_digest = $6
+               AND (
+                 $7 <> 'available'
+                 OR mcloving_owned_object_publication_allowed(
+                      organization_id,
+                      attempt_id,
+                      fence,
+                      kind,
+                      name,
+                      object_digest
+                    )
+               )
              RETURNING name",
         )
         .bind(organization_id)

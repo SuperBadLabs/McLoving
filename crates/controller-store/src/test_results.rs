@@ -315,12 +315,10 @@ pub fn parse_junit(
                     ));
                 }
             }
-            Event::CData(text) if depth == 0 => {
-                if text.as_ref().iter().any(|byte| !byte.is_ascii_whitespace()) {
-                    return Err(TestResultError::Malformed(
-                        "character data outside the document element".to_owned(),
-                    ));
-                }
+            Event::CData(_) if depth == 0 => {
+                return Err(TestResultError::Malformed(
+                    "CDATA outside the document element".to_owned(),
+                ));
             }
             Event::GeneralRef(_) if depth == 0 => {
                 return Err(TestResultError::Malformed(
@@ -1302,6 +1300,8 @@ mod tests {
             b"garbage<testsuite/>".as_slice(),
             b"<testsuite/>garbage".as_slice(),
             b"<![CDATA[garbage]]><testsuite/>".as_slice(),
+            b"<![CDATA[ ]]><testsuite/>".as_slice(),
+            b"<testsuite/><![CDATA[\n]]>".as_slice(),
             b"<testsuite/>&amp;".as_slice(),
         ] {
             assert!(matches!(

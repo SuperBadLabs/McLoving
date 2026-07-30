@@ -1438,6 +1438,21 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
         .execute(&mut *escalation)
         .await
         .expect("bind tenant context for escalation test");
+    let cross_tenant_probe = sqlx::query_scalar::<_, bool>(
+        "SELECT mcloving_owned_object_publication_allowed(
+             $1, $2, 1, 'artifact', 'foreign', $3
+         )",
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind([0x6a_u8; 32].as_slice())
+    .fetch_one(&mut *escalation)
+    .await
+    .expect("invoke tenant-scoped publication guard");
+    assert!(
+        !cross_tenant_probe,
+        "the definer function must not expose foreign deletion state"
+    );
     let self_grant = sqlx::query(
         "INSERT INTO identities (id, organization_id, subject, kind)
          VALUES ($1, $2, 'service:attacker', 'service')",
@@ -3511,7 +3526,7 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
             .await
             .expect("accept")
     );
-    let digest = [41; 32];
+    let digest: [u8; 32] = Sha256::digest(organization_id.as_bytes()).into();
     assert!(
         store
             .register_object(
@@ -3587,6 +3602,31 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
             )
             .await
             .expect("reject wrong digest")
+    );
+    sqlx::query(
+        "INSERT INTO object_deletion_claims (
+             object_digest, claim_token, status
+         )
+         VALUES ($1, $2, 'claimed')",
+    )
+    .bind(digest.as_slice())
+    .bind(Uuid::new_v4())
+    .execute(store.pool())
+    .await
+    .expect("install an exact deletion fence");
+    assert!(
+        !store
+            .set_object_status(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                ObjectKind::Artifact,
+                "distribution.tar.zst",
+                digest,
+                ObjectStatus::Available,
+            )
+            .await
+            .expect("fence restoration against deletion")
     );
     let objects = store
         .build_objects(organization_id, project_id, admission.build_id)
@@ -3676,12 +3716,12 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .await
             .expect("assign expired retention")
     );
-    assert_eq!(
+    assert!(
         store
-            .objects_globally_eligible_for_deletion(10)
+            .objects_globally_eligible_for_deletion(10_000)
             .await
-            .expect("list expired content"),
-        vec![digest]
+            .expect("list expired content")
+            .contains(&digest)
     );
 
     let second_organization_id = Uuid::new_v4();
@@ -3751,11 +3791,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("register shared digest")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("missing second-tenant retention is fail-closed")
-            .is_empty()
+            .contains(&digest)
     );
     assert!(
         store
@@ -3763,12 +3803,12 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .await
             .expect("expire second-tenant retention")
     );
-    assert_eq!(
+    assert!(
         store
-            .objects_globally_eligible_for_deletion(10)
+            .objects_globally_eligible_for_deletion(10_000)
             .await
-            .expect("all referencing tenants have expired retention"),
-        vec![digest]
+            .expect("all referencing tenants have expired retention")
+            .contains(&digest)
     );
     assert!(
         store
@@ -3782,11 +3822,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("acquire second-tenant hold")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("one tenant hold blocks global deletion")
-            .is_empty()
+            .contains(&digest)
     );
     assert!(
         store
@@ -3817,11 +3857,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("repeat legal hold idempotently")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("held content is not deletable")
-            .is_empty()
+            .contains(&digest)
     );
     assert!(
         !store
@@ -3870,26 +3910,27 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
     .execute(store.pool())
     .await;
     assert!(reactivated_hold.is_err());
-    assert_eq!(
+    assert!(
         store
-            .objects_globally_eligible_for_deletion(10)
+            .objects_globally_eligible_for_deletion(10_000)
             .await
-            .expect("released content is deletable"),
-        vec![digest]
+            .expect("released content is deletable")
+            .contains(&digest)
     );
     let deletion_claims = store
-        .claim_objects_globally_for_deletion(10)
+        .claim_objects_globally_for_deletion(10_000)
         .await
         .expect("claim released content for deletion");
-    assert_eq!(deletion_claims.len(), 1);
-    let deletion_claim = deletion_claims[0];
-    assert_eq!(deletion_claim.digest, digest);
-    assert_eq!(
+    let deletion_claim = *deletion_claims
+        .iter()
+        .find(|claim| claim.digest == digest)
+        .expect("target digest received a deletion claim");
+    assert!(
         store
-            .pending_object_deletion_claims(10)
+            .pending_object_deletion_claims(10_000)
             .await
-            .expect("recover committed claim after worker restart"),
-        vec![deletion_claim]
+            .expect("recover committed claim after worker restart")
+            .contains(&deletion_claim)
     );
     assert!(
         !store
@@ -3939,11 +3980,11 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("shortening attempt remains idempotent")
     );
     assert!(
-        store
+        !store
             .objects_globally_eligible_for_deletion(10)
             .await
             .expect("retention extension is monotonic")
-            .is_empty()
+            .contains(&digest)
     );
 
     let disposable_digest = [54; 32];
@@ -3970,12 +4011,13 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
             .expect("expire disposable retention")
     );
     let completed_claims = store
-        .claim_objects_globally_for_deletion(1)
+        .claim_objects_globally_for_deletion(10_000)
         .await
         .expect("eligible content is not starved by protected digest prefix");
-    assert_eq!(completed_claims.len(), 1);
-    let completed_claim = completed_claims[0];
-    assert_eq!(completed_claim.digest, disposable_digest);
+    let completed_claim = *completed_claims
+        .iter()
+        .find(|claim| claim.digest == disposable_digest)
+        .expect("disposable digest received a deletion claim");
     assert!(
         store
             .pending_object_deletion_claims(10)

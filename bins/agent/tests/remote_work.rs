@@ -87,6 +87,7 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .env("MCLOVING_POLL_MILLISECONDS", "10")
         .env("MCLOVING_CANCELLATION_POLL_MILLISECONDS", "50")
         .env("MCLOVING_TERMINATION_GRACE_MILLISECONDS", "100")
+        .env("MCLOVING_TEST_DROP_START_RESPONSE_ONCE", "1")
         .env("MCLOVING_SESSION_EPOCH", "1")
         .env(
             "MCLOVING_WORKSPACE_ROOT",

@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(debug_assertions)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -139,6 +141,8 @@ fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
 struct ControllerAgentService {
     store: Store,
     identities: Arc<AgentIdentityBindings>,
+    #[cfg(debug_assertions)]
+    drop_start_response_once: Arc<AtomicBool>,
 }
 
 #[tonic::async_trait]
@@ -519,6 +523,12 @@ impl AgentControl for ControllerAgentService {
             )
             .await
             .map_err(internal_store_error)?;
+        #[cfg(debug_assertions)]
+        if accepted && self.drop_start_response_once.swap(false, Ordering::SeqCst) {
+            return Err(Status::unavailable(
+                "test-only injected start acknowledgement loss",
+            ));
+        }
         Ok(Response::new(WorkReceipt {
             session_epoch: authority.session_epoch,
             accepted,
@@ -861,6 +871,10 @@ async fn run_agent_control_server(store: Store) -> Result<()> {
     let service = ControllerAgentService {
         store,
         identities: Arc::new(identities),
+        #[cfg(debug_assertions)]
+        drop_start_response_once: Arc::new(AtomicBool::new(
+            std::env::var_os("MCLOVING_TEST_DROP_START_RESPONSE_ONCE").is_some(),
+        )),
     };
     Server::builder()
         .tls_config(tls)
