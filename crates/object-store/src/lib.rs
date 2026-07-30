@@ -494,17 +494,16 @@ impl FilesystemObjectStore {
         Ok(removed)
     }
 
-    /// Lists a bounded set of old crash-recoverable publication claims.
+    /// Lists a bounded set of old crash-recoverable publication claims across
+    /// all namespaces sharing this store.
     ///
     /// Listing never mutates storage. The controller must independently prove
     /// that no live database reservation owns each claim before releasing it.
     pub fn publication_claims_older_than(
         &self,
-        namespace: &str,
         minimum_age: Duration,
         limit: usize,
     ) -> Result<Vec<PendingObject>, ObjectStoreError> {
-        validate_namespace(namespace)?;
         if limit == 0 || limit > MAX_PUBLICATION_CLAIM_SCAN {
             return Err(ObjectStoreError::InvalidPublicationClaimScan);
         }
@@ -539,9 +538,6 @@ impl FilesystemObjectStore {
             else {
                 continue;
             };
-            if !token.starts_with(&format!("{namespace}-")) {
-                continue;
-            }
             validate_pending_token(token)?;
             claims.push(PendingObject {
                 token: token.to_owned(),
@@ -1085,23 +1081,30 @@ mod tests {
             .unwrap()
             .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
             .unwrap();
-
-        assert!(
-            store
-                .publication_claims_older_than("tenant-b", Duration::from_secs(1), 8)
-                .unwrap()
-                .is_empty(),
-            "tenant scans must not inspect another namespace"
-        );
-        let candidates = store
-            .publication_claims_older_than("tenant-a", Duration::from_secs(1), 8)
+        let other = store
+            .stage_artifact("tenant-b", b"other-claim")
+            .unwrap()
+            .persist()
             .unwrap();
-        assert_eq!(candidates, vec![claimed.clone()]);
+        let other_claim = store.claim_pending(&other).unwrap();
+        File::options()
+            .write(true)
+            .open(store.claimed_path(other.token()))
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(SystemTime::UNIX_EPOCH))
+            .unwrap();
+
+        let candidates = store
+            .publication_claims_older_than(Duration::from_secs(1), 8)
+            .unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.contains(&claimed));
+        assert!(candidates.contains(&other_claim));
 
         store.claim_pending(&pending).unwrap();
         assert!(
             !store
-                .release_publication_claim(&candidates[0], Duration::from_secs(1))
+                .release_publication_claim(&claimed, Duration::from_secs(1))
                 .unwrap(),
             "an exact retry refreshes the claim under the quota lock"
         );
@@ -1114,7 +1117,7 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .release_publication_claim(&candidates[0], Duration::from_secs(1))
+                .release_publication_claim(&claimed, Duration::from_secs(1))
                 .unwrap()
         );
         assert_eq!(store.verify_pending(&pending).unwrap(), pending.reference);

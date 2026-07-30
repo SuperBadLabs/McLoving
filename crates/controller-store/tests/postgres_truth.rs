@@ -6815,6 +6815,35 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
             .expect("inspect recoverable publication claim"),
         "an expired lease must not discard a claim that exact replay can recover"
     );
+    sqlx::query(
+        "UPDATE attempts
+         SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("revoke the expired publication authority");
+    assert!(
+        !store
+            .artifact_publication_claim_active(organization_id, digest, 4096)
+            .await
+            .expect("inspect revoked publication claim"),
+        "a scheduler-revoked attempt must release its abandoned claim"
+    );
+    sqlx::query(
+        "UPDATE attempts
+         SET status = 'finalizing',
+             lease_owner = 'artifact-agent',
+             lease_expires_at = clock_timestamp() - interval '1 second'
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(claim.attempt_id)
+    .execute(store.pool())
+    .await
+    .expect("restore exact expired finalization authority");
     assert!(
         store
             .register_artifact(
