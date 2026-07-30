@@ -2,7 +2,8 @@
 
 const context = { organization: "", project: "", token: "" };
 let liveTimer = null;
-let loadBuildInFlight = null;
+let loadBuildQueue = Promise.resolve();
+const pendingBuildLoads = new Map();
 const liveLogState = { base: "", cursor: null, items: [] };
 
 const byId = (id) => document.getElementById(id);
@@ -190,12 +191,14 @@ function displayLog(entry) {
   return `[${entry.stream}] ${content}`;
 }
 
-async function loadBuildOnce() {
-  const base = buildPath();
+async function loadBuildOnce(base) {
   const [status, graph, logs, tests, artifacts, approvals] = await Promise.all([
     api(base), api(`${base}/graph`), loadAllLogs(base),
     api(`${base}/tests`), api(`${base}/artifacts`), api(`${base}/approvals`)
   ]);
+  if (base !== buildPath()) {
+    return { status, graph, logs: logs.items?.length || 0, tests, artifacts, approvals, stale: true };
+  }
   byId("build-summary").textContent = pretty(status);
   byId("build-graph").textContent = pretty(graph);
   byId("build-logs").textContent = (logs.items || []).map(displayLog).join("\n");
@@ -206,14 +209,18 @@ async function loadBuildOnce() {
 }
 
 async function loadBuild() {
-  if (loadBuildInFlight) return loadBuildInFlight;
-  const operation = loadBuildOnce();
-  loadBuildInFlight = operation;
-  try {
-    return await operation;
-  } finally {
-    if (loadBuildInFlight === operation) loadBuildInFlight = null;
-  }
+  const base = buildPath();
+  const pending = pendingBuildLoads.get(base);
+  if (pending) return pending;
+  const operation = loadBuildQueue
+    .catch(() => undefined)
+    .then(() => loadBuildOnce(base));
+  const tracked = operation.finally(() => {
+    if (pendingBuildLoads.get(base) === tracked) pendingBuildLoads.delete(base);
+  });
+  loadBuildQueue = tracked;
+  pendingBuildLoads.set(base, tracked);
+  return tracked;
 }
 
 function renderArtifacts(artifacts) {

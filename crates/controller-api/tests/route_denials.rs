@@ -142,6 +142,8 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(html.contains("<option value=\"aborted\">cancelled</option>"));
     assert!(html.contains("<input id=\"approval-id\" required"));
     assert!(html.contains("<input id=\"idempotency-key\" required>"));
+    assert!(html.contains("stages:\n  - id: hello"));
+    assert!(!html.contains("stages: []"));
     assert!(!html.contains("browser-submit"));
     assert!(!html.contains("<style"));
     assert_eq!(html.matches("<script").count(), 1);
@@ -168,9 +170,11 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(app_js.contains("const liveLogState = { base: \"\", cursor: null, items: [] }"));
     assert!(app_js.contains("let cursor = liveLogState.cursor"));
     assert!(app_js.contains("liveLogState.cursor = cursorFromLog"));
-    assert!(app_js.contains("let loadBuildInFlight = null"));
-    assert!(app_js.contains("if (loadBuildInFlight) return loadBuildInFlight"));
-    assert!(app_js.contains("if (loadBuildInFlight === operation) loadBuildInFlight = null"));
+    assert!(app_js.contains("let loadBuildQueue = Promise.resolve()"));
+    assert!(app_js.contains("const pendingBuildLoads = new Map()"));
+    assert!(app_js.contains("const pending = pendingBuildLoads.get(base)"));
+    assert!(app_js.contains(".then(() => loadBuildOnce(base))"));
+    assert!(app_js.contains("if (base !== buildPath())"));
     assert!(app_js.contains("if (!page.next_after) return"));
     assert!(app_js.contains("after_fence"));
     assert!(app_js.contains("entry.content_hex"));

@@ -229,11 +229,28 @@ impl Store {
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
-                "mcloving.pipeline.{}.{}.{}",
-                input.organization_id, input.project_id, input.pipeline_id
+                "mcloving.pipeline.{}.{}",
+                input.organization_id, input.pipeline_id
             ))
             .execute(&mut *tx)
             .await?;
+        let existing_project = sqlx::query_scalar::<_, Uuid>(
+            "SELECT project_id
+             FROM pipeline_definitions
+             WHERE organization_id = $1
+               AND pipeline_id = $2",
+        )
+        .bind(input.organization_id)
+        .bind(input.pipeline_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if existing_project.is_some_and(|project_id| project_id != input.project_id) {
+            tx.rollback().await?;
+            return Err(StoreError::ProductConflict(format!(
+                "pipeline id '{}' is already in use in another project",
+                input.pipeline_id
+            )));
+        }
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
             .bind(format!(
                 "mcloving.pipeline.slug.{}.{}.{}",

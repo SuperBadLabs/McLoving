@@ -1419,6 +1419,20 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
         .await
         .expect("bootstrap through privileged connection");
     let store = unprivileged_store(&admin).await;
+    let can_use_log_cursor_sequence = sqlx::query_scalar::<_, bool>(
+        "SELECT has_sequence_privilege(
+             'mcloving_tenant',
+             'attempt_log_chunks_cursor_id_seq',
+             'USAGE'
+         )",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("inspect log cursor sequence privilege");
+    assert!(
+        can_use_log_cursor_sequence,
+        "runtime role must be able to allocate globally ordered log cursors"
+    );
     let can_mutate_grants = sqlx::query_scalar::<_, bool>(
         "SELECT
            has_table_privilege('mcloving_tenant', 'identities', 'INSERT')
@@ -7764,6 +7778,28 @@ async fn product_catalogs_are_versioned_immutable_paginated_and_tenant_scoped() 
         panic!("first pipeline write must create");
     };
     assert_eq!(created.revision, 1);
+    let other_project_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO projects (id, organization_id, slug)
+         VALUES ($1, $2, 'other-product-catalog')",
+    )
+    .bind(other_project_id)
+    .bind(organization_id)
+    .execute(admin.pool())
+    .await
+    .expect("create second product catalog project");
+    let cross_project_id_reuse = PipelineWrite {
+        project_id: other_project_id,
+        slug: "cross-project-id-reuse".to_owned(),
+        ..pipeline.clone()
+    };
+    let conflict = store
+        .put_pipeline(&cross_project_id_reuse, Some(0))
+        .await
+        .expect_err("reject an organization-wide pipeline id collision");
+    assert!(matches!(conflict, StoreError::ProductConflict(message)
+            if message.contains(&pipeline_id.to_string())
+                && message.contains("another project")));
     let mut conflicting_pipeline = pipeline.clone();
     conflicting_pipeline.pipeline_id = Uuid::new_v4();
     conflicting_pipeline.source_sha256 = [0x23; 32];

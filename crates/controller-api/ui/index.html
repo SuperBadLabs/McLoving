@@ -63,7 +63,13 @@
         <label>Pipeline source
           <textarea id="pipeline-source" rows="14" required>version: 1
 name: hello
-stages: []</textarea>
+stages:
+  - id: hello
+    name: Hello
+    steps:
+      - process:
+          program: echo
+          args: [hello]</textarea>
         </label>
         <label>Parameters (JSON object)
           <textarea id="pipeline-parameters" rows="3">{}</textarea>

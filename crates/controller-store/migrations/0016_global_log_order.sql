@@ -6,3 +6,5 @@ ALTER TABLE attempt_log_chunks
 
 CREATE INDEX attempt_log_chunks_tenant_cursor_idx
     ON attempt_log_chunks (organization_id, cursor_id);
+
+GRANT USAGE, SELECT ON SEQUENCE attempt_log_chunks_cursor_id_seq TO mcloving_tenant;
