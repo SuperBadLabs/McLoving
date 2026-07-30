@@ -2907,6 +2907,7 @@ impl Store {
                    AND a.restore_epoch = (
                        SELECT restore_epoch FROM controller_metadata WHERE singleton
                    )
+                   AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')
                    AND a.lease_owner IS NOT NULL
              )",
         )
