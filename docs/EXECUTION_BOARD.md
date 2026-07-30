@@ -84,6 +84,41 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   digest for every eligible agent target. Missing, changed, newly effective, or
   secret-bearing unredacted properties invalidate certification and block
   authority transfer until recertified.
+- Every in-scope job must also bind its complete enclosing regular-folder chain,
+  not only Organization Folder or job configuration. `MIG-000` must inventory
+  each ancestor's identity, configuration digest, property source and
+  resolution order, including inherited environment, tools, shared libraries,
+  credential references without secret material, authorization, and
+  plugin-defined properties. `MIG-002` and `MIG-006` must bind and certify the
+  resulting effective values and precedence. The `MIG-008` pre-effect and
+  `MIG-009` cutover freezes must re-read every ancestor and the effective
+  property-set digest; any changed, inserted, removed, newly effective, or
+  unredacted secret-bearing property invalidates certification.
+- A completed `MIG-000` export is a versioned inventory epoch, not permanent
+  proof of population completeness. Before every `MIG-008` production effect
+  grant, `MIG-009` authority transfer or rollback, and Jenkins decommissioning
+  action, quiesce mutations to the affected scope and reconcile a fresh live
+  export against the latest signed epoch. Reconcile all jobs and parent chains,
+  triggers and pending deliveries, readers, configuration and run-control
+  writers, identities/authorization, agents/properties, runtime dependencies,
+  state, retention/holds, and external effects; bind the live export and
+  population-delta digests into the transition receipt. A new, changed,
+  deleted, or previously unobserved object or caller must complete its required
+  inventory, classification, migration, certification, cutover/retirement, and
+  rollback gates before the transition; absence from the old inventory never
+  implies eligibility. Decommissioning requires zero unreconciled objects or
+  clients across the entire retiring scope and endpoint.
+- Jobs that read wall-clock or calendar time through conditions, shell/process
+  commands, language APIs, timestamps, or plugins must inventory each clock
+  source, timezone, locale calendar, tzdata/runtime version, and allowed skew.
+  `MIG-002` must define deterministic controlled-clock cases for relevant
+  boundaries, including DST gaps/folds, date rollover, leap-day, skew, and
+  restart; `MIG-006` must run both oracles against the same receipt-bound virtual
+  clock and compare all time-derived arguments, state, logs, artifacts, and
+  outcomes. `MIG-008` and `MIG-009` must freeze the production clock policy,
+  timezone, tzdata/runtime, and synchronization configuration. Any uncontrolled
+  time dependency, drift, or unsupported clock injection is fail-closed and
+  ineligible rather than assumed equivalent.
 - Jenkins decommissioning must quiesce before the final export: pause and
   verify all trigger ingress and administrative writes, freeze new scheduling
   and external-effect authority, drain or explicitly reconcile every accepted
