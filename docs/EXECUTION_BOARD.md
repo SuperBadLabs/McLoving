@@ -34,6 +34,13 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   trust/filter strategy, Jenkinsfile selection policy, child identity policy,
   and orphan policy. Any change invalidates prior proof and requires
   recertification before authoritative cutover.
+- Jenkins decommissioning must quiesce before the final export: pause and
+  verify all trigger ingress and administrative writes, freeze new scheduling
+  and external-effect authority, drain or explicitly reconcile every queued or
+  running build, lease, lock, retry, and uncertain effect, and prove zero active
+  work or ambiguous destination state. Only then capture and verify the final
+  configuration/build/artifact/audit export, revoke remaining read and write
+  authority, credentials, and network paths, and retire compute and secrets.
 - Stop only for an owner-level decision, new authority, or genuine blocker.
 
 ## Batch ledger
