@@ -41,6 +41,15 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   work or ambiguous destination state. Only then capture and verify the final
   configuration/build/artifact/audit export, revoke remaining read and write
   authority, credentials, and network paths, and retire compute and secrets.
+- `MIG-000` must inventory every Jenkins retention schedule and active legal
+  hold covering configuration, build history, console logs, tests, artifacts,
+  workspaces/state, and audit evidence, including record scope, policy digest,
+  owner/custodian, expiry, and hold/release authority. Before `MIG-009` retires
+  any affected scope, reconcile every protected record against the final
+  export, import it with equivalent or stronger `OPS-002` retention and hold
+  metadata plus immutable provenance, prove deletion remains blocked, and
+  verify indexed retrieval and backup restore. Missing records, weaker policy,
+  untested restore, or an unapproved hold release blocks retirement.
 - Every stateful `MIG-009` per-job cutover must similarly quiesce before its
   cutover snapshot: pause and verify scheduled, webhook, upstream, remote,
   manual, and API build ingress plus administrative writers for the job and
