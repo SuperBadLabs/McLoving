@@ -73,15 +73,21 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   trust/filter strategy, Jenkinsfile selection policy, child identity policy,
   and orphan policy. Any change invalidates prior proof and requires
   recertification before authoritative cutover.
-- The `MIG-008` pre-effect and `MIG-009` cutover freezes must also re-read and
-  match every separately deployed runtime implementation used by the job,
-  including SCM acquisition, dependency resolver, cache service, secret
-  provider adapter, connector, independent destination observer, and agent
-  components: exact binary/image or release-component digest, protocol/version,
-  deployment/service identity, endpoint, live configuration digest, and policy
-  digest. Matching logical requests, resolved outputs, or cache contents without
-  the certified implementation identities is insufficient and forces
-  recertification.
+- The `MIG-008` pre-effect and `MIG-009` cutover freezes, and every
+  post-cutover build admission, scheduling decision, and effect grant, must
+  re-read and match the packaged certified McLoving controller/release identity
+  plus every separately deployed runtime implementation used by the job,
+  including SCM acquisition, trigger, dependency resolver, cache service,
+  secret provider adapter, connector, independent destination observer, and
+  agent components: exact binary/image or release-component digest,
+  protocol/version, deployment/service identity, endpoint, live configuration
+  digest, and policy digest. Matching logical requests, resolved outputs, or
+  cache contents without the certified implementation identities is
+  insufficient. Any runtime drift atomically quarantines the job, pauses new
+  trigger admission and scheduling, withholds all effect grants, and reconciles
+  already accepted work until the exact changed runtime completes every affected
+  `MIG-006` differential and `MIG-008` canary gate and a new package receipt is
+  approved; prior authority is never grandfathered across an upgrade.
 - Every independently observed destination-state or reconciliation receipt used
   by `MIG-006`, `MIG-008`, or `MIG-009` must bind an observer that is separate
   from the effectful connector and runner. `OBS-001` owns its implementation,
