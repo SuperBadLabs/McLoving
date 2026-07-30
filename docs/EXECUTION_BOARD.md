@@ -183,6 +183,17 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   node/attempt lineage, state, logs, artifacts, results, effects, and audit.
   Unimplemented or uncertified durability semantics are explicit unsupported
   classifications and make affected jobs ineligible for canary or cutover.
+- `MIG-000` must inventory every interactive approval/input parameter's type,
+  schema, confidentiality, default-presence policy, submitter restriction, and
+  downstream use without retaining secret values or defaults. `MIG-002` adds
+  public and secret input equivalence classes plus unique marker scans.
+  `MIG-003` may map a secret input only as an invocation-only tainted reference:
+  accept it over the authenticated approval channel, immediately broker it into
+  an expiry-bound, attempt/action-scoped `SEC-003` grant, persist and audit only
+  the redacted typed reference and policy/result metadata, and exclude raw
+  values from IR/YAML, diagnostics, database/state, logs, artifacts, tests,
+  audit, backups, and API/UI/CLI responses. Unsupported handling or any marker
+  disclosure rejects the job fail-closed and cannot count as runnable.
 - Stop only for an owner-level decision, new authority, or genuine blocker.
 
 ## Batch ledger
