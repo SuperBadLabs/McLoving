@@ -677,10 +677,11 @@ fn load_manifest<T: DeserializeOwned>(
 
 fn load_checksums(root: &Path) -> Result<BTreeMap<String, String>, InventoryError> {
     let path = root.join(CHECKSUM_FILE);
-    let source = fs::read_to_string(&path).map_err(|error| {
+    let bytes = read_regular_file(&path)?;
+    let source = std::str::from_utf8(&bytes).map_err(|error| {
         InventoryError::new(
-            "INV_READ",
-            format!("failed to read {}: {error}", path.display()),
+            "INV_UTF8",
+            format!("{} is not UTF-8: {error}", path.display()),
         )
     })?;
     let mut checksums = BTreeMap::new();
@@ -903,10 +904,38 @@ fn inventory_limits() -> ParseLimits {
 }
 
 fn read_regular_file(path: &Path) -> Result<Vec<u8>, InventoryError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
+    use std::io::Read;
+
+    let path_metadata = fs::symlink_metadata(path).map_err(|error| {
         InventoryError::new(
             "INV_READ",
             format!("failed to inspect {}: {error}", path.display()),
+        )
+    })?;
+    if !path_metadata.file_type().is_file() {
+        return Err(InventoryError::new(
+            "INV_FILE_TYPE",
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|error| {
+        InventoryError::new(
+            "INV_READ",
+            format!("failed to read {}: {error}", path.display()),
+        )
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        InventoryError::new(
+            "INV_READ",
+            format!("failed to inspect open file {}: {error}", path.display()),
         )
     })?;
     if !metadata.file_type().is_file() {
@@ -915,25 +944,97 @@ fn read_regular_file(path: &Path) -> Result<Vec<u8>, InventoryError> {
             format!("{} is not a regular file", path.display()),
         ));
     }
-    fs::read(path).map_err(|error| {
-        InventoryError::new(
-            "INV_READ",
-            format!("failed to read {}: {error}", path.display()),
-        )
-    })
+
+    let max_bytes = inventory_limits().max_source_bytes;
+    let max_bytes_u64 = u64::try_from(max_bytes)
+        .map_err(|_| InventoryError::new("INV_SIZE_LIMIT", "source limit exceeds u64"))?;
+    if metadata.len() > max_bytes_u64 {
+        return Err(InventoryError::new(
+            "INV_FILE_TOO_LARGE",
+            format!(
+                "{} is {} bytes; the limit is {max_bytes}",
+                path.display(),
+                metadata.len()
+            ),
+        ));
+    }
+
+    let capacity = usize::try_from(metadata.len()).unwrap_or(max_bytes);
+    let mut bytes = Vec::with_capacity(capacity.min(max_bytes));
+    file.take(max_bytes_u64.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            InventoryError::new(
+                "INV_READ",
+                format!("failed to read {}: {error}", path.display()),
+            )
+        })?;
+    if bytes.len() > max_bytes {
+        return Err(InventoryError::new(
+            "INV_FILE_TOO_LARGE",
+            format!("{} exceeds the {max_bytes}-byte limit", path.display()),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), InventoryError> {
     use std::io::Write;
 
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(InventoryError::new(
+                "INV_FILE_TYPE",
+                format!("{} is a symbolic link", path.display()),
+            ));
+        }
+        Ok(_) => {
+            return Err(InventoryError::new(
+                "INV_IMMUTABLE",
+                format!("{} already exists", path.display()),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(InventoryError::new(
+                "INV_WRITE",
+                format!("failed to inspect {}: {error}", path.display()),
+            ));
+        }
+    }
+
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
     let mut file = options.open(path).map_err(|error| {
         InventoryError::new(
             "INV_WRITE",
             format!("failed to create {}: {error}", path.display()),
         )
     })?;
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            drop(file);
+            let _ = fs::remove_file(path);
+            return Err(InventoryError::new(
+                "INV_WRITE",
+                format!("failed to inspect created file {}: {error}", path.display()),
+            ));
+        }
+    };
+    if !metadata.file_type().is_file() {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(InventoryError::new(
+            "INV_FILE_TYPE",
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
     if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         drop(file);
         let _ = fs::remove_file(path);

@@ -13,5 +13,8 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde-saphyr = "=1.0.0-rc.2"
 sha2 = "=0.10.9"
 
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
 [lints]
 workspace = true

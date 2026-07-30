@@ -6,7 +6,8 @@ because it appears in an inventory.
 
 ## Files
 
-An inventory root contains exactly:
+Before reconciliation, an inventory root contains exactly these source-evidence
+files:
 
 ```text
 job-graph.yaml
@@ -65,7 +66,10 @@ in-scope job, and rejects:
 - malformed digests, missing ownership, duplicate state/hold identities, or
   incomplete per-job coverage.
 
-The resulting `eligibility-ledger.yaml` is published with create-new semantics.
+The resulting derived `eligibility-ledger.yaml` is published with create-new
+semantics. When the default output path is used, it is added to the sealed
+inventory root after the five source-evidence files above; it is not an input
+to `SHA256SUMS` or to source-snapshot verification.
 Eligibility is conservative: the least-compatible dependency determines a
 job's `native`, `mappable`, `scripted`, or `unsupported` class. The ledger
 separately reports population denominators, parity-substrate demand by

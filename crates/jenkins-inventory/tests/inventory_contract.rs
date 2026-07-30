@@ -160,6 +160,53 @@ fn strict_yaml_rejects_aliases_before_deserialization() {
 }
 
 #[test]
+fn oversized_checksum_is_rejected_before_parsing() {
+    let directory = TestDirectory::new("oversized-checksum");
+    write_bundle(&directory.0, &fixture());
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    let checksum = directory.0.join("SHA256SUMS");
+    fs::remove_file(&checksum).expect("remove checksum");
+    let file = fs::File::create(&checksum).expect("create oversized checksum");
+    file.set_len((16 * 1024 * 1024) + 1)
+        .expect("size oversized checksum");
+
+    let error = load_bundle(&directory.0).expect_err("oversized checksum must fail");
+    assert_eq!(error.code, "INV_FILE_TOO_LARGE");
+}
+
+#[cfg(unix)]
+#[test]
+fn checksum_symlink_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TestDirectory::new("checksum-symlink");
+    write_bundle(&directory.0, &fixture());
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    let checksum = directory.0.join("SHA256SUMS");
+    fs::remove_file(&checksum).expect("remove checksum");
+    symlink(directory.0.join(JOB_GRAPH_FILE), &checksum).expect("link checksum");
+
+    let error = load_bundle(&directory.0).expect_err("checksum symlink must fail");
+    assert_eq!(error.code, "INV_FILE_TYPE");
+}
+
+#[cfg(unix)]
+#[test]
+fn seal_refuses_a_broken_checksum_symlink_without_creating_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let directory = TestDirectory::new("seal-symlink");
+    write_bundle(&directory.0, &fixture());
+    let outside = directory.0.join("outside-checksum");
+    symlink(&outside, directory.0.join("SHA256SUMS")).expect("link checksum");
+
+    let error =
+        seal_manifest_directory(&directory.0).expect_err("checksum symlink must be refused");
+    assert_eq!(error.code, "INV_FILE_TYPE");
+    assert!(!outside.exists());
+}
+
+#[test]
 fn reconciliation_rejects_unknown_acl_principal() {
     let directory = TestDirectory::new("acl");
     let mut bundle = fixture();
