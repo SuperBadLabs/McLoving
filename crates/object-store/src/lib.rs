@@ -385,6 +385,13 @@ impl FilesystemObjectStore {
             return Err(ObjectStoreError::ForeignStagingPath);
         }
         if staged_path.is_file() {
+            // Validate the client's declaration while the upload still has a
+            // reapable staging name. A corrupt declaration must not be able
+            // to strand a non-reapable publication claim and permanently
+            // consume one staged-object reservation.
+            if inspect(&staged_path)? != pending.reference {
+                return Err(ObjectStoreError::CorruptStagedObject);
+            }
             fs::rename(&staged_path, &claimed_path)?;
             sync_directory(&self.staging)?;
         } else if !claimed_path.is_file() {
@@ -1035,6 +1042,42 @@ mod tests {
         assert_eq!(resumed, claimed);
         let committed = reopened.commit_pending(resumed).unwrap();
         assert_eq!(reopened.read_verified(&committed).unwrap(), b"claimed");
+    }
+
+    #[test]
+    fn corrupt_publication_declaration_remains_reapable() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FilesystemObjectStore::open(
+            root.path(),
+            Quota {
+                max_object_bytes: 1024,
+                max_total_bytes: 4096,
+                max_staged_objects: 1,
+            },
+        )
+        .unwrap();
+        let pending = store
+            .stage_artifact("tenant-a", b"declared")
+            .unwrap()
+            .persist()
+            .unwrap();
+        let corrupt = PendingObject::from_parts(
+            pending.token().to_owned(),
+            ObjectRef {
+                sha256: Sha256::digest(b"substitute").into(),
+                bytes: b"substitute".len() as u64,
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            store.claim_pending(&corrupt),
+            Err(ObjectStoreError::CorruptStagedObject)
+        ));
+        assert!(store.staging.join(pending.token()).is_file());
+        assert!(!store.claimed_path(pending.token()).exists());
+        assert_eq!(store.reap_staged_older_than(Duration::ZERO).unwrap(), 1);
+        assert!(store.stage_artifact("tenant-a", b"replacement").is_ok());
     }
 
     #[test]
