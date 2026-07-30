@@ -513,7 +513,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W4-A | MIG-000, MIG-001, MIG-002, MIG-003 | ACTIVE | Owner-scoped production inventory, isolated compiler boundary, pinned Jenkins corpus/oracle, and deterministic Declarative translation |
 | W4-B | MIG-004, MIG-005A, MIG-005 | PENDING | Versioned step and bidirectional state mappings plus shared-library/scripted boundaries |
 | W4-C | IDP-001, AUTHZ-001, OBS-001, MIG-006 | PENDING | Production identity lifecycle, migrated-job action-scoped authorization parity, independent destination observation, and differential certification |
-| W4-D | MIG-007, REL-001, MIG-008, MIG-009 | PENDING | Generated migration packages, trusted release provenance, shadow/canary proof, and cutover/rollback readiness |
+| W4-D | TRIG-001, SCM-001, SECRET-001, EXT-001, INPUT-001, PROV-001 | PENDING | Typed production trigger ingress, live source and secret acquisition, external effect and read boundaries, and dynamic provisioning |
+| W4-E | DISC-001, DEP-001, CACHE-001, REL-001, CONSUMER-001, ADMIN-001 | PENDING | Multibranch discovery, workload dependency and cache truth, trusted release provenance, and read/write client migration |
+| W4-F | MIG-007, MIG-008, MIG-009 | PENDING | Generated migration packages, shadow/canary proof, and cutover/rollback/decommission readiness |
 
 ## Wave 0 — Architecture and foundation
 
