@@ -73,6 +73,10 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .env("MCLOVING_MIGRATION_DATABASE_URL", &migration_url)
         .env("MCLOVING_DATABASE_URL", &runtime_url)
         .env("MCLOVING_API_TOKEN", TOKEN)
+        .env(
+            "MCLOVING_ARTIFACT_AGENT_TOKEN",
+            "remote-artifact-agent-token-32-bytes",
+        )
         .env("MCLOVING_LISTEN", format!("127.0.0.1:{api_port}"))
         .env("MCLOVING_AGENT_LISTEN", format!("127.0.0.1:{agent_port}"))
         .env("MCLOVING_AGENT_SERVER_CERT_PATH", &tls.server_certificate)
@@ -195,9 +199,14 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .expect("read remote logs");
     assert_eq!(logs.len(), 2);
     assert_eq!(logs[0].stream, "stdout");
-    assert_eq!(logs[0].text, "remote-agent-ran\n");
+    assert_eq!(logs[0].text.as_deref(), Some("remote-agent-ran\n"));
+    assert_eq!(logs[0].content_hex, "72656d6f74652d6167656e742d72616e0a");
     assert_eq!(logs[1].stream, "stderr");
-    assert_eq!(logs[1].text, "remote-agent-stderr\n");
+    assert_eq!(logs[1].text.as_deref(), Some("remote-agent-stderr\n"));
+    assert_eq!(
+        logs[1].content_hex,
+        "72656d6f74652d6167656e742d7374646572720a"
+    );
     let terminal_events = sqlx::query_scalar::<_, i64>(
         "SELECT count(*)
          FROM build_events

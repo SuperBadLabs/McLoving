@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use mcloving_cli::{Arguments, Command, CommandOutput, OutputMode, execute};
@@ -89,9 +90,9 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
     let watched = structured(watched);
     assert_eq!(watched["state"], "terminal");
     assert_eq!(watched["polls"], 2);
-    assert_eq!(watched["logs"].as_array().unwrap().len(), 2);
+    assert_eq!(watched["logs"].as_array().unwrap().len(), 3);
     assert_eq!(watched["resume_after"]["attempt_id"], attempt.to_string());
-    assert_eq!(watched["resume_after"]["sequence"], 2);
+    assert_eq!(watched["resume_after"]["sequence"], 3);
     assert_eq!(watched["resume_after"]["stream"], "stdout");
     assert_eq!(polls.load(Ordering::SeqCst), 2);
 
@@ -128,19 +129,46 @@ async fn status(State(state): State<MockState>, headers: HeaderMap) -> Json<Valu
     }))
 }
 
-async fn logs(State(state): State<MockState>, headers: HeaderMap) -> Json<Value> {
+async fn logs(
+    State(state): State<MockState>,
+    Query(query): Query<BTreeMap<String, String>>,
+    headers: HeaderMap,
+) -> Json<Value> {
     require_token(&headers);
-    let sequence = state.polls.load(Ordering::SeqCst) as i64;
+    let status_polls = state.polls.load(Ordering::SeqCst);
+    let after_sequence = query
+        .get("after_sequence")
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(-1);
+    let sequence = if status_polls == 2 && after_sequence == 2 {
+        3
+    } else {
+        status_polls as i64
+    };
+    let next_after = (status_polls == 2 && after_sequence < 2).then(|| {
+        json!({
+            "attempt_id": state.attempt,
+            "sequence": sequence,
+            "stream": "stdout",
+        })
+    });
+    let text = format!("line-{sequence}");
+    let content_hex = text
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     Json(json!({
         "items": [{
             "attempt_id": state.attempt,
             "fence": 1,
             "sequence": sequence,
             "stream": "stdout",
-            "text": format!("line-{sequence}"),
+            "text": text,
+            "content_hex": content_hex,
             "sha256": "00".repeat(32),
         }],
-        "next_after": null,
+        "next_after": next_after,
     }))
 }
 

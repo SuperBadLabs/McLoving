@@ -108,10 +108,12 @@ canary, and release-readiness assessment.
 
 ## Current next batch
 
-`W2-B` merged through PR #8 at protected-main commit `776d842`. It is a
-completed foundation batch, not closure of `WIN-001`, `WIN-002`, or `WIN-003`;
-those tickets remain active for the explicit production and persistent-host
-gates above.
+`W3-C` closes the Wave 3 native product surface through PR #12 after exact-head
+review, complete foundation validation, real-PostgreSQL execution, deployable
+embedded/remote-agent proof, and backup/restore verification. The next
+sequenced product batch is Wave 4 Jenkins migration. `WIN-001`, `WIN-002`, and
+`WIN-003` remain independently active for their explicit production and
+persistent-Windows-host gates; Wave 3 closure does not waive those gates.
 
 `W2-C` is complete on `codex/wave2-agent-completion`. Production agents
 negotiate `work-delivery-v1`, cancel execution on lease-renewal loss, commit

@@ -489,37 +489,43 @@ async fn watch(
         };
         let terminal = terminal_status(&status.status);
         last_status = Some(to_value(status)?);
-        match client
-            .logs_page(
-                organization_id,
-                project_id,
-                build_id,
-                after.as_ref(),
-                Some(1_000),
-            )
-            .await
-        {
-            Ok(page) => {
-                let latest = page.items.last().map(|item| LogCursor {
-                    attempt_id: item.attempt_id,
-                    sequence: item.sequence,
-                    stream: item.stream.clone(),
-                });
-                logs.extend(page.items);
-                if let Some(cursor) = page.next_after.or(latest) {
-                    after = Some(cursor);
+        loop {
+            let page = match client
+                .logs_page(
+                    organization_id,
+                    project_id,
+                    build_id,
+                    after.as_ref(),
+                    Some(1_000),
+                )
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    return Ok(json!({
+                        "state": "uncertain",
+                        "reason": "log_request_failed",
+                        "error": error.to_string(),
+                        "build_id": build_id,
+                        "last_status": last_status,
+                        "logs": logs,
+                        "resume_after": after,
+                    }));
                 }
+            };
+            let latest = page.items.last().map(|item| LogCursor {
+                attempt_id: item.attempt_id,
+                sequence: item.sequence,
+                stream: item.stream.clone(),
+            });
+            let continuation = page.next_after;
+            let has_continuation = continuation.is_some();
+            logs.extend(page.items);
+            if let Some(cursor) = continuation.or(latest) {
+                after = Some(cursor);
             }
-            Err(error) => {
-                return Ok(json!({
-                    "state": "uncertain",
-                    "reason": "log_request_failed",
-                    "error": error.to_string(),
-                    "build_id": build_id,
-                    "last_status": last_status,
-                    "logs": logs,
-                    "resume_after": after,
-                }));
+            if !has_continuation {
+                break;
             }
         }
         if terminal {

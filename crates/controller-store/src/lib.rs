@@ -393,6 +393,8 @@ pub enum StoreError {
     InvalidTrustPool,
     #[error("invalid pipeline DAG: {0}")]
     InvalidDag(String),
+    #[error("idempotency key conflict: {0}")]
+    IdempotencyConflict(String),
     #[error("invalid security operation: {0}")]
     InvalidSecurityOperation(String),
     #[error("invalid audit operation: {0}")]

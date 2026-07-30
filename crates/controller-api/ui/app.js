@@ -114,15 +114,45 @@ async function refreshBuilds() {
   return page;
 }
 
+function logCursorQuery(cursor) {
+  const query = new URLSearchParams({ limit: "1000" });
+  if (cursor) {
+    query.set("after_attempt_id", cursor.attempt_id);
+    query.set("after_sequence", String(cursor.sequence));
+    query.set("after_stream", cursor.stream);
+  }
+  return query;
+}
+
+async function loadAllLogs(base) {
+  const items = [];
+  let cursor = null;
+  for (;;) {
+    const page = await api(`${base}/logs?${logCursorQuery(cursor)}`);
+    items.push(...(page.items || []));
+    if (!page.next_after) return { items, next_after: null };
+    if (cursor && pretty(page.next_after) === pretty(cursor)) {
+      throw new Error("log pagination cursor did not advance");
+    }
+    cursor = page.next_after;
+  }
+}
+
+function displayLog(entry) {
+  const content = typeof entry.text === "string" ?
+    entry.text : `[non-UTF-8 bytes: ${entry.content_hex}]`;
+  return `[${entry.stream}] ${content}`;
+}
+
 async function loadBuild() {
   const base = buildPath();
   const [status, graph, logs, tests, artifacts, approvals] = await Promise.all([
-    api(base), api(`${base}/graph`), api(`${base}/logs?limit=1000`),
+    api(base), api(`${base}/graph`), loadAllLogs(base),
     api(`${base}/tests`), api(`${base}/artifacts`), api(`${base}/approvals`)
   ]);
   byId("build-summary").textContent = pretty(status);
   byId("build-graph").textContent = pretty(graph);
-  byId("build-logs").textContent = (logs.items || []).map((entry) => `[${entry.stream}] ${entry.text}`).join("\n");
+  byId("build-logs").textContent = (logs.items || []).map(displayLog).join("\n");
   byId("build-tests").textContent = pretty(tests);
   byId("build-approvals").textContent = pretty(approvals);
   renderArtifacts(artifacts);

@@ -805,7 +805,7 @@ async fn existing_dag_admission(
     .await?;
     let (build_id, digest, dag_mode, contract_matches) = row;
     if !dag_mode || digest != input.pipeline_digest || !contract_matches {
-        return Err(StoreError::InvalidDag(
+        return Err(StoreError::IdempotencyConflict(
             "idempotency key already belongs to a different build contract".to_owned(),
         ));
     }
@@ -841,7 +841,7 @@ async fn existing_dag_admission(
             .iter()
             .any(|node| !nodes.contains_key(&node.node_key))
     {
-        return Err(StoreError::InvalidDag(
+        return Err(StoreError::IdempotencyConflict(
             "idempotent DAG exists with a different node contract".to_owned(),
         ));
     }

@@ -5291,6 +5291,46 @@ async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
 }
 
 #[tokio::test]
+async fn dag_idempotency_mismatch_is_an_explicit_conflict() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "dag-idempotency-conflict",
+        )
+        .await
+        .expect("create conflict project");
+    let input = NewDagBuild {
+        organization_id,
+        project_id,
+        idempotency_key: "stable-key".to_owned(),
+        pipeline_digest: [0x91; 32],
+        priority: 0,
+        nodes: vec![dag_node(
+            "build",
+            DagNodeKind::Work,
+            Vec::new(),
+            "linux",
+            "build",
+        )],
+    };
+    store.admit_dag(&input).await.expect("admit original DAG");
+    let mut conflicting = input.clone();
+    conflicting.pipeline_digest = [0x92; 32];
+    assert!(matches!(
+        store.admit_dag(&conflicting).await,
+        Err(StoreError::IdempotencyConflict(_))
+    ));
+}
+
+#[tokio::test]
 async fn dag_log_cursor_never_hides_later_node_output() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -5653,7 +5693,10 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
             ],
         })
         .await;
-    assert!(matches!(changed_replay, Err(StoreError::InvalidDag(_))));
+    assert!(matches!(
+        changed_replay,
+        Err(StoreError::IdempotencyConflict(_))
+    ));
 
     let linux_store = store.clone();
     let windows_store = store.clone();

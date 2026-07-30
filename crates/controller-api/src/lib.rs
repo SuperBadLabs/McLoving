@@ -35,6 +35,7 @@ pub const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 pub const TRUST_POOL_HEADER: &str = "mcloving-trust-pool";
 pub const PLATFORM_HEADER: &str = "mcloving-platform";
 pub const ARTIFACT_NAME_HEADER: &str = "mcloving-artifact-name";
+pub const ARTIFACT_AGENT_AUTHORIZATION_HEADER: &str = "mcloving-agent-authorization";
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
 const DEFAULT_PLATFORM: &str = "linux";
 const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
@@ -42,12 +43,24 @@ const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
 #[derive(Clone)]
 pub struct ApiState {
     store: Store,
-    token_digest: [u8; 32],
-    principal: Principal,
+    credentials: Vec<ApiCredential>,
+    artifact_agents: Vec<ArtifactAgentCredential>,
     object_store: Option<FilesystemObjectStore>,
     artifact_body_limit: usize,
     staged_upload_ttl: Duration,
     publication_claim_cursor: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Clone)]
+struct ApiCredential {
+    token_digest: [u8; 32],
+    principal: Principal,
+}
+
+#[derive(Clone)]
+struct ArtifactAgentCredential {
+    token_digest: [u8; 32],
+    agent_id: String,
 }
 
 impl ApiState {
@@ -59,13 +72,75 @@ impl ApiState {
         }
         Ok(Self {
             store,
-            token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
-            principal,
+            credentials: vec![ApiCredential {
+                token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
+                principal,
+            }],
+            artifact_agents: Vec::new(),
             object_store: None,
             artifact_body_limit: 2 * 1024 * 1024,
             staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
             publication_claim_cursor: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Adds another independently authenticated API principal.
+    ///
+    /// Distinct human approvers must use distinct tokens and subjects so
+    /// multi-party policy cannot collapse them into the controller service
+    /// identity.
+    pub fn with_bearer_principal(
+        mut self,
+        bearer_token: &str,
+        principal: Principal,
+    ) -> Result<Self, ApiError> {
+        validate_bearer_secret(bearer_token)?;
+        let token_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
+        if self
+            .credentials
+            .iter()
+            .any(|credential| constant_time_eq(&credential.token_digest, &token_digest))
+        {
+            return Err(ApiError::configuration(
+                "each API principal must have a unique bearer token",
+            ));
+        }
+        self.credentials.push(ApiCredential {
+            token_digest,
+            principal,
+        });
+        Ok(self)
+    }
+
+    /// Binds an independent bearer secret to one artifact-publishing agent.
+    ///
+    /// The public API bearer token is deliberately insufficient for immutable
+    /// artifact publication.
+    pub fn with_artifact_agent_token(
+        mut self,
+        bearer_token: &str,
+        agent_id: &str,
+    ) -> Result<Self, ApiError> {
+        validate_bearer_secret(bearer_token)?;
+        if agent_id.trim().is_empty() || agent_id.trim() != agent_id {
+            return Err(ApiError::configuration(
+                "artifact agent ID must be non-empty and canonical",
+            ));
+        }
+        let token_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
+        if self.artifact_agents.iter().any(|credential| {
+            credential.agent_id == agent_id
+                || constant_time_eq(&credential.token_digest, &token_digest)
+        }) {
+            return Err(ApiError::configuration(
+                "artifact agent IDs and bearer tokens must be unique",
+            ));
+        }
+        self.artifact_agents.push(ArtifactAgentCredential {
+            token_digest,
+            agent_id: agent_id.to_owned(),
+        });
+        Ok(self)
     }
 
     pub fn with_object_store(mut self, object_store: FilesystemObjectStore) -> Self {
@@ -527,7 +602,8 @@ fn openapi_document() -> Value {
                 "parameters": [organization.clone(), project.clone(), build.clone(), upload],
                 "post": api_operation(
                     "commitArtifact", "evidence", "Commit an exact fenced artifact upload", "200",
-                    Vec::new(), Some("ArtifactCommitRequest")
+                    vec![header_parameter(ARTIFACT_AGENT_AUTHORIZATION_HEADER, true)],
+                    Some("ArtifactCommitRequest")
                 )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifacts": {
@@ -1148,7 +1224,7 @@ async fn create_approval(
     headers: HeaderMap,
     Json(request): Json<ApprovalRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    authorize(
+    let approver = authorize(
         &state,
         &headers,
         organization_id,
@@ -1171,7 +1247,7 @@ async fn create_approval(
             pipeline_digest: graph.build.pipeline_digest,
             environment: &request.environment,
             action: &request.action,
-            approver_subject: &state.principal.subject,
+            approver_subject: &approver.subject,
             ttl_seconds: request.ttl_seconds,
         })
         .await
@@ -1257,7 +1333,8 @@ pub struct LogResponse {
     pub fence: i64,
     pub sequence: i64,
     pub stream: String,
-    pub text: String,
+    pub text: Option<String>,
+    pub content_hex: String,
     pub sha256: String,
 }
 
@@ -1451,7 +1528,7 @@ async fn submit(
             nodes,
         })
         .await
-        .map_err(internal)?;
+        .map_err(admission_error)?;
     let first = pipeline
         .stages
         .first()
@@ -1748,6 +1825,20 @@ fn product_error(error: StoreError) -> ApiError {
     }
 }
 
+fn admission_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::IdempotencyConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "idempotency_conflict", message)
+        }
+        StoreError::InvalidDag(message) => ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "pipeline_rejected",
+            message,
+        ),
+        other => internal(other),
+    }
+}
+
 fn security_error(error: StoreError) -> ApiError {
     match error {
         StoreError::InvalidSecurityOperation(message) => ApiError::new(
@@ -1927,6 +2018,7 @@ async fn commit_artifact(
         Some(project_id),
         Action::BuildSubmit,
     )?;
+    authorize_artifact_agent(&state, &headers, &request.agent_id)?;
     require_build(&state, organization_id, project_id, build_id).await?;
     if !upload_token.starts_with(&format!("{organization_id}-")) {
         return Err(ApiError::new(
@@ -2244,13 +2336,17 @@ async fn logs(
     };
     let items = logs
         .into_iter()
-        .map(|entry| LogResponse {
-            attempt_id: entry.attempt_id,
-            fence: entry.fence,
-            sequence: entry.sequence,
-            stream: entry.stream,
-            text: String::from_utf8_lossy(&entry.content).into_owned(),
-            sha256: hex(&entry.digest),
+        .map(|entry| {
+            let (text, content_hex) = encode_log_content(&entry.content);
+            LogResponse {
+                attempt_id: entry.attempt_id,
+                fence: entry.fence,
+                sequence: entry.sequence,
+                stream: entry.stream,
+                text,
+                content_hex,
+                sha256: hex(&entry.digest),
+            }
         })
         .collect();
     Ok(Json(LogPage { items, next_after }))
@@ -2545,26 +2641,63 @@ fn object_store_error(error: ObjectStoreError) -> ApiError {
     }
 }
 
-fn authorize(
-    state: &ApiState,
+fn authorize<'a>(
+    state: &'a ApiState,
     headers: &HeaderMap,
     organization_id: Uuid,
     project_id: Option<Uuid>,
     action: Action,
-) -> Result<(), ApiError> {
+) -> Result<&'a Principal, ApiError> {
+    let principal = authenticate_principal(state, headers)?;
+    authorize_principal(principal, organization_id, project_id, action)
+        .map_err(|error| ApiError::new(StatusCode::FORBIDDEN, "forbidden", error.to_string()))?;
+    Ok(principal)
+}
+
+fn authenticate_principal<'a>(
+    state: &'a ApiState,
+    headers: &HeaderMap,
+) -> Result<&'a Principal, ApiError> {
     let supplied = bearer_token(headers)
         .map(|token| Sha256::digest(token.as_bytes()))
         .ok_or_else(unauthorized)?;
-    if !constant_time_eq(supplied.as_slice(), &state.token_digest) {
-        return Err(unauthorized());
+    state
+        .credentials
+        .iter()
+        .find(|credential| constant_time_eq(supplied.as_slice(), &credential.token_digest))
+        .map(|credential| &credential.principal)
+        .ok_or_else(unauthorized)
+}
+
+fn authorize_artifact_agent(
+    state: &ApiState,
+    headers: &HeaderMap,
+    requested_agent_id: &str,
+) -> Result<(), ApiError> {
+    let supplied = header_bearer_token(headers, ARTIFACT_AGENT_AUTHORIZATION_HEADER)
+        .map(|token| Sha256::digest(token.as_bytes()))
+        .ok_or_else(unauthorized)?;
+    let credential = state
+        .artifact_agents
+        .iter()
+        .find(|credential| constant_time_eq(supplied.as_slice(), &credential.token_digest))
+        .ok_or_else(unauthorized)?;
+    if credential.agent_id != requested_agent_id {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "agent_identity_mismatch",
+            "artifact agent identity does not match its authenticated bearer",
+        ));
     }
-    authorize_principal(&state.principal, organization_id, project_id, action)
-        .map_err(|error| ApiError::new(StatusCode::FORBIDDEN, "forbidden", error.to_string()))?;
     Ok(())
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
-    let value = headers.get("authorization")?.to_str().ok()?;
+    header_bearer_token(headers, "authorization")
+}
+
+fn header_bearer_token<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let value = headers.get(name)?.to_str().ok()?;
     let mut fields = value.split_ascii_whitespace();
     let scheme = fields.next()?;
     let token = fields.next()?;
@@ -2572,6 +2705,15 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         return None;
     }
     Some(token)
+}
+
+fn validate_bearer_secret(bearer_token: &str) -> Result<(), ApiError> {
+    if bearer_token.len() < 32 {
+        return Err(ApiError::configuration(
+            "bearer token must contain at least 32 bytes",
+        ));
+    }
+    Ok(())
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -2623,10 +2765,18 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn encode_log_content(content: &[u8]) -> (Option<String>, String) {
+    (
+        std::str::from_utf8(content).ok().map(str::to_owned),
+        hex(content),
+    )
+}
+
 #[derive(Clone)]
 pub struct Client {
     base_url: String,
     bearer_token: String,
+    artifact_agent_token: Option<String>,
     inner: reqwest::Client,
 }
 
@@ -2643,8 +2793,14 @@ impl Client {
         Self {
             base_url: base_url.trim_end_matches('/').to_owned(),
             bearer_token: bearer_token.to_owned(),
+            artifact_agent_token: None,
             inner: reqwest::Client::new(),
         }
+    }
+
+    pub fn with_artifact_agent_token(mut self, bearer_token: &str) -> Self {
+        self.artifact_agent_token = Some(bearer_token.to_owned());
+        self
     }
 
     pub async fn submit(
@@ -3110,15 +3266,20 @@ impl Client {
         upload_token: &str,
         request: &ArtifactCommitRequest,
     ) -> Result<ArtifactResponse, ClientError> {
-        self.send(
-            self.inner
-                .post(format!(
-                    "{}/artifact-uploads/{upload_token}/commit",
-                    self.build_url(organization_id, project_id, build_id)
-                ))
-                .json(request),
-        )
-        .await
+        let mut http_request = self
+            .inner
+            .post(format!(
+                "{}/artifact-uploads/{upload_token}/commit",
+                self.build_url(organization_id, project_id, build_id)
+            ))
+            .json(request);
+        if let Some(token) = &self.artifact_agent_token {
+            http_request = http_request.header(
+                ARTIFACT_AGENT_AUTHORIZATION_HEADER,
+                format!("Bearer {token}"),
+            );
+        }
+        self.send(http_request).await
     }
 
     pub async fn artifacts(
@@ -3258,6 +3419,121 @@ mod tests {
         assert!(constant_time_eq(&[1, 2, 3], &[1, 2, 3]));
         assert!(!constant_time_eq(&[1, 2, 3], &[1, 2, 4]));
         assert!(!constant_time_eq(&[1, 2], &[1, 2, 0]));
+    }
+
+    #[tokio::test]
+    async fn bearer_tokens_resolve_distinct_approval_subjects() {
+        let organization_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("construct lazy pool");
+        let service = Principal {
+            subject: "service:api".to_owned(),
+            kind: mcloving_controller_store::authz::PrincipalKind::Service,
+            organization_id,
+            project_roles: BTreeMap::new(),
+            service_scopes: [mcloving_controller_store::authz::ServiceScope::ProjectAdmin].into(),
+        };
+        let human = Principal {
+            subject: "oidc:alice".to_owned(),
+            kind: mcloving_controller_store::authz::PrincipalKind::Human,
+            organization_id,
+            project_roles: [(
+                project_id,
+                mcloving_controller_store::authz::ProjectRole::Admin,
+            )]
+            .into(),
+            service_scopes: BTreeSet::new(),
+        };
+        let state = ApiState::new(
+            Store::new(pool),
+            "service-api-principal-token-32-bytes",
+            service,
+        )
+        .unwrap()
+        .with_bearer_principal("alice-human-principal-token-32-bytes", human)
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer alice-human-principal-token-32-bytes"
+                .parse()
+                .unwrap(),
+        );
+        let resolved = authorize(
+            &state,
+            &headers,
+            organization_id,
+            Some(project_id),
+            Action::ProjectAdmin,
+        )
+        .expect("human principal is independently authenticated");
+        assert_eq!(resolved.subject, "oidc:alice");
+    }
+
+    #[tokio::test]
+    async fn artifact_commit_requires_agent_bound_bearer() {
+        let organization_id = Uuid::new_v4();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("construct lazy pool");
+        let principal = Principal {
+            subject: "service:api".to_owned(),
+            kind: mcloving_controller_store::authz::PrincipalKind::Service,
+            organization_id,
+            project_roles: BTreeMap::new(),
+            service_scopes: BTreeSet::new(),
+        };
+        let state = ApiState::new(
+            Store::new(pool),
+            "public-api-principal-token-32-bytes",
+            principal,
+        )
+        .unwrap()
+        .with_artifact_agent_token("agent-publication-secret-token-32-bytes", "agent-1")
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            authorize_artifact_agent(&state, &headers, "agent-1")
+                .unwrap_err()
+                .status,
+            StatusCode::UNAUTHORIZED
+        );
+        headers.insert(
+            ARTIFACT_AGENT_AUTHORIZATION_HEADER,
+            "Bearer agent-publication-secret-token-32-bytes"
+                .parse()
+                .unwrap(),
+        );
+        authorize_artifact_agent(&state, &headers, "agent-1")
+            .expect("exact agent binding is accepted");
+        assert_eq!(
+            authorize_artifact_agent(&state, &headers, "agent-2")
+                .unwrap_err()
+                .status,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn log_transport_preserves_exact_non_utf8_bytes() {
+        let content = [0xf0, 0x9f, 0x92];
+        let (text, content_hex) = encode_log_content(&content);
+        assert_eq!(text, None);
+        assert_eq!(content_hex, "f09f92");
+        let (text, content_hex) = encode_log_content("McLoving".as_bytes());
+        assert_eq!(text.as_deref(), Some("McLoving"));
+        assert_eq!(content_hex, "4d634c6f76696e67");
+    }
+
+    #[test]
+    fn idempotency_reuse_is_a_client_visible_conflict() {
+        let error = admission_error(StoreError::IdempotencyConflict(
+            "key belongs to another contract".to_owned(),
+        ));
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "idempotency_conflict");
     }
 
     #[test]

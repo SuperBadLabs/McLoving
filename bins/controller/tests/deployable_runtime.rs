@@ -62,10 +62,12 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .expect("read port")
         .port();
     let root = tempfile::tempdir().expect("worker root");
+    let artifact_agent_token = "artifact-agent-contract-token-32-bytes";
     let mut controller = Command::new(env!("CARGO_BIN_EXE_mcloving-controller"))
         .env("MCLOVING_MIGRATION_DATABASE_URL", &migration_url)
         .env("MCLOVING_DATABASE_URL", &runtime_url)
         .env("MCLOVING_API_TOKEN", TOKEN)
+        .env("MCLOVING_ARTIFACT_AGENT_TOKEN", artifact_agent_token)
         .env("MCLOVING_LISTEN", format!("127.0.0.1:{port}"))
         .env("MCLOVING_ORGANIZATION_ID", organization_id.to_string())
         .env("MCLOVING_AGENT_ID", "embedded-test-agent")
@@ -83,7 +85,8 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .kill_on_drop(true)
         .spawn()
         .expect("start shipped controller");
-    let client = Client::new(&format!("http://127.0.0.1:{port}"), TOKEN);
+    let client = Client::new(&format!("http://127.0.0.1:{port}"), TOKEN)
+        .with_artifact_agent_token(artifact_agent_token);
     wait_until_listening(&client, organization_id).await;
     let admission = client
         .submit_on_platform_in_pool(
@@ -370,7 +373,11 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
         .logs(organization_id, project_id, admission.build_id)
         .await
         .expect("read logs");
-    assert_eq!(logs[0].text, "controller-binary-ran\n");
+    assert_eq!(logs[0].text.as_deref(), Some("controller-binary-ran\n"));
+    assert_eq!(
+        logs[0].content_hex,
+        "636f6e74726f6c6c65722d62696e6172792d72616e0a"
+    );
     controller.kill().await.expect("stop test controller");
 }
 

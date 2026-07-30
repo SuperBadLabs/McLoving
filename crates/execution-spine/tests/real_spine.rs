@@ -159,8 +159,13 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
         .await
         .expect("read committed logs through HTTP");
     assert_eq!(logs.len(), 2);
-    assert_eq!(logs[0].text, "hello-from-mcloving\n");
-    assert_eq!(logs[1].text, "diagnostic\n");
+    assert_eq!(logs[0].text.as_deref(), Some("hello-from-mcloving\n"));
+    assert_eq!(
+        logs[0].content_hex,
+        "68656c6c6f2d66726f6d2d6d636c6f76696e670a"
+    );
+    assert_eq!(logs[1].text.as_deref(), Some("diagnostic\n"));
+    assert_eq!(logs[1].content_hex, "646961676e6f737469630a");
     assert!(logs.iter().all(|log| log.sha256.len() == 64));
 
     let events = store
