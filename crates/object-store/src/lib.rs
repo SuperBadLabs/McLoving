@@ -194,6 +194,10 @@ impl FilesystemObjectStore {
         })
     }
 
+    pub fn quota(&self) -> Quota {
+        self.quota
+    }
+
     /// Stages binary bytes without transformation.
     pub fn stage_artifact(
         &self,
@@ -325,6 +329,19 @@ impl FilesystemObjectStore {
     pub fn commit_pending(&self, pending: PendingObject) -> Result<ObjectRef, ObjectStoreError> {
         let staged = self.resume_pending(&pending)?;
         self.commit(staged)
+    }
+
+    /// Verifies a durable staged upload without publishing or consuming it.
+    pub fn verify_pending(&self, pending: &PendingObject) -> Result<ObjectRef, ObjectStoreError> {
+        validate_pending_token(&pending.token)?;
+        let path = self.staging.join(&pending.token);
+        if path.parent() != Some(self.staging.as_path()) || !path.is_file() {
+            return Err(ObjectStoreError::ForeignStagingPath);
+        }
+        if inspect(&path)? != pending.reference {
+            return Err(ObjectStoreError::CorruptStagedObject);
+        }
+        Ok(pending.reference.clone())
     }
 
     /// Removes an unpublished upload without admitting its bytes.

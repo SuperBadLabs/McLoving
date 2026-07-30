@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -32,6 +33,7 @@ pub struct ApiState {
     store: Store,
     token_digest: [u8; 32],
     object_store: Option<FilesystemObjectStore>,
+    artifact_body_limit: usize,
 }
 
 impl ApiState {
@@ -45,16 +47,25 @@ impl ApiState {
             store,
             token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
             object_store: None,
+            artifact_body_limit: 2 * 1024 * 1024,
         })
     }
 
     pub fn with_object_store(mut self, object_store: FilesystemObjectStore) -> Self {
+        self.artifact_body_limit =
+            usize::try_from(object_store.quota().max_object_bytes).unwrap_or(usize::MAX);
         self.object_store = Some(object_store);
         self
     }
 }
 
 pub fn router(state: ApiState) -> Router {
+    let artifact_upload = Router::new()
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads",
+            post(stage_artifact),
+        )
+        .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
     Router::new()
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds",
@@ -72,10 +83,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/cancel",
             post(cancel),
         )
-        .route(
-            "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads",
-            post(stage_artifact),
-        )
+        .merge(artifact_upload)
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/artifact-uploads/{upload_token}/commit",
             post(commit_artifact),
@@ -479,10 +487,10 @@ async fn commit_artifact(
         },
     )
     .map_err(object_store_error)?;
-    let committed = object_store(&state)?
-        .commit_pending(pending)
+    object_store(&state)?
+        .verify_pending(&pending)
         .map_err(object_store_error)?;
-    let bytes = i64::try_from(committed.bytes).map_err(|_| {
+    let bytes = i64::try_from(request.bytes).map_err(|_| {
         ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             "artifact_too_large",
@@ -500,7 +508,7 @@ async fn commit_artifact(
             request.restore_epoch,
             &request.agent_id,
             &request.name,
-            committed.sha256,
+            digest,
             bytes,
             &request.media_type,
             request.retention_seconds,
@@ -508,10 +516,23 @@ async fn commit_artifact(
         .await
         .map_err(internal)?;
     if !registered {
+        object_store(&state)?
+            .abort_pending(&pending)
+            .map_err(object_store_error)?;
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "artifact_authority_rejected",
             "artifact metadata did not match live fenced execution authority",
+        ));
+    }
+    let committed = object_store(&state)?
+        .commit_pending(pending)
+        .map_err(object_store_error)?;
+    if committed.sha256 != digest || committed.bytes != request.bytes {
+        return Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "artifact_publication_mismatch",
+            "published artifact identity differs from its verified reservation",
         ));
     }
     let artifact = find_artifact(

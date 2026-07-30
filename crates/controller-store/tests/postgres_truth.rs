@@ -4755,6 +4755,22 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
             .expect("issue protected grant")
     );
     assert!(
+        store
+            .approve_environment(&NewEnvironmentApproval {
+                id: Uuid::new_v4(),
+                organization_id,
+                project_id,
+                build_id: admission.build_id,
+                pipeline_digest,
+                environment: "production",
+                action: "deploy",
+                approver_subject: "oidc:release-owner",
+                ttl_seconds: 300,
+            })
+            .await
+            .expect("renew consumed approval for a later attempt")
+    );
+    assert!(
         !store
             .issue_credential_grant(&grant)
             .await

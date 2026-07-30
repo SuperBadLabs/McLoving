@@ -128,19 +128,22 @@ struct OutputCapture {
 }
 
 impl OutputCapture {
-    fn start(stdout: File, stderr: File, limit: u64) -> Self {
+    fn start(stdout: File, stderr: File, limit: u64, overlap: u64) -> Self {
         let total = Arc::new(AtomicU64::new(0));
         let limit_exceeded = CancellationToken::new();
+        let capture_limit = limit.saturating_add(overlap);
         Self {
             stdout: Some(tokio::spawn(capture_pipe(
                 stdout,
                 limit,
+                capture_limit,
                 Arc::clone(&total),
                 limit_exceeded.clone(),
             ))),
             stderr: Some(tokio::spawn(capture_pipe(
                 stderr,
                 limit,
+                capture_limit,
                 total,
                 limit_exceeded.clone(),
             ))),
@@ -148,6 +151,7 @@ impl OutputCapture {
         }
     }
 
+    #[cfg(unix)]
     async fn limit_exceeded(&self) {
         self.limit_exceeded.cancelled().await;
     }
@@ -187,11 +191,12 @@ impl Drop for OutputCapture {
 async fn capture_pipe(
     reader: File,
     limit: u64,
+    capture_limit: u64,
     total: Arc<AtomicU64>,
     limit_exceeded: CancellationToken,
 ) -> Result<Vec<u8>, io::Error> {
     let mut reader = tokio::fs::File::from_std(reader);
-    let capacity = usize::try_from(limit.min(1024 * 1024)).unwrap_or(1024 * 1024);
+    let capacity = usize::try_from(capture_limit.min(1024 * 1024)).unwrap_or(1024 * 1024);
     let mut captured = Vec::with_capacity(capacity);
     let mut buffer = [0_u8; 8192];
     loop {
@@ -205,7 +210,10 @@ async fn capture_pipe(
                 Some(value.saturating_add(bytes))
             })
             .unwrap_or_else(|value| value);
-        let retained = bytes.min(limit.saturating_sub(previous));
+        let retained = bytes.min(
+            capture_limit
+                .saturating_sub(u64::try_from(captured.len()).expect("captured length fits u64")),
+        );
         captured.extend_from_slice(
             &buffer[..usize::try_from(retained).expect("retained bytes fit usize")],
         );
@@ -227,6 +235,16 @@ fn write_redacted_output(
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&redacted)?;
     Ok(())
+}
+
+fn redaction_overlap(redactions: &[Vec<u8>]) -> u64 {
+    redactions
+        .iter()
+        .map(Vec::len)
+        .max()
+        .and_then(|length| length.checked_sub(1))
+        .and_then(|length| u64::try_from(length).ok())
+        .unwrap_or(0)
 }
 
 fn validate_redactions(redactions: &[Vec<u8>]) -> Result<(), ExecutionError> {

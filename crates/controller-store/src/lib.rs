@@ -3897,7 +3897,7 @@ async fn append_event_and_outbox(
 fn audit_category_for_event(kind: &str) -> &'static str {
     if kind.contains("credential") {
         "credential_grant"
-    } else if kind.contains("approval") {
+    } else if kind.contains("approval") || kind.contains("approved") {
         "approval"
     } else if kind.contains("artifact") || kind.contains("object") {
         "artifact"
@@ -4095,5 +4095,11 @@ mod unit_tests {
         assert!(log_sequence_is_bounded(MAX_ATTEMPT_LOG_CHUNKS - 1));
         assert!(!log_sequence_is_bounded(MAX_ATTEMPT_LOG_CHUNKS));
         assert!(!log_sequence_is_bounded(-1));
+    }
+
+    #[test]
+    fn protected_environment_approval_events_use_the_approval_category() {
+        assert_eq!(audit_category_for_event("environment.approved"), "approval");
+        assert_eq!(audit_category_for_event("approval.requested"), "approval");
     }
 }

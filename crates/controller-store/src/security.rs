@@ -104,23 +104,41 @@ impl Store {
         validate_approval(approval)?;
         let mut tx = self.tenant_transaction(approval.organization_id).await?;
         let inserted = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO environment_approvals (
+            "WITH locked_build AS MATERIALIZED (
+                 SELECT b.organization_id, b.project_id, b.id,
+                        b.pipeline_digest
+                 FROM builds AS b
+                 JOIN protected_environments AS e
+                   ON e.organization_id = b.organization_id
+                  AND e.project_id = b.project_id
+                  AND e.environment = $6
+                  AND e.action = $7
+                 WHERE b.organization_id = $2
+                   AND b.project_id = $3
+                   AND b.id = $4
+                   AND b.pipeline_digest = $5
+                 FOR UPDATE OF b
+             )
+             INSERT INTO environment_approvals (
                  id, organization_id, project_id, build_id, pipeline_digest,
                  environment, action, approver_subject, expires_at
              )
              SELECT $1, b.organization_id, b.project_id, b.id,
                     b.pipeline_digest, $6, $7, $8,
                     clock_timestamp() + make_interval(secs => $9)
-             FROM builds AS b
-             JOIN protected_environments AS e
-               ON e.organization_id = b.organization_id
-              AND e.project_id = b.project_id
-              AND e.environment = $6
-              AND e.action = $7
-             WHERE b.organization_id = $2
-               AND b.project_id = $3
-               AND b.id = $4
-               AND b.pipeline_digest = $5
+             FROM locked_build AS b
+             WHERE NOT EXISTS (
+                 SELECT 1
+                 FROM environment_approvals AS existing
+                 WHERE existing.organization_id = b.organization_id
+                   AND existing.build_id = b.id
+                   AND existing.pipeline_digest = b.pipeline_digest
+                   AND existing.environment = $6
+                   AND existing.action = $7
+                   AND existing.approver_subject = $8
+                   AND existing.consumed_at IS NULL
+                   AND existing.expires_at > clock_timestamp()
+             )
              ON CONFLICT DO NOTHING
              RETURNING id",
         )

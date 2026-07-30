@@ -26,14 +26,6 @@ CREATE TABLE environment_approvals (
     consumed_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (organization_id, id),
-    UNIQUE (
-        organization_id,
-        build_id,
-        pipeline_digest,
-        environment,
-        action,
-        approver_subject
-    ),
     CHECK (
         (consumed_by_attempt IS NULL AND consumed_fence IS NULL AND consumed_at IS NULL)
         OR

@@ -20,7 +20,8 @@ use crate::SpoolEntry;
 
 use super::{
     Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, OutputCapture,
-    Termination, create_workspace, sync_directory, validate_redactions, write_redacted_output,
+    Termination, create_workspace, redaction_overlap, sync_directory, validate_redactions,
+    write_redacted_output,
 };
 
 /// Executes one process in a new process group.
@@ -136,9 +137,12 @@ where
     let mut child = command.spawn()?;
     drop(command);
     let mut capture = match (stdout_reader, stderr_reader, capture_limit) {
-        (Some(stdout), Some(stderr), Some(limit)) => {
-            Some(OutputCapture::start(stdout, stderr, limit))
-        }
+        (Some(stdout), Some(stderr), Some(limit)) => Some(OutputCapture::start(
+            stdout,
+            stderr,
+            limit,
+            redaction_overlap(redactions),
+        )),
         (None, None, None) => None,
         _ => unreachable!("capture configuration is internally consistent"),
     };
@@ -223,6 +227,7 @@ where
         let (captured_stdout, captured_stderr) = capture.finish().await?;
         write_redacted_output(&mut stdout_control, &captured_stdout, redactions)?;
         write_redacted_output(&mut stderr_control, &captured_stderr, redactions)?;
+        truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     } else if termination.0 == Termination::OutputLimitExceeded || exceeded {
         truncate_output_to_limit(&stdout_control, &stderr_control, request.output_limit_bytes)?;
     }
@@ -816,6 +821,37 @@ mod tests {
         let stderr_digest: [u8; 32] = Sha256::digest(&stderr).into();
         assert_eq!(outcome.stdout.digest, stdout_digest);
         assert_eq!(outcome.stderr.digest, stderr_digest);
+    }
+
+    #[tokio::test]
+    async fn credential_crossing_output_limit_is_redacted_before_truncation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut request = request(
+            root.path(),
+            "credential-limit-boundary",
+            Duration::from_secs(5),
+        );
+        request.arguments = vec![
+            OsString::from("-c"),
+            OsString::from("printf '123456789012345marker-secret'"),
+        ];
+        request.output_limit_bytes = Some(16);
+
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &request,
+            CancellationToken::new(),
+            &[b"marker-secret".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path))
+            .await
+            .unwrap();
+        assert_eq!(stdout, b"123456789012345");
+        assert!(outcome.stdout.bytes <= 16);
+        assert!(!stdout.ends_with(b"m"));
     }
 
     #[tokio::test]

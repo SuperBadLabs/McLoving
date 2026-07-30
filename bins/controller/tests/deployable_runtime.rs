@@ -110,6 +110,64 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
     })
     .await
     .expect("embedded worker enters running state");
+    let rejected = client
+        .stage_artifact(
+            organization_id,
+            project_id,
+            admission.build_id,
+            "reports/rejected.bin",
+            "application/octet-stream",
+            b"must-not-publish".to_vec(),
+        )
+        .await
+        .expect("stage rejected artifact through shipped controller");
+    let rejected_commit = ArtifactCommitRequest {
+        node_id: admission.node_id,
+        attempt_id: admission.attempt_id,
+        fence: running.fence + 1,
+        restore_epoch: 1,
+        agent_id: running.lease_owner.clone().expect("running lease owner"),
+        name: rejected.name.clone(),
+        media_type: rejected.media_type.clone(),
+        sha256: rejected.sha256.clone(),
+        bytes: rejected.bytes,
+        retention_seconds: 3600,
+    };
+    assert!(
+        client
+            .commit_artifact(
+                organization_id,
+                project_id,
+                admission.build_id,
+                &rejected.upload_token,
+                &rejected_commit,
+            )
+            .await
+            .is_err(),
+        "stale authority must be rejected before immutable publication"
+    );
+    assert!(
+        !root
+            .path()
+            .join("objects")
+            .join("staging")
+            .join(&rejected.upload_token)
+            .exists(),
+        "rejected authority must release its staging reservation"
+    );
+    assert!(
+        !root
+            .path()
+            .join("objects")
+            .join("objects")
+            .join("sha256")
+            .join(&rejected.sha256[..2])
+            .join(&rejected.sha256)
+            .exists(),
+        "rejected authority must not publish immutable bytes"
+    );
+
+    let artifact_content = vec![0xA5; 3 * 1024 * 1024];
     let staged = client
         .stage_artifact(
             organization_id,
@@ -117,10 +175,10 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
             admission.build_id,
             "reports/result.bin",
             "application/octet-stream",
-            b"artifact-from-public-api".to_vec(),
+            artifact_content.clone(),
         )
         .await
-        .expect("stage artifact through shipped controller");
+        .expect("configured upload limit must admit artifacts above Axum's 2 MiB default");
     let mut commit = ArtifactCommitRequest {
         node_id: admission.node_id,
         attempt_id: admission.attempt_id,
@@ -144,7 +202,7 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
             )
             .await
             .is_err(),
-        "digest substitution must not publish the staged upload"
+        "digest substitution must not reserve metadata or publish staged bytes"
     );
     commit.sha256.clone_from(&staged.sha256);
     let artifact = client
@@ -189,7 +247,7 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
             )
             .await
             .expect("download verified artifact"),
-        b"artifact-from-public-api"
+        artifact_content
     );
 
     let status = tokio::time::timeout(Duration::from_secs(10), async {
