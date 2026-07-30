@@ -237,6 +237,19 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   runner's fenced grant; this applies Jenkins-to-McLoving and
   McLoving-to-Jenkins, and input receipt matching alone cannot replace
   quiescence.
+- `MIG-005A` owns versioned deterministic forward and reverse transforms for
+  the complete execution-history record of every job, regardless of
+  stateless/stateful classification: trigger/cause, build and queue identity,
+  timing, result, graph/stage/node/attempt lineage, approvals and submitted
+  values, normalized tests, logs, artifacts and retrieval metadata, audit
+  linkage, and record provenance. Its existing build-number, previous-result,
+  cross-build artifact, workspace, and persistent-state requirements are
+  additive for jobs that use them. `MIG-005A` must prove both directions,
+  idempotent replay, gaps/conflicts/duplicate denial, and exact-profile
+  destination retrieval before `DONE`; `MIG-006` must certify these mappings,
+  and `MIG-007` must package their exact implementation/configuration digests
+  and receipts. `MIG-008` and `MIG-009` may use only those packaged certified
+  transforms—never ad hoc handoff or rollback import logic.
 - For every `MIG-008` or `MIG-009` authority transfer or rollback, regardless of
   whether the job is classified as stateless, after quiescing the relinquishing
   runner and before granting the gaining runner, take a fresh content-hashed
