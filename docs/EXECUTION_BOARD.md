@@ -35,6 +35,14 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   trust/filter strategy, Jenkinsfile selection policy, child identity policy,
   and orphan policy. Any change invalidates prior proof and requires
   recertification before authoritative cutover.
+- The `MIG-008` pre-effect and `MIG-009` cutover freezes must also re-read and
+  match every separately deployed runtime implementation used by the job,
+  including SCM acquisition, dependency resolver, cache service, secret
+  provider adapter, connector, and agent components: exact binary/image or
+  release-component digest, protocol/version, deployment/service identity,
+  endpoint, live configuration digest, and policy digest. Matching logical
+  requests, resolved outputs, or cache contents without the certified
+  implementation identities is insufficient and forces recertification.
 - Jenkins decommissioning must quiesce before the final export: pause and
   verify all trigger ingress and administrative writes, freeze new scheduling
   and external-effect authority, drain or explicitly reconcile every queued or
@@ -144,6 +152,17 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   revoked, unclassified, or undecipherable secret-bearing state fails closed.
   Prove injected markers never enter destination state, logs, artifacts,
   backups, receipts, APIs, or the reverse transform.
+- Treat every retained workspace/state filesystem import in either direction as
+  hostile input. Parse a canonical manifest inside an isolated staging root;
+  enforce bounded entries, total/apparent/extracted bytes, depth, path and name
+  length, metadata, time, and compression ratio; reject absolute/traversal,
+  NUL, case/Unicode collisions, reserved names, symlinks, hardlinks, devices,
+  FIFOs, sockets, sparse/overlapping entries, setuid/setgid, capabilities,
+  unapproved ACLs/xattrs, and unsupported file types. Materialize regular files
+  and directories with no-follow beneath-root operations, quotas, immutable
+  content verification, atomic destination promotion, and failure cleanup.
+  Hostile archive/workspace fixtures must prove escape, overwrite, race, and
+  resource-exhaustion denial for forward and reverse transforms.
 - A corpus case whose production semantics depend on an implementation not yet
   complete at its first `MIG-006` run—including `DEP-001` dependency resolution
   or `CACHE-001` cache behavior—cannot count as native, mappable, runnable, or
