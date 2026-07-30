@@ -20,9 +20,9 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   threats, mitigations, verification evidence, and residual risks; unchanged
   sections require an explicit reviewed no-change receipt.
 - Independently of ticket status, before the first `CANARY-001` production
-  authority/effect grant, each `CUTOVER-001` authoritative cutover, every
-  `ROLLBACK-001` authority reversal, and every `DECOM-001` irreversible Jenkins
-  decommissioning action, review the current threat model
+  authority/effect grant, each `CUTOVER-001` or `RECUTOVER-001` authoritative
+  cutover, every `ROLLBACK-001` authority reversal, and every `DECOM-001`
+  irreversible Jenkins decommissioning action, review the current threat model
   for all affected boundaries and bind its content digest, mitigations,
   verification evidence, residual-risk acceptance, reviewers, and timestamp to
   the signed transition receipt. Any relevant implementation/configuration,
@@ -30,10 +30,16 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   action until re-review; post-action review cannot satisfy this gate.
 - Action ownership is explicit: `SHADOW-001` owns effect-free paired execution,
   `CANARY-001` owns every graduated production effect grant, `CUTOVER-001` owns
-  each authoritative cutover transaction, `ROLLBACK-001` owns each authority
-  reversal, and `DECOM-001` owns each irreversible Jenkins retirement.
+  the first authoritative cutover transaction, `ROLLBACK-001` owns the rehearsal
+  authority reversal, `RECUTOVER-001` owns the fresh post-rehearsal authority
+  transfer, and `DECOM-001` owns each irreversible Jenkins retirement.
   `MIG-008` and `MIG-009` are receipt-verification closure gates only; neither
   may grant authority or retroactively satisfy a pre-action gate.
+- Every Working rule that names a `CUTOVER-001` precondition, freeze,
+  quiescence, transfer, or receipt also applies independently to
+  `RECUTOVER-001` against fresh current source, target, state, history, runtime,
+  client, trigger, effect, observer, threat-model, and inventory receipts. The
+  first cutover's receipt cannot authorize the final transfer.
 - After merge, select the next unblocked batch without waiting for ceremony.
 - No job may enter `CANARY-001` effect-authoritative canary or `CUTOVER-001`
   authoritative cutover while an inventoried external reader still consumes
@@ -608,7 +614,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | W5-D | DEP-001, CACHE-001, CONSUMER-001, ADMIN-001 | PENDING | Workload dependency/cache truth and external read/write client migration |
 | W6-A | DIFF-001, DIFF-002, DIFF-003, MIG-006, MIG-007 | PENDING | Three differential evidence families followed by aggregate closure and reproducible migration packages |
 | W7-A | SHADOW-001, CANARY-001, MIG-008 | PENDING | Canonical input replay, deny-authority shadowing, and graduated effect authority |
-| W7-B | CUTOVER-001, ROLLBACK-001, DECOM-001, MIG-009 | PENDING | Frozen cutover, reverse reconciliation, Jenkins retirement, and authority-transfer closure |
+| W7-B | CUTOVER-001, ROLLBACK-001, RECUTOVER-001, DECOM-001, MIG-009 | PENDING | Frozen rehearsal cutover, reverse reconciliation, fresh final cutover, Jenkins retirement, and authority-transfer closure |
 | W8-A | PROOF-001, PERF-001, WAR-001 | PENDING | Claim ledger, capacity/regression envelope, and destructive Linux/Windows war campaign |
 | W8-B | SEC-004, DR-001, REL-002 | PENDING | Security review, disaster/soak campaign, and private release-readiness decision |
 
@@ -699,8 +705,9 @@ lane.
 | MIG-008 | PENDING | SHADOW-001, CANARY-001 | Close shadow and graduated-canary readiness by verifying every per-job receipt against the exact MIG-007 package and MIG-006 certified case. Require zero unclassified mismatch, zero duplicate or shadow production effect, stable source/target/package/runtime identities, exact operational-state and authorization parity, complete trigger/input/outcome replay, successful abort/freeze behavior, independently observed effects, and explicit ineligibility for scripted/unsupported or workload-visible secret-dependent jobs. Partial truth or a regression budget can never trigger automatic cutover. |
 | CUTOVER-001 | PENDING | MIG-008, MIG-007, REL-001, AUTHZ-001, JOBSTATE-001 | Define and prove the per-job cutover freeze and switch. Before the transaction, satisfy and bind the current pre-action threat-model receipt, live inventory reconciliation, quiescence proof, and complete runtime/input/authority freeze required by the Working rules; post-cutover review cannot satisfy the gate. Under owner approval and one signed transaction, atomically re-read every certified source and target identity: Jenkinsfile/library/job/core/plugin/global settings; source/target operational state and authz; trigger/discovery/source/secret/input/dependency/cache/provisioner/connector/observer configurations and generations; platform/agent/toolchain/local-input digests; migration package/YAML/IR/mapping/component/state transforms; McLoving release/SBOM/signature; and authoritative destination-state receipts. Any drift aborts without transferring trigger, scheduler, credential, or effect authority. Disabled, scripted, unsupported, unresolved, or uncertified jobs remain ineligible. |
 | ROLLBACK-001 | PENDING | CUTOVER-001, MIG-005A, OPS-002 | Prove bounded per-job rollback after at least one authoritative McLoving build plus denial-only disabled-job probes. Freeze new triggers/effects, reconcile build number/result/SCM baseline/changelog, artifacts, retained workspace/state, retention/legal holds, audit linkage, operational state, agent-local inputs, and external outcomes through the exact MIG-005A reverse transform; restore the pinned Jenkins core/plugin/configuration, trigger/discovery/client authority, identity/authz and dependency/cache/source/secret mappings; then deliver a later revision/event and prove Jenkins resumes without stale lookup, missing evidence, unintended enablement, duplicate mapping, work, or effect. |
-| DECOM-001 | PENDING | CUTOVER-001, ROLLBACK-001, CONSUMER-001, ADMIN-001 | Prove explicit owner-approved Jenkins scope decommissioning only after the rollback window. Every production job must be cut over or owner-retired, every read-side consumer and administrative writer migrated or owner-retired, and no ineligible dependency may remain. Preserve and verify the final export and legal-hold evidence, then revoke Jenkins triggers, credentials, network, read APIs, administrative write APIs and compute; prove zero production traffic, caller, scheduled work, valid credential, live agent, or remaining Jenkins authority. Decommissioning is separately authorized from cutover. |
-| MIG-009 | PENDING | CUTOVER-001, ROLLBACK-001, DECOM-001 | Close authority transfer by verifying signed cutover, rollback, and decommission evidence without invoking alternative migration logic. Require per-job eligibility, exact freeze identities, bounded dual-run and rollback windows, successful seeded-history transition, no residual reader/writer/trigger/credential/compute authority, preserved retention/legal holds and final export, and zero duplicate work or effect. Publish the immutable disposition of every inventoried job, client, state class, and Jenkins scope; an unresolved item blocks closure. |
+| RECUTOVER-001 | PENDING | ROLLBACK-001, MIG-008, MIG-007, REL-001, AUTHZ-001, JOBSTATE-001 | After `ROLLBACK-001` leaves Jenkins authoritative and proves a later Jenkins revision/build, execute the entire `CUTOVER-001` protocol again as a fresh transaction. Reconcile a new live inventory epoch; freeze current source/target/runtime/security/client identities; quiesce both sides; transfer every post-rollback trigger cursor, delivery, build/history/state, retention/hold, reader/writer, scheduler, credential, and effect-authority change through the exact certified transforms; and re-read all pre-action receipts. Prove McLoving becomes the sole current authority, Jenkins is fenced but still rollback-capable, the later Jenkins build and state are queryable on McLoving, and no delivery, work, history, reader/write operation, or effect is skipped or duplicated. A prior cutover receipt, stale snapshot, or closure-only verification cannot satisfy this ticket. |
+| DECOM-001 | PENDING | RECUTOVER-001, CONSUMER-001, ADMIN-001 | Prove explicit owner-approved Jenkins scope decommissioning only after the rollback rehearsal, fresh final cutover, and rollback window. Re-read and bind the current `RECUTOVER-001` receipt and prove McLoving—not Jenkins—is authoritative immediately before retirement. Every production job must be cut over or owner-retired, every read-side consumer and administrative writer migrated or owner-retired, and no ineligible dependency may remain. Preserve and verify the final export and legal-hold evidence, then revoke Jenkins triggers, credentials, network, read APIs, administrative write APIs and compute; prove zero production traffic, caller, scheduled work, valid credential, live agent, or remaining Jenkins authority. Decommissioning is separately authorized from cutover. |
+| MIG-009 | PENDING | CUTOVER-001, ROLLBACK-001, RECUTOVER-001, DECOM-001 | Close authority transfer by verifying signed rehearsal-cutover, rollback, fresh-final-cutover, and decommission evidence without invoking alternative migration logic. Require per-job eligibility, exact freeze identities, bounded dual-run and rollback windows, successful seeded-history transition, a current receipt proving McLoving holds sole authority immediately before retirement, no residual reader/writer/trigger/credential/compute authority, preserved retention/legal holds and final export, and zero duplicate work or effect. Publish the immutable disposition of every inventoried job, client, state class, and Jenkins scope; an unresolved item blocks closure. |
 
 ## Migration parity substrate tickets
 
