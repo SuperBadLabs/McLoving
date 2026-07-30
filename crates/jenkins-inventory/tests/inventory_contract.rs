@@ -246,6 +246,40 @@ fn reconciliation_rejects_invalid_security_realm_digest() {
 }
 
 #[test]
+fn reconciliation_rejects_empty_in_scope_population() {
+    let directory = TestDirectory::new("empty-population");
+    let mut bundle = fixture();
+    for job in &mut bundle.job_graph.jobs {
+        job.scope = ApprovedDisposition {
+            disposition: ScopeDisposition::Retired,
+            approval: Some("owner-approval/retire-all".to_owned()),
+        };
+    }
+    bundle.runtime_dependencies.jobs.clear();
+    bundle.persistent_state.jobs.clear();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("empty population must fail");
+    assert_eq!(error.code, "INV_EMPTY_POPULATION");
+}
+
+#[test]
+fn reconciliation_rejects_principal_alias_collisions() {
+    let directory = TestDirectory::new("principal-alias");
+    let mut bundle = fixture();
+    let colliding_id = bundle.identity_clients.principals[1].id.clone();
+    bundle.identity_clients.principals[0].aliases = vec![colliding_id];
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("alias collision must fail");
+    assert_eq!(error.code, "INV_PRINCIPAL_NAME_COLLISION");
+}
+
+#[test]
 fn reconciliation_rejects_parent_cycles() {
     let directory = TestDirectory::new("parent-cycle");
     let mut bundle = fixture();
@@ -270,6 +304,19 @@ fn reconciliation_rejects_blank_secret_references() {
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("blank secret reference must fail");
     assert_eq!(error.code, "INV_SECRET_REFERENCE_REQUIRED");
+}
+
+#[test]
+fn reconciliation_rejects_unknown_confidentiality_labels() {
+    let directory = TestDirectory::new("confidentiality");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1].dependencies[0].confidentiality = "Secret ".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("unknown confidentiality must fail");
+    assert_eq!(error.code, "INV_CONFIDENTIALITY");
 }
 
 #[test]

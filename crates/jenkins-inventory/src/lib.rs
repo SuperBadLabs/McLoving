@@ -391,6 +391,12 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         }
     }
     validate_job_graph_acyclic(&bundle.job_graph.jobs)?;
+    if in_scope.is_empty() {
+        return Err(InventoryError::new(
+            "INV_EMPTY_POPULATION",
+            "inventory contains no in-scope jobs",
+        ));
+    }
 
     let principal_ids = unique_ids(
         "principal",
@@ -400,6 +406,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             .iter()
             .map(|principal| principal.id.as_str()),
     )?;
+    validate_principal_namespace(&bundle.identity_clients.principals)?;
     let principal_kinds = bundle
         .identity_clients
         .principals
@@ -509,6 +516,10 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         let disposition = classify(dependencies)?;
         for dependency in dependencies {
             validate_nonempty("runtime dependency owner", &dependency.owner)?;
+            validate_confidentiality(
+                "runtime dependency confidentiality",
+                &dependency.confidentiality,
+            )?;
             validate_digest(
                 "runtime dependency implementation",
                 &dependency.implementation_sha256,
@@ -538,6 +549,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         }
         for record in records {
             validate_nonempty("state owner", &record.owner)?;
+            validate_confidentiality("state confidentiality", &record.confidentiality)?;
             validate_nonempty("state retention deadline", &record.retention_deadline)?;
             validate_digest("state source", &record.source_sha256)?;
             for consumer in &record.external_consumers {
@@ -947,6 +959,37 @@ fn validate_job_graph_acyclic(jobs: &[JobRecord]) -> Result<(), InventoryError> 
             current = parents.get(job_id).copied().flatten();
         }
         complete.extend(path);
+    }
+    Ok(())
+}
+
+fn validate_principal_namespace(principals: &[Principal]) -> Result<(), InventoryError> {
+    let mut names = BTreeMap::new();
+    for principal in principals {
+        for name in std::iter::once(principal.id.as_str())
+            .chain(principal.aliases.iter().map(String::as_str))
+        {
+            validate_identifier("principal name", name)?;
+            if let Some(existing) = names.insert(name, principal.id.as_str()) {
+                return Err(InventoryError::new(
+                    "INV_PRINCIPAL_NAME_COLLISION",
+                    format!(
+                        "principal name {name} is claimed by both {existing} and {}",
+                        principal.id
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_confidentiality(name: &str, value: &str) -> Result<(), InventoryError> {
+    if !matches!(value, "public" | "internal" | "confidential" | "secret") {
+        return Err(InventoryError::new(
+            "INV_CONFIDENTIALITY",
+            format!("{name} {value:?} is not a supported label"),
+        ));
     }
     Ok(())
 }

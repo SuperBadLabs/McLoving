@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mcloving_jenkins_inventory::{
     LEDGER_FILE, load_bundle, reconcile, seal_manifest_directory, write_ledger,
@@ -50,9 +50,6 @@ fn main() -> Result<()> {
         Command::Verify { root } => {
             let bundle = load_bundle(&root).context("inventory verification failed")?;
             let ledger = reconcile(&bundle).context("inventory reconciliation failed")?;
-            if ledger.jobs.is_empty() {
-                bail!("inventory contains no in-scope jobs");
-            }
             println!(
                 "inventory-ok controller={} epoch={} jobs={} dependencies={} state-records={}",
                 ledger.binding.controller_id,
