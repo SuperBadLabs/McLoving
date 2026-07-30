@@ -19,6 +19,14 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   deployment, migration, and decommissioning, and updated with the affected
   threats, mitigations, verification evidence, and residual risks; unchanged
   sections require an explicit reviewed no-change receipt.
+- Independently of ticket status, before the first `MIG-008` production
+  authority/effect grant, each `MIG-009` authoritative cutover, and every
+  irreversible Jenkins decommissioning action, review the current threat model
+  for all affected boundaries and bind its content digest, mitigations,
+  verification evidence, residual-risk acceptance, reviewers, and timestamp to
+  the signed transition receipt. Any relevant implementation/configuration,
+  threat, mitigation, or evidence change invalidates the receipt and blocks the
+  action until re-review; post-action review cannot satisfy this gate.
 - After merge, select the next unblocked batch without waiting for ceremony.
 - No job may enter `MIG-008` effect-authoritative canary or `MIG-009`
   authoritative cutover while an inventoried external reader still consumes
@@ -59,7 +67,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   metadata plus immutable provenance, prove deletion remains blocked, and
   verify indexed retrieval and backup restore. Missing records, weaker policy,
   untested restore, or an unapproved hold release blocks retirement.
-- Every effectful or stateful `MIG-009` per-job cutover must quiesce first:
+- Every `MIG-009` per-job authoritative cutover must quiesce first, including
+  stateless and effect-free jobs:
   pause and verify scheduled, webhook, upstream, remote, manual, and API build
   ingress plus administrative writers for the job and affected enclosing scope;
   freeze new scheduling and effect-authority transfers; drain or reconcile all
