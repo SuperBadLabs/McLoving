@@ -233,6 +233,7 @@ pub fn parse_junit(
                 if depth > limits.max_depth {
                     return Err(TestResultError::LimitExceeded("XML depth"));
                 }
+                validate_all_attributes(&reader, &start, limits)?;
                 on_start(
                     &reader,
                     &start,
@@ -250,6 +251,7 @@ pub fn parse_junit(
                 if event_depth > limits.max_depth {
                     return Err(TestResultError::LimitExceeded("XML depth"));
                 }
+                validate_all_attributes(&reader, &start, limits)?;
                 on_empty(
                     &reader,
                     &start,
@@ -698,6 +700,23 @@ fn attribute(
         }
     }
     Ok(found)
+}
+
+fn validate_all_attributes(
+    reader: &Reader<Cursor<&[u8]>>,
+    start: &BytesStart<'_>,
+    limits: JunitLimits,
+) -> Result<(), TestResultError> {
+    for attribute in start.attributes().with_checks(true) {
+        let attribute = attribute.map_err(|error| TestResultError::Malformed(error.to_string()))?;
+        let value = attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+            .map_err(|error| TestResultError::Malformed(error.to_string()))?;
+        if value.len() > limits.max_field_bytes {
+            return Err(TestResultError::LimitExceeded("field byte limit"));
+        }
+    }
+    Ok(())
 }
 
 fn parse_duration_ms(value: &str) -> Result<u64, TestResultError> {
@@ -1231,6 +1250,20 @@ mod tests {
             ),
             Err(TestResultError::Malformed(_))
         ));
+        assert!(matches!(
+            parse_junit(
+                b"<testsuite><properties value=\"&undefined;\"/></testsuite>",
+                source(),
+                JunitLimits::default()
+            ),
+            Err(TestResultError::Malformed(_))
+        ));
+        parse_junit(
+            b"<testsuite><properties value=\"&amp;\"/></testsuite>",
+            source(),
+            JunitLimits::default(),
+        )
+        .expect("predefined references remain valid in ignored attributes");
         parse_junit(
             b"<testsuite><testcase name=\"amp\">&amp;</testcase></testsuite>",
             source(),
