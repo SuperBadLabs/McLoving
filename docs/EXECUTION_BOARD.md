@@ -150,13 +150,20 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 - During every shadow, dual-run, canary, cutover, and rollback window, exactly
   one fenced runner may possess a production write-capable connector path or
   destination credential. The other runner must emit a canonical signed
-  dry-run request/intent into an isolated no-authority comparison sink; compare
-  that intent and all effect arguments before or independently of the one
-  authoritative submission. The shadow may never submit to the production
-  effect endpoint, even with a shared idempotency key, because request ordering
-  could commit the wrong payload. Idempotency is required only for retries and
-  reconciliation by the single authoritative runner. Any external system or
-  migration design that requires both runners to submit production writes is
+  dry-run request/intent into an isolated no-authority comparison sink. Before
+  any production connector submission, buffer the authoritative runner's
+  canonical signed intent as well, bind both intents to the same input receipts,
+  execution identities, certified mapping and release, and require exact
+  agreement on action, target, preconditions, all effect arguments, and
+  idempotency/fencing identity. Only a successful comparison receipt may issue
+  the one narrowly scoped connector grant and release the authoritative intent;
+  missing, late, ambiguous, or mismatched intent comparison freezes the grant
+  and produces zero production request. The shadow may never submit to the
+  production effect endpoint, even with a shared idempotency key, because
+  request ordering could commit the wrong payload. Idempotency is required only
+  for retries and reconciliation by the single authoritative runner. Any
+  external system or migration design that cannot buffer and compare before
+  submission, or that requires both runners to submit production writes, is
   ineligible until redesigned; request acceptance, deduplication, or later
   reconciliation cannot retroactively satisfy the effect-free-shadow gate.
 - Every effective Jenkins node/agent property consumed by an in-scope job is
