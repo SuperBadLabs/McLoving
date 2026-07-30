@@ -540,6 +540,43 @@ fn reconciliation_rejects_unknown_state_consumer() {
 }
 
 #[test]
+fn reconciliation_rejects_write_only_state_consumers() {
+    let directory = TestDirectory::new("write-only-state-consumer");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0].external_consumers = vec!["seed-service".to_owned()];
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("write-only state consumer must fail");
+    assert_eq!(error.code, "INV_STATE_CONSUMER_DIRECTION");
+}
+
+#[test]
+fn reconciliation_strictly_validates_the_derived_ledger() {
+    let directory = TestDirectory::new("derived-ledger-limit");
+    let mut bundle = fixture();
+    let template = bundle.runtime_dependencies.jobs[1].dependencies[0].clone();
+    for index in 0..256 {
+        let mut dependency = template.clone();
+        dependency.id = format!("runtime/extra-{index}");
+        dependency.kind = format!("kind-{index}");
+        dependency.confidentiality = "internal".to_owned();
+        dependency.credential_reference = None;
+        dependency.redaction_reference = None;
+        bundle.runtime_dependencies.jobs[1]
+            .dependencies
+            .push(dependency);
+    }
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("oversized derived ledger mapping must fail");
+    assert_eq!(error.code, "INV_RENDER_STRICT");
+}
+
+#[test]
 fn reconciliation_rejects_duplicate_acl_scope() {
     let directory = TestDirectory::new("duplicate-acl");
     let mut bundle = fixture();

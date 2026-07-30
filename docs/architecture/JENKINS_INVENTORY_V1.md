@@ -45,7 +45,8 @@ and persistent-state mutation for one bounded export epoch.
 - `persistent-state.yaml` owns each per-job record class, counts and source
   digest, retention deadline, legal holds and release authority, restore target,
   conflict policy, external consumers, ownership, confidentiality, and
-  provenance.
+  provenance. Every external consumer must reference a client whose direction
+  includes reads; write-only clients cannot consume state.
 
 Secret values are never inventory fields. A dependency classified `secret`
 must carry a typed `credential_reference` or `redaction_reference`; the
@@ -84,8 +85,9 @@ legal-hold evidence remains sealed in the source manifests without inflating
 migration eligibility or demand. The ledger grants no compiler, scheduler,
 credential, agent, trigger, connector, effect, canary, or cutover authority.
 
-`mcloving-inventory verify --root ROOT` performs the same validation without
-writing an output.
+`mcloving-inventory verify --root ROOT` performs the same reconciliation,
+derived-ledger rendering, and strict output validation without writing an
+output.
 
 ## Closure boundary
 

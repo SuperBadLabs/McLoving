@@ -488,7 +488,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             }
         }
     }
-    let client_ids = unique_ids(
+    unique_ids(
         "client",
         bundle
             .identity_clients
@@ -514,6 +514,12 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             ));
         }
     }
+    let client_directions = bundle
+        .identity_clients
+        .clients
+        .iter()
+        .map(|client| (client.id.clone(), client.direction))
+        .collect::<BTreeMap<_, _>>();
     let mut acl_keys = BTreeSet::new();
     for acl in &bundle.identity_clients.acl_entries {
         validate_nonempty("ACL scope", &acl.scope)?;
@@ -569,7 +575,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         );
     }
     for (job_id, records) in &state {
-        validate_state_records(job_id, records, &client_ids)?;
+        validate_state_records(job_id, records, &client_directions)?;
     }
 
     let mut parity_demands = BTreeMap::new();
@@ -641,7 +647,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     let runtime_dependencies = runtime.values().map(|records| records.len()).sum::<usize>();
     let persistent_record_classes = state.values().map(|records| records.len()).sum::<usize>();
 
-    Ok(EligibilityLedger {
+    let ledger = EligibilityLedger {
         schema: LEDGER_SCHEMA_VERSION.to_owned(),
         binding: bundle.job_graph.binding.clone(),
         manifest_sha256: bundle.file_digests.clone(),
@@ -659,12 +665,17 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         jobs,
         parity_demands,
         state_transform_records,
-    })
+    };
+    render_ledger(&ledger)?;
+    Ok(ledger)
 }
 
 pub fn render_ledger(ledger: &EligibilityLedger) -> Result<String, InventoryError> {
-    serde_saphyr::to_string(ledger)
-        .map_err(|error| InventoryError::new("INV_RENDER", error.to_string()))
+    let rendered = serde_saphyr::to_string(ledger)
+        .map_err(|error| InventoryError::new("INV_RENDER", error.to_string()))?;
+    parse_strict(&rendered, inventory_limits())
+        .map_err(|error| InventoryError::new("INV_RENDER_STRICT", error.to_string()))?;
+    Ok(rendered)
 }
 
 pub fn seal_manifest_directory(root: &Path) -> Result<(), InventoryError> {
@@ -695,8 +706,6 @@ pub fn write_ledger(output: &Path, ledger: &EligibilityLedger) -> Result<(), Inv
         ));
     }
     let rendered = render_ledger(ledger)?;
-    parse_strict(&rendered, inventory_limits())
-        .map_err(|error| InventoryError::new("INV_RENDER_STRICT", error.to_string()))?;
     write_new(output, rendered.as_bytes())
 }
 
@@ -930,7 +939,7 @@ fn validate_runtime_dependencies(
 fn validate_state_records(
     job_id: &str,
     records: &[StateRecord],
-    client_ids: &BTreeSet<String>,
+    client_directions: &BTreeMap<String, ClientDirection>,
 ) -> Result<(), InventoryError> {
     for record in records {
         validate_nonempty("state kind", &record.kind)?;
@@ -942,14 +951,26 @@ fn validate_state_records(
         validate_nonempty("state provenance", &record.provenance)?;
         validate_digest("state source", &record.source_sha256)?;
         for consumer in &record.external_consumers {
-            if !client_ids.contains(consumer) {
-                return Err(InventoryError::new(
-                    "INV_UNKNOWN_STATE_CONSUMER",
-                    format!(
-                        "state record {} for job {job_id} references unknown client {consumer}",
-                        record.id
-                    ),
-                ));
+            match client_directions.get(consumer) {
+                Some(ClientDirection::Read | ClientDirection::ReadWrite) => {}
+                Some(ClientDirection::Write) => {
+                    return Err(InventoryError::new(
+                        "INV_STATE_CONSUMER_DIRECTION",
+                        format!(
+                            "state record {} for job {job_id} references write-only client {consumer}",
+                            record.id
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(InventoryError::new(
+                        "INV_UNKNOWN_STATE_CONSUMER",
+                        format!(
+                            "state record {} for job {job_id} references unknown client {consumer}",
+                            record.id
+                        ),
+                    ));
+                }
             }
         }
         let mut hold_ids = BTreeSet::new();
