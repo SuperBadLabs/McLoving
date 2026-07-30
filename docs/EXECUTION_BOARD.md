@@ -214,10 +214,15 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   boundaries, including DST gaps/folds, date rollover, leap-day, skew, and
   restart; `MIG-006` must run both oracles against the same receipt-bound virtual
   clock and compare all time-derived arguments, state, logs, artifacts, and
-  outcomes. `MIG-008` and `MIG-009` must freeze the production clock policy,
-  timezone, tzdata/runtime, and synchronization configuration. Any uncontrolled
-  time dependency, drift, or unsupported clock injection is fail-closed and
-  ineligible rather than assumed equivalent.
+  outcomes. During every `MIG-008` shadow or canary comparison, capture one
+  receipt-bound wall-clock instant and, where the job observes elapsed time, one
+  bounded clock stream; supply the identical values and consumption contract to
+  both runners and compare their clock-consumption traces and all time-derived
+  semantics. Independently sampled live clocks are not equivalent. `MIG-008`
+  and `MIG-009` must freeze the production clock injection, policy, timezone,
+  tzdata/runtime, and synchronization configuration through cutover and the
+  rollback window. Any uncontrolled time dependency, drift, or unsupported
+  clock injection is fail-closed and ineligible rather than assumed equivalent.
 - For every Jenkins schedule using `H`, ranges/steps containing `H`, or another
   identity-derived slot, `MIG-000` must inventory the exact Jenkins core/plugin
   hash algorithm/version, canonical full job/folder identity and other hash
