@@ -21,8 +21,8 @@ use crate::SpoolEntry;
 
 use super::{
     Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, OutputCapture,
-    Termination, create_workspace, is_link_or_reparse_point, redaction_overlap, sync_directory,
-    validate_redactions, write_redacted_output,
+    Termination, create_workspace, is_link_or_reparse_point, sync_directory, validate_redactions,
+    write_redacted_output,
 };
 
 const TERMINATED_EXIT_CODE: u32 = 0xC000_013A;
@@ -124,12 +124,9 @@ where
     drop(stdout_destination);
     drop(stderr_destination);
     let mut capture = match (stdout_reader, stderr_reader, capture_limit) {
-        (Some(stdout), Some(stderr), Some(limit)) => Some(OutputCapture::start(
-            stdout,
-            stderr,
-            limit,
-            redaction_overlap(redactions),
-        )),
+        (Some(stdout), Some(stderr), Some(limit)) => {
+            Some(OutputCapture::start(stdout, stderr, limit, redactions))
+        }
         (None, None, None) => None,
         _ => unreachable!("capture configuration is internally consistent"),
     };
@@ -572,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn credential_crossing_output_limit_is_redacted_before_truncation() {
         let root = tempfile::tempdir().unwrap();
-        let mut request = request(
+        let mut boundary_request = request(
             root.path(),
             "credential-limit-boundary",
             ExecutionMode::Direct,
@@ -584,10 +581,10 @@ mod tests {
                 OsString::from("[Console]::Out.Write('123456789012345marker-secret')"),
             ],
         );
-        request.output_limit_bytes = Some(16);
+        boundary_request.output_limit_bytes = Some(16);
 
         let outcome = execute_with_spawn_hook_and_redactions(
-            &request,
+            &boundary_request,
             CancellationToken::new(),
             &[b"marker-secret".to_vec()],
             |_| Ok(()),
@@ -599,6 +596,30 @@ mod tests {
         assert_eq!(stdout, b"123456789012345");
         assert!(outcome.stdout.bytes <= 16);
         assert!(!stdout.ends_with(b"m"));
+
+        let mut repeated_request = request(
+            root.path(),
+            "credential-repeated-deletion-boundary",
+            ExecutionMode::Direct,
+            "powershell.exe",
+            vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-NonInteractive"),
+                OsString::from("-Command"),
+                OsString::from("[Console]::Out.Write('AAAAAAAAAAAAAAAASECRZ')"),
+            ],
+        );
+        repeated_request.output_limit_bytes = Some(16);
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &repeated_request,
+            CancellationToken::new(),
+            &[b"AAAA".to_vec(), b"SECR".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path)).unwrap();
+        assert_eq!(stdout, b"Z");
     }
 
     #[tokio::test]

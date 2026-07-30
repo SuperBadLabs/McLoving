@@ -302,11 +302,15 @@ pub fn parse_junit(
                 ));
             }
             Event::Eof => break,
-            Event::Decl(_)
-            | Event::Text(_)
-            | Event::CData(_)
-            | Event::Comment(_)
-            | Event::GeneralRef(_) => {}
+            Event::Decl(_) | Event::Text(_) | Event::CData(_) | Event::Comment(_) => {}
+            Event::GeneralRef(reference) => match reference.as_ref() {
+                b"amp" | b"lt" | b"gt" | b"apos" | b"quot" => {}
+                _ => {
+                    return Err(TestResultError::Malformed(
+                        "undefined XML general reference".to_owned(),
+                    ));
+                }
+            },
         }
         buffer.clear();
     }
@@ -1091,5 +1095,19 @@ mod tests {
             ),
             Err(TestResultError::Malformed(_))
         ));
+        assert!(matches!(
+            parse_junit(
+                b"<testsuite><testcase name=\"x\">&undefined;</testcase></testsuite>",
+                source(),
+                JunitLimits::default()
+            ),
+            Err(TestResultError::Malformed(_))
+        ));
+        parse_junit(
+            b"<testsuite><testcase name=\"amp\">&amp;</testcase></testsuite>",
+            source(),
+            JunitLimits::default(),
+        )
+        .expect("predefined XML references remain valid");
     }
 }

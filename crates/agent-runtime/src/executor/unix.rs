@@ -20,8 +20,7 @@ use crate::SpoolEntry;
 
 use super::{
     Containment, ExecutionError, ExecutionMode, ExecutionOutcome, ExecutionRequest, OutputCapture,
-    Termination, create_workspace, redaction_overlap, sync_directory, validate_redactions,
-    write_redacted_output,
+    Termination, create_workspace, sync_directory, validate_redactions, write_redacted_output,
 };
 
 /// Executes one process in a new process group.
@@ -137,12 +136,9 @@ where
     let mut child = command.spawn()?;
     drop(command);
     let mut capture = match (stdout_reader, stderr_reader, capture_limit) {
-        (Some(stdout), Some(stderr), Some(limit)) => Some(OutputCapture::start(
-            stdout,
-            stderr,
-            limit,
-            redaction_overlap(redactions),
-        )),
+        (Some(stdout), Some(stderr), Some(limit)) => {
+            Some(OutputCapture::start(stdout, stderr, limit, redactions))
+        }
         (None, None, None) => None,
         _ => unreachable!("capture configuration is internally consistent"),
     };
@@ -826,19 +822,19 @@ mod tests {
     #[tokio::test]
     async fn credential_crossing_output_limit_is_redacted_before_truncation() {
         let root = tempfile::tempdir().unwrap();
-        let mut request = request(
+        let mut boundary_request = request(
             root.path(),
             "credential-limit-boundary",
             Duration::from_secs(5),
         );
-        request.arguments = vec![
+        boundary_request.arguments = vec![
             OsString::from("-c"),
             OsString::from("printf '123456789012345marker-secret'"),
         ];
-        request.output_limit_bytes = Some(16);
+        boundary_request.output_limit_bytes = Some(16);
 
         let outcome = execute_with_spawn_hook_and_redactions(
-            &request,
+            &boundary_request,
             CancellationToken::new(),
             &[b"marker-secret".to_vec()],
             |_| Ok(()),
@@ -852,6 +848,29 @@ mod tests {
         assert_eq!(stdout, b"123456789012345");
         assert!(outcome.stdout.bytes <= 16);
         assert!(!stdout.ends_with(b"m"));
+
+        let mut repeated_request = request(
+            root.path(),
+            "credential-repeated-deletion-boundary",
+            Duration::from_secs(5),
+        );
+        repeated_request.arguments = vec![
+            OsString::from("-c"),
+            OsString::from("printf 'AAAAAAAAAAAAAAAASECRZ'"),
+        ];
+        repeated_request.output_limit_bytes = Some(16);
+        let outcome = execute_with_spawn_hook_and_redactions(
+            &repeated_request,
+            CancellationToken::new(),
+            &[b"AAAA".to_vec(), b"SECR".to_vec()],
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        let stdout = fs::read(root.path().join(&outcome.stdout.relative_path))
+            .await
+            .unwrap();
+        assert_eq!(stdout, b"Z");
     }
 
     #[tokio::test]

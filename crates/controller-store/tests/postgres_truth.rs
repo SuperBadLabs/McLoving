@@ -6197,6 +6197,17 @@ async fn tenant_audit_is_hash_chained_exportable_immutable_and_retained() {
             .await
             .expect("append explicit audit category");
     }
+    store
+        .append_audit_event(&NewAuditEvent {
+            organization_id,
+            category: "admin",
+            actor_subject: "oidc:operator",
+            action: "numeric.canonicalized",
+            subject: "tenant:self",
+            payload: json!({"negative_zero": -0.0}),
+        })
+        .await
+        .expect("append a payload PostgreSQL JSONB normalizes");
 
     let export = store
         .verify_audit_chain(organization_id)

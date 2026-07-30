@@ -128,22 +128,21 @@ struct OutputCapture {
 }
 
 impl OutputCapture {
-    fn start(stdout: File, stderr: File, limit: u64, overlap: u64) -> Self {
+    fn start(stdout: File, stderr: File, limit: u64, redactions: &[Vec<u8>]) -> Self {
         let total = Arc::new(AtomicU64::new(0));
         let limit_exceeded = CancellationToken::new();
-        let capture_limit = limit.saturating_add(overlap);
         Self {
             stdout: Some(tokio::spawn(capture_pipe(
                 stdout,
                 limit,
-                capture_limit,
+                redactions.to_vec(),
                 Arc::clone(&total),
                 limit_exceeded.clone(),
             ))),
             stderr: Some(tokio::spawn(capture_pipe(
                 stderr,
                 limit,
-                capture_limit,
+                redactions.to_vec(),
                 total,
                 limit_exceeded.clone(),
             ))),
@@ -191,35 +190,77 @@ impl Drop for OutputCapture {
 async fn capture_pipe(
     reader: File,
     limit: u64,
-    capture_limit: u64,
+    redactions: Vec<Vec<u8>>,
     total: Arc<AtomicU64>,
     limit_exceeded: CancellationToken,
 ) -> Result<Vec<u8>, io::Error> {
     let mut reader = tokio::fs::File::from_std(reader);
-    let capacity = usize::try_from(capture_limit.min(1024 * 1024)).unwrap_or(1024 * 1024);
+    let capacity = usize::try_from(limit.min(1024 * 1024)).unwrap_or(1024 * 1024);
     let mut captured = Vec::with_capacity(capacity);
+    let mut secrets = redactions
+        .iter()
+        .map(Vec::as_slice)
+        .filter(|secret| !secret.is_empty())
+        .collect::<Vec<_>>();
+    secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
+    let tail_limit = secrets
+        .iter()
+        .map(|secret| secret.len())
+        .max()
+        .and_then(|length| length.checked_sub(1))
+        .unwrap_or(0);
+    let mut pending = Vec::with_capacity(tail_limit.saturating_add(1));
+    let mut ready = Vec::with_capacity(8192);
     let mut buffer = [0_u8; 8192];
     loop {
         let bytes = reader.read(&mut buffer).await?;
         if bytes == 0 {
+            retain_redacted_bytes(&mut captured, &pending, limit, &total, &limit_exceeded);
             return Ok(captured);
         }
-        let bytes = u64::try_from(bytes).expect("read buffer size fits u64");
-        let previous = total
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                Some(value.saturating_add(bytes))
-            })
-            .unwrap_or_else(|value| value);
-        let retained = bytes.min(
-            capture_limit
-                .saturating_sub(u64::try_from(captured.len()).expect("captured length fits u64")),
-        );
-        captured.extend_from_slice(
-            &buffer[..usize::try_from(retained).expect("retained bytes fit usize")],
-        );
-        if previous.saturating_add(bytes) > limit {
-            limit_exceeded.cancel();
+        if secrets.is_empty() {
+            retain_redacted_bytes(
+                &mut captured,
+                &buffer[..bytes],
+                limit,
+                &total,
+                &limit_exceeded,
+            );
+            continue;
         }
+        for byte in &buffer[..bytes] {
+            pending.push(*byte);
+            while let Some(secret) = secrets.iter().find(|secret| pending.ends_with(secret)) {
+                pending.truncate(pending.len() - secret.len());
+            }
+            if pending.len() > tail_limit {
+                let stable = pending.len() - tail_limit;
+                ready.extend(pending.drain(..stable));
+            }
+        }
+        retain_redacted_bytes(&mut captured, &ready, limit, &total, &limit_exceeded);
+        ready.clear();
+    }
+}
+
+fn retain_redacted_bytes(
+    captured: &mut Vec<u8>,
+    bytes: &[u8],
+    limit: u64,
+    total: &AtomicU64,
+    limit_exceeded: &CancellationToken,
+) {
+    let bytes_len = u64::try_from(bytes.len()).expect("captured read size fits u64");
+    let previous = total
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            Some(value.saturating_add(bytes_len))
+        })
+        .unwrap_or_else(|value| value);
+    let retained = bytes_len.min(limit.saturating_sub(previous));
+    captured
+        .extend_from_slice(&bytes[..usize::try_from(retained).expect("retained bytes fit usize")]);
+    if previous.saturating_add(bytes_len) > limit {
+        limit_exceeded.cancel();
     }
 }
 
@@ -254,16 +295,6 @@ fn redact_to_fixed_point(
         }
     }
     Ok(output)
-}
-
-fn redaction_overlap(redactions: &[Vec<u8>]) -> u64 {
-    redactions
-        .iter()
-        .map(Vec::len)
-        .max()
-        .and_then(|length| length.checked_sub(1))
-        .and_then(|length| u64::try_from(length).ok())
-        .unwrap_or(0)
 }
 
 fn validate_redactions(redactions: &[Vec<u8>]) -> Result<(), ExecutionError> {

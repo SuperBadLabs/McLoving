@@ -326,6 +326,13 @@ pub(crate) async fn append_audit_record(
     payload: Value,
 ) -> Result<AuditEvent, StoreError> {
     validate_fields(category, actor_subject, action, subject)?;
+    // PostgreSQL JSONB is the durable payload representation. Round-trip
+    // through that representation before hashing so values such as negative
+    // zero cannot produce a hash that differs from the exported row.
+    let payload = sqlx::query_scalar::<_, Value>("SELECT $1::jsonb")
+        .bind(&payload)
+        .fetch_one(&mut **tx)
+        .await?;
     sqlx::query(
         "INSERT INTO audit_chain_heads (organization_id)
          VALUES ($1)
