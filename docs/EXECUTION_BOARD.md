@@ -198,6 +198,18 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   timezone, tzdata/runtime, and synchronization configuration. Any uncontrolled
   time dependency, drift, or unsupported clock injection is fail-closed and
   ineligible rather than assumed equivalent.
+- For every Jenkins schedule using `H`, ranges/steps containing `H`, or another
+  identity-derived slot, `MIG-000` must inventory the exact Jenkins core/plugin
+  hash algorithm/version, canonical full job/folder identity and other hash
+  inputs, seed/salt identity without exposing protected material, timezone,
+  calendar, original expression, and resolved firing slots. `TRIG-001` must
+  reproduce and differentially prove the exact slots across restart, controller
+  migration, cutover, rollback, job/folder rename, clone, daylight-saving
+  transition, and hash-boundary cases; a new stable-but-different hash is not
+  equivalent. `MIG-008` and `MIG-009` freeze all hash inputs, implementation,
+  configuration, and resolved-slot digests and reconcile the schedule watermark
+  before authority transfer. Any unresolvable or drifting hashed schedule is
+  ineligible until explicitly remapped with owner-approved timing delta.
 - Jobs whose control flow, effect arguments, identifiers, retry timing, or
   outputs consume randomness or entropy—including shell RNGs, random devices,
   UUID APIs, language runtimes, and plugins—must inventory each source,
