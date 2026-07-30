@@ -115,10 +115,12 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   insufficient. Any runtime drift atomically quarantines the job, pauses new
   trigger admission and scheduling, withholds all effect grants, and reconciles
   already accepted work until the exact changed runtime completes every affected
-  `MIG-006` differential and `CANARY-001` canary gate and a new package receipt is
-  approved; prior authority is never grandfathered across an upgrade.
+  `DIFF-001`, `DIFF-002`, or `DIFF-003` scenario, a refreshed `MIG-006`
+  aggregate closure, the `CANARY-001` canary gate, and a new package receipt;
+  prior authority is never grandfathered across an upgrade.
 - Every independently observed destination-state or reconciliation receipt used
-  by `MIG-006`, `CANARY-001`, `CUTOVER-001`, or `ROLLBACK-001` must bind an
+  by `DIFF-003`, the `MIG-006` aggregate closure, `CANARY-001`, `CUTOVER-001`,
+  `RECUTOVER-001`, or `ROLLBACK-001` must bind an
   observer that is separate from the effectful connector and runner. `OBS-001`
   owns its implementation,
   deployment, identity and grant separation, certification, and receipt
@@ -144,9 +146,10 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   deployment grant, or external-effect authority. A direct native/component
   effect mapping is ineligible and must be remapped to a connector or rejected
   fail-closed. Therefore every reference in this board to a "connector-backed"
-  effect or job includes every authoritative external effect; `MIG-006` must
-  certify the connector boundary, and `CANARY-001`/`CUTOVER-001` may grant or transfer
-  no such authority until `EXT-001` is `DONE` for the exact connector action,
+  effect or job includes every authoritative external effect; `DIFF-003` must
+  certify the connector boundary and `MIG-006` must verify that exact evidence,
+  while `CANARY-001`/`CUTOVER-001` may grant or transfer no such authority until
+  `EXT-001` is `DONE` for the exact connector action,
   identity, implementation, permission, fencing, deduplication, and
   reconciliation contract.
 - Every live external read whose response can influence pipeline control flow,
@@ -158,7 +161,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   cursor, response provenance/signature, confidentiality/taint, size/rate
   bounds, owner, and failure/default policy. `MIG-002` must define bounded
   success, branch, stale, missing, malformed, oversized, unauthorized,
-  substituted, outage, replay, and secret-marker fixtures; `MIG-006` must use
+  substituted, outage, replay, and secret-marker fixtures; `DIFF-003` must use
   only exact fixture-local implementations and compare response-consumption and
   non-disclosure. `CANARY-001` and `CUTOVER-001` must keep the job ineligible until
   `INPUT-001` is `DONE`. During every `SHADOW-001` or `CANARY-001` comparison, the
@@ -182,7 +185,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   image/AMI and bootstrap/toolchain digests, platform/capabilities/trust pool,
   network/volume/workspace/cache policy, identity/IAM grants, labels, quotas,
   lifecycle/retention, owner, and cleanup/rollback contract. `MIG-002` and
-  `MIG-006` must certify exact contained fixtures plus substitution, exhaustion,
+  `DIFF-003` must certify exact contained fixtures plus substitution, exhaustion,
   interruption, orphan, stale-instance, and cleanup cases. `CANARY-001` and
   `CUTOVER-001` must keep every dependent job ineligible until `PROV-001` is `DONE`
   and freeze the exact deployed provisioner, template, image, policy, identity,
@@ -226,7 +229,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   inventory the property source, resolution/override order, effective value or
   protected redaction digest, node/label scope, owner, and configuration digest;
   `MIG-002` must bind it into the corpus profile and equivalence cases; and
-  `MIG-006` must certify the resulting environment, tool identity, scheduling,
+  `DIFF-001` must certify the resulting environment, tool identity, scheduling,
   and authority behavior. The `CANARY-001` pre-effect and `CUTOVER-001` atomic cutover
   freezes must re-read the live effective-property set and exact configuration
   digest for every eligible agent target. Missing, changed, newly effective, or
@@ -247,7 +250,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   build numbers and canonical job identity, bind URL values to the certified
   route/consumer mapping, bind node values to the certified agent mapping, and
   normalize workspace roots while preserving relative-path and isolation truth.
-  `MIG-006` must inject the receipt-bound per-run values into both exact-profile
+  `DIFF-001` must inject the receipt-bound per-run values into both exact-profile
   executions and compare their consumption, shell/process environments,
   normalized outputs, artifact tags/links/paths, and effect arguments across
   those cases. `CANARY-001` and `CUTOVER-001` must derive and freeze each live per-run
@@ -260,7 +263,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   each ancestor's identity, configuration digest, property source and
   resolution order, including inherited environment, tools, shared libraries,
   credential references without secret material, authorization, and
-  plugin-defined properties. `MIG-002` and `MIG-006` must bind and certify the
+  plugin-defined properties. `MIG-002`, `DIFF-001`, and `DIFF-002` must bind and certify the
   resulting effective values and precedence. The `CANARY-001` pre-effect and
   `CUTOVER-001` cutover freezes must re-read every ancestor and the effective
   property-set digest; any changed, inserted, removed, newly effective, or
@@ -285,7 +288,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   source, timezone, locale calendar, tzdata/runtime version, and allowed skew.
   `MIG-002` must define deterministic controlled-clock cases for relevant
   boundaries, including DST gaps/folds, date rollover, leap-day, skew, and
-  restart; `MIG-006` must run both oracles against the same receipt-bound virtual
+  restart; `DIFF-001` must run both oracles against the same receipt-bound virtual
   clock and compare all time-derived arguments, state, logs, artifacts, and
   outcomes. During every `SHADOW-001` or `CANARY-001` comparison, capture one
   receipt-bound wall-clock instant and, where the job observes elapsed time, one
@@ -313,7 +316,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   UUID APIs, language runtimes, and plugins—must inventory each source,
   algorithm/provider/runtime identity, consumption point, semantic use, and
   security classification. `MIG-002` must define bounded deterministic seed or
-  byte-stream fixtures that force every relevant branch/outcome; `MIG-006` must
+  byte-stream fixtures that force every relevant branch/outcome; `DIFF-001` must
   give both deny-authority oracles the same receipt-bound test stream, compare
   consumption traces and semantic outputs, and repeat seeds to prove
   determinism. Non-semantic random identifiers require an explicit normalization
@@ -470,7 +473,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   union active holds, forbid deadline shortening or hold release, and map an
   unsupported policy fail-closed. `MIG-005A` must prove both directions,
   idempotent replay, gaps/conflicts/duplicate denial, and exact-profile
-  destination retrieval before `DONE`; `MIG-006` must certify these mappings,
+  destination retrieval before `DONE`; `DIFF-002` must certify these mappings,
   and `MIG-007` must package their exact implementation/configuration digests
   and receipts. `CANARY-001`, `CUTOVER-001`, and `ROLLBACK-001` may use only
   those packaged certified transforms—never ad hoc handoff or rollback import
@@ -503,7 +506,8 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   keeps the gaining runner effect-free; the prior runner resumes only after its
   authority and history remain or are restored consistently. A pre-cutover
   snapshot or rehearsal receipt alone is insufficient.
-- In `MIG-006`, "no network or host mounts" means no external, host,
+- In every `DIFF-001`, `DIFF-002`, and `DIFF-003` fixture, "no network or host
+  mounts" means no external, host,
   production, staging, shared-service, or cross-fixture network or mounts; the
   private network contained wholly inside one disposable fixture is permitted.
   "No secrets, database, agent, scheduler, or controller authority" means no
@@ -517,7 +521,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   tests, and complete teardown after receipt sealing.
 - `MIG-005A` owns the versioned forward/reverse state transforms and executable
   seeded-history rehearsal before differential certification. Every
-  `MIG-006` transition case must use those exact content-hashed transforms and
+  `DIFF-002` transition case must use those exact content-hashed transforms and
   receipts; ad hoc import/export logic cannot earn equivalence. `MIG-007`
   packages the already-certified mapping and receipts rather than defining a
   downstream replacement.
@@ -558,12 +562,14 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   Hostile archive/workspace fixtures must prove escape, overwrite, race, and
   resource-exhaustion denial for forward and reverse transforms.
 - A corpus case whose production semantics depend on an implementation not yet
-  complete at its first `MIG-006` run—including `DEP-001` dependency resolution
+  complete at its first differential run and `MIG-006` closure—including
+  `DEP-001` dependency resolution
   or `CACHE-001` cache behavior—cannot count as native, mappable, runnable, or
   certified through fixture/ad hoc behavior. After the required implementation
-  is complete, rerun every affected `MIG-006` scenario against its exact
-  deployed binary/image, configuration, policy, and provenance identities,
-  regenerate the `MIG-007` package and receipts, and pass exact-head review
+  is complete, rerun every affected `DIFF-001`, `DIFF-002`, or `DIFF-003`
+  scenario against its exact deployed binary/image, configuration, policy, and
+  provenance identities, refresh the `MIG-006` aggregate closure, regenerate
+  the `MIG-007` package and receipts, and pass exact-head review
   before `CANARY-001` effect authority. This recertification rule applies to any
   later trigger, discovery, connector, SCM, secret, dependency, cache, agent,
   or other runtime implementation that changes certified behavior.
@@ -573,7 +579,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
   `MIG-002` defines bounded controller restart/crash, agent disconnect/reconnect
   and loss, executor/container kill, network partition, checkpoint replay,
   preserved-stash recovery, retry, cancellation, and duplicate-effect scenarios;
-  `MIG-006` runs them through both exact-profile systems and compares resumed
+  `DIFF-001` and `DIFF-002` run them through both exact-profile systems and compare resumed
   node/attempt lineage, state, logs, artifacts, results, effects, and audit.
   Unimplemented or uncertified durability semantics are explicit unsupported
   classifications and make affected jobs ineligible for canary or cutover.
