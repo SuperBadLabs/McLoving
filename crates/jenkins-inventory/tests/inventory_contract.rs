@@ -649,7 +649,7 @@ fn reconciliation_rejects_same_cardinality_population_substitution() {
                 bundle.job_graph.jobs[2].id = "replacement".to_owned();
                 refresh_direct_child_count_subject(&mut bundle.job_graph.jobs[2]);
             }) as fn(&mut Fixture),
-            "INV_JOB_SET_MISMATCH",
+            "INV_UNKNOWN_RUNTIME_JOB",
         ),
         (
             "job-parent-set",
@@ -660,9 +660,23 @@ fn reconciliation_rejects_same_cardinality_population_substitution() {
             "INV_JOB_SET_MISMATCH",
         ),
         (
+            "job-semantic-set",
+            (|bundle: &mut Fixture| {
+                bundle.job_graph.jobs[1].owner = "replacement-owner".to_owned();
+            }) as fn(&mut Fixture),
+            "INV_JOB_SET_MISMATCH",
+        ),
+        (
             "principal-set",
             (|bundle: &mut Fixture| {
                 bundle.identity_clients.principals[2].id = "group/replacement".to_owned();
+            }) as fn(&mut Fixture),
+            "INV_UNKNOWN_GROUP",
+        ),
+        (
+            "principal-semantic-set",
+            (|bundle: &mut Fixture| {
+                bundle.identity_clients.principals[0].lifecycle = PrincipalLifecycle::Disabled;
             }) as fn(&mut Fixture),
             "INV_PRINCIPAL_SET_MISMATCH",
         ),
@@ -694,12 +708,20 @@ fn reconciliation_rejects_same_cardinality_population_substitution() {
             (|bundle: &mut Fixture| {
                 bundle.identity_clients.clients[0].id = "replacement".to_owned();
             }) as fn(&mut Fixture),
-            "INV_CLIENT_SET_MISMATCH",
+            "INV_UNKNOWN_STATE_CONSUMER",
         ),
         (
             "client-direction-set",
             (|bundle: &mut Fixture| {
                 bundle.identity_clients.clients[0].direction = ClientDirection::Write;
+            }) as fn(&mut Fixture),
+            "INV_STATE_CONSUMER_DIRECTION",
+        ),
+        (
+            "client-semantic-set",
+            (|bundle: &mut Fixture| {
+                bundle.identity_clients.clients[0].endpoint =
+                    "/job/replacement/api/json".to_owned();
             }) as fn(&mut Fixture),
             "INV_CLIENT_SET_MISMATCH",
         ),
@@ -1090,6 +1112,7 @@ fn reconciliation_accepts_observed_source_clients_without_fabricated_principals(
     bundle.identity_clients.clients[0].caller = ClientCaller::ObservedSource {
         source: "reverse-proxy/access-log/public-dashboard".to_owned(),
     };
+    refresh_fixture_sets(&mut bundle);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1860,9 +1883,11 @@ fn refresh_fixture_sets(fixture: &mut Fixture) {
     )];
     job_entries.extend(fixture.job_graph.jobs.iter().map(|job| {
         vec![
-            b"job".to_vec(),
+            b"job-record-v1".to_vec(),
             job.id.as_bytes().to_vec(),
-            job.parent_id.as_deref().unwrap_or("").as_bytes().to_vec(),
+            serde_saphyr::to_string(job)
+                .expect("serialize job commitment")
+                .into_bytes(),
         ]
     }));
     fixture.job_graph.job_set = owned_set_evidence("jenkins/controller/item-set", job_entries);
@@ -1871,13 +1896,21 @@ fn refresh_fixture_sets(fixture: &mut Fixture) {
         b"principal-set",
         &[],
     )];
-    principal_entries.extend(
-        fixture
-            .identity_clients
-            .principals
-            .iter()
-            .map(|principal| vec![b"principal".to_vec(), principal.id.as_bytes().to_vec()]),
-    );
+    principal_entries.push(vec![
+        b"security-realm-record-v1".to_vec(),
+        serde_saphyr::to_string(&fixture.identity_clients.security_realm)
+            .expect("serialize security-realm commitment")
+            .into_bytes(),
+    ]);
+    principal_entries.extend(fixture.identity_clients.principals.iter().map(|principal| {
+        vec![
+            b"principal-record-v1".to_vec(),
+            principal.id.as_bytes().to_vec(),
+            serde_saphyr::to_string(principal)
+                .expect("serialize principal commitment")
+                .into_bytes(),
+        ]
+    }));
     fixture.identity_clients.principal_set =
         owned_set_evidence("jenkins/security-realm/principal-set", principal_entries);
     let mut acl_entries = vec![set_subject_entry_for(
@@ -1886,21 +1919,17 @@ fn refresh_fixture_sets(fixture: &mut Fixture) {
         &[],
     )];
     acl_entries.extend(fixture.identity_clients.acl_entries.iter().map(|acl| {
-        let mut permissions = acl
-            .permissions
-            .iter()
-            .map(|permission| permission.as_bytes().to_vec())
-            .collect::<Vec<_>>();
-        permissions.sort();
-        let mut fields = vec![
-            b"acl".to_vec(),
+        let mut canonical_acl = acl.clone();
+        canonical_acl.permissions.sort();
+        vec![
+            b"acl-record-v1".to_vec(),
             acl.job_id.as_bytes().to_vec(),
             acl.principal_id.as_bytes().to_vec(),
             acl.scope.as_bytes().to_vec(),
-            acl.generation.as_bytes().to_vec(),
-        ];
-        fields.extend(permissions);
-        fields
+            serde_saphyr::to_string(&canonical_acl)
+                .expect("serialize ACL commitment")
+                .into_bytes(),
+        ]
     }));
     fixture.identity_clients.acl_entry_set =
         owned_set_evidence("jenkins/authorization/acl-entry-set", acl_entries);
@@ -1911,9 +1940,11 @@ fn refresh_fixture_sets(fixture: &mut Fixture) {
     )];
     client_entries.extend(fixture.identity_clients.clients.iter().map(|client| {
         vec![
-            b"client".to_vec(),
+            b"client-record-v1".to_vec(),
             client.id.as_bytes().to_vec(),
-            client_direction_bytes(client.direction).to_vec(),
+            serde_saphyr::to_string(client)
+                .expect("serialize client commitment")
+                .into_bytes(),
         ]
     }));
     fixture.identity_clients.client_set =
@@ -2088,14 +2119,6 @@ fn owned_set_evidence(provenance: &str, entries: Vec<Vec<Vec<u8>>>) -> SetEviden
         provenance: provenance.to_owned(),
         source_sha256: DIGEST_C.to_owned(),
         entries_sha256: canonical_owned_entries_sha256(entries),
-    }
-}
-
-fn client_direction_bytes(direction: ClientDirection) -> &'static [u8] {
-    match direction {
-        ClientDirection::Read => b"read",
-        ClientDirection::Write => b"write",
-        ClientDirection::ReadWrite => b"read-write",
     }
 }
 

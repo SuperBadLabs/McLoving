@@ -46,17 +46,19 @@ and persistent-state mutation for one bounded export epoch.
   count for every job must exactly match the manifest population and hierarchy;
   each count binds a collector distinct from the manifest exporter, provenance,
   and a source-evidence digest. The independently collected canonical
-  `(job ID, parent ID)` set is separately SHA-256 bound and must match exactly,
-  so same-cardinality parent/child substitutions cannot pass.
+  set commits each complete deterministic job record—identity and hierarchy,
+  owner/scope approval, operational state, source/configuration, declared
+  requirements, node authority, and publication behavior—so stale semantics or
+  same-cardinality parent/child substitutions cannot pass.
 - `identity-clients.yaml` owns the security realm, immutable principals and
   lifecycle evidence, effective ACLs, and every read-side or write-side client.
   Independently sourced principal, effective-ACL-entry, and client totals must
   each exactly match their manifest population. Each total binds a collector
   distinct from the manifest exporter, provenance, and a source-evidence
-  digest. Independent canonical identity sets also bind principal IDs,
-  `(job ID, principal ID, scope, ACL generation, canonical permission set)`
-  authorization records, and `(client ID, direction)` client records,
-  preventing same-cardinality identity or semantic-class substitution.
+  digest. Independent canonical sets commit the complete security realm,
+  principal records, ACL records with canonical permissions, and client
+  contracts, preventing stale lifecycle/mapping/caller/endpoint semantics and
+  same-cardinality identity substitution.
   Principal, ACL, and client sets have distinct controller/epoch subjects even
   when their populations are empty.
   Principal kind is one of `user`, `service`, or `group`; lifecycle is one of
