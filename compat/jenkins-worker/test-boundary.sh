@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 IMAGE=${1:-localhost/mcloving/jenkins-compiler-worker:mario-jenkins-oracle-228-v1}
-EXPECTED_PROFILE=243e40cca38b4e789f81dbfd004470b2338b3af402e9dda97e467ee4f788bb41
+EXPECTED_PROFILE=feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/mcloving-compiler-test.XXXXXXXX")
 CONTAINER_ID=
 

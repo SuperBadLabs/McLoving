@@ -792,7 +792,7 @@ descriptors, temporary storage, time, input, and output. Deterministic,
 hostile-input, target-substitution, symlink, mount, secret-marker, and
 authority-negative gates pass. It intentionally returns `unsupported` until a
 subset is admitted. `MIG-002` is complete at corpus manifest
-`bc1516a2b34ced52368deef30b7dbf3721accabf6fffb0f7acd78061bb2552db`:
+`8c5bb4707303f54ea04e12b95196385cca53a860fe225f322dc324e279989d58`:
 228 exact-commit sources, 230 disabled job mappings, 127 declared-license and
 101 evidence-only `NOASSERTION` dispositions, six typed redactions across two
 files, four XML line-ending receipts, 80 Declarative-valid, 199 compile/CPS

@@ -28,7 +28,7 @@ copied at offline epoch `2026-07-31T06:44:17Z`. Profile v1 binds:
 
 | Component | Identity |
 |---|---|
-| Inventory fingerprint | `3473f1528e0fa8b1b856ae4941e5a5169d4c2c46389b813d0dd34935fb505198` |
+| Inventory fingerprint | `b1c2f81c74ec0ffc36971f358f920b2d0775c6009f474bea924448cd2a1915c1` |
 | Jenkins image | `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02` |
 | Jenkins core | `2.568.1` |
 | Jenkins WAR SHA-256 | `58f24f3965fbef7708629fbe158d51bf138ffd577cadbc86b46367e8ad0beb83` |
@@ -38,7 +38,7 @@ copied at offline epoch `2026-07-31T06:44:17Z`. Profile v1 binds:
 | Java | Eclipse Adoptium Temurin `21.0.11+10-LTS` |
 | Plugin files | 90 |
 | Plugin manifest SHA-256 | `e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0` |
-| Profile SHA-256 | `243e40cca38b4e789f81dbfd004470b2338b3af402e9dda97e467ee4f788bb41` |
+| Profile SHA-256 | `feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271` |
 
 The offline image build verifies every plugin against the sealed manifest and
 extracts Groovy and Jenkins core from the pinned WAR. Every worker process
@@ -84,7 +84,7 @@ The rootless-container boundary suite independently proves:
   and all default capabilities dropped; and
 - compile remains unsupported with no execution or effect authority.
 
-The exact-profile HeMan build used for the MIG-001 gate had image ID
-`a08cf23a6d063bb80928360bc5806e46e6ff4d3d9f957da876955539de566aa3`.
+The successor-inventory-bound HeMan rebuild had image ID
+`344402b7e1a2b1831aa43184ee30db93ff8beaf13efaa80819d562511fd5a303`.
 This local image ID is supporting evidence, not a published release identity.
 Future source changes require a new image receipt and all gates again.
