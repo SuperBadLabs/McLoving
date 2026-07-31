@@ -1,12 +1,20 @@
 use std::collections::BTreeMap;
 
+#[cfg(target_os = "linux")]
+use std::{
+    fs,
+    os::unix::{fs::symlink, net::UnixListener},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
 use mcloving_state_transfer::{
-    BuildResult, BuildState, ChangeEntry, ConflictPolicy, DataBinding, DataClassification, Digest,
-    ExpectedBinding, FilesystemEntry, FilesystemEntryKind, JobState, LegalHold, ObjectKind,
-    ObjectState, PersistentDependency, Protection, RecordProvenance, RetentionPolicy,
-    RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState, SecretDisposition, SecretReference,
-    StateBundle, SystemIdentity, TransferBinding, TransferDirection, TransferError, TriggerCause,
-    transform,
+    BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy, DataBinding,
+    DataClassification, Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind, JobState,
+    LegalHold, MaterializationLimits, ObjectKind, ObjectState, PersistentDependency, Protection,
+    RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState,
+    SecretDisposition, SecretReference, StateBundle, SystemIdentity, TransferBinding,
+    TransferDirection, TransferError, TriggerCause, evaluate_change_predicate,
+    materialize_filesystem_entries, sha256, transform,
 };
 
 fn digest(byte: u8) -> Digest {
@@ -437,4 +445,193 @@ fn hostile_or_ambiguous_filesystem_manifests_fail_closed() {
         transform(&wrong_size, &expected, &BTreeMap::new()),
         Err(TransferError::InvalidField(field)) if field.contains("byte total")
     ));
+}
+
+#[test]
+fn transferred_changes_drive_exact_path_and_changelog_predicates() {
+    let (bundle, _) = fixture(TransferDirection::JenkinsToMcLoving);
+    let checkout = &bundle.jobs[0].builds[1].checkouts[0];
+    let decision = evaluate_change_predicate(
+        checkout,
+        &ChangePredicate {
+            path_suffixes: vec!["main.rs".to_owned()],
+            message_digests: vec![digest(23)],
+        },
+    )
+    .unwrap();
+    assert!(decision.selected);
+    assert_eq!(
+        decision.matched_change_record_ids,
+        vec!["change:stateful:8:1"]
+    );
+
+    let miss = evaluate_change_predicate(
+        checkout,
+        &ChangePredicate {
+            path_suffixes: vec!["never.matches".to_owned()],
+            message_digests: vec![digest(92)],
+        },
+    )
+    .unwrap();
+    assert!(!miss.selected);
+    assert!(miss.matched_change_record_ids.is_empty());
+}
+
+#[cfg(target_os = "linux")]
+fn materialization_root(label: &str) -> std::path::PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "mcloving-state-transfer-{label}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&path).unwrap();
+    path
+}
+
+#[cfg(target_os = "linux")]
+fn materialization_limits() -> MaterializationLimits {
+    MaterializationLimits {
+        max_entries: 16,
+        max_file_bytes: 1_024,
+        max_total_bytes: 4_096,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn directory_entry(path: &str) -> FilesystemEntry {
+    FilesystemEntry {
+        path: path.to_owned(),
+        kind: FilesystemEntryKind::Directory,
+        content_digest: None,
+        bytes: 0,
+        data_binding: internal_data(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn file_entry(path: &str, bytes: &[u8]) -> FilesystemEntry {
+    FilesystemEntry {
+        path: path.to_owned(),
+        kind: FilesystemEntryKind::RegularFile,
+        content_digest: Some(sha256(bytes)),
+        bytes: bytes.len() as u64,
+        data_binding: internal_data(),
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn no_follow_materializer_writes_only_classified_bounded_files() {
+    let root = materialization_root("success");
+    let entries = vec![
+        directory_entry("cache"),
+        file_entry("cache/result.bin", b"sealed-result"),
+        file_entry("top.txt", b"top-level"),
+    ];
+    let payloads = BTreeMap::from([
+        ("cache/result.bin".to_owned(), b"sealed-result".to_vec()),
+        ("top.txt".to_owned(), b"top-level".to_vec()),
+    ]);
+
+    let receipt =
+        materialize_filesystem_entries(&root, &entries, &payloads, materialization_limits())
+            .unwrap();
+    assert_eq!(receipt.entry_count, 3);
+    assert_eq!(receipt.file_count, 2);
+    assert_eq!(receipt.total_bytes, 22);
+    assert_eq!(
+        fs::read(root.join("cache/result.bin")).unwrap(),
+        b"sealed-result"
+    );
+    assert_eq!(fs::read(root.join("top.txt")).unwrap(), b"top-level");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn no_follow_materializer_denies_traversal_symlink_hardlink_and_special_inode() {
+    let outside = materialization_root("outside");
+    let root = materialization_root("hostile");
+    fs::write(outside.join("held.txt"), b"held").unwrap();
+    symlink(&outside, root.join("link")).unwrap();
+    fs::hard_link(outside.join("held.txt"), root.join("hardlink")).unwrap();
+    let _socket = UnixListener::bind(root.join("socket")).unwrap();
+
+    let cases = [
+        ("../escape", root.join("escape")),
+        ("link/escape", outside.join("escape")),
+        ("hardlink", outside.join("held.txt")),
+        ("socket", root.join("socket")),
+    ];
+    for (path, protected_path) in cases {
+        let entries = vec![file_entry(path, b"substitution")];
+        let payloads = BTreeMap::from([(path.to_owned(), b"substitution".to_vec())]);
+        assert!(
+            materialize_filesystem_entries(&root, &entries, &payloads, materialization_limits())
+                .is_err()
+        );
+        if path == "hardlink" {
+            assert_eq!(fs::read(protected_path).unwrap(), b"held");
+        } else if path != "socket" {
+            assert!(!protected_path.exists());
+        }
+    }
+
+    drop(_socket);
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn materializer_rejects_payload_substitution_unclassified_bytes_and_secret_literals() {
+    let root = materialization_root("binding");
+    let entry = file_entry("artifact.bin", b"expected");
+    let substituted = BTreeMap::from([("artifact.bin".to_owned(), b"substituted".to_vec())]);
+    assert!(
+        materialize_filesystem_entries(
+            &root,
+            std::slice::from_ref(&entry),
+            &substituted,
+            materialization_limits()
+        )
+        .is_err()
+    );
+
+    let extra = BTreeMap::from([
+        ("artifact.bin".to_owned(), b"expected".to_vec()),
+        ("unclassified.bin".to_owned(), b"extra".to_vec()),
+    ]);
+    assert!(
+        materialize_filesystem_entries(
+            &root,
+            std::slice::from_ref(&entry),
+            &extra,
+            materialization_limits()
+        )
+        .is_err()
+    );
+
+    let mut secret = entry;
+    secret.data_binding = DataBinding {
+        classification: DataClassification::SecretMaterial,
+        secret_disposition: Some(SecretDisposition::Reference(SecretReference {
+            provider: "vault".to_owned(),
+            reference: "kv/ci/artifact".to_owned(),
+            version: "1".to_owned(),
+            keyed_digest: digest(99),
+        })),
+    };
+    let literal = BTreeMap::from([("artifact.bin".to_owned(), b"expected".to_vec())]);
+    assert!(matches!(
+        materialize_filesystem_entries(
+            &root,
+            &[secret],
+            &literal,
+            materialization_limits()
+        ),
+        Err(TransferError::Materialization(message)) if message.contains("credential grant")
+    ));
+    fs::remove_dir_all(root).unwrap();
 }

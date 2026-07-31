@@ -5,7 +5,13 @@
 //! destination protections, and returns canonical bytes plus a verification
 //! digest. Persistence and execution authority remain separate concerns.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
+
+#[cfg(target_os = "linux")]
+use std::{fs::File, io::Write};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -339,6 +345,33 @@ pub struct TransferPlan {
     pub canonical_bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangePredicate {
+    pub path_suffixes: Vec<String>,
+    pub message_digests: Vec<Digest>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PredicateDecision {
+    pub selected: bool,
+    pub matched_change_record_ids: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaterializationLimits {
+    pub max_entries: usize,
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaterializationReceipt {
+    pub entry_count: usize,
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub content_digests: BTreeMap<String, Digest>,
+}
+
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum TransferError {
     #[error("unsupported state-transfer schema {0}")]
@@ -371,6 +404,10 @@ pub enum TransferError {
     DivergentRetention(Digest),
     #[error("canonical state serialization failed: {0}")]
     Serialization(String),
+    #[error("state-transfer materialization failed: {0}")]
+    Materialization(String),
+    #[error("safe state-transfer materialization is unsupported on this platform")]
+    UnsupportedMaterializationPlatform,
 }
 
 /// Validates and transforms one immutable bundle.
@@ -480,6 +517,52 @@ pub fn canonical_bytes(bundle: &StateBundle) -> Result<Vec<u8>, TransferError> {
     canonical_bytes_of(bundle)
 }
 
+/// Evaluates the transferred canonical change entries used by Jenkins
+/// `changeset`/`changelog` conditions. Mapping code resolves Jenkins patterns
+/// and regexes into these exact suffix/message-digest predicates before this
+/// state boundary is invoked.
+pub fn evaluate_change_predicate(
+    checkout: &ScmState,
+    predicate: &ChangePredicate,
+) -> Result<PredicateDecision, TransferError> {
+    validate_sorted_unique_strings(&predicate.path_suffixes, "predicate path suffixes")?;
+    if predicate.path_suffixes.is_empty() && predicate.message_digests.is_empty() {
+        return Err(TransferError::InvalidField(
+            "change predicate must contain at least one matcher".to_owned(),
+        ));
+    }
+    let mut previous_digest: Option<Digest> = None;
+    for digest in &predicate.message_digests {
+        validate_digest(*digest, "predicate message digest")?;
+        if previous_digest.is_some_and(|previous| previous >= *digest) {
+            return Err(TransferError::InvalidField(
+                "predicate message digests must be strictly sorted and unique".to_owned(),
+            ));
+        }
+        previous_digest = Some(*digest);
+    }
+    let mut matched = Vec::new();
+    for change in &checkout.changes {
+        let path_match = change.paths.iter().any(|path| {
+            predicate
+                .path_suffixes
+                .iter()
+                .any(|suffix| path.ends_with(suffix))
+        });
+        let message_match = predicate
+            .message_digests
+            .binary_search(&change.message_digest)
+            .is_ok();
+        if path_match || message_match {
+            matched.push(change.record.id.clone());
+        }
+    }
+    Ok(PredicateDecision {
+        selected: !matched.is_empty(),
+        matched_change_record_ids: matched,
+    })
+}
+
 /// Returns all record-level provenance in canonical record-ID order.
 pub fn record_provenance(bundle: &StateBundle) -> Vec<RecordProvenance> {
     let mut records = BTreeMap::new();
@@ -568,6 +651,212 @@ pub fn protections(bundle: &StateBundle) -> Result<BTreeMap<Digest, Protection>,
 
 pub fn sha256(bytes: &[u8]) -> Digest {
     Sha256::digest(bytes).into()
+}
+
+/// Materializes a validated inventory without following filesystem links.
+///
+/// The destination root must already exist. On Linux every path component is
+/// resolved relative to an open directory descriptor with `openat2(2)` using
+/// `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
+/// RESOLVE_NO_XDEV`. Files are created exclusively, so existing files,
+/// hardlinks, devices, FIFOs and sockets are denied rather than overwritten.
+/// Secret material is never accepted as a literal payload.
+pub fn materialize_filesystem_entries(
+    root: &Path,
+    entries: &[FilesystemEntry],
+    payloads: &BTreeMap<String, Vec<u8>>,
+    limits: MaterializationLimits,
+) -> Result<MaterializationReceipt, TransferError> {
+    validate_materialization_request(entries, payloads, limits)?;
+    materialize_filesystem_entries_platform(root, entries, payloads)
+}
+
+fn validate_materialization_request(
+    entries: &[FilesystemEntry],
+    payloads: &BTreeMap<String, Vec<u8>>,
+    limits: MaterializationLimits,
+) -> Result<(), TransferError> {
+    if limits.max_entries == 0 || limits.max_file_bytes == 0 || limits.max_total_bytes == 0 {
+        return Err(TransferError::Materialization(
+            "materialization limits must be positive".to_owned(),
+        ));
+    }
+    if entries.len() > limits.max_entries {
+        return Err(TransferError::Materialization(
+            "filesystem entry quota exceeded".to_owned(),
+        ));
+    }
+
+    let mut prior: Option<&str> = None;
+    let mut expected_payloads = BTreeSet::new();
+    let mut total_bytes = 0_u64;
+    for entry in entries {
+        validate_relative_path(&entry.path)?;
+        if prior.is_some_and(|value| value >= entry.path.as_str()) {
+            return Err(TransferError::Materialization(
+                "filesystem entries must be strictly sorted by path".to_owned(),
+            ));
+        }
+        prior = Some(&entry.path);
+        validate_data_binding(&entry.data_binding)?;
+        match entry.kind {
+            FilesystemEntryKind::Directory => {
+                if entry.content_digest.is_some() || entry.bytes != 0 {
+                    return Err(TransferError::Materialization(
+                        "directory entry must not carry content".to_owned(),
+                    ));
+                }
+            }
+            FilesystemEntryKind::RegularFile => {
+                if entry.data_binding.classification == DataClassification::SecretMaterial {
+                    return Err(TransferError::Materialization(
+                        "secret material must be resolved through a credential grant, not imported as literal bytes"
+                            .to_owned(),
+                    ));
+                }
+                if entry.bytes > limits.max_file_bytes {
+                    return Err(TransferError::Materialization(
+                        "per-file byte quota exceeded".to_owned(),
+                    ));
+                }
+                total_bytes = total_bytes.checked_add(entry.bytes).ok_or_else(|| {
+                    TransferError::Materialization("filesystem byte count overflow".to_owned())
+                })?;
+                if total_bytes > limits.max_total_bytes {
+                    return Err(TransferError::Materialization(
+                        "total byte quota exceeded".to_owned(),
+                    ));
+                }
+                let expected_digest = entry.content_digest.ok_or_else(|| {
+                    TransferError::Materialization(
+                        "regular file entry requires a content digest".to_owned(),
+                    )
+                })?;
+                let payload = payloads.get(&entry.path).ok_or_else(|| {
+                    TransferError::Materialization(format!("missing payload for {}", entry.path))
+                })?;
+                if payload.len() as u64 != entry.bytes || sha256(payload) != expected_digest {
+                    return Err(TransferError::Materialization(format!(
+                        "payload size or digest mismatch for {}",
+                        entry.path
+                    )));
+                }
+                expected_payloads.insert(entry.path.as_str());
+            }
+        }
+    }
+    if payloads
+        .keys()
+        .any(|path| !expected_payloads.contains(path.as_str()))
+    {
+        return Err(TransferError::Materialization(
+            "unclassified payload is not present in the filesystem inventory".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn materialize_filesystem_entries_platform(
+    root: &Path,
+    entries: &[FilesystemEntry],
+    payloads: &BTreeMap<String, Vec<u8>>,
+) -> Result<MaterializationReceipt, TransferError> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, open, openat2};
+    use rustix::io::{Errno, dup};
+
+    let root_fd = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| materialization_io("open destination root", error))?;
+    let resolve = ResolveFlags::BENEATH
+        | ResolveFlags::NO_SYMLINKS
+        | ResolveFlags::NO_MAGICLINKS
+        | ResolveFlags::NO_XDEV;
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+
+    let open_directory =
+        |parent: &rustix::fd::OwnedFd, name: &str| -> Result<rustix::fd::OwnedFd, TransferError> {
+            match openat2(parent, name, directory_flags, Mode::empty(), resolve) {
+                Ok(fd) => Ok(fd),
+                Err(Errno::NOENT) => {
+                    mkdirat(parent, name, Mode::from_bits_truncate(0o700))
+                        .map_err(|error| materialization_io("create directory", error))?;
+                    openat2(parent, name, directory_flags, Mode::empty(), resolve)
+                        .map_err(|error| materialization_io("open created directory", error))
+                }
+                Err(error) => Err(materialization_io("open directory component", error)),
+            }
+        };
+
+    let mut receipt = MaterializationReceipt {
+        entry_count: entries.len(),
+        file_count: 0,
+        total_bytes: 0,
+        content_digests: BTreeMap::new(),
+    };
+    for entry in entries {
+        let components = entry.path.split('/').collect::<Vec<_>>();
+        let mut parent = dup(&root_fd)
+            .map_err(|error| materialization_io("duplicate root descriptor", error))?;
+        for component in &components[..components.len() - 1] {
+            parent = open_directory(&parent, component)?;
+        }
+        let leaf = components[components.len() - 1];
+        match entry.kind {
+            FilesystemEntryKind::Directory => {
+                open_directory(&parent, leaf)?;
+            }
+            FilesystemEntryKind::RegularFile => {
+                let payload = &payloads[&entry.path];
+                let fd = openat2(
+                    &parent,
+                    leaf,
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::from_bits_truncate(0o600),
+                    resolve,
+                )
+                .map_err(|error| materialization_io("create regular file", error))?;
+                let mut file = File::from(fd);
+                file.write_all(payload)
+                    .map_err(|error| materialization_std_io("write regular file", error))?;
+                file.sync_all()
+                    .map_err(|error| materialization_std_io("sync regular file", error))?;
+                receipt.file_count += 1;
+                receipt.total_bytes += entry.bytes;
+                receipt.content_digests.insert(
+                    entry.path.clone(),
+                    entry.content_digest.expect("validated digest"),
+                );
+            }
+        }
+    }
+    Ok(receipt)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn materialize_filesystem_entries_platform(
+    _root: &Path,
+    _entries: &[FilesystemEntry],
+    _payloads: &BTreeMap<String, Vec<u8>>,
+) -> Result<MaterializationReceipt, TransferError> {
+    Err(TransferError::UnsupportedMaterializationPlatform)
+}
+
+#[cfg(target_os = "linux")]
+fn materialization_io(label: &str, error: rustix::io::Errno) -> TransferError {
+    TransferError::Materialization(format!("{label}: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn materialization_std_io(label: &str, error: std::io::Error) -> TransferError {
+    TransferError::Materialization(format!("{label}: {error}"))
 }
 
 fn canonical_bytes_of<T: Serialize>(value: &T) -> Result<Vec<u8>, TransferError> {

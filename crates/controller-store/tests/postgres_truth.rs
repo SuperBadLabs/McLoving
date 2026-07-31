@@ -15,9 +15,9 @@ use mcloving_state_transfer::{
     DataBinding as TransferDataBinding, DataClassification as TransferDataClassification,
     ExpectedBinding, JobState as TransferJobState, LegalHold as TransferLegalHold,
     ObjectKind as TransferObjectKind, ObjectState as TransferObjectState,
-    Protection as TransferProtection, RecordProvenance, RetentionPolicy, STATE_TRANSFER_SCHEMA_V1,
-    RetrievalMetadata as TransferRetrievalMetadata, StateBundle, SystemIdentity, TransferBinding,
-    TransferDirection, TriggerCause as TransferTriggerCause,
+    Protection as TransferProtection, RecordProvenance, RetentionPolicy,
+    RetrievalMetadata as TransferRetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, StateBundle,
+    SystemIdentity, TransferBinding, TransferDirection, TriggerCause as TransferTriggerCause,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};

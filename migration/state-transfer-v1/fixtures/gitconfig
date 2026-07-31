@@ -1,0 +1,5 @@
+[safe]
+	directory = /fixture/repo
+	directory = /fixture/repo/.git
+[protocol "file"]
+	allow = always
