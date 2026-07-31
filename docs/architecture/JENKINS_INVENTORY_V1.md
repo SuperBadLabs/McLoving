@@ -37,7 +37,11 @@ and persistent-state mutation for one bounded export epoch.
 
 - `job-graph.yaml` owns controller and job structure, canonical definition
   sources and digests, operational state, triggers, platform/agent/toolchain
-  requirements, publication behavior, ownership, and reviewed scope.
+  requirements, publication behavior, ownership, and reviewed scope. An
+  independently sourced controller total and independently sourced direct-child
+  count for every job must exactly match the manifest population and hierarchy;
+  each count binds a collector distinct from the manifest exporter, provenance,
+  and a source-evidence digest.
 - `identity-clients.yaml` owns the security realm, immutable principals and
   lifecycle evidence, effective ACLs, and every read-side or write-side client.
   Principal kind is one of `user`, `service`, or `group`; lifecycle is one of
@@ -53,7 +57,10 @@ and persistent-state mutation for one bounded export epoch.
   and built-in environment dependencies. The generic typed record uses `kind`
   for the dependency family and requires an explicit compatibility disposition.
   Mutability is one of `immutable`, `pinned-revision`, `mutable`, or `floating`;
-  mutable and floating dependencies cannot be classified `native`.
+  mutable and floating dependencies cannot be classified `native`. Every secret
+  dependency additionally binds its exact tagged consumer, typed taint class,
+  non-empty taint path, provenance, and evidence digest. Consumer type and
+  taint class must agree.
 - `persistent-state.yaml` owns each per-job record class, counts and source
   digest, retention-policy identity and digest, retention deadline, legal holds
   and release authority, restore target, conflict policy, external consumers,
@@ -62,11 +69,13 @@ and persistent-state mutation for one bounded export epoch.
   consume state. Reusing a legal-hold identity with a conflicting scope, reason,
   generation, or release authority fails reconciliation. Retention deadlines
   use the exact UTC form `YYYY-MM-DDTHH:MM:SSZ` and must be valid calendar
-  timestamps.
+  timestamps. Every state record carries independently classified forward and
+  rollback transforms with mapping identity, evidence digest, and provenance.
 
 Secret values are never inventory fields. A dependency classified `secret`
 must carry a typed `credential_reference` or `redaction_reference`; the
-reconciler rejects an unbound secret dependency.
+reconciler rejects an unbound secret dependency or one without typed consumer
+and taint evidence.
 Runtime dependencies and persistent-state records accept only the exact
 confidentiality labels `public`, `internal`, `confidential`, and `secret`.
 Unknown or case-variant labels fail closed.
@@ -83,8 +92,9 @@ rejects:
 - duplicate or ambiguous identities;
 - unknown job, parent, ACL principal, or client principal references;
 - exclusions without owner approval;
-- unclassified runtime behavior;
-- secret dependencies without typed references;
+- source controller or direct-child counts that differ from the manifest;
+- unclassified runtime or state-transform behavior;
+- secret dependencies without typed references and consumer/taint evidence;
 - malformed digests, missing ownership, duplicate state/hold identities, or
   incomplete per-job coverage.
 
@@ -95,8 +105,9 @@ to `SHA256SUMS`. Verification rejects every other post-seal entry and requires
 an existing published ledger to exactly match a fresh reconciliation of the
 sealed source evidence. A custom output may be written outside the inventory
 root; inside the root, the only permitted output is `eligibility-ledger.yaml`.
-Eligibility is conservative: the least-compatible dependency determines a
-job's `native`, `mappable`, `scripted`, or `unsupported` class. The ledger
+Eligibility is conservative: the least-compatible runtime dependency, forward
+state transform, or rollback state transform determines a job's `native`,
+`mappable`, `scripted`, or `unsupported` class. The ledger
 reports whole-inventory population denominators, while eligibility rows,
 parity-substrate demand by dependency kind, and state-transform record demand
 cover only the approved in-scope population. Excluded-job retention and

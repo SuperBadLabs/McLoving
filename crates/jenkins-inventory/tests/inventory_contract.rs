@@ -4,13 +4,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mcloving_jenkins_inventory::{
     AclEntry, ApprovedDisposition, ClientCaller, ClientDirection, ClientRecord,
-    CompatibilityDisposition, DependencyMutability, HistoricalNameClaim, IDENTITY_CLIENT_FILE,
-    IdentityClientManifest, JOB_GRAPH_FILE, JobDependencies, JobGraphManifest, JobRecord,
-    JobStateRecords, LegalHold, OperationalState, PERSISTENT_STATE_FILE, PersistentStateManifest,
-    Principal, PrincipalKind, PrincipalLifecycle, RUNTIME_DEPENDENCY_FILE, RuntimeDependency,
-    RuntimeDependencyManifest, SCHEMA_VERSION, ScopeDisposition, SecurityRealm, SnapshotBinding,
-    StateRecord, load_bundle, reconcile, seal_manifest_directory, validate_ledger_output_path,
-    write_ledger,
+    CompatibilityDisposition, CountEvidence, DependencyMutability, HistoricalNameClaim,
+    IDENTITY_CLIENT_FILE, IdentityClientManifest, JOB_GRAPH_FILE, JobDependencies,
+    JobGraphManifest, JobRecord, JobStateRecords, LegalHold, OperationalState,
+    PERSISTENT_STATE_FILE, PersistentStateManifest, Principal, PrincipalKind, PrincipalLifecycle,
+    RUNTIME_DEPENDENCY_FILE, RuntimeDependency, RuntimeDependencyManifest, SCHEMA_VERSION,
+    ScopeDisposition, SecretConsumer, SecretConsumerEvidence, SecretTaint, SecurityRealm,
+    SnapshotBinding, StateRecord, StateTransformEvidence, load_bundle, reconcile,
+    seal_manifest_directory, validate_ledger_output_path, write_ledger,
 };
 use serde::Serialize;
 
@@ -231,6 +232,49 @@ fn secret_dependencies_require_typed_references() {
 }
 
 #[test]
+fn secret_dependencies_require_consumer_and_taint_evidence() {
+    let directory = TestDirectory::new("secret-consumer");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1].dependencies[0].secret_consumer = None;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("unclassified secret consumer must fail");
+    assert_eq!(error.code, "INV_SECRET_CONSUMER_REQUIRED");
+}
+
+#[test]
+fn secret_consumer_taint_must_match_and_have_a_path() {
+    let directory = TestDirectory::new("secret-taint-mismatch");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1].dependencies[0]
+        .secret_consumer
+        .as_mut()
+        .expect("fixture secret consumer")
+        .taint = SecretTaint::WorkloadVisible;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("inconsistent secret taint must fail");
+    assert_eq!(error.code, "INV_SECRET_TAINT_MISMATCH");
+
+    let directory = TestDirectory::new("secret-taint-path");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1].dependencies[0]
+        .secret_consumer
+        .as_mut()
+        .expect("fixture secret consumer")
+        .taint_path
+        .clear();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("empty secret taint path must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+}
+
+#[test]
 fn strict_yaml_rejects_aliases_before_deserialization() {
     let directory = TestDirectory::new("strict-yaml");
     write_bundle(&directory.0, &fixture());
@@ -378,6 +422,46 @@ fn reconciliation_requires_operational_state_evidence() {
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("blank operational actor must fail");
     assert_eq!(error.code, "INV_REQUIRED");
+}
+
+#[test]
+fn reconciliation_rejects_controller_job_count_mismatch() {
+    let directory = TestDirectory::new("controller-count");
+    let mut bundle = fixture();
+    bundle.job_graph.controller_job_count.count = 4;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("controller count mismatch must fail");
+    assert_eq!(error.code, "INV_JOB_COUNT_MISMATCH");
+}
+
+#[test]
+fn reconciliation_requires_an_independent_count_collector() {
+    let directory = TestDirectory::new("count-collector");
+    let mut bundle = fixture();
+    bundle.job_graph.controller_job_count.collector_id =
+        bundle.job_graph.binding.exporter_id.clone();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("same exporter and count collector must fail");
+    assert_eq!(error.code, "INV_COUNT_NOT_INDEPENDENT");
+}
+
+#[test]
+fn reconciliation_rejects_direct_child_count_mismatch() {
+    let directory = TestDirectory::new("child-count");
+    let mut bundle = fixture();
+    bundle.job_graph.jobs[0].direct_child_count.count = 2;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("direct child count mismatch must fail");
+    assert_eq!(error.code, "INV_CHILD_COUNT_MISMATCH");
 }
 
 #[test]
@@ -545,6 +629,7 @@ fn reconciliation_rejects_parent_cycles() {
     let directory = TestDirectory::new("parent-cycle");
     let mut bundle = fixture();
     bundle.job_graph.jobs[0].parent_id = Some("folder/build".to_owned());
+    bundle.job_graph.jobs[1].direct_child_count.count = 1;
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -656,6 +741,41 @@ fn reconciliation_rejects_conflicting_retention_policy_definitions() {
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("conflicting retention policies must fail");
     assert_eq!(error.code, "INV_RETENTION_POLICY_CONFLICT");
+}
+
+#[test]
+fn state_transform_disposition_constrains_job_eligibility() {
+    let directory = TestDirectory::new("state-disposition");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0]
+        .rollback_transform
+        .disposition = CompatibilityDisposition::Unsupported;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let ledger = reconcile(&loaded).expect("classified unsupported state must reconcile");
+    let job = ledger
+        .jobs
+        .iter()
+        .find(|job| job.job_id == "folder/build")
+        .expect("fixture job");
+    assert_eq!(job.disposition, CompatibilityDisposition::Unsupported);
+}
+
+#[test]
+fn reconciliation_rejects_unclassified_state_transforms() {
+    let directory = TestDirectory::new("state-unclassified");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0]
+        .forward_transform
+        .disposition = CompatibilityDisposition::Unclassified;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("unclassified state transform must fail");
+    assert_eq!(error.code, "INV_STATE_UNCLASSIFIED");
 }
 
 #[test]
@@ -858,11 +978,14 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let binding = binding();
+    let mut folder = job("folder", None, ScopeDisposition::InScope);
+    folder.direct_child_count.count = 1;
     Fixture {
         job_graph: JobGraphManifest {
             binding: binding.clone(),
+            controller_job_count: count_evidence(3, "jenkins/controller/item-count"),
             jobs: vec![
-                job("folder", None, ScopeDisposition::InScope),
+                folder,
                 job("folder/build", Some("folder"), ScopeDisposition::InScope),
                 JobRecord {
                     scope: ApprovedDisposition {
@@ -971,6 +1094,18 @@ fn fixture() -> Fixture {
                         confidentiality: "secret".to_owned(),
                         credential_reference: Some("protected-evidence/credential-7".to_owned()),
                         redaction_reference: None,
+                        secret_consumer: Some(SecretConsumerEvidence {
+                            consumer: SecretConsumer::SourceAcquisition {
+                                checkout_id: "source-checkout/provider-auth".to_owned(),
+                            },
+                            taint: SecretTaint::SourceAcquisitionOnly,
+                            taint_path: vec![
+                                "credential/provider-token".to_owned(),
+                                "checkout/auth-header".to_owned(),
+                            ],
+                            provenance: "jenkins/job/folder/build/credential-usage".to_owned(),
+                            evidence_sha256: DIGEST_C.to_owned(),
+                        }),
                         disposition: CompatibilityDisposition::Mappable,
                     }],
                 },
@@ -997,6 +1132,8 @@ fn fixture() -> Fixture {
                         retention_policy_id: "jenkins/job-log-rotator".to_owned(),
                         retention_policy_sha256: DIGEST_B.to_owned(),
                         retention_deadline: "2027-07-30T00:00:00Z".to_owned(),
+                        forward_transform: state_transform(CompatibilityDisposition::Native),
+                        rollback_transform: state_transform(CompatibilityDisposition::Native),
                         legal_holds: vec![LegalHold {
                             id: "hold-7".to_owned(),
                             scope: "all-history".to_owned(),
@@ -1080,10 +1217,29 @@ fn job(id: &str, parent_id: Option<&str>, disposition: ScopeDisposition) -> JobR
         node_authority: "trusted-linux".to_owned(),
         publishes_artifacts: true,
         publishes_tests: true,
+        direct_child_count: count_evidence(0, &format!("jenkins/job/{id}/child-count")),
         scope: ApprovedDisposition {
             disposition,
             approval: None,
         },
+    }
+}
+
+fn count_evidence(count: u64, provenance: &str) -> CountEvidence {
+    CountEvidence {
+        count,
+        collector_id: "jenkins/count-api-v1".to_owned(),
+        provenance: provenance.to_owned(),
+        source_sha256: DIGEST_C.to_owned(),
+    }
+}
+
+fn state_transform(disposition: CompatibilityDisposition) -> StateTransformEvidence {
+    StateTransformEvidence {
+        mapping_id: "state/native-copy-v1".to_owned(),
+        disposition,
+        evidence_sha256: DIGEST_A.to_owned(),
+        provenance: "contained/state-transform-certification".to_owned(),
     }
 }
 

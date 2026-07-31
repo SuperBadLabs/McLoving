@@ -67,7 +67,17 @@ pub struct ApprovedDisposition {
 #[serde(deny_unknown_fields)]
 pub struct JobGraphManifest {
     pub binding: SnapshotBinding,
+    pub controller_job_count: CountEvidence,
     pub jobs: Vec<JobRecord>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CountEvidence {
+    pub count: u64,
+    pub collector_id: String,
+    pub provenance: String,
+    pub source_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -96,6 +106,7 @@ pub struct JobRecord {
     pub node_authority: String,
     pub publishes_artifacts: bool,
     pub publishes_tests: bool,
+    pub direct_child_count: CountEvidence,
     pub scope: ApprovedDisposition,
 }
 
@@ -240,6 +251,52 @@ pub enum DependencyMutability {
     Floating,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SecretTaint {
+    ConnectorOnly,
+    ControllerOnly,
+    SourceAcquisitionOnly,
+    WorkloadVisible,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum SecretConsumer {
+    Connector {
+        connector_id: String,
+    },
+    Controller {
+        operation: String,
+    },
+    SourceAcquisition {
+        checkout_id: String,
+    },
+    Workload {
+        channel: WorkloadSecretChannel,
+        target: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkloadSecretChannel {
+    Argument,
+    EnvironmentVariable,
+    File,
+    StandardInput,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretConsumerEvidence {
+    pub consumer: SecretConsumer,
+    pub taint: SecretTaint,
+    pub taint_path: Vec<String>,
+    pub provenance: String,
+    pub evidence_sha256: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeDependency {
@@ -256,6 +313,8 @@ pub struct RuntimeDependency {
     pub credential_reference: Option<String>,
     #[serde(default)]
     pub redaction_reference: Option<String>,
+    #[serde(default)]
+    pub secret_consumer: Option<SecretConsumerEvidence>,
     pub disposition: CompatibilityDisposition,
 }
 
@@ -287,10 +346,21 @@ pub struct StateRecord {
     pub retention_policy_id: String,
     pub retention_policy_sha256: String,
     pub retention_deadline: String,
+    pub forward_transform: StateTransformEvidence,
+    pub rollback_transform: StateTransformEvidence,
     #[serde(default)]
     pub legal_holds: Vec<LegalHold>,
     #[serde(default)]
     pub external_consumers: Vec<String>,
+    pub provenance: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateTransformEvidence {
+    pub mapping_id: String,
+    pub disposition: CompatibilityDisposition,
+    pub evidence_sha256: String,
     pub provenance: String,
 }
 
@@ -424,6 +494,11 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         "security-realm configuration",
         &bundle.identity_clients.security_realm.config_sha256,
     )?;
+    validate_count_evidence(
+        "controller job count",
+        &bundle.job_graph.controller_job_count,
+        &bundle.job_graph.binding.exporter_id,
+    )?;
 
     let mut job_ids = BTreeSet::new();
     let mut in_scope = BTreeSet::new();
@@ -455,6 +530,11 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         }
         validate_digest("job source", &job.source_sha256)?;
         validate_digest("job configuration", &job.config_sha256)?;
+        validate_count_evidence(
+            "job direct-child count",
+            &job.direct_child_count,
+            &bundle.job_graph.binding.exporter_id,
+        )?;
         if !job_ids.insert(job.id.clone()) {
             return Err(InventoryError::new(
                 "INV_DUPLICATE_JOB",
@@ -477,6 +557,22 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             in_scope.insert(job.id.clone());
         }
     }
+    if bundle.job_graph.controller_job_count.count != u64_count(job_ids.len())? {
+        return Err(InventoryError::new(
+            "INV_JOB_COUNT_MISMATCH",
+            format!(
+                "controller source reports {} jobs but the manifest contains {}",
+                bundle.job_graph.controller_job_count.count,
+                job_ids.len()
+            ),
+        ));
+    }
+    let mut direct_child_counts = BTreeMap::new();
+    for job in &bundle.job_graph.jobs {
+        if let Some(parent) = &job.parent_id {
+            *direct_child_counts.entry(parent.as_str()).or_insert(0_u64) += 1;
+        }
+    }
     for job in &bundle.job_graph.jobs {
         if let Some(parent) = &job.parent_id
             && !job_ids.contains(parent)
@@ -493,6 +589,19 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             return Err(InventoryError::new(
                 "INV_EXCLUDED_PARENT",
                 format!("in-scope job {} has excluded parent {parent}", job.id),
+            ));
+        }
+        let observed = direct_child_counts
+            .get(job.id.as_str())
+            .copied()
+            .unwrap_or(0);
+        if job.direct_child_count.count != observed {
+            return Err(InventoryError::new(
+                "INV_CHILD_COUNT_MISMATCH",
+                format!(
+                    "job {} source reports {} direct children but the manifest contains {observed}",
+                    job.id, job.direct_child_count.count
+                ),
             ));
         }
     }
@@ -643,16 +752,20 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             validate_runtime_dependencies(job_id, dependencies)?,
         );
     }
+    let mut state_dispositions = BTreeMap::new();
     let mut legal_hold_definitions = BTreeMap::new();
     let mut retention_policy_definitions = BTreeMap::new();
     for (job_id, records) in &state {
-        validate_state_records(
-            job_id,
-            records,
-            &client_directions,
-            &mut legal_hold_definitions,
-            &mut retention_policy_definitions,
-        )?;
+        state_dispositions.insert(
+            job_id.as_str(),
+            validate_state_records(
+                job_id,
+                records,
+                &client_directions,
+                &mut legal_hold_definitions,
+                &mut retention_policy_definitions,
+            )?,
+        );
     }
 
     let mut parity_demands = BTreeMap::new();
@@ -666,9 +779,13 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     {
         let dependencies = *runtime.get(&job.id).expect("coverage checked");
         let records = *state.get(&job.id).expect("coverage checked");
-        let disposition = *runtime_dispositions
+        let runtime_disposition = *runtime_dispositions
             .get(job.id.as_str())
             .expect("validated coverage");
+        let state_disposition = *state_dispositions
+            .get(job.id.as_str())
+            .expect("validated coverage");
+        let disposition = runtime_disposition.max(state_disposition);
         for dependency in dependencies {
             *parity_demands.entry(dependency.kind.clone()).or_insert(0) += 1;
         }
@@ -1089,6 +1206,18 @@ fn validate_runtime_dependencies(
                 ),
             ));
         }
+        if dependency.confidentiality == "secret" && dependency.secret_consumer.is_none() {
+            return Err(InventoryError::new(
+                "INV_SECRET_CONSUMER_REQUIRED",
+                format!(
+                    "secret dependency {} for job {job_id} has no typed consumer and taint evidence",
+                    dependency.id
+                ),
+            ));
+        }
+        if let Some(consumer) = &dependency.secret_consumer {
+            validate_secret_consumer(job_id, &dependency.id, consumer)?;
+        }
         for reference in [
             dependency.credential_reference.as_deref(),
             dependency.redaction_reference.as_deref(),
@@ -1114,13 +1243,50 @@ fn validate_runtime_dependencies(
     Ok(disposition)
 }
 
+fn validate_secret_consumer(
+    job_id: &str,
+    dependency_id: &str,
+    consumer: &SecretConsumerEvidence,
+) -> Result<(), InventoryError> {
+    let expected_taint = match &consumer.consumer {
+        SecretConsumer::Connector { connector_id } => {
+            validate_identifier("secret connector consumer", connector_id)?;
+            SecretTaint::ConnectorOnly
+        }
+        SecretConsumer::Controller { operation } => {
+            validate_nonempty("secret controller operation", operation)?;
+            SecretTaint::ControllerOnly
+        }
+        SecretConsumer::SourceAcquisition { checkout_id } => {
+            validate_identifier("secret source-acquisition consumer", checkout_id)?;
+            SecretTaint::SourceAcquisitionOnly
+        }
+        SecretConsumer::Workload { target, .. } => {
+            validate_nonempty("secret workload target", target)?;
+            SecretTaint::WorkloadVisible
+        }
+    };
+    if consumer.taint != expected_taint {
+        return Err(InventoryError::new(
+            "INV_SECRET_TAINT_MISMATCH",
+            format!(
+                "secret dependency {dependency_id} for job {job_id} has a taint inconsistent with its consumer"
+            ),
+        ));
+    }
+    validate_nonempty_collection("secret taint path", &consumer.taint_path)?;
+    validate_nonempty("secret consumer provenance", &consumer.provenance)?;
+    validate_digest("secret consumer evidence", &consumer.evidence_sha256)
+}
+
 fn validate_state_records(
     job_id: &str,
     records: &[StateRecord],
     client_directions: &BTreeMap<String, ClientDirection>,
     legal_hold_definitions: &mut BTreeMap<String, LegalHold>,
     retention_policy_definitions: &mut BTreeMap<String, String>,
-) -> Result<(), InventoryError> {
+) -> Result<CompatibilityDisposition, InventoryError> {
+    let mut disposition = CompatibilityDisposition::Native;
     for record in records {
         validate_nonempty("state kind", &record.kind)?;
         validate_nonempty("state owner", &record.owner)?;
@@ -1146,6 +1312,18 @@ fn validate_state_records(
             );
         }
         validate_utc_timestamp("state retention deadline", &record.retention_deadline)?;
+        disposition = disposition.max(validate_state_transform(
+            job_id,
+            &record.id,
+            "forward",
+            &record.forward_transform,
+        )?);
+        disposition = disposition.max(validate_state_transform(
+            job_id,
+            &record.id,
+            "rollback",
+            &record.rollback_transform,
+        )?);
         validate_nonempty("state provenance", &record.provenance)?;
         validate_digest("state source", &record.source_sha256)?;
         for consumer in &record.external_consumers {
@@ -1202,7 +1380,27 @@ fn validate_state_records(
             }
         }
     }
-    Ok(())
+    Ok(disposition)
+}
+
+fn validate_state_transform(
+    job_id: &str,
+    record_id: &str,
+    direction: &str,
+    transform: &StateTransformEvidence,
+) -> Result<CompatibilityDisposition, InventoryError> {
+    validate_identifier("state transform mapping", &transform.mapping_id)?;
+    validate_nonempty("state transform provenance", &transform.provenance)?;
+    validate_digest("state transform evidence", &transform.evidence_sha256)?;
+    if transform.disposition == CompatibilityDisposition::Unclassified {
+        return Err(InventoryError::new(
+            "INV_STATE_UNCLASSIFIED",
+            format!(
+                "{direction} transform for state record {record_id} in job {job_id} is unclassified"
+            ),
+        ));
+    }
+    Ok(transform.disposition)
 }
 
 fn classify(
@@ -1236,6 +1434,22 @@ fn unique_ids<'a>(
         }
     }
     Ok(unique)
+}
+
+fn validate_count_evidence(
+    kind: &str,
+    evidence: &CountEvidence,
+    manifest_exporter_id: &str,
+) -> Result<(), InventoryError> {
+    validate_identifier(&format!("{kind} collector"), &evidence.collector_id)?;
+    if evidence.collector_id == manifest_exporter_id {
+        return Err(InventoryError::new(
+            "INV_COUNT_NOT_INDEPENDENT",
+            format!("{kind} must use a collector distinct from the manifest exporter"),
+        ));
+    }
+    validate_nonempty(&format!("{kind} provenance"), &evidence.provenance)?;
+    validate_digest(&format!("{kind} source"), &evidence.source_sha256)
 }
 
 fn validate_identifier(kind: &str, value: &str) -> Result<(), InventoryError> {
