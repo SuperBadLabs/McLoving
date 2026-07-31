@@ -1,9 +1,20 @@
 # Mario Jenkins oracle inventory receipt — Wave 4A
 
-This directory is the immutable, owner-designated `MIG-000` source inventory
-for Wave 4B. It represents the rootless Podman controller
+The `inventory-20260731T064417Z` directory is the immutable, rejected
+predecessor for the owner-designated `MIG-000` source inventory. It represents
+the rootless Podman controller
 `jenkins-oracle-228` on Mario at the bounded offline epoch
 `2026-07-31T06:44:17Z`.
+
+Corpus reconciliation later proved that its exporter ignored XML
+`GeneralRef` events, truncating 220 of 230 inline-source digests. The source
+snapshot itself was not damaged. `inventory-20260731T064417Z-r2` is the
+create-new successor produced from the same frozen source by committed exporter
+`57336d6`, after repairing reference preservation and shared-library
+requirement coverage. Its trusted inventory fingerprint is
+`b1c2f81c74ec0ffc36971f358f920b2d0775c6009f474bea924448cd2a1915c1`.
+It reconciles all 230 disabled jobs and preserves 226 byte-exact source hashes
+plus four explicit XML 1.0 CRLF-to-LF normalizations.
 
 ## Source binding
 
@@ -19,7 +30,7 @@ for Wave 4B. It represents the rootless Podman controller
   `2e350d0089c94379eb01124929ccc0f931c8e10f93860bef30be9d300572e556`
 - exporter binary:
   `c5a3827ff7814a4b83cad816965440e7258b79c13861c2bf100b2666d12c66e9`
-- trusted inventory fingerprint:
+- rejected predecessor inventory fingerprint:
   `3473f1528e0fa8b1b856ae4941e5a5169d4c2c46389b813d0dd34935fb505198`
 
 The controller had no running build or queued work before the service was
@@ -27,7 +38,7 @@ stopped. Its bind-mounted home, plugins, and corpus were copied while the
 service was offline. The generated systemd unit was restored immediately and
 HTTP health returned successfully.
 
-## Sealed evidence
+## Rejected predecessor evidence
 
 | File | SHA-256 |
 |---|---|
@@ -47,6 +58,15 @@ jobs=230 dependencies=230 state-records=230
 ```
 
 The digest-pinned gitleaks image scanned 1.49 MB and reported no leaks.
+
+## Accepted successor evidence
+
+| Evidence | SHA-256 |
+|---|---|
+| inventory fingerprint | `b1c2f81c74ec0ffc36971f358f920b2d0775c6009f474bea924448cd2a1915c1` |
+| `inventory-20260731T064417Z-r2/SHA256SUMS` | `8cf682d06522b050c97c504c1a516f33463bd906e4ee10c3d6a1c38c03c6ec07` |
+| `inventory-20260731T064417Z-r2/eligibility-ledger.yaml` | `436c76718f537ce199e4177e4db9998aad4b661176ff25d5daef17e082e4e636` |
+| exporter binary | `5e2a2d5f2e101501f3b4999eee1cd99efe8cda4d8855cfa37116c4721b838132` |
 
 ## Conservative eligibility
 
