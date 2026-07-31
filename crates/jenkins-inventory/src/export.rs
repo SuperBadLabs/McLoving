@@ -83,10 +83,12 @@ pub fn export_snapshot(options: &ExportOptions) -> Result<(), InventoryError> {
     // every listed payload before deriving any inventory output from the
     // snapshot. Keeping the verified manifest digests also binds the exported
     // records to the exact attestations that were checked here.
-    let _root_attestation = verify_attestation(&options.snapshot_root, "ROOT_SHA256SUMS")?;
-    let job_source_evidence = verify_attestation(&options.snapshot_root, "JOB_CONFIG_SHA256SUMS")?;
-    let plugin_profile_sha256 = verify_attestation(&options.snapshot_root, "PLUGIN_SHA256SUMS")?;
-    let _corpus_attestation = verify_attestation(&options.snapshot_root, "CORPUS_SHA256SUMS")?;
+    let (_root_attestation, _) = verify_attestation(&options.snapshot_root, "ROOT_SHA256SUMS")?;
+    let (job_source_evidence, attested_job_configs) =
+        verify_attestation(&options.snapshot_root, "JOB_CONFIG_SHA256SUMS")?;
+    let (plugin_profile_sha256, _) =
+        verify_attestation(&options.snapshot_root, "PLUGIN_SHA256SUMS")?;
+    let (_corpus_attestation, _) = verify_attestation(&options.snapshot_root, "CORPUS_SHA256SUMS")?;
 
     let home = options.snapshot_root.join("home");
     let global_config = read_regular(&home.join("config.xml"))?;
@@ -119,6 +121,7 @@ pub fn export_snapshot(options: &ExportOptions) -> Result<(), InventoryError> {
     };
 
     let job_sources = collect_jobs(&home.join("jobs"))?;
+    verify_job_config_coverage(&job_sources, &attested_job_configs)?;
     let job_graph = build_job_graph(
         &binding,
         &job_sources,
@@ -1024,7 +1027,10 @@ fn read_regular(path: &Path) -> Result<Vec<u8>, InventoryError> {
     fs::read(path).map_err(export_io(path))
 }
 
-fn verify_attestation(root: &Path, manifest_name: &str) -> Result<String, InventoryError> {
+fn verify_attestation(
+    root: &Path,
+    manifest_name: &str,
+) -> Result<(String, BTreeSet<PathBuf>), InventoryError> {
     let manifest_path = root.join(manifest_name);
     let manifest = read_regular(&manifest_path)?;
     let text = std::str::from_utf8(&manifest).map_err(|_| {
@@ -1098,7 +1104,39 @@ fn verify_attestation(root: &Path, manifest_name: &str) -> Result<String, Invent
             format!("{manifest_name} contains no entries"),
         ));
     }
-    Ok(sha256_hex(&manifest))
+    Ok((sha256_hex(&manifest), listed))
+}
+
+fn verify_job_config_coverage(
+    sources: &[JobSource],
+    attested: &BTreeSet<PathBuf>,
+) -> Result<(), InventoryError> {
+    let collected = sources
+        .iter()
+        .map(|source| {
+            PathBuf::from("home")
+                .join("jobs")
+                .join(&source.id)
+                .join("config.xml")
+        })
+        .collect::<BTreeSet<_>>();
+    if collected != *attested {
+        let missing = collected.difference(attested).next();
+        let unexpected = attested.difference(&collected).next();
+        return Err(InventoryError::new(
+            "INV_EXPORT_ATTESTATION",
+            format!(
+                "JOB_CONFIG_SHA256SUMS does not exactly cover exported jobs; missing={} unexpected={}",
+                missing
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "none".to_owned()),
+                unexpected
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "none".to_owned())
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn read_snapshot_regular(root: &Path, relative: &Path) -> Result<Vec<u8>, InventoryError> {

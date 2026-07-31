@@ -93,6 +93,42 @@ fn export_rejects_tampering_in_every_snapshot_attestation_family() {
 }
 
 #[test]
+fn export_rejects_jobs_missing_from_or_injected_into_the_job_attestation() {
+    for name in ["missing-job", "unexpected-job"] {
+        let root = TestDirectory::new(name);
+        write_snapshot(&root.0);
+        let job_manifest = root.0.join("JOB_CONFIG_SHA256SUMS");
+        if name == "missing-job" {
+            let extra = root.0.join("home/jobs/extra");
+            fs::create_dir(&extra).expect("extra job directory");
+            fs::copy(
+                root.0.join("home/jobs/example/config.xml"),
+                extra.join("config.xml"),
+            )
+            .expect("extra unattested job config");
+        } else {
+            fs::write(root.0.join("home/unexported.xml"), b"unexported")
+                .expect("unexpected attested file");
+            let config =
+                fs::read(root.0.join("home/jobs/example/config.xml")).expect("read job config");
+            fs::write(
+                &job_manifest,
+                format!(
+                    "{}  home/jobs/example/config.xml\n{}  home/unexported.xml\n",
+                    digest(&config),
+                    digest(b"unexported")
+                ),
+            )
+            .expect("manifest with unexpected job evidence");
+        }
+
+        let error = export_snapshot(&options(&root.0, &root.0.join("inventory")))
+            .expect_err("incomplete or overbroad job evidence must fail closed");
+        assert_eq!(error.code, "INV_EXPORT_ATTESTATION");
+    }
+}
+
+#[test]
 fn export_rejects_duplicate_and_traversing_attestation_paths() {
     for name in ["duplicate", "traversal"] {
         let root = TestDirectory::new(name);
