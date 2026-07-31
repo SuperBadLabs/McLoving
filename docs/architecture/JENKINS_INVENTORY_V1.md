@@ -1,0 +1,206 @@
+# Jenkins inventory contract v1
+
+Wave 4 begins with four independently collected, immutable source-truth
+manifests. McLoving does not compile or execute a Jenkins definition merely
+because it appears in an inventory.
+
+## Files
+
+Before reconciliation, an inventory root contains exactly these source-evidence
+files:
+
+```text
+job-graph.yaml
+identity-clients.yaml
+runtime-dependencies.yaml
+persistent-state.yaml
+SHA256SUMS
+```
+
+`mcloving-inventory seal --root ROOT` creates `SHA256SUMS` with
+create-new semantics. It refuses an already sealed root and any root containing
+an entry outside the four source manifests, so stale or secret-bearing exports
+cannot sit outside the seal. Every manifest is strict YAML: aliases, anchors,
+tags, directives, duplicate keys, multiple documents, and resource-limit
+violations fail before typed deserialization. Unknown typed fields also fail.
+
+The manifests share one byte-identical `binding`. It identifies the controller,
+Jenkins core and plugin profile, effective global configuration, exporter,
+provenance, source generation, and collection epoch. A mixed epoch is rejected.
+Every independently collected population count and set commitment is also
+domain-separated and binds the complete snapshot: schema, controller identity,
+URL, core/plugin/global configuration, epoch/source generation, collection
+time, exporter identity/version/content, and provenance. This prevents a
+per-job or global population proof from an older or differently configured
+snapshot from being replayed inside a fresh common binding.
+The collection time is an exact, calendar-valid UTC
+`YYYY-MM-DDTHH:MM:SSZ` timestamp.
+If Jenkins cannot provide a coherent snapshot, collection must quiesce all
+configuration, identity, client, runtime-dependency, job-state, retention, hold,
+and persistent-state mutation for one bounded export epoch.
+
+## Families
+
+- `job-graph.yaml` owns controller and job structure, canonical definition
+  sources and digests, operational state, triggers, platform/agent/toolchain
+  requirements, publication behavior, ownership, and reviewed scope. An
+  independently sourced controller total and independently sourced direct-child
+  count for every job must exactly match the manifest population and hierarchy;
+  each count binds a collector distinct from the manifest exporter, provenance,
+  and a source-evidence digest. The independently collected canonical
+  set commits each complete deterministic job record—identity and hierarchy,
+  owner/scope approval, operational state, source/configuration, declared
+  requirements, node authority, and publication behavior—so stale semantics or
+  same-cardinality parent/child substitutions cannot pass.
+- `identity-clients.yaml` owns the security realm, immutable principals and
+  lifecycle evidence, effective ACLs, and every read-side or write-side client.
+  Independently sourced principal, effective-ACL-entry, and client totals must
+  each exactly match their manifest population. Each total binds a collector
+  distinct from the manifest exporter, provenance, and a source-evidence
+  digest. Independent canonical sets commit the complete security realm,
+  principal records, ACL records with canonical permissions, and client
+  contracts, preventing stale lifecycle/mapping/caller/endpoint semantics and
+  same-cardinality identity substitution.
+  Principal, ACL, and client sets have distinct controller/epoch subjects even
+  when their populations are empty.
+  Principal kind is one of `user`, `service`, or `group`; lifecycle is one of
+  `active`, `disabled`, `retired`, or `deleted`. Current aliases participate in
+  the unique principal namespace. Historical-name claims carry their own
+  generation and provenance, preserving deleted-name reuse without creating a
+  current mapping ambiguity. A client caller is either a canonical principal
+  reference or an explicit observed source; anonymous and legacy callers never
+  require a fabricated principal.
+- `runtime-dependencies.yaml` owns per-job parameters, credentials by typed
+  reference, source and package resolution, approvals, triggers, live reads,
+  mutable inputs, agents, caches, effects, provisioners, locks, global values,
+  and built-in environment dependencies. The generic typed record uses `kind`
+  for the dependency family, requires an explicit compatibility disposition,
+  and carries typed coverage for declared shared libraries, triggers,
+  platforms, agent labels, and toolchains. Every declared requirement must
+  have exactly one matching compatibility classification; undeclared or
+  duplicate coverage and duplicate declarations fail.
+  Every supplied job group also carries an independently sourced dependency
+  count that must exactly match the complete dependency population, including
+  zero-count groups and retained obligations for excluded jobs. Every
+  inventoried job, including retired and out-of-scope jobs, must supply exactly
+  one runtime group. The count commitment is domain-separated and bound to its
+  owning job. An independent
+  canonical set of complete dependency records must match as well. Each entry
+  binds the job and dependency identities plus the deterministic strict-YAML
+  serialization of every requirement, digest, scope, mutability,
+  confidentiality, secret-consumer/taint field, and disposition; an explicit
+  runtime-domain job-binding entry also seals zero-dependency groups.
+  Mutability is one of `immutable`, `pinned-revision`, `mutable`, or `floating`;
+  mutable and floating dependencies cannot be classified `native`. Every secret
+  dependency additionally binds its exact tagged consumer, typed taint class,
+  non-empty taint path, provenance, and evidence digest. Consumer type and
+  taint class must agree. Workload-visible secret taint is always
+  `unsupported`; an owner-supplied weaker disposition is rejected.
+- `persistent-state.yaml` owns each per-job record class, counts and source
+  digest, retention-policy identity and digest, retention deadline, legal holds
+  and release authority, restore target, conflict policy, external consumers,
+  ownership, confidentiality, and provenance. Every external consumer must
+  reference a client whose direction includes reads; write-only clients cannot
+  consume state. Reusing a legal-hold identity with a conflicting scope, reason,
+  generation, or release authority fails reconciliation. Retention deadlines
+  use the exact UTC form `YYYY-MM-DDTHH:MM:SSZ` and must be valid calendar
+  timestamps. Every state record carries independently classified forward and
+  rollback transforms with mapping identity, evidence digest, and provenance.
+  Every supplied job group carries an independently sourced record-class count
+  that must exactly match the manifest, including explicit zero-count groups
+  and retained obligations for excluded jobs. The count commitment is
+  domain-separated and bound to its owning job.
+  The independently collected canonical set of complete state records is
+  length-prefixed, sorted, and SHA-256 bound as well. Each entry binds the job
+  and record identities plus the deterministic strict-YAML serialization of
+  transforms and their evidence, instance-count evidence, confidentiality,
+  restore/conflict policy, retention, holds, consumers, and provenance, so
+  stale semantic payloads and same-cardinality class or owner substitutions
+  fail reconciliation; an explicit job-binding entry also seals zero-state
+  groups.
+  Every record class also carries an independently sourced instance count with
+  collector identity, provenance, source digest, and a domain-separated subject
+  digest binding the owning job, record ID, and record kind; this source count,
+  rather than an exporter assertion, drives migration-demand aggregation.
+
+Secret values are never inventory fields. A dependency classified `secret`
+must carry a typed `credential_reference` or `redaction_reference`; the
+reconciler rejects an unbound secret dependency or one without typed consumer
+and taint evidence. Conversely, the presence of either reference or consumer
+evidence forces the `secret` confidentiality label, so an exporter cannot
+downgrade a credential-bearing dependency to bypass those checks.
+Runtime dependencies and persistent-state records accept only the exact
+confidentiality labels `public`, `internal`, `confidential`, and `secret`.
+Unknown or case-variant labels fail closed.
+
+## Reconciliation
+
+`mcloving-inventory reconcile --root ROOT
+--expected-snapshot-sha256 TRUSTED_DIGEST` verifies the detached hashes,
+strictly parses all four manifests, requires the complete snapshot binding and
+all four sealed manifest content hashes to match one trusted digest supplied
+outside the replayable directory, checks epoch identity and referential
+integrity, requires exactly one runtime and state
+record group for every
+in-scope job and requires an explicit state group for every job, including
+out-of-scope and retired jobs. Retired jobs may declare an independently proven
+zero-class state group, but approval alone never discards retention or legal
+hold obligations. Every supplied group is validated regardless of scope, and
+rejects:
+
+- duplicate or ambiguous identities;
+- unknown job, parent, ACL principal, or client principal references;
+- exclusions without owner approval;
+- source controller, direct-child, principal, ACL, client, per-job dependency,
+  or per-job state-record-class counts that differ from the manifest;
+- job/parent-edge, principal, ACL/permission-generation, client/direction,
+  per-job dependency, or per-job state-class identity sets that differ from
+  their independently sourced canonical sets;
+- state record classes whose instance counts lack independent source evidence;
+- unclassified runtime or state-transform behavior;
+- unknown or noncanonical runtime dependency kinds; the closed v1 taxonomy is
+  `public-parameter`, `secret-parameter`, `credential`, `source-checkout`,
+  `workload-dependency`, `approval-input`, `trigger`, `external-read`,
+  `agent-local-input`, `agent-capability`, `cache`, `external-effect`,
+  `dynamic-provisioner`, `shared-lock`, `controller-global`, and
+  `builtin-environment`; `credential` and `secret-parameter` always require
+  `secret` confidentiality plus typed reference and consumer/taint evidence;
+- missing, duplicate, or undeclared compatibility evidence for a job's shared
+  libraries, triggers, platforms, agent labels, or toolchains;
+- secret dependencies without typed references and consumer/taint evidence;
+- workload-visible secret dependencies with any disposition other than
+  `unsupported`;
+- malformed digests, missing ownership, duplicate state/hold identities, or
+  incomplete per-job coverage.
+
+The resulting derived `eligibility-ledger.yaml` is published with create-new
+semantics. When the default output path is used, it is added to the sealed
+inventory root after the five source-evidence files above; it is not an input
+to `SHA256SUMS`. Verification rejects every other post-seal entry and requires
+an existing published ledger to exactly match a fresh reconciliation of the
+sealed source evidence. A custom output may be written outside the inventory
+root; inside the root, the only permitted output is `eligibility-ledger.yaml`.
+Eligibility is conservative: the least-compatible runtime dependency, forward
+state transform, or rollback state transform determines a job's `native`,
+`mappable`, `scripted`, or `unsupported` class. The ledger
+reports whole-inventory population denominators, while eligibility rows,
+parity-substrate demand by dependency kind, and state-transform record demand
+cover only the approved in-scope population. Excluded-job retention and
+legal-hold evidence remains sealed in the source manifests without inflating
+migration eligibility or demand. The ledger grants no compiler, scheduler,
+credential, agent, trigger, connector, effect, canary, or cutover authority.
+
+`mcloving-inventory verify --root ROOT
+--expected-snapshot-sha256 TRUSTED_DIGEST` performs the same externally pinned
+reconciliation, derived-ledger rendering, and strict output validation without
+writing an output. The trusted digest commits both the binding and the canonical
+filename/digest map from `SHA256SUMS`; it belongs in owner-reviewed inventory
+coordination state, not inside the sealed directory it protects.
+
+## Closure boundary
+
+This contract and its contained fixtures implement the W4-A evidence machinery.
+The four `INV-*` tickets and `MIG-000` close only after the owner-selected
+controller population is exported under one coherent epoch, secret-scanned,
+reviewed, sealed, and reconciled. Contained fixtures are verification evidence,
+not production inventory.
