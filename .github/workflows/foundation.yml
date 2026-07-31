@@ -73,6 +73,7 @@ jobs:
       - name: Verify foundation records
         run: |
           bash -n scripts/validate-foundation.sh
+          python3 scripts/verify-execution-board.py
           test "$(find docs/adr -maxdepth 1 -name '[0-9][0-9][0-9][0-9]-*.md' | wc -l)" -eq 15
           test -s docs/architecture/CHARTER.md
           test -s docs/threat-model/README.md
