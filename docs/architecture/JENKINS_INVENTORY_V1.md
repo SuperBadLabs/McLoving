@@ -75,7 +75,9 @@ and persistent-state mutation for one bounded export epoch.
 Secret values are never inventory fields. A dependency classified `secret`
 must carry a typed `credential_reference` or `redaction_reference`; the
 reconciler rejects an unbound secret dependency or one without typed consumer
-and taint evidence.
+and taint evidence. Conversely, the presence of either reference forces the
+`secret` confidentiality label, so an exporter cannot downgrade a
+credential-bearing dependency to bypass those checks.
 Runtime dependencies and persistent-state records accept only the exact
 confidentiality labels `public`, `internal`, `confidential`, and `secret`.
 Unknown or case-variant labels fail closed.

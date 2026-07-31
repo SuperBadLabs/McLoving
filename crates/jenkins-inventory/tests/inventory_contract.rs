@@ -245,6 +245,19 @@ fn secret_dependencies_require_consumer_and_taint_evidence() {
 }
 
 #[test]
+fn credential_references_cannot_downgrade_confidentiality() {
+    let directory = TestDirectory::new("credential-confidentiality");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1].dependencies[0].confidentiality = "confidential".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("credential-label downgrade must fail");
+    assert_eq!(error.code, "INV_CREDENTIAL_CONFIDENTIALITY");
+}
+
+#[test]
 fn secret_consumer_taint_must_match_and_have_a_path() {
     let directory = TestDirectory::new("secret-taint-mismatch");
     let mut bundle = fixture();

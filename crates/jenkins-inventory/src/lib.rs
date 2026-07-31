@@ -1189,6 +1189,10 @@ fn validate_runtime_dependencies(
                 ),
             ));
         }
+        validate_confidentiality(
+            "runtime dependency confidentiality",
+            &dependency.confidentiality,
+        )?;
         if dependency.confidentiality == "secret"
             && ![
                 dependency.credential_reference.as_deref(),
@@ -1206,7 +1210,25 @@ fn validate_runtime_dependencies(
                 ),
             ));
         }
-        if dependency.confidentiality == "secret" && dependency.secret_consumer.is_none() {
+        let has_secret_reference = [
+            dependency.credential_reference.as_deref(),
+            dependency.redaction_reference.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|reference| !reference.trim().is_empty());
+        if has_secret_reference && dependency.confidentiality != "secret" {
+            return Err(InventoryError::new(
+                "INV_CREDENTIAL_CONFIDENTIALITY",
+                format!(
+                    "credential-bearing dependency {} for job {job_id} must be classified secret",
+                    dependency.id
+                ),
+            ));
+        }
+        if (dependency.confidentiality == "secret" || has_secret_reference)
+            && dependency.secret_consumer.is_none()
+        {
             return Err(InventoryError::new(
                 "INV_SECRET_CONSUMER_REQUIRED",
                 format!(
@@ -1227,10 +1249,6 @@ fn validate_runtime_dependencies(
         {
             validate_nonempty("runtime dependency typed reference", reference)?;
         }
-        validate_confidentiality(
-            "runtime dependency confidentiality",
-            &dependency.confidentiality,
-        )?;
         validate_digest(
             "runtime dependency implementation",
             &dependency.implementation_sha256,
