@@ -1,6 +1,9 @@
 {:paths ["src"]
  :deps {org.clojure/clojure {:mvn/version "1.12.1"}}
  :aliases
- {:test
-  {:extra-paths ["test"]
+ {:foundation
+  {:extra-deps {org.codehaus.groovy/groovy-all {:mvn/version "2.4.21"}}}
+  :test
+  {:extra-deps {org.codehaus.groovy/groovy-all {:mvn/version "2.4.21"}}
+   :extra-paths ["test"]
    :main-opts ["-m" "mcloving.compat.test-runner"]}}}

@@ -2,9 +2,10 @@
   "Versioned, bounded worker protocol. It is intentionally compile-only and deny-authority."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
+            [mcloving.compat.compiler :as compiler]
             [mcloving.compat.profile :as profile])
   (:import (java.io ByteArrayOutputStream InputStream PushbackReader StringReader)
-           (java.nio.file Files LinkOption Paths)))
+           (java.nio.file Files LinkOption Paths StandardOpenOption)))
 
 (def protocol-version "mcloving.jenkins.compiler/1")
 (def compiler-id "mcloving-jenkins-compiler-worker/1")
@@ -97,6 +98,12 @@
        (<= 1 (count value) 96)
        (boolean (re-matches #"[A-Za-z0-9][A-Za-z0-9._:-]*" value))))
 
+(defn- valid-job-id?
+  [value]
+  (and (string? value)
+       (<= 1 (count value) 128)
+       (boolean (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]*" value))))
+
 (defn current-environment-keys
   []
   (set (keys (System/getenv))))
@@ -109,7 +116,30 @@
       (fail! "E_ENV_AUTHORITY"))
     (sort keys)))
 
-(defn- source-receipt!
+(defn- read-source-bytes!
+  [path]
+  (try
+    (with-open [input
+                (Files/newInputStream
+                 path
+                 (into-array
+                  java.nio.file.OpenOption
+                  [StandardOpenOption/READ LinkOption/NOFOLLOW_LINKS]))]
+      (let [output (ByteArrayOutputStream.)
+            buffer (byte-array 8192)]
+        (loop [total 0]
+          (let [read-count (.read input buffer)]
+            (if (neg? read-count)
+              (.toByteArray output)
+              (let [next-total (+ total read-count)]
+                (when (> next-total max-source-bytes)
+                  (fail! "E_SOURCE_TOO_LARGE"))
+                (.write output buffer 0 read-count)
+                (recur next-total)))))))
+    (catch java.io.IOException _
+      (fail! "E_SOURCE_TYPE"))))
+
+(defn- source-input!
   [request]
   (when-not (= "/input/Jenkinsfile" (:source-path request))
     (fail! "E_SOURCE_PATH"))
@@ -122,10 +152,12 @@
     (let [size (Files/size path)]
       (when (> size max-source-bytes)
         (fail! "E_SOURCE_TOO_LARGE"))
-      (let [actual (profile/sha256-file (.toString path))]
+      (let [bytes (read-source-bytes! path)
+            actual (profile/sha256-bytes bytes)]
         (when-not (= actual (:source-sha256 request))
           (fail! "E_SOURCE_DIGEST"))
-        (sorted-map :bytes size :sha256 actual)))))
+        {:receipt (sorted-map :bytes (alength bytes) :sha256 actual)
+         :source (String. bytes java.nio.charset.StandardCharsets/UTF_8)}))))
 
 (defn- base-response
   [profile request status]
@@ -160,17 +192,36 @@
     :compile
     (do
       (exact-keys! request
-                   #{:operation :protocol :request-id :source-path
+                   #{:inventory-fingerprint :job-actor :job-effective-time
+                     :job-enabled :job-generation :job-id :job-reason
+                     :operation :protocol :request-id :source-path
                      :source-sha256 :target-profile-sha256})
       (when-not (valid-sha? (:source-sha256 request))
         (fail! "E_SOURCE_DIGEST"))
+      (when-not (and (valid-sha? (:job-generation request))
+                     (valid-sha? (:inventory-fingerprint request))
+                     (valid-job-id? (:job-id request))
+                     (boolean? (:job-enabled request))
+                     (string? (:job-reason request))
+                     (string? (:job-actor request))
+                     (string? (:job-effective-time request)))
+        (fail! "E_JOB_PROVENANCE"))
       (environment-safe!)
-      (assoc (base-response profile request :unsupported)
-             :diagnostic
-             (sorted-map
-              :code "E_COMPILER_SUBSET_NOT_IMPLEMENTED"
-              :message "source is outside the currently admitted compiler subset")
-             :source (source-receipt! request)))
+      (let [{:keys [receipt source]} (source-input! request)]
+        (try
+          (assoc (base-response profile request :compiled)
+                 :result (compiler/compile-admitted!
+                          compiler-id profile request source)
+                 :source receipt)
+          (catch clojure.lang.ExceptionInfo exception
+            (assoc (base-response profile request :unsupported)
+                   :diagnostic
+                   (sorted-map
+                    :code (or (:code (ex-data exception))
+                              "E_COMPILER_INTERNAL")
+                    :message
+                    "source is outside the currently admitted compiler subset")
+                   :source receipt)))))
 
     (fail! "E_OPERATION")))
 

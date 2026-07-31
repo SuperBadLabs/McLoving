@@ -43,11 +43,30 @@ duplicating a version lock whose `name:version` syntax produces false-positive
 secret alerts.
 
 `SCENARIO_CONTRACT.yaml` pre-registers the required behavior families and
-bounded cases. Every family is currently `unsupported`; the two synthetic
-secret markers may be injected only at invocation and their absence is checked
-through every persisted evidence file. MIG-003 may admit a case only by adding
-exact expected traces and independent Rust validation without weakening this
-bundle.
+bounded cases. Every broad behavior family remains `unsupported`; the two
+synthetic secret markers may be injected only at invocation and their absence
+is checked through every persisted evidence file.
+
+MIG-003 admits exactly one compile-only case,
+`cinqict_jenkinsdev.Jenkinsfile`, into deterministic strict YAML plus a
+separate disabled operational-state record. `compiler-v1/` contains the exact
+worker response, expected trace, outputs, and independent Rust admission
+receipt. Native runnable coverage and certified equivalence remain zero; the
+case has no scheduler, agent, credential, trigger, or effect authority.
+
+MIG-004 adds `mapping-v1/`, an immutable catalog and detached mapping lock for
+the only corpus-earned step mapping. The exact literal Jenkins `sh` step is
+pinned to `workflow-durable-task-step` version `1479.v56e587f413a_7`, its
+sealed plugin digest, the compiler profile, predecessor corpus manifest,
+source, job, target IR, process shape, trust pool, and all-false authority
+ledger. Unknown and unearned behavior remains unsupported; floating mappings,
+silent fallback, undeclared host reads, credentials, network, and direct
+production effects are forbidden. The catalog does not increase native
+runnable or certified-equivalence coverage.
+
+Every non-admitted source has the stable worker-v1 disposition
+`E_SOURCE_NOT_ADMITTED`; the corpus verifier rejects aliases or placeholder
+diagnostics.
 
 Rebuild the joined views from the sealed evidence:
 

@@ -1,0 +1,28 @@
+schema: mcloving.jenkins.compiler-trace/v1
+source:
+  controller: mario/jenkins-oracle-228
+  job_id: corpus-052-cinqict_jenkinsdev
+  source_sha256: 666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100
+jenkins_oracle:
+  declarative_model_valid: true
+  cps_compilation_entered: true
+  agent_scheduling_reached: true
+  successful_execution_proven: false
+translation:
+  agent:
+    jenkins_selector: any
+    mcloving_platform: any
+    trust_pool: migration-deny-authority
+    effect_authority: false
+  ordered_stages: [Build]
+  processes:
+    - stage: Build
+      program: /bin/sh
+      args: [-xe, -c, "echo \"Hello World\""]
+  operational_state: disabled
+claims:
+  deterministic_compile: true
+  independently_admitted_by_rust: true
+  native_runnable: false
+  certified_equivalence: false
+  execution_authority: false

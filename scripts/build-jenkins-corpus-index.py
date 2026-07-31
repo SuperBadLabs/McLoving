@@ -10,6 +10,17 @@ import sys
 import yaml
 
 
+ADMITTED_COMPILER_V1 = {
+    "cinqict_jenkinsdev.Jenkinsfile": {
+        "source_sha256": (
+            "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100"
+        ),
+        "migration_class": "admitted-compile-only",
+        "worker_v1": "compiled-disabled-import",
+    }
+}
+
+
 def rows(path):
     with path.open(newline="") as stream:
         return list(csv.DictReader(stream, delimiter="\t"))
@@ -114,6 +125,9 @@ def main():
     index = []
     for filename in sorted(provenance):
         source = provenance[filename]
+        admission = ADMITTED_COMPILER_V1.get(filename)
+        if admission and source["source_sha256"] != admission["source_sha256"]:
+            raise ValueError(f"compiler admission source substitution: {filename}")
         project = projects[filename]
         lint_result = lint[filename]
         job_result = jobs[filename]
@@ -151,8 +165,12 @@ def main():
                 "jenkins_console_sha256": job_result["console_sha256"],
                 "linux_case": "denied-no-execution-authority",
                 "windows_case": "denied-no-execution-authority",
-                "migration_class": "unsupported",
-                "worker_v1": "E_COMPILER_SUBSET_NOT_IMPLEMENTED",
+                "migration_class": (
+                    admission["migration_class"] if admission else "unsupported"
+                ),
+                "worker_v1": (
+                    admission["worker_v1"] if admission else "E_SOURCE_NOT_ADMITTED"
+                ),
                 "certified_equivalence": "false",
             }
         )

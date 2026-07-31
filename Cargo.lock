@@ -1376,6 +1376,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-jenkins-compiler-admission"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcloving-pipeline-ir",
+ "sha2",
+]
+
+[[package]]
 name = "mcloving-jenkins-inventory"
 version = "0.0.0"
 dependencies = [
@@ -1384,6 +1393,17 @@ dependencies = [
  "libc",
  "mcloving-pipeline-ir",
  "quick-xml",
+ "serde",
+ "serde-saphyr",
+ "sha2",
+]
+
+[[package]]
+name = "mcloving-jenkins-mapping-catalog"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcloving-pipeline-ir",
  "serde",
  "serde-saphyr",
  "sha2",
