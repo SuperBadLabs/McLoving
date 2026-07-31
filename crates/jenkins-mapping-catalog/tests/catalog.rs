@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use mcloving_jenkins_mapping_catalog::{
     CATALOG_ID, CATALOG_VERSION, CORPUS_MANIFEST_SHA256, PROFILE_SHA256, SCHEMA,
@@ -15,6 +17,35 @@ fn catalog() -> Vec<u8> {
     fs::read(bundle_root().join("catalog.yaml")).expect("read catalog")
 }
 
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct TestBundle(PathBuf);
+
+impl TestBundle {
+    fn copy() -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "mcloving-mapping-bundle-{}-{nonce}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("create temporary bundle");
+        for name in ["README.md", "catalog.lock.yaml", "catalog.yaml"] {
+            fs::copy(bundle_root().join(name), root.join(name)).expect("copy bundle file");
+        }
+        Self(root)
+    }
+}
+
+impl Drop for TestBundle {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.0).expect("remove temporary bundle");
+    }
+}
+
 #[test]
 fn exact_corpus_earned_bundle_is_admitted() {
     let receipt = verify_bundle(&bundle_root()).expect("admit exact bundle");
@@ -23,6 +54,27 @@ fn exact_corpus_earned_bundle_is_admitted() {
     assert_eq!(receipt.catalog_version, CATALOG_VERSION);
     assert_eq!(receipt.mappings, 1);
     assert_eq!(receipt.earned_cases, 1);
+}
+
+#[test]
+fn readme_directory_is_rejected_as_a_non_regular_bundle_entry() {
+    let bundle = TestBundle::copy();
+    fs::remove_file(bundle.0.join("README.md")).expect("remove copied README");
+    fs::create_dir(bundle.0.join("README.md")).expect("replace README with directory");
+    let error = verify_bundle(&bundle.0).expect_err("directory README must fail");
+    assert_eq!(error.code, "E_BUNDLE_ENTRY");
+}
+
+#[cfg(unix)]
+#[test]
+fn readme_symlink_is_rejected_as_a_non_regular_bundle_entry() {
+    use std::os::unix::fs::symlink;
+
+    let bundle = TestBundle::copy();
+    fs::remove_file(bundle.0.join("README.md")).expect("remove copied README");
+    symlink("catalog.yaml", bundle.0.join("README.md")).expect("replace README with symlink");
+    let error = verify_bundle(&bundle.0).expect_err("symlink README must fail");
+    assert_eq!(error.code, "E_BUNDLE_ENTRY");
 }
 
 #[test]

@@ -34,6 +34,7 @@ pub const TARGET_IR: &str = "mcloving.pipeline/1";
 pub const TRUST_POOL: &str = "migration-deny-authority";
 const MAX_CATALOG_BYTES: usize = 65_536;
 const MAX_LOCK_BYTES: usize = 8_192;
+const MAX_README_BYTES: usize = 65_536;
 const BUNDLE_FILES: [&str; 3] = ["README.md", "catalog.lock.yaml", "catalog.yaml"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -232,6 +233,7 @@ struct CatalogLock {
 
 pub fn verify_bundle(root: &Path) -> Result<CatalogReceipt, CatalogError> {
     validate_bundle_entries(root)?;
+    let _readme_bytes = read_regular(root.join("README.md"), MAX_README_BYTES)?;
     let catalog_bytes = read_regular(root.join("catalog.yaml"), MAX_CATALOG_BYTES)?;
     let lock_bytes = read_regular(root.join("catalog.lock.yaml"), MAX_LOCK_BYTES)?;
     let catalog_sha256 = sha256_hex(&catalog_bytes);
