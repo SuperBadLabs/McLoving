@@ -4,6 +4,8 @@
 //! Reconciliation accepts them only when their detached digests verify and all
 //! four bind the same controller snapshot.
 
+pub mod export;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;

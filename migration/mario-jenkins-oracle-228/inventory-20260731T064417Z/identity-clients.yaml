@@ -1,0 +1,2392 @@
+binding:
+  schema: mcloving.jenkins.inventory/v1
+  controller_id: mario/jenkins-oracle-228
+  controller_url: http://100.127.170.90:18080
+  controller_core_version: 2.568.1
+  plugin_profile_sha256: e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0
+  global_config_sha256: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+  epoch_id: mario-oracle-20260731T064417Z
+  source_generation: 2e350d0089c94379eb01124929ccc0f931c8e10f93860bef30be9d300572e556
+  collected_at: 2026-07-31T06:44:17Z
+  exporter_id: mcloving-inventory-export
+  exporter_version: wave4b-exporter-v1-precommit
+  exporter_sha256: c5a3827ff7814a4b83cad816965440e7258b79c13861c2bf100b2666d12c66e9
+  provenance: owner-designated-offline-mario-jenkins-oracle-228-snapshot
+security_realm:
+  implementation: hudson.security.HudsonPrivateSecurityRealm
+  config_sha256: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+  identity_provider_generation: b5bfb4fe8c68d6a90aacb224a5fdb111df279f3e0ea600f6cf15258cb22efccd
+principal_count:
+  count: 1
+  collector_id: offline-jenkins-identity-scan-v1
+  provenance: >-
+    owner-designated-offline-mario-jenkins-oracle-228-snapshot; offline Jenkins
+    users scan
+  source_sha256: b5bfb4fe8c68d6a90aacb224a5fdb111df279f3e0ea600f6cf15258cb22efccd
+  subject_sha256: 5a18e62dc98ebe7396b0829e8b5501cea645f0775805624f6ef6be543108c4ef
+principal_set:
+  collector_id: offline-jenkins-identity-scan-v1
+  provenance: >-
+    owner-designated-offline-mario-jenkins-oracle-228-snapshot; canonical realm and
+    principal scan
+  source_sha256: b5bfb4fe8c68d6a90aacb224a5fdb111df279f3e0ea600f6cf15258cb22efccd
+  entries_sha256: bbff449ae34d8f5ace555d6d911f609195cba61dc4ef8009611ebd831247b04a
+principals:
+- id: oracle-admin
+  kind: user
+  aliases: []
+  historical_names: []
+  groups: []
+  membership_generation: 03fdbfee9e3fa1a3b35e786280975dc75f491af950b123cf6692c33a7471c084
+  lifecycle: active
+  provenance: >-
+    owner-designated-offline-mario-jenkins-oracle-228-snapshot;
+    /home/srikanth/mcloving-wave4/inventory-epoch-20260731T064417Z/home/users/oracleadmin_fcdd81363880ca6ba1e53bdfa9fb304c819ed1000c01ff95784b03a7b5d3c9f3
+acl_entry_count:
+  count: 230
+  collector_id: offline-jenkins-identity-scan-v1
+  provenance: >-
+    owner-designated-offline-mario-jenkins-oracle-228-snapshot; effective
+    authorization-strategy expansion
+  source_sha256: b5bfb4fe8c68d6a90aacb224a5fdb111df279f3e0ea600f6cf15258cb22efccd
+  subject_sha256: 324fd5e4ff3a9eab72b22f25f67685cb57ff741a702fa39aa2cae259ea65c1dc
+acl_entry_set:
+  collector_id: offline-jenkins-identity-scan-v1
+  provenance: >-
+    owner-designated-offline-mario-jenkins-oracle-228-snapshot; canonical effective
+    ACL expansion
+  source_sha256: b5bfb4fe8c68d6a90aacb224a5fdb111df279f3e0ea600f6cf15258cb22efccd
+  entries_sha256: 7c4050c5fdda91e147b96985e4245128a1c4b6cc26c475ef9870815c5d040c08
+acl_entries:
+- job_id: control-native-013-MrRameshRajendran_Hybrid_MultiCloud_Overlay
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: control-native-v2-013-MrRameshRajendran_Hybrid_MultiCloud_Overlay
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-001-Ableton_python-pipeline-utils
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-002-AmanPathak-DevOps_EKS-Terraform-GitHub-Actions
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-003-BBVA_mirrorgate
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-004-Ben1980_jenkinsexample
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-005-Blazemeter_taurus
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-006-Chabane_mitosis-microservice-spark-cassandra
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-007-DeekshithSN_Jenkinsfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-008-HariSekhon_DevOps-Bash-tools
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-009-HariSekhon_Jenkins
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-010-HariSekhon_Nagios-Plugins
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-011-HariSekhon_Templates
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-012-Jotschi_maven-release-workflow-test
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-013-MrRameshRajendran_Hybrid_MultiCloud_Overlay
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-014-ORCID_ORCID-Source
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-015-Primus19_jenkins-pipeline-deploy-to-eks
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-016-Rapter1990_springbootmicroservicedailybuffer
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-017-RitheeshBaradwaj_JenkinsPipeline
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-018-Romeh_spring-boot-ignite
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-019-Romeh_spring-boot-sample-app
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-020-Statemood_jenkins-library
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-021-SumanReddy568_Selenium-Python-Pytest-framework
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-022-SumitKr88_multiscanpipeline-jenkins-fastlane-ios
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-023-SumitM01_CI-CD-for-Docker-Kubernetes-using-Jenki
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-024-TTFHW_jenkins_pipeline_java_maven
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-025-TTFHW_jenkins_pipeline_shell_scripts
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-026-TechPrimers_jenkins-example
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-027-Terradue_DotNet4One
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-028-Terradue_DotNetOpenSearchClient
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-029-TomCzHen_jenkins-android-sample
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-030-Tynab_crm-project
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-031-VAD37_unity-jenkinsfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-032-adamrushuk_powershell-pipeline
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-033-ahmedmourshedi_Automation-Testing-of-ECommerce-W
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-034-aiwithqasim_Capstone-Project-Devops
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-035-alanmacgowan_WebApplication
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-036-alexguzun_jenkins-pipeline-gitflow-maven
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-037-allcloud-io_jenkins-pipeline-tutorial
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-038-arun-gupta_docker-jenkins-pipeline
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-039-aws-samples_ecs-bg-external-controller
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-040-awslabs_aws-codepipeline-plugin-for-jenkins
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-041-bcgov_openshift-wiki
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-042-beifei1_fire-cloud
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-043-bmustiata_jenny
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-044-boozallen_devsecops-example-helloworld
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-045-bszeti_kubernetes-integration-test
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-046-buildit_jenkins-pipeline-libraries
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-047-camiloribeiro_cdeasy
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-048-captjt_jenkins-pipeline-express
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-049-charlires_golang-docker-jenkins
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-050-choiis_Cpp-IOCP-Server
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-051-chrsoo_microservices
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-052-cinqict_jenkinsdev
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-053-clintmod_unit-testing-jenkinsfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-054-cloud-bulldozer_scale-ci-pipeline
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-055-cloudogu_ces-build-lib
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-056-cloudogu_continuous-delivery-slides
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-057-cloudogu_gitops-build-lib
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-058-cloudogu_gitops-playground
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-059-cloudogu_reveal-js-docker-example
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-060-concur_jenkins-yml-workflowLibs
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-061-cvitter_jenkins-pipeline-examples
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-062-darinpope_jenkinsfile-library
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-063-devops-ws_learn-pipeline-java
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-064-eggsy84_gcp-spring-boot-app
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-065-eldada_jenkins-pipeline-kubernetes
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-066-esign-consulting_logistics
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-067-everflux_angular-jenkinsfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-068-evry-ace_jenkins-ace-library
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-069-executeautomation_JenkinsPipeline
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-070-fabric8io_fabric8-pipeline-library
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-071-fabric8io_fabric8-platform
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-072-fatimajamali81_jenkins-iis-cicd-pipeline
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-073-gdemengin_pipeline-logparser
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-074-gfkse_jenkins-shared-library
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-075-griddynamics-archive_mpl
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-076-hakdogan_jenkins-pipeline
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-077-hamitmizrak_Devops_Jenkinsfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-078-holdennguyen_cicd-pipeline-java-webapp
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-079-hungbang_spring-boot-aws-docdb-example
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-080-ishrivatsa_terraform-vault-jenkins
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-081-j8kin_habr-jenkinsfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-082-jalogut_jenkinsfile-basic-sample
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-083-jalogut_jenkinsfile-shared-library-sample
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-084-jenkins-infra_jenkins-io
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-085-jenkins-infra_pipeline-library
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-086-jenkins-infra_update-center2
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-087-jenkins-zh_jenkins-cli
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-088-jenkinsci_JenkinsPipelineUnit
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-089-jenkinsci_amazon-ecs-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-090-jenkinsci_artifact-promotion-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-091-jenkinsci_badge-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-092-jenkinsci_bitbucket-push-and-pull-request-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-093-jenkinsci_ci-jenkins-io-runner
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-094-jenkinsci_code-coverage-api-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-095-jenkinsci_config-driven-pipeline-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-096-jenkinsci_configuration-as-code-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-097-jenkinsci_credentials-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-098-jenkinsci_declarative-pipeline-migration-assista
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-099-jenkinsci_dependency-track-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-100-jenkinsci_dingtalk-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-101-jenkinsci_docker-agents
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-102-jenkinsci_docker-inbound-agent
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-103-jenkinsci_docker-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-104-jenkinsci_docker-workflow-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-105-jenkinsci_docker
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-106-jenkinsci_gitea-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-107-jenkinsci_github-branch-source-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-108-jenkinsci_github-pr-comment-build-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-109-jenkinsci_gitlab-branch-source-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-110-jenkinsci_groovy-sandbox
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-111-jenkinsci_hashicorp-vault-pipeline-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-112-jenkinsci_hashicorp-vault-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-113-jenkinsci_http-request-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-114-jenkinsci_hubot-steps-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-115-jenkinsci_jacoco-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-116-jenkinsci_jenkins-test-harness
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-117-jenkinsci_jenkins
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-118-jenkinsci_jenkinsfile-runner-test-framework
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-119-jenkinsci_jenkinsfile-runner
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-120-jenkinsci_jira-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-121-jenkinsci_jira-steps-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-122-jenkinsci_jira-trigger-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-123-jenkinsci_job-dsl-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-124-jenkinsci_labelled-steps-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-125-jenkinsci_multiple-scms-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-126-jenkinsci_nested-data-reporting-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-127-jenkinsci_opentelemetry-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-128-jenkinsci_performance-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-129-jenkinsci_pipeline-as-yaml-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-130-jenkinsci_pipeline-aws-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-131-jenkinsci_pipeline-cloudwatch-logs-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-132-jenkinsci_pipeline-github-lib-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-133-jenkinsci_pipeline-githubnotify-step-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-134-jenkinsci_pipeline-gitstatuswrapper-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-135-jenkinsci_pipeline-graph-view-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-136-jenkinsci_pipeline-maven-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-137-jenkinsci_pipeline-model-definition-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-138-jenkinsci_pipeline-stage-view-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-139-jenkinsci_pipeline-utility-steps-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-140-jenkinsci_plot-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-141-jenkinsci_plugin-installation-manager-tool
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-142-jenkinsci_qy-wechat-notification-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-143-jenkinsci_remote-file-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-144-jenkinsci_remoting
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-145-jenkinsci_role-strategy-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-146-jenkinsci_simple-build-for-pipeline-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-147-jenkinsci_ssh-steps-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-148-jenkinsci_stashnotifier-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-149-jenkinsci_subversion-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-150-jenkinsci_swarm-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-151-jenkinsci_tekton-client-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-152-jenkinsci_warnings-ng-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-153-jenkinsci_webhook-step-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-154-jenkinsci_workflow-basic-steps-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-155-jenkinsci_workflow-job-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-156-jenkinsci_workflow-multibranch-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-157-jerearista_python-jenkinsfile-testing
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-158-jjasghar_jenkinsfile_cookbook_pipeline
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-159-judexzhu_Jenkins-Pipeline-CI-CD-with-Helm-on-Kub
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-160-jussaragranja_SeleniumEasyTest2
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-161-juvalen_mb-checker
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-162-k11h-de_zap-jenkins
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-163-kenych_jenkins_config_as_code
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-164-kesselborn_jenkinsfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-165-kishorebhatia_pipeline-as-code-demo
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-166-kitconcept_jenkins-pipeline-examples
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-167-krasi-georgiev_cd-demo
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-168-ksuther_jenkins-jenkinsfile-include
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-169-liatrio_pipeline-library
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-170-linuxacademy_cicd-pipeline-train-schedule-autode
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-171-linuxacademy_cicd-pipeline-train-schedule-canary
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-172-linuxacademy_cicd-pipeline-train-schedule-cd
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-173-linuxacademy_cicd-pipeline-train-schedule-docker
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-174-linuxacademy_cicd-pipeline-train-schedule-kubern
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-175-ljpengelen_jenkinsfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-176-llknur_jenkinsfile-pipeline-project
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-177-maajor_Blender-Geometry-CI
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-178-macg33zr_pipelineUnit
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-179-maxyermayank_jenkins-pipeline-demo-api
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-180-maxyermayank_jenkins-pipeline-demo-pwa
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-181-mercedes-benz_pipeliner
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-182-merken_netCoreBuild
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-183-metersphere_jenkins-plugin
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-184-microsoft_movie-db-java-on-azure
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-185-mindstix-labs_qa-automation-accelerator
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-186-mjah_kubernetes-jenkins-cicd-pipeline-example
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-187-mjuuso_provisioning_example
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-188-mmelmesary_Automated-DevOps-Project
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-189-mraible_ng-demo
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-190-msfidelis_jenkins-ecs-slaves
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-191-murphysecurity_murphysec-jenkins-tools
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-192-narasimhavuppala_jenkins-calculator
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-193-narottamgla_selenium-bdd-cucumber
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-194-netcorebcn_quiz
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-195-nikoly_selenium-grid-docker
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-196-ocf_ircbot
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-197-ocf_ocflib
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-198-ocf_ocfweb
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-199-ocf_slackbridge
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-200-pavankjadda_BookStore
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-201-pawnu_PythonSecurityPipeline
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-202-planetpratik_CMake-Jenkins-CPP
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-203-prashantgohel321_DevOps-Project-Two-Tier-Flask-A
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-204-qiuhuanhen_springboot-DDD
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-205-releaseworks_hellonode
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-206-restalion_python-jenkins-pipeline
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-207-ricardozanini_soccer-stats
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-208-rmkanda_secure-pipeline-java-demo
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-209-roryeckel_codex-jenkinsfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-210-rosineygp_mkdkr
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-211-saidsef_alpine-jenkins-dockerfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-212-saidsef_jenkins-pipeline-examples
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-213-shazforiot_Jenkins-integration-with-kubernetes
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-214-shipping-docker_simple-jerkins
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-215-sidd-harth_apigee-cicd
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-216-sixeyed_jenkins-pipeline-demos
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-217-stakater_GitWebhookProxy
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-218-tknerr_jenkins-pipes-helloworld
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-219-tomasbjerre_bitbucket-server-jenkins-release-tag
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-220-varunpalekar_php-ci-cd
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-221-vineet68sharma_CI-CD-Docker
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-222-vinsguru_docker-selenium-jenkinsfile
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-223-vskurikhin_DayBook3
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-224-wanghaoxi3000_advproject
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-225-wildec2_java-selenium-framework
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-226-yashpimple_Jenkins-CI-CD-with-GitHub-Integration
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-227-zhangjian-ai_AutomationTestPlat
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+- job_id: corpus-228-zowe_jenkins-library
+  principal_id: oracle-admin
+  scope: effective-controller-full-control
+  permissions:
+  - job.build
+  - job.cancel
+  - job.configure
+  - job.read
+  - overall.administer
+  generation: d520e09da0bca7926e6c1ec63a3439b3019e698eef044df84e9fac57b00c8951
+client_count:
+  count: 1
+  collector_id: offline-jenkins-identity-scan-v1
+  provenance: >-
+    owner-designated-offline-mario-jenkins-oracle-228-snapshot; owner-reviewed
+    effective-client scan
+  source_sha256: b5bfb4fe8c68d6a90aacb224a5fdb111df279f3e0ea600f6cf15258cb22efccd
+  subject_sha256: 6fa7f19c1f234669fb6ace525a276cfb2b87cc0c611a9a22813f05045e0bdb04
+client_set:
+  collector_id: offline-jenkins-identity-scan-v1
+  provenance: >-
+    owner-designated-offline-mario-jenkins-oracle-228-snapshot; canonical
+    effective-client scan
+  source_sha256: b5bfb4fe8c68d6a90aacb224a5fdb111df279f3e0ea600f6cf15258cb22efccd
+  entries_sha256: bb2496424e79e42db7b80bfbdb238527ecdbaa143431fcab4dc416fc95cf61fa
+clients:
+- id: owner-operator
+  direction: read-write
+  caller:
+    kind: principal
+    principal_id: oracle-admin
+  authentication: jenkins-private-realm-session
+  endpoint: http://100.127.170.90:18080
+  actions:
+  - administer
+  - build
+  - configure
+  - read
+  scope: owner-designated-oracle-controller
+  owner: SuperBadLabs
+  observed_use: owner-designated corpus-oracle administration
+  generation: b5bfb4fe8c68d6a90aacb224a5fdb111df279f3e0ea600f6cf15258cb22efccd

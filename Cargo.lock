@@ -1383,6 +1383,7 @@ dependencies = [
  "clap",
  "libc",
  "mcloving-pipeline-ir",
+ "quick-xml",
  "serde",
  "serde-saphyr",
  "sha2",

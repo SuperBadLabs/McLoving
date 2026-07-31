@@ -9,6 +9,7 @@ publish.workspace = true
 anyhow = "=1.0.104"
 clap = { version = "=4.5.48", features = ["derive"] }
 mcloving-pipeline-ir = { version = "0.0.0", path = "../pipeline-ir" }
+quick-xml = "=0.41.0"
 serde = { version = "=1.0.228", features = ["derive"] }
 serde-saphyr = "=1.0.0-rc.2"
 sha2 = "=0.10.9"
