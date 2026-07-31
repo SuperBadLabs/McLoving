@@ -232,6 +232,16 @@ pub struct JobDependencies {
     pub dependencies: Vec<RuntimeDependency>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum JobRequirement {
+    SharedLibrary { reference: String },
+    Trigger { declaration: String },
+    Platform { name: String },
+    AgentLabel { label: String },
+    Toolchain { name: String },
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CompatibilityDisposition {
@@ -302,6 +312,8 @@ pub struct SecretConsumerEvidence {
 pub struct RuntimeDependency {
     pub id: String,
     pub kind: String,
+    #[serde(default)]
+    pub requirements: Vec<JobRequirement>,
     pub owner: String,
     pub implementation_sha256: String,
     pub config_sha256: String,
@@ -745,11 +757,20 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         ));
     }
 
+    let jobs_by_id = bundle
+        .job_graph
+        .jobs
+        .iter()
+        .map(|job| (job.id.as_str(), job))
+        .collect::<BTreeMap<_, _>>();
     let mut runtime_dispositions = BTreeMap::new();
     for (job_id, dependencies) in &runtime {
+        let job = jobs_by_id
+            .get(job_id.as_str())
+            .expect("runtime job identity checked");
         runtime_dispositions.insert(
             job_id.as_str(),
-            validate_runtime_dependencies(job_id, dependencies)?,
+            validate_runtime_dependencies(job, dependencies)?,
         );
     }
     let mut state_dispositions = BTreeMap::new();
@@ -1164,12 +1185,34 @@ fn index_state<'a>(
 }
 
 fn validate_runtime_dependencies(
-    job_id: &str,
+    job: &JobRecord,
     dependencies: &[RuntimeDependency],
 ) -> Result<CompatibilityDisposition, InventoryError> {
-    let disposition = classify(dependencies)?;
+    let job_id = job.id.as_str();
+    let declared_requirements = declared_job_requirements(job)?;
+    let mut covered_requirements = BTreeSet::new();
     for dependency in dependencies {
         validate_nonempty("runtime dependency kind", &dependency.kind)?;
+        for requirement in &dependency.requirements {
+            validate_job_requirement(requirement)?;
+            if !declared_requirements.contains(requirement) {
+                return Err(InventoryError::new(
+                    "INV_UNDECLARED_REQUIREMENT",
+                    format!(
+                        "runtime dependency {} for job {job_id} covers an undeclared requirement",
+                        dependency.id
+                    ),
+                ));
+            }
+            if !covered_requirements.insert(requirement.clone()) {
+                return Err(InventoryError::new(
+                    "INV_DUPLICATE_REQUIREMENT_EVIDENCE",
+                    format!(
+                        "job {job_id} has more than one compatibility classification for a declared requirement"
+                    ),
+                ));
+            }
+        }
         validate_nonempty("runtime dependency owner", &dependency.owner)?;
         validate_nonempty(
             "runtime dependency resource scope",
@@ -1240,6 +1283,17 @@ fn validate_runtime_dependencies(
         }
         if let Some(consumer) = &dependency.secret_consumer {
             validate_secret_consumer(job_id, &dependency.id, consumer)?;
+            if consumer.taint == SecretTaint::WorkloadVisible
+                && dependency.disposition != CompatibilityDisposition::Unsupported
+            {
+                return Err(InventoryError::new(
+                    "INV_WORKLOAD_SECRET_DISPOSITION",
+                    format!(
+                        "workload-visible secret dependency {} for job {job_id} must be classified unsupported",
+                        dependency.id
+                    ),
+                ));
+            }
         }
         for reference in [
             dependency.credential_reference.as_deref(),
@@ -1259,7 +1313,72 @@ fn validate_runtime_dependencies(
             &dependency.config_sha256,
         )?;
     }
-    Ok(disposition)
+    if covered_requirements != declared_requirements {
+        return Err(InventoryError::new(
+            "INV_REQUIREMENT_COVERAGE",
+            format!(
+                "job {job_id} has declared execution requirements without exactly one typed compatibility classification"
+            ),
+        ));
+    }
+    classify(dependencies)
+}
+
+fn declared_job_requirements(job: &JobRecord) -> Result<BTreeSet<JobRequirement>, InventoryError> {
+    let requirements = job
+        .shared_library_refs
+        .iter()
+        .cloned()
+        .map(|reference| JobRequirement::SharedLibrary { reference })
+        .chain(
+            job.triggers
+                .iter()
+                .cloned()
+                .map(|declaration| JobRequirement::Trigger { declaration }),
+        )
+        .chain(
+            job.platforms
+                .iter()
+                .cloned()
+                .map(|name| JobRequirement::Platform { name }),
+        )
+        .chain(
+            job.agent_labels
+                .iter()
+                .cloned()
+                .map(|label| JobRequirement::AgentLabel { label }),
+        )
+        .chain(
+            job.toolchains
+                .iter()
+                .cloned()
+                .map(|name| JobRequirement::Toolchain { name }),
+        )
+        .collect::<Vec<_>>();
+    let mut unique = BTreeSet::new();
+    for requirement in requirements {
+        if !unique.insert(requirement) {
+            return Err(InventoryError::new(
+                "INV_DUPLICATE_REQUIREMENT_DECLARATION",
+                format!(
+                    "job {} declares the same execution requirement more than once",
+                    job.id
+                ),
+            ));
+        }
+    }
+    Ok(unique)
+}
+
+fn validate_job_requirement(requirement: &JobRequirement) -> Result<(), InventoryError> {
+    let value = match requirement {
+        JobRequirement::SharedLibrary { reference } => reference,
+        JobRequirement::Trigger { declaration } => declaration,
+        JobRequirement::Platform { name } => name,
+        JobRequirement::AgentLabel { label } => label,
+        JobRequirement::Toolchain { name } => name,
+    };
+    validate_nonempty("runtime dependency requirement", value)
 }
 
 fn validate_secret_consumer(

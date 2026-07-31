@@ -6,12 +6,12 @@ use mcloving_jenkins_inventory::{
     AclEntry, ApprovedDisposition, ClientCaller, ClientDirection, ClientRecord,
     CompatibilityDisposition, CountEvidence, DependencyMutability, HistoricalNameClaim,
     IDENTITY_CLIENT_FILE, IdentityClientManifest, JOB_GRAPH_FILE, JobDependencies,
-    JobGraphManifest, JobRecord, JobStateRecords, LegalHold, OperationalState,
+    JobGraphManifest, JobRecord, JobRequirement, JobStateRecords, LegalHold, OperationalState,
     PERSISTENT_STATE_FILE, PersistentStateManifest, Principal, PrincipalKind, PrincipalLifecycle,
     RUNTIME_DEPENDENCY_FILE, RuntimeDependency, RuntimeDependencyManifest, SCHEMA_VERSION,
     ScopeDisposition, SecretConsumer, SecretConsumerEvidence, SecretTaint, SecurityRealm,
-    SnapshotBinding, StateRecord, StateTransformEvidence, load_bundle, reconcile,
-    seal_manifest_directory, validate_ledger_output_path, write_ledger,
+    SnapshotBinding, StateRecord, StateTransformEvidence, WorkloadSecretChannel, load_bundle,
+    reconcile, seal_manifest_directory, validate_ledger_output_path, write_ledger,
 };
 use serde::Serialize;
 
@@ -301,6 +301,118 @@ fn secret_consumer_taint_must_match_and_have_a_path() {
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("empty secret taint path must fail");
     assert_eq!(error.code, "INV_REQUIRED");
+}
+
+#[test]
+fn workload_visible_secrets_are_never_native_eligible() {
+    let directory = TestDirectory::new("workload-visible-secret");
+    let mut bundle = fixture();
+    let dependency = &mut bundle.runtime_dependencies.jobs[1].dependencies[0];
+    dependency.secret_consumer = Some(SecretConsumerEvidence {
+        consumer: SecretConsumer::Workload {
+            channel: WorkloadSecretChannel::EnvironmentVariable,
+            target: "DEPLOY_TOKEN".to_owned(),
+        },
+        taint: SecretTaint::WorkloadVisible,
+        taint_path: vec![
+            "credential/deploy-token".to_owned(),
+            "workload/environment/DEPLOY_TOKEN".to_owned(),
+        ],
+        provenance: "jenkins/job/folder/build/workload-secret".to_owned(),
+        evidence_sha256: DIGEST_C.to_owned(),
+    });
+    dependency.disposition = CompatibilityDisposition::Native;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("workload-visible secret must be unsupported");
+    assert_eq!(error.code, "INV_WORKLOAD_SECRET_DISPOSITION");
+
+    let directory = TestDirectory::new("workload-visible-secret-unsupported");
+    let mut bundle = fixture();
+    let dependency = &mut bundle.runtime_dependencies.jobs[1].dependencies[0];
+    dependency.secret_consumer = Some(SecretConsumerEvidence {
+        consumer: SecretConsumer::Workload {
+            channel: WorkloadSecretChannel::EnvironmentVariable,
+            target: "DEPLOY_TOKEN".to_owned(),
+        },
+        taint: SecretTaint::WorkloadVisible,
+        taint_path: vec![
+            "credential/deploy-token".to_owned(),
+            "workload/environment/DEPLOY_TOKEN".to_owned(),
+        ],
+        provenance: "jenkins/job/folder/build/workload-secret".to_owned(),
+        evidence_sha256: DIGEST_C.to_owned(),
+    });
+    dependency.disposition = CompatibilityDisposition::Unsupported;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let ledger = reconcile(&loaded).expect("unsupported workload secret is explicit");
+    assert_eq!(
+        ledger.jobs[1].disposition,
+        CompatibilityDisposition::Unsupported
+    );
+}
+
+#[test]
+fn every_declared_job_requirement_needs_typed_compatibility_evidence() {
+    let directory = TestDirectory::new("missing-requirement");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1].dependencies[0]
+        .requirements
+        .retain(|requirement| !matches!(requirement, JobRequirement::Trigger { .. }));
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("unclassified trigger must fail");
+    assert_eq!(error.code, "INV_REQUIREMENT_COVERAGE");
+}
+
+#[test]
+fn requirement_evidence_must_be_declared_and_unique() {
+    let directory = TestDirectory::new("undeclared-requirement");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1].dependencies[0]
+        .requirements
+        .push(JobRequirement::SharedLibrary {
+            reference: "unlisted-library".to_owned(),
+        });
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("undeclared requirement evidence must fail");
+    assert_eq!(error.code, "INV_UNDECLARED_REQUIREMENT");
+
+    let directory = TestDirectory::new("duplicate-requirement");
+    let mut bundle = fixture();
+    let duplicate = bundle.runtime_dependencies.jobs[1].dependencies[0].requirements[0].clone();
+    bundle.runtime_dependencies.jobs[1].dependencies[0]
+        .requirements
+        .push(duplicate);
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("duplicate requirement evidence must fail");
+    assert_eq!(error.code, "INV_DUPLICATE_REQUIREMENT_EVIDENCE");
+}
+
+#[test]
+fn duplicate_job_requirement_declarations_are_rejected() {
+    let directory = TestDirectory::new("duplicate-requirement-declaration");
+    let mut bundle = fixture();
+    bundle.job_graph.jobs[1].triggers.push("manual".to_owned());
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("duplicate job requirement must fail");
+    assert_eq!(error.code, "INV_DUPLICATE_REQUIREMENT_DECLARATION");
 }
 
 #[test]
@@ -966,6 +1078,7 @@ fn reconciliation_strictly_validates_the_derived_ledger() {
         let mut dependency = template.clone();
         dependency.id = format!("runtime/extra-{index}");
         dependency.kind = format!("kind-{index}");
+        dependency.requirements.clear();
         dependency.confidentiality = "internal".to_owned();
         dependency.credential_reference = None;
         dependency.redaction_reference = None;
@@ -1115,6 +1228,20 @@ fn fixture() -> Fixture {
                     dependencies: vec![RuntimeDependency {
                         id: "credential/source".to_owned(),
                         kind: "source-checkout".to_owned(),
+                        requirements: vec![
+                            JobRequirement::Trigger {
+                                declaration: "manual".to_owned(),
+                            },
+                            JobRequirement::Platform {
+                                name: "linux".to_owned(),
+                            },
+                            JobRequirement::AgentLabel {
+                                label: "linux".to_owned(),
+                            },
+                            JobRequirement::Toolchain {
+                                name: "jdk-21".to_owned(),
+                            },
+                        ],
                         owner: "ci-platform".to_owned(),
                         implementation_sha256: DIGEST_A.to_owned(),
                         config_sha256: DIGEST_B.to_owned(),
@@ -1183,6 +1310,7 @@ fn fixture() -> Fixture {
 fn add_excluded_obligations(fixture: &mut Fixture) {
     let mut dependency = fixture.runtime_dependencies.jobs[1].dependencies[0].clone();
     dependency.id = "credential/legacy".to_owned();
+    dependency.requirements.clear();
     dependency.provenance = "jenkins/credentials/legacy".to_owned();
     fixture.runtime_dependencies.jobs.push(JobDependencies {
         job_id: "legacy".to_owned(),
@@ -1220,6 +1348,7 @@ fn binding() -> SnapshotBinding {
 }
 
 fn job(id: &str, parent_id: Option<&str>, disposition: ScopeDisposition) -> JobRecord {
+    let is_pipeline = parent_id.is_some();
     JobRecord {
         id: id.to_owned(),
         parent_id: parent_id.map(str::to_owned),
@@ -1240,10 +1369,22 @@ fn job(id: &str, parent_id: Option<&str>, disposition: ScopeDisposition) -> JobR
             actor: "jenkins/system".to_owned(),
         },
         shared_library_refs: Vec::new(),
-        triggers: vec!["manual".to_owned()],
-        platforms: vec!["linux".to_owned()],
-        agent_labels: vec!["linux".to_owned()],
-        toolchains: vec!["jdk-21".to_owned()],
+        triggers: is_pipeline
+            .then(|| "manual".to_owned())
+            .into_iter()
+            .collect(),
+        platforms: is_pipeline
+            .then(|| "linux".to_owned())
+            .into_iter()
+            .collect(),
+        agent_labels: is_pipeline
+            .then(|| "linux".to_owned())
+            .into_iter()
+            .collect(),
+        toolchains: is_pipeline
+            .then(|| "jdk-21".to_owned())
+            .into_iter()
+            .collect(),
         node_authority: "trusted-linux".to_owned(),
         publishes_artifacts: true,
         publishes_tests: true,

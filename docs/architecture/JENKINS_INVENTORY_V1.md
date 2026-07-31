@@ -55,12 +55,17 @@ and persistent-state mutation for one bounded export epoch.
   reference, source and package resolution, approvals, triggers, live reads,
   mutable inputs, agents, caches, effects, provisioners, locks, global values,
   and built-in environment dependencies. The generic typed record uses `kind`
-  for the dependency family and requires an explicit compatibility disposition.
+  for the dependency family, requires an explicit compatibility disposition,
+  and carries typed coverage for declared shared libraries, triggers,
+  platforms, agent labels, and toolchains. Every declared requirement must
+  have exactly one matching compatibility classification; undeclared or
+  duplicate coverage and duplicate declarations fail.
   Mutability is one of `immutable`, `pinned-revision`, `mutable`, or `floating`;
   mutable and floating dependencies cannot be classified `native`. Every secret
   dependency additionally binds its exact tagged consumer, typed taint class,
   non-empty taint path, provenance, and evidence digest. Consumer type and
-  taint class must agree.
+  taint class must agree. Workload-visible secret taint is always
+  `unsupported`; an owner-supplied weaker disposition is rejected.
 - `persistent-state.yaml` owns each per-job record class, counts and source
   digest, retention-policy identity and digest, retention deadline, legal holds
   and release authority, restore target, conflict policy, external consumers,
@@ -96,7 +101,11 @@ rejects:
 - exclusions without owner approval;
 - source controller or direct-child counts that differ from the manifest;
 - unclassified runtime or state-transform behavior;
+- missing, duplicate, or undeclared compatibility evidence for a job's shared
+  libraries, triggers, platforms, agent labels, or toolchains;
 - secret dependencies without typed references and consumer/taint evidence;
+- workload-visible secret dependencies with any disposition other than
+  `unsupported`;
 - malformed digests, missing ownership, duplicate state/hold identities, or
   incomplete per-job coverage.
 
