@@ -27,11 +27,15 @@ enum Command {
         #[arg(long)]
         root: PathBuf,
         #[arg(long)]
+        expected_snapshot_sha256: String,
+        #[arg(long)]
         output: Option<PathBuf>,
     },
     Verify {
         #[arg(long)]
         root: PathBuf,
+        #[arg(long)]
+        expected_snapshot_sha256: String,
     },
 }
 
@@ -41,18 +45,27 @@ fn main() -> Result<()> {
         Command::Seal { root } => {
             seal_manifest_directory(&root).context("inventory sealing failed")?;
         }
-        Command::Reconcile { root, output } => {
+        Command::Reconcile {
+            root,
+            expected_snapshot_sha256,
+            output,
+        } => {
             let bundle = load_bundle(&root).context("inventory verification failed")?;
-            let ledger = reconcile(&bundle).context("inventory reconciliation failed")?;
+            let ledger = reconcile(&bundle, &expected_snapshot_sha256)
+                .context("inventory reconciliation failed")?;
             let output = output.unwrap_or_else(|| root.join(LEDGER_FILE));
             validate_ledger_output_path(&root, &output)
                 .context("eligibility ledger output validation failed")?;
             write_ledger(&output, &ledger).context("eligibility ledger publication failed")?;
             println!("{}", output.display());
         }
-        Command::Verify { root } => {
+        Command::Verify {
+            root,
+            expected_snapshot_sha256,
+        } => {
             let bundle = load_bundle(&root).context("inventory verification failed")?;
-            let ledger = reconcile(&bundle).context("inventory reconciliation failed")?;
+            let ledger = reconcile(&bundle, &expected_snapshot_sha256)
+                .context("inventory reconciliation failed")?;
             println!(
                 "inventory-ok controller={} epoch={} jobs={} dependencies={} state-records={}",
                 ledger.binding.controller_id,

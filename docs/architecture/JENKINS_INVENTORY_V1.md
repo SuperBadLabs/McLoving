@@ -135,9 +135,12 @@ Unknown or case-variant labels fail closed.
 
 ## Reconciliation
 
-`mcloving-inventory reconcile --root ROOT` verifies the detached hashes,
-strictly parses all four manifests, checks epoch identity and referential
-integrity, requires exactly one runtime and state record group for every
+`mcloving-inventory reconcile --root ROOT
+--expected-snapshot-sha256 TRUSTED_DIGEST` verifies the detached hashes,
+strictly parses all four manifests, requires the complete snapshot binding to
+match a trusted digest supplied outside the replayable directory, checks epoch
+identity and referential integrity, requires exactly one runtime and state
+record group for every
 in-scope job and requires an explicit state group for every job, including
 out-of-scope and retired jobs. Retired jobs may declare an independently proven
 zero-class state group, but approval alone never discards retention or legal
@@ -154,6 +157,12 @@ rejects:
   their independently sourced canonical sets;
 - state record classes whose instance counts lack independent source evidence;
 - unclassified runtime or state-transform behavior;
+- unknown or noncanonical runtime dependency kinds; the closed v1 taxonomy is
+  `public-parameter`, `secret-parameter`, `credential`, `source-checkout`,
+  `workload-dependency`, `approval-input`, `trigger`, `external-read`,
+  `agent-local-input`, `agent-capability`, `cache`, `external-effect`,
+  `dynamic-provisioner`, `shared-lock`, `controller-global`, and
+  `builtin-environment`;
 - missing, duplicate, or undeclared compatibility evidence for a job's shared
   libraries, triggers, platforms, agent labels, or toolchains;
 - secret dependencies without typed references and consumer/taint evidence;
@@ -179,9 +188,11 @@ legal-hold evidence remains sealed in the source manifests without inflating
 migration eligibility or demand. The ledger grants no compiler, scheduler,
 credential, agent, trigger, connector, effect, canary, or cutover authority.
 
-`mcloving-inventory verify --root ROOT` performs the same reconciliation,
-derived-ledger rendering, and strict output validation without writing an
-output.
+`mcloving-inventory verify --root ROOT
+--expected-snapshot-sha256 TRUSTED_DIGEST` performs the same externally pinned
+reconciliation, derived-ledger rendering, and strict output validation without
+writing an output. The trusted digest belongs in owner-reviewed inventory
+coordination state, not inside the sealed directory it protects.
 
 ## Closure boundary
 

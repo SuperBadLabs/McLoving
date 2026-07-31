@@ -8,10 +8,11 @@ use mcloving_jenkins_inventory::{
     IDENTITY_CLIENT_FILE, IdentityClientManifest, JOB_GRAPH_FILE, JobDependencies,
     JobGraphManifest, JobRecord, JobRequirement, JobStateRecords, LegalHold, OperationalState,
     PERSISTENT_STATE_FILE, PersistentStateManifest, Principal, PrincipalKind, PrincipalLifecycle,
-    RUNTIME_DEPENDENCY_FILE, RuntimeDependency, RuntimeDependencyManifest, SCHEMA_VERSION,
-    ScopeDisposition, SecretConsumer, SecretConsumerEvidence, SecretTaint, SecurityRealm,
-    SetEvidence, SnapshotBinding, StateRecord, StateTransformEvidence, WorkloadSecretChannel,
-    load_bundle, reconcile, seal_manifest_directory, validate_ledger_output_path, write_ledger,
+    RUNTIME_DEPENDENCY_FILE, RuntimeDependency, RuntimeDependencyKind, RuntimeDependencyManifest,
+    SCHEMA_VERSION, ScopeDisposition, SecretConsumer, SecretConsumerEvidence, SecretTaint,
+    SecurityRealm, SetEvidence, SnapshotBinding, StateRecord, StateTransformEvidence,
+    WorkloadSecretChannel, load_bundle, reconcile as reconcile_for_snapshot,
+    seal_manifest_directory, snapshot_binding_sha256, validate_ledger_output_path, write_ledger,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -19,6 +20,14 @@ use sha2::{Digest, Sha256};
 const DIGEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const DIGEST_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+fn reconcile(
+    bundle: &mcloving_jenkins_inventory::InventoryBundle,
+) -> Result<mcloving_jenkins_inventory::EligibilityLedger, mcloving_jenkins_inventory::InventoryError>
+{
+    let expected = snapshot_binding_sha256(&bundle.job_graph.binding);
+    reconcile_for_snapshot(bundle, &expected)
+}
 
 struct TestDirectory(PathBuf);
 
@@ -728,7 +737,8 @@ fn reconciliation_rejects_same_cardinality_population_substitution() {
         (
             "dependency-set",
             (|bundle: &mut Fixture| {
-                bundle.runtime_dependencies.jobs[1].dependencies[0].kind = "replacement".to_owned();
+                bundle.runtime_dependencies.jobs[1].dependencies[0].kind =
+                    RuntimeDependencyKind::ExternalEffect;
             }) as fn(&mut Fixture),
             "INV_DEPENDENCY_SET_MISMATCH",
         ),
@@ -866,6 +876,7 @@ fn reconciliation_rejects_cross_epoch_per_job_evidence_replay() {
 fn reconciliation_rejects_stale_evidence_after_snapshot_configuration_changes() {
     let directory = TestDirectory::new("stale-snapshot-configuration");
     let mut bundle = fixture();
+    let trusted_snapshot_sha256 = snapshot_binding_sha256(&bundle.job_graph.binding);
     for binding in [
         &mut bundle.job_graph.binding,
         &mut bundle.identity_clients.binding,
@@ -874,12 +885,14 @@ fn reconciliation_rejects_stale_evidence_after_snapshot_configuration_changes() 
     ] {
         binding.global_config_sha256 = DIGEST_A.to_owned();
     }
+    refresh_population_commitments(&mut bundle);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
     let loaded = load_bundle(&directory.0).expect("load bundle");
-    let error = reconcile(&loaded).expect_err("stale snapshot evidence must fail");
-    assert_eq!(error.code, "INV_COUNT_SUBJECT_MISMATCH");
+    let error = reconcile_for_snapshot(&loaded, &trusted_snapshot_sha256)
+        .expect_err("stale snapshot evidence must fail");
+    assert_eq!(error.code, "INV_SNAPSHOT_EXPECTATION_MISMATCH");
 }
 
 #[test]
@@ -1504,31 +1517,20 @@ fn reconciliation_rejects_write_only_state_consumers() {
 }
 
 #[test]
-fn reconciliation_strictly_validates_the_derived_ledger() {
-    let directory = TestDirectory::new("derived-ledger-limit");
-    let mut bundle = fixture();
-    let template = bundle.runtime_dependencies.jobs[1].dependencies[0].clone();
-    for index in 0..256 {
-        let mut dependency = template.clone();
-        dependency.id = format!("runtime/extra-{index}");
-        dependency.kind = format!("kind-{index}");
-        dependency.requirements.clear();
-        dependency.confidentiality = "internal".to_owned();
-        dependency.credential_reference = None;
-        dependency.redaction_reference = None;
-        dependency.secret_consumer = None;
-        bundle.runtime_dependencies.jobs[1]
-            .dependencies
-            .push(dependency);
-    }
-    bundle.runtime_dependencies.jobs[1].dependency_count.count = 257;
-    refresh_dependency_set(&mut bundle.runtime_dependencies.jobs[1]);
-    write_bundle(&directory.0, &bundle);
-    seal_manifest_directory(&directory.0).expect("seal inventory");
+fn strict_schema_rejects_unknown_runtime_dependency_kind() {
+    let directory = TestDirectory::new("unknown-runtime-dependency-kind");
+    write_bundle(&directory.0, &fixture());
+    let path = directory.0.join(RUNTIME_DEPENDENCY_FILE);
+    let source = fs::read_to_string(&path).expect("read runtime manifest");
+    fs::write(
+        &path,
+        source.replacen("kind: source-checkout", "kind: source-checkoutt", 1),
+    )
+    .expect("write hostile runtime manifest");
+    seal_manifest_directory(&directory.0).expect("seal hostile inventory");
 
-    let loaded = load_bundle(&directory.0).expect("load bundle");
-    let error = reconcile(&loaded).expect_err("oversized derived ledger mapping must fail");
-    assert_eq!(error.code, "INV_RENDER_STRICT");
+    let error = load_bundle(&directory.0).expect_err("unknown dependency kind must fail");
+    assert_eq!(error.code, "INV_SCHEMA");
 }
 
 #[test]
@@ -1681,7 +1683,7 @@ fn fixture() -> Fixture {
                     "folder/build",
                     vec![RuntimeDependency {
                         id: "credential/source".to_owned(),
-                        kind: "source-checkout".to_owned(),
+                        kind: RuntimeDependencyKind::SourceCheckout,
                         requirements: vec![
                             JobRequirement::Trigger {
                                 declaration: "manual".to_owned(),

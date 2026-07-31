@@ -330,7 +330,7 @@ pub struct SecretConsumerEvidence {
 #[serde(deny_unknown_fields)]
 pub struct RuntimeDependency {
     pub id: String,
-    pub kind: String,
+    pub kind: RuntimeDependencyKind,
     #[serde(default)]
     pub requirements: Vec<JobRequirement>,
     pub owner: String,
@@ -347,6 +347,50 @@ pub struct RuntimeDependency {
     #[serde(default)]
     pub secret_consumer: Option<SecretConsumerEvidence>,
     pub disposition: CompatibilityDisposition,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeDependencyKind {
+    PublicParameter,
+    SecretParameter,
+    Credential,
+    SourceCheckout,
+    WorkloadDependency,
+    ApprovalInput,
+    Trigger,
+    ExternalRead,
+    AgentLocalInput,
+    AgentCapability,
+    Cache,
+    ExternalEffect,
+    DynamicProvisioner,
+    SharedLock,
+    ControllerGlobal,
+    BuiltinEnvironment,
+}
+
+impl RuntimeDependencyKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PublicParameter => "public-parameter",
+            Self::SecretParameter => "secret-parameter",
+            Self::Credential => "credential",
+            Self::SourceCheckout => "source-checkout",
+            Self::WorkloadDependency => "workload-dependency",
+            Self::ApprovalInput => "approval-input",
+            Self::Trigger => "trigger",
+            Self::ExternalRead => "external-read",
+            Self::AgentLocalInput => "agent-local-input",
+            Self::AgentCapability => "agent-capability",
+            Self::Cache => "cache",
+            Self::ExternalEffect => "external-effect",
+            Self::DynamicProvisioner => "dynamic-provisioner",
+            Self::SharedLock => "shared-lock",
+            Self::ControllerGlobal => "controller-global",
+            Self::BuiltinEnvironment => "builtin-environment",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -509,9 +553,19 @@ pub fn load_bundle(root: &Path) -> Result<InventoryBundle, InventoryError> {
     })
 }
 
-pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, InventoryError> {
+pub fn reconcile(
+    bundle: &InventoryBundle,
+    expected_snapshot_sha256: &str,
+) -> Result<EligibilityLedger, InventoryError> {
     validate_bindings(bundle)?;
     validate_binding(&bundle.job_graph.binding)?;
+    validate_digest("expected snapshot", expected_snapshot_sha256)?;
+    if snapshot_binding_sha256(&bundle.job_graph.binding) != expected_snapshot_sha256 {
+        return Err(InventoryError::new(
+            "INV_SNAPSHOT_EXPECTATION_MISMATCH",
+            "inventory snapshot does not match the caller's trusted external expectation",
+        ));
+    }
     validate_nonempty(
         "security-realm implementation",
         &bundle.identity_clients.security_realm.implementation,
@@ -932,7 +986,9 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             .expect("validated coverage");
         let disposition = runtime_disposition.max(state_disposition);
         for dependency in dependencies {
-            *parity_demands.entry(dependency.kind.clone()).or_insert(0) += 1;
+            *parity_demands
+                .entry(dependency.kind.as_str().to_owned())
+                .or_insert(0) += 1;
         }
         for record in records {
             state_transform_records = state_transform_records
@@ -1338,7 +1394,6 @@ fn validate_runtime_dependencies(
     let declared_requirements = declared_job_requirements(job)?;
     let mut covered_requirements = BTreeSet::new();
     for dependency in dependencies {
-        validate_nonempty("runtime dependency kind", &dependency.kind)?;
         for requirement in &dependency.requirements {
             validate_job_requirement(requirement)?;
             if !declared_requirements.contains(requirement) {
@@ -1872,6 +1927,25 @@ fn canonical_record_bytes(kind: &str, value: &impl Serialize) -> Result<Vec<u8>,
                 format!("failed to canonicalize {kind}: {error}"),
             )
         })
+}
+
+pub fn snapshot_binding_sha256(binding: &SnapshotBinding) -> String {
+    canonical_owned_entries_sha256(vec![vec![
+        b"snapshot-binding-v1".to_vec(),
+        binding.schema.as_bytes().to_vec(),
+        binding.controller_id.as_bytes().to_vec(),
+        binding.controller_url.as_bytes().to_vec(),
+        binding.controller_core_version.as_bytes().to_vec(),
+        binding.plugin_profile_sha256.as_bytes().to_vec(),
+        binding.global_config_sha256.as_bytes().to_vec(),
+        binding.epoch_id.as_bytes().to_vec(),
+        binding.source_generation.as_bytes().to_vec(),
+        binding.collected_at.as_bytes().to_vec(),
+        binding.exporter_id.as_bytes().to_vec(),
+        binding.exporter_version.as_bytes().to_vec(),
+        binding.exporter_sha256.as_bytes().to_vec(),
+        binding.provenance.as_bytes().to_vec(),
+    ]])
 }
 
 fn count_subject_sha256(
