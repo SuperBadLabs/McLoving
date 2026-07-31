@@ -292,6 +292,7 @@ pub struct InventoryBundle {
     pub runtime_dependencies: RuntimeDependencyManifest,
     pub persistent_state: PersistentStateManifest,
     pub file_digests: BTreeMap<String, String>,
+    published_ledger: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -355,17 +356,34 @@ impl fmt::Display for InventoryError {
 impl std::error::Error for InventoryError {}
 
 pub fn load_bundle(root: &Path) -> Result<InventoryBundle, InventoryError> {
+    let allowed = MANIFEST_FILES
+        .into_iter()
+        .chain([CHECKSUM_FILE, LEDGER_FILE])
+        .collect::<BTreeSet<_>>();
+    validate_directory_entries(root, &allowed)?;
     let expected = load_checksums(root)?;
     let job_graph = load_manifest(root, JOB_GRAPH_FILE, &expected)?;
     let identity_clients = load_manifest(root, IDENTITY_CLIENT_FILE, &expected)?;
     let runtime_dependencies = load_manifest(root, RUNTIME_DEPENDENCY_FILE, &expected)?;
     let persistent_state = load_manifest(root, PERSISTENT_STATE_FILE, &expected)?;
+    let ledger_path = root.join(LEDGER_FILE);
+    let published_ledger = match fs::symlink_metadata(&ledger_path) {
+        Ok(_) => Some(read_regular_file(&ledger_path)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(InventoryError::new(
+                "INV_IO",
+                format!("cannot inspect {}: {error}", ledger_path.display()),
+            ));
+        }
+    };
     Ok(InventoryBundle {
         job_graph,
         identity_clients,
         runtime_dependencies,
         persistent_state,
         file_digests: expected,
+        published_ledger,
     })
 }
 
@@ -696,7 +714,15 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         parity_demands,
         state_transform_records,
     };
-    render_ledger(&ledger)?;
+    let rendered = render_ledger(&ledger)?;
+    if let Some(published) = &bundle.published_ledger
+        && published.as_slice() != rendered.as_bytes()
+    {
+        return Err(InventoryError::new(
+            "INV_LEDGER_MISMATCH",
+            "published eligibility ledger does not match the reconciled source evidence",
+        ));
+    }
     Ok(ledger)
 }
 
@@ -732,6 +758,20 @@ pub fn seal_manifest_directory(root: &Path) -> Result<(), InventoryError> {
         }
     }
     let allowed = MANIFEST_FILES.into_iter().collect::<BTreeSet<_>>();
+    validate_directory_entries(root, &allowed)?;
+    let mut lines = String::new();
+    for filename in MANIFEST_FILES {
+        let path = root.join(filename);
+        let bytes = read_regular_file(&path)?;
+        lines.push_str(&sha256_hex(&bytes));
+        lines.push_str("  ");
+        lines.push_str(filename);
+        lines.push('\n');
+    }
+    write_new(&checksum_path, lines.as_bytes())
+}
+
+fn validate_directory_entries(root: &Path, allowed: &BTreeSet<&str>) -> Result<(), InventoryError> {
     for entry in fs::read_dir(root).map_err(|error| {
         InventoryError::new(
             "INV_IO",
@@ -758,16 +798,7 @@ pub fn seal_manifest_directory(root: &Path) -> Result<(), InventoryError> {
             ));
         }
     }
-    let mut lines = String::new();
-    for filename in MANIFEST_FILES {
-        let path = root.join(filename);
-        let bytes = read_regular_file(&path)?;
-        lines.push_str(&sha256_hex(&bytes));
-        lines.push_str("  ");
-        lines.push_str(filename);
-        lines.push('\n');
-    }
-    write_new(&checksum_path, lines.as_bytes())
+    Ok(())
 }
 
 pub fn write_ledger(output: &Path, ledger: &EligibilityLedger) -> Result<(), InventoryError> {

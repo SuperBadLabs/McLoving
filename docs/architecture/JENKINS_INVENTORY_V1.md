@@ -85,7 +85,9 @@ rejects:
 The resulting derived `eligibility-ledger.yaml` is published with create-new
 semantics. When the default output path is used, it is added to the sealed
 inventory root after the five source-evidence files above; it is not an input
-to `SHA256SUMS` or to source-snapshot verification.
+to `SHA256SUMS`. Verification rejects every other post-seal entry and requires
+an existing published ledger to exactly match a fresh reconciliation of the
+sealed source evidence.
 Eligibility is conservative: the least-compatible dependency determines a
 job's `native`, `mappable`, `scripted`, or `unsupported` class. The ledger
 reports whole-inventory population denominators, while eligibility rows,

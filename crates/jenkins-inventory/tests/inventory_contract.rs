@@ -89,6 +89,39 @@ fn seal_rejects_unexpected_root_entries() {
 }
 
 #[test]
+fn verification_rejects_entries_injected_after_sealing() {
+    let directory = TestDirectory::new("post-seal-injection");
+    write_bundle(&directory.0, &fixture());
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    fs::write(
+        directory.0.join("unsealed-export.txt"),
+        "secret-bearing stale export\n",
+    )
+    .expect("inject unsealed entry");
+
+    let error = load_bundle(&directory.0).expect_err("post-seal injection must fail");
+    assert_eq!(error.code, "INV_UNEXPECTED_ENTRY");
+}
+
+#[test]
+fn verification_accepts_only_the_exact_published_ledger() {
+    let directory = TestDirectory::new("published-ledger");
+    write_bundle(&directory.0, &fixture());
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    let bundle = load_bundle(&directory.0).expect("load sealed inventory");
+    let ledger = reconcile(&bundle).expect("reconcile inventory");
+    let output = directory.0.join("eligibility-ledger.yaml");
+    write_ledger(&output, &ledger).expect("publish ledger");
+
+    let reloaded = load_bundle(&directory.0).expect("load inventory with ledger");
+    reconcile(&reloaded).expect("exact published ledger must verify");
+    fs::write(&output, "schema: stale\n").expect("replace published ledger");
+    let reloaded = load_bundle(&directory.0).expect("load inventory with stale ledger");
+    let error = reconcile(&reloaded).expect_err("stale published ledger must fail");
+    assert_eq!(error.code, "INV_LEDGER_MISMATCH");
+}
+
+#[test]
 fn verification_path_is_read_only() {
     let directory = TestDirectory::new("verify");
     write_bundle(&directory.0, &fixture());
