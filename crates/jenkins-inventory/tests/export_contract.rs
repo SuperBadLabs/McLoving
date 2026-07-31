@@ -73,6 +73,52 @@ fn export_is_create_new_and_refuses_to_overwrite_a_reviewed_directory() {
     assert_eq!(error.code, "INV_IMMUTABLE");
 }
 
+#[test]
+fn export_rejects_tampering_in_every_snapshot_attestation_family() {
+    for (name, relative) in [
+        ("root", "home/config.xml"),
+        ("job", "home/jobs/example/config.xml"),
+        ("plugin", "plugins/workflow-cps.jpi"),
+        ("corpus", "corpus/example.Jenkinsfile"),
+    ] {
+        let root = TestDirectory::new(name);
+        write_snapshot(&root.0);
+        fs::write(root.0.join(relative), format!("tampered-{name}"))
+            .expect("tamper attested payload");
+
+        let error = export_snapshot(&options(&root.0, &root.0.join("inventory")))
+            .expect_err("tampered snapshot must fail closed");
+        assert_eq!(error.code, "INV_EXPORT_ATTESTATION");
+    }
+}
+
+#[test]
+fn export_rejects_duplicate_and_traversing_attestation_paths() {
+    for name in ["duplicate", "traversal"] {
+        let root = TestDirectory::new(name);
+        write_snapshot(&root.0);
+        if name == "duplicate" {
+            let config = fs::read(root.0.join("home/config.xml")).expect("read config");
+            let checksum = digest(&config);
+            fs::write(
+                root.0.join("ROOT_SHA256SUMS"),
+                format!("{checksum}  home/config.xml\n{checksum}  home/config.xml\n"),
+            )
+            .expect("duplicate manifest");
+        } else {
+            fs::write(
+                root.0.join("ROOT_SHA256SUMS"),
+                format!("{}  ../outside\n", digest(b"outside")),
+            )
+            .expect("traversing manifest");
+        }
+
+        let error = export_snapshot(&options(&root.0, &root.0.join("inventory")))
+            .expect_err("unsafe attestation must fail closed");
+        assert_eq!(error.code, "INV_EXPORT_ATTESTATION");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn export_rejects_symlinks_in_persistent_build_evidence() {
@@ -153,26 +199,29 @@ pipeline { agent none; stages { stage('Verify') { steps { sh 'true &amp;&amp; fa
         "2.568.1\n",
     )
     .expect("core version");
+    fs::write(root.join("plugins/workflow-cps.jpi"), b"plugin fixture").expect("plugin fixture");
     fs::write(
-        root.join("ROOT_SHA256SUMS"),
-        format!("{}  home/config.xml\n", digest(b"root")),
+        root.join("corpus/example.Jenkinsfile"),
+        b"pipeline { agent none }\n",
     )
-    .expect("root attestation");
-    fs::write(
-        root.join("JOB_CONFIG_SHA256SUMS"),
-        format!("{}  home/jobs/example/config.xml\n", digest(b"job")),
-    )
-    .expect("job attestation");
-    fs::write(
-        root.join("PLUGIN_SHA256SUMS"),
-        format!("{}  plugins/workflow-cps.jpi\n", digest(b"plugin")),
-    )
-    .expect("plugin attestation");
-    fs::write(
-        root.join("CORPUS_SHA256SUMS"),
-        format!("{}  corpus/example.Jenkinsfile\n", digest(b"corpus")),
-    )
-    .expect("corpus attestation");
+    .expect("corpus fixture");
+    write_attestation(root, "ROOT_SHA256SUMS", &["home/config.xml"]);
+    write_attestation(
+        root,
+        "JOB_CONFIG_SHA256SUMS",
+        &["home/jobs/example/config.xml"],
+    );
+    write_attestation(root, "PLUGIN_SHA256SUMS", &["plugins/workflow-cps.jpi"]);
+    write_attestation(root, "CORPUS_SHA256SUMS", &["corpus/example.Jenkinsfile"]);
+}
+
+fn write_attestation(root: &Path, name: &str, paths: &[&str]) {
+    let mut manifest = String::new();
+    for relative in paths {
+        let bytes = fs::read(root.join(relative)).expect("read attested payload");
+        manifest.push_str(&format!("{}  {relative}\n", digest(&bytes)));
+    }
+    fs::write(root.join(name), manifest).expect("write attestation");
 }
 
 fn digest(bytes: &[u8]) -> String {

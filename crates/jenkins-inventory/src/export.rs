@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesRef, Event};
@@ -79,9 +79,17 @@ pub fn export_snapshot(options: &ExportOptions) -> Result<(), InventoryError> {
         ));
     }
 
+    // The detached manifests are trust inputs, not descriptive metadata. Verify
+    // every listed payload before deriving any inventory output from the
+    // snapshot. Keeping the verified manifest digests also binds the exported
+    // records to the exact attestations that were checked here.
+    let _root_attestation = verify_attestation(&options.snapshot_root, "ROOT_SHA256SUMS")?;
+    let job_source_evidence = verify_attestation(&options.snapshot_root, "JOB_CONFIG_SHA256SUMS")?;
+    let plugin_profile_sha256 = verify_attestation(&options.snapshot_root, "PLUGIN_SHA256SUMS")?;
+    let _corpus_attestation = verify_attestation(&options.snapshot_root, "CORPUS_SHA256SUMS")?;
+
     let home = options.snapshot_root.join("home");
     let global_config = read_regular(&home.join("config.xml"))?;
-    let plugin_profile_sha256 = hash_attestation(&options.snapshot_root.join("PLUGIN_SHA256SUMS"))?;
     let global_config_sha256 = sha256_hex(&global_config);
     let controller_core_version =
         fs::read_to_string(home.join("jenkins.install.UpgradeWizard.state"))
@@ -111,8 +119,6 @@ pub fn export_snapshot(options: &ExportOptions) -> Result<(), InventoryError> {
     };
 
     let job_sources = collect_jobs(&home.join("jobs"))?;
-    let job_source_evidence =
-        hash_attestation(&options.snapshot_root.join("JOB_CONFIG_SHA256SUMS"))?;
     let job_graph = build_job_graph(
         &binding,
         &job_sources,
@@ -1018,8 +1024,121 @@ fn read_regular(path: &Path) -> Result<Vec<u8>, InventoryError> {
     fs::read(path).map_err(export_io(path))
 }
 
-fn hash_attestation(path: &Path) -> Result<String, InventoryError> {
-    Ok(sha256_hex(&read_regular(path)?))
+fn verify_attestation(root: &Path, manifest_name: &str) -> Result<String, InventoryError> {
+    let manifest_path = root.join(manifest_name);
+    let manifest = read_regular(&manifest_path)?;
+    let text = std::str::from_utf8(&manifest).map_err(|_| {
+        InventoryError::new(
+            "INV_EXPORT_ATTESTATION",
+            format!("{manifest_name} is not valid UTF-8"),
+        )
+    })?;
+    if !text.ends_with('\n') {
+        return Err(InventoryError::new(
+            "INV_EXPORT_ATTESTATION",
+            format!("{manifest_name} must end with a newline"),
+        ));
+    }
+
+    let mut listed = BTreeSet::new();
+    for (index, line) in text.lines().enumerate() {
+        let line_number = index + 1;
+        let (expected, relative_text) = line.split_once("  ").ok_or_else(|| {
+            InventoryError::new(
+                "INV_EXPORT_ATTESTATION",
+                format!("{manifest_name}:{line_number} is not canonical sha256sum syntax"),
+            )
+        })?;
+        if expected.len() != 64
+            || !expected
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(InventoryError::new(
+                "INV_EXPORT_ATTESTATION",
+                format!("{manifest_name}:{line_number} has an invalid SHA-256 digest"),
+            ));
+        }
+        if relative_text.is_empty() || relative_text.contains('\0') {
+            return Err(InventoryError::new(
+                "INV_EXPORT_ATTESTATION",
+                format!("{manifest_name}:{line_number} has an invalid path"),
+            ));
+        }
+
+        let relative = Path::new(relative_text);
+        if relative.is_absolute()
+            || !relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        {
+            return Err(InventoryError::new(
+                "INV_EXPORT_ATTESTATION",
+                format!("{manifest_name}:{line_number} path must be normalized and relative"),
+            ));
+        }
+        if !listed.insert(relative.to_owned()) {
+            return Err(InventoryError::new(
+                "INV_EXPORT_ATTESTATION",
+                format!("{manifest_name}:{line_number} duplicates {relative_text}"),
+            ));
+        }
+
+        let actual = sha256_hex(&read_snapshot_regular(root, relative)?);
+        if actual != expected {
+            return Err(InventoryError::new(
+                "INV_EXPORT_ATTESTATION",
+                format!("{manifest_name}:{line_number} digest mismatch for {relative_text}"),
+            ));
+        }
+    }
+    if listed.is_empty() {
+        return Err(InventoryError::new(
+            "INV_EXPORT_ATTESTATION",
+            format!("{manifest_name} contains no entries"),
+        ));
+    }
+    Ok(sha256_hex(&manifest))
+}
+
+fn read_snapshot_regular(root: &Path, relative: &Path) -> Result<Vec<u8>, InventoryError> {
+    let root_metadata = fs::symlink_metadata(root).map_err(export_io(root))?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(InventoryError::new(
+            "INV_EXPORT_FILE_TYPE",
+            format!("snapshot root {} is not a real directory", root.display()),
+        ));
+    }
+
+    let mut path = root.to_owned();
+    let component_count = relative.components().count();
+    for (index, component) in relative.components().enumerate() {
+        let Component::Normal(component) = component else {
+            return Err(InventoryError::new(
+                "INV_EXPORT_ATTESTATION",
+                format!("attested path {} is not normalized", relative.display()),
+            ));
+        };
+        path.push(component);
+        let metadata = fs::symlink_metadata(&path).map_err(export_io(&path))?;
+        if metadata.file_type().is_symlink() {
+            return Err(InventoryError::new(
+                "INV_EXPORT_FILE_TYPE",
+                format!("attested path contains symbolic link {}", path.display()),
+            ));
+        }
+        let is_last = index + 1 == component_count;
+        if (is_last && !metadata.is_file()) || (!is_last && !metadata.is_dir()) {
+            return Err(InventoryError::new(
+                "INV_EXPORT_FILE_TYPE",
+                format!(
+                    "attested path has an invalid file type at {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    fs::read(&path).map_err(export_io(&path))
 }
 
 fn write_yaml_new(path: PathBuf, value: &impl serde::Serialize) -> Result<(), InventoryError> {

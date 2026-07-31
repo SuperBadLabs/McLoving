@@ -33,10 +33,7 @@ actual_plugin_manifest=$(sha256sum "$SNAPSHOT_ROOT/PLUGIN_SHA256SUMS" | awk '{pr
   exit 66
 }
 
-(
-  cd "$SNAPSHOT_ROOT"
-  sha256sum --strict --check PLUGIN_SHA256SUMS
-) >/dev/null
+"$SCRIPT_DIR/verify-plugin-directory.sh" "$SNAPSHOT_ROOT"
 
 base_id=$(podman image inspect \
   docker.io/jenkins/jenkins@"$EXPECTED_BASE" \
