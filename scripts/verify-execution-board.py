@@ -25,7 +25,10 @@ def fail(messages: list[str]) -> None:
 
 def main() -> None:
     board = Path(__file__).resolve().parents[1] / "docs" / "EXECUTION_BOARD.md"
-    text = board.read_text(encoding="utf-8")
+    try:
+        text = board.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        fail([f"cannot read {board}: {error}"])
     errors: list[str] = []
 
     tickets: dict[str, tuple[str, list[str]]] = {}
