@@ -19,6 +19,8 @@ container="mcloving-mig005a-reverse-$$"
 network="mcloving-mig005a-reverse-$$"
 port=$((19550 + ($$ % 400)))
 staging="$output_root/imported-build-3"
+reverse_bundle="$transform_root/reverse-bundle.json"
+rehearsal_summary="$transform_root/rehearsal-summary.json"
 
 if [[ -e "$staging" ]]; then
   echo "refusing to reuse existing reverse-import staging path: $staging" >&2
@@ -31,37 +33,122 @@ cleanup() {
 }
 trap cleanup EXIT
 
-test -f "$transform_root/reverse-bundle.json"
+test -f "$reverse_bundle"
+test -f "$rehearsal_summary"
 test -f "$transform_root/jenkins-import-map.json"
 test -f "$job_home/builds/2/build.xml"
 test ! -e "$job_home/builds/3"
 test "$(cat "$job_home/nextBuildNumber")" = 3
+expected_bundle_digest=$(jq -r '.reverse_bundle_digest' "$rehearsal_summary")
+actual_bundle_digest=$(sha256sum "$reverse_bundle" | awk '{print $1}')
+test "$expected_bundle_digest" = "$actual_bundle_digest"
+
 jq --exit-status '
+  .binding.schema == "mcloving.state-transfer/v1"
+  and .binding.direction == "mc_loving_to_jenkins"
+  and .binding.source.kind == "mcloving"
+  and .binding.destination.kind == "jenkins"
+  and .binding.conflict_policy == "reject_divergence"
+  and (.jobs | length) == 1
+  and ([.jobs[] | select(.source_job_id == "stateful")] | length) == 1
+  and ([.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3)] | length) == 1
+  and ([.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .graph_nodes[]
+        | select((.node_id == "01-changeset-predicate" or .node_id == "02-changelog-predicate")
+                 and .result == "succeeded")] | length) == 2
+  and ([.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3)
+        | .artifacts[].logical_name] | sort)
+      == ["changelog.intent", "changeset.intent", "persistent.state"]
+' "$reverse_bundle" >/dev/null
+
+build_number=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .number' "$reverse_bundle")
+next_build_number=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .next_build_number' "$reverse_bundle")
+revision_2=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .checkouts[0].previous_revision' "$reverse_bundle")
+revision_3=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .checkouts[0].revision' "$reverse_bundle")
+reverse_result=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .result' "$reverse_bundle")
+test "$build_number" = 3
+test "$next_build_number" = 4
+case "$reverse_result" in
+  succeeded) jenkins_result=SUCCESS ;;
+  failed) jenkins_result=FAILURE ;;
+  aborted) jenkins_result=ABORTED ;;
+  *)
+    echo "unsupported reverse-bundle result: $reverse_result" >&2
+    exit 65
+    ;;
+esac
+
+jq --exit-status \
+  --argjson build_number "$build_number" \
+  --argjson next_build_number "$next_build_number" \
+  --arg result "$jenkins_result" \
+  --arg revision "$revision_3" \
+  --arg previous_revision "$revision_2" \
+  --arg reverse_bundle_digest "$actual_bundle_digest" '
   .schema == "mcloving.jenkins-rehearsal-import/v1"
   and .source_template_build == 2
-  and .destination_build == 3
-  and .next_build_number == 4
-  and .result == "SUCCESS"
+  and .destination_build == $build_number
+  and .next_build_number == $next_build_number
+  and .result == $result
+  and .revision == $revision
+  and .previous_revision == $previous_revision
+  and .reverse_bundle_digest == $reverse_bundle_digest
 ' "$transform_root/jenkins-import-map.json" >/dev/null
 
-revision_2=$(jq -r '.previous_revision' "$transform_root/jenkins-import-map.json")
-revision_3=$(jq -r '.revision' "$transform_root/jenkins-import-map.json")
 test "$(git -C "$repository" rev-parse HEAD)" = "$revision_3"
+
+materialize_artifact() {
+  local logical_name=$1
+  local payload="$transform_root/mcloving-$logical_name"
+  local destination="$staging/archive/$logical_name"
+  local bundle_digest bundle_bytes payload_digest payload_bytes
+
+  test -f "$payload"
+  bundle_digest=$(jq -r --arg logical_name "$logical_name" '
+    .jobs[] | select(.source_job_id == "stateful")
+    | .builds[] | select(.number == 3)
+    | .artifacts[] | select(.logical_name == $logical_name)
+    | .content_digest[]
+  ' "$reverse_bundle" | awk '{printf "%02x", $1} END {print ""}')
+  bundle_bytes=$(jq -r --arg logical_name "$logical_name" '
+    .jobs[] | select(.source_job_id == "stateful")
+    | .builds[] | select(.number == 3)
+    | .artifacts[] | select(.logical_name == $logical_name)
+    | .bytes
+  ' "$reverse_bundle")
+  payload_digest=$(sha256sum "$payload" | awk '{print $1}')
+  payload_bytes=$(wc -c < "$payload" | tr -d ' ')
+
+  test "$bundle_digest" = "$payload_digest"
+  test "$bundle_bytes" = "$payload_bytes"
+  jq --exit-status --arg logical_name "$logical_name" '
+    .jobs[] | select(.source_job_id == "stateful")
+    | .builds[] | select(.number == 3)
+    | .artifacts[] | select(.logical_name == $logical_name)
+    | .kind == "artifact"
+      and .producer_build_number == 3
+      and .retrieval.logical_locator == ("artifacts/stateful/3/" + $logical_name)
+      and .retrieval.content_digest == .content_digest
+      and .data_binding.classification == "internal"
+      and .data_binding.secret_disposition == null
+      and .filesystem_entries == []
+  ' "$reverse_bundle" >/dev/null
+  cp "$payload" "$destination"
+}
 
 mkdir -p "$evidence"
 cp -r "$job_home/builds/2" "$staging"
 chmod -R u+rwX "$staging"
 old_persistent_md5=$(md5sum "$staging/archive/persistent.state" | awk '{print $1}')
-cp "$transform_root/mcloving-changeset.intent" "$staging/archive/changeset.intent"
-cp "$transform_root/mcloving-changelog.intent" "$staging/archive/changelog.intent"
-cp "$transform_root/mcloving-persistent.state" "$staging/archive/persistent.state"
+materialize_artifact changeset.intent
+materialize_artifact changelog.intent
+materialize_artifact persistent.state
 new_persistent_md5=$(md5sum "$staging/archive/persistent.state" | awk '{print $1}')
 
 sed -i \
   -e "s/$revision_2/$revision_3/g" \
-  -e 's#<hudsonBuildNumber>2</hudsonBuildNumber>#<hudsonBuildNumber>3</hudsonBuildNumber>#g' \
+  -e "s#<hudsonBuildNumber>2</hudsonBuildNumber>#<hudsonBuildNumber>${build_number}</hudsonBuildNumber>#g" \
   -e 's#<queueId>3</queueId>#<queueId>4</queueId>#g' \
-  -e 's#/builds/2/#/builds/3/#g' \
+  -e "s#/builds/2/#/builds/${build_number}/#g" \
   -e "s/$old_persistent_md5/$new_persistent_md5/g" \
   "$staging/build.xml"
 
@@ -82,13 +169,14 @@ sed -i \
   "$staging/log"
 
 rg --quiet "<sha1>$revision_3</sha1>" "$staging/build.xml"
-rg --quiet '<hudsonBuildNumber>3</hudsonBuildNumber>' "$staging/build.xml"
-rg --quiet '/builds/3/' "$staging/build.xml"
+rg --quiet "<hudsonBuildNumber>${build_number}</hudsonBuildNumber>" "$staging/build.xml"
+rg --quiet "/builds/${build_number}/" "$staging/build.xml"
+rg --quiet "<result>${jenkins_result}</result>" "$staging/build.xml"
 test "$(cat "$staging/archive/persistent.state")" = 'build=3'
 test "$(cat "$staging/archive/changeset.intent")" = 'selected'
 test "$(cat "$staging/archive/changelog.intent")" = 'selected'
 
-printf '%s\n' 4 > "$output_root/nextBuildNumber"
+printf '%s\n' "$next_build_number" > "$output_root/nextBuildNumber"
 printf '%s\n' \
   'lastCompletedBuild 3' \
   'lastStableBuild 3' \
@@ -131,13 +219,15 @@ for _ in $(seq 1 180); do
   if curl --fail --silent --show-error \
     "http://127.0.0.1:${port}/job/stateful/3/api/json" \
     -o "$evidence/jenkins-imported-build-3.json" 2>/dev/null \
-    && jq --exit-status '.number == 3 and .result == "SUCCESS" and .building == false' \
+    && jq --exit-status --argjson number "$build_number" --arg result "$jenkins_result" \
+      '.number == $number and .result == $result and .building == false' \
       "$evidence/jenkins-imported-build-3.json" >/dev/null; then
     break
   fi
   sleep 1
 done
-jq --exit-status '.number == 3 and .result == "SUCCESS" and .building == false' \
+jq --exit-status --argjson number "$build_number" --arg result "$jenkins_result" \
+  '.number == $number and .result == $result and .building == false' \
   "$evidence/jenkins-imported-build-3.json" >/dev/null
 for _ in $(seq 1 60); do
   if curl --fail --silent --show-error \

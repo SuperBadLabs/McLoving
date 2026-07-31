@@ -75,12 +75,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `47bc01cdab3a8539a5ec32b5a60767ac5b409f12a877823a282873cbb6bc8563`;
-- source-evidence manifest SHA-256 `f8b85140d8958c1303889cbb496981378723a2b127bd35d4853d906eae692870`;
-- forward bundle SHA-256 `5a836aaf0c3cd0e19a0195ea635d9d448241f53a4ae67c26060945cca0bba2a8`;
-- reverse bundle SHA-256 `08903fb71fe1d4998e53d1ab1298617092322555d5254d4cc48c5a729e5807b5`;
-- reverse-evidence manifest SHA-256 `d75d96d1d1e4523c8fcdc0c134db3689ed40c7bb6d7a5d98eb24b7d2d92da552`;
-- sealed transform-evidence manifest SHA-256 `c5cc221e08fe58112c3cb1234d414114991988889b338dfd5c002e690bb1eb3c`.
+- transform binary SHA-256 `f8e6a28dc592e84a1d381cc686551b0ed2afd8f132aedf27af6ab914a425544f`;
+- source-evidence manifest SHA-256 `791d43f8c5f1594f34d35b8b3e77a2b9a0b66808391b341687ad632a8e833830`;
+- forward bundle SHA-256 `50d71cd4dad8287dc223def74ad1aa1fdbd4bf60bb3c8540ae39d4a134275d28`;
+- reverse bundle SHA-256 `43a558f83452e22bf67e171da3009ec824add52c6fb14c98c7ae6dd813ad13c4`;
+- reverse-evidence manifest SHA-256 `19e14caecab21c4070434bbc30721c32d4c7d968c06ec32bbbc1de6fb07e1d51`;
+- sealed transform-evidence manifest SHA-256 `f233eaa013027ab5793da10cebe5112e3ddab273070a4b223791bde564b63857`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 112 record-provenance rows, eight effective
@@ -92,8 +92,11 @@ release was denied.
 Jenkins builds 1 and 2 established the SCM baseline and positive `changeset`
 and `changelog` branches. The pinned next revision selected both equivalent
 predicates in McLoving, produced one externally effect-free authoritative build
-3, and advanced history to build 4. Jenkins then loaded reverse-imported build
-3, retrieved its exact artifact, used its revision as the next changelog
+3, and advanced history to build 4. The reverse rehearsal verified the canonical
+bundle digest, derived build/result/SCM/predicate state from that bundle, and
+accepted artifact sidecars only after their lengths and SHA-256 digests matched
+the bundle's retrieval records. Jenkins then loaded reverse-imported build 3,
+retrieved its exact artifact, used its revision as the next changelog
 baseline, and ran build 4 on a nonmatching revision. Both predicate stages were
 skipped, only `persistent.state` was archived, builds 1–4 were unique, and
 `nextBuildNumber` became 5. Both Jenkins epochs were internal-network-only.

@@ -95,10 +95,20 @@ AS $$
               OR length(value ->> 'scope') NOT BETWEEN 1 AND 1024
               OR jsonb_typeof(value -> 'reason') IS DISTINCT FROM 'string'
               OR length(value ->> 'reason') NOT BETWEEN 1 AND 1024
-              OR jsonb_typeof(value -> 'placed_at_unix_ms') IS DISTINCT FROM 'number'
-              OR (value ->> 'placed_at_unix_ms')::numeric < 0
-              OR jsonb_typeof(value -> 'generation') IS DISTINCT FROM 'number'
-              OR (value ->> 'generation')::numeric <= 0
+              OR CASE
+                     WHEN jsonb_typeof(value -> 'placed_at_unix_ms') = 'number'
+                      AND (value ->> 'placed_at_unix_ms') ~ '^(0|[1-9][0-9]*)$'
+                     THEN (value ->> 'placed_at_unix_ms')::numeric
+                          NOT BETWEEN 0 AND 9223372036854775807::numeric
+                     ELSE true
+                 END
+              OR CASE
+                     WHEN jsonb_typeof(value -> 'generation') = 'number'
+                      AND (value ->> 'generation') ~ '^(0|[1-9][0-9]*)$'
+                     THEN (value ->> 'generation')::numeric
+                          NOT BETWEEN 1 AND 18446744073709551615::numeric
+                     ELSE true
+                 END
               OR jsonb_typeof(value -> 'release_authority') IS DISTINCT FROM 'string'
               OR length(value ->> 'release_authority') NOT BETWEEN 1 AND 512
               OR jsonb_typeof(value -> 'record' -> 'id') IS DISTINCT FROM 'string'

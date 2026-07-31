@@ -259,6 +259,50 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         );
     }
 
+    for (hold_id, field, invalid_value) in [
+        ("fractional-placed-at", "placed_at_unix_ms", json!(1.5)),
+        (
+            "out-of-range-placed-at",
+            "placed_at_unix_ms",
+            serde_json::from_str("9223372036854775808").unwrap(),
+        ),
+        ("fractional-generation", "generation", json!(1.5)),
+        (
+            "out-of-range-generation",
+            "generation",
+            serde_json::from_str("18446744073709551616").unwrap(),
+        ),
+    ] {
+        let invalid_hold = sqlx::query(
+            "UPDATE state_transfer_protections
+             SET active_holds = active_holds || jsonb_build_array(
+                 (active_holds -> 0) || jsonb_build_object(
+                     'hold_id', $4,
+                     $5, $6::jsonb
+                 )
+             )
+             WHERE organization_id = $1
+               AND project_id = $2
+               AND subject_digest = $3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(subject.as_slice())
+        .bind(hold_id)
+        .bind(field)
+        .bind(invalid_value)
+        .execute(store.pool())
+        .await
+        .expect_err("database rejects legal-hold integers outside Rust's exact domain");
+        assert_eq!(
+            invalid_hold
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("23514")
+        );
+    }
+
     let omitted_hold = sqlx::query(
         "UPDATE state_transfer_protections
          SET active_holds = '[]'::jsonb
