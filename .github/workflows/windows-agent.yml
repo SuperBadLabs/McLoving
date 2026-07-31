@@ -2,14 +2,6 @@ name: Windows Agent
 
 on:
   pull_request:
-    paths:
-      - ".github/workflows/windows-agent.yml"
-      - "bins/agent/**"
-      - "crates/agent-protocol/**"
-      - "crates/agent-runtime/**"
-      - "crates/domain/**"
-      - "crates/windows-job/**"
-      - "scripts/windows-agent-war.ps1"
   push:
     branches:
       - main
@@ -22,8 +14,42 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  impact:
+    name: Classify Windows impact
+    runs-on: ubuntu-24.04
+    outputs:
+      run-windows: ${{ steps.impact.outputs.run-windows }}
+    steps:
+      - name: Check out source and comparison history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install pinned Rust toolchain
+        if: github.event_name == 'pull_request'
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Test impact classifier
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/test-windows-agent-impact.py
+      - name: Classify exact change
+        id: impact
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            printf 'run-windows=true\n' >> "${GITHUB_OUTPUT}"
+          else
+            python3 scripts/windows-agent-impact.py \
+              --base "${BASE_SHA}" \
+              --head "${HEAD_SHA}" \
+              >> "${GITHUB_OUTPUT}"
+          fi
+
   windows-agent:
     name: Windows agent
+    needs: impact
+    if: needs.impact.outputs.run-windows == 'true'
     runs-on: windows-2025
     steps:
       - name: Check out source
@@ -56,6 +82,7 @@ jobs:
         run: >-
           cargo +1.97.1 test --locked
           -p mcloving-agent-runtime
+          -p mcloving-agent
           -p mcloving-windows-job
       - name: Build debug agent for native service gate
         shell: pwsh

@@ -32,7 +32,7 @@ fetch_verified() {
   mv "${temporary}" "${destination}"
 }
 
-for command in curl java clojure mktemp podman sha256sum tar timeout; do
+for command in curl java clojure mktemp podman python3 sha256sum tar timeout; do
   require_command "${command}"
 done
 
@@ -86,7 +86,8 @@ podman run --rm \
   "${MCLOVING_RUST_IMAGE}" \
   /tools/cargo-deny check
 
-"${actionlint_dir}/actionlint" "${repo_root}/.github/workflows/foundation.yml"
+python3 "${repo_root}/scripts/test-windows-agent-impact.py"
+"${actionlint_dir}/actionlint" "${repo_root}/.github/workflows/"*.yml
 
 java -cp "${tlaplus_jar}" tla2sany.SANY \
   "${repo_root}/formal/tla/AttemptLease.tla"
