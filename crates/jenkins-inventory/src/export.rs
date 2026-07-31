@@ -338,7 +338,7 @@ fn build_identity_manifest(
     identity_hasher.update(global_config);
     for user in users {
         let config = read_regular(&user.join("config.xml"))?;
-        identity_hasher.update(&(config.len() as u64).to_be_bytes());
+        identity_hasher.update((config.len() as u64).to_be_bytes());
         identity_hasher.update(&config);
         let parsed = parse_selected_xml(&config)?;
         let id = parsed.user_id.ok_or_else(|| {
@@ -684,9 +684,9 @@ fn digest_tree(root: &Path) -> Result<String, InventoryError> {
     let mut hasher = Sha256::new();
     for (relative, path) in files {
         let bytes = read_regular(&path)?;
-        hasher.update(&(relative.len() as u64).to_be_bytes());
+        hasher.update((relative.len() as u64).to_be_bytes());
         hasher.update(relative.as_bytes());
-        hasher.update(&(bytes.len() as u64).to_be_bytes());
+        hasher.update((bytes.len() as u64).to_be_bytes());
         hasher.update(&bytes);
     }
     Ok(hex_digest(hasher.finalize()))

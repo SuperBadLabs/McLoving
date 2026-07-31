@@ -1,2 +1,6 @@
 {:paths ["src"]
- :deps {org.clojure/clojure {:mvn/version "1.12.1"}}}
+ :deps {org.clojure/clojure {:mvn/version "1.12.1"}}
+ :aliases
+ {:test
+  {:extra-paths ["test"]
+   :main-opts ["-m" "mcloving.compat.test-runner"]}}}
