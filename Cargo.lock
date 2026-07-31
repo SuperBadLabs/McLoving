@@ -1398,6 +1398,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-jenkins-mapping-catalog"
+version = "0.0.0"
+dependencies = [
+ "mcloving-pipeline-ir",
+ "serde",
+ "serde-saphyr",
+ "sha2",
+]
+
+[[package]]
 name = "mcloving-object-store"
 version = "0.0.0"
 dependencies = [

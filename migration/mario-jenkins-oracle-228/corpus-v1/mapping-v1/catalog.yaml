@@ -1,0 +1,77 @@
+schema: mcloving.jenkins.mapping-catalog/v1
+catalog_id: mario-jenkins-oracle-228-v1
+catalog_version: 1
+source:
+  controller_id: mario/jenkins-oracle-228
+  inventory_sha256: b1c2f81c74ec0ffc36971f358f920b2d0775c6009f474bea924448cd2a1915c1
+  corpus_manifest_sha256: 0b1b7f291b309013e278d3eec7866e614a1de1306d9270c2fcf8c65975e6a30c
+  compiler: mcloving-jenkins-compiler-worker/1
+  compiler_profile_sha256: feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271
+target:
+  pipeline_ir: mcloving.pipeline/1
+  platform: any
+  trust_pool: migration-deny-authority
+policy:
+  unknown_step: unsupported
+  unknown_plugin: unsupported
+  floating_mapping: forbidden
+  silent_fallback: forbidden
+  undeclared_host_reads: forbidden
+  external_effects: connector-only
+mappings:
+  - mapping_id: jenkins.workflow-durable-task-step.sh.literal.v1
+    mapping_version: 1
+    classification: native-process
+    source:
+      symbol: sh
+      plugin: workflow-durable-task-step
+      plugin_version: 1479.v56e587f413a_7
+      plugin_sha256: a0f0f1464ce3592f76d0f0079ce9fc2d4272594f995bf3d1a7ede4cd5031452e
+      parameters:
+        - name: script
+          value_type: string
+          required: true
+          literal_only: true
+          confidentiality: public
+      additional_parameters: forbidden
+    target:
+      kind: process
+      program: /bin/sh
+      args_prefix:
+        - -xe
+        - -c
+      source_parameter: script
+      target_position: 2
+      working_directory: workspace-root
+    effects:
+      class: workspace-process
+      workspace_write: true
+      network: forbidden
+      credentials: forbidden
+      host_filesystem: forbidden
+      production_external_effects: connector-only
+    trust:
+      required_pool: migration-deny-authority
+      required_platform: any
+      workload_execution: false
+      scheduler: false
+      agent_protocol: false
+      credentials: false
+      connector: false
+      external_effects: false
+    supported_target_profiles:
+      - feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271
+    provenance:
+      source_job_id: corpus-052-cinqict_jenkinsdev
+      source_sha256: 666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100
+      evidence: compiler-v1/rust-admission.receipt
+    local_input: not-applicable
+    shared_resource: not-applicable
+    cache: not-applicable
+coverage:
+  corpus_sources: 228
+  compiler_admitted_cases: 1
+  mapping_earned_cases: 1
+  mapped_source_sha256:
+    - 666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100
+  certified_equivalence_cases: 0
