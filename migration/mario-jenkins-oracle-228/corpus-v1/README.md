@@ -54,6 +54,16 @@ worker response, expected trace, outputs, and independent Rust admission
 receipt. Native runnable coverage and certified equivalence remain zero; the
 case has no scheduler, agent, credential, trigger, or effect authority.
 
+MIG-004 adds `mapping-v1/`, an immutable catalog and detached mapping lock for
+the only corpus-earned step mapping. The exact literal Jenkins `sh` step is
+pinned to `workflow-durable-task-step` version `1479.v56e587f413a_7`, its
+sealed plugin digest, the compiler profile, predecessor corpus manifest,
+source, job, target IR, process shape, trust pool, and all-false authority
+ledger. Unknown and unearned behavior remains unsupported; floating mappings,
+silent fallback, undeclared host reads, credentials, network, and direct
+production effects are forbidden. The catalog does not increase native
+runnable or certified-equivalence coverage.
+
 Rebuild the joined views from the sealed evidence:
 
 ```sh
