@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: foundation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   rust:
     name: Rust
@@ -21,6 +25,10 @@ jobs:
           rustup toolchain install 1.97.1 --profile minimal
           --component clippy
           --component rustfmt
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: foundation-linux
       - name: Check formatting
         run: cargo +1.97.1 fmt --all -- --check
       - name: Verify lockfile
@@ -29,48 +37,6 @@ jobs:
         run: cargo +1.97.1 clippy --locked --workspace --all-targets -- -D warnings
       - name: Run tests
         run: cargo +1.97.1 test --locked --workspace
-
-  windows-agent:
-    name: Windows agent
-    runs-on: windows-2025
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install pinned Rust toolchain
-        shell: pwsh
-        run: >-
-          rustup toolchain install 1.97.1 --profile minimal
-          --component clippy
-          --component rustfmt
-      - name: Check Windows workspace
-        shell: pwsh
-        run: cargo +1.97.1 check --locked --workspace --all-targets
-      - name: Lint Windows workspace
-        shell: pwsh
-        run: cargo +1.97.1 clippy --locked --workspace --all-targets -- -D warnings
-      - name: Run Windows runtime tests
-        shell: pwsh
-        run: >-
-          cargo +1.97.1 test --locked
-          -p mcloving-agent-runtime
-          -p mcloving-agent
-          -p mcloving-windows-job
-      - name: Build debug agent for native service gate
-        shell: pwsh
-        run: cargo +1.97.1 build --locked -p mcloving-agent
-      - name: Run debug native service and crash-recovery war gate
-        shell: pwsh
-        run: >-
-          ./scripts/windows-agent-war.ps1
-          -AgentBinary ./target/debug/mcloving-agent.exe
-      - name: Build release agent
-        shell: pwsh
-        run: cargo +1.97.1 build --locked --release -p mcloving-agent
-      - name: Run native service and crash-recovery war gate
-        shell: pwsh
-        run: >-
-          ./scripts/windows-agent-war.ps1
-          -AgentBinary ./target/release/mcloving-agent.exe
 
   dependencies:
     name: Dependencies and licenses
@@ -160,6 +126,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: foundation-linux
       - name: Run real-PostgreSQL transaction and race tests
         run: cargo +1.97.1 test --locked -p mcloving-controller-store --test postgres_truth
 

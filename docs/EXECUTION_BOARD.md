@@ -601,6 +601,7 @@ Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 | Batch | Tickets | Status | Outcome |
 |---|---|---|---|
 | W0-A | FOUND-001 | DONE | PR #1 established private repository and architecture baseline |
+| W0-CI | CI-001 | DONE | Cancel superseded PR runs, restore digest-pinned Rust caches, and move the full Windows war gate to agent-impacting PRs plus every main push |
 | W0-B | ARCH-001, FOUND-002, SEC-001 | DONE | Finite formal model, reproducible HeMan gate, and owned threat model |
 | W0-C | IR-001, IR-002, ARCH-002 | DONE | Bounded strict YAML, canonical IR v1, and admission properties |
 | W1-A | CTRL-001, CTRL-002, SEC-002 | DONE | PostgreSQL truth, outbox, scheduler, and tenant enforcement |
@@ -635,6 +636,7 @@ lane.
 | Ticket | Status | Depends on | Objective and acceptance |
 |---|---|---|---|
 | FOUND-001 | DONE | — | Private monorepo, ADRs 1–15, board, threat model skeleton, CI, clean protected merge |
+| CI-001 | DONE | FOUND-001 | Preserve every protected required check while cancelling superseded PR runs, restoring commit-pinned Rust caches keyed by the lockfile/toolchain, and tiering the full Windows native-service/crash-recovery war gate to Windows-agent-impacting PRs and every push to `main`; unrelated PRs must not pay the Windows critical path, while persistent-host `WIN-003` evidence remains a separate release gate |
 | ARCH-001 | DONE | FOUND-001 | Finite TLC model; lease type, stale publication rejection, fencing, terminal monotonicity, and completion stability checked in CI |
 | FOUND-002 | DONE | FOUND-001 | Digest-pinned Rust/gitleaks, checksummed tools, documented cache policy, one-command HeMan validation |
 | SEC-001 | DONE | FOUND-001 | Actors, assets, boundaries, assumptions, 24 owned threats, mitigations, residual risk, and verification map |
