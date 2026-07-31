@@ -104,7 +104,27 @@ AS $$
               OR jsonb_typeof(value -> 'record' -> 'id') IS DISTINCT FROM 'string'
               OR length(value -> 'record' ->> 'id') NOT BETWEEN 1 AND 1024
               OR jsonb_typeof(value -> 'record' -> 'source_digest') IS DISTINCT FROM 'array'
-              OR jsonb_array_length(value -> 'record' -> 'source_digest') <> 32
+              OR CASE
+                     WHEN jsonb_typeof(value -> 'record' -> 'source_digest') = 'array'
+                     THEN jsonb_array_length(value -> 'record' -> 'source_digest') <> 32
+                     ELSE true
+                 END
+              OR EXISTS (
+                  SELECT 1
+                  FROM jsonb_array_elements(
+                      CASE
+                          WHEN jsonb_typeof(value -> 'record' -> 'source_digest') = 'array'
+                          THEN value -> 'record' -> 'source_digest'
+                          ELSE '[]'::jsonb
+                      END
+                  ) AS digest_element(value)
+                  WHERE jsonb_typeof(digest_element.value) IS DISTINCT FROM 'number'
+                     OR CASE
+                            WHEN digest_element.value::text ~ '^(0|[1-9][0-9]{0,2})$'
+                            THEN (digest_element.value::text)::integer NOT BETWEEN 0 AND 255
+                            ELSE true
+                        END
+              )
               OR jsonb_typeof(value -> 'record' -> 'provenance') IS DISTINCT FROM 'string'
               OR length(value -> 'record' ->> 'provenance') NOT BETWEEN 1 AND 4096
        )
@@ -207,6 +227,8 @@ FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_protection_monotonic();
 GRANT SELECT, INSERT ON state_transfer_receipts, state_transfer_records
 TO mcloving_tenant;
 GRANT SELECT, INSERT, UPDATE ON state_transfer_protections
+TO mcloving_tenant;
+GRANT EXECUTE ON FUNCTION mcloving_state_transfer_holds_valid(jsonb)
 TO mcloving_tenant;
 
 ALTER TABLE state_transfer_receipts ENABLE ROW LEVEL SECURITY;

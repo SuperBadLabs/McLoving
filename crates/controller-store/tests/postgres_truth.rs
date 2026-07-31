@@ -55,7 +55,8 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         .expect("create state-transfer tenant");
 
     let (bundle, expected) = transfer_bundle(20);
-    let first = store
+    let tenant_store = unprivileged_store(&store).await;
+    let first = tenant_store
         .import_state_transfer(
             organization_id,
             project_id,
@@ -68,6 +69,18 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
     assert!(first.created);
     assert_eq!(first.record_count, 5);
     assert_eq!(first.protection_count, 2);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT has_function_privilege(
+                 'mcloving_tenant',
+                 'mcloving_state_transfer_holds_valid(jsonb)',
+                 'EXECUTE'
+             )",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("inspect runtime hold-validator privilege")
+    );
     let replay = store
         .import_state_transfer(
             organization_id,
@@ -205,6 +218,46 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
             .as_deref(),
         Some("23514")
     );
+
+    for (hold_id, invalid_digest) in [
+        (
+            "invalid-null-digest",
+            serde_json::Value::Array(vec![serde_json::Value::Null; 32]),
+        ),
+        (
+            "invalid-out-of-range-digest",
+            serde_json::Value::Array(vec![serde_json::Value::from(256); 32]),
+        ),
+    ] {
+        let invalid_hold = sqlx::query(
+            "UPDATE state_transfer_protections
+             SET active_holds = active_holds || jsonb_build_array(
+                 (active_holds -> 0) || jsonb_build_object(
+                     'hold_id', $4,
+                     'record', (active_holds -> 0 -> 'record') ||
+                         jsonb_build_object('source_digest', $5::jsonb)
+                 )
+             )
+             WHERE organization_id = $1
+               AND project_id = $2
+               AND subject_digest = $3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(subject.as_slice())
+        .bind(hold_id)
+        .bind(invalid_digest)
+        .execute(store.pool())
+        .await
+        .expect_err("database rejects a non-byte legal-hold source digest");
+        assert_eq!(
+            invalid_hold
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("23514")
+        );
+    }
 
     let omitted_hold = sqlx::query(
         "UPDATE state_transfer_protections

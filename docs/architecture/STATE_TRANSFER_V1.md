@@ -62,11 +62,12 @@ Linux materialization is quota-bound and descriptor-relative. It opens the
 pre-existing staging root without following links, resolves every component
 with `openat2(2)` using `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`,
 `RESOLVE_NO_MAGICLINKS`, and `RESOLVE_NO_XDEV`, and creates regular files with
-exclusive no-follow semantics. Existing regular files, hardlinks, devices,
-FIFOs, and sockets are rejected rather than overwritten. Payload count, size,
-classification, and SHA-256 must match before the first write. Platforms without
-this safe implementation return an explicit unsupported error; there is no
-weaker fallback.
+exclusive no-follow semantics. The staging root must be empty before the first
+write; existing regular files, directories, hardlinks, devices, FIFOs, sockets,
+and other unclassified entries are rejected rather than retained or overwritten.
+Payload count, size, classification, and SHA-256 must match before the first
+write. Platforms without this safe implementation return an explicit unsupported
+error; there is no weaker fallback.
 
 ## Exact-profile rehearsal
 
@@ -74,12 +75,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `d601288f08d6db44976f6d3bfd74f988632cfb9d23795da47ca9e7954fe6cc61`;
-- source-evidence manifest SHA-256 `9ed6a2bcce9cf356f99cb2760d73584077020eb861225b110dc20bf5ce184e7a`;
-- forward bundle SHA-256 `22d0292d6946560895ac04631c5b0a75256474668190ddb6f0d9520ff399a98d`;
-- reverse bundle SHA-256 `57f1a76bc796ded69e2f78e87f4ca9aae78b9b5b609dd1d22bdc8fa76cf6f84f`;
-- reverse-evidence manifest SHA-256 `fadca66fd5977ebfbdffa4ab1c48ae599f534e8375b7e472a3affde5f0c1be5c`;
-- sealed transform-evidence manifest SHA-256 `4a47f269c931cd4a315d4667cbd07ce3fa88168f1e5a056fd738f2e3fcd6440b`.
+- transform binary SHA-256 `47bc01cdab3a8539a5ec32b5a60767ac5b409f12a877823a282873cbb6bc8563`;
+- source-evidence manifest SHA-256 `f8b85140d8958c1303889cbb496981378723a2b127bd35d4853d906eae692870`;
+- forward bundle SHA-256 `5a836aaf0c3cd0e19a0195ea635d9d448241f53a4ae67c26060945cca0bba2a8`;
+- reverse bundle SHA-256 `08903fb71fe1d4998e53d1ab1298617092322555d5254d4cc48c5a729e5807b5`;
+- reverse-evidence manifest SHA-256 `d75d96d1d1e4523c8fcdc0c134db3689ed40c7bb6d7a5d98eb24b7d2d92da552`;
+- sealed transform-evidence manifest SHA-256 `c5cc221e08fe58112c3cb1234d414114991988889b338dfd5c002e690bb1eb3c`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 112 record-provenance rows, eight effective

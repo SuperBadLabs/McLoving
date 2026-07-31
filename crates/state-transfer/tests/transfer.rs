@@ -569,6 +569,27 @@ fn no_follow_materializer_writes_only_classified_bounded_files() {
 
 #[test]
 #[cfg(target_os = "linux")]
+fn no_follow_materializer_rejects_a_nonempty_staging_root() {
+    let root = materialization_root("nonempty");
+    fs::write(root.join("stale-unclassified.bin"), b"stale").unwrap();
+    let entries = vec![file_entry("fresh.bin", b"fresh")];
+    let payloads = BTreeMap::from([("fresh.bin".to_owned(), b"fresh".to_vec())]);
+
+    assert!(matches!(
+        materialize_filesystem_entries(&root, &entries, &payloads, materialization_limits()),
+        Err(TransferError::Materialization(message))
+            if message.contains("empty staging directory")
+    ));
+    assert_eq!(
+        fs::read(root.join("stale-unclassified.bin")).unwrap(),
+        b"stale"
+    );
+    assert!(!root.join("fresh.bin").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn no_follow_materializer_denies_traversal_symlink_hardlink_and_special_inode() {
     let outside = materialization_root("outside");
     let root = materialization_root("hostile");

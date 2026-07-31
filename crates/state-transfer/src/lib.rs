@@ -764,7 +764,7 @@ fn materialize_filesystem_entries_platform(
     entries: &[FilesystemEntry],
     payloads: &BTreeMap<String, Vec<u8>>,
 ) -> Result<MaterializationReceipt, TransferError> {
-    use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, open, openat2};
+    use rustix::fs::{Dir, Mode, OFlags, ResolveFlags, mkdirat, open, openat2};
     use rustix::io::{Errno, dup};
 
     let root_fd = open(
@@ -773,6 +773,16 @@ fn materialize_filesystem_entries_platform(
         Mode::empty(),
     )
     .map_err(|error| materialization_io("open destination root", error))?;
+    let root_entries = Dir::read_from(&root_fd)
+        .map_err(|error| materialization_io("inspect destination root", error))?;
+    for entry in root_entries {
+        let entry = entry.map_err(|error| materialization_io("inspect destination root", error))?;
+        if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            return Err(TransferError::Materialization(
+                "destination root must be an empty staging directory".to_owned(),
+            ));
+        }
+    }
     let resolve = ResolveFlags::BENEATH
         | ResolveFlags::NO_SYMLINKS
         | ResolveFlags::NO_MAGICLINKS
