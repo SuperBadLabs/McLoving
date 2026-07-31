@@ -3,13 +3,14 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mcloving_jenkins_inventory::{
-    AclEntry, ApprovedDisposition, ClientDirection, ClientRecord, CompatibilityDisposition,
-    DependencyMutability, IDENTITY_CLIENT_FILE, IdentityClientManifest, JOB_GRAPH_FILE,
-    JobDependencies, JobGraphManifest, JobRecord, JobStateRecords, LegalHold, OperationalState,
-    PERSISTENT_STATE_FILE, PersistentStateManifest, Principal, PrincipalKind, PrincipalLifecycle,
-    RUNTIME_DEPENDENCY_FILE, RuntimeDependency, RuntimeDependencyManifest, SCHEMA_VERSION,
-    ScopeDisposition, SecurityRealm, SnapshotBinding, StateRecord, load_bundle, reconcile,
-    seal_manifest_directory, validate_ledger_output_path, write_ledger,
+    AclEntry, ApprovedDisposition, ClientCaller, ClientDirection, ClientRecord,
+    CompatibilityDisposition, DependencyMutability, HistoricalNameClaim, IDENTITY_CLIENT_FILE,
+    IdentityClientManifest, JOB_GRAPH_FILE, JobDependencies, JobGraphManifest, JobRecord,
+    JobStateRecords, LegalHold, OperationalState, PERSISTENT_STATE_FILE, PersistentStateManifest,
+    Principal, PrincipalKind, PrincipalLifecycle, RUNTIME_DEPENDENCY_FILE, RuntimeDependency,
+    RuntimeDependencyManifest, SCHEMA_VERSION, ScopeDisposition, SecurityRealm, SnapshotBinding,
+    StateRecord, load_bundle, reconcile, seal_manifest_directory, validate_ledger_output_path,
+    write_ledger,
 };
 use serde::Serialize;
 
@@ -454,6 +455,61 @@ fn reconciliation_rejects_principal_alias_collisions() {
 }
 
 #[test]
+fn reconciliation_preserves_deleted_historical_name_reuse() {
+    let directory = TestDirectory::new("deleted-name-reuse");
+    let mut bundle = fixture();
+    bundle.identity_clients.principals.push(Principal {
+        id: "user/deleted-operator".to_owned(),
+        kind: PrincipalKind::User,
+        aliases: Vec::new(),
+        historical_names: vec![HistoricalNameClaim {
+            name: "operator-old".to_owned(),
+            generation: "identity-generation-1".to_owned(),
+            provenance: "jenkins/deleted-user/operator-old".to_owned(),
+        }],
+        groups: Vec::new(),
+        membership_generation: "membership-deleted-1".to_owned(),
+        lifecycle: PrincipalLifecycle::Deleted,
+        provenance: "jenkins/deleted-user/operator".to_owned(),
+    });
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let ledger = reconcile(&loaded).expect("historical name reuse is evidence, not ambiguity");
+    assert_eq!(ledger.population.principals, 4);
+}
+
+#[test]
+fn reconciliation_accepts_observed_source_clients_without_fabricated_principals() {
+    let directory = TestDirectory::new("observed-source-client");
+    let mut bundle = fixture();
+    bundle.identity_clients.clients[0].caller = ClientCaller::ObservedSource {
+        source: "reverse-proxy/access-log/public-dashboard".to_owned(),
+    };
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    reconcile(&loaded).expect("observed caller source must be admissible");
+}
+
+#[test]
+fn reconciliation_rejects_unknown_client_principals() {
+    let directory = TestDirectory::new("unknown-client-principal");
+    let mut bundle = fixture();
+    bundle.identity_clients.clients[0].caller = ClientCaller::Principal {
+        principal_id: "user/missing".to_owned(),
+    };
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("unknown caller principal must fail");
+    assert_eq!(error.code, "INV_UNKNOWN_CLIENT_PRINCIPAL");
+}
+
+#[test]
 fn reconciliation_requires_principal_client_and_acl_evidence() {
     let directory = TestDirectory::new("identity-required");
     let mut bundle = fixture();
@@ -562,6 +618,27 @@ fn reconciliation_rejects_invalid_retention_deadlines() {
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("invalid retention deadline must fail");
     assert_eq!(error.code, "INV_TIMESTAMP");
+}
+
+#[test]
+fn reconciliation_requires_bound_retention_policies() {
+    let directory = TestDirectory::new("blank-retention-policy");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0].retention_policy_id = " ".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("blank retention policy must fail");
+    assert_eq!(error.code, "INV_REQUIRED");
+
+    let directory = TestDirectory::new("invalid-retention-policy-digest");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0].retention_policy_sha256 = "not-a-digest".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("invalid retention policy digest must fail");
+    assert_eq!(error.code, "INV_DIGEST");
 }
 
 #[test]
@@ -791,6 +868,7 @@ fn fixture() -> Fixture {
                     id: "user/operator".to_owned(),
                     kind: PrincipalKind::User,
                     aliases: vec!["operator-old".to_owned()],
+                    historical_names: Vec::new(),
                     groups: vec!["group/builders".to_owned()],
                     membership_generation: "membership-3".to_owned(),
                     lifecycle: PrincipalLifecycle::Active,
@@ -800,6 +878,7 @@ fn fixture() -> Fixture {
                     id: "service/seed".to_owned(),
                     kind: PrincipalKind::Service,
                     aliases: Vec::new(),
+                    historical_names: Vec::new(),
                     groups: Vec::new(),
                     membership_generation: "service-1".to_owned(),
                     lifecycle: PrincipalLifecycle::Active,
@@ -809,6 +888,7 @@ fn fixture() -> Fixture {
                     id: "group/builders".to_owned(),
                     kind: PrincipalKind::Group,
                     aliases: Vec::new(),
+                    historical_names: Vec::new(),
                     groups: Vec::new(),
                     membership_generation: "group-4".to_owned(),
                     lifecycle: PrincipalLifecycle::Active,
@@ -826,7 +906,9 @@ fn fixture() -> Fixture {
                 ClientRecord {
                     id: "dashboard".to_owned(),
                     direction: ClientDirection::Read,
-                    caller_identity: "user/operator".to_owned(),
+                    caller: ClientCaller::Principal {
+                        principal_id: "user/operator".to_owned(),
+                    },
                     authentication: "session".to_owned(),
                     endpoint: "/job/folder/job/build/api/json".to_owned(),
                     actions: vec!["read-status".to_owned()],
@@ -838,7 +920,9 @@ fn fixture() -> Fixture {
                 ClientRecord {
                     id: "seed-service".to_owned(),
                     direction: ClientDirection::Write,
-                    caller_identity: "service/seed".to_owned(),
+                    caller: ClientCaller::Principal {
+                        principal_id: "service/seed".to_owned(),
+                    },
                     authentication: "api-token".to_owned(),
                     endpoint: "/createItem".to_owned(),
                     actions: vec!["create-job".to_owned()],
@@ -893,6 +977,8 @@ fn fixture() -> Fixture {
                         confidentiality: "internal".to_owned(),
                         restore_target: "jenkins/folder/build".to_owned(),
                         conflict_policy: "reject".to_owned(),
+                        retention_policy_id: "jenkins/job-log-rotator".to_owned(),
+                        retention_policy_sha256: DIGEST_B.to_owned(),
                         retention_deadline: "2027-07-30T00:00:00Z".to_owned(),
                         legal_holds: vec![LegalHold {
                             id: "hold-7".to_owned(),

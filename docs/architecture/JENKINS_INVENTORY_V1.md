@@ -41,7 +41,12 @@ and persistent-state mutation for one bounded export epoch.
 - `identity-clients.yaml` owns the security realm, immutable principals and
   lifecycle evidence, effective ACLs, and every read-side or write-side client.
   Principal kind is one of `user`, `service`, or `group`; lifecycle is one of
-  `active`, `disabled`, `retired`, or `deleted`.
+  `active`, `disabled`, `retired`, or `deleted`. Current aliases participate in
+  the unique principal namespace. Historical-name claims carry their own
+  generation and provenance, preserving deleted-name reuse without creating a
+  current mapping ambiguity. A client caller is either a canonical principal
+  reference or an explicit observed source; anonymous and legacy callers never
+  require a fabricated principal.
 - `runtime-dependencies.yaml` owns per-job parameters, credentials by typed
   reference, source and package resolution, approvals, triggers, live reads,
   mutable inputs, agents, caches, effects, provisioners, locks, global values,
@@ -50,13 +55,14 @@ and persistent-state mutation for one bounded export epoch.
   Mutability is one of `immutable`, `pinned-revision`, `mutable`, or `floating`;
   mutable and floating dependencies cannot be classified `native`.
 - `persistent-state.yaml` owns each per-job record class, counts and source
-  digest, retention deadline, legal holds and release authority, restore target,
-  conflict policy, external consumers, ownership, confidentiality, and
-  provenance. Every external consumer must reference a client whose direction
-  includes reads; write-only clients cannot consume state. Reusing a legal-hold
-  identity with a conflicting scope, reason, generation, or release authority
-  fails reconciliation. Retention deadlines use the exact UTC form
-  `YYYY-MM-DDTHH:MM:SSZ` and must be valid calendar timestamps.
+  digest, retention-policy identity and digest, retention deadline, legal holds
+  and release authority, restore target, conflict policy, external consumers,
+  ownership, confidentiality, and provenance. Every external consumer must
+  reference a client whose direction includes reads; write-only clients cannot
+  consume state. Reusing a legal-hold identity with a conflicting scope, reason,
+  generation, or release authority fails reconciliation. Retention deadlines
+  use the exact UTC form `YYYY-MM-DDTHH:MM:SSZ` and must be valid calendar
+  timestamps.
 
 Secret values are never inventory fields. A dependency classified `secret`
 must carry a typed `credential_reference` or `redaction_reference`; the

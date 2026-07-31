@@ -134,6 +134,8 @@ pub struct Principal {
     #[serde(default)]
     pub aliases: Vec<String>,
     #[serde(default)]
+    pub historical_names: Vec<HistoricalNameClaim>,
+    #[serde(default)]
     pub groups: Vec<String>,
     pub membership_generation: String,
     pub lifecycle: PrincipalLifecycle,
@@ -159,6 +161,14 @@ pub enum PrincipalLifecycle {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct HistoricalNameClaim {
+    pub name: String,
+    pub generation: String,
+    pub provenance: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AclEntry {
     pub job_id: String,
     pub principal_id: String,
@@ -176,11 +186,18 @@ pub enum ClientDirection {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ClientCaller {
+    Principal { principal_id: String },
+    ObservedSource { source: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientRecord {
     pub id: String,
     pub direction: ClientDirection,
-    pub caller_identity: String,
+    pub caller: ClientCaller,
     pub authentication: String,
     pub endpoint: String,
     pub actions: Vec<String>,
@@ -267,6 +284,8 @@ pub struct StateRecord {
     pub confidentiality: String,
     pub restore_target: String,
     pub conflict_policy: String,
+    pub retention_policy_id: String,
+    pub retention_policy_sha256: String,
     pub retention_deadline: String,
     #[serde(default)]
     pub legal_holds: Vec<LegalHold>,
@@ -546,14 +565,22 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         validate_nonempty("client observed use", &client.observed_use)?;
         validate_nonempty("client generation", &client.generation)?;
         validate_nonempty_collection("client action", &client.actions)?;
-        if !principal_ids.contains(&client.caller_identity) {
-            return Err(InventoryError::new(
-                "INV_UNKNOWN_CLIENT_PRINCIPAL",
-                format!(
-                    "client {} references unknown principal {}",
-                    client.id, client.caller_identity
-                ),
-            ));
+        match &client.caller {
+            ClientCaller::Principal { principal_id } => {
+                validate_identifier("client caller principal", principal_id)?;
+                if !principal_ids.contains(principal_id) {
+                    return Err(InventoryError::new(
+                        "INV_UNKNOWN_CLIENT_PRINCIPAL",
+                        format!(
+                            "client {} references unknown principal {principal_id}",
+                            client.id
+                        ),
+                    ));
+                }
+            }
+            ClientCaller::ObservedSource { source } => {
+                validate_nonempty("client observed caller source", source)?;
+            }
         }
     }
     let client_directions = bundle
@@ -1097,6 +1124,8 @@ fn validate_state_records(
         validate_confidentiality("state confidentiality", &record.confidentiality)?;
         validate_nonempty("state restore target", &record.restore_target)?;
         validate_nonempty("state conflict policy", &record.conflict_policy)?;
+        validate_identifier("state retention policy", &record.retention_policy_id)?;
+        validate_digest("state retention policy", &record.retention_policy_sha256)?;
         validate_utc_timestamp("state retention deadline", &record.retention_deadline)?;
         validate_nonempty("state provenance", &record.provenance)?;
         validate_digest("state source", &record.source_sha256)?;
@@ -1334,6 +1363,7 @@ fn validate_job_graph_acyclic(jobs: &[JobRecord]) -> Result<(), InventoryError> 
 
 fn validate_principal_namespace(principals: &[Principal]) -> Result<(), InventoryError> {
     let mut names = BTreeMap::new();
+    let mut historical_names = BTreeMap::new();
     for principal in principals {
         for name in std::iter::once(principal.id.as_str())
             .chain(principal.aliases.iter().map(String::as_str))
@@ -1345,6 +1375,21 @@ fn validate_principal_namespace(principals: &[Principal]) -> Result<(), Inventor
                     format!(
                         "principal name {name} is claimed by both {existing} and {}",
                         principal.id
+                    ),
+                ));
+            }
+        }
+        for claim in &principal.historical_names {
+            validate_identifier("historical principal name", &claim.name)?;
+            validate_nonempty("historical-name generation", &claim.generation)?;
+            validate_nonempty("historical-name provenance", &claim.provenance)?;
+            let key = (claim.name.as_str(), claim.generation.as_str());
+            if let Some(existing) = historical_names.insert(key, principal.id.as_str()) {
+                return Err(InventoryError::new(
+                    "INV_HISTORICAL_NAME_CONFLICT",
+                    format!(
+                        "historical principal name {} at generation {} is claimed by both {existing} and {}",
+                        claim.name, claim.generation, principal.id
                     ),
                 ));
             }
