@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 
@@ -44,6 +46,30 @@ class WindowsAgentImpactTests(unittest.TestCase):
         )
         self.assertTrue(run_windows)
         self.assertIn("dependency source", reason)
+
+    def test_repository_cargo_configuration_triggers(self) -> None:
+        for path in (".cargo/config", ".cargo/config.toml"):
+            with self.subTest(path=path):
+                run_windows, reason = IMPACT.classify(
+                    {path},
+                    {Path("bins/agent")},
+                    {Path("bins/agent")},
+                    "same",
+                    "same",
+                    "same",
+                    "same",
+                )
+                self.assertTrue(run_windows)
+                self.assertIn("gate definition", reason)
+
+    def test_reason_is_not_a_workflow_output(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        reason = "agent dependency source changed: bins/agent/x\nrun-windows=false"
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            IMPACT.emit_result(True, reason)
+        self.assertEqual(stdout.getvalue(), "run-windows=true\n")
+        self.assertIn(reason, stderr.getvalue())
 
     def test_resolved_external_dependency_change_triggers(self) -> None:
         run_windows, reason = IMPACT.classify(
