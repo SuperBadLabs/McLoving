@@ -137,9 +137,10 @@ Unknown or case-variant labels fail closed.
 
 `mcloving-inventory reconcile --root ROOT
 --expected-snapshot-sha256 TRUSTED_DIGEST` verifies the detached hashes,
-strictly parses all four manifests, requires the complete snapshot binding to
-match a trusted digest supplied outside the replayable directory, checks epoch
-identity and referential integrity, requires exactly one runtime and state
+strictly parses all four manifests, requires the complete snapshot binding and
+all four sealed manifest content hashes to match one trusted digest supplied
+outside the replayable directory, checks epoch identity and referential
+integrity, requires exactly one runtime and state
 record group for every
 in-scope job and requires an explicit state group for every job, including
 out-of-scope and retired jobs. Retired jobs may declare an independently proven
@@ -162,7 +163,8 @@ rejects:
   `workload-dependency`, `approval-input`, `trigger`, `external-read`,
   `agent-local-input`, `agent-capability`, `cache`, `external-effect`,
   `dynamic-provisioner`, `shared-lock`, `controller-global`, and
-  `builtin-environment`;
+  `builtin-environment`; `credential` and `secret-parameter` always require
+  `secret` confidentiality plus typed reference and consumer/taint evidence;
 - missing, duplicate, or undeclared compatibility evidence for a job's shared
   libraries, triggers, platforms, agent labels, or toolchains;
 - secret dependencies without typed references and consumer/taint evidence;
@@ -191,7 +193,8 @@ credential, agent, trigger, connector, effect, canary, or cutover authority.
 `mcloving-inventory verify --root ROOT
 --expected-snapshot-sha256 TRUSTED_DIGEST` performs the same externally pinned
 reconciliation, derived-ledger rendering, and strict output validation without
-writing an output. The trusted digest belongs in owner-reviewed inventory
+writing an output. The trusted digest commits both the binding and the canonical
+filename/digest map from `SHA256SUMS`; it belongs in owner-reviewed inventory
 coordination state, not inside the sealed directory it protects.
 
 ## Closure boundary

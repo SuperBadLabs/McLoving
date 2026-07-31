@@ -560,7 +560,7 @@ pub fn reconcile(
     validate_bindings(bundle)?;
     validate_binding(&bundle.job_graph.binding)?;
     validate_digest("expected snapshot", expected_snapshot_sha256)?;
-    if snapshot_binding_sha256(&bundle.job_graph.binding) != expected_snapshot_sha256 {
+    if inventory_snapshot_sha256(bundle) != expected_snapshot_sha256 {
         return Err(InventoryError::new(
             "INV_SNAPSHOT_EXPECTATION_MISMATCH",
             "inventory snapshot does not match the caller's trusted external expectation",
@@ -1414,6 +1414,19 @@ fn validate_runtime_dependencies(
                 ));
             }
         }
+        if matches!(
+            dependency.kind,
+            RuntimeDependencyKind::Credential | RuntimeDependencyKind::SecretParameter
+        ) && dependency.confidentiality != "secret"
+        {
+            return Err(InventoryError::new(
+                "INV_SECRET_KIND_CONFIDENTIALITY",
+                format!(
+                    "dependency {} for job {job_id} has a secret-bearing kind but is not classified secret",
+                    dependency.id
+                ),
+            ));
+        }
         validate_nonempty("runtime dependency owner", &dependency.owner)?;
         validate_nonempty(
             "runtime dependency resource scope",
@@ -1929,23 +1942,56 @@ fn canonical_record_bytes(kind: &str, value: &impl Serialize) -> Result<Vec<u8>,
         })
 }
 
-pub fn snapshot_binding_sha256(binding: &SnapshotBinding) -> String {
-    canonical_owned_entries_sha256(vec![vec![
+pub fn inventory_snapshot_sha256(bundle: &InventoryBundle) -> String {
+    let mut entries = vec![vec![
         b"snapshot-binding-v1".to_vec(),
-        binding.schema.as_bytes().to_vec(),
-        binding.controller_id.as_bytes().to_vec(),
-        binding.controller_url.as_bytes().to_vec(),
-        binding.controller_core_version.as_bytes().to_vec(),
-        binding.plugin_profile_sha256.as_bytes().to_vec(),
-        binding.global_config_sha256.as_bytes().to_vec(),
-        binding.epoch_id.as_bytes().to_vec(),
-        binding.source_generation.as_bytes().to_vec(),
-        binding.collected_at.as_bytes().to_vec(),
-        binding.exporter_id.as_bytes().to_vec(),
-        binding.exporter_version.as_bytes().to_vec(),
-        binding.exporter_sha256.as_bytes().to_vec(),
-        binding.provenance.as_bytes().to_vec(),
-    ]])
+        bundle.job_graph.binding.schema.as_bytes().to_vec(),
+        bundle.job_graph.binding.controller_id.as_bytes().to_vec(),
+        bundle.job_graph.binding.controller_url.as_bytes().to_vec(),
+        bundle
+            .job_graph
+            .binding
+            .controller_core_version
+            .as_bytes()
+            .to_vec(),
+        bundle
+            .job_graph
+            .binding
+            .plugin_profile_sha256
+            .as_bytes()
+            .to_vec(),
+        bundle
+            .job_graph
+            .binding
+            .global_config_sha256
+            .as_bytes()
+            .to_vec(),
+        bundle.job_graph.binding.epoch_id.as_bytes().to_vec(),
+        bundle
+            .job_graph
+            .binding
+            .source_generation
+            .as_bytes()
+            .to_vec(),
+        bundle.job_graph.binding.collected_at.as_bytes().to_vec(),
+        bundle.job_graph.binding.exporter_id.as_bytes().to_vec(),
+        bundle
+            .job_graph
+            .binding
+            .exporter_version
+            .as_bytes()
+            .to_vec(),
+        bundle.job_graph.binding.exporter_sha256.as_bytes().to_vec(),
+        bundle.job_graph.binding.provenance.as_bytes().to_vec(),
+    ]];
+    entries.extend(bundle.file_digests.iter().map(|(filename, digest)| {
+        vec![
+            b"sealed-manifest-v1".to_vec(),
+            filename.as_bytes().to_vec(),
+            digest.as_bytes().to_vec(),
+        ]
+    }));
+    canonical_owned_entries_sha256(entries)
 }
 
 fn count_subject_sha256(

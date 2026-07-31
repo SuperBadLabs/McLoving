@@ -11,8 +11,9 @@ use mcloving_jenkins_inventory::{
     RUNTIME_DEPENDENCY_FILE, RuntimeDependency, RuntimeDependencyKind, RuntimeDependencyManifest,
     SCHEMA_VERSION, ScopeDisposition, SecretConsumer, SecretConsumerEvidence, SecretTaint,
     SecurityRealm, SetEvidence, SnapshotBinding, StateRecord, StateTransformEvidence,
-    WorkloadSecretChannel, load_bundle, reconcile as reconcile_for_snapshot,
-    seal_manifest_directory, snapshot_binding_sha256, validate_ledger_output_path, write_ledger,
+    WorkloadSecretChannel, inventory_snapshot_sha256, load_bundle,
+    reconcile as reconcile_for_snapshot, seal_manifest_directory, validate_ledger_output_path,
+    write_ledger,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -25,7 +26,7 @@ fn reconcile(
     bundle: &mcloving_jenkins_inventory::InventoryBundle,
 ) -> Result<mcloving_jenkins_inventory::EligibilityLedger, mcloving_jenkins_inventory::InventoryError>
 {
-    let expected = snapshot_binding_sha256(&bundle.job_graph.binding);
+    let expected = inventory_snapshot_sha256(bundle);
     reconcile_for_snapshot(bundle, &expected)
 }
 
@@ -874,9 +875,13 @@ fn reconciliation_rejects_cross_epoch_per_job_evidence_replay() {
 
 #[test]
 fn reconciliation_rejects_stale_evidence_after_snapshot_configuration_changes() {
-    let directory = TestDirectory::new("stale-snapshot-configuration");
+    let trusted_directory = TestDirectory::new("trusted-snapshot-configuration");
     let mut bundle = fixture();
-    let trusted_snapshot_sha256 = snapshot_binding_sha256(&bundle.job_graph.binding);
+    write_bundle(&trusted_directory.0, &bundle);
+    seal_manifest_directory(&trusted_directory.0).expect("seal trusted inventory");
+    let trusted = load_bundle(&trusted_directory.0).expect("load trusted inventory");
+    let trusted_snapshot_sha256 = inventory_snapshot_sha256(&trusted);
+
     for binding in [
         &mut bundle.job_graph.binding,
         &mut bundle.identity_clients.binding,
@@ -886,6 +891,7 @@ fn reconciliation_rejects_stale_evidence_after_snapshot_configuration_changes() 
         binding.global_config_sha256 = DIGEST_A.to_owned();
     }
     refresh_population_commitments(&mut bundle);
+    let directory = TestDirectory::new("stale-snapshot-configuration");
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -893,6 +899,35 @@ fn reconciliation_rejects_stale_evidence_after_snapshot_configuration_changes() 
     let error = reconcile_for_snapshot(&loaded, &trusted_snapshot_sha256)
         .expect_err("stale snapshot evidence must fail");
     assert_eq!(error.code, "INV_SNAPSHOT_EXPECTATION_MISMATCH");
+}
+
+#[test]
+fn secret_bearing_dependency_kinds_cannot_downgrade_their_semantics() {
+    for (name, kind) in [
+        (
+            "credential-kind-downgrade",
+            RuntimeDependencyKind::Credential,
+        ),
+        (
+            "secret-parameter-kind-downgrade",
+            RuntimeDependencyKind::SecretParameter,
+        ),
+    ] {
+        let directory = TestDirectory::new(name);
+        let mut bundle = fixture();
+        let dependency = &mut bundle.runtime_dependencies.jobs[1].dependencies[0];
+        dependency.kind = kind;
+        dependency.confidentiality = "public".to_owned();
+        dependency.credential_reference = None;
+        dependency.redaction_reference = None;
+        dependency.secret_consumer = None;
+        write_bundle(&directory.0, &bundle);
+        seal_manifest_directory(&directory.0).expect("seal inventory");
+
+        let loaded = load_bundle(&directory.0).expect("load bundle");
+        let error = reconcile(&loaded).expect_err("secret-bearing kind downgrade must fail");
+        assert_eq!(error.code, "INV_SECRET_KIND_CONFIDENTIALITY");
+    }
 }
 
 #[test]
