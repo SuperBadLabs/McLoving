@@ -721,6 +721,33 @@ fn reconciliation_rejects_same_cardinality_population_substitution() {
 }
 
 #[test]
+fn reconciliation_rejects_per_job_population_ownership_substitution() {
+    let directory = TestDirectory::new("runtime-job-ownership");
+    let mut bundle = fixture();
+    let first_job = bundle.runtime_dependencies.jobs[0].job_id.clone();
+    bundle.runtime_dependencies.jobs[0].job_id = bundle.runtime_dependencies.jobs[1].job_id.clone();
+    bundle.runtime_dependencies.jobs[1].job_id = first_job;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("runtime ownership substitution must fail");
+    assert_eq!(error.code, "INV_DEPENDENCY_SET_MISMATCH");
+
+    let directory = TestDirectory::new("state-job-ownership");
+    let mut bundle = fixture();
+    let first_job = bundle.persistent_state.jobs[0].job_id.clone();
+    bundle.persistent_state.jobs[0].job_id = bundle.persistent_state.jobs[1].job_id.clone();
+    bundle.persistent_state.jobs[1].job_id = first_job;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("state ownership substitution must fail");
+    assert_eq!(error.code, "INV_STATE_CLASS_SET_MISMATCH");
+}
+
+#[test]
 fn reconciliation_rejects_runtime_dependency_population_omission() {
     let directory = TestDirectory::new("runtime-dependency-count");
     let mut bundle = fixture();
@@ -1727,25 +1754,32 @@ fn job_dependencies(job_id: &str, dependencies: Vec<RuntimeDependency>) -> JobDe
             dependencies.len() as u64,
             &format!("jenkins/job/{job_id}/runtime-dependency-count"),
         ),
-        dependency_set: set_evidence(
+        dependency_set: owned_set_evidence(
             &format!("jenkins/job/{job_id}/runtime-dependency-set"),
-            dependencies
-                .iter()
-                .map(|dependency| vec![dependency.id.as_bytes(), dependency.kind.as_bytes()])
-                .collect(),
+            dependency_set_entries(job_id, &dependencies),
         ),
         dependencies,
     }
 }
 
 fn refresh_dependency_set(job: &mut JobDependencies) {
-    job.dependency_set = set_evidence(
+    job.dependency_set = owned_set_evidence(
         &format!("jenkins/job/{}/runtime-dependency-set", job.job_id),
-        job.dependencies
-            .iter()
-            .map(|dependency| vec![dependency.id.as_bytes(), dependency.kind.as_bytes()])
-            .collect(),
+        dependency_set_entries(&job.job_id, &job.dependencies),
     );
+}
+
+fn dependency_set_entries(job_id: &str, dependencies: &[RuntimeDependency]) -> Vec<Vec<Vec<u8>>> {
+    let mut entries = vec![vec![b"job".to_vec(), job_id.as_bytes().to_vec()]];
+    entries.extend(dependencies.iter().map(|dependency| {
+        vec![
+            b"dependency".to_vec(),
+            job_id.as_bytes().to_vec(),
+            dependency.id.as_bytes().to_vec(),
+            dependency.kind.as_bytes().to_vec(),
+        ]
+    }));
+    entries
 }
 
 fn job_state_records(job_id: &str, records: Vec<StateRecord>) -> JobStateRecords {
@@ -1767,12 +1801,18 @@ fn refresh_state_class_set(job: &mut JobStateRecords) {
 }
 
 fn state_class_set_evidence(job_id: &str, records: &[StateRecord]) -> SetEvidence {
-    set_evidence(
+    let mut entries = vec![vec![b"job".to_vec(), job_id.as_bytes().to_vec()]];
+    entries.extend(records.iter().map(|record| {
+        vec![
+            b"state-class".to_vec(),
+            job_id.as_bytes().to_vec(),
+            record.id.as_bytes().to_vec(),
+            record.kind.as_bytes().to_vec(),
+        ]
+    }));
+    owned_set_evidence(
         &format!("jenkins/job/{job_id}/state-record-class-set"),
-        records
-            .iter()
-            .map(|record| vec![record.id.as_bytes(), record.kind.as_bytes()])
-            .collect(),
+        entries,
     )
 }
 

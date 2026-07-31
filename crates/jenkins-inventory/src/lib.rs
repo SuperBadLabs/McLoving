@@ -1233,12 +1233,7 @@ fn index_runtime<'a>(
         validate_exact_set(
             "runtime-dependency set",
             &job.dependency_set,
-            canonical_entries_sha256(
-                job.dependencies
-                    .iter()
-                    .map(|dependency| vec![dependency.id.as_bytes(), dependency.kind.as_bytes()])
-                    .collect(),
-            ),
+            dependency_set_sha256(&job.job_id, &job.dependencies),
             manifest_exporter_id,
             "INV_DEPENDENCY_SET_MISMATCH",
         )?;
@@ -1284,7 +1279,7 @@ fn index_state<'a>(
         validate_exact_set(
             "persistent-state record-class set",
             &job.record_class_set,
-            state_class_set_sha256(&job.records),
+            state_class_set_sha256(&job.job_id, &job.records),
             manifest_exporter_id,
             "INV_STATE_CLASS_SET_MISMATCH",
         )?;
@@ -1772,13 +1767,30 @@ fn validate_exact_set(
     Ok(())
 }
 
-fn state_class_set_sha256(records: &[StateRecord]) -> String {
-    canonical_entries_sha256(
-        records
-            .iter()
-            .map(|record| vec![record.id.as_bytes(), record.kind.as_bytes()])
-            .collect(),
-    )
+fn dependency_set_sha256(job_id: &str, dependencies: &[RuntimeDependency]) -> String {
+    let mut entries = vec![vec![b"job".to_vec(), job_id.as_bytes().to_vec()]];
+    entries.extend(dependencies.iter().map(|dependency| {
+        vec![
+            b"dependency".to_vec(),
+            job_id.as_bytes().to_vec(),
+            dependency.id.as_bytes().to_vec(),
+            dependency.kind.as_bytes().to_vec(),
+        ]
+    }));
+    canonical_owned_entries_sha256(entries)
+}
+
+fn state_class_set_sha256(job_id: &str, records: &[StateRecord]) -> String {
+    let mut entries = vec![vec![b"job".to_vec(), job_id.as_bytes().to_vec()]];
+    entries.extend(records.iter().map(|record| {
+        vec![
+            b"state-class".to_vec(),
+            job_id.as_bytes().to_vec(),
+            record.id.as_bytes().to_vec(),
+            record.kind.as_bytes().to_vec(),
+        ]
+    }));
+    canonical_owned_entries_sha256(entries)
 }
 
 fn job_graph_set_sha256(jobs: &[JobRecord]) -> String {

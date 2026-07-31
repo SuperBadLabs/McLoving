@@ -72,7 +72,8 @@ and persistent-state mutation for one bounded export epoch.
   Every supplied job group also carries an independently sourced dependency
   count that must exactly match the complete dependency population, including
   zero-count groups and retained obligations for excluded jobs. An independent
-  canonical `(dependency ID, dependency kind)` set must match as well.
+  canonical `(job ID, dependency ID, dependency kind)` set must match as well;
+  an explicit job-binding entry also seals zero-dependency groups.
   Mutability is one of `immutable`, `pinned-revision`, `mutable`, or `floating`;
   mutable and floating dependencies cannot be classified `native`. Every secret
   dependency additionally binds its exact tagged consumer, typed taint class,
@@ -92,9 +93,11 @@ and persistent-state mutation for one bounded export epoch.
   Every supplied job group carries an independently sourced record-class count
   that must exactly match the manifest, including explicit zero-count groups
   and retained obligations for excluded jobs.
-  The independently collected canonical set of `(record id, record kind)`
-  identities is length-prefixed, sorted, and SHA-256 bound as well, so a
-  same-cardinality class substitution or misspelling fails reconciliation.
+  The independently collected canonical set of
+  `(job ID, record ID, record kind)` identities is length-prefixed, sorted,
+  and SHA-256 bound as well, so a same-cardinality class or owner substitution
+  fails reconciliation; an explicit job-binding entry also seals zero-state
+  groups.
   Every record class also carries an independently sourced instance count with
   collector identity, provenance, and source digest; this source count, rather
   than an exporter assertion, drives migration-demand aggregation.
