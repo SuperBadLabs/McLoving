@@ -134,10 +134,7 @@ pub fn validate_response(
             expect_keyword(root, "status", "unsupported")?;
             validate_profile(field(root, "profile")?)?;
             validate_source_receipt(field(root, "source")?, expected.source)?;
-            if expected.job_id == ADMITTED_JOB_ID
-                && expected.job_generation == ADMITTED_JOB_GENERATION
-                && sha256_hex(expected.source) == ADMITTED_SOURCE_SHA256
-            {
+            if is_exact_admitted_input(&expected) {
                 return Err(AdmissionError::new(
                     "E_STATUS_DOWNGRADE",
                     "worker downgraded the exact admitted source to unsupported",
@@ -205,6 +202,12 @@ pub fn validate_response(
                 ],
                 "request rejected without execution authority",
             )?;
+            if is_exact_admitted_input(&expected) {
+                return Err(AdmissionError::new(
+                    "E_STATUS_DOWNGRADE",
+                    "worker downgraded the exact admitted source to rejected",
+                ));
+            }
             Ok(ValidatedResponse::Rejected { code })
         }
         _ => Err(AdmissionError::new(
@@ -212,6 +215,12 @@ pub fn validate_response(
             format!("unexpected compile response status: {status}"),
         )),
     }
+}
+
+fn is_exact_admitted_input(expected: &ExpectedAdmission<'_>) -> bool {
+    expected.job_id == ADMITTED_JOB_ID
+        && expected.job_generation == ADMITTED_JOB_GENERATION
+        && sha256_hex(expected.source) == ADMITTED_SOURCE_SHA256
 }
 
 /// Reparse and independently validate one worker response.

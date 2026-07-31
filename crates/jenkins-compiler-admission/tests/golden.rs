@@ -49,8 +49,17 @@ fn every_compile_status_is_independently_validated() {
     ));
     let downgrade = validate_response(UNSUPPORTED, expected()).unwrap_err();
     assert_eq!(downgrade.code, "E_STATUS_DOWNGRADE");
+    let downgrade = validate_response(REJECTED, expected()).unwrap_err();
+    assert_eq!(downgrade.code, "E_STATUS_DOWNGRADE");
     assert_eq!(
-        validate_response(REJECTED, expected()).unwrap(),
+        validate_response(
+            REJECTED,
+            ExpectedAdmission {
+                job_id: "non-admitted-job",
+                ..expected()
+            }
+        )
+        .unwrap(),
         ValidatedResponse::Rejected {
             code: "E_ENV_AUTHORITY".to_owned()
         }
@@ -58,9 +67,11 @@ fn every_compile_status_is_independently_validated() {
 }
 
 #[test]
-fn exact_admitted_case_cannot_be_downgraded_to_unsupported() {
-    let error = validate_response(UNSUPPORTED, expected()).unwrap_err();
-    assert_eq!(error.code, "E_STATUS_DOWNGRADE");
+fn exact_admitted_case_cannot_be_downgraded_to_a_denial_status() {
+    for response in [UNSUPPORTED, REJECTED] {
+        let error = validate_response(response, expected()).unwrap_err();
+        assert_eq!(error.code, "E_STATUS_DOWNGRADE");
+    }
 }
 
 #[test]
