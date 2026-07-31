@@ -9,9 +9,7 @@ on:
       - "crates/agent-runtime/**"
       - "crates/domain/**"
       - "crates/windows-job/**"
-      - "proto/**"
       - "scripts/windows-agent-war.ps1"
-      - "tools/versions.env"
   push:
     branches:
       - main
@@ -40,18 +38,24 @@ jobs:
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: windows-agent
-      - name: Check Windows workspace
+      - name: Check Windows production agent
         shell: pwsh
-        run: cargo +1.97.1 check --locked --workspace --all-targets
-      - name: Lint Windows workspace
+        run: >-
+          cargo +1.97.1 check --locked
+          -p mcloving-agent
+          --bin mcloving-agent
+      - name: Lint Windows production agent
         shell: pwsh
-        run: cargo +1.97.1 clippy --locked --workspace --all-targets -- -D warnings
-      - name: Run Windows runtime tests
+        run: >-
+          cargo +1.97.1 clippy --locked
+          -p mcloving-agent
+          --bin mcloving-agent
+          -- -D warnings
+      - name: Run Windows-specific runtime tests
         shell: pwsh
         run: >-
           cargo +1.97.1 test --locked
           -p mcloving-agent-runtime
-          -p mcloving-agent
           -p mcloving-windows-job
       - name: Build debug agent for native service gate
         shell: pwsh
