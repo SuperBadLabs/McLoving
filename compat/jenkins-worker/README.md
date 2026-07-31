@@ -28,17 +28,29 @@ dropped, `no-new-privileges`, one CPU, 512 MiB memory, 64 PIDs, bounded file
 descriptors, a 16 MiB no-exec tmpfs, a cleared and allowlisted environment, a
 five-second deadline, and a 64 KiB single-response limit. Inherited image
 volumes are ignored, preventing Jenkins' base-image declaration from silently
-creating a writable home volume.
+creating a writable home volume. A `compiled` response is not returned by the
+launcher until the independent Rust admission binary accepts it.
 
 The protocol is one bounded EDN request and one canonical EDN response.
-Protocol v1 supports `probe` and `compile`. Until MIG-003 admits a deterministic
-Declarative subset, every valid source receives stable
-`E_COMPILER_SUBSET_NOT_IMPLEMENTED` and `unsupported`; it never executes.
+Protocol v1 supports `probe` and `compile`. MIG-003 admits exactly the
+Mario-oracle case `corpus-052-cinqict_jenkinsdev`: `agent any`, one ordered
+stage, and one literal `sh` step. Groovy is parsed only to its CONVERSION-phase
+AST and is never evaluated. The output is deterministic strict YAML plus a
+separate disabled job-state import record. Every other source receives a
+stable fail-closed diagnostic and no authority.
+
+Worker output is not trusted. `mcloving-jenkins-compiler-admission` reparses
+the canonical EDN envelope and both strict-YAML documents, validates all
+source/profile/compiler hashes and the all-false authority ledger, recompiles
+Pipeline IR in Rust, validates its independent canonical bytes, and refuses
+noncanonical or substituted output.
 
 ```sh
 clojure -M:test
 ./build-image.sh /path/to/frozen/snapshot
 ./test-boundary.sh
 ./run-worker.sh probe example-probe
-./run-worker.sh compile /path/to/Jenkinsfile example-compile
+./run-worker.sh compile /path/to/Jenkinsfile example-compile \
+  corpus-052-cinqict_jenkinsdev \
+  e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97
 ```

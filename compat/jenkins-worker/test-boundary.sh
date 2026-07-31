@@ -15,15 +15,50 @@ cleanup() {
 }
 trap cleanup EXIT
 
-printf 'pipeline { agent any; stages { stage("Build") { steps { echo "ok" } } } }\n' \
-  > "$TEST_ROOT/Jenkinsfile"
+ADMITTED_SOURCE="$SCRIPT_DIR/../../migration/mario-jenkins-oracle-228/corpus-v1/sources/cinqict_jenkinsdev.Jenkinsfile"
+ADMITTED_JOB=corpus-052-cinqict_jenkinsdev
+ADMITTED_GENERATION=e76362bbc8e899510b8498808ffd0d2f83bb64d3215cf2c5b31690895f251d97
+cp "$ADMITTED_SOURCE" "$TEST_ROOT/Jenkinsfile"
+cargo build --quiet --locked \
+  --manifest-path "$SCRIPT_DIR/../../Cargo.toml" \
+  -p mcloving-jenkins-compiler-admission
 
-first=$("$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/Jenkinsfile" boundary-a)
-second=$("$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/Jenkinsfile" boundary-a)
+first=$("$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/Jenkinsfile" boundary-a \
+  "$ADMITTED_JOB" "$ADMITTED_GENERATION")
+second=$("$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/Jenkinsfile" boundary-a \
+  "$ADMITTED_JOB" "$ADMITTED_GENERATION")
 [[ "$first" == "$second" ]]
-grep -q ':status :unsupported' <<<"$first"
-grep -q 'E_COMPILER_SUBSET_NOT_IMPLEMENTED' <<<"$first"
+grep -q ':status :compiled' <<<"$first"
+grep -q ':state: disabled' <<<"$first" || grep -q 'state: disabled' <<<"$first"
 grep -q ':effects false' <<<"$first"
+printf '%s\n' "$first" > "$TEST_ROOT/compiled.edn"
+cargo run --quiet --locked \
+  --manifest-path "$SCRIPT_DIR/../../Cargo.toml" \
+  -p mcloving-jenkins-compiler-admission -- \
+  "$TEST_ROOT/compiled.edn" "$TEST_ROOT/Jenkinsfile" boundary-a \
+  "$ADMITTED_JOB" "$ADMITTED_GENERATION" > "$TEST_ROOT/admission.receipt"
+grep -qx 'status=admitted' "$TEST_ROOT/admission.receipt"
+grep -qx 'state=disabled' "$TEST_ROOT/admission.receipt"
+
+printf 'pipeline { agent any; stages { stage("Build") { steps { echo "ok" } } } }\n' \
+  > "$TEST_ROOT/unsupported.Jenkinsfile"
+unsupported=$("$SCRIPT_DIR/run-worker.sh" compile \
+  "$TEST_ROOT/unsupported.Jenkinsfile" boundary-unsupported \
+  "$ADMITTED_JOB" "$ADMITTED_GENERATION")
+grep -q ':status :unsupported' <<<"$unsupported"
+grep -q 'E_SOURCE_NOT_ADMITTED' <<<"$unsupported"
+
+sed 's/:effect-authority false/:effect-authority true/' \
+  "$TEST_ROOT/compiled.edn" > "$TEST_ROOT/authority-substitution.edn"
+if cargo run --quiet --locked \
+  --manifest-path "$SCRIPT_DIR/../../Cargo.toml" \
+  -p mcloving-jenkins-compiler-admission -- \
+  "$TEST_ROOT/authority-substitution.edn" "$TEST_ROOT/Jenkinsfile" boundary-a \
+  "$ADMITTED_JOB" "$ADMITTED_GENERATION" \
+  >"$TEST_ROOT/authority.out" 2>"$TEST_ROOT/authority.err"; then
+  echo "Rust admission accepted substituted effect authority" >&2
+  exit 1
+fi
 
 probe=$("$SCRIPT_DIR/run-worker.sh" probe boundary-probe)
 grep -q ':status :ok' <<<"$probe"
@@ -32,6 +67,7 @@ grep -q ":profile-sha256 \"$EXPECTED_PROFILE\"" <<<"$probe"
 
 ln -s "$TEST_ROOT/Jenkinsfile" "$TEST_ROOT/symlink"
 if "$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/symlink" boundary-symlink \
+  "$ADMITTED_JOB" "$ADMITTED_GENERATION" \
   >"$TEST_ROOT/symlink.out" 2>"$TEST_ROOT/symlink.err"; then
   echo "symlink source was not rejected" >&2
   exit 1
@@ -39,6 +75,7 @@ fi
 
 dd if=/dev/zero of="$TEST_ROOT/oversize" bs=262145 count=1 status=none
 if "$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/oversize" boundary-oversize \
+  "$ADMITTED_JOB" "$ADMITTED_GENERATION" \
   >"$TEST_ROOT/oversize.out" 2>"$TEST_ROOT/oversize.err"; then
   echo "oversize source was not rejected" >&2
   exit 1

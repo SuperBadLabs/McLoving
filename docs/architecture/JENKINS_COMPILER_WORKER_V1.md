@@ -16,10 +16,26 @@ source path. Unknown fields, operations, protocol versions, target profiles,
 source paths, digests, tagged values, trailing forms, and resource-limit
 violations fail closed with stable diagnostic codes.
 
-MIG-001 deliberately implements only `probe` and a fail-closed `compile`.
-Until MIG-003 admits a deterministic Declarative subset, a valid Jenkinsfile
-returns `unsupported` with `E_COMPILER_SUBSET_NOT_IMPLEMENTED`. No source is
-executed.
+MIG-003 admits one exact Mario-oracle case:
+`corpus-052-cinqict_jenkinsdev` at source SHA-256
+`666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100`.
+The admitted syntax is `pipeline`, `agent any`, ordered `stages`, literal stage
+names, `steps`, and literal `sh` bodies. It produces one direct
+`/bin/sh -xe -c` process per shell step. Any additional directive, dynamic
+expression, alternate agent, or source/provenance identity is unsupported.
+Groovy is used only to construct a CONVERSION-phase AST; no source is
+evaluated.
+
+The result includes deterministic strict YAML and a separate versioned
+operational-state import record. The latter preserves Mario's disabled state,
+configuration generation, reason, actor, effective time, inventory
+fingerprint, source hash, compiler, and profile. It grants no mutable
+JOBSTATE-001 transition or execution authority.
+
+The supported launcher refuses to return a `compiled` response unless the
+independent Rust admission binary accepts the exact response, source,
+request identity, job identity, and operational generation. Raw worker output
+is evidence, not an admission path.
 
 ## Mario target profile
 
@@ -63,9 +79,11 @@ The only supported launcher uses rootless Podman with:
 - a five-second process deadline; and
 - a 262,144-byte request/source limit plus one 65,536-byte response limit.
 
-Worker responses repeat an all-false authority ledger. Callers must still
-verify the container receipt and, beginning with MIG-003, independently reparse
-and validate all produced IR and canonical strict YAML in Rust.
+Worker responses repeat an all-false authority ledger. The independent Rust
+admission crate rejects noncanonical EDN, unexpected fields or types,
+authority/profile/source substitution, malformed or noncanonical pipeline and
+job-state YAML, semantic drift, hash substitution, or invalid canonical IR.
+Only after this reparse and validation does it issue a disabled import receipt.
 
 ## Verification
 
@@ -86,5 +104,8 @@ The rootless-container boundary suite independently proves:
 
 The successor-inventory-bound HeMan rebuild had image ID
 `344402b7e1a2b1831aa43184ee30db93ff8beaf13efaa80819d562511fd5a303`.
-This local image ID is supporting evidence, not a published release identity.
-Future source changes require a new image receipt and all gates again.
+The MIG-003 compiler rebuild has image ID
+`8459b3b080d4239daffa2d5ba632c707dfbd18657b0176fb0e6340ff5dd45548`.
+These local image IDs are supporting evidence, not published release
+identities. Future source changes require a new image receipt and all gates
+again.

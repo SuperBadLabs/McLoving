@@ -2,6 +2,7 @@
   "Versioned, bounded worker protocol. It is intentionally compile-only and deny-authority."
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
+            [mcloving.compat.compiler :as compiler]
             [mcloving.compat.profile :as profile])
   (:import (java.io ByteArrayOutputStream InputStream PushbackReader StringReader)
            (java.nio.file Files LinkOption Paths)))
@@ -97,6 +98,12 @@
        (<= 1 (count value) 96)
        (boolean (re-matches #"[A-Za-z0-9][A-Za-z0-9._:-]*" value))))
 
+(defn- valid-job-id?
+  [value]
+  (and (string? value)
+       (<= 1 (count value) 128)
+       (boolean (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]*" value))))
+
 (defn current-environment-keys
   []
   (set (keys (System/getenv))))
@@ -160,17 +167,39 @@
     :compile
     (do
       (exact-keys! request
-                   #{:operation :protocol :request-id :source-path
+                   #{:inventory-fingerprint :job-actor :job-effective-time
+                     :job-enabled :job-generation :job-id :job-reason
+                     :operation :protocol :request-id :source-path
                      :source-sha256 :target-profile-sha256})
       (when-not (valid-sha? (:source-sha256 request))
         (fail! "E_SOURCE_DIGEST"))
+      (when-not (and (valid-sha? (:job-generation request))
+                     (valid-sha? (:inventory-fingerprint request))
+                     (valid-job-id? (:job-id request))
+                     (boolean? (:job-enabled request))
+                     (string? (:job-reason request))
+                     (string? (:job-actor request))
+                     (string? (:job-effective-time request)))
+        (fail! "E_JOB_PROVENANCE"))
       (environment-safe!)
-      (assoc (base-response profile request :unsupported)
-             :diagnostic
-             (sorted-map
-              :code "E_COMPILER_SUBSET_NOT_IMPLEMENTED"
-              :message "source is outside the currently admitted compiler subset")
-             :source (source-receipt! request)))
+      (let [source-receipt (source-receipt! request)
+            source (Files/readString
+                    (Paths/get (:source-path request) (make-array String 0))
+                    java.nio.charset.StandardCharsets/UTF_8)]
+        (try
+          (assoc (base-response profile request :compiled)
+                 :result (compiler/compile-admitted!
+                          compiler-id profile request source)
+                 :source source-receipt)
+          (catch clojure.lang.ExceptionInfo exception
+            (assoc (base-response profile request :unsupported)
+                   :diagnostic
+                   (sorted-map
+                    :code (or (:code (ex-data exception))
+                              "E_COMPILER_INTERNAL")
+                    :message
+                    "source is outside the currently admitted compiler subset")
+                   :source source-receipt)))))
 
     (fail! "E_OPERATION")))
 
