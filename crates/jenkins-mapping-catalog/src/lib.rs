@@ -24,7 +24,7 @@ pub const PROFILE_SHA256: &str = "feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd
 pub const INVENTORY_SHA256: &str =
     "b1c2f81c74ec0ffc36971f358f920b2d0775c6009f474bea924448cd2a1915c1";
 pub const CORPUS_MANIFEST_SHA256: &str =
-    "0b1b7f291b309013e278d3eec7866e614a1de1306d9270c2fcf8c65975e6a30c";
+    "59faf74bb8ebfbd658f85b5224ec15ee7b0db841ad66b2da1326cd83adac4f2a";
 pub const SOURCE_SHA256: &str = "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100";
 pub const SOURCE_JOB_ID: &str = "corpus-052-cinqict_jenkinsdev";
 pub const PLUGIN_SHA256: &str = "a0f0f1464ce3592f76d0f0079ce9fc2d4272594f995bf3d1a7ede4cd5031452e";

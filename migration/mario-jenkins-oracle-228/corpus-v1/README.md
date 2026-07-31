@@ -64,6 +64,10 @@ silent fallback, undeclared host reads, credentials, network, and direct
 production effects are forbidden. The catalog does not increase native
 runnable or certified-equivalence coverage.
 
+Every non-admitted source has the stable worker-v1 disposition
+`E_SOURCE_NOT_ADMITTED`; the corpus verifier rejects aliases or placeholder
+diagnostics.
+
 Rebuild the joined views from the sealed evidence:
 
 ```sh

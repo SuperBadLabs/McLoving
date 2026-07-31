@@ -807,7 +807,7 @@ and validates canonical IR bytes, and rejects malformed, noncanonical,
 authority/profile/provenance/state/host-path/secret substitutions. The
 rootless boundary, full workspace tests/clippy, corpus verifier, and
 working-tree secret scan pass. The `MIG-003` successor corpus manifest is
-`0b1b7f291b309013e278d3eec7866e614a1de1306d9270c2fcf8c65975e6a30c`.
+`59faf74bb8ebfbd658f85b5224ec15ee7b0db841ad66b2da1326cd83adac4f2a`.
 No compiler result grants scheduler, credential, agent, trigger, connector,
 effect, canary, or cutover authority.
 
@@ -816,16 +816,16 @@ effect, canary, or cutover authority.
 `1479.v56e587f413a_7` and plugin SHA-256
 `a0f0f1464ce3592f76d0f0079ce9fc2d4272594f995bf3d1a7ede4cd5031452e`.
 The catalog byte digest is
-`b53d6a30c7dcbb799e4c6c939e4e267d7935ddb21916878a4c966395c73f3b62`
+`d383ab8e15593ca5cc2847633a1410b53e676442f60dfcca93606610d1f761c8`
 and its independently derived semantic digest is
-`2cda142fab4786e02c854488ab5fcadaf822706e961b7754bff6aa314d96be64`.
+`1349f2864edb360cf1a954eda0327fe6e2d42549296437690f24168e54f80907`.
 It is bound to the exact predecessor corpus and compiler profile, grants no
 authority, forbids floating mappings, fallback, network, credentials and host
 reads, and makes no certified-equivalence claim. Local-input,
 shared-resource, and cache semantics remain explicitly unearned. Rust strict
 YAML/schema admission and adversarial substitution gates pass. The catalog is
 included in successor corpus manifest
-`2ccbaa51c242343dcf03735e6545bccc44b80fa530bc0a675cd25a814c683e6c`.
+`a28283de801854836887e9bc6cffd43c10bb078dbeff343fdf92d19b470a74c2`.
 
 `W4-C` continues with `MIG-005A` active before shared-library work. `WIN-001`,
 `WIN-002`, and `WIN-003` remain independently active for their production and

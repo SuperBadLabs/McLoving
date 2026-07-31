@@ -196,7 +196,7 @@ def verify(root):
     )
     require(
         all(
-            row["worker_v1"] == "E_COMPILER_SUBSET_NOT_IMPLEMENTED"
+            row["worker_v1"] == "E_SOURCE_NOT_ADMITTED"
             for row in index
             if row["migration_class"] == "unsupported"
         ),

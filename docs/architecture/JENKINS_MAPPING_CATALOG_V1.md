@@ -37,8 +37,8 @@ undeclared host reads, authority substitution, profile/plugin/corpus
 substitution, and unearned local-input, shared-resource, or cache semantics.
 
 The v1 catalog byte SHA-256 is
-`b53d6a30c7dcbb799e4c6c939e4e267d7935ddb21916878a4c966395c73f3b62`;
+`d383ab8e15593ca5cc2847633a1410b53e676442f60dfcca93606610d1f761c8`;
 its semantic SHA-256 is
-`2cda142fab4786e02c854488ab5fcadaf822706e961b7754bff6aa314d96be64`.
+`1349f2864edb360cf1a954eda0327fe6e2d42549296437690f24168e54f80907`.
 It reports one mapping earned by one compiler-admitted case across 228 corpus
 sources and zero certified-equivalence cases.
