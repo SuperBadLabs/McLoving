@@ -14,7 +14,7 @@ use mcloving_state_transfer::{
     RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState,
     SecretDisposition, SecretReference, StateBundle, SystemIdentity, TransferBinding,
     TransferDirection, TransferError, TriggerCause, evaluate_change_predicate,
-    materialize_filesystem_entries, sha256, transform,
+    materialize_filesystem_entries, protections, sha256, transform,
 };
 
 fn digest(byte: u8) -> Digest {
@@ -358,12 +358,31 @@ fn provenance_and_scm_substitution_fail_closed() {
         Err(TransferError::BindingMismatch("source export digest"))
     );
 
-    let mut stale_scm = bundle;
+    let mut stale_scm = bundle.clone();
     stale_scm.jobs[0].builds[1].checkouts[0].previous_revision = Some("substituted".to_owned());
     assert!(matches!(
         transform(&stale_scm, &expected, &BTreeMap::new()),
         Err(TransferError::ScmBaselineMismatch { .. })
     ));
+
+    let mut unmatched_scm = bundle;
+    unmatched_scm.jobs[0].builds[1].checkouts[0].repository =
+        "ssh://git.example.test/substituted.git".to_owned();
+    assert!(matches!(
+        transform(&unmatched_scm, &expected, &BTreeMap::new()),
+        Err(TransferError::ScmBaselineMismatch { .. })
+    ));
+}
+
+#[test]
+fn conflicting_protection_records_use_the_general_protection_error() {
+    let (mut bundle, _) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].record.source_digest = bundle.jobs[0].builds[1].record.source_digest;
+    let result = protections(&bundle);
+    assert!(
+        matches!(result, Err(TransferError::DivergentProtection(_))),
+        "unexpected conflict result: {result:?}"
+    );
 }
 
 #[test]

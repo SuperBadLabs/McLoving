@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
 use mcloving_state_transfer::{
-    Digest, ExpectedBinding, LegalHold, Protection, StateBundle, TransferDirection,
-    record_provenance, sha256, transform,
+    Digest, ExpectedBinding, LegalHold, Protection, StateBundle, TransferBinding,
+    TransferDirection, canonical_bytes, record_provenance, sha256, transform,
 };
 use serde_json::{Value, json};
-use sqlx::Row;
+use sqlx::{Row, postgres::PgRow};
 use uuid::Uuid;
 
 use super::{Store, StoreError, audit, validate_audit_actor};
@@ -55,6 +55,25 @@ impl Store {
             ));
         }
 
+        // Validate and fingerprint the source bundle before destination
+        // protections are merged. This stable digest makes an exact replay
+        // recognizable even after a later receipt strengthens retention or
+        // appends legal holds for the same subjects.
+        let input_plan = transform(bundle, expected, &BTreeMap::new())
+            .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?;
+        let input_binding = &input_plan.bundle.binding;
+        let replay = select_replay(&mut tx, organization_id, project_id, input_binding).await?;
+        if let Some(replay) = replay {
+            let receipt = decode_replay(
+                &replay,
+                input_plan.binding_digest,
+                input_plan.bundle_digest,
+                input_binding.direction,
+            )?;
+            tx.commit().await?;
+            return Ok(receipt);
+        }
+
         let rows = sqlx::query(
             "SELECT subject_digest, retention_policy_id, retention_policy_version,
                     retention_policy_digest, retain_until_unix_ms,
@@ -79,13 +98,14 @@ impl Store {
             let subject = digest_array(row.try_get::<Vec<u8>, _>("subject_digest")?)?;
             let policy_digest =
                 digest_array(row.try_get::<Vec<u8>, _>("retention_policy_digest")?)?;
-            let holds =
+            let mut holds =
                 serde_json::from_value::<Vec<LegalHold>>(row.try_get::<Value, _>("active_holds")?)
                     .map_err(|error| {
                         StoreError::InvalidStateTransfer(format!(
                             "stored state-transfer legal holds are invalid: {error}"
                         ))
                     })?;
+            holds.sort_by(|left, right| left.hold_id.cmp(&right.hold_id));
             existing.insert(
                 subject,
                 Protection {
@@ -113,14 +133,14 @@ impl Store {
                  destination_generation, destination_configuration_digest,
                  source_export_digest, transform_implementation_digest,
                  transform_configuration_digest, binding_digest,
-                 bundle_digest, canonical_bundle, actor_subject
+                 input_bundle_digest, bundle_digest, canonical_bundle, actor_subject
              )
              VALUES (
                  $1, $2, $3, $4,
                  $5, $6, $7, $8,
                  $9, $10, $11, $12,
                  $13, $14, $15, $16,
-                 $17, $18, $19
+                 $17, $18, $19, $20
              )
              ON CONFLICT (
                  organization_id, project_id, direction,
@@ -148,6 +168,7 @@ impl Store {
         .bind(binding.transform_implementation_digest.as_slice())
         .bind(binding.transform_configuration_digest.as_slice())
         .bind(plan.binding_digest.as_slice())
+        .bind(input_plan.bundle_digest.as_slice())
         .bind(plan.bundle_digest.as_slice())
         .bind(&plan.canonical_bytes)
         .bind(actor_subject)
@@ -158,59 +179,21 @@ impl Store {
         let protections = mcloving_state_transfer::protections(&plan.bundle)
             .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?;
         let Some(receipt_id) = inserted else {
-            let replay = sqlx::query(
-                "SELECT id, binding_digest, bundle_digest, canonical_bundle
-                 FROM state_transfer_receipts
-                 WHERE organization_id = $1
-                   AND project_id = $2
-                   AND direction = $3
-                   AND source_kind = $4
-                   AND source_instance_id = $5
-                   AND source_generation = $6
-                   AND destination_kind = $7
-                   AND destination_instance_id = $8
-                   AND destination_generation = $9
-                   AND source_export_digest = $10
-                   AND transform_implementation_digest = $11
-                   AND transform_configuration_digest = $12",
-            )
-            .bind(organization_id)
-            .bind(project_id)
-            .bind(direction_name(binding.direction))
-            .bind(&binding.source.kind)
-            .bind(&binding.source.instance_id)
-            .bind(&binding.source.generation)
-            .bind(&binding.destination.kind)
-            .bind(&binding.destination.instance_id)
-            .bind(&binding.destination.generation)
-            .bind(binding.source_export_digest.as_slice())
-            .bind(binding.transform_implementation_digest.as_slice())
-            .bind(binding.transform_configuration_digest.as_slice())
-            .fetch_one(&mut *tx)
-            .await?;
-            let stored_binding = digest_array(replay.try_get::<Vec<u8>, _>("binding_digest")?)?;
-            let stored_bundle = digest_array(replay.try_get::<Vec<u8>, _>("bundle_digest")?)?;
-            let stored_bytes: Vec<u8> = replay.try_get("canonical_bundle")?;
-            if stored_binding != plan.binding_digest
-                || stored_bundle != plan.bundle_digest
-                || stored_bytes != plan.canonical_bytes
-            {
-                tx.rollback().await?;
-                return Err(StoreError::StateTransferConflict(
-                    "pinned transfer binding already has divergent canonical state".to_owned(),
-                ));
-            }
-            let receipt_id: Uuid = replay.try_get("id")?;
+            let replay = select_replay(&mut tx, organization_id, project_id, binding)
+                .await?
+                .ok_or_else(|| {
+                    StoreError::StateTransferConflict(
+                        "pinned transfer receipt disappeared during conflict resolution".to_owned(),
+                    )
+                })?;
+            let receipt = decode_replay(
+                &replay,
+                input_plan.binding_digest,
+                input_plan.bundle_digest,
+                binding.direction,
+            )?;
             tx.commit().await?;
-            return Ok(StateTransferReceipt {
-                id: receipt_id,
-                created: false,
-                direction: binding.direction,
-                binding_digest: plan.binding_digest,
-                bundle_digest: plan.bundle_digest,
-                record_count: records.len(),
-                protection_count: protections.len(),
-            });
+            return Ok(receipt);
         };
 
         for record in &records {
@@ -365,6 +348,91 @@ fn direction_name(direction: TransferDirection) -> &'static str {
         TransferDirection::JenkinsToMcLoving => "jenkins_to_mcloving",
         TransferDirection::McLovingToJenkins => "mcloving_to_jenkins",
     }
+}
+
+async fn select_replay(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+    binding: &TransferBinding,
+) -> Result<Option<PgRow>, StoreError> {
+    Ok(sqlx::query(
+        "SELECT id, binding_digest, input_bundle_digest, bundle_digest, canonical_bundle
+         FROM state_transfer_receipts
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND direction = $3
+           AND source_kind = $4
+           AND source_instance_id = $5
+           AND source_generation = $6
+           AND destination_kind = $7
+           AND destination_instance_id = $8
+           AND destination_generation = $9
+           AND source_export_digest = $10
+           AND transform_implementation_digest = $11
+           AND transform_configuration_digest = $12",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(direction_name(binding.direction))
+    .bind(&binding.source.kind)
+    .bind(&binding.source.instance_id)
+    .bind(&binding.source.generation)
+    .bind(&binding.destination.kind)
+    .bind(&binding.destination.instance_id)
+    .bind(&binding.destination.generation)
+    .bind(binding.source_export_digest.as_slice())
+    .bind(binding.transform_implementation_digest.as_slice())
+    .bind(binding.transform_configuration_digest.as_slice())
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+fn decode_replay(
+    replay: &PgRow,
+    input_binding_digest: Digest,
+    input_bundle_digest: Digest,
+    direction: TransferDirection,
+) -> Result<StateTransferReceipt, StoreError> {
+    let stored_binding = digest_array(replay.try_get::<Vec<u8>, _>("binding_digest")?)?;
+    let stored_input = digest_array(replay.try_get::<Vec<u8>, _>("input_bundle_digest")?)?;
+    if stored_binding != input_binding_digest || stored_input != input_bundle_digest {
+        return Err(StoreError::StateTransferConflict(
+            "pinned transfer binding already has divergent source state".to_owned(),
+        ));
+    }
+    let stored_bundle = digest_array(replay.try_get::<Vec<u8>, _>("bundle_digest")?)?;
+    let stored_bytes: Vec<u8> = replay.try_get("canonical_bundle")?;
+    if sha256(&stored_bytes) != stored_bundle {
+        return Err(StoreError::InvalidStateTransfer(
+            "stored state-transfer canonical bytes do not match their digest".to_owned(),
+        ));
+    }
+    let stored: StateBundle = serde_json::from_slice(&stored_bytes).map_err(|error| {
+        StoreError::InvalidStateTransfer(format!(
+            "stored state-transfer canonical bundle is invalid: {error}"
+        ))
+    })?;
+    if canonical_bytes(&stored)
+        .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?
+        != stored_bytes
+    {
+        return Err(StoreError::InvalidStateTransfer(
+            "stored state-transfer bundle is not canonical".to_owned(),
+        ));
+    }
+    let protection_count = mcloving_state_transfer::protections(&stored)
+        .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?
+        .len();
+    Ok(StateTransferReceipt {
+        id: replay.try_get("id")?,
+        created: false,
+        direction,
+        binding_digest: stored_binding,
+        bundle_digest: stored_bundle,
+        record_count: record_provenance(&stored).len(),
+        protection_count,
+    })
 }
 
 fn digest_array(bytes: Vec<u8>) -> Result<Digest, StoreError> {

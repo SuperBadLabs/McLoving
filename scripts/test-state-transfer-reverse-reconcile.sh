@@ -20,6 +20,11 @@ network="mcloving-mig005a-reverse-$$"
 port=$((19550 + ($$ % 400)))
 staging="$output_root/imported-build-3"
 
+if [[ -e "$staging" ]]; then
+  echo "refusing to reuse existing reverse-import staging path: $staging" >&2
+  exit 73
+fi
+
 cleanup() {
   podman rm -f "$container" >/dev/null 2>&1 || true
   podman network rm "$network" >/dev/null 2>&1 || true

@@ -108,6 +108,37 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         .expect("import stronger destination protections");
     assert!(stronger_receipt.created);
 
+    let replay_after_strengthening = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &bundle,
+            &expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("replay remains exact after later protections strengthen");
+    assert!(!replay_after_strengthening.created);
+    assert_eq!(replay_after_strengthening.id, first.id);
+
+    let subject = bundle.jobs[0].builds[0].record.source_digest;
+    sqlx::query(
+        "UPDATE state_transfer_protections
+         SET active_holds = (
+             SELECT jsonb_agg(value ORDER BY value ->> 'hold_id' DESC)
+             FROM jsonb_array_elements(active_holds)
+         )
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect("database permits a semantically equivalent hold-array reorder");
+
     let (regression_source, regression_expected) = transfer_bundle(22);
     let monotonic = store
         .import_state_transfer(
@@ -152,7 +183,29 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         Err(StoreError::StateTransferConflict(_))
     ));
 
-    let subject = bundle.jobs[0].builds[0].record.source_digest;
+    let duplicate_hold = sqlx::query(
+        "UPDATE state_transfer_protections
+         SET active_holds = active_holds || jsonb_build_array(
+             (active_holds -> 0) || jsonb_build_object('reason', 'substituted')
+         )
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects duplicate legal-hold identity");
+    assert_eq!(
+        duplicate_hold
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
     let omitted_hold = sqlx::query(
         "UPDATE state_transfer_protections
          SET active_holds = '[]'::jsonb
@@ -168,6 +221,25 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
     .expect_err("database rejects legal-hold omission");
     assert_eq!(
         omitted_hold
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let deleted_protection = sqlx::query(
+        "DELETE FROM state_transfer_protections
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects effective-protection deletion");
+    assert_eq!(
+        deleted_protection
             .as_database_error()
             .and_then(|error| error.code())
             .as_deref(),

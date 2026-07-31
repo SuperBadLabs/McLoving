@@ -37,6 +37,9 @@ CREATE TABLE state_transfer_receipts (
         octet_length(transform_configuration_digest) = 32
     ),
     binding_digest bytea NOT NULL CHECK (octet_length(binding_digest) = 32),
+    input_bundle_digest bytea NOT NULL CHECK (
+        octet_length(input_bundle_digest) = 32
+    ),
     bundle_digest bytea NOT NULL CHECK (octet_length(bundle_digest) = 32),
     canonical_bundle bytea NOT NULL CHECK (
         octet_length(canonical_bundle) BETWEEN 1 AND 67108864
@@ -73,6 +76,46 @@ CREATE TABLE state_transfer_records (
         REFERENCES state_transfer_receipts(id, organization_id)
 );
 
+CREATE FUNCTION mcloving_state_transfer_holds_valid(holds jsonb)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+STRICT
+SET search_path = public, pg_temp
+AS $$
+    SELECT jsonb_typeof(holds) = 'array'
+       AND NOT EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(holds) AS entry(value)
+           WHERE jsonb_typeof(value) <> 'object'
+              OR jsonb_typeof(value -> 'record') IS DISTINCT FROM 'object'
+              OR jsonb_typeof(value -> 'hold_id') IS DISTINCT FROM 'string'
+              OR length(value ->> 'hold_id') NOT BETWEEN 1 AND 256
+              OR jsonb_typeof(value -> 'scope') IS DISTINCT FROM 'string'
+              OR length(value ->> 'scope') NOT BETWEEN 1 AND 1024
+              OR jsonb_typeof(value -> 'reason') IS DISTINCT FROM 'string'
+              OR length(value ->> 'reason') NOT BETWEEN 1 AND 1024
+              OR jsonb_typeof(value -> 'placed_at_unix_ms') IS DISTINCT FROM 'number'
+              OR (value ->> 'placed_at_unix_ms')::numeric < 0
+              OR jsonb_typeof(value -> 'generation') IS DISTINCT FROM 'number'
+              OR (value ->> 'generation')::numeric <= 0
+              OR jsonb_typeof(value -> 'release_authority') IS DISTINCT FROM 'string'
+              OR length(value ->> 'release_authority') NOT BETWEEN 1 AND 512
+              OR jsonb_typeof(value -> 'record' -> 'id') IS DISTINCT FROM 'string'
+              OR length(value -> 'record' ->> 'id') NOT BETWEEN 1 AND 1024
+              OR jsonb_typeof(value -> 'record' -> 'source_digest') IS DISTINCT FROM 'array'
+              OR jsonb_array_length(value -> 'record' -> 'source_digest') <> 32
+              OR jsonb_typeof(value -> 'record' -> 'provenance') IS DISTINCT FROM 'string'
+              OR length(value -> 'record' ->> 'provenance') NOT BETWEEN 1 AND 4096
+       )
+       AND (
+           SELECT count(*) = count(DISTINCT value ->> 'hold_id')
+           FROM jsonb_array_elements(holds) AS entry(value)
+       )
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_state_transfer_holds_valid(jsonb) FROM PUBLIC;
+
 CREATE TABLE state_transfer_protections (
     organization_id uuid NOT NULL,
     project_id uuid NOT NULL,
@@ -87,7 +130,9 @@ CREATE TABLE state_transfer_protections (
         octet_length(retention_policy_digest) = 32
     ),
     retain_until_unix_ms bigint NOT NULL CHECK (retain_until_unix_ms >= 0),
-    active_holds jsonb NOT NULL CHECK (jsonb_typeof(active_holds) = 'array'),
+    active_holds jsonb NOT NULL CHECK (
+        mcloving_state_transfer_holds_valid(active_holds)
+    ),
     protection_digest bytea NOT NULL CHECK (octet_length(protection_digest) = 32),
     receipt_id uuid NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -126,6 +171,11 @@ LANGUAGE plpgsql
 SET search_path = public, pg_temp
 AS $$
 BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer protection cannot be deleted';
+    END IF;
     IF NEW.organization_id IS DISTINCT FROM OLD.organization_id
        OR NEW.project_id IS DISTINCT FROM OLD.project_id
        OR NEW.subject_digest IS DISTINCT FROM OLD.subject_digest
@@ -151,7 +201,7 @@ $$;
 REVOKE ALL ON FUNCTION mcloving_state_transfer_protection_monotonic() FROM PUBLIC;
 
 CREATE TRIGGER state_transfer_protections_monotonic
-BEFORE UPDATE ON state_transfer_protections
+BEFORE UPDATE OR DELETE ON state_transfer_protections
 FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_protection_monotonic();
 
 GRANT SELECT, INSERT ON state_transfer_receipts, state_transfer_records

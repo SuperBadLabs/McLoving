@@ -12,7 +12,8 @@ because they carry machine-generated record graphs, byte digests, and replay
 bindings rather than human intent.
 
 Every bundle binds the transfer direction, exact source and destination
-identities and generations, source-export digest, transform implementation and
+identities and generations, source-export digest, canonical input-bundle digest,
+transform implementation and
 configuration digests, conflict policy, provenance, and the complete sorted
 record inventory. The model preserves:
 
@@ -37,8 +38,9 @@ hold identity, and unauthorized hold release fail closed.
 
 Migration `0017_state_transfer.sql` adds immutable receipt, record-provenance,
 and effective-protection truth to PostgreSQL. Import runs in one transaction,
-locks the destination project's transfer history, admits an exact replay only
-when canonical bytes and every binding match, monotonically merges destination
+locks the destination project's transfer history, fingerprints canonical input
+before destination protections are merged, admits an exact replay only when
+that input and every binding match, monotonically merges destination
 retention and active holds before publishing the receipt, appends audit truth,
 and writes the transactional outbox. Database triggers deny receipt/record
 mutation, protection deletion, deadline shortening, hold omission, and hold
@@ -72,12 +74,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `358d4cb8f96dfbc7fbca7fb8ee30c970bfc7b9d05360d26a16ac9e1717678b0e`;
-- source-evidence manifest SHA-256 `972729920096cda51a1a5dd69a9b2a7a319586bba8787d7f9584ac3365eb44ac`;
-- forward bundle SHA-256 `4fa8fc1d23f30845e2674c1f0d8411e4453e9f1237e4342a9a956b61d853f9cf`;
-- reverse bundle SHA-256 `70308c80ba0ae0e756e9abf257845b6af2c1f206b107b2c83cd8f7c0d987db1e`;
-- reverse-evidence manifest SHA-256 `edb3bd8734058ee15a3ab0efec405665f039715636a2b8497b3df4bd08dfe130`;
-- sealed transform-evidence manifest SHA-256 `c4cac4c4df3eba5b04b972d04e41a7b8a4250dd18e2a8ceded73cb247ad09bb6`.
+- transform binary SHA-256 `d601288f08d6db44976f6d3bfd74f988632cfb9d23795da47ca9e7954fe6cc61`;
+- source-evidence manifest SHA-256 `9ed6a2bcce9cf356f99cb2760d73584077020eb861225b110dc20bf5ce184e7a`;
+- forward bundle SHA-256 `22d0292d6946560895ac04631c5b0a75256474668190ddb6f0d9520ff399a98d`;
+- reverse bundle SHA-256 `57f1a76bc796ded69e2f78e87f4ca9aae78b9b5b609dd1d22bdc8fa76cf6f84f`;
+- reverse-evidence manifest SHA-256 `fadca66fd5977ebfbdffa4ab1c48ae599f534e8375b7e472a3affde5f0c1be5c`;
+- sealed transform-evidence manifest SHA-256 `4a47f269c931cd4a315d4667cbd07ce3fa88168f1e5a056fd738f2e3fcd6440b`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 112 record-provenance rows, eight effective

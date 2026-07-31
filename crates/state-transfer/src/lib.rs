@@ -402,6 +402,8 @@ pub enum TransferError {
     DivergentHold(String),
     #[error("equal retention deadline has divergent policy for subject {0:?}")]
     DivergentRetention(Digest),
+    #[error("protection records diverged for subject {0:?}")]
+    DivergentProtection(Digest),
     #[error("canonical state serialization failed: {0}")]
     Serialization(String),
     #[error("state-transfer materialization failed: {0}")]
@@ -1133,16 +1135,28 @@ fn validate_scm_baseline(
     current: &BuildState,
 ) -> Result<(), TransferError> {
     for current_scm in &current.checkouts {
-        if let Some(previous_scm) = previous.checkouts.iter().find(|candidate| {
+        let previous_scm = previous.checkouts.iter().find(|candidate| {
             candidate.provider == current_scm.provider
                 && candidate.repository == current_scm.repository
                 && candidate.reference == current_scm.reference
-        }) && current_scm.previous_revision.as_deref() != Some(previous_scm.revision.as_str())
-        {
-            return Err(TransferError::ScmBaselineMismatch {
-                job: job.to_owned(),
-                build: current.number,
-            });
+        });
+        match previous_scm {
+            Some(previous_scm)
+                if current_scm.previous_revision.as_deref()
+                    != Some(previous_scm.revision.as_str()) =>
+            {
+                return Err(TransferError::ScmBaselineMismatch {
+                    job: job.to_owned(),
+                    build: current.number,
+                });
+            }
+            None if current_scm.previous_revision.is_some() => {
+                return Err(TransferError::ScmBaselineMismatch {
+                    job: job.to_owned(),
+                    build: current.number,
+                });
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -1506,7 +1520,9 @@ fn insert_protection(
     protection: &Protection,
 ) -> Result<(), TransferError> {
     match protections.get(&subject) {
-        Some(existing) if existing != protection => Err(TransferError::DivergentRetention(subject)),
+        Some(existing) if existing != protection => {
+            Err(TransferError::DivergentProtection(subject))
+        }
         Some(_) => Ok(()),
         None => {
             protections.insert(subject, protection.clone());
