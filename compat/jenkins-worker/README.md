@@ -28,8 +28,9 @@ dropped, `no-new-privileges`, one CPU, 512 MiB memory, 64 PIDs, bounded file
 descriptors, a 16 MiB no-exec tmpfs, a cleared and allowlisted environment, a
 five-second deadline, and a 64 KiB single-response limit. Inherited image
 volumes are ignored, preventing Jenkins' base-image declaration from silently
-creating a writable home volume. A `compiled` response is not returned by the
-launcher until the independent Rust admission binary accepts it.
+creating a writable home volume. No `compile` response is returned by the
+launcher until the independent Rust validator has parsed and accepted its
+exact status-specific envelope.
 
 The protocol is one bounded EDN request and one canonical EDN response.
 Protocol v1 supports `probe` and `compile`. MIG-003 admits exactly the

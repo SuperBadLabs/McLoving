@@ -53,6 +53,15 @@ pub struct AdmissionReceipt {
     pub state: String,
 }
 
+/// Independently validated worker response. Only compiled responses carry an
+/// admission receipt; unsupported and rejected responses remain deny-authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidatedResponse {
+    Admitted(AdmissionReceipt),
+    Unsupported { code: String },
+    Rejected { code: String },
+}
+
 /// Stable independent-admission failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdmissionError {
@@ -87,33 +96,121 @@ enum Edn {
     Integer(i64),
 }
 
+/// Reparse and independently validate every compile response before it can
+/// cross the isolated worker boundary.
+pub fn validate_response(
+    response: &[u8],
+    expected: ExpectedAdmission<'_>,
+) -> Result<ValidatedResponse, AdmissionError> {
+    let parsed = parse_canonical_response(response)?;
+    let Edn::Map(root) = &parsed else {
+        return Err(AdmissionError::new("E_RESPONSE_FIELDS", "expected map"));
+    };
+    let Edn::Keyword(status) = field(root, "status")? else {
+        return Err(AdmissionError::new(
+            "E_RESPONSE_TYPE",
+            "status must be a keyword",
+        ));
+    };
+
+    match status.as_str() {
+        "compiled" => admit_response(response, expected).map(ValidatedResponse::Admitted),
+        "unsupported" => {
+            let root = exact_map(
+                &parsed,
+                &[
+                    "authority",
+                    "compiler",
+                    "diagnostic",
+                    "profile",
+                    "protocol",
+                    "request-id",
+                    "source",
+                    "status",
+                ],
+                "E_RESPONSE_FIELDS",
+            )?;
+            validate_common_response(root, expected.request_id)?;
+            expect_keyword(root, "status", "unsupported")?;
+            validate_profile(field(root, "profile")?)?;
+            validate_source_receipt(field(root, "source")?, expected.source)?;
+            let code = validate_diagnostic(
+                field(root, "diagnostic")?,
+                &[
+                    "E_AGENT_UNSUPPORTED",
+                    "E_COMPILER_INTERNAL",
+                    "E_DECLARATIVE_ROOT",
+                    "E_DIRECTIVE_UNSUPPORTED",
+                    "E_SOURCE_NOT_ADMITTED",
+                    "E_STAGE_ARGUMENT",
+                    "E_STAGE_BODY",
+                    "E_STAGE_DUPLICATE",
+                    "E_STAGE_DYNAMIC",
+                    "E_STAGE_NAME",
+                    "E_STAGE_UNSUPPORTED",
+                    "E_STAGES_BODY",
+                    "E_STEP_ARGUMENT",
+                    "E_STEP_DYNAMIC",
+                    "E_STEP_UNSUPPORTED",
+                ],
+                "source is outside the currently admitted compiler subset",
+            )?;
+            Ok(ValidatedResponse::Unsupported { code })
+        }
+        "rejected" => {
+            let root = exact_map(
+                &parsed,
+                &["authority", "compiler", "diagnostic", "protocol", "status"],
+                "E_RESPONSE_FIELDS",
+            )?;
+            expect_string(root, "protocol", PROTOCOL)?;
+            expect_string(root, "compiler", COMPILER)?;
+            expect_keyword(root, "status", "rejected")?;
+            validate_authority(field(root, "authority")?)?;
+            let code = validate_diagnostic(
+                field(root, "diagnostic")?,
+                &[
+                    "E_ENV_AUTHORITY",
+                    "E_JOB_PROVENANCE",
+                    "E_OPERATION",
+                    "E_PROFILE_MISMATCH",
+                    "E_PROFILE_MISSING",
+                    "E_PROFILE_PLUGIN_CONTENT",
+                    "E_PROFILE_PLUGIN_MANIFEST",
+                    "E_PROFILE_RUNTIME_CONTENT",
+                    "E_PROTOCOL_VERSION",
+                    "E_REQUEST_EMPTY",
+                    "E_REQUEST_FIELDS",
+                    "E_REQUEST_ID",
+                    "E_REQUEST_INVALID",
+                    "E_REQUEST_TAGGED",
+                    "E_REQUEST_TOO_LARGE",
+                    "E_REQUEST_TRAILING",
+                    "E_REQUEST_TYPE",
+                    "E_SOURCE_DIGEST",
+                    "E_SOURCE_PATH",
+                    "E_SOURCE_TOO_LARGE",
+                    "E_SOURCE_TYPE",
+                    "E_TARGET_PROFILE",
+                    "E_WORKER_INTERNAL",
+                ],
+                "request rejected without execution authority",
+            )?;
+            Ok(ValidatedResponse::Rejected { code })
+        }
+        _ => Err(AdmissionError::new(
+            "E_RESPONSE_STATUS",
+            format!("unexpected compile response status: {status}"),
+        )),
+    }
+}
+
 /// Reparse and independently validate one worker response.
 pub fn admit_response(
     response: &[u8],
     expected: ExpectedAdmission<'_>,
 ) -> Result<AdmissionReceipt, AdmissionError> {
-    if response.len() > MAX_RESPONSE_BYTES {
-        return Err(AdmissionError::new(
-            "E_RESPONSE_TOO_LARGE",
-            "worker response exceeds 65536 bytes",
-        ));
-    }
-    let text = std::str::from_utf8(response)
-        .map_err(|_| AdmissionError::new("E_RESPONSE_UTF8", "response is not UTF-8"))?;
-    let canonical = text.strip_suffix('\n').unwrap_or(text);
-    if canonical.contains('\n') && text.ends_with("\n\n") {
-        return Err(AdmissionError::new(
-            "E_RESPONSE_CANONICAL",
-            "response has more than one terminal newline",
-        ));
-    }
-    let parsed = EdnParser::new(canonical).parse()?;
-    if render_edn(&parsed) != canonical {
-        return Err(AdmissionError::new(
-            "E_RESPONSE_CANONICAL",
-            "response is not canonical EDN",
-        ));
-    }
+    let parsed = parse_canonical_response(response)?;
 
     let root = exact_map(
         &parsed,
@@ -129,11 +226,8 @@ pub fn admit_response(
         ],
         "E_RESPONSE_FIELDS",
     )?;
-    expect_string(root, "protocol", PROTOCOL)?;
-    expect_string(root, "compiler", COMPILER)?;
-    expect_string(root, "request-id", expected.request_id)?;
+    validate_common_response(root, expected.request_id)?;
     expect_keyword(root, "status", "compiled")?;
-    validate_authority(field(root, "authority")?)?;
     validate_profile(field(root, "profile")?)?;
 
     let source_sha256 = sha256_hex(expected.source);
@@ -146,13 +240,7 @@ pub fn admit_response(
             "caller expectations do not identify the admitted Mario oracle case",
         ));
     }
-    let source = exact_map(
-        field(root, "source")?,
-        &["bytes", "sha256"],
-        "E_SOURCE_RECEIPT",
-    )?;
-    expect_integer(source, "bytes", expected.source.len() as i64)?;
-    expect_string(source, "sha256", &source_sha256)?;
+    validate_source_receipt(field(root, "source")?, expected.source)?;
 
     let result = exact_map(
         field(root, "result")?,
@@ -211,6 +299,66 @@ pub fn admit_response(
         steps: summary.steps,
         state: "disabled".to_owned(),
     })
+}
+
+fn parse_canonical_response(response: &[u8]) -> Result<Edn, AdmissionError> {
+    if response.len() > MAX_RESPONSE_BYTES {
+        return Err(AdmissionError::new(
+            "E_RESPONSE_TOO_LARGE",
+            "worker response exceeds 65536 bytes",
+        ));
+    }
+    let text = std::str::from_utf8(response)
+        .map_err(|_| AdmissionError::new("E_RESPONSE_UTF8", "response is not UTF-8"))?;
+    let canonical = text.strip_suffix('\n').unwrap_or(text);
+    if canonical.contains('\n') && text.ends_with("\n\n") {
+        return Err(AdmissionError::new(
+            "E_RESPONSE_CANONICAL",
+            "response has more than one terminal newline",
+        ));
+    }
+    let parsed = EdnParser::new(canonical).parse()?;
+    if render_edn(&parsed) != canonical {
+        return Err(AdmissionError::new(
+            "E_RESPONSE_CANONICAL",
+            "response is not canonical EDN",
+        ));
+    }
+
+    Ok(parsed)
+}
+
+fn validate_common_response(
+    root: &BTreeMap<String, Edn>,
+    request_id: &str,
+) -> Result<(), AdmissionError> {
+    expect_string(root, "protocol", PROTOCOL)?;
+    expect_string(root, "compiler", COMPILER)?;
+    expect_string(root, "request-id", request_id)?;
+    validate_authority(field(root, "authority")?)
+}
+
+fn validate_source_receipt(value: &Edn, source: &[u8]) -> Result<(), AdmissionError> {
+    let receipt = exact_map(value, &["bytes", "sha256"], "E_SOURCE_RECEIPT")?;
+    expect_integer(receipt, "bytes", source.len() as i64)?;
+    expect_string(receipt, "sha256", &sha256_hex(source))
+}
+
+fn validate_diagnostic(
+    value: &Edn,
+    allowed_codes: &[&str],
+    expected_message: &str,
+) -> Result<String, AdmissionError> {
+    let diagnostic = exact_map(value, &["code", "message"], "E_DIAGNOSTIC_FIELDS")?;
+    let code = string_field(diagnostic, "code")?;
+    if !allowed_codes.contains(&code) {
+        return Err(AdmissionError::new(
+            "E_DIAGNOSTIC_CODE",
+            format!("unexpected diagnostic code: {code}"),
+        ));
+    }
+    expect_string(diagnostic, "message", expected_message)?;
+    Ok(code.to_owned())
 }
 
 fn validate_authority(value: &Edn) -> Result<(), AdmissionError> {

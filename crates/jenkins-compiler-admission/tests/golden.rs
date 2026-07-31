@@ -1,10 +1,12 @@
 use mcloving_jenkins_compiler_admission::{
     ADMITTED_JOB_GENERATION, ADMITTED_JOB_ID, ADMITTED_SOURCE_SHA256, ExpectedAdmission,
-    admit_response,
+    ValidatedResponse, admit_response, validate_response,
 };
 use sha2::{Digest, Sha256};
 
 const RESPONSE: &[u8] = include_bytes!("fixtures/mig003-golden.edn");
+const UNSUPPORTED: &[u8] = include_bytes!("fixtures/mig003-unsupported.edn");
+const REJECTED: &[u8] = include_bytes!("fixtures/rejected.edn");
 const SOURCE: &[u8] = include_bytes!(
     "../../../migration/mario-jenkins-oracle-228/corpus-v1/sources/cinqict_jenkinsdev.Jenkinsfile"
 );
@@ -37,6 +39,43 @@ fn exact_worker_fixture_is_independently_admitted() {
         receipt.semantic_ir_sha256,
         "2a9b8b7bcd076950c67de874bd1e2b693af511ad55a7de3495d5c0b4210349d3"
     );
+}
+
+#[test]
+fn every_compile_status_is_independently_validated() {
+    assert!(matches!(
+        validate_response(RESPONSE, expected()).unwrap(),
+        ValidatedResponse::Admitted(_)
+    ));
+    assert_eq!(
+        validate_response(UNSUPPORTED, expected()).unwrap(),
+        ValidatedResponse::Unsupported {
+            code: "E_DIRECTIVE_UNSUPPORTED".to_owned()
+        }
+    );
+    assert_eq!(
+        validate_response(REJECTED, expected()).unwrap(),
+        ValidatedResponse::Rejected {
+            code: "E_ENV_AUTHORITY".to_owned()
+        }
+    );
+}
+
+#[test]
+fn alternate_edn_whitespace_cannot_bypass_compiled_admission() {
+    let mutation = String::from_utf8(RESPONSE.to_vec())
+        .unwrap()
+        .replace(":status :compiled", ":status,:compiled");
+    assert!(mutation.contains(":status,:compiled"));
+    assert!(validate_response(mutation.as_bytes(), expected()).is_err());
+}
+
+#[test]
+fn undeclared_worker_diagnostics_fail_closed() {
+    let mutation = String::from_utf8(REJECTED.to_vec())
+        .unwrap()
+        .replace("E_ENV_AUTHORITY", "E_UNDECLARED_DIAGNOSTIC");
+    assert!(validate_response(mutation.as_bytes(), expected()).is_err());
 }
 
 #[test]

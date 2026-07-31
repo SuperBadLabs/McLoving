@@ -115,8 +115,7 @@ set -e
   exit 70
 }
 
-if [[ "$OPERATION" == "compile" ]] &&
-  grep -q ':status :compiled' "$OUTPUT"; then
+if [[ "$OPERATION" == "compile" ]]; then
   ADMISSION_BIN=${MCLOVING_JENKINS_ADMISSION_BIN:-"$SCRIPT_DIR/../../target/debug/mcloving-jenkins-compiler-admission"}
   [[ -x "$ADMISSION_BIN" ]] || {
     echo "independent Rust admission binary is missing" >&2
