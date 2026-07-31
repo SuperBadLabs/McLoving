@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,67 @@ SPEC.loader.exec_module(IMPACT)
 
 
 class WindowsAgentImpactTests(unittest.TestCase):
+    def test_rename_preserves_source_and_destination_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            repository = Path(root)
+            subprocess.run(["git", "init"], cwd=repository, check=True, capture_output=True)
+            subprocess.run(
+                ["git", "config", "user.email", "classifier@example.invalid"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "Classifier Test"],
+                cwd=repository,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "config", "diff.renames", "true"],
+                cwd=repository,
+                check=True,
+            )
+            scripts = repository / "scripts"
+            scripts.mkdir()
+            source = scripts / "windows-agent-war.ps1"
+            source.write_text("Write-Host 'war'\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "base"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+            )
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            source.rename(scripts / "windows-war.ps1")
+            subprocess.run(["git", "add", "-A"], cwd=repository, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "rename"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+            )
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=repository,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            paths = IMPACT.changed_paths(base, head, repository)
+
+        self.assertEqual(
+            paths,
+            {"scripts/windows-agent-war.ps1", "scripts/windows-war.ps1"},
+        )
+
     def test_unrelated_workspace_member_does_not_trigger(self) -> None:
         run_windows, reason = IMPACT.classify(
             {"crates/jenkins-inventory/src/lib.rs", "Cargo.toml", "Cargo.lock"},
