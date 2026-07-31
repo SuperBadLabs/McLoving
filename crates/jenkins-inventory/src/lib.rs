@@ -1217,7 +1217,8 @@ fn validate_runtime_dependencies(
         .into_iter()
         .flatten()
         .any(|reference| !reference.trim().is_empty());
-        if has_secret_reference && dependency.confidentiality != "secret" {
+        let has_secret_evidence = has_secret_reference || dependency.secret_consumer.is_some();
+        if has_secret_evidence && dependency.confidentiality != "secret" {
             return Err(InventoryError::new(
                 "INV_CREDENTIAL_CONFIDENTIALITY",
                 format!(
@@ -1226,7 +1227,7 @@ fn validate_runtime_dependencies(
                 ),
             ));
         }
-        if (dependency.confidentiality == "secret" || has_secret_reference)
+        if (dependency.confidentiality == "secret" || has_secret_evidence)
             && dependency.secret_consumer.is_none()
         {
             return Err(InventoryError::new(

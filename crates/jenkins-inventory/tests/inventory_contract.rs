@@ -258,6 +258,22 @@ fn credential_references_cannot_downgrade_confidentiality() {
 }
 
 #[test]
+fn secret_consumer_evidence_cannot_downgrade_confidentiality() {
+    let directory = TestDirectory::new("consumer-confidentiality");
+    let mut bundle = fixture();
+    let dependency = &mut bundle.runtime_dependencies.jobs[1].dependencies[0];
+    dependency.confidentiality = "public".to_owned();
+    dependency.credential_reference = None;
+    dependency.redaction_reference = None;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("secret-consumer label downgrade must fail");
+    assert_eq!(error.code, "INV_CREDENTIAL_CONFIDENTIALITY");
+}
+
+#[test]
 fn secret_consumer_taint_must_match_and_have_a_path() {
     let directory = TestDirectory::new("secret-taint-mismatch");
     let mut bundle = fixture();
@@ -953,6 +969,7 @@ fn reconciliation_strictly_validates_the_derived_ledger() {
         dependency.confidentiality = "internal".to_owned();
         dependency.credential_reference = None;
         dependency.redaction_reference = None;
+        dependency.secret_consumer = None;
         bundle.runtime_dependencies.jobs[1]
             .dependencies
             .push(dependency);
