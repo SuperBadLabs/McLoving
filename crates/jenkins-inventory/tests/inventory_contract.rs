@@ -805,6 +805,53 @@ fn reconciliation_requires_runtime_coverage_for_excluded_jobs() {
 }
 
 #[test]
+fn reconciliation_rejects_cross_epoch_per_job_evidence_replay() {
+    let directory = TestDirectory::new("cross-epoch-runtime-replay");
+    let mut bundle = fixture();
+    let stale_runtime = bundle.runtime_dependencies.jobs[1].clone();
+    for binding in [
+        &mut bundle.job_graph.binding,
+        &mut bundle.identity_clients.binding,
+        &mut bundle.runtime_dependencies.binding,
+        &mut bundle.persistent_state.binding,
+    ] {
+        binding.epoch_id = "epoch-2".to_owned();
+        binding.source_generation = "generation-43".to_owned();
+    }
+    refresh_population_commitments(&mut bundle);
+    bundle.runtime_dependencies.jobs[1] = stale_runtime;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("stale runtime evidence must fail");
+    assert_eq!(error.code, "INV_COUNT_SUBJECT_MISMATCH");
+}
+
+#[test]
+fn reconciliation_rejects_cross_domain_empty_identity_set_evidence() {
+    let directory = TestDirectory::new("empty-identity-domain");
+    let mut bundle = fixture();
+    bundle.identity_clients.principals.clear();
+    bundle.identity_clients.acl_entries.clear();
+    bundle.identity_clients.clients.clear();
+    bundle.identity_clients.principal_count.count = 0;
+    bundle.identity_clients.acl_entry_count.count = 0;
+    bundle.identity_clients.client_count.count = 0;
+    bundle.persistent_state.jobs[1].records[0]
+        .external_consumers
+        .clear();
+    refresh_population_commitments(&mut bundle);
+    bundle.identity_clients.acl_entry_set = bundle.identity_clients.principal_set.clone();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("cross-domain identity evidence must fail");
+    assert_eq!(error.code, "INV_ACL_SET_MISMATCH");
+}
+
+#[test]
 fn reconciliation_rejects_runtime_dependency_population_omission() {
     let directory = TestDirectory::new("runtime-dependency-count");
     let mut bundle = fixture();
@@ -1460,7 +1507,7 @@ fn fixture() -> Fixture {
             controller_job_count: count_evidence(
                 3,
                 "jenkins/controller/item-count",
-                &[b"controller-job-population", b"jenkins/oracle"],
+                &[b"controller-job-count"],
             ),
             job_set: placeholder_set_evidence("jenkins/controller/item-set"),
             jobs: vec![
@@ -1485,7 +1532,7 @@ fn fixture() -> Fixture {
             principal_count: count_evidence(
                 3,
                 "jenkins/security-realm/principal-count",
-                &[b"principal-population", b"jenkins/oracle"],
+                &[b"principal-count"],
             ),
             principal_set: placeholder_set_evidence("jenkins/security-realm/principal-set"),
             principals: vec![
@@ -1523,7 +1570,7 @@ fn fixture() -> Fixture {
             acl_entry_count: count_evidence(
                 1,
                 "jenkins/authorization/acl-entry-count",
-                &[b"acl-population", b"jenkins/oracle"],
+                &[b"acl-count"],
             ),
             acl_entry_set: placeholder_set_evidence("jenkins/authorization/acl-entry-set"),
             acl_entries: vec![AclEntry {
@@ -1533,11 +1580,7 @@ fn fixture() -> Fixture {
                 permissions: vec!["job/read".to_owned(), "job/build".to_owned()],
                 generation: "acl-12".to_owned(),
             }],
-            client_count: count_evidence(
-                2,
-                "jenkins/access-log/client-count",
-                &[b"client-population", b"jenkins/oracle"],
-            ),
+            client_count: count_evidence(2, "jenkins/access-log/client-count", &[b"client-count"]),
             client_set: placeholder_set_evidence("jenkins/access-log/client-set"),
             clients: vec![
                 ClientRecord {
@@ -1634,7 +1677,7 @@ fn fixture() -> Fixture {
                             8,
                             "jenkins/job/folder/build/build-history-count",
                             &[
-                                b"state-record-instance-population",
+                                b"state-record-instance-count",
                                 b"folder/build",
                                 b"build-history",
                                 b"build-number-and-result",
@@ -1681,7 +1724,7 @@ fn add_excluded_obligations(fixture: &mut Fixture) {
         13,
         "jenkins/job/legacy/build-history-count",
         &[
-            b"state-record-instance-population",
+            b"state-record-instance-count",
             b"legacy",
             b"legacy-history",
             b"build-number-and-result",
@@ -1755,7 +1798,7 @@ fn job(id: &str, parent_id: Option<&str>, disposition: ScopeDisposition) -> JobR
         direct_child_count: count_evidence(
             0,
             &format!("jenkins/job/{id}/child-count"),
-            &[b"direct-child-population", id.as_bytes()],
+            &[b"direct-child-count", id.as_bytes()],
         ),
         scope: ApprovedDisposition {
             disposition,
@@ -1776,22 +1819,22 @@ fn count_evidence(count: u64, provenance: &str, subject_fields: &[&[u8]]) -> Cou
 
 fn refresh_direct_child_count_subject(job: &mut JobRecord) {
     job.direct_child_count.subject_sha256 =
-        count_subject_sha256(&[b"direct-child-population", job.id.as_bytes()]);
+        count_subject_sha256(&[b"direct-child-count", job.id.as_bytes()]);
 }
 
 fn refresh_dependency_count_subject(job: &mut JobDependencies) {
     job.dependency_count.subject_sha256 =
-        count_subject_sha256(&[b"runtime-dependency-population", job.job_id.as_bytes()]);
+        count_subject_sha256(&[b"runtime-dependency-count", job.job_id.as_bytes()]);
 }
 
 fn refresh_state_class_count_subject(job: &mut JobStateRecords) {
     job.record_class_count.subject_sha256 =
-        count_subject_sha256(&[b"state-class-population", job.job_id.as_bytes()]);
+        count_subject_sha256(&[b"state-class-count", job.job_id.as_bytes()]);
 }
 
 fn refresh_record_count_subject(job_id: &str, record: &mut StateRecord) {
     record.record_count.subject_sha256 = count_subject_sha256(&[
-        b"state-record-instance-population",
+        b"state-record-instance-count",
         job_id.as_bytes(),
         record.id.as_bytes(),
         record.kind.as_bytes(),
@@ -1803,67 +1846,125 @@ fn placeholder_set_evidence(provenance: &str) -> SetEvidence {
 }
 
 fn refresh_fixture_sets(fixture: &mut Fixture) {
-    fixture.job_graph.job_set = owned_set_evidence(
-        "jenkins/controller/item-set",
-        fixture
-            .job_graph
-            .jobs
-            .iter()
-            .map(|job| {
-                vec![
-                    job.id.as_bytes().to_vec(),
-                    job.parent_id.as_deref().unwrap_or("").as_bytes().to_vec(),
-                ]
-            })
-            .collect(),
-    );
-    fixture.identity_clients.principal_set = set_evidence(
-        "jenkins/security-realm/principal-set",
+    let mut job_entries = vec![set_subject_entry_for(
+        &fixture.job_graph.binding,
+        b"job-graph-set",
+        &[],
+    )];
+    job_entries.extend(fixture.job_graph.jobs.iter().map(|job| {
+        vec![
+            b"job".to_vec(),
+            job.id.as_bytes().to_vec(),
+            job.parent_id.as_deref().unwrap_or("").as_bytes().to_vec(),
+        ]
+    }));
+    fixture.job_graph.job_set = owned_set_evidence("jenkins/controller/item-set", job_entries);
+    let mut principal_entries = vec![set_subject_entry_for(
+        &fixture.identity_clients.binding,
+        b"principal-set",
+        &[],
+    )];
+    principal_entries.extend(
         fixture
             .identity_clients
             .principals
             .iter()
-            .map(|principal| vec![principal.id.as_bytes()])
-            .collect(),
+            .map(|principal| vec![b"principal".to_vec(), principal.id.as_bytes().to_vec()]),
     );
-    fixture.identity_clients.acl_entry_set = owned_set_evidence(
-        "jenkins/authorization/acl-entry-set",
-        fixture
-            .identity_clients
-            .acl_entries
+    fixture.identity_clients.principal_set =
+        owned_set_evidence("jenkins/security-realm/principal-set", principal_entries);
+    let mut acl_entries = vec![set_subject_entry_for(
+        &fixture.identity_clients.binding,
+        b"acl-set",
+        &[],
+    )];
+    acl_entries.extend(fixture.identity_clients.acl_entries.iter().map(|acl| {
+        let mut permissions = acl
+            .permissions
             .iter()
-            .map(|acl| {
-                let mut permissions = acl
-                    .permissions
-                    .iter()
-                    .map(|permission| permission.as_bytes().to_vec())
-                    .collect::<Vec<_>>();
-                permissions.sort();
-                let mut fields = vec![
-                    acl.job_id.as_bytes().to_vec(),
-                    acl.principal_id.as_bytes().to_vec(),
-                    acl.scope.as_bytes().to_vec(),
-                    acl.generation.as_bytes().to_vec(),
-                ];
-                fields.extend(permissions);
-                fields
-            })
-            .collect(),
-    );
-    fixture.identity_clients.client_set = owned_set_evidence(
-        "jenkins/access-log/client-set",
-        fixture
-            .identity_clients
-            .clients
-            .iter()
-            .map(|client| {
-                vec![
-                    client.id.as_bytes().to_vec(),
-                    client_direction_bytes(client.direction).to_vec(),
-                ]
-            })
-            .collect(),
-    );
+            .map(|permission| permission.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        permissions.sort();
+        let mut fields = vec![
+            b"acl".to_vec(),
+            acl.job_id.as_bytes().to_vec(),
+            acl.principal_id.as_bytes().to_vec(),
+            acl.scope.as_bytes().to_vec(),
+            acl.generation.as_bytes().to_vec(),
+        ];
+        fields.extend(permissions);
+        fields
+    }));
+    fixture.identity_clients.acl_entry_set =
+        owned_set_evidence("jenkins/authorization/acl-entry-set", acl_entries);
+    let mut client_entries = vec![set_subject_entry_for(
+        &fixture.identity_clients.binding,
+        b"client-set",
+        &[],
+    )];
+    client_entries.extend(fixture.identity_clients.clients.iter().map(|client| {
+        vec![
+            b"client".to_vec(),
+            client.id.as_bytes().to_vec(),
+            client_direction_bytes(client.direction).to_vec(),
+        ]
+    }));
+    fixture.identity_clients.client_set =
+        owned_set_evidence("jenkins/access-log/client-set", client_entries);
+}
+
+fn refresh_population_commitments(fixture: &mut Fixture) {
+    fixture.job_graph.controller_job_count.subject_sha256 =
+        count_subject_sha256_for(&fixture.job_graph.binding, &[b"controller-job-count"]);
+    for job in &mut fixture.job_graph.jobs {
+        job.direct_child_count.subject_sha256 = count_subject_sha256_for(
+            &fixture.job_graph.binding,
+            &[b"direct-child-count", job.id.as_bytes()],
+        );
+    }
+    fixture.identity_clients.principal_count.subject_sha256 =
+        count_subject_sha256_for(&fixture.identity_clients.binding, &[b"principal-count"]);
+    fixture.identity_clients.acl_entry_count.subject_sha256 =
+        count_subject_sha256_for(&fixture.identity_clients.binding, &[b"acl-count"]);
+    fixture.identity_clients.client_count.subject_sha256 =
+        count_subject_sha256_for(&fixture.identity_clients.binding, &[b"client-count"]);
+    for job in &mut fixture.runtime_dependencies.jobs {
+        job.dependency_count.subject_sha256 = count_subject_sha256_for(
+            &fixture.runtime_dependencies.binding,
+            &[b"runtime-dependency-count", job.job_id.as_bytes()],
+        );
+        job.dependency_set = owned_set_evidence(
+            &format!("jenkins/job/{}/runtime-dependency-set", job.job_id),
+            dependency_set_entries_for(
+                &fixture.runtime_dependencies.binding,
+                &job.job_id,
+                &job.dependencies,
+            ),
+        );
+    }
+    for job in &mut fixture.persistent_state.jobs {
+        job.record_class_count.subject_sha256 = count_subject_sha256_for(
+            &fixture.persistent_state.binding,
+            &[b"state-class-count", job.job_id.as_bytes()],
+        );
+        job.record_class_set = state_class_set_evidence_for(
+            &fixture.persistent_state.binding,
+            &job.job_id,
+            &job.records,
+        );
+        for record in &mut job.records {
+            record.record_count.subject_sha256 = count_subject_sha256_for(
+                &fixture.persistent_state.binding,
+                &[
+                    b"state-record-instance-count",
+                    job.job_id.as_bytes(),
+                    record.id.as_bytes(),
+                    record.kind.as_bytes(),
+                ],
+            );
+        }
+    }
+    refresh_fixture_sets(fixture);
 }
 
 fn job_dependencies(job_id: &str, dependencies: Vec<RuntimeDependency>) -> JobDependencies {
@@ -1872,7 +1973,7 @@ fn job_dependencies(job_id: &str, dependencies: Vec<RuntimeDependency>) -> JobDe
         dependency_count: count_evidence(
             dependencies.len() as u64,
             &format!("jenkins/job/{job_id}/runtime-dependency-count"),
-            &[b"runtime-dependency-population", job_id.as_bytes()],
+            &[b"runtime-dependency-count", job_id.as_bytes()],
         ),
         dependency_set: owned_set_evidence(
             &format!("jenkins/job/{job_id}/runtime-dependency-set"),
@@ -1890,7 +1991,19 @@ fn refresh_dependency_set(job: &mut JobDependencies) {
 }
 
 fn dependency_set_entries(job_id: &str, dependencies: &[RuntimeDependency]) -> Vec<Vec<Vec<u8>>> {
-    let mut entries = vec![vec![b"runtime-job".to_vec(), job_id.as_bytes().to_vec()]];
+    dependency_set_entries_for(&binding(), job_id, dependencies)
+}
+
+fn dependency_set_entries_for(
+    binding: &SnapshotBinding,
+    job_id: &str,
+    dependencies: &[RuntimeDependency],
+) -> Vec<Vec<Vec<u8>>> {
+    let mut entries = vec![set_subject_entry_for(
+        binding,
+        b"runtime-dependency-set",
+        &[job_id.as_bytes()],
+    )];
     entries.extend(dependencies.iter().map(|dependency| {
         vec![
             b"dependency".to_vec(),
@@ -1906,7 +2019,7 @@ fn job_state_records(job_id: &str, records: Vec<StateRecord>) -> JobStateRecords
     let record_class_count = count_evidence(
         records.len() as u64,
         &format!("jenkins/job/{job_id}/state-record-class-count"),
-        &[b"state-class-population", job_id.as_bytes()],
+        &[b"state-class-count", job_id.as_bytes()],
     );
     let record_class_set = state_class_set_evidence(job_id, &records);
     JobStateRecords {
@@ -1922,7 +2035,19 @@ fn refresh_state_class_set(job: &mut JobStateRecords) {
 }
 
 fn state_class_set_evidence(job_id: &str, records: &[StateRecord]) -> SetEvidence {
-    let mut entries = vec![vec![b"state-job".to_vec(), job_id.as_bytes().to_vec()]];
+    state_class_set_evidence_for(&binding(), job_id, records)
+}
+
+fn state_class_set_evidence_for(
+    binding: &SnapshotBinding,
+    job_id: &str,
+    records: &[StateRecord],
+) -> SetEvidence {
+    let mut entries = vec![set_subject_entry_for(
+        binding,
+        b"state-class-set",
+        &[job_id.as_bytes()],
+    )];
     entries.extend(records.iter().map(|record| {
         vec![
             b"state-class".to_vec(),
@@ -1992,13 +2117,42 @@ fn append_test_length_prefixed(output: &mut Vec<u8>, value: &[u8]) {
     output.extend_from_slice(value);
 }
 
+fn set_subject_entry_for(
+    binding: &SnapshotBinding,
+    family: &[u8],
+    owner_fields: &[&[u8]],
+) -> Vec<Vec<u8>> {
+    population_subject_entry(b"set-subject-v1", binding, family, owner_fields)
+}
+
+fn population_subject_entry(
+    commitment_kind: &[u8],
+    binding: &SnapshotBinding,
+    family: &[u8],
+    owner_fields: &[&[u8]],
+) -> Vec<Vec<u8>> {
+    let mut fields = vec![
+        commitment_kind.to_vec(),
+        family.to_vec(),
+        binding.controller_id.as_bytes().to_vec(),
+        binding.epoch_id.as_bytes().to_vec(),
+        binding.source_generation.as_bytes().to_vec(),
+    ];
+    fields.extend(owner_fields.iter().map(|field| field.to_vec()));
+    fields
+}
+
 fn count_subject_sha256(fields: &[&[u8]]) -> String {
-    let mut canonical = Vec::new();
-    append_test_length_prefixed(&mut canonical, &(fields.len() as u64).to_be_bytes());
-    for field in fields {
-        append_test_length_prefixed(&mut canonical, field);
-    }
-    format!("{:x}", Sha256::digest(canonical))
+    count_subject_sha256_for(&binding(), fields)
+}
+
+fn count_subject_sha256_for(binding: &SnapshotBinding, fields: &[&[u8]]) -> String {
+    canonical_owned_entries_sha256(vec![population_subject_entry(
+        b"count-subject-v1",
+        binding,
+        fields[0],
+        &fields[1..],
+    )])
 }
 
 fn state_transform(disposition: CompatibilityDisposition) -> StateTransformEvidence {

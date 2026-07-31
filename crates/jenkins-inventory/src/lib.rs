@@ -531,10 +531,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         "controller job count",
         &bundle.job_graph.controller_job_count,
         &bundle.job_graph.binding.exporter_id,
-        count_subject_sha256(&[
-            b"controller-job-population",
-            bundle.job_graph.binding.controller_id.as_bytes(),
-        ]),
+        count_subject_sha256(&bundle.job_graph.binding, b"controller-job-count", &[]),
     )?;
 
     let mut job_ids = BTreeSet::new();
@@ -571,7 +568,11 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             "job direct-child count",
             &job.direct_child_count,
             &bundle.job_graph.binding.exporter_id,
-            count_subject_sha256(&[b"direct-child-population", job.id.as_bytes()]),
+            count_subject_sha256(
+                &bundle.job_graph.binding,
+                b"direct-child-count",
+                &[job.id.as_bytes()],
+            ),
         )?;
         if !job_ids.insert(job.id.clone()) {
             return Err(InventoryError::new(
@@ -608,7 +609,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     validate_exact_set(
         "controller job set",
         &bundle.job_graph.job_set,
-        job_graph_set_sha256(&bundle.job_graph.jobs),
+        job_graph_set_sha256(&bundle.job_graph.binding, &bundle.job_graph.jobs),
         &bundle.job_graph.binding.exporter_id,
         "INV_JOB_SET_MISMATCH",
     )?;
@@ -663,10 +664,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         &bundle.identity_clients.principal_count,
         bundle.identity_clients.principals.len(),
         &bundle.identity_clients.binding.exporter_id,
-        count_subject_sha256(&[
-            b"principal-population",
-            bundle.identity_clients.binding.controller_id.as_bytes(),
-        ]),
+        count_subject_sha256(&bundle.identity_clients.binding, b"principal-count", &[]),
         "INV_PRINCIPAL_COUNT_MISMATCH",
     )?;
     validate_exact_count(
@@ -674,10 +672,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         &bundle.identity_clients.acl_entry_count,
         bundle.identity_clients.acl_entries.len(),
         &bundle.identity_clients.binding.exporter_id,
-        count_subject_sha256(&[
-            b"acl-population",
-            bundle.identity_clients.binding.controller_id.as_bytes(),
-        ]),
+        count_subject_sha256(&bundle.identity_clients.binding, b"acl-count", &[]),
         "INV_ACL_COUNT_MISMATCH",
     )?;
     validate_exact_count(
@@ -685,22 +680,15 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         &bundle.identity_clients.client_count,
         bundle.identity_clients.clients.len(),
         &bundle.identity_clients.binding.exporter_id,
-        count_subject_sha256(&[
-            b"client-population",
-            bundle.identity_clients.binding.controller_id.as_bytes(),
-        ]),
+        count_subject_sha256(&bundle.identity_clients.binding, b"client-count", &[]),
         "INV_CLIENT_COUNT_MISMATCH",
     )?;
     validate_exact_set(
         "principal set",
         &bundle.identity_clients.principal_set,
-        canonical_entries_sha256(
-            bundle
-                .identity_clients
-                .principals
-                .iter()
-                .map(|principal| vec![principal.id.as_bytes()])
-                .collect(),
+        principal_set_sha256(
+            &bundle.identity_clients.binding,
+            &bundle.identity_clients.principals,
         ),
         &bundle.identity_clients.binding.exporter_id,
         "INV_PRINCIPAL_SET_MISMATCH",
@@ -708,14 +696,20 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     validate_exact_set(
         "ACL-entry set",
         &bundle.identity_clients.acl_entry_set,
-        acl_entry_set_sha256(&bundle.identity_clients.acl_entries),
+        acl_entry_set_sha256(
+            &bundle.identity_clients.binding,
+            &bundle.identity_clients.acl_entries,
+        ),
         &bundle.identity_clients.binding.exporter_id,
         "INV_ACL_SET_MISMATCH",
     )?;
     validate_exact_set(
         "client set",
         &bundle.identity_clients.client_set,
-        client_set_sha256(&bundle.identity_clients.clients),
+        client_set_sha256(
+            &bundle.identity_clients.binding,
+            &bundle.identity_clients.clients,
+        ),
         &bundle.identity_clients.binding.exporter_id,
         "INV_CLIENT_SET_MISMATCH",
     )?;
@@ -840,12 +834,12 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     let runtime = index_runtime(
         &bundle.runtime_dependencies.jobs,
         &job_ids,
-        &bundle.runtime_dependencies.binding.exporter_id,
+        &bundle.runtime_dependencies.binding,
     )?;
     let state = index_state(
         &bundle.persistent_state.jobs,
         &job_ids,
-        &bundle.persistent_state.binding.exporter_id,
+        &bundle.persistent_state.binding,
     )?;
     if !job_ids.iter().all(|job_id| runtime.contains_key(job_id)) {
         return Err(InventoryError::new(
@@ -886,7 +880,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
                 job_id,
                 records,
                 &client_directions,
-                &bundle.persistent_state.binding.exporter_id,
+                &bundle.persistent_state.binding,
                 &mut legal_hold_definitions,
                 &mut retention_policy_definitions,
             )?,
@@ -1231,7 +1225,7 @@ fn validate_binding(binding: &SnapshotBinding) -> Result<(), InventoryError> {
 fn index_runtime<'a>(
     jobs: &'a [JobDependencies],
     known_jobs: &BTreeSet<String>,
-    manifest_exporter_id: &str,
+    binding: &SnapshotBinding,
 ) -> Result<BTreeMap<String, &'a [RuntimeDependency]>, InventoryError> {
     let mut indexed = BTreeMap::new();
     for job in jobs {
@@ -1245,15 +1239,19 @@ fn index_runtime<'a>(
             "runtime-dependency count",
             &job.dependency_count,
             job.dependencies.len(),
-            manifest_exporter_id,
-            count_subject_sha256(&[b"runtime-dependency-population", job.job_id.as_bytes()]),
+            &binding.exporter_id,
+            count_subject_sha256(
+                binding,
+                b"runtime-dependency-count",
+                &[job.job_id.as_bytes()],
+            ),
             "INV_DEPENDENCY_COUNT_MISMATCH",
         )?;
         validate_exact_set(
             "runtime-dependency set",
             &job.dependency_set,
-            dependency_set_sha256(&job.job_id, &job.dependencies),
-            manifest_exporter_id,
+            dependency_set_sha256(binding, &job.job_id, &job.dependencies),
+            &binding.exporter_id,
             "INV_DEPENDENCY_SET_MISMATCH",
         )?;
         if indexed
@@ -1278,7 +1276,7 @@ fn index_runtime<'a>(
 fn index_state<'a>(
     jobs: &'a [JobStateRecords],
     known_jobs: &BTreeSet<String>,
-    manifest_exporter_id: &str,
+    binding: &SnapshotBinding,
 ) -> Result<BTreeMap<String, &'a [StateRecord]>, InventoryError> {
     let mut indexed = BTreeMap::new();
     for job in jobs {
@@ -1292,15 +1290,15 @@ fn index_state<'a>(
             "persistent-state record-class count",
             &job.record_class_count,
             job.records.len(),
-            manifest_exporter_id,
-            count_subject_sha256(&[b"state-class-population", job.job_id.as_bytes()]),
+            &binding.exporter_id,
+            count_subject_sha256(binding, b"state-class-count", &[job.job_id.as_bytes()]),
             "INV_STATE_CLASS_COUNT_MISMATCH",
         )?;
         validate_exact_set(
             "persistent-state record-class set",
             &job.record_class_set,
-            state_class_set_sha256(&job.job_id, &job.records),
-            manifest_exporter_id,
+            state_class_set_sha256(binding, &job.job_id, &job.records),
+            &binding.exporter_id,
             "INV_STATE_CLASS_SET_MISMATCH",
         )?;
         if indexed
@@ -1557,7 +1555,7 @@ fn validate_state_records(
     job_id: &str,
     records: &[StateRecord],
     client_directions: &BTreeMap<String, ClientDirection>,
-    manifest_exporter_id: &str,
+    binding: &SnapshotBinding,
     legal_hold_definitions: &mut BTreeMap<String, LegalHold>,
     retention_policy_definitions: &mut BTreeMap<String, String>,
 ) -> Result<CompatibilityDisposition, InventoryError> {
@@ -1568,13 +1566,16 @@ fn validate_state_records(
         validate_count_evidence(
             "state record instance count",
             &record.record_count,
-            manifest_exporter_id,
-            count_subject_sha256(&[
-                b"state-record-instance-population",
-                job_id.as_bytes(),
-                record.id.as_bytes(),
-                record.kind.as_bytes(),
-            ]),
+            &binding.exporter_id,
+            count_subject_sha256(
+                binding,
+                b"state-record-instance-count",
+                &[
+                    job_id.as_bytes(),
+                    record.id.as_bytes(),
+                    record.kind.as_bytes(),
+                ],
+            ),
         )?;
         validate_confidentiality("state confidentiality", &record.confidentiality)?;
         validate_nonempty("state restore target", &record.restore_target)?;
@@ -1808,8 +1809,16 @@ fn validate_exact_set(
     Ok(())
 }
 
-fn dependency_set_sha256(job_id: &str, dependencies: &[RuntimeDependency]) -> String {
-    let mut entries = vec![vec![b"runtime-job".to_vec(), job_id.as_bytes().to_vec()]];
+fn dependency_set_sha256(
+    binding: &SnapshotBinding,
+    job_id: &str,
+    dependencies: &[RuntimeDependency],
+) -> String {
+    let mut entries = vec![set_subject_entry(
+        binding,
+        b"runtime-dependency-set",
+        &[job_id.as_bytes()],
+    )];
     entries.extend(dependencies.iter().map(|dependency| {
         vec![
             b"dependency".to_vec(),
@@ -1821,8 +1830,16 @@ fn dependency_set_sha256(job_id: &str, dependencies: &[RuntimeDependency]) -> St
     canonical_owned_entries_sha256(entries)
 }
 
-fn state_class_set_sha256(job_id: &str, records: &[StateRecord]) -> String {
-    let mut entries = vec![vec![b"state-job".to_vec(), job_id.as_bytes().to_vec()]];
+fn state_class_set_sha256(
+    binding: &SnapshotBinding,
+    job_id: &str,
+    records: &[StateRecord],
+) -> String {
+    let mut entries = vec![set_subject_entry(
+        binding,
+        b"state-class-set",
+        &[job_id.as_bytes()],
+    )];
     entries.extend(records.iter().map(|record| {
         vec![
             b"state-class".to_vec(),
@@ -1834,40 +1851,76 @@ fn state_class_set_sha256(job_id: &str, records: &[StateRecord]) -> String {
     canonical_owned_entries_sha256(entries)
 }
 
-fn count_subject_sha256(fields: &[&[u8]]) -> String {
-    let mut canonical = Vec::new();
-    append_length_prefixed(&mut canonical, &(fields.len() as u64).to_be_bytes());
-    for field in fields {
-        append_length_prefixed(&mut canonical, field);
-    }
-    format!("{:x}", Sha256::digest(canonical))
+fn count_subject_sha256(
+    binding: &SnapshotBinding,
+    family: &[u8],
+    owner_fields: &[&[u8]],
+) -> String {
+    canonical_owned_entries_sha256(vec![population_subject_entry(
+        b"count-subject-v1",
+        binding,
+        family,
+        owner_fields,
+    )])
 }
 
-fn job_graph_set_sha256(jobs: &[JobRecord]) -> String {
-    canonical_entries_sha256(
-        jobs.iter()
-            .map(|job| {
-                vec![
-                    job.id.as_bytes(),
-                    job.parent_id.as_deref().unwrap_or("").as_bytes(),
-                ]
-            })
-            .collect(),
-    )
+fn set_subject_entry(
+    binding: &SnapshotBinding,
+    family: &[u8],
+    owner_fields: &[&[u8]],
+) -> Vec<Vec<u8>> {
+    population_subject_entry(b"set-subject-v1", binding, family, owner_fields)
 }
 
-fn client_set_sha256(clients: &[ClientRecord]) -> String {
-    canonical_entries_sha256(
-        clients
+fn population_subject_entry(
+    commitment_kind: &[u8],
+    binding: &SnapshotBinding,
+    family: &[u8],
+    owner_fields: &[&[u8]],
+) -> Vec<Vec<u8>> {
+    let mut fields = vec![
+        commitment_kind.to_vec(),
+        family.to_vec(),
+        binding.controller_id.as_bytes().to_vec(),
+        binding.epoch_id.as_bytes().to_vec(),
+        binding.source_generation.as_bytes().to_vec(),
+    ];
+    fields.extend(owner_fields.iter().map(|field| field.to_vec()));
+    fields
+}
+
+fn job_graph_set_sha256(binding: &SnapshotBinding, jobs: &[JobRecord]) -> String {
+    let mut entries = vec![set_subject_entry(binding, b"job-graph-set", &[])];
+    entries.extend(jobs.iter().map(|job| {
+        vec![
+            b"job".to_vec(),
+            job.id.as_bytes().to_vec(),
+            job.parent_id.as_deref().unwrap_or("").as_bytes().to_vec(),
+        ]
+    }));
+    canonical_owned_entries_sha256(entries)
+}
+
+fn principal_set_sha256(binding: &SnapshotBinding, principals: &[Principal]) -> String {
+    let mut entries = vec![set_subject_entry(binding, b"principal-set", &[])];
+    entries.extend(
+        principals
             .iter()
-            .map(|client| {
-                vec![
-                    client.id.as_bytes(),
-                    client_direction_bytes(client.direction),
-                ]
-            })
-            .collect(),
-    )
+            .map(|principal| vec![b"principal".to_vec(), principal.id.as_bytes().to_vec()]),
+    );
+    canonical_owned_entries_sha256(entries)
+}
+
+fn client_set_sha256(binding: &SnapshotBinding, clients: &[ClientRecord]) -> String {
+    let mut entries = vec![set_subject_entry(binding, b"client-set", &[])];
+    entries.extend(clients.iter().map(|client| {
+        vec![
+            b"client".to_vec(),
+            client.id.as_bytes().to_vec(),
+            client_direction_bytes(client.direction).to_vec(),
+        ]
+    }));
+    canonical_owned_entries_sha256(entries)
 }
 
 fn client_direction_bytes(direction: ClientDirection) -> &'static [u8] {
@@ -1878,40 +1931,26 @@ fn client_direction_bytes(direction: ClientDirection) -> &'static [u8] {
     }
 }
 
-fn acl_entry_set_sha256(entries: &[AclEntry]) -> String {
-    canonical_owned_entries_sha256(
-        entries
+fn acl_entry_set_sha256(binding: &SnapshotBinding, entries: &[AclEntry]) -> String {
+    let mut canonical_entries = vec![set_subject_entry(binding, b"acl-set", &[])];
+    canonical_entries.extend(entries.iter().map(|acl| {
+        let mut permissions = acl
+            .permissions
             .iter()
-            .map(|acl| {
-                let mut permissions = acl
-                    .permissions
-                    .iter()
-                    .map(|permission| permission.as_bytes().to_vec())
-                    .collect::<Vec<_>>();
-                permissions.sort();
-                let mut fields = vec![
-                    acl.job_id.as_bytes().to_vec(),
-                    acl.principal_id.as_bytes().to_vec(),
-                    acl.scope.as_bytes().to_vec(),
-                    acl.generation.as_bytes().to_vec(),
-                ];
-                fields.extend(permissions);
-                fields
-            })
-            .collect(),
-    )
-}
-
-fn canonical_entries_sha256(mut entries: Vec<Vec<&[u8]>>) -> String {
-    entries.sort();
-    let mut canonical = Vec::new();
-    for entry in entries {
-        append_length_prefixed(&mut canonical, &(entry.len() as u64).to_be_bytes());
-        for field in entry {
-            append_length_prefixed(&mut canonical, field);
-        }
-    }
-    sha256_hex(&canonical)
+            .map(|permission| permission.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        permissions.sort();
+        let mut fields = vec![
+            b"acl".to_vec(),
+            acl.job_id.as_bytes().to_vec(),
+            acl.principal_id.as_bytes().to_vec(),
+            acl.scope.as_bytes().to_vec(),
+            acl.generation.as_bytes().to_vec(),
+        ];
+        fields.extend(permissions);
+        fields
+    }));
+    canonical_owned_entries_sha256(canonical_entries)
 }
 
 fn canonical_owned_entries_sha256(mut entries: Vec<Vec<Vec<u8>>>) -> String {

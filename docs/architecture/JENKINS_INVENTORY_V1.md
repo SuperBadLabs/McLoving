@@ -27,6 +27,10 @@ violations fail before typed deserialization. Unknown typed fields also fail.
 The manifests share one byte-identical `binding`. It identifies the controller,
 Jenkins core and plugin profile, effective global configuration, exporter,
 provenance, source generation, and collection epoch. A mixed epoch is rejected.
+Every independently collected population count and set commitment is also
+domain-separated and binds the controller ID, epoch ID, and source generation,
+preventing a per-job or global population proof from an older snapshot from
+being replayed inside a fresh common binding.
 The collection time is an exact, calendar-valid UTC
 `YYYY-MM-DDTHH:MM:SSZ` timestamp.
 If Jenkins cannot provide a coherent snapshot, collection must quiesce all
@@ -53,6 +57,8 @@ and persistent-state mutation for one bounded export epoch.
   `(job ID, principal ID, scope, ACL generation, canonical permission set)`
   authorization records, and `(client ID, direction)` client records,
   preventing same-cardinality identity or semantic-class substitution.
+  Principal, ACL, and client sets have distinct controller/epoch subjects even
+  when their populations are empty.
   Principal kind is one of `user`, `service`, or `group`; lifecycle is one of
   `active`, `disabled`, `retired`, or `deleted`. Current aliases participate in
   the unique principal namespace. Historical-name claims carry their own
