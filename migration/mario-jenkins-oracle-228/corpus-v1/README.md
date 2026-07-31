@@ -43,11 +43,16 @@ duplicating a version lock whose `name:version` syntax produces false-positive
 secret alerts.
 
 `SCENARIO_CONTRACT.yaml` pre-registers the required behavior families and
-bounded cases. Every family is currently `unsupported`; the two synthetic
-secret markers may be injected only at invocation and their absence is checked
-through every persisted evidence file. MIG-003 may admit a case only by adding
-exact expected traces and independent Rust validation without weakening this
-bundle.
+bounded cases. Every broad behavior family remains `unsupported`; the two
+synthetic secret markers may be injected only at invocation and their absence
+is checked through every persisted evidence file.
+
+MIG-003 admits exactly one compile-only case,
+`cinqict_jenkinsdev.Jenkinsfile`, into deterministic strict YAML plus a
+separate disabled operational-state record. `compiler-v1/` contains the exact
+worker response, expected trace, outputs, and independent Rust admission
+receipt. Native runnable coverage and certified equivalence remain zero; the
+case has no scheduler, agent, credential, trigger, or effect authority.
 
 Rebuild the joined views from the sealed evidence:
 

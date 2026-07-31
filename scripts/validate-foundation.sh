@@ -98,7 +98,7 @@ java -cp "${tlaplus_jar}" tlc2.TLC \
 
 (
   cd "${repo_root}/compat/jenkins-worker"
-  timeout 60 clojure -M -m mcloving.compat.main
+  timeout 60 clojure -M:foundation -m mcloving.compat.main
 )
 
 podman run --rm \

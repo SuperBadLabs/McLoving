@@ -75,3 +75,26 @@
                nil
                (catch clojure.lang.ExceptionInfo exception
                  (:code (ex-data exception)))))))))
+
+(deftest compile-provenance-fields-are-typed-before-source-access
+  (with-redefs [protocol/current-environment-keys (fn [] #{"LANG" "TZ"})]
+    (let [request
+          {:inventory-fingerprint (apply str (repeat 64 "a"))
+           :job-actor "jenkins/system"
+           :job-effective-time "2026-07-31T06:44:17Z"
+           :job-enabled false
+           :job-generation "not-a-digest"
+           :job-id "corpus-052-cinqict_jenkinsdev"
+           :job-reason "offline-frozen-source-state"
+           :operation :compile
+           :protocol protocol/protocol-version
+           :request-id "unit-job-provenance"
+           :source-path "/input/Jenkinsfile"
+           :source-sha256 (apply str (repeat 64 "a"))
+           :target-profile-sha256 (:profile-sha256 profile)}]
+      (is (= "E_JOB_PROVENANCE"
+             (try
+               (protocol/handle-request profile request)
+               nil
+               (catch clojure.lang.ExceptionInfo exception
+                 (:code (ex-data exception)))))))))

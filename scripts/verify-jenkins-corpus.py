@@ -186,7 +186,22 @@ def verify(root):
     require({row["file"] for row in job_map} == set(source_hashes), "job-map source set mismatch")
     require(all(row["enabled"] == "false" for row in job_map), "enabled source job is forbidden")
     require(all(row["all_jobs_disabled"] == "true" for row in index), "index disabled state mismatch")
-    require(all(row["migration_class"] == "unsupported" for row in index), "premature migration admission")
+    admitted = [row for row in index if row["migration_class"] != "unsupported"]
+    require(len(admitted) == 1, "expected exactly one compile-only admitted case")
+    require(
+        admitted[0]["file"] == "cinqict_jenkinsdev.Jenkinsfile"
+        and admitted[0]["migration_class"] == "admitted-compile-only"
+        and admitted[0]["worker_v1"] == "compiled-disabled-import",
+        "unexpected compile-only admitted case",
+    )
+    require(
+        all(
+            row["worker_v1"] == "E_COMPILER_SUBSET_NOT_IMPLEMENTED"
+            for row in index
+            if row["migration_class"] == "unsupported"
+        ),
+        "unsupported compiler disposition drift",
+    )
     require(all(row["certified_equivalence"] == "false" for row in index), "premature equivalence claim")
     require(all(row["linux_case"] == "denied-no-execution-authority" for row in index), "Linux authority leak")
     require(all(row["windows_case"] == "denied-no-execution-authority" for row in index), "Windows authority leak")
@@ -240,6 +255,21 @@ def verify(root):
     )
     require(sum(row["jenkins_compiled"] == "true" for row in index) == 199, "compile count drift")
     require(sum(row["jenkins_reached_agent"] == "true" for row in index) == 119, "agent count drift")
+
+    compiler_root = root / "compiler-v1"
+    require(
+        digest(compiler_root / "worker-response.edn")
+        == "2eec55ccd153f7692b1cfd1b2d606a1a45af434a154bebdd62f9ab0bd89aef52",
+        "compiler response drift",
+    )
+    require(
+        "state=disabled" in (compiler_root / "rust-admission.receipt").read_text(),
+        "disabled Rust admission receipt missing",
+    )
+    require(
+        "effect_authority: false" in (compiler_root / "expected-trace.yaml").read_text(),
+        "compiler evidence grants effect authority",
+    )
 
     require(EXPECTED_PROFILE in (root / "SCENARIO_CONTRACT.yaml").read_text(), "profile binding missing")
     require(EXPECTED_INVENTORY in (root / "SCENARIO_CONTRACT.yaml").read_text(), "inventory binding missing")
