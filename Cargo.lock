@@ -1379,6 +1379,7 @@ dependencies = [
 name = "mcloving-jenkins-compiler-admission"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "mcloving-pipeline-ir",
  "sha2",
 ]
