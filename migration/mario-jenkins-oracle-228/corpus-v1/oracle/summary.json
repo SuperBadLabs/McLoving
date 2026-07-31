@@ -1,0 +1,92 @@
+{
+  "counts": {
+    "chengis_parsed": 140,
+    "jenkins_compiled": 199,
+    "jenkins_job": {
+      "compile_or_model_failure": 29,
+      "compiled_waiting_for_agent": 119,
+      "declarative_agent_value_failure": 1,
+      "missing_binding_or_library": 4,
+      "missing_cloud_configuration": 4,
+      "missing_shared_library": 1,
+      "missing_step_or_plugin": 67,
+      "offline_scm_dependency": 1,
+      "other_runtime_failure": 2
+    },
+    "jenkins_lint": {
+      "declarative_invalid": 14,
+      "declarative_valid": 80,
+      "not_declarative_pipeline": 134
+    },
+    "jenkins_reached_agent": 119,
+    "ranvil_native": 18
+  },
+  "crosstab_chengis_job": {
+    "empty": {
+      "compile_or_model_failure": 11,
+      "compiled_waiting_for_agent": 8,
+      "missing_binding_or_library": 2,
+      "missing_shared_library": 1,
+      "missing_step_or_plugin": 66
+    },
+    "parsed": {
+      "compile_or_model_failure": 18,
+      "compiled_waiting_for_agent": 111,
+      "declarative_agent_value_failure": 1,
+      "missing_binding_or_library": 2,
+      "missing_cloud_configuration": 4,
+      "missing_step_or_plugin": 1,
+      "offline_scm_dependency": 1,
+      "other_runtime_failure": 2
+    }
+  },
+  "crosstab_lint_job": {
+    "declarative_invalid": {
+      "compile_or_model_failure": 14
+    },
+    "declarative_valid": {
+      "compile_or_model_failure": 2,
+      "compiled_waiting_for_agent": 73,
+      "declarative_agent_value_failure": 1,
+      "missing_cloud_configuration": 2,
+      "offline_scm_dependency": 1,
+      "other_runtime_failure": 1
+    },
+    "not_declarative_pipeline": {
+      "compile_or_model_failure": 13,
+      "compiled_waiting_for_agent": 46,
+      "missing_binding_or_library": 4,
+      "missing_cloud_configuration": 2,
+      "missing_shared_library": 1,
+      "missing_step_or_plugin": 67,
+      "other_runtime_failure": 1
+    }
+  },
+  "crosstab_ranvil_job": {
+    "accepted": {
+      "compiled_waiting_for_agent": 17,
+      "declarative_agent_value_failure": 1
+    },
+    "rejected": {
+      "compile_or_model_failure": 29,
+      "compiled_waiting_for_agent": 102,
+      "missing_binding_or_library": 4,
+      "missing_cloud_configuration": 4,
+      "missing_shared_library": 1,
+      "missing_step_or_plugin": 67,
+      "offline_scm_dependency": 1,
+      "other_runtime_failure": 2
+    }
+  },
+  "sets": {
+    "chengis_parsed_only_vs_jenkins_compile": 18,
+    "jenkins_compiled_and_chengis_parsed": 122,
+    "jenkins_compiled_only_vs_chengis": 77,
+    "jenkins_declarative_valid_ranvil_native": 18,
+    "jenkins_declarative_valid_ranvil_rejected": 62,
+    "neither_jenkins_compile_nor_chengis_parse": 11,
+    "ranvil_native_jenkins_compiled": 18,
+    "ranvil_native_jenkins_lint_valid": 18,
+    "ranvil_native_reached_agent": 17
+  }
+}

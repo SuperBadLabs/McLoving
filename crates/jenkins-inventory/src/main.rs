@@ -3,8 +3,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mcloving_jenkins_inventory::{
-    LEDGER_FILE, load_bundle, reconcile, seal_manifest_directory, validate_ledger_output_path,
-    write_ledger,
+    LEDGER_FILE,
+    export::{ExportOptions, export_snapshot},
+    inventory_snapshot_sha256, load_bundle, reconcile, seal_manifest_directory,
+    validate_ledger_output_path, write_ledger,
 };
 
 #[derive(Parser)]
@@ -19,7 +21,35 @@ struct Arguments {
 
 #[derive(Subcommand)]
 enum Command {
+    Export {
+        #[arg(long)]
+        snapshot_root: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        controller_id: String,
+        #[arg(long)]
+        controller_url: String,
+        #[arg(long)]
+        epoch_id: String,
+        #[arg(long)]
+        source_generation: String,
+        #[arg(long)]
+        collected_at: String,
+        #[arg(long)]
+        exporter_version: String,
+        #[arg(long)]
+        exporter_sha256: String,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        provenance: String,
+    },
     Seal {
+        #[arg(long)]
+        root: PathBuf,
+    },
+    Fingerprint {
         #[arg(long)]
         root: PathBuf,
     },
@@ -42,8 +72,41 @@ enum Command {
 fn main() -> Result<()> {
     let arguments = Arguments::parse();
     match arguments.command {
+        Command::Export {
+            snapshot_root,
+            output,
+            controller_id,
+            controller_url,
+            epoch_id,
+            source_generation,
+            collected_at,
+            exporter_version,
+            exporter_sha256,
+            owner,
+            provenance,
+        } => {
+            export_snapshot(&ExportOptions {
+                snapshot_root,
+                output,
+                controller_id,
+                controller_url,
+                epoch_id,
+                source_generation,
+                collected_at,
+                exporter_id: "mcloving-inventory-export".to_owned(),
+                exporter_version,
+                exporter_sha256,
+                owner,
+                provenance,
+            })
+            .context("inventory export failed")?;
+        }
         Command::Seal { root } => {
             seal_manifest_directory(&root).context("inventory sealing failed")?;
+        }
+        Command::Fingerprint { root } => {
+            let bundle = load_bundle(&root).context("inventory verification failed")?;
+            println!("{}", inventory_snapshot_sha256(&bundle));
         }
         Command::Reconcile {
             root,
