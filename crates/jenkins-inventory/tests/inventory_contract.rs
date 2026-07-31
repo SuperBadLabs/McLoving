@@ -6,9 +6,10 @@ use mcloving_jenkins_inventory::{
     AclEntry, ApprovedDisposition, ClientDirection, ClientRecord, CompatibilityDisposition,
     DependencyMutability, IDENTITY_CLIENT_FILE, IdentityClientManifest, JOB_GRAPH_FILE,
     JobDependencies, JobGraphManifest, JobRecord, JobStateRecords, LegalHold, OperationalState,
-    PERSISTENT_STATE_FILE, PersistentStateManifest, Principal, RUNTIME_DEPENDENCY_FILE,
-    RuntimeDependency, RuntimeDependencyManifest, SCHEMA_VERSION, ScopeDisposition, SecurityRealm,
-    SnapshotBinding, StateRecord, load_bundle, reconcile, seal_manifest_directory, write_ledger,
+    PERSISTENT_STATE_FILE, PersistentStateManifest, Principal, PrincipalKind, PrincipalLifecycle,
+    RUNTIME_DEPENDENCY_FILE, RuntimeDependency, RuntimeDependencyManifest, SCHEMA_VERSION,
+    ScopeDisposition, SecurityRealm, SnapshotBinding, StateRecord, load_bundle, reconcile,
+    seal_manifest_directory, write_ledger,
 };
 use serde::Serialize;
 
@@ -477,7 +478,21 @@ fn reconciliation_rejects_blank_retention_deadline() {
 
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("blank retention deadline must fail");
-    assert_eq!(error.code, "INV_REQUIRED");
+    assert_eq!(error.code, "INV_TIMESTAMP");
+}
+
+#[test]
+fn reconciliation_rejects_invalid_retention_deadlines() {
+    let directory = TestDirectory::new("invalid-retention");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0].retention_deadline =
+        "2027-99-99T25:61:61Z".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("invalid retention deadline must fail");
+    assert_eq!(error.code, "INV_TIMESTAMP");
 }
 
 #[test]
@@ -554,6 +569,36 @@ fn reconciliation_rejects_unknown_group_membership() {
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("unknown group must fail");
     assert_eq!(error.code, "INV_UNKNOWN_GROUP");
+}
+
+#[test]
+fn strict_schema_rejects_unknown_principal_kind() {
+    let directory = TestDirectory::new("principal-kind");
+    write_bundle(&directory.0, &fixture());
+    let path = directory.0.join(IDENTITY_CLIENT_FILE);
+    let source = fs::read_to_string(&path).expect("read identity manifest");
+    let hostile = source.replacen("kind: user", "kind: groupp", 1);
+    assert_ne!(hostile, source, "fixture must contain a user principal");
+    fs::write(path, hostile).expect("write hostile identity manifest");
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let error = load_bundle(&directory.0).expect_err("unknown principal kind must fail");
+    assert_eq!(error.code, "INV_SCHEMA");
+}
+
+#[test]
+fn strict_schema_rejects_unknown_principal_lifecycle() {
+    let directory = TestDirectory::new("principal-lifecycle");
+    write_bundle(&directory.0, &fixture());
+    let path = directory.0.join(IDENTITY_CLIENT_FILE);
+    let source = fs::read_to_string(&path).expect("read identity manifest");
+    let hostile = source.replacen("lifecycle: active", "lifecycle: deletd", 1);
+    assert_ne!(hostile, source, "fixture must contain an active principal");
+    fs::write(path, hostile).expect("write hostile identity manifest");
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let error = load_bundle(&directory.0).expect_err("unknown principal lifecycle must fail");
+    assert_eq!(error.code, "INV_SCHEMA");
 }
 
 #[test]
@@ -658,29 +703,29 @@ fn fixture() -> Fixture {
             principals: vec![
                 Principal {
                     id: "user/operator".to_owned(),
-                    kind: "user".to_owned(),
+                    kind: PrincipalKind::User,
                     aliases: vec!["operator-old".to_owned()],
                     groups: vec!["group/builders".to_owned()],
                     membership_generation: "membership-3".to_owned(),
-                    lifecycle: "active".to_owned(),
+                    lifecycle: PrincipalLifecycle::Active,
                     provenance: "jenkins/user/operator".to_owned(),
                 },
                 Principal {
                     id: "service/seed".to_owned(),
-                    kind: "service".to_owned(),
+                    kind: PrincipalKind::Service,
                     aliases: Vec::new(),
                     groups: Vec::new(),
                     membership_generation: "service-1".to_owned(),
-                    lifecycle: "active".to_owned(),
+                    lifecycle: PrincipalLifecycle::Active,
                     provenance: "jenkins/service/seed".to_owned(),
                 },
                 Principal {
                     id: "group/builders".to_owned(),
-                    kind: "group".to_owned(),
+                    kind: PrincipalKind::Group,
                     aliases: Vec::new(),
                     groups: Vec::new(),
                     membership_generation: "group-4".to_owned(),
-                    lifecycle: "active".to_owned(),
+                    lifecycle: PrincipalLifecycle::Active,
                     provenance: "jenkins/group/builders".to_owned(),
                 },
             ],

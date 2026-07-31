@@ -37,6 +37,8 @@ and persistent-state mutation for one bounded export epoch.
   requirements, publication behavior, ownership, and reviewed scope.
 - `identity-clients.yaml` owns the security realm, immutable principals and
   lifecycle evidence, effective ACLs, and every read-side or write-side client.
+  Principal kind is one of `user`, `service`, or `group`; lifecycle is one of
+  `active`, `disabled`, `retired`, or `deleted`.
 - `runtime-dependencies.yaml` owns per-job parameters, credentials by typed
   reference, source and package resolution, approvals, triggers, live reads,
   mutable inputs, agents, caches, effects, provisioners, locks, global values,
@@ -50,7 +52,8 @@ and persistent-state mutation for one bounded export epoch.
   provenance. Every external consumer must reference a client whose direction
   includes reads; write-only clients cannot consume state. Reusing a legal-hold
   identity with a conflicting scope, reason, generation, or release authority
-  fails reconciliation.
+  fails reconciliation. Retention deadlines use the exact UTC form
+  `YYYY-MM-DDTHH:MM:SSZ` and must be valid calendar timestamps.
 
 Secret values are never inventory fields. A dependency classified `secret`
 must carry a typed `credential_reference` or `redaction_reference`; the

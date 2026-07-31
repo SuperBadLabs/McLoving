@@ -130,14 +130,31 @@ pub struct SecurityRealm {
 #[serde(deny_unknown_fields)]
 pub struct Principal {
     pub id: String,
-    pub kind: String,
+    pub kind: PrincipalKind,
     #[serde(default)]
     pub aliases: Vec<String>,
     #[serde(default)]
     pub groups: Vec<String>,
     pub membership_generation: String,
-    pub lifecycle: String,
+    pub lifecycle: PrincipalLifecycle,
     pub provenance: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrincipalKind {
+    User,
+    Service,
+    Group,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrincipalLifecycle {
+    Active,
+    Disabled,
+    Retired,
+    Deleted,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -463,19 +480,17 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         .identity_clients
         .principals
         .iter()
-        .map(|principal| (principal.id.as_str(), principal.kind.as_str()))
+        .map(|principal| (principal.id.as_str(), principal.kind))
         .collect::<BTreeMap<_, _>>();
     for principal in &bundle.identity_clients.principals {
-        validate_nonempty("principal kind", &principal.kind)?;
         validate_nonempty(
             "principal membership generation",
             &principal.membership_generation,
         )?;
-        validate_nonempty("principal lifecycle", &principal.lifecycle)?;
         validate_nonempty("principal provenance", &principal.provenance)?;
         for group in &principal.groups {
             match principal_kinds.get(group.as_str()) {
-                Some(&"group") => {}
+                Some(PrincipalKind::Group) => {}
                 Some(_) => {
                     return Err(InventoryError::new(
                         "INV_GROUP_KIND",
@@ -975,7 +990,7 @@ fn validate_state_records(
         validate_confidentiality("state confidentiality", &record.confidentiality)?;
         validate_nonempty("state restore target", &record.restore_target)?;
         validate_nonempty("state conflict policy", &record.conflict_policy)?;
-        validate_nonempty("state retention deadline", &record.retention_deadline)?;
+        validate_utc_timestamp("state retention deadline", &record.retention_deadline)?;
         validate_nonempty("state provenance", &record.provenance)?;
         validate_digest("state source", &record.source_sha256)?;
         for consumer in &record.external_consumers {
@@ -1091,6 +1106,55 @@ fn validate_nonempty(name: &str, value: &str) -> Result<(), InventoryError> {
         ));
     }
     Ok(())
+}
+
+fn validate_utc_timestamp(name: &str, value: &str) -> Result<(), InventoryError> {
+    let bytes = value.as_bytes();
+    let shape_is_valid = bytes.len() == 20
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'Z'
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        });
+    if !shape_is_valid {
+        return Err(InventoryError::new(
+            "INV_TIMESTAMP",
+            format!("{name} must be an exact UTC timestamp YYYY-MM-DDTHH:MM:SSZ"),
+        ));
+    }
+
+    let year = decimal(bytes, 0, 4);
+    let month = decimal(bytes, 5, 7);
+    let day = decimal(bytes, 8, 10);
+    let hour = decimal(bytes, 11, 13);
+    let minute = decimal(bytes, 14, 16);
+    let second = decimal(bytes, 17, 19);
+    let leap_year =
+        year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let maximum_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if year == 0 || day == 0 || day > maximum_day || hour > 23 || minute > 59 || second > 59 {
+        return Err(InventoryError::new(
+            "INV_TIMESTAMP",
+            format!("{name} is not a valid UTC calendar timestamp"),
+        ));
+    }
+    Ok(())
+}
+
+fn decimal(bytes: &[u8], start: usize, end: usize) -> u32 {
+    bytes[start..end]
+        .iter()
+        .fold(0_u32, |value, byte| value * 10 + u32::from(byte - b'0'))
 }
 
 fn validate_nonempty_collection(name: &str, values: &[String]) -> Result<(), InventoryError> {
