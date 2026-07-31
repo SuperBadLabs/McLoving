@@ -71,9 +71,13 @@ and persistent-state mutation for one bounded export epoch.
   duplicate coverage and duplicate declarations fail.
   Every supplied job group also carries an independently sourced dependency
   count that must exactly match the complete dependency population, including
-  zero-count groups and retained obligations for excluded jobs. An independent
+  zero-count groups and retained obligations for excluded jobs. Every
+  inventoried job, including retired and out-of-scope jobs, must supply exactly
+  one runtime group. The count commitment is domain-separated and bound to its
+  owning job. An independent
   canonical `(job ID, dependency ID, dependency kind)` set must match as well;
-  an explicit job-binding entry also seals zero-dependency groups.
+  an explicit runtime-domain job-binding entry also seals zero-dependency
+  groups.
   Mutability is one of `immutable`, `pinned-revision`, `mutable`, or `floating`;
   mutable and floating dependencies cannot be classified `native`. Every secret
   dependency additionally binds its exact tagged consumer, typed taint class,
@@ -92,15 +96,17 @@ and persistent-state mutation for one bounded export epoch.
   rollback transforms with mapping identity, evidence digest, and provenance.
   Every supplied job group carries an independently sourced record-class count
   that must exactly match the manifest, including explicit zero-count groups
-  and retained obligations for excluded jobs.
+  and retained obligations for excluded jobs. The count commitment is
+  domain-separated and bound to its owning job.
   The independently collected canonical set of
   `(job ID, record ID, record kind)` identities is length-prefixed, sorted,
   and SHA-256 bound as well, so a same-cardinality class or owner substitution
   fails reconciliation; an explicit job-binding entry also seals zero-state
   groups.
   Every record class also carries an independently sourced instance count with
-  collector identity, provenance, and source digest; this source count, rather
-  than an exporter assertion, drives migration-demand aggregation.
+  collector identity, provenance, source digest, and a domain-separated subject
+  digest binding the owning job, record ID, and record kind; this source count,
+  rather than an exporter assertion, drives migration-demand aggregation.
 
 Secret values are never inventory fields. A dependency classified `secret`
 must carry a typed `credential_reference` or `redaction_reference`; the

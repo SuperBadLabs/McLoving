@@ -79,6 +79,7 @@ pub struct CountEvidence {
     pub collector_id: String,
     pub provenance: String,
     pub source_sha256: String,
+    pub subject_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -530,6 +531,10 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         "controller job count",
         &bundle.job_graph.controller_job_count,
         &bundle.job_graph.binding.exporter_id,
+        count_subject_sha256(&[
+            b"controller-job-population",
+            bundle.job_graph.binding.controller_id.as_bytes(),
+        ]),
     )?;
 
     let mut job_ids = BTreeSet::new();
@@ -566,6 +571,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             "job direct-child count",
             &job.direct_child_count,
             &bundle.job_graph.binding.exporter_id,
+            count_subject_sha256(&[b"direct-child-population", job.id.as_bytes()]),
         )?;
         if !job_ids.insert(job.id.clone()) {
             return Err(InventoryError::new(
@@ -657,6 +663,10 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         &bundle.identity_clients.principal_count,
         bundle.identity_clients.principals.len(),
         &bundle.identity_clients.binding.exporter_id,
+        count_subject_sha256(&[
+            b"principal-population",
+            bundle.identity_clients.binding.controller_id.as_bytes(),
+        ]),
         "INV_PRINCIPAL_COUNT_MISMATCH",
     )?;
     validate_exact_count(
@@ -664,6 +674,10 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         &bundle.identity_clients.acl_entry_count,
         bundle.identity_clients.acl_entries.len(),
         &bundle.identity_clients.binding.exporter_id,
+        count_subject_sha256(&[
+            b"acl-population",
+            bundle.identity_clients.binding.controller_id.as_bytes(),
+        ]),
         "INV_ACL_COUNT_MISMATCH",
     )?;
     validate_exact_count(
@@ -671,6 +685,10 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         &bundle.identity_clients.client_count,
         bundle.identity_clients.clients.len(),
         &bundle.identity_clients.binding.exporter_id,
+        count_subject_sha256(&[
+            b"client-population",
+            bundle.identity_clients.binding.controller_id.as_bytes(),
+        ]),
         "INV_CLIENT_COUNT_MISMATCH",
     )?;
     validate_exact_set(
@@ -829,10 +847,10 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         &job_ids,
         &bundle.persistent_state.binding.exporter_id,
     )?;
-    if !in_scope.iter().all(|job_id| runtime.contains_key(job_id)) {
+    if !job_ids.iter().all(|job_id| runtime.contains_key(job_id)) {
         return Err(InventoryError::new(
             "INV_RUNTIME_COVERAGE",
-            "every in-scope job must have exactly one runtime-dependency record",
+            "every job must have exactly one runtime-dependency record group, including retired and out-of-scope jobs",
         ));
     }
     if !job_ids.iter().all(|job_id| state.contains_key(job_id)) {
@@ -1228,6 +1246,7 @@ fn index_runtime<'a>(
             &job.dependency_count,
             job.dependencies.len(),
             manifest_exporter_id,
+            count_subject_sha256(&[b"runtime-dependency-population", job.job_id.as_bytes()]),
             "INV_DEPENDENCY_COUNT_MISMATCH",
         )?;
         validate_exact_set(
@@ -1274,6 +1293,7 @@ fn index_state<'a>(
             &job.record_class_count,
             job.records.len(),
             manifest_exporter_id,
+            count_subject_sha256(&[b"state-class-population", job.job_id.as_bytes()]),
             "INV_STATE_CLASS_COUNT_MISMATCH",
         )?;
         validate_exact_set(
@@ -1549,6 +1569,12 @@ fn validate_state_records(
             "state record instance count",
             &record.record_count,
             manifest_exporter_id,
+            count_subject_sha256(&[
+                b"state-record-instance-population",
+                job_id.as_bytes(),
+                record.id.as_bytes(),
+                record.kind.as_bytes(),
+            ]),
         )?;
         validate_confidentiality("state confidentiality", &record.confidentiality)?;
         validate_nonempty("state restore target", &record.restore_target)?;
@@ -1700,6 +1726,7 @@ fn validate_count_evidence(
     kind: &str,
     evidence: &CountEvidence,
     manifest_exporter_id: &str,
+    expected_subject_sha256: String,
 ) -> Result<(), InventoryError> {
     validate_identifier(&format!("{kind} collector"), &evidence.collector_id)?;
     if evidence.collector_id == manifest_exporter_id {
@@ -1709,7 +1736,15 @@ fn validate_count_evidence(
         ));
     }
     validate_nonempty(&format!("{kind} provenance"), &evidence.provenance)?;
-    validate_digest(&format!("{kind} source"), &evidence.source_sha256)
+    validate_digest(&format!("{kind} source"), &evidence.source_sha256)?;
+    validate_digest(&format!("{kind} subject"), &evidence.subject_sha256)?;
+    if evidence.subject_sha256 != expected_subject_sha256 {
+        return Err(InventoryError::new(
+            "INV_COUNT_SUBJECT_MISMATCH",
+            format!("{kind} is not bound to its expected population owner"),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_exact_count(
@@ -1717,9 +1752,15 @@ fn validate_exact_count(
     evidence: &CountEvidence,
     actual: usize,
     manifest_exporter_id: &str,
+    expected_subject_sha256: String,
     mismatch_code: &'static str,
 ) -> Result<(), InventoryError> {
-    validate_count_evidence(kind, evidence, manifest_exporter_id)?;
+    validate_count_evidence(
+        kind,
+        evidence,
+        manifest_exporter_id,
+        expected_subject_sha256,
+    )?;
     let actual = u64_count(actual)?;
     if evidence.count != actual {
         return Err(InventoryError::new(
@@ -1768,7 +1809,7 @@ fn validate_exact_set(
 }
 
 fn dependency_set_sha256(job_id: &str, dependencies: &[RuntimeDependency]) -> String {
-    let mut entries = vec![vec![b"job".to_vec(), job_id.as_bytes().to_vec()]];
+    let mut entries = vec![vec![b"runtime-job".to_vec(), job_id.as_bytes().to_vec()]];
     entries.extend(dependencies.iter().map(|dependency| {
         vec![
             b"dependency".to_vec(),
@@ -1781,7 +1822,7 @@ fn dependency_set_sha256(job_id: &str, dependencies: &[RuntimeDependency]) -> St
 }
 
 fn state_class_set_sha256(job_id: &str, records: &[StateRecord]) -> String {
-    let mut entries = vec![vec![b"job".to_vec(), job_id.as_bytes().to_vec()]];
+    let mut entries = vec![vec![b"state-job".to_vec(), job_id.as_bytes().to_vec()]];
     entries.extend(records.iter().map(|record| {
         vec![
             b"state-class".to_vec(),
@@ -1791,6 +1832,15 @@ fn state_class_set_sha256(job_id: &str, records: &[StateRecord]) -> String {
         ]
     }));
     canonical_owned_entries_sha256(entries)
+}
+
+fn count_subject_sha256(fields: &[&[u8]]) -> String {
+    let mut canonical = Vec::new();
+    append_length_prefixed(&mut canonical, &(fields.len() as u64).to_be_bytes());
+    for field in fields {
+        append_length_prefixed(&mut canonical, field);
+    }
+    format!("{:x}", Sha256::digest(canonical))
 }
 
 fn job_graph_set_sha256(jobs: &[JobRecord]) -> String {
