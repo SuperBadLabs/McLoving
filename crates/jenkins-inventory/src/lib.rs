@@ -68,6 +68,7 @@ pub struct ApprovedDisposition {
 pub struct JobGraphManifest {
     pub binding: SnapshotBinding,
     pub controller_job_count: CountEvidence,
+    pub job_set: SetEvidence,
     pub jobs: Vec<JobRecord>,
 }
 
@@ -134,10 +135,13 @@ pub struct IdentityClientManifest {
     pub binding: SnapshotBinding,
     pub security_realm: SecurityRealm,
     pub principal_count: CountEvidence,
+    pub principal_set: SetEvidence,
     pub principals: Vec<Principal>,
     pub acl_entry_count: CountEvidence,
+    pub acl_entry_set: SetEvidence,
     pub acl_entries: Vec<AclEntry>,
     pub client_count: CountEvidence,
+    pub client_set: SetEvidence,
     pub clients: Vec<ClientRecord>,
 }
 
@@ -242,6 +246,7 @@ pub struct RuntimeDependencyManifest {
 pub struct JobDependencies {
     pub job_id: String,
     pub dependency_count: CountEvidence,
+    pub dependency_set: SetEvidence,
     pub dependencies: Vec<RuntimeDependency>,
 }
 
@@ -529,7 +534,6 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
 
     let mut job_ids = BTreeSet::new();
     let mut in_scope = BTreeSet::new();
-    let mut state_required = BTreeSet::new();
     for job in &bundle.job_graph.jobs {
         validate_identifier("job", &job.id)?;
         validate_nonempty("job owner", &job.owner)?;
@@ -584,9 +588,6 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         if job.scope.disposition == ScopeDisposition::InScope {
             in_scope.insert(job.id.clone());
         }
-        if job.scope.disposition != ScopeDisposition::Retired {
-            state_required.insert(job.id.clone());
-        }
     }
     if bundle.job_graph.controller_job_count.count != u64_count(job_ids.len())? {
         return Err(InventoryError::new(
@@ -598,6 +599,20 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             ),
         ));
     }
+    validate_exact_set(
+        "controller job set",
+        &bundle.job_graph.job_set,
+        canonical_entries_sha256(
+            bundle
+                .job_graph
+                .jobs
+                .iter()
+                .map(|job| vec![job.id.as_bytes()])
+                .collect(),
+        ),
+        &bundle.job_graph.binding.exporter_id,
+        "INV_JOB_SET_MISMATCH",
+    )?;
     let mut direct_child_counts = BTreeMap::new();
     for job in &bundle.job_graph.jobs {
         if let Some(parent) = &job.parent_id {
@@ -664,6 +679,54 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         bundle.identity_clients.clients.len(),
         &bundle.identity_clients.binding.exporter_id,
         "INV_CLIENT_COUNT_MISMATCH",
+    )?;
+    validate_exact_set(
+        "principal set",
+        &bundle.identity_clients.principal_set,
+        canonical_entries_sha256(
+            bundle
+                .identity_clients
+                .principals
+                .iter()
+                .map(|principal| vec![principal.id.as_bytes()])
+                .collect(),
+        ),
+        &bundle.identity_clients.binding.exporter_id,
+        "INV_PRINCIPAL_SET_MISMATCH",
+    )?;
+    validate_exact_set(
+        "ACL-entry set",
+        &bundle.identity_clients.acl_entry_set,
+        canonical_entries_sha256(
+            bundle
+                .identity_clients
+                .acl_entries
+                .iter()
+                .map(|acl| {
+                    vec![
+                        acl.job_id.as_bytes(),
+                        acl.principal_id.as_bytes(),
+                        acl.scope.as_bytes(),
+                    ]
+                })
+                .collect(),
+        ),
+        &bundle.identity_clients.binding.exporter_id,
+        "INV_ACL_SET_MISMATCH",
+    )?;
+    validate_exact_set(
+        "client set",
+        &bundle.identity_clients.client_set,
+        canonical_entries_sha256(
+            bundle
+                .identity_clients
+                .clients
+                .iter()
+                .map(|client| vec![client.id.as_bytes()])
+                .collect(),
+        ),
+        &bundle.identity_clients.binding.exporter_id,
+        "INV_CLIENT_SET_MISMATCH",
     )?;
 
     let principal_ids = unique_ids(
@@ -799,13 +862,10 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             "every in-scope job must have exactly one runtime-dependency record",
         ));
     }
-    if !state_required
-        .iter()
-        .all(|job_id| state.contains_key(job_id))
-    {
+    if !job_ids.iter().all(|job_id| state.contains_key(job_id)) {
         return Err(InventoryError::new(
             "INV_STATE_COVERAGE",
-            "every in-scope or out-of-scope job must have exactly one persistent-state record group; only an approved retired job may omit it",
+            "every job must have exactly one persistent-state record group, including retired and out-of-scope jobs",
         ));
     }
 
@@ -1197,6 +1257,18 @@ fn index_runtime<'a>(
             manifest_exporter_id,
             "INV_DEPENDENCY_COUNT_MISMATCH",
         )?;
+        validate_exact_set(
+            "runtime-dependency set",
+            &job.dependency_set,
+            canonical_entries_sha256(
+                job.dependencies
+                    .iter()
+                    .map(|dependency| vec![dependency.id.as_bytes(), dependency.kind.as_bytes()])
+                    .collect(),
+            ),
+            manifest_exporter_id,
+            "INV_DEPENDENCY_SET_MISMATCH",
+        )?;
         if indexed
             .insert(job.job_id.clone(), job.dependencies.as_slice())
             .is_some()
@@ -1236,21 +1308,13 @@ fn index_state<'a>(
             manifest_exporter_id,
             "INV_STATE_CLASS_COUNT_MISMATCH",
         )?;
-        validate_set_evidence(
+        validate_exact_set(
             "persistent-state record-class set",
             &job.record_class_set,
+            state_class_set_sha256(&job.records),
             manifest_exporter_id,
+            "INV_STATE_CLASS_SET_MISMATCH",
         )?;
-        let observed_set = state_class_set_sha256(&job.records);
-        if job.record_class_set.entries_sha256 != observed_set {
-            return Err(InventoryError::new(
-                "INV_STATE_CLASS_SET_MISMATCH",
-                format!(
-                    "persistent-state record-class source set does not match job {}",
-                    job.job_id
-                ),
-            ));
-        }
         if indexed
             .insert(job.job_id.clone(), job.records.as_slice())
             .is_some()
@@ -1718,16 +1782,40 @@ fn validate_set_evidence(
     validate_digest(&format!("{kind} entries"), &evidence.entries_sha256)
 }
 
+fn validate_exact_set(
+    kind: &str,
+    evidence: &SetEvidence,
+    actual_sha256: String,
+    manifest_exporter_id: &str,
+    mismatch_code: &'static str,
+) -> Result<(), InventoryError> {
+    validate_set_evidence(kind, evidence, manifest_exporter_id)?;
+    if evidence.entries_sha256 != actual_sha256 {
+        return Err(InventoryError::new(
+            mismatch_code,
+            format!("{kind} source identities do not match the manifest population"),
+        ));
+    }
+    Ok(())
+}
+
 fn state_class_set_sha256(records: &[StateRecord]) -> String {
-    let mut entries = records
-        .iter()
-        .map(|record| (record.id.as_bytes(), record.kind.as_bytes()))
-        .collect::<Vec<_>>();
+    canonical_entries_sha256(
+        records
+            .iter()
+            .map(|record| vec![record.id.as_bytes(), record.kind.as_bytes()])
+            .collect(),
+    )
+}
+
+fn canonical_entries_sha256(mut entries: Vec<Vec<&[u8]>>) -> String {
     entries.sort();
     let mut canonical = Vec::new();
-    for (id, kind) in entries {
-        append_length_prefixed(&mut canonical, id);
-        append_length_prefixed(&mut canonical, kind);
+    for entry in entries {
+        append_length_prefixed(&mut canonical, &(entry.len() as u64).to_be_bytes());
+        for field in entry {
+            append_length_prefixed(&mut canonical, field);
+        }
     }
     sha256_hex(&canonical)
 }

@@ -41,13 +41,16 @@ and persistent-state mutation for one bounded export epoch.
   independently sourced controller total and independently sourced direct-child
   count for every job must exactly match the manifest population and hierarchy;
   each count binds a collector distinct from the manifest exporter, provenance,
-  and a source-evidence digest.
+  and a source-evidence digest. The independently collected canonical job-ID
+  set is separately SHA-256 bound and must match exactly.
 - `identity-clients.yaml` owns the security realm, immutable principals and
   lifecycle evidence, effective ACLs, and every read-side or write-side client.
   Independently sourced principal, effective-ACL-entry, and client totals must
   each exactly match their manifest population. Each total binds a collector
   distinct from the manifest exporter, provenance, and a source-evidence
-  digest.
+  digest. Independent canonical identity sets also bind principal IDs,
+  `(job ID, principal ID, scope)` ACL keys, and client IDs, preventing
+  same-cardinality substitution.
   Principal kind is one of `user`, `service`, or `group`; lifecycle is one of
   `active`, `disabled`, `retired`, or `deleted`. Current aliases participate in
   the unique principal namespace. Historical-name claims carry their own
@@ -66,7 +69,8 @@ and persistent-state mutation for one bounded export epoch.
   duplicate coverage and duplicate declarations fail.
   Every supplied job group also carries an independently sourced dependency
   count that must exactly match the complete dependency population, including
-  zero-count groups and retained obligations for excluded jobs.
+  zero-count groups and retained obligations for excluded jobs. An independent
+  canonical `(dependency ID, dependency kind)` set must match as well.
   Mutability is one of `immutable`, `pinned-revision`, `mutable`, or `floating`;
   mutable and floating dependencies cannot be classified `native`. Every secret
   dependency additionally binds its exact tagged consumer, typed taint class,
@@ -108,9 +112,10 @@ Unknown or case-variant labels fail closed.
 `mcloving-inventory reconcile --root ROOT` verifies the detached hashes,
 strictly parses all four manifests, checks epoch identity and referential
 integrity, requires exactly one runtime and state record group for every
-in-scope job, requires a state group for every out-of-scope job, permits
-retained obligation groups for approved retired jobs, validates every supplied
-group regardless of scope, and
+in-scope job and requires an explicit state group for every job, including
+out-of-scope and retired jobs. Retired jobs may declare an independently proven
+zero-class state group, but approval alone never discards retention or legal
+hold obligations. Every supplied group is validated regardless of scope, and
 rejects:
 
 - duplicate or ambiguous identities;
@@ -118,8 +123,8 @@ rejects:
 - exclusions without owner approval;
 - source controller, direct-child, principal, ACL, client, per-job dependency,
   or per-job state-record-class counts that differ from the manifest;
-- per-job state-class identity sets that differ from the independently sourced
-  canonical set;
+- job, principal, ACL, client, per-job dependency, or per-job state-class
+  identity sets that differ from their independently sourced canonical sets;
 - state record classes whose instance counts lack independent source evidence;
 - unclassified runtime or state-transform behavior;
 - missing, duplicate, or undeclared compatibility evidence for a job's shared

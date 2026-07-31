@@ -483,6 +483,7 @@ fn reconciliation_rejects_unknown_acl_principal() {
     let directory = TestDirectory::new("acl");
     let mut bundle = fixture();
     bundle.identity_clients.acl_entries[0].principal_id = "user/missing".to_owned();
+    refresh_fixture_sets(&mut bundle);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -639,6 +640,56 @@ fn reconciliation_rejects_identity_population_omissions() {
 }
 
 #[test]
+fn reconciliation_rejects_same_cardinality_population_substitution() {
+    for (name, mutate, expected) in [
+        (
+            "job-set",
+            (|bundle: &mut Fixture| bundle.job_graph.jobs[2].id = "replacement".to_owned())
+                as fn(&mut Fixture),
+            "INV_JOB_SET_MISMATCH",
+        ),
+        (
+            "principal-set",
+            (|bundle: &mut Fixture| {
+                bundle.identity_clients.principals[2].id = "group/replacement".to_owned();
+            }) as fn(&mut Fixture),
+            "INV_PRINCIPAL_SET_MISMATCH",
+        ),
+        (
+            "acl-set",
+            (|bundle: &mut Fixture| {
+                bundle.identity_clients.acl_entries[0].scope = "replacement".to_owned();
+            }) as fn(&mut Fixture),
+            "INV_ACL_SET_MISMATCH",
+        ),
+        (
+            "client-set",
+            (|bundle: &mut Fixture| {
+                bundle.identity_clients.clients[0].id = "replacement".to_owned();
+            }) as fn(&mut Fixture),
+            "INV_CLIENT_SET_MISMATCH",
+        ),
+        (
+            "dependency-set",
+            (|bundle: &mut Fixture| {
+                bundle.runtime_dependencies.jobs[1].dependencies[0].kind = "replacement".to_owned();
+            }) as fn(&mut Fixture),
+            "INV_DEPENDENCY_SET_MISMATCH",
+        ),
+    ] {
+        let directory = TestDirectory::new(name);
+        let mut bundle = fixture();
+        mutate(&mut bundle);
+        write_bundle(&directory.0, &bundle);
+        seal_manifest_directory(&directory.0).expect("seal inventory");
+
+        let loaded = load_bundle(&directory.0).expect("load bundle");
+        let error = reconcile(&loaded).expect_err("same-cardinality substitution must fail");
+        assert_eq!(error.code, expected);
+    }
+}
+
+#[test]
 fn reconciliation_rejects_runtime_dependency_population_omission() {
     let directory = TestDirectory::new("runtime-dependency-count");
     let mut bundle = fixture();
@@ -672,11 +723,25 @@ fn reconciliation_requires_state_coverage_for_out_of_scope_jobs() {
         disposition: ScopeDisposition::OutOfScope,
         approval: Some("owner-approval/defer-legacy".to_owned()),
     };
+    bundle.persistent_state.jobs.remove(2);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("out-of-scope state omission must fail");
+    assert_eq!(error.code, "INV_STATE_COVERAGE");
+}
+
+#[test]
+fn reconciliation_requires_state_coverage_for_retired_jobs() {
+    let directory = TestDirectory::new("retired-state-coverage");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs.remove(2);
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("retired state omission must fail");
     assert_eq!(error.code, "INV_STATE_COVERAGE");
 }
 
@@ -831,6 +896,7 @@ fn reconciliation_preserves_deleted_historical_name_reuse() {
         provenance: "jenkins/deleted-user/operator".to_owned(),
     });
     bundle.identity_clients.principal_count.count = 4;
+    refresh_fixture_sets(&mut bundle);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1228,6 +1294,7 @@ fn reconciliation_strictly_validates_the_derived_ledger() {
             .push(dependency);
     }
     bundle.runtime_dependencies.jobs[1].dependency_count.count = 257;
+    refresh_dependency_set(&mut bundle.runtime_dependencies.jobs[1]);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1245,6 +1312,7 @@ fn reconciliation_rejects_duplicate_acl_scope() {
         .acl_entries
         .push(bundle.identity_clients.acl_entries[0].clone());
     bundle.identity_clients.acl_entry_count.count = 2;
+    refresh_fixture_sets(&mut bundle);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1265,10 +1333,11 @@ fn fixture() -> Fixture {
     let binding = binding();
     let mut folder = job("folder", None, ScopeDisposition::InScope);
     folder.direct_child_count.count = 1;
-    Fixture {
+    let mut fixture = Fixture {
         job_graph: JobGraphManifest {
             binding: binding.clone(),
             controller_job_count: count_evidence(3, "jenkins/controller/item-count"),
+            job_set: placeholder_set_evidence("jenkins/controller/item-set"),
             jobs: vec![
                 folder,
                 job("folder/build", Some("folder"), ScopeDisposition::InScope),
@@ -1289,6 +1358,7 @@ fn fixture() -> Fixture {
                 identity_provider_generation: "realm-generation-7".to_owned(),
             },
             principal_count: count_evidence(3, "jenkins/security-realm/principal-count"),
+            principal_set: placeholder_set_evidence("jenkins/security-realm/principal-set"),
             principals: vec![
                 Principal {
                     id: "user/operator".to_owned(),
@@ -1322,6 +1392,7 @@ fn fixture() -> Fixture {
                 },
             ],
             acl_entry_count: count_evidence(1, "jenkins/authorization/acl-entry-count"),
+            acl_entry_set: placeholder_set_evidence("jenkins/authorization/acl-entry-set"),
             acl_entries: vec![AclEntry {
                 job_id: "folder/build".to_owned(),
                 principal_id: "user/operator".to_owned(),
@@ -1330,6 +1401,7 @@ fn fixture() -> Fixture {
                 generation: "acl-12".to_owned(),
             }],
             client_count: count_evidence(2, "jenkins/access-log/client-count"),
+            client_set: placeholder_set_evidence("jenkins/access-log/client-set"),
             clients: vec![
                 ClientRecord {
                     id: "dashboard".to_owned(),
@@ -1364,21 +1436,10 @@ fn fixture() -> Fixture {
         runtime_dependencies: RuntimeDependencyManifest {
             binding: binding.clone(),
             jobs: vec![
-                JobDependencies {
-                    job_id: "folder".to_owned(),
-                    dependency_count: count_evidence(
-                        0,
-                        "jenkins/job/folder/runtime-dependency-count",
-                    ),
-                    dependencies: Vec::new(),
-                },
-                JobDependencies {
-                    job_id: "folder/build".to_owned(),
-                    dependency_count: count_evidence(
-                        1,
-                        "jenkins/job/folder/build/runtime-dependency-count",
-                    ),
-                    dependencies: vec![RuntimeDependency {
+                job_dependencies("folder", Vec::new()),
+                job_dependencies(
+                    "folder/build",
+                    vec![RuntimeDependency {
                         id: "credential/source".to_owned(),
                         kind: "source-checkout".to_owned(),
                         requirements: vec![
@@ -1418,7 +1479,7 @@ fn fixture() -> Fixture {
                         }),
                         disposition: CompatibilityDisposition::Mappable,
                     }],
-                },
+                ),
             ],
         },
         persistent_state: PersistentStateManifest {
@@ -1455,9 +1516,12 @@ fn fixture() -> Fixture {
                         provenance: "jenkins/build-history/folder/build".to_owned(),
                     }],
                 ),
+                job_state_records("legacy", Vec::new()),
             ],
         },
-    }
+    };
+    refresh_fixture_sets(&mut fixture);
+    fixture
 }
 
 fn add_excluded_obligations(fixture: &mut Fixture) {
@@ -1465,11 +1529,10 @@ fn add_excluded_obligations(fixture: &mut Fixture) {
     dependency.id = "credential/legacy".to_owned();
     dependency.requirements.clear();
     dependency.provenance = "jenkins/credentials/legacy".to_owned();
-    fixture.runtime_dependencies.jobs.push(JobDependencies {
-        job_id: "legacy".to_owned(),
-        dependency_count: count_evidence(1, "jenkins/job/legacy/runtime-dependency-count"),
-        dependencies: vec![dependency],
-    });
+    fixture
+        .runtime_dependencies
+        .jobs
+        .push(job_dependencies("legacy", vec![dependency]));
 
     let mut state = fixture.persistent_state.jobs[1].records[0].clone();
     state.id = "legacy-history".to_owned();
@@ -1477,10 +1540,7 @@ fn add_excluded_obligations(fixture: &mut Fixture) {
     state.restore_target = "retention-vault/legacy".to_owned();
     state.external_consumers.clear();
     state.provenance = "jenkins/build-history/legacy".to_owned();
-    fixture
-        .persistent_state
-        .jobs
-        .push(job_state_records("legacy", vec![state]));
+    fixture.persistent_state.jobs[2] = job_state_records("legacy", vec![state]);
 }
 
 fn binding() -> SnapshotBinding {
@@ -1559,6 +1619,83 @@ fn count_evidence(count: u64, provenance: &str) -> CountEvidence {
     }
 }
 
+fn placeholder_set_evidence(provenance: &str) -> SetEvidence {
+    set_evidence(provenance, Vec::new())
+}
+
+fn refresh_fixture_sets(fixture: &mut Fixture) {
+    fixture.job_graph.job_set = set_evidence(
+        "jenkins/controller/item-set",
+        fixture
+            .job_graph
+            .jobs
+            .iter()
+            .map(|job| vec![job.id.as_bytes()])
+            .collect(),
+    );
+    fixture.identity_clients.principal_set = set_evidence(
+        "jenkins/security-realm/principal-set",
+        fixture
+            .identity_clients
+            .principals
+            .iter()
+            .map(|principal| vec![principal.id.as_bytes()])
+            .collect(),
+    );
+    fixture.identity_clients.acl_entry_set = set_evidence(
+        "jenkins/authorization/acl-entry-set",
+        fixture
+            .identity_clients
+            .acl_entries
+            .iter()
+            .map(|acl| {
+                vec![
+                    acl.job_id.as_bytes(),
+                    acl.principal_id.as_bytes(),
+                    acl.scope.as_bytes(),
+                ]
+            })
+            .collect(),
+    );
+    fixture.identity_clients.client_set = set_evidence(
+        "jenkins/access-log/client-set",
+        fixture
+            .identity_clients
+            .clients
+            .iter()
+            .map(|client| vec![client.id.as_bytes()])
+            .collect(),
+    );
+}
+
+fn job_dependencies(job_id: &str, dependencies: Vec<RuntimeDependency>) -> JobDependencies {
+    JobDependencies {
+        job_id: job_id.to_owned(),
+        dependency_count: count_evidence(
+            dependencies.len() as u64,
+            &format!("jenkins/job/{job_id}/runtime-dependency-count"),
+        ),
+        dependency_set: set_evidence(
+            &format!("jenkins/job/{job_id}/runtime-dependency-set"),
+            dependencies
+                .iter()
+                .map(|dependency| vec![dependency.id.as_bytes(), dependency.kind.as_bytes()])
+                .collect(),
+        ),
+        dependencies,
+    }
+}
+
+fn refresh_dependency_set(job: &mut JobDependencies) {
+    job.dependency_set = set_evidence(
+        &format!("jenkins/job/{}/runtime-dependency-set", job.job_id),
+        job.dependencies
+            .iter()
+            .map(|dependency| vec![dependency.id.as_bytes(), dependency.kind.as_bytes()])
+            .collect(),
+    );
+}
+
 fn job_state_records(job_id: &str, records: Vec<StateRecord>) -> JobStateRecords {
     let record_class_count = count_evidence(
         records.len() as u64,
@@ -1578,24 +1715,39 @@ fn refresh_state_class_set(job: &mut JobStateRecords) {
 }
 
 fn state_class_set_evidence(job_id: &str, records: &[StateRecord]) -> SetEvidence {
-    let mut entries = records
-        .iter()
-        .map(|record| (record.id.as_bytes(), record.kind.as_bytes()))
-        .collect::<Vec<_>>();
+    set_evidence(
+        &format!("jenkins/job/{job_id}/state-record-class-set"),
+        records
+            .iter()
+            .map(|record| vec![record.id.as_bytes(), record.kind.as_bytes()])
+            .collect(),
+    )
+}
+
+fn set_evidence(provenance: &str, entries: Vec<Vec<&[u8]>>) -> SetEvidence {
+    SetEvidence {
+        collector_id: "jenkins/set-api-v1".to_owned(),
+        provenance: provenance.to_owned(),
+        source_sha256: DIGEST_C.to_owned(),
+        entries_sha256: canonical_entries_sha256(entries),
+    }
+}
+
+fn canonical_entries_sha256(mut entries: Vec<Vec<&[u8]>>) -> String {
     entries.sort();
     let mut canonical = Vec::new();
-    for (id, kind) in entries {
-        canonical.extend_from_slice(&(id.len() as u64).to_be_bytes());
-        canonical.extend_from_slice(id);
-        canonical.extend_from_slice(&(kind.len() as u64).to_be_bytes());
-        canonical.extend_from_slice(kind);
+    for entry in entries {
+        append_test_length_prefixed(&mut canonical, &(entry.len() as u64).to_be_bytes());
+        for field in entry {
+            append_test_length_prefixed(&mut canonical, field);
+        }
     }
-    SetEvidence {
-        collector_id: "jenkins/state-class-api-v1".to_owned(),
-        provenance: format!("jenkins/job/{job_id}/state-record-class-set"),
-        source_sha256: DIGEST_C.to_owned(),
-        entries_sha256: format!("{:x}", Sha256::digest(canonical)),
-    }
+    format!("{:x}", Sha256::digest(canonical))
+}
+
+fn append_test_length_prefixed(output: &mut Vec<u8>, value: &[u8]) {
+    output.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    output.extend_from_slice(value);
 }
 
 fn state_transform(disposition: CompatibilityDisposition) -> StateTransformEvidence {
