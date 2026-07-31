@@ -5,9 +5,9 @@ on:
     paths:
       - ".github/workflows/windows-agent.yml"
       - "bins/agent/**"
-      - "crates/agent/**"
+      - "crates/agent-protocol/**"
       - "crates/agent-runtime/**"
-      - "crates/execution-spine/**"
+      - "crates/domain/**"
       - "crates/windows-job/**"
       - "proto/**"
       - "scripts/windows-agent-war.ps1"
