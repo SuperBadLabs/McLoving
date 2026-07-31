@@ -1904,9 +1904,20 @@ fn population_subject_entry(
     let mut fields = vec![
         commitment_kind.to_vec(),
         family.to_vec(),
+        b"snapshot-binding-v1".to_vec(),
+        binding.schema.as_bytes().to_vec(),
         binding.controller_id.as_bytes().to_vec(),
+        binding.controller_url.as_bytes().to_vec(),
+        binding.controller_core_version.as_bytes().to_vec(),
+        binding.plugin_profile_sha256.as_bytes().to_vec(),
+        binding.global_config_sha256.as_bytes().to_vec(),
         binding.epoch_id.as_bytes().to_vec(),
         binding.source_generation.as_bytes().to_vec(),
+        binding.collected_at.as_bytes().to_vec(),
+        binding.exporter_id.as_bytes().to_vec(),
+        binding.exporter_version.as_bytes().to_vec(),
+        binding.exporter_sha256.as_bytes().to_vec(),
+        binding.provenance.as_bytes().to_vec(),
     ];
     fields.extend(owner_fields.iter().map(|field| field.to_vec()));
     fields

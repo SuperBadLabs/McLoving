@@ -863,6 +863,26 @@ fn reconciliation_rejects_cross_epoch_per_job_evidence_replay() {
 }
 
 #[test]
+fn reconciliation_rejects_stale_evidence_after_snapshot_configuration_changes() {
+    let directory = TestDirectory::new("stale-snapshot-configuration");
+    let mut bundle = fixture();
+    for binding in [
+        &mut bundle.job_graph.binding,
+        &mut bundle.identity_clients.binding,
+        &mut bundle.runtime_dependencies.binding,
+        &mut bundle.persistent_state.binding,
+    ] {
+        binding.global_config_sha256 = DIGEST_A.to_owned();
+    }
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("stale snapshot evidence must fail");
+    assert_eq!(error.code, "INV_COUNT_SUBJECT_MISMATCH");
+}
+
+#[test]
 fn reconciliation_rejects_cross_domain_empty_identity_set_evidence() {
     let directory = TestDirectory::new("empty-identity-domain");
     let mut bundle = fixture();
@@ -2168,9 +2188,20 @@ fn population_subject_entry(
     let mut fields = vec![
         commitment_kind.to_vec(),
         family.to_vec(),
+        b"snapshot-binding-v1".to_vec(),
+        binding.schema.as_bytes().to_vec(),
         binding.controller_id.as_bytes().to_vec(),
+        binding.controller_url.as_bytes().to_vec(),
+        binding.controller_core_version.as_bytes().to_vec(),
+        binding.plugin_profile_sha256.as_bytes().to_vec(),
+        binding.global_config_sha256.as_bytes().to_vec(),
         binding.epoch_id.as_bytes().to_vec(),
         binding.source_generation.as_bytes().to_vec(),
+        binding.collected_at.as_bytes().to_vec(),
+        binding.exporter_id.as_bytes().to_vec(),
+        binding.exporter_version.as_bytes().to_vec(),
+        binding.exporter_sha256.as_bytes().to_vec(),
+        binding.provenance.as_bytes().to_vec(),
     ];
     fields.extend(owner_fields.iter().map(|field| field.to_vec()));
     fields

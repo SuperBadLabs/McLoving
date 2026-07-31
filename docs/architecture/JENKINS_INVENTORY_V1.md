@@ -28,9 +28,11 @@ The manifests share one byte-identical `binding`. It identifies the controller,
 Jenkins core and plugin profile, effective global configuration, exporter,
 provenance, source generation, and collection epoch. A mixed epoch is rejected.
 Every independently collected population count and set commitment is also
-domain-separated and binds the controller ID, epoch ID, and source generation,
-preventing a per-job or global population proof from an older snapshot from
-being replayed inside a fresh common binding.
+domain-separated and binds the complete snapshot: schema, controller identity,
+URL, core/plugin/global configuration, epoch/source generation, collection
+time, exporter identity/version/content, and provenance. This prevents a
+per-job or global population proof from an older or differently configured
+snapshot from being replayed inside a fresh common binding.
 The collection time is an exact, calendar-valid UTC
 `YYYY-MM-DDTHH:MM:SSZ` timestamp.
 If Jenkins cannot provide a coherent snapshot, collection must quiesce all
