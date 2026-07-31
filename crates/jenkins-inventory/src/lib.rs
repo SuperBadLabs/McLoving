@@ -710,11 +710,53 @@ pub fn render_ledger(ledger: &EligibilityLedger) -> Result<String, InventoryErro
 
 pub fn seal_manifest_directory(root: &Path) -> Result<(), InventoryError> {
     let checksum_path = root.join(CHECKSUM_FILE);
-    if checksum_path.exists() {
-        return Err(InventoryError::new(
-            "INV_IMMUTABLE",
-            format!("{} already exists", checksum_path.display()),
-        ));
+    match fs::symlink_metadata(&checksum_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(InventoryError::new(
+                "INV_FILE_TYPE",
+                format!("{} is a symbolic link", checksum_path.display()),
+            ));
+        }
+        Ok(_) => {
+            return Err(InventoryError::new(
+                "INV_IMMUTABLE",
+                format!("{} already exists", checksum_path.display()),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(InventoryError::new(
+                "INV_IO",
+                format!("cannot inspect {}: {error}", checksum_path.display()),
+            ));
+        }
+    }
+    let allowed = MANIFEST_FILES.into_iter().collect::<BTreeSet<_>>();
+    for entry in fs::read_dir(root).map_err(|error| {
+        InventoryError::new(
+            "INV_IO",
+            format!("cannot inspect {}: {error}", root.display()),
+        )
+    })? {
+        let entry = entry.map_err(|error| {
+            InventoryError::new(
+                "INV_IO",
+                format!("cannot inspect an entry in {}: {error}", root.display()),
+            )
+        })?;
+        let filename = entry.file_name();
+        let Some(filename) = filename.to_str() else {
+            return Err(InventoryError::new(
+                "INV_UNEXPECTED_ENTRY",
+                format!("{} contains a non-UTF-8 entry", root.display()),
+            ));
+        };
+        if !allowed.contains(filename) {
+            return Err(InventoryError::new(
+                "INV_UNEXPECTED_ENTRY",
+                format!("{} contains unexpected entry {filename}", root.display()),
+            ));
+        }
     }
     let mut lines = String::new();
     for filename in MANIFEST_FILES {
@@ -845,6 +887,7 @@ fn validate_binding(binding: &SnapshotBinding) -> Result<(), InventoryError> {
     ] {
         validate_nonempty(name, value)?;
     }
+    validate_utc_timestamp("collection time", &binding.collected_at)?;
     validate_digest("plugin profile", &binding.plugin_profile_sha256)?;
     validate_digest("global configuration", &binding.global_config_sha256)?;
     validate_digest("exporter", &binding.exporter_sha256)

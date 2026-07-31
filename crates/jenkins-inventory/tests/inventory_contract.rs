@@ -74,6 +74,21 @@ fn sealed_inventory_reconciles_to_a_conservative_ledger() {
 }
 
 #[test]
+fn seal_rejects_unexpected_root_entries() {
+    let directory = TestDirectory::new("unexpected-entry");
+    write_bundle(&directory.0, &fixture());
+    fs::write(
+        directory.0.join("eligibility-ledger.yaml"),
+        "unverified: secret-bearing-stale-output\n",
+    )
+    .expect("write unexpected entry");
+
+    let error = seal_manifest_directory(&directory.0).expect_err("extra entry must fail");
+    assert_eq!(error.code, "INV_UNEXPECTED_ENTRY");
+    assert!(!directory.0.join("SHA256SUMS").exists());
+}
+
+#[test]
 fn verification_path_is_read_only() {
     let directory = TestDirectory::new("verify");
     write_bundle(&directory.0, &fixture());
@@ -492,6 +507,23 @@ fn reconciliation_rejects_invalid_retention_deadlines() {
 
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("invalid retention deadline must fail");
+    assert_eq!(error.code, "INV_TIMESTAMP");
+}
+
+#[test]
+fn reconciliation_rejects_invalid_collection_timestamp() {
+    let directory = TestDirectory::new("invalid-collection-time");
+    let mut bundle = fixture();
+    let invalid = "2026-02-30T12:00:00Z".to_owned();
+    bundle.job_graph.binding.collected_at = invalid.clone();
+    bundle.identity_clients.binding.collected_at = invalid.clone();
+    bundle.runtime_dependencies.binding.collected_at = invalid.clone();
+    bundle.persistent_state.binding.collected_at = invalid;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("invalid collection timestamp must fail");
     assert_eq!(error.code, "INV_TIMESTAMP");
 }
 

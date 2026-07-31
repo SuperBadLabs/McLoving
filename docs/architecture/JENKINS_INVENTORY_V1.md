@@ -18,14 +18,17 @@ SHA256SUMS
 ```
 
 `mcloving-inventory seal --root ROOT` creates `SHA256SUMS` with
-create-new semantics. It refuses an already sealed root. Every manifest is
-strict YAML: aliases, anchors, tags, directives, duplicate keys, multiple
-documents, and resource-limit violations fail before typed deserialization.
-Unknown typed fields also fail.
+create-new semantics. It refuses an already sealed root and any root containing
+an entry outside the four source manifests, so stale or secret-bearing exports
+cannot sit outside the seal. Every manifest is strict YAML: aliases, anchors,
+tags, directives, duplicate keys, multiple documents, and resource-limit
+violations fail before typed deserialization. Unknown typed fields also fail.
 
 The manifests share one byte-identical `binding`. It identifies the controller,
 Jenkins core and plugin profile, effective global configuration, exporter,
 provenance, source generation, and collection epoch. A mixed epoch is rejected.
+The collection time is an exact, calendar-valid UTC
+`YYYY-MM-DDTHH:MM:SSZ` timestamp.
 If Jenkins cannot provide a coherent snapshot, collection must quiesce all
 configuration, identity, client, runtime-dependency, job-state, retention, hold,
 and persistent-state mutation for one bounded export epoch.
