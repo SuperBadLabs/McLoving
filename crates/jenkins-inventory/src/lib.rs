@@ -355,7 +355,7 @@ pub struct StateRecord {
     pub id: String,
     pub kind: String,
     pub owner: String,
-    pub record_count: u64,
+    pub record_count: CountEvidence,
     pub source_sha256: String,
     pub confidentiality: String,
     pub restore_target: String,
@@ -519,6 +519,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
 
     let mut job_ids = BTreeSet::new();
     let mut in_scope = BTreeSet::new();
+    let mut state_required = BTreeSet::new();
     for job in &bundle.job_graph.jobs {
         validate_identifier("job", &job.id)?;
         validate_nonempty("job owner", &job.owner)?;
@@ -572,6 +573,9 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         }
         if job.scope.disposition == ScopeDisposition::InScope {
             in_scope.insert(job.id.clone());
+        }
+        if job.scope.disposition != ScopeDisposition::Retired {
+            state_required.insert(job.id.clone());
         }
     }
     if bundle.job_graph.controller_job_count.count != u64_count(job_ids.len())? {
@@ -785,10 +789,13 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             "every in-scope job must have exactly one runtime-dependency record",
         ));
     }
-    if !in_scope.iter().all(|job_id| state.contains_key(job_id)) {
+    if !state_required
+        .iter()
+        .all(|job_id| state.contains_key(job_id))
+    {
         return Err(InventoryError::new(
             "INV_STATE_COVERAGE",
-            "every in-scope job must have exactly one persistent-state record",
+            "every in-scope or out-of-scope job must have exactly one persistent-state record group; only an approved retired job may omit it",
         ));
     }
 
@@ -818,6 +825,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
                 job_id,
                 records,
                 &client_directions,
+                &bundle.persistent_state.binding.exporter_id,
                 &mut legal_hold_definitions,
                 &mut retention_policy_definitions,
             )?,
@@ -847,7 +855,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         }
         for record in records {
             state_transform_records = state_transform_records
-                .checked_add(record.record_count)
+                .checked_add(record.record_count.count)
                 .ok_or_else(|| {
                     InventoryError::new(
                         "INV_COUNT_OVERFLOW",
@@ -1472,6 +1480,7 @@ fn validate_state_records(
     job_id: &str,
     records: &[StateRecord],
     client_directions: &BTreeMap<String, ClientDirection>,
+    manifest_exporter_id: &str,
     legal_hold_definitions: &mut BTreeMap<String, LegalHold>,
     retention_policy_definitions: &mut BTreeMap<String, String>,
 ) -> Result<CompatibilityDisposition, InventoryError> {
@@ -1479,6 +1488,11 @@ fn validate_state_records(
     for record in records {
         validate_nonempty("state kind", &record.kind)?;
         validate_nonempty("state owner", &record.owner)?;
+        validate_count_evidence(
+            "state record instance count",
+            &record.record_count,
+            manifest_exporter_id,
+        )?;
         validate_confidentiality("state confidentiality", &record.confidentiality)?;
         validate_nonempty("state restore target", &record.restore_target)?;
         validate_nonempty("state conflict policy", &record.conflict_policy)?;

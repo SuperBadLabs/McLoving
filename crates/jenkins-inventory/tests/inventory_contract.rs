@@ -664,6 +664,37 @@ fn reconciliation_rejects_state_record_class_population_omission() {
 }
 
 #[test]
+fn reconciliation_requires_state_coverage_for_out_of_scope_jobs() {
+    let directory = TestDirectory::new("out-of-scope-state-coverage");
+    let mut bundle = fixture();
+    bundle.job_graph.jobs[2].scope = ApprovedDisposition {
+        disposition: ScopeDisposition::OutOfScope,
+        approval: Some("owner-approval/defer-legacy".to_owned()),
+    };
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("out-of-scope state omission must fail");
+    assert_eq!(error.code, "INV_STATE_COVERAGE");
+}
+
+#[test]
+fn state_record_instance_counts_require_independent_evidence() {
+    let directory = TestDirectory::new("state-instance-count-collector");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0]
+        .record_count
+        .collector_id = bundle.persistent_state.binding.exporter_id.clone();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("dependent state instance count must fail");
+    assert_eq!(error.code, "INV_COUNT_NOT_INDEPENDENT");
+}
+
+#[test]
 fn every_population_count_requires_an_independent_collector() {
     let directory = TestDirectory::new("population-count-collector");
     let mut bundle = fixture();
@@ -1059,13 +1090,13 @@ fn reconciliation_rejects_state_record_count_overflow() {
     let directory = TestDirectory::new("state-count-overflow");
     let mut bundle = fixture();
     let records = &mut bundle.persistent_state.jobs[1].records;
-    records[0].record_count = i64::MAX as u64;
+    records[0].record_count.count = i64::MAX as u64;
     let mut second = records[0].clone();
     second.id = "state/folder/overflow".to_owned();
     records.push(second);
     let mut third = records[0].clone();
     third.id = "state/folder/overflow-final".to_owned();
-    third.record_count = 2;
+    third.record_count.count = 2;
     records.push(third);
     bundle.persistent_state.jobs[1].record_class_count.count = 3;
     write_bundle(&directory.0, &bundle);
@@ -1379,7 +1410,10 @@ fn fixture() -> Fixture {
                         id: "build-history".to_owned(),
                         kind: "build-number-and-result".to_owned(),
                         owner: "ci-platform".to_owned(),
-                        record_count: 8,
+                        record_count: count_evidence(
+                            8,
+                            "jenkins/job/folder/build/build-history-count",
+                        ),
                         source_sha256: DIGEST_C.to_owned(),
                         confidentiality: "internal".to_owned(),
                         restore_target: "jenkins/folder/build".to_owned(),
@@ -1418,7 +1452,7 @@ fn add_excluded_obligations(fixture: &mut Fixture) {
 
     let mut state = fixture.persistent_state.jobs[1].records[0].clone();
     state.id = "legacy-history".to_owned();
-    state.record_count = 13;
+    state.record_count = count_evidence(13, "jenkins/job/legacy/build-history-count");
     state.restore_target = "retention-vault/legacy".to_owned();
     state.external_consumers.clear();
     state.provenance = "jenkins/build-history/legacy".to_owned();

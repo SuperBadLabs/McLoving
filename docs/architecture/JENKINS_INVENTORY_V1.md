@@ -86,6 +86,9 @@ and persistent-state mutation for one bounded export epoch.
   Every supplied job group carries an independently sourced record-class count
   that must exactly match the manifest, including explicit zero-count groups
   and retained obligations for excluded jobs.
+  Every record class also carries an independently sourced instance count with
+  collector identity, provenance, and source digest; this source count, rather
+  than an exporter assertion, drives migration-demand aggregation.
 
 Secret values are never inventory fields. A dependency classified `secret`
 must carry a typed `credential_reference` or `redaction_reference`; the
@@ -102,8 +105,9 @@ Unknown or case-variant labels fail closed.
 `mcloving-inventory reconcile --root ROOT` verifies the detached hashes,
 strictly parses all four manifests, checks epoch identity and referential
 integrity, requires exactly one runtime and state record group for every
-in-scope job, permits retained obligation groups for approved retired or
-out-of-scope jobs, validates every supplied group regardless of scope, and
+in-scope job, requires a state group for every out-of-scope job, permits
+retained obligation groups for approved retired jobs, validates every supplied
+group regardless of scope, and
 rejects:
 
 - duplicate or ambiguous identities;
@@ -111,6 +115,7 @@ rejects:
 - exclusions without owner approval;
 - source controller, direct-child, principal, ACL, client, per-job dependency,
   or per-job state-record-class counts that differ from the manifest;
+- state record classes whose instance counts lack independent source evidence;
 - unclassified runtime or state-transform behavior;
 - missing, duplicate, or undeclared compatibility evidence for a job's shared
   libraries, triggers, platforms, agent labels, or toolchains;
