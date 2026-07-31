@@ -41,16 +41,18 @@ and persistent-state mutation for one bounded export epoch.
   independently sourced controller total and independently sourced direct-child
   count for every job must exactly match the manifest population and hierarchy;
   each count binds a collector distinct from the manifest exporter, provenance,
-  and a source-evidence digest. The independently collected canonical job-ID
-  set is separately SHA-256 bound and must match exactly.
+  and a source-evidence digest. The independently collected canonical
+  `(job ID, parent ID)` set is separately SHA-256 bound and must match exactly,
+  so same-cardinality parent/child substitutions cannot pass.
 - `identity-clients.yaml` owns the security realm, immutable principals and
   lifecycle evidence, effective ACLs, and every read-side or write-side client.
   Independently sourced principal, effective-ACL-entry, and client totals must
   each exactly match their manifest population. Each total binds a collector
   distinct from the manifest exporter, provenance, and a source-evidence
   digest. Independent canonical identity sets also bind principal IDs,
-  `(job ID, principal ID, scope)` ACL keys, and client IDs, preventing
-  same-cardinality substitution.
+  `(job ID, principal ID, scope, ACL generation, canonical permission set)`
+  authorization records, and `(client ID, direction)` client records,
+  preventing same-cardinality identity or semantic-class substitution.
   Principal kind is one of `user`, `service`, or `group`; lifecycle is one of
   `active`, `disabled`, `retired`, or `deleted`. Current aliases participate in
   the unique principal namespace. Historical-name claims carry their own
@@ -123,8 +125,9 @@ rejects:
 - exclusions without owner approval;
 - source controller, direct-child, principal, ACL, client, per-job dependency,
   or per-job state-record-class counts that differ from the manifest;
-- job, principal, ACL, client, per-job dependency, or per-job state-class
-  identity sets that differ from their independently sourced canonical sets;
+- job/parent-edge, principal, ACL/permission-generation, client/direction,
+  per-job dependency, or per-job state-class identity sets that differ from
+  their independently sourced canonical sets;
 - state record classes whose instance counts lack independent source evidence;
 - unclassified runtime or state-transform behavior;
 - missing, duplicate, or undeclared compatibility evidence for a job's shared

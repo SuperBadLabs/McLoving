@@ -602,14 +602,7 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     validate_exact_set(
         "controller job set",
         &bundle.job_graph.job_set,
-        canonical_entries_sha256(
-            bundle
-                .job_graph
-                .jobs
-                .iter()
-                .map(|job| vec![job.id.as_bytes()])
-                .collect(),
-        ),
+        job_graph_set_sha256(&bundle.job_graph.jobs),
         &bundle.job_graph.binding.exporter_id,
         "INV_JOB_SET_MISMATCH",
     )?;
@@ -697,34 +690,14 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
     validate_exact_set(
         "ACL-entry set",
         &bundle.identity_clients.acl_entry_set,
-        canonical_entries_sha256(
-            bundle
-                .identity_clients
-                .acl_entries
-                .iter()
-                .map(|acl| {
-                    vec![
-                        acl.job_id.as_bytes(),
-                        acl.principal_id.as_bytes(),
-                        acl.scope.as_bytes(),
-                    ]
-                })
-                .collect(),
-        ),
+        acl_entry_set_sha256(&bundle.identity_clients.acl_entries),
         &bundle.identity_clients.binding.exporter_id,
         "INV_ACL_SET_MISMATCH",
     )?;
     validate_exact_set(
         "client set",
         &bundle.identity_clients.client_set,
-        canonical_entries_sha256(
-            bundle
-                .identity_clients
-                .clients
-                .iter()
-                .map(|client| vec![client.id.as_bytes()])
-                .collect(),
-        ),
+        client_set_sha256(&bundle.identity_clients.clients),
         &bundle.identity_clients.binding.exporter_id,
         "INV_CLIENT_SET_MISMATCH",
     )?;
@@ -1808,6 +1781,65 @@ fn state_class_set_sha256(records: &[StateRecord]) -> String {
     )
 }
 
+fn job_graph_set_sha256(jobs: &[JobRecord]) -> String {
+    canonical_entries_sha256(
+        jobs.iter()
+            .map(|job| {
+                vec![
+                    job.id.as_bytes(),
+                    job.parent_id.as_deref().unwrap_or("").as_bytes(),
+                ]
+            })
+            .collect(),
+    )
+}
+
+fn client_set_sha256(clients: &[ClientRecord]) -> String {
+    canonical_entries_sha256(
+        clients
+            .iter()
+            .map(|client| {
+                vec![
+                    client.id.as_bytes(),
+                    client_direction_bytes(client.direction),
+                ]
+            })
+            .collect(),
+    )
+}
+
+fn client_direction_bytes(direction: ClientDirection) -> &'static [u8] {
+    match direction {
+        ClientDirection::Read => b"read",
+        ClientDirection::Write => b"write",
+        ClientDirection::ReadWrite => b"read-write",
+    }
+}
+
+fn acl_entry_set_sha256(entries: &[AclEntry]) -> String {
+    canonical_owned_entries_sha256(
+        entries
+            .iter()
+            .map(|acl| {
+                let mut permissions = acl
+                    .permissions
+                    .iter()
+                    .map(|permission| permission.as_bytes().to_vec())
+                    .collect::<Vec<_>>();
+                permissions.sort();
+                let mut fields = vec![
+                    acl.job_id.as_bytes().to_vec(),
+                    acl.principal_id.as_bytes().to_vec(),
+                    acl.scope.as_bytes().to_vec(),
+                    acl.generation.as_bytes().to_vec(),
+                ];
+                fields.extend(permissions);
+                fields
+            })
+            .collect(),
+    )
+}
+
 fn canonical_entries_sha256(mut entries: Vec<Vec<&[u8]>>) -> String {
     entries.sort();
     let mut canonical = Vec::new();
@@ -1815,6 +1847,18 @@ fn canonical_entries_sha256(mut entries: Vec<Vec<&[u8]>>) -> String {
         append_length_prefixed(&mut canonical, &(entry.len() as u64).to_be_bytes());
         for field in entry {
             append_length_prefixed(&mut canonical, field);
+        }
+    }
+    sha256_hex(&canonical)
+}
+
+fn canonical_owned_entries_sha256(mut entries: Vec<Vec<Vec<u8>>>) -> String {
+    entries.sort();
+    let mut canonical = Vec::new();
+    for entry in entries {
+        append_length_prefixed(&mut canonical, &(entry.len() as u64).to_be_bytes());
+        for field in entry {
+            append_length_prefixed(&mut canonical, &field);
         }
     }
     sha256_hex(&canonical)

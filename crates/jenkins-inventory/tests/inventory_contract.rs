@@ -649,6 +649,14 @@ fn reconciliation_rejects_same_cardinality_population_substitution() {
             "INV_JOB_SET_MISMATCH",
         ),
         (
+            "job-parent-set",
+            (|bundle: &mut Fixture| {
+                bundle.job_graph.jobs[1].parent_id = None;
+                bundle.job_graph.jobs[2].parent_id = Some("folder".to_owned());
+            }) as fn(&mut Fixture),
+            "INV_JOB_SET_MISMATCH",
+        ),
+        (
             "principal-set",
             (|bundle: &mut Fixture| {
                 bundle.identity_clients.principals[2].id = "group/replacement".to_owned();
@@ -663,9 +671,32 @@ fn reconciliation_rejects_same_cardinality_population_substitution() {
             "INV_ACL_SET_MISMATCH",
         ),
         (
+            "acl-permission-set",
+            (|bundle: &mut Fixture| {
+                bundle.identity_clients.acl_entries[0].permissions =
+                    vec!["job/configure".to_owned()];
+            }) as fn(&mut Fixture),
+            "INV_ACL_SET_MISMATCH",
+        ),
+        (
+            "acl-generation-set",
+            (|bundle: &mut Fixture| {
+                bundle.identity_clients.acl_entries[0].generation =
+                    "acl-generation-replacement".to_owned();
+            }) as fn(&mut Fixture),
+            "INV_ACL_SET_MISMATCH",
+        ),
+        (
             "client-set",
             (|bundle: &mut Fixture| {
                 bundle.identity_clients.clients[0].id = "replacement".to_owned();
+            }) as fn(&mut Fixture),
+            "INV_CLIENT_SET_MISMATCH",
+        ),
+        (
+            "client-direction-set",
+            (|bundle: &mut Fixture| {
+                bundle.identity_clients.clients[0].direction = ClientDirection::Write;
             }) as fn(&mut Fixture),
             "INV_CLIENT_SET_MISMATCH",
         ),
@@ -958,6 +989,7 @@ fn reconciliation_requires_principal_client_and_acl_evidence() {
     let directory = TestDirectory::new("acl-required");
     let mut bundle = fixture();
     bundle.identity_clients.acl_entries[0].permissions.clear();
+    refresh_fixture_sets(&mut bundle);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
     let loaded = load_bundle(&directory.0).expect("load bundle");
@@ -971,6 +1003,7 @@ fn reconciliation_rejects_parent_cycles() {
     let mut bundle = fixture();
     bundle.job_graph.jobs[0].parent_id = Some("folder/build".to_owned());
     bundle.job_graph.jobs[1].direct_child_count.count = 1;
+    refresh_fixture_sets(&mut bundle);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1624,13 +1657,18 @@ fn placeholder_set_evidence(provenance: &str) -> SetEvidence {
 }
 
 fn refresh_fixture_sets(fixture: &mut Fixture) {
-    fixture.job_graph.job_set = set_evidence(
+    fixture.job_graph.job_set = owned_set_evidence(
         "jenkins/controller/item-set",
         fixture
             .job_graph
             .jobs
             .iter()
-            .map(|job| vec![job.id.as_bytes()])
+            .map(|job| {
+                vec![
+                    job.id.as_bytes().to_vec(),
+                    job.parent_id.as_deref().unwrap_or("").as_bytes().to_vec(),
+                ]
+            })
             .collect(),
     );
     fixture.identity_clients.principal_set = set_evidence(
@@ -1642,28 +1680,42 @@ fn refresh_fixture_sets(fixture: &mut Fixture) {
             .map(|principal| vec![principal.id.as_bytes()])
             .collect(),
     );
-    fixture.identity_clients.acl_entry_set = set_evidence(
+    fixture.identity_clients.acl_entry_set = owned_set_evidence(
         "jenkins/authorization/acl-entry-set",
         fixture
             .identity_clients
             .acl_entries
             .iter()
             .map(|acl| {
-                vec![
-                    acl.job_id.as_bytes(),
-                    acl.principal_id.as_bytes(),
-                    acl.scope.as_bytes(),
-                ]
+                let mut permissions = acl
+                    .permissions
+                    .iter()
+                    .map(|permission| permission.as_bytes().to_vec())
+                    .collect::<Vec<_>>();
+                permissions.sort();
+                let mut fields = vec![
+                    acl.job_id.as_bytes().to_vec(),
+                    acl.principal_id.as_bytes().to_vec(),
+                    acl.scope.as_bytes().to_vec(),
+                    acl.generation.as_bytes().to_vec(),
+                ];
+                fields.extend(permissions);
+                fields
             })
             .collect(),
     );
-    fixture.identity_clients.client_set = set_evidence(
+    fixture.identity_clients.client_set = owned_set_evidence(
         "jenkins/access-log/client-set",
         fixture
             .identity_clients
             .clients
             .iter()
-            .map(|client| vec![client.id.as_bytes()])
+            .map(|client| {
+                vec![
+                    client.id.as_bytes().to_vec(),
+                    client_direction_bytes(client.direction).to_vec(),
+                ]
+            })
             .collect(),
     );
 }
@@ -1733,6 +1785,23 @@ fn set_evidence(provenance: &str, entries: Vec<Vec<&[u8]>>) -> SetEvidence {
     }
 }
 
+fn owned_set_evidence(provenance: &str, entries: Vec<Vec<Vec<u8>>>) -> SetEvidence {
+    SetEvidence {
+        collector_id: "jenkins/set-api-v1".to_owned(),
+        provenance: provenance.to_owned(),
+        source_sha256: DIGEST_C.to_owned(),
+        entries_sha256: canonical_owned_entries_sha256(entries),
+    }
+}
+
+fn client_direction_bytes(direction: ClientDirection) -> &'static [u8] {
+    match direction {
+        ClientDirection::Read => b"read",
+        ClientDirection::Write => b"write",
+        ClientDirection::ReadWrite => b"read-write",
+    }
+}
+
 fn canonical_entries_sha256(mut entries: Vec<Vec<&[u8]>>) -> String {
     entries.sort();
     let mut canonical = Vec::new();
@@ -1740,6 +1809,18 @@ fn canonical_entries_sha256(mut entries: Vec<Vec<&[u8]>>) -> String {
         append_test_length_prefixed(&mut canonical, &(entry.len() as u64).to_be_bytes());
         for field in entry {
             append_test_length_prefixed(&mut canonical, field);
+        }
+    }
+    format!("{:x}", Sha256::digest(canonical))
+}
+
+fn canonical_owned_entries_sha256(mut entries: Vec<Vec<Vec<u8>>>) -> String {
+    entries.sort();
+    let mut canonical = Vec::new();
+    for entry in entries {
+        append_test_length_prefixed(&mut canonical, &(entry.len() as u64).to_be_bytes());
+        for field in entry {
+            append_test_length_prefixed(&mut canonical, &field);
         }
     }
     format!("{:x}", Sha256::digest(canonical))
