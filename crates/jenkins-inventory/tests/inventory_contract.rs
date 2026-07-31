@@ -10,10 +10,11 @@ use mcloving_jenkins_inventory::{
     PERSISTENT_STATE_FILE, PersistentStateManifest, Principal, PrincipalKind, PrincipalLifecycle,
     RUNTIME_DEPENDENCY_FILE, RuntimeDependency, RuntimeDependencyManifest, SCHEMA_VERSION,
     ScopeDisposition, SecretConsumer, SecretConsumerEvidence, SecretTaint, SecurityRealm,
-    SnapshotBinding, StateRecord, StateTransformEvidence, WorkloadSecretChannel, load_bundle,
-    reconcile, seal_manifest_directory, validate_ledger_output_path, write_ledger,
+    SetEvidence, SnapshotBinding, StateRecord, StateTransformEvidence, WorkloadSecretChannel,
+    load_bundle, reconcile, seal_manifest_directory, validate_ledger_output_path, write_ledger,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 const DIGEST_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -695,6 +696,34 @@ fn state_record_instance_counts_require_independent_evidence() {
 }
 
 #[test]
+fn reconciliation_binds_state_class_identities_to_source_evidence() {
+    let directory = TestDirectory::new("state-class-set");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records[0].kind = "workspace".to_owned();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("substituted state class must fail");
+    assert_eq!(error.code, "INV_STATE_CLASS_SET_MISMATCH");
+}
+
+#[test]
+fn state_class_sets_require_an_independent_collector() {
+    let directory = TestDirectory::new("state-class-set-collector");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1]
+        .record_class_set
+        .collector_id = bundle.persistent_state.binding.exporter_id.clone();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("dependent state class collector must fail");
+    assert_eq!(error.code, "INV_SET_NOT_INDEPENDENT");
+}
+
+#[test]
 fn every_population_count_requires_an_independent_collector() {
     let directory = TestDirectory::new("population-count-collector");
     let mut bundle = fixture();
@@ -982,6 +1011,7 @@ fn reconciliation_rejects_conflicting_retention_policy_definitions() {
     second.external_consumers.clear();
     bundle.persistent_state.jobs[0].records.push(second);
     bundle.persistent_state.jobs[0].record_class_count.count = 1;
+    refresh_state_class_set(&mut bundle.persistent_state.jobs[0]);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1077,6 +1107,7 @@ fn reconciliation_rejects_conflicting_legal_hold_definitions() {
     second.legal_holds[0].scope = "artifacts-only".to_owned();
     bundle.persistent_state.jobs[1].records.push(second);
     bundle.persistent_state.jobs[1].record_class_count.count = 2;
+    refresh_state_class_set(&mut bundle.persistent_state.jobs[1]);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1099,6 +1130,7 @@ fn reconciliation_rejects_state_record_count_overflow() {
     third.record_count.count = 2;
     records.push(third);
     bundle.persistent_state.jobs[1].record_class_count.count = 3;
+    refresh_state_class_set(&mut bundle.persistent_state.jobs[1]);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1392,21 +1424,10 @@ fn fixture() -> Fixture {
         persistent_state: PersistentStateManifest {
             binding,
             jobs: vec![
-                JobStateRecords {
-                    job_id: "folder".to_owned(),
-                    record_class_count: count_evidence(
-                        0,
-                        "jenkins/job/folder/state-record-class-count",
-                    ),
-                    records: Vec::new(),
-                },
-                JobStateRecords {
-                    job_id: "folder/build".to_owned(),
-                    record_class_count: count_evidence(
-                        1,
-                        "jenkins/job/folder/build/state-record-class-count",
-                    ),
-                    records: vec![StateRecord {
+                job_state_records("folder", Vec::new()),
+                job_state_records(
+                    "folder/build",
+                    vec![StateRecord {
                         id: "build-history".to_owned(),
                         kind: "build-number-and-result".to_owned(),
                         owner: "ci-platform".to_owned(),
@@ -1433,7 +1454,7 @@ fn fixture() -> Fixture {
                         external_consumers: vec!["dashboard".to_owned()],
                         provenance: "jenkins/build-history/folder/build".to_owned(),
                     }],
-                },
+                ),
             ],
         },
     }
@@ -1456,11 +1477,10 @@ fn add_excluded_obligations(fixture: &mut Fixture) {
     state.restore_target = "retention-vault/legacy".to_owned();
     state.external_consumers.clear();
     state.provenance = "jenkins/build-history/legacy".to_owned();
-    fixture.persistent_state.jobs.push(JobStateRecords {
-        job_id: "legacy".to_owned(),
-        record_class_count: count_evidence(1, "jenkins/job/legacy/state-record-class-count"),
-        records: vec![state],
-    });
+    fixture
+        .persistent_state
+        .jobs
+        .push(job_state_records("legacy", vec![state]));
 }
 
 fn binding() -> SnapshotBinding {
@@ -1536,6 +1556,45 @@ fn count_evidence(count: u64, provenance: &str) -> CountEvidence {
         collector_id: "jenkins/count-api-v1".to_owned(),
         provenance: provenance.to_owned(),
         source_sha256: DIGEST_C.to_owned(),
+    }
+}
+
+fn job_state_records(job_id: &str, records: Vec<StateRecord>) -> JobStateRecords {
+    let record_class_count = count_evidence(
+        records.len() as u64,
+        &format!("jenkins/job/{job_id}/state-record-class-count"),
+    );
+    let record_class_set = state_class_set_evidence(job_id, &records);
+    JobStateRecords {
+        job_id: job_id.to_owned(),
+        record_class_count,
+        record_class_set,
+        records,
+    }
+}
+
+fn refresh_state_class_set(job: &mut JobStateRecords) {
+    job.record_class_set = state_class_set_evidence(&job.job_id, &job.records);
+}
+
+fn state_class_set_evidence(job_id: &str, records: &[StateRecord]) -> SetEvidence {
+    let mut entries = records
+        .iter()
+        .map(|record| (record.id.as_bytes(), record.kind.as_bytes()))
+        .collect::<Vec<_>>();
+    entries.sort();
+    let mut canonical = Vec::new();
+    for (id, kind) in entries {
+        canonical.extend_from_slice(&(id.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(id);
+        canonical.extend_from_slice(&(kind.len() as u64).to_be_bytes());
+        canonical.extend_from_slice(kind);
+    }
+    SetEvidence {
+        collector_id: "jenkins/state-class-api-v1".to_owned(),
+        provenance: format!("jenkins/job/{job_id}/state-record-class-set"),
+        source_sha256: DIGEST_C.to_owned(),
+        entries_sha256: format!("{:x}", Sha256::digest(canonical)),
     }
 }
 

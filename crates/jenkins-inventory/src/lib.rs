@@ -82,6 +82,15 @@ pub struct CountEvidence {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct SetEvidence {
+    pub collector_id: String,
+    pub provenance: String,
+    pub source_sha256: String,
+    pub entries_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct JobRecord {
     pub id: String,
     #[serde(default)]
@@ -346,6 +355,7 @@ pub struct PersistentStateManifest {
 pub struct JobStateRecords {
     pub job_id: String,
     pub record_class_count: CountEvidence,
+    pub record_class_set: SetEvidence,
     pub records: Vec<StateRecord>,
 }
 
@@ -1226,6 +1236,21 @@ fn index_state<'a>(
             manifest_exporter_id,
             "INV_STATE_CLASS_COUNT_MISMATCH",
         )?;
+        validate_set_evidence(
+            "persistent-state record-class set",
+            &job.record_class_set,
+            manifest_exporter_id,
+        )?;
+        let observed_set = state_class_set_sha256(&job.records);
+        if job.record_class_set.entries_sha256 != observed_set {
+            return Err(InventoryError::new(
+                "INV_STATE_CLASS_SET_MISMATCH",
+                format!(
+                    "persistent-state record-class source set does not match job {}",
+                    job.job_id
+                ),
+            ));
+        }
         if indexed
             .insert(job.job_id.clone(), job.records.as_slice())
             .is_some()
@@ -1674,6 +1699,42 @@ fn validate_exact_count(
         ));
     }
     Ok(())
+}
+
+fn validate_set_evidence(
+    kind: &str,
+    evidence: &SetEvidence,
+    manifest_exporter_id: &str,
+) -> Result<(), InventoryError> {
+    validate_identifier(&format!("{kind} collector"), &evidence.collector_id)?;
+    if evidence.collector_id == manifest_exporter_id {
+        return Err(InventoryError::new(
+            "INV_SET_NOT_INDEPENDENT",
+            format!("{kind} must use a collector distinct from the manifest exporter"),
+        ));
+    }
+    validate_nonempty(&format!("{kind} provenance"), &evidence.provenance)?;
+    validate_digest(&format!("{kind} source"), &evidence.source_sha256)?;
+    validate_digest(&format!("{kind} entries"), &evidence.entries_sha256)
+}
+
+fn state_class_set_sha256(records: &[StateRecord]) -> String {
+    let mut entries = records
+        .iter()
+        .map(|record| (record.id.as_bytes(), record.kind.as_bytes()))
+        .collect::<Vec<_>>();
+    entries.sort();
+    let mut canonical = Vec::new();
+    for (id, kind) in entries {
+        append_length_prefixed(&mut canonical, id);
+        append_length_prefixed(&mut canonical, kind);
+    }
+    sha256_hex(&canonical)
+}
+
+fn append_length_prefixed(output: &mut Vec<u8>, value: &[u8]) {
+    output.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    output.extend_from_slice(value);
 }
 
 fn validate_identifier(kind: &str, value: &str) -> Result<(), InventoryError> {

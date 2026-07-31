@@ -86,6 +86,9 @@ and persistent-state mutation for one bounded export epoch.
   Every supplied job group carries an independently sourced record-class count
   that must exactly match the manifest, including explicit zero-count groups
   and retained obligations for excluded jobs.
+  The independently collected canonical set of `(record id, record kind)`
+  identities is length-prefixed, sorted, and SHA-256 bound as well, so a
+  same-cardinality class substitution or misspelling fails reconciliation.
   Every record class also carries an independently sourced instance count with
   collector identity, provenance, and source digest; this source count, rather
   than an exporter assertion, drives migration-demand aggregation.
@@ -115,6 +118,8 @@ rejects:
 - exclusions without owner approval;
 - source controller, direct-child, principal, ACL, client, per-job dependency,
   or per-job state-record-class counts that differ from the manifest;
+- per-job state-class identity sets that differ from the independently sourced
+  canonical set;
 - state record classes whose instance counts lack independent source evidence;
 - unclassified runtime or state-transform behavior;
 - missing, duplicate, or undeclared compatibility evidence for a job's shared
