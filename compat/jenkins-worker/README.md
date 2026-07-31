@@ -15,7 +15,7 @@ The v1 target profile is byte-bound to Mario's owner-designated
 - Groovy 2.4.21 and its exact JAR;
 - all 90 plugin files and their sealed manifest; and
 - inventory fingerprint
-  `3473f1528e0fa8b1b856ae4941e5a5169d4c2c46389b813d0dd34935fb505198`.
+  `b1c2f81c74ec0ffc36971f358f920b2d0775c6009f474bea924448cd2a1915c1`.
 
 `build-image.sh` accepts only the frozen snapshot root, verifies every plugin,
 constructs the image without network access, and labels it with the exact

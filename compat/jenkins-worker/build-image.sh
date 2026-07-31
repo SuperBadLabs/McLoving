@@ -12,7 +12,7 @@ SNAPSHOT_ROOT=$1
 IMAGE=${2:-localhost/mcloving/jenkins-compiler-worker:mario-jenkins-oracle-228-v1}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 EXPECTED_BASE=sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02
-EXPECTED_PROFILE=243e40cca38b4e789f81dbfd004470b2338b3af402e9dda97e467ee4f788bb41
+EXPECTED_PROFILE=feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271
 EXPECTED_PLUGIN_MANIFEST=e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0
 
 [[ -d "$SNAPSHOT_ROOT/plugins" ]] || usage
