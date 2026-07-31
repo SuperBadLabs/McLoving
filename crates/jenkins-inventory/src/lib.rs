@@ -124,8 +124,11 @@ pub struct OperationalState {
 pub struct IdentityClientManifest {
     pub binding: SnapshotBinding,
     pub security_realm: SecurityRealm,
+    pub principal_count: CountEvidence,
     pub principals: Vec<Principal>,
+    pub acl_entry_count: CountEvidence,
     pub acl_entries: Vec<AclEntry>,
+    pub client_count: CountEvidence,
     pub clients: Vec<ClientRecord>,
 }
 
@@ -229,6 +232,7 @@ pub struct RuntimeDependencyManifest {
 #[serde(deny_unknown_fields)]
 pub struct JobDependencies {
     pub job_id: String,
+    pub dependency_count: CountEvidence,
     pub dependencies: Vec<RuntimeDependency>,
 }
 
@@ -341,6 +345,7 @@ pub struct PersistentStateManifest {
 #[serde(deny_unknown_fields)]
 pub struct JobStateRecords {
     pub job_id: String,
+    pub record_class_count: CountEvidence,
     pub records: Vec<StateRecord>,
 }
 
@@ -625,6 +630,28 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         ));
     }
 
+    validate_exact_count(
+        "principal count",
+        &bundle.identity_clients.principal_count,
+        bundle.identity_clients.principals.len(),
+        &bundle.identity_clients.binding.exporter_id,
+        "INV_PRINCIPAL_COUNT_MISMATCH",
+    )?;
+    validate_exact_count(
+        "ACL-entry count",
+        &bundle.identity_clients.acl_entry_count,
+        bundle.identity_clients.acl_entries.len(),
+        &bundle.identity_clients.binding.exporter_id,
+        "INV_ACL_COUNT_MISMATCH",
+    )?;
+    validate_exact_count(
+        "client count",
+        &bundle.identity_clients.client_count,
+        bundle.identity_clients.clients.len(),
+        &bundle.identity_clients.binding.exporter_id,
+        "INV_CLIENT_COUNT_MISMATCH",
+    )?;
+
     let principal_ids = unique_ids(
         "principal",
         bundle
@@ -742,8 +769,16 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         }
     }
 
-    let runtime = index_runtime(&bundle.runtime_dependencies.jobs, &job_ids)?;
-    let state = index_state(&bundle.persistent_state.jobs, &job_ids)?;
+    let runtime = index_runtime(
+        &bundle.runtime_dependencies.jobs,
+        &job_ids,
+        &bundle.runtime_dependencies.binding.exporter_id,
+    )?;
+    let state = index_state(
+        &bundle.persistent_state.jobs,
+        &job_ids,
+        &bundle.persistent_state.binding.exporter_id,
+    )?;
     if !in_scope.iter().all(|job_id| runtime.contains_key(job_id)) {
         return Err(InventoryError::new(
             "INV_RUNTIME_COVERAGE",
@@ -1127,6 +1162,7 @@ fn validate_binding(binding: &SnapshotBinding) -> Result<(), InventoryError> {
 fn index_runtime<'a>(
     jobs: &'a [JobDependencies],
     known_jobs: &BTreeSet<String>,
+    manifest_exporter_id: &str,
 ) -> Result<BTreeMap<String, &'a [RuntimeDependency]>, InventoryError> {
     let mut indexed = BTreeMap::new();
     for job in jobs {
@@ -1136,6 +1172,13 @@ fn index_runtime<'a>(
                 format!("runtime inventory references unknown job {}", job.job_id),
             ));
         }
+        validate_exact_count(
+            "runtime-dependency count",
+            &job.dependency_count,
+            job.dependencies.len(),
+            manifest_exporter_id,
+            "INV_DEPENDENCY_COUNT_MISMATCH",
+        )?;
         if indexed
             .insert(job.job_id.clone(), job.dependencies.as_slice())
             .is_some()
@@ -1158,6 +1201,7 @@ fn index_runtime<'a>(
 fn index_state<'a>(
     jobs: &'a [JobStateRecords],
     known_jobs: &BTreeSet<String>,
+    manifest_exporter_id: &str,
 ) -> Result<BTreeMap<String, &'a [StateRecord]>, InventoryError> {
     let mut indexed = BTreeMap::new();
     for job in jobs {
@@ -1167,6 +1211,13 @@ fn index_state<'a>(
                 format!("state inventory references unknown job {}", job.job_id),
             ));
         }
+        validate_exact_count(
+            "persistent-state record-class count",
+            &job.record_class_count,
+            job.records.len(),
+            manifest_exporter_id,
+            "INV_STATE_CLASS_COUNT_MISMATCH",
+        )?;
         if indexed
             .insert(job.job_id.clone(), job.records.as_slice())
             .is_some()
@@ -1588,6 +1639,27 @@ fn validate_count_evidence(
     }
     validate_nonempty(&format!("{kind} provenance"), &evidence.provenance)?;
     validate_digest(&format!("{kind} source"), &evidence.source_sha256)
+}
+
+fn validate_exact_count(
+    kind: &str,
+    evidence: &CountEvidence,
+    actual: usize,
+    manifest_exporter_id: &str,
+    mismatch_code: &'static str,
+) -> Result<(), InventoryError> {
+    validate_count_evidence(kind, evidence, manifest_exporter_id)?;
+    let actual = u64_count(actual)?;
+    if evidence.count != actual {
+        return Err(InventoryError::new(
+            mismatch_code,
+            format!(
+                "{kind} source reports {} records but the manifest contains {actual}",
+                evidence.count
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_identifier(kind: &str, value: &str) -> Result<(), InventoryError> {

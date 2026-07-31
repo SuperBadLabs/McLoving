@@ -44,6 +44,10 @@ and persistent-state mutation for one bounded export epoch.
   and a source-evidence digest.
 - `identity-clients.yaml` owns the security realm, immutable principals and
   lifecycle evidence, effective ACLs, and every read-side or write-side client.
+  Independently sourced principal, effective-ACL-entry, and client totals must
+  each exactly match their manifest population. Each total binds a collector
+  distinct from the manifest exporter, provenance, and a source-evidence
+  digest.
   Principal kind is one of `user`, `service`, or `group`; lifecycle is one of
   `active`, `disabled`, `retired`, or `deleted`. Current aliases participate in
   the unique principal namespace. Historical-name claims carry their own
@@ -60,6 +64,9 @@ and persistent-state mutation for one bounded export epoch.
   platforms, agent labels, and toolchains. Every declared requirement must
   have exactly one matching compatibility classification; undeclared or
   duplicate coverage and duplicate declarations fail.
+  Every supplied job group also carries an independently sourced dependency
+  count that must exactly match the complete dependency population, including
+  zero-count groups and retained obligations for excluded jobs.
   Mutability is one of `immutable`, `pinned-revision`, `mutable`, or `floating`;
   mutable and floating dependencies cannot be classified `native`. Every secret
   dependency additionally binds its exact tagged consumer, typed taint class,
@@ -76,6 +83,9 @@ and persistent-state mutation for one bounded export epoch.
   use the exact UTC form `YYYY-MM-DDTHH:MM:SSZ` and must be valid calendar
   timestamps. Every state record carries independently classified forward and
   rollback transforms with mapping identity, evidence digest, and provenance.
+  Every supplied job group carries an independently sourced record-class count
+  that must exactly match the manifest, including explicit zero-count groups
+  and retained obligations for excluded jobs.
 
 Secret values are never inventory fields. A dependency classified `secret`
 must carry a typed `credential_reference` or `redaction_reference`; the
@@ -99,7 +109,8 @@ rejects:
 - duplicate or ambiguous identities;
 - unknown job, parent, ACL principal, or client principal references;
 - exclusions without owner approval;
-- source controller or direct-child counts that differ from the manifest;
+- source controller, direct-child, principal, ACL, client, per-job dependency,
+  or per-job state-record-class counts that differ from the manifest;
 - unclassified runtime or state-transform behavior;
 - missing, duplicate, or undeclared compatibility evidence for a job's shared
   libraries, triggers, platforms, agent labels, or toolchains;

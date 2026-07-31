@@ -606,6 +606,79 @@ fn reconciliation_rejects_direct_child_count_mismatch() {
 }
 
 #[test]
+fn reconciliation_rejects_identity_population_omissions() {
+    for (name, mutate, expected) in [
+        (
+            "principal-count",
+            (|bundle: &mut Fixture| bundle.identity_clients.principals.clear()) as fn(&mut Fixture),
+            "INV_PRINCIPAL_COUNT_MISMATCH",
+        ),
+        (
+            "acl-count",
+            (|bundle: &mut Fixture| bundle.identity_clients.acl_entries.clear())
+                as fn(&mut Fixture),
+            "INV_ACL_COUNT_MISMATCH",
+        ),
+        (
+            "client-count",
+            (|bundle: &mut Fixture| bundle.identity_clients.clients.clear()) as fn(&mut Fixture),
+            "INV_CLIENT_COUNT_MISMATCH",
+        ),
+    ] {
+        let directory = TestDirectory::new(name);
+        let mut bundle = fixture();
+        mutate(&mut bundle);
+        write_bundle(&directory.0, &bundle);
+        seal_manifest_directory(&directory.0).expect("seal inventory");
+
+        let loaded = load_bundle(&directory.0).expect("load bundle");
+        let error = reconcile(&loaded).expect_err("identity population omission must fail");
+        assert_eq!(error.code, expected);
+    }
+}
+
+#[test]
+fn reconciliation_rejects_runtime_dependency_population_omission() {
+    let directory = TestDirectory::new("runtime-dependency-count");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1].dependencies.clear();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("runtime dependency omission must fail");
+    assert_eq!(error.code, "INV_DEPENDENCY_COUNT_MISMATCH");
+}
+
+#[test]
+fn reconciliation_rejects_state_record_class_population_omission() {
+    let directory = TestDirectory::new("state-record-class-count");
+    let mut bundle = fixture();
+    bundle.persistent_state.jobs[1].records.clear();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("state-record class omission must fail");
+    assert_eq!(error.code, "INV_STATE_CLASS_COUNT_MISMATCH");
+}
+
+#[test]
+fn every_population_count_requires_an_independent_collector() {
+    let directory = TestDirectory::new("population-count-collector");
+    let mut bundle = fixture();
+    bundle.runtime_dependencies.jobs[1]
+        .dependency_count
+        .collector_id = bundle.runtime_dependencies.binding.exporter_id.clone();
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("dependent population collector must fail");
+    assert_eq!(error.code, "INV_COUNT_NOT_INDEPENDENT");
+}
+
+#[test]
 fn reconciliation_rejects_in_scope_jobs_with_excluded_parents() {
     let directory = TestDirectory::new("excluded-parent");
     let mut bundle = fixture();
@@ -697,6 +770,7 @@ fn reconciliation_preserves_deleted_historical_name_reuse() {
         lifecycle: PrincipalLifecycle::Deleted,
         provenance: "jenkins/deleted-user/operator".to_owned(),
     });
+    bundle.identity_clients.principal_count.count = 4;
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -876,6 +950,7 @@ fn reconciliation_rejects_conflicting_retention_policy_definitions() {
     second.retention_policy_sha256 = DIGEST_C.to_owned();
     second.external_consumers.clear();
     bundle.persistent_state.jobs[0].records.push(second);
+    bundle.persistent_state.jobs[0].record_class_count.count = 1;
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -970,6 +1045,7 @@ fn reconciliation_rejects_conflicting_legal_hold_definitions() {
     second.id = "artifact-history".to_owned();
     second.legal_holds[0].scope = "artifacts-only".to_owned();
     bundle.persistent_state.jobs[1].records.push(second);
+    bundle.persistent_state.jobs[1].record_class_count.count = 2;
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -991,6 +1067,7 @@ fn reconciliation_rejects_state_record_count_overflow() {
     third.id = "state/folder/overflow-final".to_owned();
     third.record_count = 2;
     records.push(third);
+    bundle.persistent_state.jobs[1].record_class_count.count = 3;
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1087,6 +1164,7 @@ fn reconciliation_strictly_validates_the_derived_ledger() {
             .dependencies
             .push(dependency);
     }
+    bundle.runtime_dependencies.jobs[1].dependency_count.count = 257;
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1103,6 +1181,7 @@ fn reconciliation_rejects_duplicate_acl_scope() {
         .identity_clients
         .acl_entries
         .push(bundle.identity_clients.acl_entries[0].clone());
+    bundle.identity_clients.acl_entry_count.count = 2;
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1146,6 +1225,7 @@ fn fixture() -> Fixture {
                 config_sha256: DIGEST_A.to_owned(),
                 identity_provider_generation: "realm-generation-7".to_owned(),
             },
+            principal_count: count_evidence(3, "jenkins/security-realm/principal-count"),
             principals: vec![
                 Principal {
                     id: "user/operator".to_owned(),
@@ -1178,6 +1258,7 @@ fn fixture() -> Fixture {
                     provenance: "jenkins/group/builders".to_owned(),
                 },
             ],
+            acl_entry_count: count_evidence(1, "jenkins/authorization/acl-entry-count"),
             acl_entries: vec![AclEntry {
                 job_id: "folder/build".to_owned(),
                 principal_id: "user/operator".to_owned(),
@@ -1185,6 +1266,7 @@ fn fixture() -> Fixture {
                 permissions: vec!["job/read".to_owned(), "job/build".to_owned()],
                 generation: "acl-12".to_owned(),
             }],
+            client_count: count_evidence(2, "jenkins/access-log/client-count"),
             clients: vec![
                 ClientRecord {
                     id: "dashboard".to_owned(),
@@ -1221,10 +1303,18 @@ fn fixture() -> Fixture {
             jobs: vec![
                 JobDependencies {
                     job_id: "folder".to_owned(),
+                    dependency_count: count_evidence(
+                        0,
+                        "jenkins/job/folder/runtime-dependency-count",
+                    ),
                     dependencies: Vec::new(),
                 },
                 JobDependencies {
                     job_id: "folder/build".to_owned(),
+                    dependency_count: count_evidence(
+                        1,
+                        "jenkins/job/folder/build/runtime-dependency-count",
+                    ),
                     dependencies: vec![RuntimeDependency {
                         id: "credential/source".to_owned(),
                         kind: "source-checkout".to_owned(),
@@ -1273,10 +1363,18 @@ fn fixture() -> Fixture {
             jobs: vec![
                 JobStateRecords {
                     job_id: "folder".to_owned(),
+                    record_class_count: count_evidence(
+                        0,
+                        "jenkins/job/folder/state-record-class-count",
+                    ),
                     records: Vec::new(),
                 },
                 JobStateRecords {
                     job_id: "folder/build".to_owned(),
+                    record_class_count: count_evidence(
+                        1,
+                        "jenkins/job/folder/build/state-record-class-count",
+                    ),
                     records: vec![StateRecord {
                         id: "build-history".to_owned(),
                         kind: "build-number-and-result".to_owned(),
@@ -1314,6 +1412,7 @@ fn add_excluded_obligations(fixture: &mut Fixture) {
     dependency.provenance = "jenkins/credentials/legacy".to_owned();
     fixture.runtime_dependencies.jobs.push(JobDependencies {
         job_id: "legacy".to_owned(),
+        dependency_count: count_evidence(1, "jenkins/job/legacy/runtime-dependency-count"),
         dependencies: vec![dependency],
     });
 
@@ -1325,6 +1424,7 @@ fn add_excluded_obligations(fixture: &mut Fixture) {
     state.provenance = "jenkins/build-history/legacy".to_owned();
     fixture.persistent_state.jobs.push(JobStateRecords {
         job_id: "legacy".to_owned(),
+        record_class_count: count_evidence(1, "jenkins/job/legacy/state-record-class-count"),
         records: vec![state],
     });
 }
