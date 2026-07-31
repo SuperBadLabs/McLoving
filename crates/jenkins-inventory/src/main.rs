@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mcloving_jenkins_inventory::{
-    LEDGER_FILE, load_bundle, reconcile, seal_manifest_directory, write_ledger,
+    LEDGER_FILE, load_bundle, reconcile, seal_manifest_directory, validate_ledger_output_path,
+    write_ledger,
 };
 
 #[derive(Parser)]
@@ -44,6 +45,8 @@ fn main() -> Result<()> {
             let bundle = load_bundle(&root).context("inventory verification failed")?;
             let ledger = reconcile(&bundle).context("inventory reconciliation failed")?;
             let output = output.unwrap_or_else(|| root.join(LEDGER_FILE));
+            validate_ledger_output_path(&root, &output)
+                .context("eligibility ledger output validation failed")?;
             write_ledger(&output, &ledger).context("eligibility ledger publication failed")?;
             println!("{}", output.display());
         }

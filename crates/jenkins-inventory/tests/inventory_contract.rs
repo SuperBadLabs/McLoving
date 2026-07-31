@@ -9,7 +9,7 @@ use mcloving_jenkins_inventory::{
     PERSISTENT_STATE_FILE, PersistentStateManifest, Principal, PrincipalKind, PrincipalLifecycle,
     RUNTIME_DEPENDENCY_FILE, RuntimeDependency, RuntimeDependencyManifest, SCHEMA_VERSION,
     ScopeDisposition, SecurityRealm, SnapshotBinding, StateRecord, load_bundle, reconcile,
-    seal_manifest_directory, write_ledger,
+    seal_manifest_directory, validate_ledger_output_path, write_ledger,
 };
 use serde::Serialize;
 
@@ -119,6 +119,27 @@ fn verification_accepts_only_the_exact_published_ledger() {
     let reloaded = load_bundle(&directory.0).expect("load inventory with stale ledger");
     let error = reconcile(&reloaded).expect_err("stale published ledger must fail");
     assert_eq!(error.code, "INV_LEDGER_MISMATCH");
+}
+
+#[test]
+fn ledger_output_layout_is_canonical_and_fail_closed() {
+    let directory = TestDirectory::new("ledger-output-layout");
+    let standard = directory.0.join("eligibility-ledger.yaml");
+    validate_ledger_output_path(&directory.0, &standard).expect("standard ledger is allowed");
+
+    let custom = directory.0.join("custom-ledger.yaml");
+    let error =
+        validate_ledger_output_path(&directory.0, &custom).expect_err("custom root output fails");
+    assert_eq!(error.code, "INV_OUTPUT_LAYOUT");
+
+    let nested = directory.0.join("nested");
+    fs::create_dir(&nested).expect("create nested directory");
+    let error = validate_ledger_output_path(&directory.0, &nested.join("eligibility-ledger.yaml"))
+        .expect_err("nested root output fails");
+    assert_eq!(error.code, "INV_OUTPUT_LAYOUT");
+
+    let external = directory.0.with_extension("ledger.yaml");
+    validate_ledger_output_path(&directory.0, &external).expect("external output is allowed");
 }
 
 #[test]

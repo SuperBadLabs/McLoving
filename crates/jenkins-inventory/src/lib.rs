@@ -812,6 +812,39 @@ pub fn write_ledger(output: &Path, ledger: &EligibilityLedger) -> Result<(), Inv
     write_new(output, rendered.as_bytes())
 }
 
+pub fn validate_ledger_output_path(root: &Path, output: &Path) -> Result<(), InventoryError> {
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        InventoryError::new(
+            "INV_OUTPUT_LAYOUT",
+            format!("cannot resolve inventory root {}: {error}", root.display()),
+        )
+    })?;
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        InventoryError::new(
+            "INV_OUTPUT_LAYOUT",
+            format!("cannot resolve output parent {}: {error}", parent.display()),
+        )
+    })?;
+    if canonical_parent.starts_with(&canonical_root)
+        && (canonical_parent != canonical_root
+            || output.file_name().and_then(|name| name.to_str()) != Some(LEDGER_FILE))
+    {
+        return Err(InventoryError::new(
+            "INV_OUTPUT_LAYOUT",
+            format!(
+                "the only ledger output permitted inside {} is {}",
+                canonical_root.display(),
+                LEDGER_FILE
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn load_manifest<T: DeserializeOwned>(
     root: &Path,
     filename: &str,
