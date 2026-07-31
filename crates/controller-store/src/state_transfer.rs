@@ -219,12 +219,6 @@ impl Store {
                     "state-transfer legal holds cannot be encoded: {error}"
                 ))
             })?;
-            let protection_bytes = serde_json::to_vec(protection).map_err(|error| {
-                StoreError::InvalidStateTransfer(format!(
-                    "state-transfer protection cannot be encoded: {error}"
-                ))
-            })?;
-            let protection_digest = sha256(&protection_bytes);
             let applied = sqlx::query_scalar::<_, Vec<u8>>(
                 "INSERT INTO state_transfer_protections (
                      organization_id, project_id, subject_digest,
@@ -232,7 +226,11 @@ impl Store {
                      retain_until_unix_ms, active_holds,
                      protection_digest, receipt_id
                  )
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 VALUES (
+                     $1, $2, $3, $4, $5, $6, $7, $8,
+                     mcloving_state_transfer_protection_digest($4, $5, $6, $7, $8),
+                     $9
+                 )
                  ON CONFLICT (organization_id, project_id, subject_digest)
                  DO UPDATE SET
                      retention_policy_id = EXCLUDED.retention_policy_id,
@@ -269,7 +267,6 @@ impl Store {
             .bind(protection.retention.policy_digest.as_slice())
             .bind(protection.retention.retain_until_unix_ms)
             .bind(&holds)
-            .bind(protection_digest.as_slice())
             .bind(receipt_id)
             .fetch_optional(&mut *tx)
             .await?;

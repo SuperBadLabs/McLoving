@@ -1268,6 +1268,47 @@ fn validate_graph_nodes(
             ));
         }
     }
+    let mut remaining_parents = nodes
+        .iter()
+        .map(|node| (node.node_id.as_str(), node.parent_node_ids.len()))
+        .collect::<BTreeMap<_, _>>();
+    let mut children = BTreeMap::<&str, Vec<&str>>::new();
+    for node in nodes {
+        for parent in &node.parent_node_ids {
+            children
+                .entry(parent.as_str())
+                .or_default()
+                .push(node.node_id.as_str());
+        }
+    }
+    let mut ready = remaining_parents
+        .iter()
+        .filter_map(|(node, parents)| (*parents == 0).then_some(*node))
+        .collect::<BTreeSet<_>>();
+    let mut visited = 0_usize;
+    while let Some(node) = ready.pop_first() {
+        visited = visited
+            .checked_add(1)
+            .ok_or_else(|| TransferError::InvalidField("graph node count overflow".to_owned()))?;
+        for child in children.get(node).into_iter().flatten() {
+            let parents = remaining_parents.get_mut(child).ok_or_else(|| {
+                TransferError::InvalidField(
+                    "graph child must name a node in the same build".to_owned(),
+                )
+            })?;
+            *parents = parents.checked_sub(1).ok_or_else(|| {
+                TransferError::InvalidField("graph parent count underflow".to_owned())
+            })?;
+            if *parents == 0 {
+                ready.insert(child);
+            }
+        }
+    }
+    if visited != nodes.len() {
+        return Err(TransferError::InvalidField(
+            "graph nodes must be acyclic".to_owned(),
+        ));
+    }
     Ok(())
 }
 

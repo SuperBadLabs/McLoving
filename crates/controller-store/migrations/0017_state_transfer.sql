@@ -47,6 +47,7 @@ CREATE TABLE state_transfer_receipts (
     actor_subject text NOT NULL CHECK (length(actor_subject) BETWEEN 1 AND 512),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (id, organization_id),
+    UNIQUE (id, organization_id, project_id),
     UNIQUE (
         organization_id,
         project_id,
@@ -146,10 +147,145 @@ $$;
 
 REVOKE ALL ON FUNCTION mcloving_state_transfer_holds_valid(jsonb) FROM PUBLIC;
 
+CREATE FUNCTION mcloving_state_transfer_digest_json(digest_value bytea)
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+STRICT
+SET search_path = public, pg_temp
+AS $$
+    SELECT jsonb_agg(get_byte(digest_value, byte_index) ORDER BY byte_index)
+    FROM generate_series(0, 31) AS offsets(byte_index)
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_state_transfer_digest_json(bytea) FROM PUBLIC;
+
+CREATE FUNCTION mcloving_state_transfer_normalize_holds(holds jsonb)
+RETURNS jsonb
+LANGUAGE sql
+IMMUTABLE
+STRICT
+SET search_path = public, pg_temp
+AS $$
+    SELECT COALESCE(jsonb_agg(value ORDER BY value ->> 'hold_id'), '[]'::jsonb)
+    FROM jsonb_array_elements(holds) AS entry(value)
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_state_transfer_normalize_holds(jsonb) FROM PUBLIC;
+
+CREATE FUNCTION mcloving_state_transfer_protection_digest(
+    policy_id text,
+    policy_version text,
+    policy_digest bytea,
+    retain_until bigint,
+    holds jsonb
+)
+RETURNS bytea
+LANGUAGE sql
+IMMUTABLE
+STRICT
+SET search_path = public, pg_temp
+AS $$
+    SELECT sha256(convert_to(jsonb_build_object(
+        'schema', 'mcloving.state-transfer-protection-row/v1',
+        'retention_policy_id', policy_id,
+        'retention_policy_version', policy_version,
+        'retention_policy_digest', encode(policy_digest, 'hex'),
+        'retain_until_unix_ms', retain_until,
+        'active_holds', mcloving_state_transfer_normalize_holds(holds)
+    )::text, 'UTF8'))
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_state_transfer_protection_digest(
+    text, text, bytea, bigint, jsonb
+) FROM PUBLIC;
+
+CREATE FUNCTION mcloving_state_transfer_receipt_has_protection(
+    expected_organization_id uuid,
+    expected_project_id uuid,
+    expected_receipt_id uuid,
+    expected_subject_digest bytea,
+    expected_policy_id text,
+    expected_policy_version text,
+    expected_policy_digest bytea,
+    expected_retain_until bigint,
+    expected_holds jsonb
+)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+STRICT
+SET search_path = public, pg_temp
+AS $$
+    WITH receipt AS (
+        SELECT convert_from(canonical_bundle, 'UTF8')::jsonb AS bundle
+        FROM state_transfer_receipts
+        WHERE id = expected_receipt_id
+          AND organization_id = expected_organization_id
+          AND project_id = expected_project_id
+    ),
+    candidates AS (
+        SELECT build.value AS entity
+        FROM receipt
+        CROSS JOIN LATERAL jsonb_array_elements(bundle -> 'jobs') AS job(value)
+        CROSS JOIN LATERAL jsonb_array_elements(job.value -> 'builds') AS build(value)
+        UNION ALL
+        SELECT artifact.value
+        FROM receipt
+        CROSS JOIN LATERAL jsonb_array_elements(bundle -> 'jobs') AS job(value)
+        CROSS JOIN LATERAL jsonb_array_elements(job.value -> 'builds') AS build(value)
+        CROSS JOIN LATERAL jsonb_array_elements(build.value -> 'artifacts') AS artifact(value)
+        UNION ALL
+        SELECT workspace.value
+        FROM receipt
+        CROSS JOIN LATERAL jsonb_array_elements(bundle -> 'jobs') AS job(value)
+        CROSS JOIN LATERAL jsonb_array_elements(job.value -> 'retained_workspaces') AS workspace(value)
+        UNION ALL
+        SELECT dependency.value
+        FROM receipt
+        CROSS JOIN LATERAL jsonb_array_elements(bundle -> 'jobs') AS job(value)
+        CROSS JOIN LATERAL jsonb_array_elements(job.value -> 'persistent_dependencies') AS dependency(value)
+    ),
+    expected AS (
+        SELECT mcloving_state_transfer_digest_json(expected_subject_digest) AS subject,
+               jsonb_build_object(
+                   'retention', jsonb_build_object(
+                       'policy_id', expected_policy_id,
+                       'policy_version', expected_policy_version,
+                       'policy_digest', mcloving_state_transfer_digest_json(
+                           expected_policy_digest
+                       ),
+                       'retain_until_unix_ms', expected_retain_until
+                   ),
+                   'active_holds', mcloving_state_transfer_normalize_holds(expected_holds)
+               ) AS protection
+    )
+    SELECT EXISTS (
+        SELECT 1
+        FROM candidates
+        CROSS JOIN expected
+        WHERE entity -> 'record' -> 'source_digest' = expected.subject
+          AND jsonb_set(
+                  entity -> 'protection',
+                  '{active_holds}',
+                  mcloving_state_transfer_normalize_holds(
+                      entity -> 'protection' -> 'active_holds'
+                  )
+              ) = expected.protection
+    )
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_state_transfer_receipt_has_protection(
+    uuid, uuid, uuid, bytea, text, text, bytea, bigint, jsonb
+) FROM PUBLIC;
+
 CREATE TABLE state_transfer_protections (
     organization_id uuid NOT NULL,
     project_id uuid NOT NULL,
-    subject_digest bytea NOT NULL CHECK (octet_length(subject_digest) = 32),
+    subject_digest bytea NOT NULL CHECK (
+        octet_length(subject_digest) = 32
+        AND subject_digest <> decode(repeat('00', 32), 'hex')
+    ),
     retention_policy_id text NOT NULL CHECK (
         length(retention_policy_id) BETWEEN 1 AND 512
     ),
@@ -163,14 +299,23 @@ CREATE TABLE state_transfer_protections (
     active_holds jsonb NOT NULL CHECK (
         mcloving_state_transfer_holds_valid(active_holds)
     ),
-    protection_digest bytea NOT NULL CHECK (octet_length(protection_digest) = 32),
+    protection_digest bytea NOT NULL CHECK (
+        octet_length(protection_digest) = 32
+        AND protection_digest = mcloving_state_transfer_protection_digest(
+            retention_policy_id,
+            retention_policy_version,
+            retention_policy_digest,
+            retain_until_unix_ms,
+            active_holds
+        )
+    ),
     receipt_id uuid NOT NULL,
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (organization_id, project_id, subject_digest),
     FOREIGN KEY (project_id, organization_id)
         REFERENCES projects(id, organization_id),
-    FOREIGN KEY (receipt_id, organization_id)
-        REFERENCES state_transfer_receipts(id, organization_id)
+    FOREIGN KEY (receipt_id, organization_id, project_id)
+        REFERENCES state_transfer_receipts(id, organization_id, project_id)
 );
 
 CREATE FUNCTION mcloving_state_transfer_receipt_immutable()
@@ -206,6 +351,33 @@ BEGIN
             ERRCODE = '23514',
             MESSAGE = 'mcloving state-transfer protection cannot be deleted';
     END IF;
+    IF NEW.protection_digest IS DISTINCT FROM
+           mcloving_state_transfer_protection_digest(
+               NEW.retention_policy_id,
+               NEW.retention_policy_version,
+               NEW.retention_policy_digest,
+               NEW.retain_until_unix_ms,
+               NEW.active_holds
+           )
+       OR NOT mcloving_state_transfer_receipt_has_protection(
+           NEW.organization_id,
+           NEW.project_id,
+           NEW.receipt_id,
+           NEW.subject_digest,
+           NEW.retention_policy_id,
+           NEW.retention_policy_version,
+           NEW.retention_policy_digest,
+           NEW.retain_until_unix_ms,
+           NEW.active_holds
+       )
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer protection lineage is invalid';
+    END IF;
+    IF TG_OP = 'INSERT' THEN
+        RETURN NEW;
+    END IF;
     IF NEW.organization_id IS DISTINCT FROM OLD.organization_id
        OR NEW.project_id IS DISTINCT FROM OLD.project_id
        OR NEW.subject_digest IS DISTINCT FROM OLD.subject_digest
@@ -231,7 +403,7 @@ $$;
 REVOKE ALL ON FUNCTION mcloving_state_transfer_protection_monotonic() FROM PUBLIC;
 
 CREATE TRIGGER state_transfer_protections_monotonic
-BEFORE UPDATE OR DELETE ON state_transfer_protections
+BEFORE INSERT OR UPDATE OR DELETE ON state_transfer_protections
 FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_protection_monotonic();
 
 GRANT SELECT, INSERT ON state_transfer_receipts, state_transfer_records
@@ -240,6 +412,16 @@ GRANT SELECT, INSERT, UPDATE ON state_transfer_protections
 TO mcloving_tenant;
 GRANT EXECUTE ON FUNCTION mcloving_state_transfer_holds_valid(jsonb)
 TO mcloving_tenant;
+GRANT EXECUTE ON FUNCTION mcloving_state_transfer_digest_json(bytea)
+TO mcloving_tenant;
+GRANT EXECUTE ON FUNCTION mcloving_state_transfer_normalize_holds(jsonb)
+TO mcloving_tenant;
+GRANT EXECUTE ON FUNCTION mcloving_state_transfer_protection_digest(
+    text, text, bytea, bigint, jsonb
+) TO mcloving_tenant;
+GRANT EXECUTE ON FUNCTION mcloving_state_transfer_receipt_has_protection(
+    uuid, uuid, uuid, bytea, text, text, bytea, bigint, jsonb
+) TO mcloving_tenant;
 
 ALTER TABLE state_transfer_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE state_transfer_receipts FORCE ROW LEVEL SECURITY;

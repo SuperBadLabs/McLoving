@@ -75,12 +75,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `f8e6a28dc592e84a1d381cc686551b0ed2afd8f132aedf27af6ab914a425544f`;
-- source-evidence manifest SHA-256 `791d43f8c5f1594f34d35b8b3e77a2b9a0b66808391b341687ad632a8e833830`;
-- forward bundle SHA-256 `50d71cd4dad8287dc223def74ad1aa1fdbd4bf60bb3c8540ae39d4a134275d28`;
-- reverse bundle SHA-256 `43a558f83452e22bf67e171da3009ec824add52c6fb14c98c7ae6dd813ad13c4`;
-- reverse-evidence manifest SHA-256 `19e14caecab21c4070434bbc30721c32d4c7d968c06ec32bbbc1de6fb07e1d51`;
-- sealed transform-evidence manifest SHA-256 `f233eaa013027ab5793da10cebe5112e3ddab273070a4b223791bde564b63857`.
+- transform binary SHA-256 `d7e00947f72bbb9c7953f7d0c1e524f9561958e8dc7b3a5bef32f1f9cbc66606`;
+- source-evidence manifest SHA-256 `d9c369546daa948d86b31017a22da4cbf08bc5180c7b32a1b10fce6a3bdcfc80`;
+- forward bundle SHA-256 `ece806022af5c52432cc0ec8d89cdd11db0b656ebba1ab9a4da61f234fe0e8fd`;
+- reverse bundle SHA-256 `039a030b2a9c76f49d31930bec901095fefacd2ec37ee361159816e509330eec`;
+- reverse-evidence manifest SHA-256 `c6c833ca70ab5a99f5338623b9ddd8d1aae170e44e85304f36b139fbd614f3b4`;
+- sealed transform-evidence manifest SHA-256 `84780d5299a1ba16c53dd87613841eee53990f35c702f744e00e3dae70697634`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 112 record-provenance rows, eight effective

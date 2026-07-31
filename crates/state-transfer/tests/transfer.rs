@@ -9,12 +9,12 @@ use std::{
 
 use mcloving_state_transfer::{
     BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy, DataBinding,
-    DataClassification, Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind, JobState,
-    LegalHold, MaterializationLimits, ObjectKind, ObjectState, PersistentDependency, Protection,
-    RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState,
-    SecretDisposition, SecretReference, StateBundle, SystemIdentity, TransferBinding,
-    TransferDirection, TransferError, TriggerCause, evaluate_change_predicate,
-    materialize_filesystem_entries, protections, sha256, transform,
+    DataClassification, Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind,
+    GraphNodeState, JobState, LegalHold, MaterializationLimits, ObjectKind, ObjectState,
+    PersistentDependency, Protection, RecordProvenance, RetentionPolicy, RetrievalMetadata,
+    STATE_TRANSFER_SCHEMA_V1, ScmState, SecretDisposition, SecretReference, StateBundle,
+    SystemIdentity, TransferBinding, TransferDirection, TransferError, TriggerCause,
+    evaluate_change_predicate, materialize_filesystem_entries, protections, sha256, transform,
 };
 
 fn digest(byte: u8) -> Digest {
@@ -346,6 +346,37 @@ fn gaps_duplicates_and_missing_records_fail_closed() {
         transform(&missing, &expected, &BTreeMap::new()),
         Err(TransferError::MissingRecords(_))
     ));
+}
+
+#[test]
+fn cyclic_graph_history_fails_closed() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![
+        GraphNodeState {
+            record: record("node:stateful:7:a", 70),
+            node_id: "a".to_owned(),
+            stage_path: "a".to_owned(),
+            node_kind: "stage".to_owned(),
+            parent_node_ids: vec!["b".to_owned()],
+            result: BuildResult::Succeeded,
+            attempts: Vec::new(),
+        },
+        GraphNodeState {
+            record: record("node:stateful:7:b", 71),
+            node_id: "b".to_owned(),
+            stage_path: "b".to_owned(),
+            node_kind: "stage".to_owned(),
+            parent_node_ids: vec!["a".to_owned()],
+            result: BuildResult::Succeeded,
+            attempts: Vec::new(),
+        },
+    ];
+    assert_eq!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "graph nodes must be acyclic".to_owned()
+        ))
+    );
 }
 
 #[test]

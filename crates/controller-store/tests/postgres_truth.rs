@@ -303,6 +303,77 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         );
     }
 
+    let substituted_protection_digest = sqlx::query(
+        "UPDATE state_transfer_protections
+         SET protection_digest = decode(repeat('11', 32), 'hex')
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects a substituted protection digest");
+    assert_eq!(
+        substituted_protection_digest
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let substituted_receipt = sqlx::query(
+        "UPDATE state_transfer_protections
+         SET receipt_id = $4
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .bind(first.id)
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects protection lineage absent from the named receipt");
+    assert_eq!(
+        substituted_receipt
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let zero_subject = sqlx::query(
+        "INSERT INTO state_transfer_protections (
+             organization_id, project_id, subject_digest,
+             retention_policy_id, retention_policy_version, retention_policy_digest,
+             retain_until_unix_ms, active_holds, protection_digest, receipt_id
+         )
+         SELECT organization_id, project_id, decode(repeat('00', 32), 'hex'),
+                retention_policy_id, retention_policy_version, retention_policy_digest,
+                retain_until_unix_ms, active_holds, protection_digest, receipt_id
+         FROM state_transfer_protections
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects a zero protection subject digest");
+    assert_eq!(
+        zero_subject
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
     let omitted_hold = sqlx::query(
         "UPDATE state_transfer_protections
          SET active_holds = '[]'::jsonb
