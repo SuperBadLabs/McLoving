@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mcloving_jenkins_mapping_catalog::{
-    CATALOG_ID, CATALOG_VERSION, CORPUS_MANIFEST_SHA256, PROFILE_SHA256, SCHEMA,
+    CATALOG_ID, CATALOG_SHA256, CATALOG_VERSION, CORPUS_MANIFEST_SHA256, PROFILE_SHA256, SCHEMA,
     validate_catalog_bytes, verify_bundle,
 };
 
@@ -75,6 +75,23 @@ fn readme_symlink_is_rejected_as_a_non_regular_bundle_entry() {
     symlink("catalog.yaml", bundle.0.join("README.md")).expect("replace README with symlink");
     let error = verify_bundle(&bundle.0).expect_err("symlink README must fail");
     assert_eq!(error.code, "E_BUNDLE_ENTRY");
+}
+
+#[test]
+fn catalog_and_lock_cannot_be_rewritten_together() {
+    let bundle = TestBundle::copy();
+    let mut mutated = catalog();
+    mutated.extend_from_slice(b"\n# presentation-only rewrite\n");
+    let (mutated_sha256, _) =
+        validate_catalog_bytes(&mutated).expect("rewritten catalog remains semantically valid");
+    fs::write(bundle.0.join("catalog.yaml"), mutated).expect("write rewritten catalog");
+    let rewritten_lock = fs::read_to_string(bundle.0.join("catalog.lock.yaml"))
+        .expect("read copied lock")
+        .replace(CATALOG_SHA256, &mutated_sha256);
+    fs::write(bundle.0.join("catalog.lock.yaml"), rewritten_lock).expect("rewrite copied lock");
+
+    let error = verify_bundle(&bundle.0).expect_err("published catalog bytes are immutable");
+    assert_eq!(error.code, "E_BINDING");
 }
 
 #[test]

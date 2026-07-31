@@ -7,7 +7,8 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use mcloving_pipeline_ir::{ParseLimits, parse_strict};
@@ -25,6 +26,9 @@ pub const INVENTORY_SHA256: &str =
     "b1c2f81c74ec0ffc36971f358f920b2d0775c6009f474bea924448cd2a1915c1";
 pub const CORPUS_MANIFEST_SHA256: &str =
     "59faf74bb8ebfbd658f85b5224ec15ee7b0db841ad66b2da1326cd83adac4f2a";
+pub const CATALOG_SHA256: &str = "d383ab8e15593ca5cc2847633a1410b53e676442f60dfcca93606610d1f761c8";
+pub const CATALOG_SEMANTIC_SHA256: &str =
+    "1349f2864edb360cf1a954eda0327fe6e2d42549296437690f24168e54f80907";
 pub const SOURCE_SHA256: &str = "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100";
 pub const SOURCE_JOB_ID: &str = "corpus-052-cinqict_jenkinsdev";
 pub const PLUGIN_SHA256: &str = "a0f0f1464ce3592f76d0f0079ce9fc2d4272594f995bf3d1a7ede4cd5031452e";
@@ -488,6 +492,12 @@ fn validate_lock(
         lock.catalog_version,
         CATALOG_VERSION,
     )?;
+    exact("catalog.sha256", catalog_sha256, CATALOG_SHA256)?;
+    exact(
+        "catalog.semantic_sha256",
+        semantic_sha256,
+        CATALOG_SEMANTIC_SHA256,
+    )?;
     exact("lock.catalog_sha256", &lock.catalog_sha256, catalog_sha256)?;
     exact(
         "lock.semantic_sha256",
@@ -594,10 +604,29 @@ fn validate_bundle_entries(root: &Path) -> Result<(), CatalogError> {
 }
 
 fn read_regular(path: PathBuf, limit: usize) -> Result<Vec<u8>, CatalogError> {
-    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(&path).map_err(|error| {
+        CatalogError::new(
+            "E_BUNDLE_ENTRY",
+            format!("cannot open {} as a regular file: {error}", path.display()),
+        )
+    })?;
+    let metadata = file.metadata().map_err(|error| {
         CatalogError::new(
             "E_BUNDLE_IO",
-            format!("cannot inspect {}: {error}", path.display()),
+            format!("cannot inspect open {}: {error}", path.display()),
         )
     })?;
     if !metadata.file_type().is_file() {
@@ -612,12 +641,22 @@ fn read_regular(path: PathBuf, limit: usize) -> Result<Vec<u8>, CatalogError> {
             format!("{} exceeds its byte limit", path.display()),
         ));
     }
-    fs::read(&path).map_err(|error| {
-        CatalogError::new(
-            "E_BUNDLE_IO",
-            format!("cannot read {}: {error}", path.display()),
-        )
-    })
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            CatalogError::new(
+                "E_BUNDLE_IO",
+                format!("cannot read open {}: {error}", path.display()),
+            )
+        })?;
+    if bytes.len() > limit {
+        return Err(CatalogError::new(
+            "E_BUNDLE_SIZE",
+            format!("{} grew beyond its byte limit", path.display()),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

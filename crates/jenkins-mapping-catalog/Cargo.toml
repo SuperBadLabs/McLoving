@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+libc = "=0.2.189"
 mcloving-pipeline-ir = { version = "0.0.0", path = "../pipeline-ir" }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde-saphyr = "=1.0.0-rc.2"

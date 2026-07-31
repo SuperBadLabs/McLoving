@@ -1401,6 +1401,7 @@ dependencies = [
 name = "mcloving-jenkins-mapping-catalog"
 version = "0.0.0"
 dependencies = [
+ "libc",
  "mcloving-pipeline-ir",
  "serde",
  "serde-saphyr",

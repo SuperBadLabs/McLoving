@@ -5,7 +5,7 @@
             [mcloving.compat.compiler :as compiler]
             [mcloving.compat.profile :as profile])
   (:import (java.io ByteArrayOutputStream InputStream PushbackReader StringReader)
-           (java.nio.file Files LinkOption Paths)))
+           (java.nio.file Files LinkOption Paths StandardOpenOption)))
 
 (def protocol-version "mcloving.jenkins.compiler/1")
 (def compiler-id "mcloving-jenkins-compiler-worker/1")
@@ -116,7 +116,30 @@
       (fail! "E_ENV_AUTHORITY"))
     (sort keys)))
 
-(defn- source-receipt!
+(defn- read-source-bytes!
+  [path]
+  (try
+    (with-open [input
+                (Files/newInputStream
+                 path
+                 (into-array
+                  java.nio.file.OpenOption
+                  [StandardOpenOption/READ LinkOption/NOFOLLOW_LINKS]))]
+      (let [output (ByteArrayOutputStream.)
+            buffer (byte-array 8192)]
+        (loop [total 0]
+          (let [read-count (.read input buffer)]
+            (if (neg? read-count)
+              (.toByteArray output)
+              (let [next-total (+ total read-count)]
+                (when (> next-total max-source-bytes)
+                  (fail! "E_SOURCE_TOO_LARGE"))
+                (.write output buffer 0 read-count)
+                (recur next-total)))))))
+    (catch java.io.IOException _
+      (fail! "E_SOURCE_TYPE"))))
+
+(defn- source-input!
   [request]
   (when-not (= "/input/Jenkinsfile" (:source-path request))
     (fail! "E_SOURCE_PATH"))
@@ -129,10 +152,12 @@
     (let [size (Files/size path)]
       (when (> size max-source-bytes)
         (fail! "E_SOURCE_TOO_LARGE"))
-      (let [actual (profile/sha256-file (.toString path))]
+      (let [bytes (read-source-bytes! path)
+            actual (profile/sha256-bytes bytes)]
         (when-not (= actual (:source-sha256 request))
           (fail! "E_SOURCE_DIGEST"))
-        (sorted-map :bytes size :sha256 actual)))))
+        {:receipt (sorted-map :bytes (alength bytes) :sha256 actual)
+         :source (String. bytes java.nio.charset.StandardCharsets/UTF_8)}))))
 
 (defn- base-response
   [profile request status]
@@ -182,15 +207,12 @@
                      (string? (:job-effective-time request)))
         (fail! "E_JOB_PROVENANCE"))
       (environment-safe!)
-      (let [source-receipt (source-receipt! request)
-            source (Files/readString
-                    (Paths/get (:source-path request) (make-array String 0))
-                    java.nio.charset.StandardCharsets/UTF_8)]
+      (let [{:keys [receipt source]} (source-input! request)]
         (try
           (assoc (base-response profile request :compiled)
                  :result (compiler/compile-admitted!
                           compiler-id profile request source)
-                 :source source-receipt)
+                 :source receipt)
           (catch clojure.lang.ExceptionInfo exception
             (assoc (base-response profile request :unsupported)
                    :diagnostic
@@ -199,7 +221,7 @@
                               "E_COMPILER_INTERNAL")
                     :message
                     "source is outside the currently admitted compiler subset")
-                   :source source-receipt)))))
+                   :source receipt)))))
 
     (fail! "E_OPERATION")))
 
