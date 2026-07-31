@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
@@ -17,6 +18,8 @@ from typing import Any
 
 ANCHOR_PACKAGE = "mcloving-agent"
 ALWAYS_RUN_PATHS = {
+    ".cargo/config",
+    ".cargo/config.toml",
     ".github/workflows/windows-agent.yml",
     "rust-toolchain.toml",
     "scripts/windows-agent-impact.py",
@@ -232,6 +235,11 @@ def classify(
     return False, "no Windows agent production or test dependency changed"
 
 
+def emit_result(run_windows: bool, reason: str) -> None:
+    print(f"Windows impact decision: {reason}", file=sys.stderr)
+    print(f"run-windows={'true' if run_windows else 'false'}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", required=True)
@@ -261,8 +269,7 @@ def main() -> None:
             root_policy(head_tree),
         )
 
-    print(f"run-windows={'true' if run_windows else 'false'}")
-    print(f"reason={reason}")
+    emit_result(run_windows, reason)
 
 
 if __name__ == "__main__":
