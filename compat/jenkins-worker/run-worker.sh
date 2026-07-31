@@ -81,29 +81,71 @@ case "$OPERATION" in
     ;;
 esac
 
+STREAM_LIMIT=65536
+STREAM_SENTINEL=$((STREAM_LIMIT + 1))
 OUTPUT=$(mktemp "${TMPDIR:-/tmp}/mcloving-compiler-output.XXXXXXXX")
 ERROR_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/mcloving-compiler-error.XXXXXXXX")
+OUTPUT_PIPE="${OUTPUT}.pipe"
+ERROR_PIPE="${ERROR_OUTPUT}.pipe"
+CID_FILE="${OUTPUT}.cid"
+mkfifo "$OUTPUT_PIPE" "$ERROR_PIPE"
 cleanup() {
-  rm -f -- "$OUTPUT" "$ERROR_OUTPUT"
+  if [[ -s "$CID_FILE" ]]; then
+    container_id=$(cat "$CID_FILE")
+    if [[ -n "$container_id" ]]; then
+      podman rm --force "$container_id" >/dev/null 2>&1 || true
+    fi
+  fi
+  for reader_pid in "${OUTPUT_READER_PID:-}" "${ERROR_READER_PID:-}"; do
+    if [[ -n "$reader_pid" ]] && kill -0 "$reader_pid" 2>/dev/null; then
+      kill "$reader_pid" 2>/dev/null || true
+      wait "$reader_pid" 2>/dev/null || true
+    fi
+  done
+  rm -f -- "$OUTPUT" "$ERROR_OUTPUT" "$OUTPUT_PIPE" "$ERROR_PIPE" "$CID_FILE"
 }
 trap cleanup EXIT
+
+head -c "$STREAM_SENTINEL" <"$OUTPUT_PIPE" >"$OUTPUT" &
+OUTPUT_READER_PID=$!
+head -c "$STREAM_SENTINEL" <"$ERROR_PIPE" >"$ERROR_OUTPUT" &
+ERROR_READER_PID=$!
 
 set +e
 printf '%s\n' "$REQUEST" |
   timeout --signal=KILL 5s \
     podman run --rm \
+      --cidfile "$CID_FILE" \
       "${WORKER_PODMAN_OPTIONS[@]}" \
       "${PODMAN_EXTRA[@]}" \
-      "$IMAGE" >"$OUTPUT" 2>"$ERROR_OUTPUT"
+      "$IMAGE" >"$OUTPUT_PIPE" 2>"$ERROR_PIPE" &
+PRODUCER_PID=$!
+limit_exceeded=0
+while kill -0 "$PRODUCER_PID" 2>/dev/null; do
+  if [[ $(wc -c <"$OUTPUT") -gt $STREAM_LIMIT ]] ||
+    [[ $(wc -c <"$ERROR_OUTPUT") -gt $STREAM_LIMIT ]]; then
+    limit_exceeded=1
+    if [[ -s "$CID_FILE" ]]; then
+      podman kill --signal KILL "$(cat "$CID_FILE")" >/dev/null 2>&1 || true
+    fi
+    break
+  fi
+  sleep 0.01
+done
+wait "$PRODUCER_PID"
 status=$?
+wait "$OUTPUT_READER_PID" 2>/dev/null || true
+wait "$ERROR_READER_PID" 2>/dev/null || true
 set -e
 
+if [[ $limit_exceeded -eq 1 ]] ||
+  [[ $(wc -c <"$OUTPUT") -gt $STREAM_LIMIT ]] ||
+  [[ $(wc -c <"$ERROR_OUTPUT") -gt $STREAM_LIMIT ]]; then
+  echo "isolated compiler exceeded stream limit" >&2
+  exit 70
+fi
 [[ $status -eq 0 ]] || {
   echo "isolated compiler failed with status $status" >&2
-  exit 70
-}
-[[ $(wc -c < "$OUTPUT") -le 65536 ]] || {
-  echo "isolated compiler exceeded output limit" >&2
   exit 70
 }
 [[ $(wc -l < "$OUTPUT") -eq 1 ]] || {

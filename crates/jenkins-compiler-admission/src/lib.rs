@@ -134,6 +134,15 @@ pub fn validate_response(
             expect_keyword(root, "status", "unsupported")?;
             validate_profile(field(root, "profile")?)?;
             validate_source_receipt(field(root, "source")?, expected.source)?;
+            if expected.job_id == ADMITTED_JOB_ID
+                && expected.job_generation == ADMITTED_JOB_GENERATION
+                && sha256_hex(expected.source) == ADMITTED_SOURCE_SHA256
+            {
+                return Err(AdmissionError::new(
+                    "E_STATUS_DOWNGRADE",
+                    "worker downgraded the exact admitted source to unsupported",
+                ));
+            }
             let code = validate_diagnostic(
                 field(root, "diagnostic")?,
                 &[

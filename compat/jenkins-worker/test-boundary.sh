@@ -23,6 +23,24 @@ cargo build --quiet --locked \
   --manifest-path "$SCRIPT_DIR/../../Cargo.toml" \
   -p mcloving-jenkins-compiler-admission
 
+FAKE_BIN="$TEST_ROOT/fake-bin"
+mkdir -p "$FAKE_BIN"
+ln -s "$SCRIPT_DIR/test/fake-podman.sh" "$FAKE_BIN/podman"
+for stream in stdout stderr; do
+  stream_tmp="$TEST_ROOT/limit-$stream"
+  mkdir -p "$stream_tmp"
+  if PATH="$FAKE_BIN:$PATH" \
+    TMPDIR="$stream_tmp" \
+    FAKE_PODMAN_STREAM="$stream" \
+    "$SCRIPT_DIR/run-worker.sh" probe "boundary-limit-$stream" \
+    >"$TEST_ROOT/limit-$stream.out" 2>"$TEST_ROOT/limit-$stream.err"; then
+    echo "untrusted $stream stream exceeded its bound without rejection" >&2
+    exit 1
+  fi
+  grep -q 'isolated compiler exceeded stream limit' "$TEST_ROOT/limit-$stream.err"
+  [[ -z "$(find "$stream_tmp" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+done
+
 first=$("$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/Jenkinsfile" boundary-a \
   "$ADMITTED_JOB" "$ADMITTED_GENERATION")
 second=$("$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/Jenkinsfile" boundary-a \

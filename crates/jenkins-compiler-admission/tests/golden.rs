@@ -47,18 +47,20 @@ fn every_compile_status_is_independently_validated() {
         validate_response(RESPONSE, expected()).unwrap(),
         ValidatedResponse::Admitted(_)
     ));
-    assert_eq!(
-        validate_response(UNSUPPORTED, expected()).unwrap(),
-        ValidatedResponse::Unsupported {
-            code: "E_DIRECTIVE_UNSUPPORTED".to_owned()
-        }
-    );
+    let downgrade = validate_response(UNSUPPORTED, expected()).unwrap_err();
+    assert_eq!(downgrade.code, "E_STATUS_DOWNGRADE");
     assert_eq!(
         validate_response(REJECTED, expected()).unwrap(),
         ValidatedResponse::Rejected {
             code: "E_ENV_AUTHORITY".to_owned()
         }
     );
+}
+
+#[test]
+fn exact_admitted_case_cannot_be_downgraded_to_unsupported() {
+    let error = validate_response(UNSUPPORTED, expected()).unwrap_err();
+    assert_eq!(error.code, "E_STATUS_DOWNGRADE");
 }
 
 #[test]
