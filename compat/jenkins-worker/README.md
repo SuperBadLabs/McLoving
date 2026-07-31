@@ -47,7 +47,9 @@ Pipeline IR in Rust, validates its independent canonical bytes, and refuses
 noncanonical or substituted output. Before launch, that same binary opens the
 source once with no-follow/nonblocking semantics, validates and bounds it on
 the opened handle, and creates the private snapshot used for hashing,
-container compilation, and independent admission.
+container compilation, and independent admission. Rootless Podman's keep-id
+mapping explicitly maps the caller-owned snapshot to worker UID/GID 1000, so
+the mode-0600 boundary does not depend on the host account's numeric IDs.
 
 ```sh
 clojure -M:test
