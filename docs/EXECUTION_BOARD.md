@@ -650,7 +650,9 @@ The class describes integration behavior, not business priority. A `SERIAL`
 ticket may run in a lane that is globally parallel with another lane, but only
 one ticket in that lane may mutate state at a time. A `BATCH` is one reviewed
 pull request. A `PARALLEL` ticket is always a standalone pull request and may
-run concurrently only under the isolation rules above.
+run concurrently only under the isolation rules above. No remaining ticket is
+currently classified `BATCH`: after the recent review history, every remaining
+boundary is too large or authority-sensitive to share a pull request safely.
 
 ### Active and translation lanes
 
@@ -665,7 +667,7 @@ run concurrently only under the isolation rules above.
 | Lane | Ticket or ordered chain | Class | Start gate | Streamlined execution rule |
 |---|---|---|---|---|
 | Identity | `IDP-001` -> `AUTHZ-001` | SERIAL | Ready | Separate security-reviewed PRs; authorization starts from the merged identity model |
-| Operational ingress | `JOBSTATE-001` + `TRIG-001` | BATCH | Ready | One PR with job-state first and trigger ingress second; one race/threat review covers every admission path |
+| Operational ingress | `JOBSTATE-001` -> `TRIG-001` | SERIAL | Ready | Separate PRs; merge and verify the operational-state fence before trigger ingress consumes it |
 | Source acquisition | `SCM-001` | PARALLEL | Ready | Standalone contained-source boundary PR |
 | Live inputs | `INPUT-001` | PARALLEL | Ready | Standalone read-only adapter and receipt boundary PR |
 | Dynamic agents | `PROV-001` | PARALLEL | Ready | Standalone provisioner identity, lifecycle, and cleanup PR |
@@ -676,7 +678,7 @@ run concurrently only under the isolation rules above.
 | Secret mapping | `SECRET-001` | SERIAL | `SCM-001`, `EXT-001` | Starts only after both consumer receipt protocols are merged; no speculative adapter contract |
 | Discovery | `DISC-001` | SERIAL | `TRIG-001`, `SCM-001`, `AUTHZ-001` | Integrates only the exact merged ingress, source, and policy contracts |
 | Dependencies | `DEP-001` | SERIAL | `SCM-001` | Builds on the merged source-acquisition trust policy |
-| External clients | `CONSUMER-001` + `ADMIN-001` | BATCH | `AUTHZ-001` | One compatibility-surface PR with separate read and write commits plus common authz/audit denial gates |
+| External clients | `CONSUMER-001` -> `ADMIN-001` | SERIAL | `AUTHZ-001` | Separate PRs; close read compatibility before adding the higher-authority administrative write surface |
 
 ### Certification, authority, and proof lanes
 
