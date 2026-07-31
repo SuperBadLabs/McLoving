@@ -644,12 +644,14 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         );
     }
     let mut legal_hold_definitions = BTreeMap::new();
+    let mut retention_policy_definitions = BTreeMap::new();
     for (job_id, records) in &state {
         validate_state_records(
             job_id,
             records,
             &client_directions,
             &mut legal_hold_definitions,
+            &mut retention_policy_definitions,
         )?;
     }
 
@@ -1117,6 +1119,7 @@ fn validate_state_records(
     records: &[StateRecord],
     client_directions: &BTreeMap<String, ClientDirection>,
     legal_hold_definitions: &mut BTreeMap<String, LegalHold>,
+    retention_policy_definitions: &mut BTreeMap<String, String>,
 ) -> Result<(), InventoryError> {
     for record in records {
         validate_nonempty("state kind", &record.kind)?;
@@ -1126,6 +1129,22 @@ fn validate_state_records(
         validate_nonempty("state conflict policy", &record.conflict_policy)?;
         validate_identifier("state retention policy", &record.retention_policy_id)?;
         validate_digest("state retention policy", &record.retention_policy_sha256)?;
+        if let Some(existing) = retention_policy_definitions.get(&record.retention_policy_id) {
+            if existing != &record.retention_policy_sha256 {
+                return Err(InventoryError::new(
+                    "INV_RETENTION_POLICY_CONFLICT",
+                    format!(
+                        "retention policy {} has conflicting digests across state records",
+                        record.retention_policy_id
+                    ),
+                ));
+            }
+        } else {
+            retention_policy_definitions.insert(
+                record.retention_policy_id.clone(),
+                record.retention_policy_sha256.clone(),
+            );
+        }
         validate_utc_timestamp("state retention deadline", &record.retention_deadline)?;
         validate_nonempty("state provenance", &record.provenance)?;
         validate_digest("state source", &record.source_sha256)?;

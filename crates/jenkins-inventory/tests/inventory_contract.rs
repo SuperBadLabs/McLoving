@@ -642,6 +642,23 @@ fn reconciliation_requires_bound_retention_policies() {
 }
 
 #[test]
+fn reconciliation_rejects_conflicting_retention_policy_definitions() {
+    let directory = TestDirectory::new("retention-policy-conflict");
+    let mut bundle = fixture();
+    let mut second = bundle.persistent_state.jobs[1].records[0].clone();
+    second.id = "folder-history".to_owned();
+    second.retention_policy_sha256 = DIGEST_C.to_owned();
+    second.external_consumers.clear();
+    bundle.persistent_state.jobs[0].records.push(second);
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("conflicting retention policies must fail");
+    assert_eq!(error.code, "INV_RETENTION_POLICY_CONFLICT");
+}
+
+#[test]
 fn reconciliation_rejects_invalid_collection_timestamp() {
     let directory = TestDirectory::new("invalid-collection-time");
     let mut bundle = fixture();
