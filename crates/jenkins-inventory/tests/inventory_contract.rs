@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mcloving_jenkins_inventory::{
     AclEntry, ApprovedDisposition, ClientDirection, ClientRecord, CompatibilityDisposition,
-    IDENTITY_CLIENT_FILE, IdentityClientManifest, JOB_GRAPH_FILE, JobDependencies,
-    JobGraphManifest, JobRecord, JobStateRecords, LegalHold, OperationalState,
+    DependencyMutability, IDENTITY_CLIENT_FILE, IdentityClientManifest, JOB_GRAPH_FILE,
+    JobDependencies, JobGraphManifest, JobRecord, JobStateRecords, LegalHold, OperationalState,
     PERSISTENT_STATE_FILE, PersistentStateManifest, Principal, RUNTIME_DEPENDENCY_FILE,
     RuntimeDependency, RuntimeDependencyManifest, SCHEMA_VERSION, ScopeDisposition, SecurityRealm,
     SnapshotBinding, StateRecord, load_bundle, reconcile, seal_manifest_directory, write_ledger,
@@ -126,6 +126,21 @@ fn reconciliation_rejects_unclassified_runtime_dependency() {
     let loaded = load_bundle(&directory.0).expect("load bundle");
     let error = reconcile(&loaded).expect_err("unclassified dependency must fail");
     assert_eq!(error.code, "INV_UNCLASSIFIED");
+}
+
+#[test]
+fn reconciliation_rejects_native_mutable_dependencies() {
+    let directory = TestDirectory::new("native-mutable");
+    let mut bundle = fixture();
+    let dependency = &mut bundle.runtime_dependencies.jobs[1].dependencies[0];
+    dependency.mutability = DependencyMutability::Mutable;
+    dependency.disposition = CompatibilityDisposition::Native;
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("native mutable dependency must fail");
+    assert_eq!(error.code, "INV_MUTABLE_NATIVE");
 }
 
 #[test]
@@ -492,6 +507,22 @@ fn reconciliation_requires_legal_hold_identity() {
 }
 
 #[test]
+fn reconciliation_rejects_conflicting_legal_hold_definitions() {
+    let directory = TestDirectory::new("hold-conflict");
+    let mut bundle = fixture();
+    let mut second = bundle.persistent_state.jobs[1].records[0].clone();
+    second.id = "artifact-history".to_owned();
+    second.legal_holds[0].scope = "artifacts-only".to_owned();
+    bundle.persistent_state.jobs[1].records.push(second);
+    write_bundle(&directory.0, &bundle);
+    seal_manifest_directory(&directory.0).expect("seal inventory");
+
+    let loaded = load_bundle(&directory.0).expect("load bundle");
+    let error = reconcile(&loaded).expect_err("conflicting legal hold definitions must fail");
+    assert_eq!(error.code, "INV_HOLD_CONFLICT");
+}
+
+#[test]
 fn reconciliation_rejects_state_record_count_overflow() {
     let directory = TestDirectory::new("state-count-overflow");
     let mut bundle = fixture();
@@ -703,7 +734,7 @@ fn fixture() -> Fixture {
                         implementation_sha256: DIGEST_A.to_owned(),
                         config_sha256: DIGEST_B.to_owned(),
                         resource_scope: "repo/example".to_owned(),
-                        mutability: "pinned-revision".to_owned(),
+                        mutability: DependencyMutability::PinnedRevision,
                         provenance: "jenkins/credentials/source".to_owned(),
                         confidentiality: "secret".to_owned(),
                         credential_reference: Some("protected-evidence/credential-7".to_owned()),

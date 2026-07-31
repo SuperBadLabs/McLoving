@@ -42,11 +42,15 @@ and persistent-state mutation for one bounded export epoch.
   mutable inputs, agents, caches, effects, provisioners, locks, global values,
   and built-in environment dependencies. The generic typed record uses `kind`
   for the dependency family and requires an explicit compatibility disposition.
+  Mutability is one of `immutable`, `pinned-revision`, `mutable`, or `floating`;
+  mutable and floating dependencies cannot be classified `native`.
 - `persistent-state.yaml` owns each per-job record class, counts and source
   digest, retention deadline, legal holds and release authority, restore target,
   conflict policy, external consumers, ownership, confidentiality, and
   provenance. Every external consumer must reference a client whose direction
-  includes reads; write-only clients cannot consume state.
+  includes reads; write-only clients cannot consume state. Reusing a legal-hold
+  identity with a conflicting scope, reason, generation, or release authority
+  fails reconciliation.
 
 Secret values are never inventory fields. A dependency classified `secret`
 must carry a typed `credential_reference` or `redaction_reference`; the

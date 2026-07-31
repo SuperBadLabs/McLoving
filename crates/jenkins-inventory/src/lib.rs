@@ -197,6 +197,15 @@ pub enum CompatibilityDisposition {
     Unclassified,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DependencyMutability {
+    Immutable,
+    PinnedRevision,
+    Mutable,
+    Floating,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeDependency {
@@ -206,7 +215,7 @@ pub struct RuntimeDependency {
     pub implementation_sha256: String,
     pub config_sha256: String,
     pub resource_scope: String,
-    pub mutability: String,
+    pub mutability: DependencyMutability,
     pub provenance: String,
     pub confidentiality: String,
     #[serde(default)]
@@ -574,8 +583,14 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
             validate_runtime_dependencies(job_id, dependencies)?,
         );
     }
+    let mut legal_hold_definitions = BTreeMap::new();
     for (job_id, records) in &state {
-        validate_state_records(job_id, records, &client_directions)?;
+        validate_state_records(
+            job_id,
+            records,
+            &client_directions,
+            &mut legal_hold_definitions,
+        )?;
     }
 
     let mut parity_demands = BTreeMap::new();
@@ -892,8 +907,20 @@ fn validate_runtime_dependencies(
             "runtime dependency resource scope",
             &dependency.resource_scope,
         )?;
-        validate_nonempty("runtime dependency mutability", &dependency.mutability)?;
         validate_nonempty("runtime dependency provenance", &dependency.provenance)?;
+        if matches!(
+            dependency.mutability,
+            DependencyMutability::Mutable | DependencyMutability::Floating
+        ) && dependency.disposition == CompatibilityDisposition::Native
+        {
+            return Err(InventoryError::new(
+                "INV_MUTABLE_NATIVE",
+                format!(
+                    "mutable dependency {} for job {job_id} cannot be classified native",
+                    dependency.id
+                ),
+            ));
+        }
         if dependency.confidentiality == "secret"
             && ![
                 dependency.credential_reference.as_deref(),
@@ -940,6 +967,7 @@ fn validate_state_records(
     job_id: &str,
     records: &[StateRecord],
     client_directions: &BTreeMap<String, ClientDirection>,
+    legal_hold_definitions: &mut BTreeMap<String, LegalHold>,
 ) -> Result<(), InventoryError> {
     for record in records {
         validate_nonempty("state kind", &record.kind)?;
@@ -989,6 +1017,19 @@ fn validate_state_records(
             validate_nonempty("legal-hold reason", &hold.reason)?;
             validate_nonempty("legal-hold generation", &hold.generation)?;
             validate_nonempty("legal-hold release authority", &hold.release_authority)?;
+            if let Some(existing) = legal_hold_definitions.get(&hold.id) {
+                if existing != hold {
+                    return Err(InventoryError::new(
+                        "INV_HOLD_CONFLICT",
+                        format!(
+                            "legal hold {} has conflicting definitions across state records",
+                            hold.id
+                        ),
+                    ));
+                }
+            } else {
+                legal_hold_definitions.insert(hold.id.clone(), hold.clone());
+            }
         }
     }
     Ok(())
