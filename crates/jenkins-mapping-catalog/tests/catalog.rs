@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mcloving_jenkins_mapping_catalog::{
     CATALOG_ID, CATALOG_SHA256, CATALOG_VERSION, CORPUS_MANIFEST_SHA256, PROFILE_SHA256, SCHEMA,
-    validate_catalog_bytes, verify_bundle,
+    digest_catalog_file, validate_catalog_bytes, verify_bundle,
 };
 
 fn bundle_root() -> PathBuf {
@@ -54,6 +54,33 @@ fn exact_corpus_earned_bundle_is_admitted() {
     assert_eq!(receipt.catalog_version, CATALOG_VERSION);
     assert_eq!(receipt.mappings, 1);
     assert_eq!(receipt.earned_cases, 1);
+}
+
+#[test]
+fn standalone_digest_reads_only_a_bounded_regular_catalog() {
+    let bundle = TestBundle::copy();
+    let digests = digest_catalog_file(&bundle.0.join("catalog.yaml")).expect("digest catalog");
+    assert_eq!(digests.0, CATALOG_SHA256);
+
+    let oversized = bundle.0.join("oversized.yaml");
+    fs::write(&oversized, vec![b'x'; 65_537]).expect("write oversized catalog");
+    let error = digest_catalog_file(&oversized).expect_err("oversized catalog must fail");
+    assert_eq!(error.code, "E_BUNDLE_SIZE");
+
+    let error = digest_catalog_file(&bundle.0).expect_err("directory catalog must fail");
+    assert_eq!(error.code, "E_BUNDLE_ENTRY");
+}
+
+#[cfg(unix)]
+#[test]
+fn standalone_digest_rejects_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let bundle = TestBundle::copy();
+    let link = bundle.0.join("catalog-link.yaml");
+    symlink("catalog.yaml", &link).expect("create catalog symlink");
+    let error = digest_catalog_file(&link).expect_err("catalog symlink must fail");
+    assert_eq!(error.code, "E_BUNDLE_ENTRY");
 }
 
 #[test]

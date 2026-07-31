@@ -257,6 +257,13 @@ pub fn verify_bundle(root: &Path) -> Result<CatalogReceipt, CatalogError> {
     })
 }
 
+/// Read and validate one catalog through the same bounded, no-follow file
+/// boundary used by bundle verification.
+pub fn digest_catalog_file(path: &Path) -> Result<(String, String), CatalogError> {
+    let source = read_regular(path.to_path_buf(), MAX_CATALOG_BYTES)?;
+    validate_catalog_bytes(&source)
+}
+
 pub fn validate_catalog_bytes(source: &[u8]) -> Result<(String, String), CatalogError> {
     let catalog = parse_catalog(source)?;
     Ok((sha256_hex(source), semantic_digest(&catalog)))
@@ -609,7 +616,7 @@ fn read_regular(path: PathBuf, limit: usize) -> Result<Vec<u8>, CatalogError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
     }
     #[cfg(windows)]
     {

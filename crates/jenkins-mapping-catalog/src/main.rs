@@ -1,9 +1,8 @@
 use std::env;
-use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-use mcloving_jenkins_mapping_catalog::{validate_catalog_bytes, verify_bundle};
+use mcloving_jenkins_mapping_catalog::{digest_catalog_file, verify_bundle};
 
 fn main() -> ExitCode {
     let mut args = env::args_os();
@@ -58,8 +57,7 @@ fn verify(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn digest(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = fs::read(path)?;
-    let (catalog_sha256, semantic_sha256) = validate_catalog_bytes(&bytes)?;
+    let (catalog_sha256, semantic_sha256) = digest_catalog_file(path)?;
     println!("catalog-sha256={catalog_sha256} semantic-sha256={semantic_sha256}");
     Ok(())
 }
