@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use quick_xml::Reader;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesRef, Event};
 use sha2::{Digest, Sha256};
 
 use super::{
@@ -829,6 +829,10 @@ fn parse_job_xml(bytes: &[u8]) -> Result<JobXml, InventoryError> {
                 })?;
                 assign_job_text(&mut parsed, &path, &value);
             }
+            Ok(Event::GeneralRef(reference)) => {
+                let value = decode_general_reference(&reference)?;
+                assign_job_text(&mut parsed, &path, &value);
+            }
             Ok(Event::End(_)) => {
                 path.pop();
             }
@@ -917,6 +921,17 @@ fn parse_selected_xml(bytes: &[u8]) -> Result<SelectedXml, InventoryError> {
                     _ => {}
                 }
             }
+            Ok(Event::GeneralRef(reference)) => {
+                let value = decode_general_reference(&reference)?;
+                match path.last().map(String::as_str) {
+                    Some("denyAnonymousReadAccess") => {
+                        parsed.deny_anonymous_read = value.trim() == "true";
+                    }
+                    Some("id") if path.len() == 2 => parsed.user_id = Some(value),
+                    Some("fullName") if path.len() == 2 => parsed.full_name = Some(value),
+                    _ => {}
+                }
+            }
             Ok(Event::End(_)) => {
                 path.pop();
             }
@@ -931,6 +946,24 @@ fn parse_selected_xml(bytes: &[u8]) -> Result<SelectedXml, InventoryError> {
         }
     }
     Ok(parsed)
+}
+
+fn decode_general_reference(reference: &BytesRef<'_>) -> Result<String, InventoryError> {
+    let decoded = reference.decode().map_err(|error| {
+        InventoryError::new(
+            "INV_EXPORT_XML",
+            format!("invalid XML general reference: {error}"),
+        )
+    })?;
+    let escaped = format!("&{decoded};");
+    quick_xml::escape::unescape(&escaped)
+        .map(|value| value.into_owned())
+        .map_err(|error| {
+            InventoryError::new(
+                "INV_EXPORT_XML",
+                format!("invalid XML general reference: {error}"),
+            )
+        })
 }
 
 fn read_directories(root: &Path) -> Result<Vec<PathBuf>, InventoryError> {

@@ -761,17 +761,21 @@ unbounded “later Wave 5” escape hatch.
 Wave 3 is merged through PR #12 at protected-main commit
 `3756c2f0a15ad2c9ba1a9b96464b852a85f4ae1c`; the original Wave 4 migration
 board is merged through PR #13 at protected-main commit
-`abb7c91faa13712698fc20fb792882b879837942`. `W4-A` is complete against the
-owner-designated Mario `jenkins-oracle-228` population. The controller was
+`abb7c91faa13712698fc20fb792882b879837942`. `W4-A` was initially closed
+against the owner-designated Mario `jenkins-oracle-228` population. The
+controller was
 quiesced and copied at offline epoch `2026-07-31T06:44:17Z`; four manifests
 cover 230 disabled parse-oracle jobs, one private-realm principal, 230 effective
 ACL rows, 230 whole-source opaque CPS runtime surfaces, and 230 build-history
 record classes containing 231 build instances. The sealed inventory fingerprint
 is `3473f1528e0fa8b1b856ae4941e5a5169d4c2c46389b813d0dd34935fb505198`.
-Independent verification and the digest-pinned secret scan pass. Every job
-remains conservatively `unsupported` because CPS behavior is opaque and both
-state transforms are uncertified; the ledger grants no execution or effect
-authority.
+Corpus reconciliation subsequently proved that 220 of 230 inline-source
+digests were truncated because the exporter ignored XML `GeneralRef` events.
+The original inventory remains immutable as a rejected predecessor. The
+exporter now preserves predefined and numeric references with a regression
+fixture; `MIG-000` remains under repair until a create-new successor inventory
+reproduces all 230 canonical source digests and passes the original reconciliation
+and secret-scan gates. No predecessor row grants execution or effect authority.
 
 `W4-B` is the current batch. `MIG-001` is complete: the isolated compiler
 worker binds exact Java, Groovy, Jenkins core, WAR, image, 90-plugin, and

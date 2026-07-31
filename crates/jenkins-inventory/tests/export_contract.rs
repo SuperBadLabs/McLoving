@@ -44,6 +44,12 @@ fn frozen_home_exports_and_reconciles_without_granting_execution_authority() {
     let fingerprint = inventory_snapshot_sha256(&bundle);
     let ledger = reconcile(&bundle, &fingerprint).expect("reconcile");
 
+    assert_eq!(
+        bundle.job_graph.jobs[0].source_sha256,
+        digest(
+            b"pipeline { agent none; stages { stage('Verify') { steps { sh 'true && false'; echo '<safe>' } } } }"
+        )
+    );
     assert_eq!(ledger.population.jobs_total, 1);
     assert_eq!(ledger.population.principals, 1);
     assert_eq!(ledger.population.acl_entries, 1);
@@ -129,7 +135,7 @@ fn write_snapshot(root: &Path) {
         r#"<flow-definition>
   <description>sealed corpus file example.Jenkinsfile</description>
   <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition">
-    <script>pipeline { agent none; stages { stage('Verify') { steps { echo 'ok' } } } }</script>
+    <script>pipeline { agent none; stages { stage('Verify') { steps { sh 'true &amp;&amp; false'; echo '&lt;safe&gt;' } } } }</script>
   </definition>
   <triggers/>
   <disabled>true</disabled>
