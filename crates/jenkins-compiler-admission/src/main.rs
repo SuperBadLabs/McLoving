@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::OpenOptions;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
 
 use mcloving_jenkins_compiler_admission::{
@@ -16,9 +16,14 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = env::args().collect::<Vec<_>>();
+    if arguments.len() == 3 && arguments[1] == "snapshot" {
+        let source = read_regular_bounded(&arguments[2], 262_144)?;
+        io::stdout().lock().write_all(&source)?;
+        return Ok(());
+    }
     if arguments.len() != 6 {
         return Err(
-            "usage: mcloving-jenkins-compiler-admission RESPONSE SOURCE REQUEST_ID JOB_ID JOB_GENERATION"
+            "usage: mcloving-jenkins-compiler-admission snapshot SOURCE\n       mcloving-jenkins-compiler-admission RESPONSE SOURCE REQUEST_ID JOB_ID JOB_GENERATION"
                 .into(),
         );
     }

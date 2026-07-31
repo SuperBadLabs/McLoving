@@ -44,7 +44,10 @@ Worker output is not trusted. `mcloving-jenkins-compiler-admission` reparses
 the canonical EDN envelope and both strict-YAML documents, validates all
 source/profile/compiler hashes and the all-false authority ledger, recompiles
 Pipeline IR in Rust, validates its independent canonical bytes, and refuses
-noncanonical or substituted output.
+noncanonical or substituted output. Before launch, that same binary opens the
+source once with no-follow/nonblocking semantics, validates and bounds it on
+the opened handle, and creates the private snapshot used for hashing,
+container compilation, and independent admission.
 
 ```sh
 clojure -M:test

@@ -16,6 +16,7 @@ WORKER_PODMAN_OPTIONS=(
   --memory-swap 512m
   --cpus 1
   --ulimit nofile=64:64
+  --userns keep-id
   --user 1000:1000
   --unsetenv-all
   --env LANG=C.UTF-8

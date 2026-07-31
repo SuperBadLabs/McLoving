@@ -14,6 +14,13 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 PROFILE_SHA256=$(sha256sum "$SCRIPT_DIR/profile-v1.properties" | awk '{print $1}')
 EXPECTED_PROFILE=feeeb44d32aa10181e572a0dbbf5b2e23895731b1913bd46aba9f38d56172271
 REQUEST_ID=$2
+SOURCE_SNAPSHOT=
+cleanup_source_snapshot() {
+  if [[ -n "$SOURCE_SNAPSHOT" ]]; then
+    rm -f -- "$SOURCE_SNAPSHOT"
+  fi
+}
+trap cleanup_source_snapshot EXIT
 if [[ "$OPERATION" == "compile" ]]; then
   [[ $# -ge 3 ]] || usage
   REQUEST_ID=$3
@@ -60,11 +67,14 @@ case "$OPERATION" in
       echo "invalid job generation" >&2
       exit 64
     }
-    [[ -f "$SOURCE" && ! -L "$SOURCE" ]] || {
-      echo "source must be a regular non-symlink file" >&2
-      exit 65
+    ADMISSION_BIN=${MCLOVING_JENKINS_ADMISSION_BIN:-"$SCRIPT_DIR/../../target/debug/mcloving-jenkins-compiler-admission"}
+    [[ -x "$ADMISSION_BIN" ]] || {
+      echo "independent Rust admission binary is missing" >&2
+      exit 70
     }
-    SOURCE=$(cd -- "$(dirname -- "$SOURCE")" && printf '%s/%s\n' "$PWD" "$(basename -- "$SOURCE")")
+    SOURCE_SNAPSHOT=$(mktemp "${TMPDIR:-/tmp}/mcloving-compiler-source.XXXXXXXX")
+    "$ADMISSION_BIN" snapshot "$SOURCE" >"$SOURCE_SNAPSHOT"
+    SOURCE=$SOURCE_SNAPSHOT
     SOURCE_BYTES=$(wc -c < "$SOURCE" | tr -d ' ')
     [[ "$SOURCE_BYTES" -le 262144 ]] || {
       echo "source exceeds 262144-byte compiler limit" >&2
@@ -102,7 +112,8 @@ cleanup() {
       wait "$reader_pid" 2>/dev/null || true
     fi
   done
-  rm -f -- "$OUTPUT" "$ERROR_OUTPUT" "$OUTPUT_PIPE" "$ERROR_PIPE" "$CID_FILE"
+  rm -f -- "$OUTPUT" "$ERROR_OUTPUT" "$OUTPUT_PIPE" "$ERROR_PIPE" "$CID_FILE" \
+    "$SOURCE_SNAPSHOT"
 }
 trap cleanup EXIT
 
@@ -158,11 +169,6 @@ fi
 }
 
 if [[ "$OPERATION" == "compile" ]]; then
-  ADMISSION_BIN=${MCLOVING_JENKINS_ADMISSION_BIN:-"$SCRIPT_DIR/../../target/debug/mcloving-jenkins-compiler-admission"}
-  [[ -x "$ADMISSION_BIN" ]] || {
-    echo "independent Rust admission binary is missing" >&2
-    exit 70
-  }
   "$ADMISSION_BIN" \
     "$OUTPUT" "$SOURCE" "$REQUEST_ID" "$JOB_ID" "$JOB_GENERATION" >/dev/null
 fi

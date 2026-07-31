@@ -41,10 +41,14 @@ for stream in stdout stderr; do
   [[ -z "$(find "$stream_tmp" -mindepth 1 -maxdepth 1 -print -quit)" ]]
 done
 
-first=$("$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/Jenkinsfile" boundary-a \
+compile_tmp="$TEST_ROOT/compile-tmp"
+mkdir -p "$compile_tmp"
+first=$(TMPDIR="$compile_tmp" "$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/Jenkinsfile" boundary-a \
   "$ADMITTED_JOB" "$ADMITTED_GENERATION")
-second=$("$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/Jenkinsfile" boundary-a \
+[[ -z "$(find "$compile_tmp" -mindepth 1 -maxdepth 1 -print -quit)" ]]
+second=$(TMPDIR="$compile_tmp" "$SCRIPT_DIR/run-worker.sh" compile "$TEST_ROOT/Jenkinsfile" boundary-a \
   "$ADMITTED_JOB" "$ADMITTED_GENERATION")
+[[ -z "$(find "$compile_tmp" -mindepth 1 -maxdepth 1 -print -quit)" ]]
 [[ "$first" == "$second" ]]
 grep -q ':status :compiled' <<<"$first"
 grep -q ':state: disabled' <<<"$first" || grep -q 'state: disabled' <<<"$first"
