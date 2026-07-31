@@ -95,6 +95,13 @@ def main() -> None:
             )
         if execution_class == "BATCH" and len(row_tickets) < 2:
             errors.append(f"BATCH topology row must contain at least two tickets: {cells[2]}")
+        if execution_class == "SERIAL":
+            for predecessor, successor in zip(row_tickets, row_tickets[1:]):
+                if successor in tickets and predecessor not in tickets[successor][1]:
+                    errors.append(
+                        f"SERIAL chain {predecessor} -> {successor} lacks a direct "
+                        f"dependency edge on {successor}"
+                    )
         for ticket in row_tickets:
             if ticket in classified:
                 errors.append(
