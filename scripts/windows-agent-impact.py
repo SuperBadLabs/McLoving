@@ -50,6 +50,7 @@ def changed_paths(base: str, head: str, repository: Path) -> set[str]:
     output = run(
         "git",
         "diff",
+        "--no-renames",
         "--name-only",
         "-z",
         base,
