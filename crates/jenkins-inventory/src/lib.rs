@@ -865,26 +865,48 @@ pub fn reconcile(bundle: &InventoryBundle) -> Result<EligibilityLedger, Inventor
         let job = jobs_by_id
             .get(job_id.as_str())
             .expect("runtime job identity checked");
-        runtime_dispositions.insert(
-            job_id.as_str(),
-            validate_runtime_dependencies(job, dependencies)?,
-        );
+        let group = bundle
+            .runtime_dependencies
+            .jobs
+            .iter()
+            .find(|group| group.job_id == job_id.as_str())
+            .expect("runtime coverage indexed");
+        let disposition = validate_runtime_dependencies(job, dependencies)?;
+        validate_exact_set(
+            "runtime-dependency set",
+            &group.dependency_set,
+            dependency_set_sha256(&bundle.runtime_dependencies.binding, job_id, dependencies)?,
+            &bundle.runtime_dependencies.binding.exporter_id,
+            "INV_DEPENDENCY_SET_MISMATCH",
+        )?;
+        runtime_dispositions.insert(job_id.as_str(), disposition);
     }
     let mut state_dispositions = BTreeMap::new();
     let mut legal_hold_definitions = BTreeMap::new();
     let mut retention_policy_definitions = BTreeMap::new();
     for (job_id, records) in &state {
-        state_dispositions.insert(
-            job_id.as_str(),
-            validate_state_records(
-                job_id,
-                records,
-                &client_directions,
-                &bundle.persistent_state.binding,
-                &mut legal_hold_definitions,
-                &mut retention_policy_definitions,
-            )?,
-        );
+        let group = bundle
+            .persistent_state
+            .jobs
+            .iter()
+            .find(|group| group.job_id == job_id.as_str())
+            .expect("state coverage indexed");
+        let disposition = validate_state_records(
+            job_id,
+            records,
+            &client_directions,
+            &bundle.persistent_state.binding,
+            &mut legal_hold_definitions,
+            &mut retention_policy_definitions,
+        )?;
+        validate_exact_set(
+            "persistent-state record-class set",
+            &group.record_class_set,
+            state_class_set_sha256(&bundle.persistent_state.binding, job_id, records)?,
+            &bundle.persistent_state.binding.exporter_id,
+            "INV_STATE_CLASS_SET_MISMATCH",
+        )?;
+        state_dispositions.insert(job_id.as_str(), disposition);
     }
 
     let mut parity_demands = BTreeMap::new();
@@ -1247,13 +1269,6 @@ fn index_runtime<'a>(
             ),
             "INV_DEPENDENCY_COUNT_MISMATCH",
         )?;
-        validate_exact_set(
-            "runtime-dependency set",
-            &job.dependency_set,
-            dependency_set_sha256(binding, &job.job_id, &job.dependencies),
-            &binding.exporter_id,
-            "INV_DEPENDENCY_SET_MISMATCH",
-        )?;
         if indexed
             .insert(job.job_id.clone(), job.dependencies.as_slice())
             .is_some()
@@ -1293,13 +1308,6 @@ fn index_state<'a>(
             &binding.exporter_id,
             count_subject_sha256(binding, b"state-class-count", &[job.job_id.as_bytes()]),
             "INV_STATE_CLASS_COUNT_MISMATCH",
-        )?;
-        validate_exact_set(
-            "persistent-state record-class set",
-            &job.record_class_set,
-            state_class_set_sha256(binding, &job.job_id, &job.records),
-            &binding.exporter_id,
-            "INV_STATE_CLASS_SET_MISMATCH",
         )?;
         if indexed
             .insert(job.job_id.clone(), job.records.as_slice())
@@ -1813,42 +1821,53 @@ fn dependency_set_sha256(
     binding: &SnapshotBinding,
     job_id: &str,
     dependencies: &[RuntimeDependency],
-) -> String {
+) -> Result<String, InventoryError> {
     let mut entries = vec![set_subject_entry(
         binding,
         b"runtime-dependency-set",
         &[job_id.as_bytes()],
     )];
-    entries.extend(dependencies.iter().map(|dependency| {
-        vec![
-            b"dependency".to_vec(),
+    for dependency in dependencies {
+        entries.push(vec![
+            b"dependency-record-v1".to_vec(),
             job_id.as_bytes().to_vec(),
             dependency.id.as_bytes().to_vec(),
-            dependency.kind.as_bytes().to_vec(),
-        ]
-    }));
-    canonical_owned_entries_sha256(entries)
+            canonical_record_bytes("runtime dependency", dependency)?,
+        ]);
+    }
+    Ok(canonical_owned_entries_sha256(entries))
 }
 
 fn state_class_set_sha256(
     binding: &SnapshotBinding,
     job_id: &str,
     records: &[StateRecord],
-) -> String {
+) -> Result<String, InventoryError> {
     let mut entries = vec![set_subject_entry(
         binding,
         b"state-class-set",
         &[job_id.as_bytes()],
     )];
-    entries.extend(records.iter().map(|record| {
-        vec![
-            b"state-class".to_vec(),
+    for record in records {
+        entries.push(vec![
+            b"state-record-v1".to_vec(),
             job_id.as_bytes().to_vec(),
             record.id.as_bytes().to_vec(),
-            record.kind.as_bytes().to_vec(),
-        ]
-    }));
-    canonical_owned_entries_sha256(entries)
+            canonical_record_bytes("state record", record)?,
+        ]);
+    }
+    Ok(canonical_owned_entries_sha256(entries))
+}
+
+fn canonical_record_bytes(kind: &str, value: &impl Serialize) -> Result<Vec<u8>, InventoryError> {
+    serde_saphyr::to_string(value)
+        .map(String::into_bytes)
+        .map_err(|error| {
+            InventoryError::new(
+                "INV_CANONICAL_RECORD",
+                format!("failed to canonicalize {kind}: {error}"),
+            )
+        })
 }
 
 fn count_subject_sha256(

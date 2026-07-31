@@ -81,9 +81,11 @@ and persistent-state mutation for one bounded export epoch.
   inventoried job, including retired and out-of-scope jobs, must supply exactly
   one runtime group. The count commitment is domain-separated and bound to its
   owning job. An independent
-  canonical `(job ID, dependency ID, dependency kind)` set must match as well;
-  an explicit runtime-domain job-binding entry also seals zero-dependency
-  groups.
+  canonical set of complete dependency records must match as well. Each entry
+  binds the job and dependency identities plus the deterministic strict-YAML
+  serialization of every requirement, digest, scope, mutability,
+  confidentiality, secret-consumer/taint field, and disposition; an explicit
+  runtime-domain job-binding entry also seals zero-dependency groups.
   Mutability is one of `immutable`, `pinned-revision`, `mutable`, or `floating`;
   mutable and floating dependencies cannot be classified `native`. Every secret
   dependency additionally binds its exact tagged consumer, typed taint class,
@@ -104,10 +106,13 @@ and persistent-state mutation for one bounded export epoch.
   that must exactly match the manifest, including explicit zero-count groups
   and retained obligations for excluded jobs. The count commitment is
   domain-separated and bound to its owning job.
-  The independently collected canonical set of
-  `(job ID, record ID, record kind)` identities is length-prefixed, sorted,
-  and SHA-256 bound as well, so a same-cardinality class or owner substitution
-  fails reconciliation; an explicit job-binding entry also seals zero-state
+  The independently collected canonical set of complete state records is
+  length-prefixed, sorted, and SHA-256 bound as well. Each entry binds the job
+  and record identities plus the deterministic strict-YAML serialization of
+  transforms and their evidence, instance-count evidence, confidentiality,
+  restore/conflict policy, retention, holds, consumers, and provenance, so
+  stale semantic payloads and same-cardinality class or owner substitutions
+  fail reconciliation; an explicit job-binding entry also seals zero-state
   groups.
   Every record class also carries an independently sourced instance count with
   collector identity, provenance, source digest, and a domain-separated subject

@@ -347,6 +347,7 @@ fn workload_visible_secrets_are_never_native_eligible() {
         evidence_sha256: DIGEST_C.to_owned(),
     });
     dependency.disposition = CompatibilityDisposition::Unsupported;
+    refresh_dependency_set(&mut bundle.runtime_dependencies.jobs[1]);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -709,6 +710,23 @@ fn reconciliation_rejects_same_cardinality_population_substitution() {
             }) as fn(&mut Fixture),
             "INV_DEPENDENCY_SET_MISMATCH",
         ),
+        (
+            "dependency-semantic-set",
+            (|bundle: &mut Fixture| {
+                bundle.runtime_dependencies.jobs[1].dependencies[0].disposition =
+                    CompatibilityDisposition::Scripted;
+            }) as fn(&mut Fixture),
+            "INV_DEPENDENCY_SET_MISMATCH",
+        ),
+        (
+            "state-semantic-set",
+            (|bundle: &mut Fixture| {
+                bundle.persistent_state.jobs[1].records[0]
+                    .forward_transform
+                    .disposition = CompatibilityDisposition::Scripted;
+            }) as fn(&mut Fixture),
+            "INV_STATE_CLASS_SET_MISMATCH",
+        ),
     ] {
         let directory = TestDirectory::new(name);
         let mut bundle = fixture();
@@ -726,11 +744,8 @@ fn reconciliation_rejects_same_cardinality_population_substitution() {
 fn reconciliation_rejects_per_job_population_ownership_substitution() {
     let directory = TestDirectory::new("runtime-job-ownership");
     let mut bundle = fixture();
-    let first_job = bundle.runtime_dependencies.jobs[0].job_id.clone();
-    bundle.runtime_dependencies.jobs[0].job_id = bundle.runtime_dependencies.jobs[1].job_id.clone();
-    bundle.runtime_dependencies.jobs[1].job_id = first_job;
-    refresh_dependency_count_subject(&mut bundle.runtime_dependencies.jobs[0]);
-    refresh_dependency_count_subject(&mut bundle.runtime_dependencies.jobs[1]);
+    bundle.runtime_dependencies.jobs[0].dependency_set =
+        bundle.runtime_dependencies.jobs[1].dependency_set.clone();
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -740,11 +755,8 @@ fn reconciliation_rejects_per_job_population_ownership_substitution() {
 
     let directory = TestDirectory::new("state-job-ownership");
     let mut bundle = fixture();
-    let first_job = bundle.persistent_state.jobs[0].job_id.clone();
-    bundle.persistent_state.jobs[0].job_id = bundle.persistent_state.jobs[1].job_id.clone();
-    bundle.persistent_state.jobs[1].job_id = first_job;
-    refresh_state_class_count_subject(&mut bundle.persistent_state.jobs[0]);
-    refresh_state_class_count_subject(&mut bundle.persistent_state.jobs[1]);
+    bundle.persistent_state.jobs[0].record_class_set =
+        bundle.persistent_state.jobs[1].record_class_set.clone();
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -927,6 +939,10 @@ fn reconciliation_binds_state_class_identities_to_source_evidence() {
     let directory = TestDirectory::new("state-class-set");
     let mut bundle = fixture();
     bundle.persistent_state.jobs[1].records[0].kind = "workspace".to_owned();
+    refresh_record_count_subject(
+        "folder/build",
+        &mut bundle.persistent_state.jobs[1].records[0],
+    );
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1258,6 +1274,7 @@ fn state_transform_disposition_constrains_job_eligibility() {
     bundle.persistent_state.jobs[1].records[0]
         .rollback_transform
         .disposition = CompatibilityDisposition::Unsupported;
+    refresh_state_class_set(&mut bundle.persistent_state.jobs[1]);
     write_bundle(&directory.0, &bundle);
     seal_manifest_directory(&directory.0).expect("seal inventory");
 
@@ -1822,16 +1839,6 @@ fn refresh_direct_child_count_subject(job: &mut JobRecord) {
         count_subject_sha256(&[b"direct-child-count", job.id.as_bytes()]);
 }
 
-fn refresh_dependency_count_subject(job: &mut JobDependencies) {
-    job.dependency_count.subject_sha256 =
-        count_subject_sha256(&[b"runtime-dependency-count", job.job_id.as_bytes()]);
-}
-
-fn refresh_state_class_count_subject(job: &mut JobStateRecords) {
-    job.record_class_count.subject_sha256 =
-        count_subject_sha256(&[b"state-class-count", job.job_id.as_bytes()]);
-}
-
 fn refresh_record_count_subject(job_id: &str, record: &mut StateRecord) {
     record.record_count.subject_sha256 = count_subject_sha256(&[
         b"state-record-instance-count",
@@ -2006,10 +2013,12 @@ fn dependency_set_entries_for(
     )];
     entries.extend(dependencies.iter().map(|dependency| {
         vec![
-            b"dependency".to_vec(),
+            b"dependency-record-v1".to_vec(),
             job_id.as_bytes().to_vec(),
             dependency.id.as_bytes().to_vec(),
-            dependency.kind.as_bytes().to_vec(),
+            serde_saphyr::to_string(dependency)
+                .expect("serialize dependency commitment")
+                .into_bytes(),
         ]
     }));
     entries
@@ -2050,10 +2059,12 @@ fn state_class_set_evidence_for(
     )];
     entries.extend(records.iter().map(|record| {
         vec![
-            b"state-class".to_vec(),
+            b"state-record-v1".to_vec(),
             job_id.as_bytes().to_vec(),
             record.id.as_bytes().to_vec(),
-            record.kind.as_bytes().to_vec(),
+            serde_saphyr::to_string(record)
+                .expect("serialize state commitment")
+                .into_bytes(),
         ]
     }));
     owned_set_evidence(
