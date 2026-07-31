@@ -12,6 +12,7 @@ mod dag;
 mod product;
 mod scheduler;
 mod security;
+mod state_transfer;
 mod test_results;
 
 pub use audit::{
@@ -31,6 +32,7 @@ pub use product::{
 };
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 pub use security::{CredentialDelivery, NewCredentialGrant, NewEnvironmentApproval};
+pub use state_transfer::StateTransferReceipt;
 pub use test_results::{
     DEFAULT_MAX_JUNIT_BYTES, DEFAULT_MAX_JUNIT_CASES, DEFAULT_MAX_JUNIT_SUITES, JunitLimits,
     NormalizedTestCase, NormalizedTestReport, NormalizedTestSuite,
@@ -81,6 +83,8 @@ pub const OBJECT_PUBLICATION_FENCE_V14: &str =
 pub const PRODUCT_SURFACE_V15: &str = include_str!("../migrations/0015_product_surface.sql");
 /// Monotonic cross-node ordering for resumable build-log pages.
 pub const GLOBAL_LOG_ORDER_V16: &str = include_str!("../migrations/0016_global_log_order.sql");
+/// Immutable, replay-safe Jenkins/McLoving persistent-state transfer records.
+pub const STATE_TRANSFER_V17: &str = include_str!("../migrations/0017_state_transfer.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -407,6 +411,10 @@ pub enum StoreError {
     InvalidProductOperation(String),
     #[error("product catalog conflict: {0}")]
     ProductConflict(String),
+    #[error("invalid state transfer: {0}")]
+    InvalidStateTransfer(String),
+    #[error("state-transfer conflict: {0}")]
+    StateTransferConflict(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -460,6 +468,7 @@ impl Store {
         apply_migration(&mut tx, 14, OBJECT_PUBLICATION_FENCE_V14).await?;
         apply_migration(&mut tx, 15, PRODUCT_SURFACE_V15).await?;
         apply_migration(&mut tx, 16, GLOBAL_LOG_ORDER_V16).await?;
+        apply_migration(&mut tx, 17, STATE_TRANSFER_V17).await?;
         tx.commit().await?;
         Ok(())
     }

@@ -1,0 +1,376 @@
+use std::collections::BTreeMap;
+
+use mcloving_state_transfer::{
+    Digest, ExpectedBinding, LegalHold, Protection, StateBundle, TransferDirection,
+    record_provenance, sha256, transform,
+};
+use serde_json::{Value, json};
+use sqlx::Row;
+use uuid::Uuid;
+
+use super::{Store, StoreError, audit, validate_audit_actor};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateTransferReceipt {
+    pub id: Uuid,
+    pub created: bool,
+    pub direction: TransferDirection,
+    pub binding_digest: Digest,
+    pub bundle_digest: Digest,
+    pub record_count: usize,
+    pub protection_count: usize,
+}
+
+impl Store {
+    /// Validates and transactionally imports one exact persistent-state bundle.
+    ///
+    /// Replaying the same pinned binding and canonical bundle is idempotent.
+    /// Any divergent replay, protection regression, omitted active hold, or
+    /// substituted source identity aborts the entire transaction.
+    pub async fn import_state_transfer(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        bundle: &StateBundle,
+        expected: &ExpectedBinding,
+        actor_subject: &str,
+    ) -> Result<StateTransferReceipt, StoreError> {
+        validate_audit_actor(actor_subject)?;
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let project_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM projects
+                 WHERE organization_id = $1 AND id = $2
+             )",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !project_exists {
+            tx.rollback().await?;
+            return Err(StoreError::InvalidStateTransfer(
+                "state-transfer project does not exist in the tenant".to_owned(),
+            ));
+        }
+
+        let rows = sqlx::query(
+            "SELECT subject_digest, retention_policy_id, retention_policy_version,
+                    retention_policy_digest, retain_until_unix_ms,
+                    active_holds
+             FROM state_transfer_protections
+             WHERE organization_id = $1 AND project_id = $2
+             ORDER BY subject_digest
+             LIMIT 1000001",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if rows.len() > 1_000_000 {
+            tx.rollback().await?;
+            return Err(StoreError::InvalidStateTransfer(
+                "stored state-transfer protections exceed the verification limit".to_owned(),
+            ));
+        }
+        let mut existing = BTreeMap::new();
+        for row in rows {
+            let subject = digest_array(row.try_get::<Vec<u8>, _>("subject_digest")?)?;
+            let policy_digest =
+                digest_array(row.try_get::<Vec<u8>, _>("retention_policy_digest")?)?;
+            let holds =
+                serde_json::from_value::<Vec<LegalHold>>(row.try_get::<Value, _>("active_holds")?)
+                    .map_err(|error| {
+                        StoreError::InvalidStateTransfer(format!(
+                            "stored state-transfer legal holds are invalid: {error}"
+                        ))
+                    })?;
+            existing.insert(
+                subject,
+                Protection {
+                    retention: mcloving_state_transfer::RetentionPolicy {
+                        policy_id: row.try_get("retention_policy_id")?,
+                        policy_version: row.try_get("retention_policy_version")?,
+                        policy_digest,
+                        retain_until_unix_ms: row.try_get("retain_until_unix_ms")?,
+                    },
+                    active_holds: holds,
+                },
+            );
+        }
+
+        let plan = transform(bundle, expected, &existing)
+            .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?;
+        let binding = &plan.bundle.binding;
+        let receipt_id = Uuid::new_v4();
+        let inserted = sqlx::query_scalar::<_, Uuid>(
+            "INSERT INTO state_transfer_receipts (
+                 id, organization_id, project_id, direction,
+                 source_kind, source_instance_id, source_generation,
+                 source_configuration_digest,
+                 destination_kind, destination_instance_id,
+                 destination_generation, destination_configuration_digest,
+                 source_export_digest, transform_implementation_digest,
+                 transform_configuration_digest, binding_digest,
+                 bundle_digest, canonical_bundle, actor_subject
+             )
+             VALUES (
+                 $1, $2, $3, $4,
+                 $5, $6, $7, $8,
+                 $9, $10, $11, $12,
+                 $13, $14, $15, $16,
+                 $17, $18, $19
+             )
+             ON CONFLICT (
+                 organization_id, project_id, direction,
+                 source_kind, source_instance_id, source_generation,
+                 destination_kind, destination_instance_id,
+                 destination_generation, source_export_digest,
+                 transform_implementation_digest,
+                 transform_configuration_digest
+             ) DO NOTHING
+             RETURNING id",
+        )
+        .bind(receipt_id)
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(direction_name(binding.direction))
+        .bind(&binding.source.kind)
+        .bind(&binding.source.instance_id)
+        .bind(&binding.source.generation)
+        .bind(binding.source.configuration_digest.as_slice())
+        .bind(&binding.destination.kind)
+        .bind(&binding.destination.instance_id)
+        .bind(&binding.destination.generation)
+        .bind(binding.destination.configuration_digest.as_slice())
+        .bind(binding.source_export_digest.as_slice())
+        .bind(binding.transform_implementation_digest.as_slice())
+        .bind(binding.transform_configuration_digest.as_slice())
+        .bind(plan.binding_digest.as_slice())
+        .bind(plan.bundle_digest.as_slice())
+        .bind(&plan.canonical_bytes)
+        .bind(actor_subject)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let records = record_provenance(&plan.bundle);
+        let protections = mcloving_state_transfer::protections(&plan.bundle)
+            .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?;
+        let Some(receipt_id) = inserted else {
+            let replay = sqlx::query(
+                "SELECT id, binding_digest, bundle_digest, canonical_bundle
+                 FROM state_transfer_receipts
+                 WHERE organization_id = $1
+                   AND project_id = $2
+                   AND direction = $3
+                   AND source_kind = $4
+                   AND source_instance_id = $5
+                   AND source_generation = $6
+                   AND destination_kind = $7
+                   AND destination_instance_id = $8
+                   AND destination_generation = $9
+                   AND source_export_digest = $10
+                   AND transform_implementation_digest = $11
+                   AND transform_configuration_digest = $12",
+            )
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(direction_name(binding.direction))
+            .bind(&binding.source.kind)
+            .bind(&binding.source.instance_id)
+            .bind(&binding.source.generation)
+            .bind(&binding.destination.kind)
+            .bind(&binding.destination.instance_id)
+            .bind(&binding.destination.generation)
+            .bind(binding.source_export_digest.as_slice())
+            .bind(binding.transform_implementation_digest.as_slice())
+            .bind(binding.transform_configuration_digest.as_slice())
+            .fetch_one(&mut *tx)
+            .await?;
+            let stored_binding = digest_array(replay.try_get::<Vec<u8>, _>("binding_digest")?)?;
+            let stored_bundle = digest_array(replay.try_get::<Vec<u8>, _>("bundle_digest")?)?;
+            let stored_bytes: Vec<u8> = replay.try_get("canonical_bundle")?;
+            if stored_binding != plan.binding_digest
+                || stored_bundle != plan.bundle_digest
+                || stored_bytes != plan.canonical_bytes
+            {
+                tx.rollback().await?;
+                return Err(StoreError::StateTransferConflict(
+                    "pinned transfer binding already has divergent canonical state".to_owned(),
+                ));
+            }
+            let receipt_id: Uuid = replay.try_get("id")?;
+            tx.commit().await?;
+            return Ok(StateTransferReceipt {
+                id: receipt_id,
+                created: false,
+                direction: binding.direction,
+                binding_digest: plan.binding_digest,
+                bundle_digest: plan.bundle_digest,
+                record_count: records.len(),
+                protection_count: protections.len(),
+            });
+        };
+
+        for record in &records {
+            sqlx::query(
+                "INSERT INTO state_transfer_records (
+                     organization_id, receipt_id, record_id,
+                     source_digest, provenance
+                 )
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(organization_id)
+            .bind(receipt_id)
+            .bind(&record.id)
+            .bind(record.source_digest.as_slice())
+            .bind(&record.provenance)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        for (subject, protection) in &protections {
+            let holds = serde_json::to_value(&protection.active_holds).map_err(|error| {
+                StoreError::InvalidStateTransfer(format!(
+                    "state-transfer legal holds cannot be encoded: {error}"
+                ))
+            })?;
+            let protection_bytes = serde_json::to_vec(protection).map_err(|error| {
+                StoreError::InvalidStateTransfer(format!(
+                    "state-transfer protection cannot be encoded: {error}"
+                ))
+            })?;
+            let protection_digest = sha256(&protection_bytes);
+            let applied = sqlx::query_scalar::<_, Vec<u8>>(
+                "INSERT INTO state_transfer_protections (
+                     organization_id, project_id, subject_digest,
+                     retention_policy_id, retention_policy_version, retention_policy_digest,
+                     retain_until_unix_ms, active_holds,
+                     protection_digest, receipt_id
+                 )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT (organization_id, project_id, subject_digest)
+                 DO UPDATE SET
+                     retention_policy_id = EXCLUDED.retention_policy_id,
+                     retention_policy_version = EXCLUDED.retention_policy_version,
+                     retention_policy_digest = EXCLUDED.retention_policy_digest,
+                     retain_until_unix_ms = EXCLUDED.retain_until_unix_ms,
+                     active_holds = EXCLUDED.active_holds,
+                     protection_digest = EXCLUDED.protection_digest,
+                     receipt_id = EXCLUDED.receipt_id,
+                     updated_at = clock_timestamp()
+                 WHERE EXCLUDED.retain_until_unix_ms >=
+                           state_transfer_protections.retain_until_unix_ms
+                   AND EXCLUDED.active_holds @>
+                           state_transfer_protections.active_holds
+                   AND (
+                       EXCLUDED.retain_until_unix_ms >
+                           state_transfer_protections.retain_until_unix_ms
+                       OR (
+                           EXCLUDED.retention_policy_id =
+                               state_transfer_protections.retention_policy_id
+                           AND EXCLUDED.retention_policy_version =
+                               state_transfer_protections.retention_policy_version
+                           AND EXCLUDED.retention_policy_digest =
+                               state_transfer_protections.retention_policy_digest
+                       )
+                   )
+                 RETURNING subject_digest",
+            )
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(subject.as_slice())
+            .bind(&protection.retention.policy_id)
+            .bind(&protection.retention.policy_version)
+            .bind(protection.retention.policy_digest.as_slice())
+            .bind(protection.retention.retain_until_unix_ms)
+            .bind(&holds)
+            .bind(protection_digest.as_slice())
+            .bind(receipt_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if applied.is_none() {
+                tx.rollback().await?;
+                return Err(StoreError::StateTransferConflict(
+                    "state-transfer protection would regress retained state".to_owned(),
+                ));
+            }
+        }
+
+        let payload = json!({
+            "receipt_id": receipt_id,
+            "project_id": project_id,
+            "direction": direction_name(binding.direction),
+            "binding_digest": hex::encode(plan.binding_digest),
+            "bundle_digest": hex::encode(plan.bundle_digest),
+            "source_export_digest": hex::encode(binding.source_export_digest),
+            "record_count": records.len(),
+            "protection_count": protections.len(),
+        });
+        sqlx::query(
+            "INSERT INTO outbox (organization_id, topic, aggregate_id, payload)
+             VALUES ($1, 'state_transfer.imported', $2, $3)",
+        )
+        .bind(organization_id)
+        .bind(receipt_id)
+        .bind(&payload)
+        .execute(&mut *tx)
+        .await?;
+        audit::append_audit_record(
+            &mut tx,
+            organization_id,
+            "migration",
+            actor_subject,
+            "state_transfer.imported",
+            &format!("project:{project_id}:state-transfer:{receipt_id}"),
+            payload,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(StateTransferReceipt {
+            id: receipt_id,
+            created: true,
+            direction: binding.direction,
+            binding_digest: plan.binding_digest,
+            bundle_digest: plan.bundle_digest,
+            record_count: records.len(),
+            protection_count: protections.len(),
+        })
+    }
+
+    /// Reads immutable canonical transfer bytes for independent verification.
+    pub async fn state_transfer_bundle(
+        &self,
+        organization_id: Uuid,
+        receipt_id: Uuid,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let bundle = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT canonical_bundle
+             FROM state_transfer_receipts
+             WHERE organization_id = $1 AND id = $2",
+        )
+        .bind(organization_id)
+        .bind(receipt_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(bundle)
+    }
+}
+
+fn direction_name(direction: TransferDirection) -> &'static str {
+    match direction {
+        TransferDirection::JenkinsToMcLoving => "jenkins_to_mcloving",
+        TransferDirection::McLovingToJenkins => "mcloving_to_jenkins",
+    }
+}
+
+fn digest_array(bytes: Vec<u8>) -> Result<Digest, StoreError> {
+    bytes.try_into().map_err(|_| {
+        StoreError::InvalidStateTransfer(
+            "stored state-transfer digest is not exactly 32 bytes".to_owned(),
+        )
+    })
+}

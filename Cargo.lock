@@ -1341,6 +1341,7 @@ version = "0.0.0"
 dependencies = [
  "aho-corasick",
  "hex",
+ "mcloving-state-transfer",
  "quick-xml",
  "serde",
  "serde_json",
@@ -1430,6 +1431,16 @@ dependencies = [
 [[package]]
 name = "mcloving-state-machine"
 version = "0.0.0"
+
+[[package]]
+name = "mcloving-state-transfer"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
 
 [[package]]
 name = "mcloving-windows-job"

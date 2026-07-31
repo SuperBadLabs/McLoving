@@ -1,0 +1,440 @@
+use std::collections::BTreeMap;
+
+use mcloving_state_transfer::{
+    BuildResult, BuildState, ChangeEntry, ConflictPolicy, DataBinding, DataClassification, Digest,
+    ExpectedBinding, FilesystemEntry, FilesystemEntryKind, JobState, LegalHold, ObjectKind,
+    ObjectState, PersistentDependency, Protection, RecordProvenance, RetentionPolicy,
+    RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState, SecretDisposition, SecretReference,
+    StateBundle, SystemIdentity, TransferBinding, TransferDirection, TransferError, TriggerCause,
+    transform,
+};
+
+fn digest(byte: u8) -> Digest {
+    [byte; 32]
+}
+
+fn record(id: &str, byte: u8) -> RecordProvenance {
+    RecordProvenance {
+        id: id.to_owned(),
+        source_digest: digest(byte),
+        provenance: format!("sealed fixture record {id}"),
+    }
+}
+
+fn retention(id: &str, byte: u8, deadline: i64) -> RetentionPolicy {
+    RetentionPolicy {
+        policy_id: id.to_owned(),
+        policy_version: "v1".to_owned(),
+        policy_digest: digest(byte),
+        retain_until_unix_ms: deadline,
+    }
+}
+
+fn hold(id: &str, byte: u8) -> LegalHold {
+    LegalHold {
+        record: record(&format!("hold:{id}"), byte),
+        hold_id: id.to_owned(),
+        scope: "job:stateful/build:*".to_owned(),
+        reason: format!("preserve {id}"),
+        placed_at_unix_ms: 1_000,
+        generation: 1,
+        release_authority: "legal@example.test".to_owned(),
+    }
+}
+
+fn protection(deadline: i64, holds: Vec<LegalHold>) -> Protection {
+    Protection {
+        retention: retention("source-retention", 80, deadline),
+        active_holds: holds,
+    }
+}
+
+fn internal_data() -> DataBinding {
+    DataBinding {
+        classification: DataClassification::Internal,
+        secret_disposition: None,
+    }
+}
+
+fn identity(kind: &str, id: &str, byte: u8) -> SystemIdentity {
+    SystemIdentity {
+        kind: kind.to_owned(),
+        instance_id: id.to_owned(),
+        generation: format!("generation-{byte}"),
+        configuration_digest: digest(byte),
+    }
+}
+
+fn fixture(direction: TransferDirection) -> (StateBundle, ExpectedBinding) {
+    let (source, destination) = match direction {
+        TransferDirection::JenkinsToMcLoving => (
+            identity("jenkins", "jenkins/exact-profile", 1),
+            identity("mcloving", "mcloving/disposable", 2),
+        ),
+        TransferDirection::McLovingToJenkins => (
+            identity("mcloving", "mcloving/disposable", 2),
+            identity("jenkins", "jenkins/exact-profile", 1),
+        ),
+    };
+    let binding = TransferBinding {
+        schema: STATE_TRANSFER_SCHEMA_V1.to_owned(),
+        direction,
+        source: source.clone(),
+        destination: destination.clone(),
+        source_export_digest: digest(3),
+        transform_implementation_digest: digest(4),
+        transform_configuration_digest: digest(5),
+        conflict_policy: ConflictPolicy::RejectDivergence,
+        provenance: "sealed exact-profile rehearsal export".to_owned(),
+    };
+    let builds = vec![
+        BuildState {
+            record: record("build:stateful:7", 10),
+            source_queue_id: "queue:stateful:7".to_owned(),
+            source_build_id: "stateful#7".to_owned(),
+            trigger: TriggerCause {
+                record: record("trigger:stateful:7", 41),
+                trigger_kind: "scm".to_owned(),
+                external_id: "event-7".to_owned(),
+                actor_subject: "scm:fixture".to_owned(),
+            },
+            invocation_parameters: Vec::new(),
+            number: 7,
+            result: BuildResult::Failed,
+            queued_at_unix_ms: 1_000,
+            started_at_unix_ms: 1_100,
+            ended_at_unix_ms: 1_200,
+            checkouts: vec![ScmState {
+                record: record("scm:stateful:7", 11),
+                provider: "git".to_owned(),
+                repository: "https://example.test/stateful.git".to_owned(),
+                reference: "refs/heads/main".to_owned(),
+                revision: "aaaa1111".to_owned(),
+                previous_revision: Some("prior000".to_owned()),
+                changes: vec![ChangeEntry {
+                    record: record("change:stateful:7:1", 12),
+                    commit: "aaaa1111".to_owned(),
+                    author: "builder@example.test".to_owned(),
+                    message_digest: digest(13),
+                    paths: vec!["src/main.rs".to_owned()],
+                }],
+            }],
+            graph_nodes: Vec::new(),
+            approvals: Vec::new(),
+            normalized_tests: Vec::new(),
+            logs: Vec::new(),
+            artifacts: vec![ObjectState {
+                record: record("object:stateful:7:artifact", 14),
+                kind: ObjectKind::Artifact,
+                logical_name: "dist.tar.zst".to_owned(),
+                content_digest: digest(15),
+                bytes: 4096,
+                producer_build_number: Some(7),
+                retrieval: RetrievalMetadata {
+                    media_type: "application/zstd".to_owned(),
+                    logical_locator: "artifacts/stateful/7/dist.tar.zst".to_owned(),
+                    content_digest: digest(15),
+                },
+                data_binding: internal_data(),
+                filesystem_entries: Vec::new(),
+                protection: protection(10_000, vec![hold("case-a", 16)]),
+            }],
+            protection: protection(10_000, Vec::new()),
+            audit_digest: digest(17),
+        },
+        BuildState {
+            record: record("build:stateful:8", 20),
+            source_queue_id: "queue:stateful:8".to_owned(),
+            source_build_id: "stateful#8".to_owned(),
+            trigger: TriggerCause {
+                record: record("trigger:stateful:8", 42),
+                trigger_kind: "scm".to_owned(),
+                external_id: "event-8".to_owned(),
+                actor_subject: "scm:fixture".to_owned(),
+            },
+            invocation_parameters: Vec::new(),
+            number: 8,
+            result: BuildResult::Succeeded,
+            queued_at_unix_ms: 2_000,
+            started_at_unix_ms: 2_100,
+            ended_at_unix_ms: 2_200,
+            checkouts: vec![ScmState {
+                record: record("scm:stateful:8", 21),
+                provider: "git".to_owned(),
+                repository: "https://example.test/stateful.git".to_owned(),
+                reference: "refs/heads/main".to_owned(),
+                revision: "bbbb2222".to_owned(),
+                previous_revision: Some("aaaa1111".to_owned()),
+                changes: vec![ChangeEntry {
+                    record: record("change:stateful:8:1", 22),
+                    commit: "bbbb2222".to_owned(),
+                    author: "builder@example.test".to_owned(),
+                    message_digest: digest(23),
+                    paths: vec!["docs/README.md".to_owned(), "src/main.rs".to_owned()],
+                }],
+            }],
+            graph_nodes: Vec::new(),
+            approvals: Vec::new(),
+            normalized_tests: Vec::new(),
+            logs: Vec::new(),
+            artifacts: Vec::new(),
+            protection: protection(20_000, vec![hold("case-b", 24)]),
+            audit_digest: digest(25),
+        },
+    ];
+    let job = JobState {
+        record: record("job:stateful", 30),
+        source_job_id: "stateful".to_owned(),
+        target_pipeline_id: "stateful".to_owned(),
+        next_build_number: 9,
+        previous_result: Some(BuildResult::Succeeded),
+        builds,
+        retained_workspaces: vec![ObjectState {
+            record: record("object:stateful:workspace", 31),
+            kind: ObjectKind::RetainedWorkspace,
+            logical_name: "workspace".to_owned(),
+            content_digest: digest(32),
+            bytes: 8192,
+            producer_build_number: Some(8),
+            retrieval: RetrievalMetadata {
+                media_type: "application/x-mcloving-workspace".to_owned(),
+                logical_locator: "workspaces/stateful".to_owned(),
+                content_digest: digest(32),
+            },
+            data_binding: internal_data(),
+            filesystem_entries: vec![FilesystemEntry {
+                path: "state/cache.bin".to_owned(),
+                kind: FilesystemEntryKind::RegularFile,
+                content_digest: Some(digest(35)),
+                bytes: 8192,
+                data_binding: internal_data(),
+            }],
+            protection: protection(30_000, Vec::new()),
+        }],
+        persistent_dependencies: vec![PersistentDependency {
+            record: record("state:stateful:cursor", 33),
+            key: "deployment-cursor".to_owned(),
+            value_digest: digest(34),
+            data_binding: internal_data(),
+            protection: protection(40_000, Vec::new()),
+        }],
+    };
+    let mut expected_record_ids = vec![
+        "build:stateful:7",
+        "build:stateful:8",
+        "change:stateful:7:1",
+        "change:stateful:8:1",
+        "hold:case-a",
+        "hold:case-b",
+        "job:stateful",
+        "object:stateful:7:artifact",
+        "object:stateful:workspace",
+        "scm:stateful:7",
+        "scm:stateful:8",
+        "state:stateful:cursor",
+        "trigger:stateful:7",
+        "trigger:stateful:8",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    expected_record_ids.sort();
+    let bundle = StateBundle {
+        binding,
+        expected_record_ids,
+        jobs: vec![job],
+    };
+    let expected = ExpectedBinding {
+        direction,
+        source,
+        destination,
+        source_export_digest: digest(3),
+        transform_implementation_digest: digest(4),
+        transform_configuration_digest: digest(5),
+        conflict_policy: ConflictPolicy::RejectDivergence,
+    };
+    (bundle, expected)
+}
+
+#[test]
+fn forward_transform_is_deterministic_and_idempotent() {
+    let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    let first = transform(&bundle, &expected, &BTreeMap::new()).expect("first transform");
+    let second = transform(&bundle, &expected, &BTreeMap::new()).expect("replay transform");
+    assert_eq!(first, second);
+    assert_eq!(
+        first.canonical_bytes,
+        serde_json::to_vec(&first.bundle).unwrap()
+    );
+}
+
+#[test]
+fn reverse_transform_preserves_all_state_records() {
+    let (forward, expected_forward) = fixture(TransferDirection::JenkinsToMcLoving);
+    let forward_plan = transform(&forward, &expected_forward, &BTreeMap::new()).unwrap();
+    let (mut reverse, expected_reverse) = fixture(TransferDirection::McLovingToJenkins);
+    reverse.jobs = forward_plan.bundle.jobs.clone();
+    reverse.expected_record_ids = forward_plan.bundle.expected_record_ids.clone();
+    let reverse_plan = transform(&reverse, &expected_reverse, &BTreeMap::new()).unwrap();
+    assert_eq!(forward_plan.bundle.jobs, reverse_plan.bundle.jobs);
+    assert_eq!(
+        forward_plan.bundle.expected_record_ids,
+        reverse_plan.bundle.expected_record_ids
+    );
+}
+
+#[test]
+fn destination_protections_can_only_strengthen_the_plan() {
+    let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    let subject = bundle.jobs[0].builds[1].record.source_digest;
+    let destination_hold = hold("case-destination", 60);
+    let destination = Protection {
+        retention: retention("destination-retention", 61, 90_000),
+        active_holds: vec![destination_hold.clone()],
+    };
+    let plan = transform(
+        &bundle,
+        &expected,
+        &BTreeMap::from([(subject, destination)]),
+    )
+    .unwrap();
+    let merged = &plan.bundle.jobs[0].builds[1].protection;
+    assert_eq!(merged.retention.retain_until_unix_ms, 90_000);
+    assert!(merged.active_holds.contains(&destination_hold));
+    assert!(
+        merged
+            .active_holds
+            .iter()
+            .any(|hold| hold.hold_id == "case-b")
+    );
+    assert!(
+        plan.bundle
+            .expected_record_ids
+            .contains(&"hold:case-destination".to_owned())
+    );
+}
+
+#[test]
+fn gaps_duplicates_and_missing_records_fail_closed() {
+    let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+
+    let mut gap = bundle.clone();
+    gap.jobs[0].builds[1].number = 9;
+    assert!(matches!(
+        transform(&gap, &expected, &BTreeMap::new()),
+        Err(TransferError::BuildGap { .. })
+    ));
+
+    let mut duplicate = bundle.clone();
+    duplicate.jobs[0].builds[1].record.id = "build:stateful:7".to_owned();
+    assert!(matches!(
+        transform(&duplicate, &expected, &BTreeMap::new()),
+        Err(TransferError::DuplicateRecord(_))
+    ));
+
+    let mut missing = bundle.clone();
+    missing.jobs[0].builds[1].checkouts[0].changes.clear();
+    assert!(matches!(
+        transform(&missing, &expected, &BTreeMap::new()),
+        Err(TransferError::MissingRecords(_))
+    ));
+}
+
+#[test]
+fn provenance_and_scm_substitution_fail_closed() {
+    let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    let mut substituted_binding = bundle.clone();
+    substituted_binding.binding.source_export_digest = digest(99);
+    assert_eq!(
+        transform(&substituted_binding, &expected, &BTreeMap::new()),
+        Err(TransferError::BindingMismatch("source export digest"))
+    );
+
+    let mut stale_scm = bundle;
+    stale_scm.jobs[0].builds[1].checkouts[0].previous_revision = Some("substituted".to_owned());
+    assert!(matches!(
+        transform(&stale_scm, &expected, &BTreeMap::new()),
+        Err(TransferError::ScmBaselineMismatch { .. })
+    ));
+}
+
+#[test]
+fn divergent_hold_and_equal_deadline_policy_are_rejected() {
+    let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    let subject = bundle.jobs[0].builds[1].record.source_digest;
+
+    let mut changed_hold = hold("case-b", 24);
+    changed_hold.reason = "substituted reason".to_owned();
+    let hold_conflict = Protection {
+        retention: protection(20_000, Vec::new()).retention,
+        active_holds: vec![changed_hold],
+    };
+    assert!(matches!(
+        transform(
+            &bundle,
+            &expected,
+            &BTreeMap::from([(subject, hold_conflict)])
+        ),
+        Err(TransferError::DivergentHold(_))
+    ));
+
+    let retention_conflict = Protection {
+        retention: retention("different-policy", 90, 20_000),
+        active_holds: Vec::new(),
+    };
+    assert!(matches!(
+        transform(
+            &bundle,
+            &expected,
+            &BTreeMap::from([(subject, retention_conflict)])
+        ),
+        Err(TransferError::DivergentRetention(_))
+    ));
+}
+
+#[test]
+fn secret_material_requires_an_explicit_non_literal_disposition() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].persistent_dependencies[0].data_binding = DataBinding {
+        classification: DataClassification::SecretMaterial,
+        secret_disposition: None,
+    };
+    assert!(matches!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(field)) if field.contains("secret material")
+    ));
+
+    bundle.jobs[0].persistent_dependencies[0]
+        .data_binding
+        .secret_disposition = Some(SecretDisposition::Reference(SecretReference {
+        provider: "vault".to_owned(),
+        reference: "kv/ci/deployment-cursor".to_owned(),
+        version: "7".to_owned(),
+        keyed_digest: digest(91),
+    }));
+    let plan = transform(&bundle, &expected, &BTreeMap::new()).unwrap();
+    let text = String::from_utf8(plan.canonical_bytes).unwrap();
+    assert!(text.contains("kv/ci/deployment-cursor"));
+    assert!(!text.contains("literal-secret-value"));
+}
+
+#[test]
+fn hostile_or_ambiguous_filesystem_manifests_fail_closed() {
+    let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+
+    for hostile in ["../escape", "/absolute", "nested//empty", "windows\\path"] {
+        let mut candidate = bundle.clone();
+        candidate.jobs[0].retained_workspaces[0].filesystem_entries[0].path = hostile.to_owned();
+        assert!(matches!(
+            transform(&candidate, &expected, &BTreeMap::new()),
+            Err(TransferError::InvalidField(field)) if field.contains("filesystem entry path")
+        ));
+    }
+
+    let mut wrong_size = bundle;
+    wrong_size.jobs[0].retained_workspaces[0].filesystem_entries[0].bytes = 8191;
+    assert!(matches!(
+        transform(&wrong_size, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(field)) if field.contains("byte total")
+    ));
+}

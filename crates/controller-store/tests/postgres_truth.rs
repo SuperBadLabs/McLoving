@@ -10,6 +10,15 @@ use mcloving_controller_store::{
     PipelineWrite, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
     TerminalOutcome, TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
+use mcloving_state_transfer::{
+    BuildResult as TransferBuildResult, BuildState as TransferBuildState, ConflictPolicy,
+    DataBinding as TransferDataBinding, DataClassification as TransferDataClassification,
+    ExpectedBinding, JobState as TransferJobState, LegalHold as TransferLegalHold,
+    ObjectKind as TransferObjectKind, ObjectState as TransferObjectState,
+    Protection as TransferProtection, RecordProvenance, RetentionPolicy, STATE_TRANSFER_SCHEMA_V1,
+    RetrievalMetadata as TransferRetrievalMetadata, StateBundle, SystemIdentity, TransferBinding,
+    TransferDirection, TriggerCause as TransferTriggerCause,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -25,6 +34,323 @@ async fn test_store() -> Option<Store> {
     let store = Store::new(pool);
     store.migrate().await.expect("install controller schema");
     Some(store)
+}
+
+#[tokio::test]
+async fn state_transfer_is_idempotent_monotonic_and_audited() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "state-transfer",
+        )
+        .await
+        .expect("create state-transfer tenant");
+
+    let (bundle, expected) = transfer_bundle(20);
+    let first = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &bundle,
+            &expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("import first state-transfer bundle");
+    assert!(first.created);
+    assert_eq!(first.record_count, 5);
+    assert_eq!(first.protection_count, 2);
+    let replay = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &bundle,
+            &expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("replay exact state-transfer bundle");
+    assert!(!replay.created);
+    assert_eq!(first.id, replay.id);
+    assert_eq!(
+        store
+            .state_transfer_bundle(organization_id, first.id)
+            .await
+            .expect("read canonical transfer bytes"),
+        Some(mcloving_state_transfer::canonical_bytes(&bundle).unwrap())
+    );
+
+    let (mut stronger, stronger_expected) = transfer_bundle(21);
+    let build_protection = &mut stronger.jobs[0].builds[0].protection;
+    build_protection.retention.retain_until_unix_ms = 20_000;
+    build_protection
+        .active_holds
+        .push(transfer_hold("case-b", 16));
+    stronger.expected_record_ids.push("hold:case-b".to_owned());
+    stronger.expected_record_ids.sort();
+    let stronger_receipt = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &stronger,
+            &stronger_expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("import stronger destination protections");
+    assert!(stronger_receipt.created);
+
+    let (regression_source, regression_expected) = transfer_bundle(22);
+    let monotonic = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &regression_source,
+            &regression_expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("merge weaker source with stronger destination protections");
+    assert!(monotonic.created);
+    let canonical = store
+        .state_transfer_bundle(organization_id, monotonic.id)
+        .await
+        .expect("read monotonic transfer")
+        .expect("monotonic transfer exists");
+    let persisted: StateBundle = serde_json::from_slice(&canonical).expect("decode stored bundle");
+    let persisted_protection = &persisted.jobs[0].builds[0].protection;
+    assert_eq!(persisted_protection.retention.retain_until_unix_ms, 20_000);
+    assert_eq!(
+        persisted_protection
+            .active_holds
+            .iter()
+            .map(|hold| hold.hold_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["case-a", "case-b"]
+    );
+
+    let mut divergent = regression_source;
+    divergent.jobs[0].builds[0].audit_digest = transfer_digest(99);
+    assert!(matches!(
+        store
+            .import_state_transfer(
+                organization_id,
+                project_id,
+                &divergent,
+                &regression_expected,
+                "migration-operator@example.test",
+            )
+            .await,
+        Err(StoreError::StateTransferConflict(_))
+    ));
+
+    let subject = bundle.jobs[0].builds[0].record.source_digest;
+    let omitted_hold = sqlx::query(
+        "UPDATE state_transfer_protections
+         SET active_holds = '[]'::jsonb
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects legal-hold omission");
+    assert_eq!(
+        omitted_hold
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let mutated_receipt = sqlx::query(
+        "UPDATE state_transfer_receipts
+         SET actor_subject = 'rewritten@example.test'
+         WHERE id = $1",
+    )
+    .bind(first.id)
+    .execute(store.pool())
+    .await
+    .expect_err("receipt history is immutable");
+    assert_eq!(
+        mutated_receipt
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let outbox_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM outbox
+         WHERE organization_id = $1
+           AND topic = 'state_transfer.imported'",
+    )
+    .bind(organization_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count state-transfer outbox records");
+    assert_eq!(outbox_count, 3);
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM audit_events
+         WHERE organization_id = $1
+           AND action = 'state_transfer.imported'",
+    )
+    .bind(organization_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count state-transfer audit records");
+    assert_eq!(audit_count, 3);
+}
+
+fn transfer_digest(byte: u8) -> [u8; 32] {
+    [byte; 32]
+}
+
+fn transfer_record(id: &str, byte: u8) -> RecordProvenance {
+    RecordProvenance {
+        id: id.to_owned(),
+        source_digest: transfer_digest(byte),
+        provenance: format!("sealed PostgreSQL fixture record {id}"),
+    }
+}
+
+fn transfer_hold(id: &str, byte: u8) -> TransferLegalHold {
+    TransferLegalHold {
+        record: transfer_record(&format!("hold:{id}"), byte),
+        hold_id: id.to_owned(),
+        scope: "job:stateful/build:3".to_owned(),
+        reason: format!("preserve {id}"),
+        placed_at_unix_ms: 1_000,
+        generation: 1,
+        release_authority: "legal@example.test".to_owned(),
+    }
+}
+
+fn transfer_protection(deadline: i64, holds: Vec<TransferLegalHold>) -> TransferProtection {
+    TransferProtection {
+        retention: RetentionPolicy {
+            policy_id: "migration-retention".to_owned(),
+            policy_version: "v1".to_owned(),
+            policy_digest: transfer_digest(70),
+            retain_until_unix_ms: deadline,
+        },
+        active_holds: holds,
+    }
+}
+
+fn transfer_bundle(source_generation: u8) -> (StateBundle, ExpectedBinding) {
+    let source = SystemIdentity {
+        kind: "jenkins".to_owned(),
+        instance_id: "jenkins/postgres-fixture".to_owned(),
+        generation: format!("source-generation-{source_generation}"),
+        configuration_digest: transfer_digest(1),
+    };
+    let destination = SystemIdentity {
+        kind: "mcloving".to_owned(),
+        instance_id: "mcloving/postgres-fixture".to_owned(),
+        generation: "destination-generation-1".to_owned(),
+        configuration_digest: transfer_digest(2),
+    };
+    let binding = TransferBinding {
+        schema: STATE_TRANSFER_SCHEMA_V1.to_owned(),
+        direction: TransferDirection::JenkinsToMcLoving,
+        source: source.clone(),
+        destination: destination.clone(),
+        source_export_digest: transfer_digest(source_generation),
+        transform_implementation_digest: transfer_digest(3),
+        transform_configuration_digest: transfer_digest(4),
+        conflict_policy: ConflictPolicy::RejectDivergence,
+        provenance: "sealed PostgreSQL fixture export".to_owned(),
+    };
+    let mut expected_record_ids = vec![
+        "artifact:stateful:3",
+        "build:stateful:3",
+        "hold:case-a",
+        "job:stateful",
+        "trigger:stateful:3",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    expected_record_ids.sort();
+    let bundle = StateBundle {
+        binding,
+        expected_record_ids,
+        jobs: vec![TransferJobState {
+            record: transfer_record("job:stateful", 10),
+            source_job_id: "stateful".to_owned(),
+            target_pipeline_id: "stateful".to_owned(),
+            next_build_number: 4,
+            previous_result: Some(TransferBuildResult::Failed),
+            builds: vec![TransferBuildState {
+                record: transfer_record("build:stateful:3", 11),
+                source_queue_id: "queue:stateful:3".to_owned(),
+                source_build_id: "stateful#3".to_owned(),
+                trigger: TransferTriggerCause {
+                    record: transfer_record("trigger:stateful:3", 16),
+                    trigger_kind: "manual".to_owned(),
+                    external_id: "fixture-trigger-3".to_owned(),
+                    actor_subject: "user:fixture".to_owned(),
+                },
+                invocation_parameters: Vec::new(),
+                number: 3,
+                result: TransferBuildResult::Failed,
+                queued_at_unix_ms: 1_000,
+                started_at_unix_ms: 1_100,
+                ended_at_unix_ms: 1_200,
+                checkouts: Vec::new(),
+                graph_nodes: Vec::new(),
+                approvals: Vec::new(),
+                normalized_tests: Vec::new(),
+                logs: Vec::new(),
+                artifacts: vec![TransferObjectState {
+                    record: transfer_record("artifact:stateful:3", 12),
+                    kind: TransferObjectKind::Artifact,
+                    logical_name: "state.tar.zst".to_owned(),
+                    content_digest: transfer_digest(13),
+                    bytes: 4096,
+                    producer_build_number: Some(3),
+                    retrieval: TransferRetrievalMetadata {
+                        media_type: "application/zstd".to_owned(),
+                        logical_locator: "artifacts/stateful/3/state.tar.zst".to_owned(),
+                        content_digest: transfer_digest(13),
+                    },
+                    data_binding: TransferDataBinding {
+                        classification: TransferDataClassification::Internal,
+                        secret_disposition: None,
+                    },
+                    filesystem_entries: Vec::new(),
+                    protection: transfer_protection(10_000, Vec::new()),
+                }],
+                protection: transfer_protection(10_000, vec![transfer_hold("case-a", 14)]),
+                audit_digest: transfer_digest(15),
+            }],
+            retained_workspaces: Vec::new(),
+            persistent_dependencies: Vec::new(),
+        }],
+    };
+    let expected = ExpectedBinding {
+        direction: bundle.binding.direction,
+        source,
+        destination,
+        source_export_digest: bundle.binding.source_export_digest,
+        transform_implementation_digest: bundle.binding.transform_implementation_digest,
+        transform_configuration_digest: bundle.binding.transform_configuration_digest,
+        conflict_policy: bundle.binding.conflict_policy,
+    };
+    (bundle, expected)
 }
 
 fn dag_node(
