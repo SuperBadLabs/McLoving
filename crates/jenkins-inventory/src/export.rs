@@ -482,12 +482,17 @@ fn build_runtime_manifest(
         let dependency = RuntimeDependency {
             id: "opaque-cps-runtime".to_owned(),
             kind: RuntimeDependencyKind::ControllerGlobal,
-            requirements: source
-                .triggers
-                .iter()
-                .map(|declaration| JobRequirement::Trigger {
-                    declaration: declaration.clone(),
-                })
+            requirements: scan_library_references(&source.script)
+                .into_iter()
+                .map(|reference| JobRequirement::SharedLibrary { reference })
+                .chain(
+                    source
+                        .triggers
+                        .iter()
+                        .map(|declaration| JobRequirement::Trigger {
+                            declaration: declaration.clone(),
+                        }),
+                )
                 .collect(),
             owner: owner.to_owned(),
             implementation_sha256: binding.plugin_profile_sha256.clone(),

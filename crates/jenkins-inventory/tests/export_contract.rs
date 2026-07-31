@@ -47,7 +47,7 @@ fn frozen_home_exports_and_reconciles_without_granting_execution_authority() {
     assert_eq!(
         bundle.job_graph.jobs[0].source_sha256,
         digest(
-            b"pipeline { agent none; stages { stage('Verify') { steps { sh 'true && false'; echo '<safe>' } } } }"
+            b"@Library('fixture@v1') _\npipeline { agent none; stages { stage('Verify') { steps { sh 'true && false'; echo '<safe>' } } } }"
         )
     );
     assert_eq!(ledger.population.jobs_total, 1);
@@ -135,7 +135,8 @@ fn write_snapshot(root: &Path) {
         r#"<flow-definition>
   <description>sealed corpus file example.Jenkinsfile</description>
   <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition">
-    <script>pipeline { agent none; stages { stage('Verify') { steps { sh 'true &amp;&amp; false'; echo '&lt;safe&gt;' } } } }</script>
+    <script>@Library('fixture@v1') _
+pipeline { agent none; stages { stage('Verify') { steps { sh 'true &amp;&amp; false'; echo '&lt;safe&gt;' } } } }</script>
   </definition>
   <triggers/>
   <disabled>true</disabled>
