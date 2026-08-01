@@ -13,8 +13,11 @@ earns that claim.
 
 Only the standard Jenkins shared-library namespaces are admitted:
 `vars`, `src`, and `resources`. Prefetched source is normalized into one
-directory per resolution and sealed read-only. `.git`, build files, tests,
-root-level scripts, and every other namespace are absent from the worker input.
+directory per resolution and sealed read-only. Certification is deliberately
+Unix-only: the verifier rejects other platforms because a Windows directory's
+read-only attribute does not establish an effective write-denying ACL. `.git`,
+build files, tests, root-level scripts, and every other namespace are absent
+from the worker input.
 
 ## Exact oracle reconciliation
 
@@ -56,7 +59,8 @@ The verifier rejects:
 - floating or non-HTTPS resolution provenance;
 - writable source roots, symlinks, hard links, special files, unexpected
   resolution IDs or namespaces, path traversal, non-UTF-8 paths, excessive
-  files or bytes, and content-digest substitution;
+  files or bytes, content-digest substitution, or a platform without the Unix
+  permission semantics required by the source-sealing proof;
 - any policy that grants SCM network, SCM credential, Groovy evaluation, or
   controller execution authority; and
 - any nonzero executable-case claim.
@@ -71,10 +75,12 @@ its canonical semantic SHA-256 is
 `f925714595d48efcf29ea9c64696a99cd361b6a4a9b847c2d96b807a63add309`.
 Both values are compiled into the verifier as independent trust roots, so a
 joint ledger/lock/source substitution cannot create a newly trusted bundle.
-The authoritative path-collision-repaired external evidence is
-`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T114712Z-v9`. Its
+The authoritative platform-sealing-repaired external evidence is
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T120106Z-v10`. Its
 self-excluding manifest covers 522 files and has SHA-256
-`971f0d6dc07c04257f54bb9757e1d26e557d62239282caa1b1bb11a5d0dc128f`.
+`6eb13730aa8827e890aeabe2133032eaa3007ce78f427d2936004f8a4151a418`.
+The path-collision predecessor remains immutable at manifest
+`971f0d6dc07c04257f54bb9757e1d26e557d62239282caa1b1bb11a5d0dc128f`;
 The bounded-traversal predecessor remains immutable at manifest
 `0f41561942d065d178a86aec82a8bd2db522ee66ac4e591ee531316de913f7e5`;
 the trust-root predecessor remains immutable at manifest

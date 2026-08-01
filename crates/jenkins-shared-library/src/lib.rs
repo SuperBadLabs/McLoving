@@ -1142,8 +1142,19 @@ fn validate_exact_entries(root: &Path, expected: &[&str]) -> Result<(), LibraryE
 }
 
 fn ensure_read_only_directory(path: &Path) -> Result<(), LibraryError> {
-    let metadata = ensure_real_directory(path, "E_SOURCE_ENTRY")?;
-    ensure_read_only_metadata(&metadata)
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(LibraryError::new(
+            "E_SOURCE_PLATFORM",
+            "read-only source verification requires Unix permission semantics",
+        ))
+    }
+    #[cfg(unix)]
+    {
+        let metadata = ensure_real_directory(path, "E_SOURCE_ENTRY")?;
+        ensure_read_only_metadata(&metadata)
+    }
 }
 
 fn ensure_real_directory(path: &Path, code: &'static str) -> Result<fs::Metadata, LibraryError> {
@@ -1155,28 +1166,25 @@ fn ensure_real_directory(path: &Path, code: &'static str) -> Result<fs::Metadata
     Ok(metadata)
 }
 
+#[cfg(unix)]
 fn ensure_read_only_metadata(metadata: &fs::Metadata) -> Result<(), LibraryError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o222 != 0 {
-            return Err(LibraryError::new(
-                "E_SOURCE_WRITABLE",
-                "source input is writable",
-            ));
-        }
-    }
-    if metadata.permissions().readonly() {
-        Ok(())
-    } else {
-        #[cfg(not(unix))]
-        return Err(LibraryError::new(
+    use std::os::unix::fs::PermissionsExt;
+    if metadata.permissions().mode() & 0o222 != 0 {
+        Err(LibraryError::new(
             "E_SOURCE_WRITABLE",
             "source input is writable",
-        ));
-        #[cfg(unix)]
+        ))
+    } else {
         Ok(())
     }
+}
+
+#[cfg(not(unix))]
+fn ensure_read_only_metadata(_metadata: &fs::Metadata) -> Result<(), LibraryError> {
+    Err(LibraryError::new(
+        "E_SOURCE_PLATFORM",
+        "read-only source verification requires Unix permission semantics",
+    ))
 }
 
 fn read_regular(path: PathBuf, limit: usize) -> Result<Vec<u8>, LibraryError> {
@@ -1575,6 +1583,18 @@ mod tests {
                 .expect_err("symlink")
                 .code,
             "E_SOURCE_ENTRY"
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn source_verification_rejects_unenforceable_platform_sealing() {
+        let temp = TempDir::new().expect("tempdir");
+        assert_eq!(
+            ensure_read_only_directory(temp.path())
+                .expect_err("non-Unix source certification")
+                .code,
+            "E_SOURCE_PLATFORM"
         );
     }
 
