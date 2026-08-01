@@ -374,6 +374,7 @@ impl Store {
                 source: bundle.binding.source.clone(),
                 destination: bundle.binding.destination.clone(),
                 source_export_digest: bundle.binding.source_export_digest,
+                input_bundle_digest: sha256(&canonical),
                 transform_implementation_digest: bundle.binding.transform_implementation_digest,
                 transform_configuration_digest: bundle.binding.transform_configuration_digest,
                 conflict_policy: bundle.binding.conflict_policy,

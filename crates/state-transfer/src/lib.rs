@@ -65,6 +65,8 @@ pub struct ExpectedBinding {
     pub source: SystemIdentity,
     pub destination: SystemIdentity,
     pub source_export_digest: Digest,
+    /// Canonical digest independently pinned by the source-export boundary.
+    pub input_bundle_digest: Digest,
     pub transform_implementation_digest: Digest,
     pub transform_configuration_digest: Digest,
     pub conflict_policy: ConflictPolicy,
@@ -423,6 +425,11 @@ pub fn transform(
     existing_protections: &BTreeMap<Digest, Protection>,
 ) -> Result<TransferPlan, TransferError> {
     validate_bundle(bundle, expected)?;
+    let input_bundle_digest = sha256(&canonical_bytes(bundle)?);
+    validate_digest(expected.input_bundle_digest, "expected input bundle digest")?;
+    if input_bundle_digest != expected.input_bundle_digest {
+        return Err(TransferError::BindingMismatch("input bundle digest"));
+    }
     for (subject, protection) in existing_protections {
         validate_digest(*subject, "existing protection subject digest")?;
         validate_protection(protection)?;
@@ -1450,6 +1457,7 @@ fn validate_object_list(
     label: &str,
 ) -> Result<(), TransferError> {
     let mut previous: Option<&str> = None;
+    let mut logical_names = BTreeSet::new();
     for object in objects {
         if previous.is_some_and(|value| value >= object.record.id.as_str()) {
             return Err(TransferError::InvalidField(format!(
@@ -1459,6 +1467,11 @@ fn validate_object_list(
         previous = Some(&object.record.id);
         insert_record(records, &object.record)?;
         validate_text(&object.logical_name, 1024, "object logical name")?;
+        if !logical_names.insert(object.logical_name.as_str()) {
+            return Err(TransferError::InvalidField(format!(
+                "{label} logical names must be unique"
+            )));
+        }
         validate_digest(object.content_digest, "object content digest")?;
         if object.producer_build_number == Some(0) {
             return Err(TransferError::InvalidField(

@@ -14,7 +14,8 @@ use mcloving_state_transfer::{
     PersistentDependency, Protection, RecordProvenance, RetentionPolicy, RetrievalMetadata,
     STATE_TRANSFER_SCHEMA_V1, ScmState, SecretDisposition, SecretReference, StateBundle,
     SystemIdentity, TransferBinding, TransferDirection, TransferError, TriggerCause,
-    evaluate_change_predicate, materialize_filesystem_entries, protections, sha256, transform,
+    canonical_bytes, evaluate_change_predicate, materialize_filesystem_entries, protections,
+    sha256, transform,
 };
 
 fn digest(byte: u8) -> Digest {
@@ -257,6 +258,7 @@ fn fixture(direction: TransferDirection) -> (StateBundle, ExpectedBinding) {
         source,
         destination,
         source_export_digest: digest(3),
+        input_bundle_digest: sha256(&canonical_bytes(&bundle).unwrap()),
         transform_implementation_digest: digest(4),
         transform_configuration_digest: digest(5),
         conflict_policy: ConflictPolicy::RejectDivergence,
@@ -280,14 +282,44 @@ fn forward_transform_is_deterministic_and_idempotent() {
 fn reverse_transform_preserves_all_state_records() {
     let (forward, expected_forward) = fixture(TransferDirection::JenkinsToMcLoving);
     let forward_plan = transform(&forward, &expected_forward, &BTreeMap::new()).unwrap();
-    let (mut reverse, expected_reverse) = fixture(TransferDirection::McLovingToJenkins);
+    let (mut reverse, mut expected_reverse) = fixture(TransferDirection::McLovingToJenkins);
     reverse.jobs = forward_plan.bundle.jobs.clone();
     reverse.expected_record_ids = forward_plan.bundle.expected_record_ids.clone();
+    expected_reverse.input_bundle_digest = sha256(&canonical_bytes(&reverse).unwrap());
     let reverse_plan = transform(&reverse, &expected_reverse, &BTreeMap::new()).unwrap();
     assert_eq!(forward_plan.bundle.jobs, reverse_plan.bundle.jobs);
     assert_eq!(
         forward_plan.bundle.expected_record_ids,
         reverse_plan.bundle.expected_record_ids
+    );
+}
+
+#[test]
+fn canonical_input_digest_authenticates_semantic_state() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[1].result = BuildResult::Failed;
+    bundle.jobs[0].previous_result = Some(BuildResult::Failed);
+
+    assert_eq!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::BindingMismatch("input bundle digest"))
+    );
+}
+
+#[test]
+fn object_logical_names_are_unique_within_each_list() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    let mut duplicate = bundle.jobs[0].builds[0].artifacts[0].clone();
+    duplicate.record = record("object:stateful:7:artifact-duplicate", 73);
+    duplicate.content_digest = digest(74);
+    duplicate.retrieval.content_digest = digest(74);
+    bundle.jobs[0].builds[0].artifacts.push(duplicate);
+
+    assert_eq!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "build artifacts logical names must be unique".to_owned()
+        ))
     );
 }
 
@@ -495,7 +527,7 @@ fn divergent_hold_and_equal_deadline_policy_are_rejected() {
 
 #[test]
 fn secret_material_requires_an_explicit_non_literal_disposition() {
-    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    let (mut bundle, mut expected) = fixture(TransferDirection::JenkinsToMcLoving);
     bundle.jobs[0].persistent_dependencies[0].data_binding = DataBinding {
         classification: DataClassification::SecretMaterial,
         secret_disposition: None,
@@ -513,6 +545,7 @@ fn secret_material_requires_an_explicit_non_literal_disposition() {
         version: "7".to_owned(),
         keyed_digest: digest(91),
     }));
+    expected.input_bundle_digest = sha256(&canonical_bytes(&bundle).unwrap());
     let plan = transform(&bundle, &expected, &BTreeMap::new()).unwrap();
     let text = String::from_utf8(plan.canonical_bytes).unwrap();
     assert!(text.contains("kv/ci/deployment-cursor"));

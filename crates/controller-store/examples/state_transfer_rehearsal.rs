@@ -59,7 +59,7 @@ async fn main() -> Result<(), AnyError> {
         configuration_digest,
     )?;
     set_expected_records(&mut forward);
-    let forward_expected = expected(&forward.binding);
+    let forward_expected = expected(&forward)?;
 
     let mut destination_seed = forward.clone();
     destination_seed.binding.direction = TransferDirection::McLovingToJenkins;
@@ -86,7 +86,7 @@ async fn main() -> Result<(), AnyError> {
             organization_id,
             project_id,
             &destination_seed,
-            &expected(&destination_seed.binding),
+            &expected(&destination_seed)?,
             "migration:destination-seed",
         )
         .await?;
@@ -180,7 +180,7 @@ async fn main() -> Result<(), AnyError> {
     };
     stored_forward.binding = reverse_binding;
     set_expected_records(&mut stored_forward);
-    let reverse_expected = expected(&stored_forward.binding);
+    let reverse_expected = expected(&stored_forward)?;
     let reverse_plan = transform(&stored_forward, &reverse_expected, &BTreeMap::new())?;
     let reverse_receipt = store
         .import_state_transfer(
@@ -793,16 +793,18 @@ fn set_expected_records(bundle: &mut StateBundle) {
         .collect();
 }
 
-fn expected(binding: &TransferBinding) -> ExpectedBinding {
-    ExpectedBinding {
+fn expected(bundle: &StateBundle) -> Result<ExpectedBinding, AnyError> {
+    let binding = &bundle.binding;
+    Ok(ExpectedBinding {
         direction: binding.direction,
         source: binding.source.clone(),
         destination: binding.destination.clone(),
         source_export_digest: binding.source_export_digest,
+        input_bundle_digest: sha256(&canonical_bytes(bundle)?),
         transform_implementation_digest: binding.transform_implementation_digest,
         transform_configuration_digest: binding.transform_configuration_digest,
         conflict_policy: binding.conflict_policy,
-    }
+    })
 }
 
 fn record(id: &str, bytes: &[u8]) -> RecordProvenance {

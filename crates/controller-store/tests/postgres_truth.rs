@@ -206,6 +206,86 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
             .as_database_error()
             .is_some_and(|error| error.message().contains("protection rows"))
     );
+
+    let empty_project_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO projects (id, organization_id, slug) VALUES ($1, $2, $3)")
+        .bind(empty_project_id)
+        .bind(organization_id)
+        .bind("state-transfer-empty-counterfeit")
+        .execute(store.pool())
+        .await
+        .expect("create empty counterfeit-receipt test project");
+    let mut empty_counterfeit = tenant_store
+        .pool()
+        .begin()
+        .await
+        .expect("begin empty direct runtime receipt insert");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *empty_counterfeit)
+        .await
+        .expect("bind empty direct runtime insert tenant");
+    sqlx::query(
+        "WITH source AS (
+             SELECT *,
+                    jsonb_set(
+                        jsonb_set(
+                            convert_from(canonical_bundle, 'UTF8')::jsonb,
+                            '{expected_record_ids}',
+                            '[]'::jsonb
+                        ),
+                        '{jobs}',
+                        '[]'::jsonb
+                    ) AS empty_bundle
+             FROM state_transfer_receipts
+             WHERE organization_id = $3 AND id = $4
+         )
+         INSERT INTO state_transfer_receipts (
+             id, organization_id, project_id, direction,
+             source_kind, source_instance_id, source_generation,
+             source_configuration_digest,
+             destination_kind, destination_instance_id,
+             destination_generation, destination_configuration_digest,
+             source_export_digest, transform_implementation_digest,
+             transform_configuration_digest, binding_digest, canonical_binding,
+             input_bundle_digest, bundle_digest, canonical_bundle, actor_subject
+         )
+         SELECT $1, organization_id, $2, direction,
+                source_kind, source_instance_id, source_generation,
+                source_configuration_digest,
+                destination_kind, destination_instance_id,
+                destination_generation, destination_configuration_digest,
+                source_export_digest, transform_implementation_digest,
+                transform_configuration_digest, binding_digest, canonical_binding,
+                sha256(convert_to(empty_bundle::text, 'UTF8')),
+                sha256(convert_to(empty_bundle::text, 'UTF8')),
+                convert_to(empty_bundle::text, 'UTF8'), actor_subject
+         FROM source",
+    )
+    .bind(Uuid::new_v4())
+    .bind(empty_project_id)
+    .bind(organization_id)
+    .bind(first.id)
+    .execute(&mut *empty_counterfeit)
+    .await
+    .expect("empty direct runtime insert reaches the deferred completeness fence");
+    let empty_error = sqlx::query("SET CONSTRAINTS state_transfer_receipts_complete IMMEDIATE")
+        .execute(&mut *empty_counterfeit)
+        .await
+        .expect_err("runtime role cannot commit an empty state-transfer receipt");
+    assert_eq!(
+        empty_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    assert!(
+        empty_error
+            .as_database_error()
+            .is_some_and(|error| error.message().contains("expected record set"))
+    );
+    drop(empty_counterfeit);
     assert!(
         sqlx::query_scalar::<_, bool>(
             "SELECT has_function_privilege(
@@ -238,7 +318,7 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         Some(mcloving_state_transfer::canonical_bytes(&bundle).unwrap())
     );
 
-    let (mut stronger, stronger_expected) = transfer_bundle(21);
+    let (mut stronger, mut stronger_expected) = transfer_bundle(21);
     let build_protection = &mut stronger.jobs[0].builds[0].protection;
     build_protection.retention.retain_until_unix_ms = 20_000;
     build_protection
@@ -246,6 +326,9 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         .push(transfer_hold("case-b", 16));
     stronger.expected_record_ids.push("hold:case-b".to_owned());
     stronger.expected_record_ids.sort();
+    stronger_expected.input_bundle_digest = mcloving_state_transfer::sha256(
+        &mcloving_state_transfer::canonical_bytes(&stronger).unwrap(),
+    );
     let stronger_receipt = store
         .import_state_transfer(
             organization_id,
@@ -330,7 +413,8 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
                 "migration-operator@example.test",
             )
             .await,
-        Err(StoreError::StateTransferConflict(_))
+        Err(StoreError::InvalidStateTransfer(message))
+            if message.contains("input bundle digest")
     ));
 
     let duplicate_hold = sqlx::query(
@@ -723,6 +807,9 @@ fn transfer_bundle(source_generation: u8) -> (StateBundle, ExpectedBinding) {
         source,
         destination,
         source_export_digest: bundle.binding.source_export_digest,
+        input_bundle_digest: mcloving_state_transfer::sha256(
+            &mcloving_state_transfer::canonical_bytes(&bundle).unwrap(),
+        ),
         transform_implementation_digest: bundle.binding.transform_implementation_digest,
         transform_configuration_digest: bundle.binding.transform_configuration_digest,
         conflict_policy: bundle.binding.conflict_policy,

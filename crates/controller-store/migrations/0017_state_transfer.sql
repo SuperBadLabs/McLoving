@@ -507,6 +507,32 @@ DECLARE
 BEGIN
     bundle_value := convert_from(NEW.canonical_bundle, 'UTF8')::jsonb;
     IF jsonb_typeof(bundle_value -> 'expected_record_ids') IS DISTINCT FROM 'array'
+       OR (CASE
+              WHEN jsonb_typeof(bundle_value -> 'expected_record_ids') = 'array'
+              THEN jsonb_array_length(bundle_value -> 'expected_record_ids') = 0
+              ELSE true
+          END)
+       OR jsonb_typeof(bundle_value -> 'jobs') IS DISTINCT FROM 'array'
+       OR (CASE
+              WHEN jsonb_typeof(bundle_value -> 'jobs') = 'array'
+              THEN jsonb_array_length(bundle_value -> 'jobs') = 0
+              ELSE true
+          END)
+       OR EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(
+               CASE
+                   WHEN jsonb_typeof(bundle_value -> 'jobs') = 'array'
+                   THEN bundle_value -> 'jobs'
+                   ELSE '[]'::jsonb
+               END
+           ) AS job(value)
+           WHERE jsonb_typeof(value) IS DISTINCT FROM 'object'
+              OR jsonb_typeof(value -> 'record') IS DISTINCT FROM 'object'
+              OR jsonb_typeof(value -> 'builds') IS DISTINCT FROM 'array'
+              OR jsonb_typeof(value -> 'retained_workspaces') IS DISTINCT FROM 'array'
+              OR jsonb_typeof(value -> 'persistent_dependencies') IS DISTINCT FROM 'array'
+       )
        OR EXISTS (
            SELECT 1
            FROM jsonb_array_elements(bundle_value -> 'expected_record_ids') AS item(value)
