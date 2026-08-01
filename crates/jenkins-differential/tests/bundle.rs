@@ -67,6 +67,18 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "jenkins/container-inspect.json",
+            "JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Djava.awt.headless=true -Xms512m -Xmx2g",
+            "JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Djava.awt.headless=true -Xms512m -Xmx3g",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
+            "\"GroupAdd\": []",
+            "\"GroupAdd\": [\"0\"]",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
             "\"Source\": \"/home/srikanth/jenkins-oracle-228/plugins\"",
             "\"Source\": \"/tmp/unsealed-plugins\"",
             "E_JENKINS_CONTAINMENT",
@@ -139,8 +151,50 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/runner-inspect-pre.json",
+            "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v16:5432/mcloving",
+            "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@substituted-db:5432/mcloving",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/runner-inspect-pre.json",
+            "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
+            "MCLOVING_DIFF001_EVIDENCE_DIR=/tmp/unsealed-evidence",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/runner-inspect-pre.json",
+            "\"GroupAdd\": []",
+            "\"GroupAdd\": [\"0\"]",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/runner-inspect-pre.json",
             "\"CAP_SYS_CHROOT\"",
             "\"CAP_SYS_ADMIN\"",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/runtime.txt",
+            "groups=1000(srikanth)",
+            "groups=1000(srikanth),0(root)",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/postgres-inspect.json",
+            "\"CapAdd\": []",
+            "\"CapAdd\": [\"CAP_SYS_ADMIN\"]",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/postgres-inspect.json",
+            "\"CAP_SYS_CHROOT\"",
+            "\"CAP_SYS_ADMIN\"",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/postgres-inspect.json",
+            "PG_VERSION=17.6",
+            "PG_VERSION=17.7",
             "E_MCLOVING_CONTAINMENT",
         ),
         (

@@ -594,6 +594,29 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         &format!("docker.io/jenkins/jenkins@sha256:{JENKINS_IMAGE_SHA256}"),
         "E_JENKINS_CONTAINMENT",
     )?;
+    exact_string_array(
+        container,
+        &["Config", "Env"],
+        &[
+            "container=podman",
+            "COPY_REFERENCE_FILE_LOG=/var/jenkins_home/copy_reference_file.log",
+            "JAVA_HOME=/opt/java/openjdk",
+            "JENKINS_SLAVE_AGENT_PORT=50000",
+            "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "JENKINS_UC=https://updates.jenkins.io",
+            "JENKINS_HOME=/var/jenkins_home",
+            "JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental",
+            "JENKINS_VERSION=2.568.1",
+            "LANG=C.UTF-8",
+            "REF=/usr/share/jenkins/ref",
+            "JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals",
+            "JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Djava.awt.headless=true -Xms512m -Xmx2g",
+            "TZ=UTC",
+            "HOME=/var/jenkins_home",
+            "HOSTNAME=b64bb5ef3f6e",
+        ],
+        "E_JENKINS_CONTAINMENT",
+    )?;
     exact_string(
         container,
         &["ImageDigest"],
@@ -621,6 +644,11 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
     exact_empty_array(
         container,
         &["HostConfig", "CapAdd"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        container,
+        &["HostConfig", "GroupAdd"],
         "E_JENKINS_CONTAINMENT",
     )?;
     exact_string_array(
@@ -986,7 +1014,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
 
     let pre = json(root, "mcloving/runner-inspect-pre.json")?;
     let pre = first_object(&pre, "E_MCLOVING_CONTAINMENT")?;
-    verify_runner_contract(pre)?;
+    verify_runner_contract(pre, false)?;
     exact_string(
         pre,
         &["State", "Status"],
@@ -996,7 +1024,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
 
     let post = json(root, "mcloving/runner-inspect-post.json")?;
     let post = first_object(&post, "E_MCLOVING_CONTAINMENT")?;
-    verify_runner_contract(post)?;
+    verify_runner_contract(post, true)?;
     exact_string(
         post,
         &["State", "Status"],
@@ -1019,6 +1047,50 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         2_147_483_648,
         2_000_000_000,
         256,
+    )?;
+    exact_string_array(
+        database,
+        &["Config", "Env"],
+        &[
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "container=podman",
+            "PGDATA=/var/lib/postgresql/data/pgdata",
+            "LANG=en_US.utf8",
+            "PG_MAJOR=17",
+            "PG_VERSION=17.6",
+            "POSTGRES_HOST_AUTH_METHOD=trust",
+            "GOSU_VERSION=1.19",
+            "PG_SHA256=e0630a3600aea27511715563259ec2111cd5f4353a4b040e0be827f94cd7a8b0",
+            "DOCKER_PG_LLVM_DEPS=llvm19-dev \t\tclang19",
+            "POSTGRES_DB=mcloving",
+            "POSTGRES_USER=mcloving",
+            "HOME=/root",
+            "HOSTNAME=80e472c55998",
+        ],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        database,
+        &["HostConfig", "CapAdd"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(
+        database,
+        &["HostConfig", "CapDrop"],
+        &[
+            "CAP_FSETID",
+            "CAP_KILL",
+            "CAP_NET_BIND_SERVICE",
+            "CAP_SETFCAP",
+            "CAP_SETPCAP",
+            "CAP_SYS_CHROOT",
+        ],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        database,
+        &["HostConfig", "GroupAdd"],
+        "E_MCLOVING_CONTAINMENT",
     )?;
     exact_string_array(
         database,
@@ -1046,7 +1118,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     )?;
 
     let runtime = text(root, "mcloving/runtime.txt")?;
-    if !runtime.starts_with("uid=1000(srikanth) gid=1000(srikanth)")
+    if runtime.lines().next() != Some("uid=1000(srikanth) gid=1000(srikanth) groups=1000(srikanth)")
         || !runtime.contains("LANG=C.UTF-8\n")
         || !runtime.contains(&format!(
             "{MCLOVING_TEST_BINARY_SHA256}  target/debug/deps/diff_001-3b7075192798a581\n"
@@ -1071,7 +1143,10 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     Ok(())
 }
 
-fn verify_runner_contract(container: &Value) -> Result<(), VerificationError> {
+fn verify_runner_contract(
+    container: &Value,
+    started_environment: bool,
+) -> Result<(), VerificationError> {
     verify_common_container(
         container,
         MCLOVING_RUNNER_IMAGE_SHA256,
@@ -1109,6 +1184,26 @@ fn verify_runner_contract(container: &Value) -> Result<(), VerificationError> {
         &["bash", "-c", MCLOVING_RUNNER_COMMAND],
         "E_MCLOVING_CONTAINMENT",
     )?;
+    let mut environment = vec![
+        "LANG=C.UTF-8",
+        "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "CARGO_HOME=/usr/local/cargo",
+        "RUST_VERSION=1.97.1",
+        "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v16:5432/mcloving",
+        "container=podman",
+        "RUSTUP_HOME=/usr/local/rustup",
+        "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
+        "LC_ALL=C.UTF-8",
+    ];
+    if started_environment {
+        environment.extend(["HOME=/work", "HOSTNAME=6c58b760d4f6"]);
+    }
+    exact_string_array(
+        container,
+        &["Config", "Env"],
+        &environment,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
     exact_string(
         container,
         &["Config", "Entrypoint"],
@@ -1118,6 +1213,11 @@ fn verify_runner_contract(container: &Value) -> Result<(), VerificationError> {
     exact_empty_array(
         container,
         &["HostConfig", "CapAdd"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        container,
+        &["HostConfig", "GroupAdd"],
         "E_MCLOVING_CONTAINMENT",
     )?;
     exact_string_array(
