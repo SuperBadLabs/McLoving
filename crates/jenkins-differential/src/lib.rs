@@ -27,6 +27,24 @@ const JENKINS_CONTAINER_ID: &str =
 const JENKINS_CONTAINER_NAME: &str = "mcloving-diff001-jenkins";
 const JENKINS_CONTAINER_CREATED: &str = "2026-08-01T12:15:43.236541506Z";
 const JENKINS_CONTAINER_STARTED: &str = "2026-08-01T12:15:43.401795528Z";
+const JENKINS_CAPTURE_ROOT: &str =
+    "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/evidence/jenkins";
+const JENKINS_CAPTURE_FILES: [&str; 14] = [
+    "Jenkinsfile",
+    "build.json",
+    "console.txt",
+    "container-inspect.json",
+    "controller.log",
+    "external-network.txt",
+    "image-inspect.json",
+    "init.groovy",
+    "queue.json",
+    "runtime.txt",
+    "stage-build.json",
+    "wfapi.json",
+    "workspace-tmp.tsv",
+    "workspace.tsv",
+];
 const JENKINS_CONTAINMENT_RECEIPTS: [(&str, &str); 4] = [
     (
         "jenkins/container-inspect.json",
@@ -47,6 +65,7 @@ const JENKINS_CONTAINMENT_RECEIPTS: [(&str, &str); 4] = [
 ];
 pub const MCLOVING_RUNNER_IMAGE_SHA256: &str =
     "77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa";
+const MCLOVING_RUNNER_IMAGE_REFERENCE: &str = "docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa";
 pub const MCLOVING_DATABASE_IMAGE_SHA256: &str =
     "ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94";
 
@@ -231,6 +250,7 @@ struct CoverageAuthority {
 
 pub fn verify_bundle(root: &Path) -> Result<VerificationReceipt, VerificationError> {
     verify_manifest(root)?;
+    verify_jenkins_capture_manifest(root)?;
     verify_source_and_pipeline(root)?;
     verify_jenkins_job_definition(root)?;
     verify_jenkins_plugin_profile(root)?;
@@ -300,6 +320,66 @@ fn verify_manifest(root: &Path) -> Result<(), VerificationError> {
     }
     if total > MAX_BUNDLE_BYTES {
         return Err(VerificationError::new("E_BOUNDS", "bundle is oversized"));
+    }
+    Ok(())
+}
+
+fn verify_jenkins_capture_manifest(root: &Path) -> Result<(), VerificationError> {
+    let manifest = text(root, "jenkins/file-sha256.txt")?;
+    let mut entries = BTreeMap::new();
+    for line in manifest.lines() {
+        let (digest, absolute_path) = line.split_once("  ").ok_or_else(|| {
+            VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                "invalid Jenkins capture manifest line",
+            )
+        })?;
+        if digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || digest.bytes().any(|byte| byte.is_ascii_uppercase())
+        {
+            return Err(VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                "invalid Jenkins capture digest",
+            ));
+        }
+        let prefix = format!("{JENKINS_CAPTURE_ROOT}/");
+        let name = absolute_path.strip_prefix(&prefix).ok_or_else(|| {
+            VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                "Jenkins capture path is not rooted at the certified capture",
+            )
+        })?;
+        if name.contains('/') || entries.insert(name.to_owned(), digest).is_some() {
+            return Err(VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                "Jenkins capture path is not canonical and unique",
+            ));
+        }
+    }
+    let expected = JENKINS_CAPTURE_FILES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    if entries.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        return Err(VerificationError::new(
+            "E_JENKINS_CAPTURE_MANIFEST",
+            "Jenkins capture manifest file set is not exact",
+        ));
+    }
+    for name in JENKINS_CAPTURE_FILES {
+        let expected_digest = entries.get(name).ok_or_else(|| {
+            VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                "Jenkins capture manifest entry is absent",
+            )
+        })?;
+        if sha256(&read(root, &format!("jenkins/{name}"))?) != *expected_digest {
+            return Err(VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                format!("Jenkins capture digest differs for {name}"),
+            ));
+        }
     }
     Ok(())
 }
@@ -958,6 +1038,12 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         &MCLOVING_PIPELINE_DIGEST_BYTES,
         "E_MCLOVING",
     )?;
+    exact_string(
+        &raw,
+        &["graph", "build", "status"],
+        "succeeded",
+        "E_MCLOVING",
+    )?;
     exact_u64(&raw, &["status", "fence"], 1, "E_MCLOVING")?;
     exact_string(&raw, &["status", "status"], "succeeded", "E_MCLOVING")?;
     exact_string(
@@ -1365,6 +1451,18 @@ fn verify_runner_contract(
         4_294_967_296,
         4_000_000_000,
         512,
+    )?;
+    exact_string(
+        container,
+        &["ImageName"],
+        MCLOVING_RUNNER_IMAGE_REFERENCE,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Config", "Image"],
+        MCLOVING_RUNNER_IMAGE_REFERENCE,
+        "E_MCLOVING_CONTAINMENT",
     )?;
     exact_string(
         container,

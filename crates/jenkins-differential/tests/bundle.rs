@@ -114,6 +114,18 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_JENKINS_CONTAINMENT",
         ),
         (
+            "jenkins/file-sha256.txt",
+            "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/evidence/jenkins/Jenkinsfile",
+            "/tmp/substituted-capture/Jenkinsfile",
+            "E_JENKINS_CAPTURE_MANIFEST",
+        ),
+        (
+            "jenkins/file-sha256.txt",
+            "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100",
+            "766ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100",
+            "E_JENKINS_CAPTURE_MANIFEST",
+        ),
+        (
             "jenkins/PLUGIN_SHA256SUMS",
             "695c029c078e91dd423a4f0b98bd4e24a60469826088e7855ad022fc1a134e92",
             "795c029c078e91dd423a4f0b98bd4e24a60469826088e7855ad022fc1a134e92",
@@ -145,6 +157,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/mcloving-raw.json",
+            "\"priority\": 0,\n      \"status\": \"succeeded\"",
+            "\"priority\": 0,\n      \"status\": \"failed\"",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
             "76b55bd3-7040-40b9-8dcf-243b2b5f6f45",
             "86b55bd3-7040-40b9-8dcf-243b2b5f6f45",
             "E_MCLOVING",
@@ -171,6 +189,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "mcloving/runner-inspect-pre.json",
             "\"NetworkMode\": \"bridge\"",
             "\"NetworkMode\": \"host\"",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/runner-inspect-pre.json",
+            "\"Image\": \"docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa\"",
+            "\"Image\": \"docker.io/library/rust@sha256:87fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa\"",
             "E_MCLOVING_CONTAINMENT",
         ),
         (
@@ -295,7 +319,11 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         let mutation = original.replace(from, to);
         assert_ne!(original, mutation, "mutation must change {path}");
         fs::write(&target, mutation).expect("write mutation");
-        reseal(temporary.path());
+        if path == "jenkins/file-sha256.txt" {
+            reseal_outer(temporary.path());
+        } else {
+            reseal(temporary.path());
+        }
         let error = verify_bundle(temporary.path()).expect_err("mutation must fail closed");
         assert_eq!(error.code, code, "unexpected error for {path}: {error}");
     }
@@ -390,6 +418,24 @@ fn copy_tree(source: &Path, destination: &Path) {
 }
 
 fn reseal(root: &Path) {
+    let capture_manifest = root.join("jenkins/file-sha256.txt");
+    let capture = fs::read_to_string(&capture_manifest).expect("read Jenkins capture manifest");
+    let mut capture_lines = Vec::new();
+    for line in capture.lines() {
+        let (_, absolute_path) = line.split_once("  ").expect("parse capture manifest line");
+        let name = Path::new(absolute_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("capture manifest leaf name");
+        let bytes = fs::read(root.join("jenkins").join(name)).expect("read captured Jenkins file");
+        capture_lines.push(format!("{}  {absolute_path}", hex(&Sha256::digest(bytes))));
+    }
+    fs::write(capture_manifest, format!("{}\n", capture_lines.join("\n")))
+        .expect("reseal Jenkins capture manifest");
+    reseal_outer(root);
+}
+
+fn reseal_outer(root: &Path) {
     let manifest = fs::read_to_string(root.join("SHA256SUMS")).expect("read manifest");
     let mut lines = Vec::new();
     for line in manifest.lines() {

@@ -79,7 +79,10 @@ capture and final evidence envelope are immutable.
 manifest and exact filesystem tree. Security-relevant Jenkins and McLoving
 image, container, network, runtime, negative-network, and test transcripts also
 carry compiled detached SHA-256 anchors, so resealing the bundle cannot make an
-unchecked receipt field authoritative. It rejects traversal, symlinks, special or
+unchecked receipt field authoritative. The original 14-entry Jenkins capture
+manifest is independently parsed, required to use the exact capture root and
+file set, and reconciled byte-for-byte with the repository bundle. It rejects
+traversal, symlinks, special or
 oversized files, unmanifested/missing/additional entries, and digest
 substitution. It independently checks:
 
