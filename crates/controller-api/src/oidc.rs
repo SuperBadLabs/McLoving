@@ -25,11 +25,18 @@ use uuid::Uuid;
 use super::{ApiError, ApiState, bearer_token, unix_time_ms};
 
 const MAX_TOKEN_RESPONSE_BYTES: usize = 128 * 1024;
+pub const MAX_OIDC_SESSION_TTL_SECONDS: u64 = 60 * 60;
+pub const MAX_OIDC_REFRESH_TTL_SECONDS: u64 = 24 * 60 * 60;
+pub const MAX_OIDC_REQUEST_TIMEOUT_SECONDS: u64 = 60;
+pub const MAX_OIDC_CLOCK_SKEW_SECONDS: u64 = 5 * 60;
+pub const MAX_OIDC_JWKS_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct OidcClientConfig {
     pub organization_id: Uuid,
     pub provider_id: Uuid,
+    pub configuration_generation: i64,
+    pub configuration_digest: [u8; 32],
     pub client_secret: Option<String>,
     pub allowed_redirect_uris: BTreeSet<String>,
     pub session_ttl: Duration,
@@ -50,10 +57,16 @@ pub(crate) struct OidcClient {
 impl OidcClient {
     pub(crate) fn new(config: OidcClientConfig) -> Result<Self, ApiError> {
         if config.allowed_redirect_uris.is_empty()
+            || config.configuration_generation <= 0
             || config.session_ttl.is_zero()
             || config.refresh_ttl <= config.session_ttl
             || config.request_timeout.is_zero()
             || config.max_jwks_bytes == 0
+            || config.session_ttl.as_secs() > MAX_OIDC_SESSION_TTL_SECONDS
+            || config.refresh_ttl.as_secs() > MAX_OIDC_REFRESH_TTL_SECONDS
+            || config.request_timeout.as_secs() > MAX_OIDC_REQUEST_TIMEOUT_SECONDS
+            || config.clock_skew.as_secs() > MAX_OIDC_CLOCK_SKEW_SECONDS
+            || config.max_jwks_bytes > MAX_OIDC_JWKS_BYTES
         {
             return Err(ApiError::configuration(
                 "OIDC client bounds or redirect allowlist are invalid",
@@ -173,6 +186,8 @@ struct IdTokenClaims {
     nonce: String,
     #[serde(default)]
     nbf: Option<u64>,
+    #[serde(default)]
+    azp: Option<String>,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
 }
@@ -185,6 +200,7 @@ pub(crate) async fn start(
 ) -> Result<(HeaderMap, Json<StartResponse>), ApiError> {
     let client = runtime_client(&state, organization_id, provider_id)?;
     client.admit_start(client_address.ip())?;
+    let provider = current_provider(&state, organization_id, provider_id, client).await?;
     if !client
         .config
         .allowed_redirect_uris
@@ -195,7 +211,6 @@ pub(crate) async fn start(
             "redirect URI is not in the exact OIDC allowlist",
         ));
     }
-    let provider = current_provider(&state, organization_id, provider_id).await?;
     validate_provider_urls(&provider, client.config.allow_insecure_loopback_for_tests)?;
     let state_token = random_token();
     let nonce = random_token();
@@ -267,7 +282,7 @@ pub(crate) async fn callback(
             "OIDC state is bound to another provider",
         ));
     }
-    let provider = current_provider(&state, organization_id, provider_id).await?;
+    let provider = current_provider(&state, organization_id, provider_id, client).await?;
     validate_provider_urls(&provider, client.config.allow_insecure_loopback_for_tests)?;
     let mut token_request = client.http.post(&provider.token_endpoint).form(&[
         ("grant_type", "authorization_code"),
@@ -365,9 +380,9 @@ pub(crate) async fn refresh(
         .refresh_session_provider(organization_id, current_refresh_digest, now)
         .await
         .map_err(identity_error)?;
-    let config = runtime_client(&state, organization_id, provider_id)?
-        .config
-        .clone();
+    let client = runtime_client(&state, organization_id, provider_id)?;
+    current_provider(&state, organization_id, provider_id, client).await?;
+    let config = client.config.clone();
     let issue = session_issue(&config, &access_token, &refresh_token, now)?;
     let session = state
         .store
@@ -448,6 +463,7 @@ async fn current_provider(
     state: &ApiState,
     organization_id: Uuid,
     provider_id: Uuid,
+    client: &OidcClient,
 ) -> Result<IdentityProviderConfig, ApiError> {
     let provider = state
         .store
@@ -459,6 +475,15 @@ async fn current_provider(
             StatusCode::SERVICE_UNAVAILABLE,
             "oidc_provider_disabled",
             "OIDC provider is disabled",
+        ));
+    }
+    if provider.configuration_generation != client.config.configuration_generation
+        || provider.configuration_digest != client.config.configuration_digest
+    {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "oidc_configuration_stale",
+            "OIDC client configuration is stale on this controller",
         ));
     }
     Ok(provider)
@@ -607,13 +632,36 @@ fn validate_id_token(
     {
         return Err(invalid_id_token());
     }
-    // Retain the claim in the typed structure so serde cannot silently accept
-    // an absent or structurally invalid audience even though jsonwebtoken also
-    // performs the authoritative audience check above.
-    if claims.aud.is_null() {
+    // Retain and inspect the claim so serde cannot silently accept an absent or
+    // structurally invalid audience. OIDC requires the authorized party for a
+    // multi-audience token, and any supplied value must name this client.
+    if !authorized_party_matches(&claims.aud, claims.azp.as_deref(), &provider.client_id) {
         return Err(invalid_id_token());
     }
     Ok(claims)
+}
+
+fn authorized_party_matches(
+    audience: &Value,
+    authorized_party: Option<&str>,
+    client_id: &str,
+) -> bool {
+    let audience_count = match audience {
+        Value::String(value) if !value.is_empty() => 1,
+        Value::Array(values)
+            if !values.is_empty()
+                && values
+                    .iter()
+                    .all(|value| value.as_str().is_some_and(|value| !value.is_empty())) =>
+        {
+            values.len()
+        }
+        _ => return false,
+    };
+    match authorized_party {
+        Some(value) => value == client_id,
+        None => audience_count == 1,
+    }
 }
 
 fn claim_groups(
@@ -722,4 +770,26 @@ fn identity_error(error: StoreError) -> ApiError {
 
 fn oidc_bad_request(code: &'static str, message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::BAD_REQUEST, code, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorized_party_is_required_for_multiple_audiences_and_exact_when_present() {
+        let one = serde_json::json!("mcloving");
+        assert!(authorized_party_matches(&one, None, "mcloving"));
+        assert!(authorized_party_matches(&one, Some("mcloving"), "mcloving"));
+        assert!(!authorized_party_matches(&one, Some("other"), "mcloving"));
+
+        let many = serde_json::json!(["mcloving", "other"]);
+        assert!(!authorized_party_matches(&many, None, "mcloving"));
+        assert!(authorized_party_matches(
+            &many,
+            Some("mcloving"),
+            "mcloving"
+        ));
+        assert!(!authorized_party_matches(&many, Some("other"), "mcloving"));
+    }
 }

@@ -89,8 +89,13 @@ issuer, audience, authorization/token/JWKS endpoints, client ID, group claim,
 configuration and JWKS generations, exact lowercase JWKS SHA-256, and
 comma-separated exact redirect allowlist. A confidential client additionally
 sets `MCLOVING_OIDC_CLIENT_SECRET`. TTL, clock-skew, request-timeout, and JWKS
-byte limits have bounded operator overrides. Network endpoints and redirects
-must use HTTPS; loopback HTTP exists solely for contained protocol tests.
+byte limits have bounded operator overrides: access sessions are capped at one
+hour, refresh sessions at 24 hours, provider requests at 60 seconds, clock skew
+at five minutes, and JWKS responses at 4 MiB. The durable provider generation
+and digest bind those local controls, including the exact redirect allowlist,
+so a stale replica fails closed during configuration rollout. Network endpoints
+and redirects must use HTTPS; loopback HTTP exists solely for contained
+protocol tests.
 
 Identity administration is an offline migration-role operation rather than a
 public route. Operators use the shipped `mcloving-identity-admin` binary for

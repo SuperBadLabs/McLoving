@@ -195,24 +195,26 @@ async fn oidc_pkce_refresh_group_fencing_and_logout_are_end_to_end() {
         .await
         .expect("create OIDC tenant");
     let provider_id = Uuid::new_v4();
+    let configuration_digest = Sha256::digest(b"test-provider-v1").into();
+    let provider = IdentityProviderWrite {
+        organization_id,
+        provider_id,
+        issuer: base.clone(),
+        audience: "mcloving-test".to_owned(),
+        authorization_endpoint: format!("{base}/authorize"),
+        token_endpoint: format!("{base}/token"),
+        jwks_uri: format!("{base}/jwks"),
+        client_id: "mcloving-test".to_owned(),
+        group_claim: "groups".to_owned(),
+        configuration_generation: 1,
+        configuration_digest,
+        jwks_generation: 1,
+        jwks_digest: Sha256::digest(&jwks_bytes).into(),
+        enabled: true,
+        actor_subject: "test:operator".to_owned(),
+    };
     admin
-        .provision_identity_provider(&IdentityProviderWrite {
-            organization_id,
-            provider_id,
-            issuer: base.clone(),
-            audience: "mcloving-test".to_owned(),
-            authorization_endpoint: format!("{base}/authorize"),
-            token_endpoint: format!("{base}/token"),
-            jwks_uri: format!("{base}/jwks"),
-            client_id: "mcloving-test".to_owned(),
-            group_claim: "groups".to_owned(),
-            configuration_generation: 1,
-            configuration_digest: Sha256::digest(b"test-provider-v1").into(),
-            jwks_generation: 1,
-            jwks_digest: Sha256::digest(&jwks_bytes).into(),
-            enabled: true,
-            actor_subject: "test:operator".to_owned(),
-        })
+        .provision_identity_provider(&provider)
         .await
         .expect("provision contained OIDC provider");
     let identity_id = Uuid::new_v4();
@@ -249,6 +251,8 @@ async fn oidc_pkce_refresh_group_fencing_and_logout_are_end_to_end() {
             .with_oidc_client(OidcClientConfig {
                 organization_id,
                 provider_id,
+                configuration_generation: 1,
+                configuration_digest,
                 client_secret: Some("contained-client-secret".to_owned()),
                 allowed_redirect_uris: BTreeSet::from([redirect_uri.to_owned()]),
                 session_ttl: Duration::from_secs(300),
@@ -345,11 +349,52 @@ async fn oidc_pkce_refresh_group_fencing_and_logout_are_end_to_end() {
     assert_eq!(logout_response.status(), StatusCode::OK);
     assert_no_store(&logout_response);
     assert_eq!(
-        project_read(app, organization_id, project_id, refreshed_access).await,
+        project_read(app.clone(), organization_id, project_id, refreshed_access).await,
         StatusCode::UNAUTHORIZED,
         "logout revokes the durable session across controllers"
     );
+    admin
+        .provision_identity_provider(&IdentityProviderWrite {
+            configuration_generation: 2,
+            configuration_digest: Sha256::digest(b"test-provider-v2").into(),
+            ..provider
+        })
+        .await
+        .expect("advance the durable provider configuration");
+    assert_eq!(
+        start_status(app, organization_id, provider_id, redirect_uri).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a replica with stale local OIDC configuration must fail closed"
+    );
     idp_server.abort();
+}
+
+async fn start_status(
+    app: Router,
+    organization_id: Uuid,
+    provider_id: Uuid,
+    redirect_uri: &str,
+) -> StatusCode {
+    let mut start_url = reqwest::Url::parse("http://mcloving.invalid").expect("base URL");
+    start_url.set_path(&format!(
+        "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start"
+    ));
+    start_url
+        .query_pairs_mut()
+        .append_pair("redirect_uri", redirect_uri);
+    app.oneshot(
+        Request::get(format!(
+            "{}?{}",
+            start_url.path(),
+            start_url.query().expect("start query")
+        ))
+        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 43_123))))
+        .body(Body::empty())
+        .expect("start request"),
+    )
+    .await
+    .expect("start response")
+    .status()
 }
 
 async fn login(

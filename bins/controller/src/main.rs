@@ -20,7 +20,10 @@ use mcloving_agent_protocol::{
     ATTEMPT_CREDENTIALS_FEATURE, ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS,
     WORK_DELIVERY_FEATURE, negotiate,
 };
-use mcloving_controller_api::{ApiState, OidcClientConfig, router};
+use mcloving_controller_api::{
+    ApiState, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
+    MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig, router,
+};
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
     AgentReconciliationDisposition, ClaimRequest, IdentityProviderWrite, NewLogChunk,
@@ -291,6 +294,32 @@ fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
     if allowed_redirect_uris.iter().any(|uri| uri.trim() != uri) {
         bail!("MCLOVING_OIDC_ALLOWED_REDIRECT_URIS entries must be canonical");
     }
+    let session_ttl_seconds = bounded_u64_environment_at_most(
+        "MCLOVING_OIDC_SESSION_TTL_SECONDS",
+        15 * 60,
+        MAX_OIDC_SESSION_TTL_SECONDS,
+    )?;
+    let refresh_ttl_seconds = bounded_u64_environment_at_most(
+        "MCLOVING_OIDC_REFRESH_TTL_SECONDS",
+        8 * 60 * 60,
+        MAX_OIDC_REFRESH_TTL_SECONDS,
+    )?;
+    let request_timeout_seconds = bounded_u64_environment_at_most(
+        "MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS",
+        10,
+        MAX_OIDC_REQUEST_TIMEOUT_SECONDS,
+    )?;
+    let clock_skew_seconds = bounded_u64_environment_at_most(
+        "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
+        60,
+        MAX_OIDC_CLOCK_SKEW_SECONDS,
+    )?;
+    let max_jwks_bytes = usize::try_from(bounded_u64_environment_at_most(
+        "MCLOVING_OIDC_MAX_JWKS_BYTES",
+        256 * 1024,
+        MAX_OIDC_JWKS_BYTES as u64,
+    )?)
+    .context("MCLOVING_OIDC_MAX_JWKS_BYTES is too large")?;
     let configuration_digest = oidc_configuration_digest(
         &[
             &issuer,
@@ -302,6 +331,13 @@ fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
             &group_claim,
         ],
         client_secret.as_deref(),
+        &allowed_redirect_uris,
+        session_ttl_seconds,
+        refresh_ttl_seconds,
+        request_timeout_seconds,
+        clock_skew_seconds,
+        max_jwks_bytes,
+        false,
     );
     let configuration_generation = i64::try_from(configuration_generation)
         .context("MCLOVING_OIDC_CONFIGURATION_GENERATION is too large")?;
@@ -328,47 +364,60 @@ fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
         client: OidcClientConfig {
             organization_id,
             provider_id,
+            configuration_generation,
+            configuration_digest,
             client_secret,
             allowed_redirect_uris,
-            session_ttl: Duration::from_secs(bounded_u64_environment(
-                "MCLOVING_OIDC_SESSION_TTL_SECONDS",
-                15 * 60,
-            )?),
-            refresh_ttl: Duration::from_secs(bounded_u64_environment(
-                "MCLOVING_OIDC_REFRESH_TTL_SECONDS",
-                8 * 60 * 60,
-            )?),
-            request_timeout: Duration::from_secs(bounded_u64_environment(
-                "MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS",
-                10,
-            )?),
-            clock_skew: Duration::from_secs(bounded_u64_environment_at_most(
-                "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
-                60,
-                5 * 60,
-            )?),
-            max_jwks_bytes: usize::try_from(bounded_u64_environment(
-                "MCLOVING_OIDC_MAX_JWKS_BYTES",
-                256 * 1024,
-            )?)
-            .context("MCLOVING_OIDC_MAX_JWKS_BYTES is too large")?,
+            session_ttl: Duration::from_secs(session_ttl_seconds),
+            refresh_ttl: Duration::from_secs(refresh_ttl_seconds),
+            request_timeout: Duration::from_secs(request_timeout_seconds),
+            clock_skew: Duration::from_secs(clock_skew_seconds),
+            max_jwks_bytes,
             allow_insecure_loopback_for_tests: false,
         },
     }))
 }
 
-fn oidc_configuration_digest(fields: &[&str], client_secret: Option<&str>) -> [u8; 32] {
+#[allow(clippy::too_many_arguments)]
+fn oidc_configuration_digest(
+    fields: &[&str],
+    client_secret: Option<&str>,
+    allowed_redirect_uris: &BTreeSet<String>,
+    session_ttl_seconds: u64,
+    refresh_ttl_seconds: u64,
+    request_timeout_seconds: u64,
+    clock_skew_seconds: u64,
+    max_jwks_bytes: usize,
+    allow_insecure_loopback_for_tests: bool,
+) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(b"mcloving.oidc.configuration.v1\0");
+    hash.update(b"mcloving.oidc.configuration.v2\0");
     for field in fields {
-        hash.update(field.len().to_be_bytes());
-        hash.update(field.as_bytes());
+        hash_oidc_configuration_field(&mut hash, field.as_bytes());
     }
     match client_secret {
-        Some(secret) => hash.update(Sha256::digest(secret.as_bytes())),
-        None => hash.update([0_u8; 32]),
+        Some(secret) => {
+            hash.update([1]);
+            hash.update(Sha256::digest(secret.as_bytes()));
+        }
+        None => hash.update([0]),
     }
+    hash.update((allowed_redirect_uris.len() as u64).to_be_bytes());
+    for redirect_uri in allowed_redirect_uris {
+        hash_oidc_configuration_field(&mut hash, redirect_uri.as_bytes());
+    }
+    hash.update(session_ttl_seconds.to_be_bytes());
+    hash.update(refresh_ttl_seconds.to_be_bytes());
+    hash.update(request_timeout_seconds.to_be_bytes());
+    hash.update(clock_skew_seconds.to_be_bytes());
+    hash.update((max_jwks_bytes as u64).to_be_bytes());
+    hash.update([u8::from(allow_insecure_loopback_for_tests)]);
     hash.finalize().into()
+}
+
+fn hash_oidc_configuration_field(hash: &mut Sha256, value: &[u8]) {
+    hash.update((value.len() as u64).to_be_bytes());
+    hash.update(value);
 }
 
 fn parse_sha256_environment(name: &str) -> Result<[u8; 32]> {
@@ -1502,6 +1551,60 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("must be at most 300")
+        );
+    }
+
+    #[test]
+    fn oidc_configuration_digest_binds_local_security_controls() {
+        let first_redirects = BTreeSet::from(["https://app.example.test/callback".to_owned()]);
+        let second_redirects = BTreeSet::from(["https://new.example.test/callback".to_owned()]);
+        let fields = [
+            "https://id.example.test",
+            "audience",
+            "https://id.example.test/authorize",
+            "https://id.example.test/token",
+            "https://id.example.test/jwks",
+            "client",
+            "groups",
+        ];
+        let baseline = oidc_configuration_digest(
+            &fields,
+            Some("secret"),
+            &first_redirects,
+            900,
+            28_800,
+            10,
+            60,
+            256 * 1024,
+            false,
+        );
+        assert_ne!(
+            baseline,
+            oidc_configuration_digest(
+                &fields,
+                Some("secret"),
+                &second_redirects,
+                900,
+                28_800,
+                10,
+                60,
+                256 * 1024,
+                false,
+            )
+        );
+        assert_ne!(
+            baseline,
+            oidc_configuration_digest(
+                &fields,
+                Some("secret"),
+                &first_redirects,
+                901,
+                28_800,
+                10,
+                60,
+                256 * 1024,
+                false,
+            )
         );
     }
 }

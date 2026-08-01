@@ -2,7 +2,10 @@
 
 mod oidc;
 
-pub use oidc::OidcClientConfig;
+pub use oidc::{
+    MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
+    MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig,
+};
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
