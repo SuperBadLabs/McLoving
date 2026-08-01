@@ -1,0 +1,9 @@
+version: 1
+name: "corpus-052-cinqict_jenkinsdev"
+stages:
+  - id: "build"
+    name: "Build"
+    steps:
+      - process:
+          program: "/bin/sh"
+          args: ["-xe", "-c", "echo \"Hello World\""]

@@ -1,0 +1,2559 @@
+//! Independent, fail-closed verification for the first Jenkins/McLoving
+//! native execution differential.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::fs;
+use std::path::{Component, Path};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+pub const SCHEMA: &str = "mcloving.jenkins.native-differential/v1";
+pub const TRACE_SCHEMA: &str = "mcloving.jenkins.differential-trace/v1";
+pub const CASE: &str = "corpus-052-cinqict_jenkinsdev";
+pub const SOURCE_SHA256: &str = "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100";
+pub const PIPELINE_SHA256: &str =
+    "551d489ca13bf5d130bdc5c10ce35e5d3d988bdaa1c5488dd9bc79b30674acdc";
+pub const JENKINS_IMAGE_SHA256: &str =
+    "f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02";
+pub const JENKINS_PLUGIN_MANIFEST_SHA256: &str =
+    "e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0";
+pub const JENKINS_INIT_SHA256: &str =
+    "59e1e8ee88116c0645e7e2e4ea5af0184ce85d75b94df39b02c76d66347fdc0a";
+const JENKINS_CONTAINER_ID: &str =
+    "70fda66b870bb443c0fceb6b9f3d8836a9a9356b0b69f2d08657e7c27ab688be";
+const JENKINS_CONTAINER_NAME: &str = "mcloving-diff001-jenkins-v43";
+const JENKINS_CONTAINER_CREATED: &str = "2026-08-01T17:24:40.33500311Z";
+const JENKINS_CONTAINER_STARTED: &str = "2026-08-01T17:24:40.43851937Z";
+const JENKINS_CONTAINER_STARTED_UNIX_MILLIS: u64 = 1_785_605_080_438;
+const JENKINS_CAPTURE_ROOT: &str =
+    "/home/srikanth/mcloving-diff001-20260801T174500Z-v43/evidence/jenkins";
+const JENKINS_CAPTURE_MANIFEST_SHA256: &str =
+    "0a2e33c75435776853e48ab5cca67cb1dc9231bc4972ec95d46643f8acc96654";
+const JENKINS_CAPTURE_FILES: [&str; 16] = [
+    "Jenkinsfile",
+    "PLUGIN_SHA256SUMS",
+    "build.json",
+    "console.txt",
+    "container-inspect.json",
+    "controller.log",
+    "external-network.txt",
+    "image-inspect.json",
+    "init.groovy",
+    "plugin-verification.txt",
+    "queue.json",
+    "runtime.txt",
+    "stage-build.json",
+    "wfapi.json",
+    "workspace-tmp.tsv",
+    "workspace.tsv",
+];
+const JENKINS_CONTAINMENT_RECEIPTS: [(&str, &str); 4] = [
+    (
+        "jenkins/container-inspect.json",
+        "774577164ccf3df31595c4377c83e1f87a7f27cb07c0bb45153cde45dcbde5c4",
+    ),
+    (
+        "jenkins/image-inspect.json",
+        "815d3caf3cb5162342a9d306b86f542e324d80877da4e3e5dd709e2f71dec84d",
+    ),
+    (
+        "jenkins/external-network.txt",
+        "45dd0df6458bac2014624ee99a377ec34edb834e90bd4213c07742a51f891c55",
+    ),
+    (
+        "jenkins/runtime.txt",
+        "393b3eb6c1bd166f477c4e45056d30b831166599fea3a090f7a8eeb263f26013",
+    ),
+];
+pub const MCLOVING_RUNNER_IMAGE_SHA256: &str =
+    "77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa";
+const MCLOVING_RUNNER_IMAGE_REFERENCE: &str = "docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa";
+pub const MCLOVING_DATABASE_IMAGE_SHA256: &str =
+    "ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94";
+
+const MCLOVING_NETWORK: &str = "mcloving-diff001-net-v33";
+const MCLOVING_NETWORK_ID: &str =
+    "e59753da1a365aafe509c2540526db4c87c262b8bfd3d062c27d0e77bf6654e2";
+const MCLOVING_PIPELINE_DIGEST: &str =
+    "2a9b8b7bcd076950c67de874bd1e2b693af511ad55a7de3495d5c0b4210349d3";
+const MCLOVING_PIPELINE_DIGEST_BYTES: [u64; 32] = [
+    42, 155, 139, 123, 205, 7, 105, 80, 198, 125, 232, 116, 189, 30, 43, 105, 58, 245, 17, 173, 85,
+    167, 222, 52, 149, 213, 192, 180, 33, 3, 73, 211,
+];
+const MCLOVING_BUILD_ID: &str = "94217bcc-59eb-4357-9622-937ab015c963";
+const MCLOVING_NODE_ID: &str = "1a6ca500-7c3d-4d51-92c1-0b19eb0526ce";
+const MCLOVING_ATTEMPT_ID: &str = "e3ea476a-96b0-4b0b-8109-19fc2931b12f";
+const MCLOVING_RESULT_SHA256: &str =
+    "7b09726b2edfce62285608b12dbd89adc473bb4872ca72e2371dbb58e4d88cd4";
+const MCLOVING_TEST_BINARY_SHA256: &str =
+    "b5e72b0971df1458412676558a756b541e61876a3202a39178fa82c59bf48b68";
+const MCLOVING_CONTROLLER_BINARY_SHA256: &str =
+    "755b32204dc1a7e3628eb74579a8aede16dee5969c46ab4da43316b552e45c6c";
+const MCLOVING_RUNNER_ID: &str = "a9bcaa4cfcd91128906d367e1c8a27e2a3e42796846decaa3eb04a607fc04792";
+const MCLOVING_RUNNER_NAME: &str = "mcloving-diff001-runner-v33";
+const MCLOVING_RUNNER_CREATED: &str = "2026-08-01T11:11:22.392236609-05:00";
+const MCLOVING_RUNNER_COMMAND: &str = "set -euo pipefail; { id; uname -a; locale; sha256sum 'target/debug/deps/diff_001-3b7075192798a581' target/debug/mcloving-controller; } > /evidence/runtime.txt; exec 'target/debug/deps/diff_001-3b7075192798a581' --nocapture";
+const MCLOVING_CONTAINMENT_RECEIPTS: [(&str, &str); 6] = [
+    (
+        "mcloving/network-inspect.json",
+        "93527fbcb267cb3ccf8a0806ffed4fae5a0dbd97d76e96cd2d3765aac7999f07",
+    ),
+    (
+        "mcloving/runner-inspect-pre.json",
+        "8e80f337e6730b18d73db8674a60928094726874be9838f6862988c3cb3fb129",
+    ),
+    (
+        "mcloving/runner-inspect-post.json",
+        "37ab16c78290885e006aab89cea947f8b07355596dd62c1427fae6f4b57259dd",
+    ),
+    (
+        "mcloving/postgres-inspect.json",
+        "343e09fafc3fe18a94b8568b7795e11022cd09b401d29f828f42b73d342b2403",
+    ),
+    (
+        "mcloving/runtime.txt",
+        "2bcef7f64526c185e7467c651d948a7e0627e545823d7b9eb737ad869f0aed17",
+    ),
+    (
+        "mcloving/test-output.txt",
+        "5f0c1e1e0efd0fd9ece4abfe243f5310f481fa94a22f4666acb9fcad170e16c5",
+    ),
+];
+
+const MAX_FILES: usize = 32;
+const MAX_FILE_BYTES: u64 = 262_144;
+const MAX_BUNDLE_BYTES: u64 = 1_048_576;
+const BUNDLE_FILES: [&str; 30] = [
+    "README.md",
+    "coverage.yaml",
+    "pipeline.yaml",
+    "jenkins/Jenkinsfile",
+    "jenkins/build.json",
+    "jenkins/console.txt",
+    "jenkins/container-inspect.json",
+    "jenkins/controller.log",
+    "jenkins/external-network.txt",
+    "jenkins/file-sha256.txt",
+    "jenkins/image-inspect.json",
+    "jenkins/init.groovy",
+    "jenkins/PLUGIN_SHA256SUMS",
+    "jenkins/plugin-verification.txt",
+    "jenkins/queue.json",
+    "jenkins/runtime.txt",
+    "jenkins/stage-build.json",
+    "jenkins/wfapi.json",
+    "jenkins/workspace-tmp.tsv",
+    "jenkins/workspace.tsv",
+    "mcloving/database-integrity.txt",
+    "mcloving/mcloving-raw.json",
+    "mcloving/mcloving-trace.json",
+    "mcloving/network-inspect.json",
+    "mcloving/postgres-inspect.json",
+    "mcloving/postgres.log",
+    "mcloving/runner-inspect-post.json",
+    "mcloving/runner-inspect-pre.json",
+    "mcloving/runtime.txt",
+    "mcloving/test-output.txt",
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationReceipt {
+    pub schema: &'static str,
+    pub case: &'static str,
+    pub files: usize,
+    pub admitted_cases: u64,
+    pub certified_cases: u64,
+    pub non_admitted_cases: u64,
+    pub trace_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl VerificationError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for VerificationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for VerificationError {}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalTrace {
+    schema: String,
+    case: String,
+    source_sha256: String,
+    pipeline_sha256: String,
+    stage_order: Vec<String>,
+    process: CanonicalProcess,
+    terminal_outcome: String,
+    semantic_stdout_hex: String,
+    attempt_ordinals: Vec<u64>,
+    workspace_entries: u64,
+    artifacts: u64,
+    tests: u64,
+    approvals: u64,
+    credential_grants: u64,
+    external_effects: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalProcess {
+    program: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Coverage {
+    version: u64,
+    schema: String,
+    corpus_cases: u64,
+    admitted_cases: u64,
+    certified_cases: u64,
+    non_admitted_cases: u64,
+    jenkins_executions: u64,
+    mcloving_executions: u64,
+    admitted_case: CoverageCase,
+    non_admitted_families: Vec<String>,
+    authority: CoverageAuthority,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoverageCase {
+    id: String,
+    source_sha256: String,
+    pipeline_sha256: String,
+    platform: String,
+    trust_pool: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoverageAuthority {
+    jenkins_network: String,
+    mcloving_network: String,
+    production_effects: bool,
+    credentials: bool,
+}
+
+pub fn verify_bundle(root: &Path) -> Result<VerificationReceipt, VerificationError> {
+    verify_manifest(root)?;
+    verify_jenkins_capture_manifest(root)?;
+    verify_source_and_pipeline(root)?;
+    verify_jenkins_job_definition(root)?;
+    verify_jenkins_plugin_profile(root)?;
+    let coverage = verify_coverage(root)?;
+    let jenkins = derive_jenkins_trace(root)?;
+    verify_jenkins_capture_identity(root)?;
+    let mcloving = derive_mcloving_trace(root)?;
+    if jenkins != mcloving {
+        return Err(VerificationError::new(
+            "E_TRACE_MISMATCH",
+            format!("Jenkins trace {jenkins:?} differs from McLoving trace {mcloving:?}"),
+        ));
+    }
+    let trace_sha256 = sha256(
+        &serde_json::to_vec(&jenkins)
+            .map_err(|error| VerificationError::new("E_TRACE", error.to_string()))?,
+    );
+    Ok(VerificationReceipt {
+        schema: SCHEMA,
+        case: CASE,
+        files: BUNDLE_FILES.len(),
+        admitted_cases: coverage.admitted_cases,
+        certified_cases: coverage.certified_cases,
+        non_admitted_cases: coverage.non_admitted_cases,
+        trace_sha256,
+    })
+}
+
+fn verify_manifest(root: &Path) -> Result<(), VerificationError> {
+    verify_exact_tree(root)?;
+    let manifest = read(root, "SHA256SUMS")?;
+    let text = std::str::from_utf8(&manifest)
+        .map_err(|error| VerificationError::new("E_MANIFEST", error.to_string()))?;
+    let mut entries = BTreeMap::new();
+    for line in text.lines() {
+        let (digest, name) = line.split_once("  ").ok_or_else(|| {
+            VerificationError::new("E_MANIFEST", format!("invalid manifest line {line:?}"))
+        })?;
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(VerificationError::new("E_MANIFEST", "invalid digest"));
+        }
+        validate_relative_path(name)?;
+        if entries.insert(name.to_owned(), digest.to_owned()).is_some() {
+            return Err(VerificationError::new("E_MANIFEST", "duplicate path"));
+        }
+    }
+    let expected = BUNDLE_FILES
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<BTreeSet<_>>();
+    let actual = entries.keys().cloned().collect::<BTreeSet<_>>();
+    if actual != expected || entries.len() > MAX_FILES {
+        return Err(VerificationError::new(
+            "E_MANIFEST_SET",
+            "manifest file set is not exact",
+        ));
+    }
+    let mut total = 0_u64;
+    for (name, expected_digest) in entries {
+        let bytes = read(root, &name)?;
+        total = total.saturating_add(bytes.len() as u64);
+        if sha256(&bytes) != expected_digest {
+            return Err(VerificationError::new(
+                "E_DIGEST",
+                format!("digest mismatch for {name}"),
+            ));
+        }
+    }
+    if total > MAX_BUNDLE_BYTES {
+        return Err(VerificationError::new("E_BOUNDS", "bundle is oversized"));
+    }
+    Ok(())
+}
+
+fn verify_jenkins_capture_manifest(root: &Path) -> Result<(), VerificationError> {
+    let manifest = text(root, "jenkins/file-sha256.txt")?;
+    let mut entries = BTreeMap::new();
+    for line in manifest.lines() {
+        let (digest, absolute_path) = line.split_once("  ").ok_or_else(|| {
+            VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                "invalid Jenkins capture manifest line",
+            )
+        })?;
+        if digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || digest.bytes().any(|byte| byte.is_ascii_uppercase())
+        {
+            return Err(VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                "invalid Jenkins capture digest",
+            ));
+        }
+        let prefix = format!("{JENKINS_CAPTURE_ROOT}/");
+        let name = absolute_path.strip_prefix(&prefix).ok_or_else(|| {
+            VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                "Jenkins capture path is not rooted at the certified capture",
+            )
+        })?;
+        if name.contains('/') || entries.insert(name.to_owned(), digest).is_some() {
+            return Err(VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                "Jenkins capture path is not canonical and unique",
+            ));
+        }
+    }
+    let expected = JENKINS_CAPTURE_FILES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+    if entries.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        return Err(VerificationError::new(
+            "E_JENKINS_CAPTURE_MANIFEST",
+            "Jenkins capture manifest file set is not exact",
+        ));
+    }
+    for name in JENKINS_CAPTURE_FILES {
+        let expected_digest = entries.get(name).ok_or_else(|| {
+            VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                "Jenkins capture manifest entry is absent",
+            )
+        })?;
+        if sha256(&read(root, &format!("jenkins/{name}"))?) != *expected_digest {
+            return Err(VerificationError::new(
+                "E_JENKINS_CAPTURE_MANIFEST",
+                format!("Jenkins capture digest differs for {name}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_jenkins_capture_identity(root: &Path) -> Result<(), VerificationError> {
+    if sha256(&read(root, "jenkins/file-sha256.txt")?) != JENKINS_CAPTURE_MANIFEST_SHA256 {
+        return Err(VerificationError::new(
+            "E_JENKINS_CAPTURE_IDENTITY",
+            "Jenkins capture manifest does not match the certified execution",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_exact_tree(root: &Path) -> Result<(), VerificationError> {
+    let root_metadata = fs::symlink_metadata(root)
+        .map_err(|error| VerificationError::new("E_TREE", error.to_string()))?;
+    if !root_metadata.file_type().is_dir() {
+        return Err(VerificationError::new(
+            "E_TREE",
+            "bundle root is not a real directory",
+        ));
+    }
+    let mut expected_files = BUNDLE_FILES
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<BTreeSet<_>>();
+    expected_files.insert("SHA256SUMS".to_owned());
+    let expected_directories = ["jenkins".to_owned(), "mcloving".to_owned()]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut actual_files = BTreeSet::new();
+    let mut actual_directories = BTreeSet::new();
+    collect_tree(
+        root,
+        Path::new(""),
+        &mut actual_files,
+        &mut actual_directories,
+    )?;
+    if actual_files != expected_files || actual_directories != expected_directories {
+        return Err(VerificationError::new(
+            "E_TREE",
+            "filesystem tree is not exact",
+        ));
+    }
+    Ok(())
+}
+
+fn collect_tree(
+    root: &Path,
+    relative: &Path,
+    files: &mut BTreeSet<String>,
+    directories: &mut BTreeSet<String>,
+) -> Result<(), VerificationError> {
+    let directory = root.join(relative);
+    for entry in fs::read_dir(&directory)
+        .map_err(|error| VerificationError::new("E_TREE", error.to_string()))?
+    {
+        let entry = entry.map_err(|error| VerificationError::new("E_TREE", error.to_string()))?;
+        let child = relative.join(entry.file_name());
+        let child_name = child.to_string_lossy().into_owned();
+        validate_relative_path(&child_name)?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| VerificationError::new("E_TREE", error.to_string()))?;
+        if file_type.is_file() {
+            files.insert(child_name);
+        } else if file_type.is_dir() {
+            directories.insert(child_name);
+            collect_tree(root, &child, files, directories)?;
+        } else {
+            return Err(VerificationError::new(
+                "E_TREE",
+                "bundle contains a symlink or special file",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_source_and_pipeline(root: &Path) -> Result<(), VerificationError> {
+    if sha256(&read(root, "jenkins/Jenkinsfile")?) != SOURCE_SHA256 {
+        return Err(VerificationError::new(
+            "E_SOURCE",
+            "source digest is not the admitted source",
+        ));
+    }
+    if sha256(&read(root, "pipeline.yaml")?) != PIPELINE_SHA256 {
+        return Err(VerificationError::new(
+            "E_PIPELINE",
+            "pipeline digest is not the admitted compilation",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_jenkins_job_definition(root: &Path) -> Result<(), VerificationError> {
+    let init = read(root, "jenkins/init.groovy")?;
+    if sha256(&init) != JENKINS_INIT_SHA256 {
+        return Err(VerificationError::new(
+            "E_JENKINS_SOURCE",
+            "Jenkins initializer does not install the admitted source exactly",
+        ));
+    }
+
+    let controller_log = text(root, "jenkins/controller.log")?;
+    let init_position = controller_log
+        .find("Executing /var/jenkins_home/init.groovy.d/99-diff001.groovy")
+        .ok_or_else(|| {
+            VerificationError::new("E_JENKINS_SOURCE", "initializer execution is absent")
+        })?;
+    let ready_position = controller_log
+        .find("Jenkins is fully up and running")
+        .ok_or_else(|| VerificationError::new("E_JENKINS_SOURCE", "ready event is absent"))?;
+    let build_position = controller_log
+        .find("diff-001-admitted #1")
+        .ok_or_else(|| VerificationError::new("E_JENKINS_SOURCE", "build event is absent"))?;
+    if !(init_position < ready_position && ready_position < build_position) {
+        return Err(VerificationError::new(
+            "E_JENKINS_SOURCE",
+            "initializer, readiness, and build chronology differs",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_coverage(root: &Path) -> Result<Coverage, VerificationError> {
+    let bytes = read(root, "coverage.yaml")?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| VerificationError::new("E_COVERAGE", error.to_string()))?;
+    let coverage: Coverage = serde_saphyr::from_str(text)
+        .map_err(|error| VerificationError::new("E_COVERAGE", error.to_string()))?;
+    let expected_families = [
+        "parameters",
+        "conditions",
+        "matrix",
+        "timeouts",
+        "retries",
+        "caught-errors",
+        "unstable-results",
+        "cancellation",
+        "post",
+        "parallel",
+        "join",
+        "fail-fast",
+        "multi-build",
+        "shared-resources",
+        "alternate-agent-selection",
+        "approvals",
+        "dependencies",
+        "caches",
+        "artifacts",
+        "tests",
+        "failure-outcomes",
+        "scripted-pipeline",
+        "shared-library-runtime",
+        "external-effects",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    if coverage.version != 1
+        || coverage.schema != SCHEMA
+        || coverage.corpus_cases != 228
+        || coverage.admitted_cases != 1
+        || coverage.certified_cases != 1
+        || coverage.non_admitted_cases != 227
+        || coverage.jenkins_executions != 1
+        || coverage.mcloving_executions != 1
+        || coverage.admitted_case.id != CASE
+        || coverage.admitted_case.source_sha256 != SOURCE_SHA256
+        || coverage.admitted_case.pipeline_sha256 != PIPELINE_SHA256
+        || coverage.admitted_case.platform != "linux"
+        || coverage.admitted_case.trust_pool != "migration-deny-authority"
+        || coverage.non_admitted_families != expected_families
+        || coverage.authority.jenkins_network != "none"
+        || coverage.authority.mcloving_network != "internal-postgresql-only"
+        || coverage.authority.production_effects
+        || coverage.authority.credentials
+    {
+        return Err(VerificationError::new(
+            "E_COVERAGE",
+            "coverage or authority contract is not exact",
+        ));
+    }
+    Ok(coverage)
+}
+
+fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError> {
+    let build = json(root, "jenkins/build.json")?;
+    exact_object_keys(
+        &build,
+        &[],
+        &[
+            "_class",
+            "actions",
+            "artifacts",
+            "building",
+            "changeSets",
+            "culprits",
+            "description",
+            "displayName",
+            "duration",
+            "estimatedDuration",
+            "executor",
+            "fullDisplayName",
+            "id",
+            "inProgress",
+            "keepLog",
+            "nextBuild",
+            "number",
+            "previousBuild",
+            "queueId",
+            "result",
+            "timestamp",
+            "url",
+        ],
+        "E_JENKINS_BUILD",
+    )?;
+    exact_string(
+        &build,
+        &["_class"],
+        "org.jenkinsci.plugins.workflow.job.WorkflowRun",
+        "E_JENKINS_BUILD",
+    )?;
+    exact_string(
+        &build,
+        &["fullDisplayName"],
+        "diff-001-admitted #1",
+        "E_JENKINS_BUILD",
+    )?;
+    exact_string(&build, &["id"], "1", "E_JENKINS_BUILD")?;
+    exact_string(&build, &["displayName"], "#1", "E_JENKINS_BUILD")?;
+    exact_string(
+        &build,
+        &["url"],
+        "http://127.0.0.1:8080/job/diff-001-admitted/1/",
+        "E_JENKINS_BUILD",
+    )?;
+    exact_string(&build, &["result"], "SUCCESS", "E_JENKINS_BUILD")?;
+    exact_bool(&build, &["building"], false, "E_JENKINS_BUILD")?;
+    exact_bool(&build, &["inProgress"], false, "E_JENKINS_BUILD")?;
+    exact_u64(&build, &["number"], 1, "E_JENKINS_BUILD")?;
+    exact_u64(&build, &["queueId"], 1, "E_JENKINS_BUILD")?;
+    exact_u64(&build, &["timestamp"], 1_785_605_098_139, "E_JENKINS_BUILD")?;
+    exact_u64(&build, &["duration"], 2_130, "E_JENKINS_BUILD")?;
+    exact_u64(&build, &["estimatedDuration"], 2_130, "E_JENKINS_BUILD")?;
+    exact_bool(&build, &["keepLog"], false, "E_JENKINS_BUILD")?;
+    for field in ["description", "executor", "nextBuild", "previousBuild"] {
+        exact_null(&build, &[field], "E_JENKINS_BUILD")?;
+    }
+    exact_empty_array(&build, &["artifacts"], "E_JENKINS_BUILD")?;
+    exact_empty_array(&build, &["changeSets"], "E_JENKINS_BUILD")?;
+    exact_empty_array(&build, &["culprits"], "E_JENKINS_BUILD")?;
+
+    let workflow = json(root, "jenkins/wfapi.json")?;
+    exact_object_keys(
+        &workflow,
+        &[],
+        &[
+            "_links",
+            "durationMillis",
+            "endTimeMillis",
+            "id",
+            "name",
+            "pauseDurationMillis",
+            "queueDurationMillis",
+            "stages",
+            "startTimeMillis",
+            "status",
+        ],
+        "E_JENKINS_WORKFLOW",
+    )?;
+    exact_string(&workflow, &["id"], "1", "E_JENKINS_WORKFLOW")?;
+    exact_string(&workflow, &["name"], "#1", "E_JENKINS_WORKFLOW")?;
+    exact_string(
+        &workflow,
+        &["_links", "self", "href"],
+        "/job/diff-001-admitted/1/wfapi/describe",
+        "E_JENKINS_WORKFLOW",
+    )?;
+    exact_string(&workflow, &["status"], "SUCCESS", "E_JENKINS_WORKFLOW")?;
+    exact_u64(
+        &workflow,
+        &["startTimeMillis"],
+        1_785_605_098_142,
+        "E_JENKINS_WORKFLOW",
+    )?;
+    exact_u64(
+        &workflow,
+        &["endTimeMillis"],
+        1_785_605_100_272,
+        "E_JENKINS_WORKFLOW",
+    )?;
+    exact_u64(&workflow, &["durationMillis"], 2_130, "E_JENKINS_WORKFLOW")?;
+    exact_u64(&workflow, &["queueDurationMillis"], 3, "E_JENKINS_WORKFLOW")?;
+    exact_u64(&workflow, &["pauseDurationMillis"], 0, "E_JENKINS_WORKFLOW")?;
+    let stages = array(&workflow, &["stages"], "E_JENKINS_WORKFLOW")?;
+    if stages.len() != 1 {
+        return Err(VerificationError::new(
+            "E_JENKINS_WORKFLOW",
+            "expected one stage",
+        ));
+    }
+    exact_object_keys(
+        &stages[0],
+        &[],
+        &[
+            "_links",
+            "durationMillis",
+            "execNode",
+            "id",
+            "name",
+            "pauseDurationMillis",
+            "startTimeMillis",
+            "status",
+        ],
+        "E_JENKINS_WORKFLOW",
+    )?;
+    exact_string(&stages[0], &["name"], "Build", "E_JENKINS_WORKFLOW")?;
+    exact_string(&stages[0], &["id"], "6", "E_JENKINS_WORKFLOW")?;
+    exact_string(
+        &stages[0],
+        &["_links", "self", "href"],
+        "/job/diff-001-admitted/1/execution/node/6/wfapi/describe",
+        "E_JENKINS_WORKFLOW",
+    )?;
+    exact_string(&stages[0], &["status"], "SUCCESS", "E_JENKINS_WORKFLOW")?;
+    exact_string(&stages[0], &["execNode"], "", "E_JENKINS_WORKFLOW")?;
+    exact_u64(
+        &stages[0],
+        &["startTimeMillis"],
+        1_785_605_099_899,
+        "E_JENKINS_WORKFLOW",
+    )?;
+    exact_u64(&stages[0], &["durationMillis"], 344, "E_JENKINS_WORKFLOW")?;
+    exact_u64(
+        &stages[0],
+        &["pauseDurationMillis"],
+        0,
+        "E_JENKINS_WORKFLOW",
+    )?;
+
+    let stage = json(root, "jenkins/stage-build.json")?;
+    exact_object_keys(
+        &stage,
+        &[],
+        &[
+            "_links",
+            "durationMillis",
+            "execNode",
+            "id",
+            "name",
+            "pauseDurationMillis",
+            "stageFlowNodes",
+            "startTimeMillis",
+            "status",
+        ],
+        "E_JENKINS_STAGE",
+    )?;
+    exact_string(&stage, &["id"], "6", "E_JENKINS_STAGE")?;
+    exact_string(
+        &stage,
+        &["_links", "self", "href"],
+        "/job/diff-001-admitted/1/execution/node/6/wfapi/describe",
+        "E_JENKINS_STAGE",
+    )?;
+    exact_string(&stage, &["name"], "Build", "E_JENKINS_STAGE")?;
+    exact_string(&stage, &["status"], "SUCCESS", "E_JENKINS_STAGE")?;
+    exact_string(&stage, &["execNode"], "", "E_JENKINS_STAGE")?;
+    exact_u64(
+        &stage,
+        &["startTimeMillis"],
+        1_785_605_099_899,
+        "E_JENKINS_STAGE",
+    )?;
+    exact_u64(&stage, &["durationMillis"], 344, "E_JENKINS_STAGE")?;
+    exact_u64(&stage, &["pauseDurationMillis"], 0, "E_JENKINS_STAGE")?;
+    let steps = array(&stage, &["stageFlowNodes"], "E_JENKINS_STAGE")?;
+    if steps.len() != 1 {
+        return Err(VerificationError::new(
+            "E_JENKINS_STAGE",
+            "expected one step",
+        ));
+    }
+    exact_object_keys(
+        &steps[0],
+        &[],
+        &[
+            "_links",
+            "durationMillis",
+            "execNode",
+            "id",
+            "name",
+            "parameterDescription",
+            "parentNodes",
+            "pauseDurationMillis",
+            "startTimeMillis",
+            "status",
+        ],
+        "E_JENKINS_STAGE",
+    )?;
+    exact_string(&steps[0], &["name"], "Shell Script", "E_JENKINS_STAGE")?;
+    exact_string(&steps[0], &["id"], "7", "E_JENKINS_STAGE")?;
+    for (link, expected) in [
+        (
+            "self",
+            "/job/diff-001-admitted/1/execution/node/7/wfapi/describe",
+        ),
+        ("log", "/job/diff-001-admitted/1/execution/node/7/wfapi/log"),
+        ("console", "/job/diff-001-admitted/1/execution/node/7/log"),
+    ] {
+        exact_string(
+            &steps[0],
+            &["_links", link, "href"],
+            expected,
+            "E_JENKINS_STAGE",
+        )?;
+    }
+    exact_string_array(&steps[0], &["parentNodes"], &["6"], "E_JENKINS_STAGE")?;
+    exact_string(&steps[0], &["status"], "SUCCESS", "E_JENKINS_STAGE")?;
+    exact_string(&steps[0], &["execNode"], "", "E_JENKINS_STAGE")?;
+    exact_u64(
+        &steps[0],
+        &["startTimeMillis"],
+        1_785_605_099_947,
+        "E_JENKINS_STAGE",
+    )?;
+    exact_u64(&steps[0], &["durationMillis"], 286, "E_JENKINS_STAGE")?;
+    exact_u64(&steps[0], &["pauseDurationMillis"], 0, "E_JENKINS_STAGE")?;
+    exact_string(
+        &steps[0],
+        &["parameterDescription"],
+        "echo \"Hello World\"",
+        "E_JENKINS_STAGE",
+    )?;
+    verify_jenkins_chronology(&build, &workflow, &stages[0], &stage, &steps[0])?;
+
+    const EXPECTED_CONSOLE: &str = "Started by user unknown or anonymous\n\
+[Pipeline] Start of Pipeline\n\
+[Pipeline] node\n\
+Running on Jenkins in /var/jenkins_home/workspace/diff-001-admitted\n\
+[Pipeline] {\n\
+[Pipeline] stage\n\
+[Pipeline] { (Build)\n\
+[Pipeline] sh\n\
++ echo Hello World\n\
+Hello World\n\
+[Pipeline] }\n\
+[Pipeline] // stage\n\
+[Pipeline] }\n\
+[Pipeline] // node\n\
+[Pipeline] End of Pipeline\n\
+Finished: SUCCESS\n";
+    if text(root, "jenkins/console.txt")? != EXPECTED_CONSOLE {
+        return Err(VerificationError::new(
+            "E_JENKINS_LOG",
+            "Jenkins console transcript is not exact",
+        ));
+    }
+    if !read(root, "jenkins/workspace.tsv")?.is_empty()
+        || !read(root, "jenkins/workspace-tmp.tsv")?.is_empty()
+    {
+        return Err(VerificationError::new(
+            "E_JENKINS_WORKSPACE",
+            "Jenkins workspace is not empty",
+        ));
+    }
+    verify_jenkins_containment(root)?;
+    Ok(expected_trace())
+}
+
+fn verify_jenkins_chronology(
+    build: &Value,
+    workflow: &Value,
+    workflow_stage: &Value,
+    stage: &Value,
+    step: &Value,
+) -> Result<(), VerificationError> {
+    const CODE: &str = "E_JENKINS_CHRONOLOGY";
+    let at = |root: &Value, path: &[&str]| {
+        value(root, path)
+            .and_then(Value::as_u64)
+            .ok_or_else(|| VerificationError::new(CODE, format!("missing {}", path.join("."))))
+    };
+    let add = |left: u64, right: u64, label: &str| {
+        left.checked_add(right)
+            .ok_or_else(|| VerificationError::new(CODE, format!("{label} overflows")))
+    };
+
+    let build_start = at(build, &["timestamp"])?;
+    let build_duration = at(build, &["duration"])?;
+    let estimated_duration = at(build, &["estimatedDuration"])?;
+    let workflow_start = at(workflow, &["startTimeMillis"])?;
+    let workflow_end = at(workflow, &["endTimeMillis"])?;
+    let workflow_duration = at(workflow, &["durationMillis"])?;
+    let queue_duration = at(workflow, &["queueDurationMillis"])?;
+    let workflow_stage_start = at(workflow_stage, &["startTimeMillis"])?;
+    let workflow_stage_duration = at(workflow_stage, &["durationMillis"])?;
+    let stage_start = at(stage, &["startTimeMillis"])?;
+    let stage_duration = at(stage, &["durationMillis"])?;
+    let step_start = at(step, &["startTimeMillis"])?;
+    let step_duration = at(step, &["durationMillis"])?;
+
+    let watchdog_deadline = add(
+        JENKINS_CONTAINER_STARTED_UNIX_MILLIS,
+        600_000,
+        "Jenkins watchdog deadline",
+    )?;
+    let stage_end = add(stage_start, stage_duration, "stage interval")?;
+    let step_end = add(step_start, step_duration, "step interval")?;
+    if build_start < JENKINS_CONTAINER_STARTED_UNIX_MILLIS
+        || workflow_start != add(build_start, queue_duration, "queue interval")?
+        || workflow_end != add(workflow_start, workflow_duration, "workflow interval")?
+        || workflow_duration != build_duration
+        || estimated_duration != build_duration
+        || workflow_stage_start != stage_start
+        || workflow_stage_duration != stage_duration
+        || stage_start < workflow_start
+        || stage_end > workflow_end
+        || step_start < stage_start
+        || step_end > stage_end
+        || workflow_end > watchdog_deadline
+    {
+        return Err(VerificationError::new(
+            CODE,
+            "container, build, workflow, stage, and step chronology is inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
+    verify_receipt_digests(root, &JENKINS_CONTAINMENT_RECEIPTS, "E_JENKINS_CONTAINMENT")?;
+    let image_inspect = json(root, "jenkins/image-inspect.json")?;
+    let image = first_object(&image_inspect, "E_JENKINS_CONTAINMENT")?;
+    exact_string(
+        image,
+        &["Digest"],
+        &format!("sha256:{JENKINS_IMAGE_SHA256}"),
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(image, &["Architecture"], "amd64", "E_JENKINS_CONTAINMENT")?;
+    exact_string(image, &["Os"], "linux", "E_JENKINS_CONTAINMENT")?;
+
+    let inspect = json(root, "jenkins/container-inspect.json")?;
+    let container = inspect
+        .as_array()
+        .and_then(|values| values.first())
+        .ok_or_else(|| VerificationError::new("E_JENKINS_CONTAINMENT", "missing container"))?;
+    exact_string(
+        container,
+        &["Id"],
+        JENKINS_CONTAINER_ID,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Name"],
+        JENKINS_CONTAINER_NAME,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Created"],
+        JENKINS_CONTAINER_CREATED,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["State", "StartedAt"],
+        JENKINS_CONTAINER_STARTED,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["State", "Status"],
+        "running",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_bool(
+        container,
+        &["State", "Running"],
+        true,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_bool(
+        container,
+        &["State", "OOMKilled"],
+        false,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Path"],
+        "/usr/bin/timeout",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["Args"],
+        &[
+            "--signal=TERM",
+            "--kill-after=30s",
+            "600s",
+            "/usr/bin/tini",
+            "-s",
+            "--",
+            "/usr/local/bin/jenkins.sh",
+        ],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Config", "Entrypoint"],
+        "/usr/bin/timeout",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["Config", "Cmd"],
+        &[
+            "--signal=TERM",
+            "--kill-after=30s",
+            "600s",
+            "/usr/bin/tini",
+            "-s",
+            "--",
+            "/usr/local/bin/jenkins.sh",
+        ],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Config", "User"],
+        "jenkins",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Config", "Image"],
+        &format!("docker.io/jenkins/jenkins@sha256:{JENKINS_IMAGE_SHA256}"),
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["Config", "Env"],
+        &[
+            "JENKINS_HOME=/var/jenkins_home",
+            "JAVA_HOME=/opt/java/openjdk",
+            "container=podman",
+            "COPY_REFERENCE_FILE_LOG=/var/jenkins_home/copy_reference_file.log",
+            "JENKINS_SLAVE_AGENT_PORT=50000",
+            "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals",
+            "JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Djava.awt.headless=true -Xms512m -Xmx2g",
+            "REF=/usr/share/jenkins/ref",
+            "JENKINS_VERSION=2.568.1",
+            "JENKINS_UC=https://updates.jenkins.io",
+            "LANG=C.UTF-8",
+            "TZ=UTC",
+            "JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental",
+            "HOME=/var/jenkins_home",
+            "HOSTNAME=70fda66b870b",
+        ],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["ImageDigest"],
+        &format!("sha256:{JENKINS_IMAGE_SHA256}"),
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "NetworkMode"],
+        "none",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_bool(
+        container,
+        &["HostConfig", "ReadonlyRootfs"],
+        true,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_bool(
+        container,
+        &["HostConfig", "Privileged"],
+        false,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        container,
+        &["HostConfig", "CapAdd"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        container,
+        &["HostConfig", "GroupAdd"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["HostConfig", "SecurityOpt"],
+        &["no-new-privileges"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["HostConfig", "CapDrop"],
+        &[
+            "CAP_CHOWN",
+            "CAP_DAC_OVERRIDE",
+            "CAP_FOWNER",
+            "CAP_FSETID",
+            "CAP_KILL",
+            "CAP_NET_BIND_SERVICE",
+            "CAP_SETFCAP",
+            "CAP_SETGID",
+            "CAP_SETPCAP",
+            "CAP_SETUID",
+            "CAP_SYS_CHROOT",
+        ],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "Tmpfs", "/tmp"],
+        "rw,noexec,nosuid,nodev,size=2g,rprivate,tmpcopyup",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "Tmpfs", "/var/jenkins_home"],
+        "size=2147483648,mode=1777,rw,rprivate,nosuid,nodev,tmpcopyup",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_object_keys(
+        container,
+        &["HostConfig", "Tmpfs"],
+        &["/tmp", "/var/jenkins_home"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "LogConfig", "Type"],
+        "k8s-file",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_null(
+        container,
+        &["HostConfig", "LogConfig", "Config"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "LogConfig", "Path"],
+        "/home/srikanth/.local/share/containers/storage/overlay-containers/70fda66b870bb443c0fceb6b9f3d8836a9a9356b0b69f2d08657e7c27ab688be/userdata/ctr.log",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "LogConfig", "Tag"],
+        "",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "LogConfig", "Size"],
+        "16MB",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_empty_object(
+        container,
+        &["HostConfig", "PortBindings"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_null(container, &["EffectiveCaps"], "E_JENKINS_CONTAINMENT")?;
+    exact_null(container, &["BoundingCaps"], "E_JENKINS_CONTAINMENT")?;
+    exact_object_keys(
+        container,
+        &["NetworkSettings", "Networks"],
+        &["none"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_u64(
+        container,
+        &["HostConfig", "Memory"],
+        4_294_967_296,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_u64(
+        container,
+        &["HostConfig", "MemorySwap"],
+        4_294_967_296,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_u64(
+        container,
+        &["HostConfig", "NanoCpus"],
+        2_000_000_000,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_u64(
+        container,
+        &["HostConfig", "PidsLimit"],
+        512,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    let ulimits = array(
+        container,
+        &["HostConfig", "Ulimits"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    if ulimits.len() != 2 {
+        return Err(VerificationError::new(
+            "E_JENKINS_CONTAINMENT",
+            "Jenkins ulimit set is not exact",
+        ));
+    }
+    for (name, bound) in [("RLIMIT_NOFILE", 1_024), ("RLIMIT_NPROC", 127_781)] {
+        let limit = ulimits
+            .iter()
+            .find(|limit| value(limit, &["Name"]) == Some(&Value::String(name.into())))
+            .ok_or_else(|| {
+                VerificationError::new(
+                    "E_JENKINS_CONTAINMENT",
+                    format!("missing Jenkins ulimit {name}"),
+                )
+            })?;
+        exact_u64(limit, &["Soft"], bound, "E_JENKINS_CONTAINMENT")?;
+        exact_u64(limit, &["Hard"], bound, "E_JENKINS_CONTAINMENT")?;
+    }
+    let mounts = array(container, &["Mounts"], "E_JENKINS_CONTAINMENT")?;
+    if mounts.len() != 3 {
+        return Err(VerificationError::new(
+            "E_JENKINS_CONTAINMENT",
+            "Jenkins mount set is not exact",
+        ));
+    }
+    for (source, destination, writable) in [
+        (
+            "/home/srikanth/jenkins-oracle-228/plugins",
+            "/usr/share/jenkins/ref/plugins",
+            false,
+        ),
+        (
+            "/home/srikanth/mcloving-diff001-20260801T174500Z-v43/jenkins/fixture/Jenkinsfile",
+            "/fixture/Jenkinsfile",
+            false,
+        ),
+        (
+            "/home/srikanth/mcloving-diff001-20260801T174500Z-v43/jenkins/fixture/99-diff001.groovy",
+            "/usr/share/jenkins/ref/init.groovy.d/99-diff001.groovy",
+            false,
+        ),
+    ] {
+        let mount = mounts
+            .iter()
+            .find(|mount| {
+                value(mount, &["Destination"]) == Some(&Value::String(destination.into()))
+            })
+            .ok_or_else(|| {
+                VerificationError::new(
+                    "E_JENKINS_CONTAINMENT",
+                    format!("missing Jenkins mount {destination}"),
+                )
+            })?;
+        exact_string(mount, &["Type"], "bind", "E_JENKINS_CONTAINMENT")?;
+        exact_bool(mount, &["RW"], writable, "E_JENKINS_CONTAINMENT")?;
+        exact_string(mount, &["Source"], source, "E_JENKINS_CONTAINMENT")?;
+    }
+    const EXPECTED_EXTERNAL_NETWORK: &str = "curl: (7) Failed to connect to 192.0.2.1 port 80 after 0 ms: Could not connect to server\nexit_code=7\n";
+    const EXPECTED_RUNTIME: &str = "uid=1000(jenkins) gid=1000(jenkins) groups=1000(jenkins)\n\
+Linux 70fda66b870b 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 GNU/Linux\n\
+LANG=C.UTF-8\n\
+LANGUAGE=\n\
+LC_CTYPE=\"C.UTF-8\"\n\
+LC_NUMERIC=\"C.UTF-8\"\n\
+LC_TIME=\"C.UTF-8\"\n\
+LC_COLLATE=\"C.UTF-8\"\n\
+LC_MONETARY=\"C.UTF-8\"\n\
+LC_MESSAGES=\"C.UTF-8\"\n\
+LC_PAPER=\"C.UTF-8\"\n\
+LC_NAME=\"C.UTF-8\"\n\
+LC_ADDRESS=\"C.UTF-8\"\n\
+LC_TELEPHONE=\"C.UTF-8\"\n\
+LC_MEASUREMENT=\"C.UTF-8\"\n\
+LC_IDENTIFICATION=\"C.UTF-8\"\n\
+LC_ALL=\n\
+openjdk version \"21.0.11\" 2026-04-21 LTS\n\
+OpenJDK Runtime Environment Temurin-21.0.11+10 (build 21.0.11+10-LTS)\n\
+OpenJDK 64-Bit Server VM Temurin-21.0.11+10 (build 21.0.11+10-LTS, mixed mode)\n\
+2.568.1\n\
+timeout (GNU coreutils) 9.7\n\
+Filesystem      1B-blocks      Used  Available Use% Mounted on\n\
+tmpfs          2147483648 383537152 1763946496  18% /var/jenkins_home\n\
+controller_timeout_seconds=600\n\
+controller_timeout_kill_after_seconds=30\n\
+jenkins_home_ceiling_bytes=2147483648\n\
+controller_log_ceiling_bytes=16777216\n\
+controller_log_observed_bytes=8721\n";
+    if text(root, "jenkins/external-network.txt")? != EXPECTED_EXTERNAL_NETWORK
+        || text(root, "jenkins/runtime.txt")? != EXPECTED_RUNTIME
+    {
+        return Err(VerificationError::new(
+            "E_JENKINS_CONTAINMENT",
+            "runtime or negative-network receipt differs",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_jenkins_plugin_profile(root: &Path) -> Result<(), VerificationError> {
+    let manifest = read(root, "jenkins/PLUGIN_SHA256SUMS")?;
+    if sha256(&manifest) != JENKINS_PLUGIN_MANIFEST_SHA256 {
+        return Err(VerificationError::new(
+            "E_JENKINS_PLUGINS",
+            "Jenkins plugin manifest digest differs",
+        ));
+    }
+    let manifest_text = std::str::from_utf8(&manifest)
+        .map_err(|error| VerificationError::new("E_JENKINS_PLUGINS", error.to_string()))?;
+    let mut plugins = BTreeSet::new();
+    for line in manifest_text.lines() {
+        let (digest, path) = line.split_once("  ").ok_or_else(|| {
+            VerificationError::new("E_JENKINS_PLUGINS", "invalid plugin manifest line")
+        })?;
+        let valid_digest = digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+        let valid_path = path.strip_prefix("plugins/").is_some_and(|leaf| {
+            !leaf.is_empty()
+                && leaf.ends_with(".jpi")
+                && !leaf.contains('/')
+                && !leaf.contains('\\')
+                && leaf != ".jpi"
+        });
+        if !valid_digest || !valid_path || !plugins.insert(path) {
+            return Err(VerificationError::new(
+                "E_JENKINS_PLUGINS",
+                "plugin manifest entry is not canonical and unique",
+            ));
+        }
+    }
+    if plugins.len() != 90 {
+        return Err(VerificationError::new(
+            "E_JENKINS_PLUGINS",
+            "Jenkins plugin manifest does not contain exactly 90 plugins",
+        ));
+    }
+    const EXPECTED_RECEIPT: &str = "schema=mcloving.jenkins.plugin-verification/v1\n\
+host=mario\n\
+plugin_root=/home/srikanth/jenkins-oracle-228/plugins\n\
+plugin_manifest_sha256=e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0\n\
+plugin_count=90\n\
+latest_plugin_mtime_epoch=1785045308.9504840000\n\
+jenkins_execution_started_at=2026-08-01T17:24:40.33500311Z\n\
+verified_at=2026-08-01T17:26:25Z\n\
+verification=sha256sum-strict-all-ok\n";
+    if text(root, "jenkins/plugin-verification.txt")? != EXPECTED_RECEIPT {
+        return Err(VerificationError::new(
+            "E_JENKINS_PLUGINS",
+            "Jenkins plugin verification receipt differs",
+        ));
+    }
+    Ok(())
+}
+
+fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationError> {
+    verify_mcloving_containment(root)?;
+    let raw = json(root, "mcloving/mcloving-raw.json")?;
+    exact_object_keys(
+        &raw,
+        &[],
+        &[
+            "admission",
+            "approvals",
+            "artifacts",
+            "credential_grants",
+            "graph",
+            "logs",
+            "status",
+            "tests",
+        ],
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &raw,
+        &["admission"],
+        &[
+            "attempt_id",
+            "build_id",
+            "created",
+            "node_id",
+            "pipeline_digest",
+        ],
+        "E_MCLOVING",
+    )?;
+    for (path, expected) in [
+        (
+            &["admission", "pipeline_digest"][..],
+            MCLOVING_PIPELINE_DIGEST,
+        ),
+        (&["admission", "build_id"][..], MCLOVING_BUILD_ID),
+        (&["admission", "node_id"][..], MCLOVING_NODE_ID),
+        (&["admission", "attempt_id"][..], MCLOVING_ATTEMPT_ID),
+        (&["status", "build_id"][..], MCLOVING_BUILD_ID),
+        (&["status", "node_id"][..], MCLOVING_NODE_ID),
+        (&["status", "attempt_id"][..], MCLOVING_ATTEMPT_ID),
+        (&["graph", "build", "build_id"][..], MCLOVING_BUILD_ID),
+    ] {
+        exact_string(&raw, path, expected, "E_MCLOVING")?;
+    }
+    exact_bool(&raw, &["admission", "created"], true, "E_MCLOVING")?;
+    exact_object_keys(
+        &raw,
+        &["graph"],
+        &["attempts", "build", "dependencies", "nodes"],
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &raw,
+        &["graph", "build"],
+        &[
+            "build_id",
+            "completed_at_unix_ms",
+            "created_at_unix_micros",
+            "created_at_unix_ms",
+            "dag_mode",
+            "pipeline_digest",
+            "priority",
+            "status",
+        ],
+        "E_MCLOVING",
+    )?;
+    exact_u64_array(
+        &raw,
+        &["graph", "build", "pipeline_digest"],
+        &MCLOVING_PIPELINE_DIGEST_BYTES,
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        &raw,
+        &["graph", "build", "status"],
+        "succeeded",
+        "E_MCLOVING",
+    )?;
+    exact_bool(&raw, &["graph", "build", "dag_mode"], true, "E_MCLOVING")?;
+    exact_u64(&raw, &["graph", "build", "priority"], 0, "E_MCLOVING")?;
+    exact_u64(
+        &raw,
+        &["graph", "build", "created_at_unix_ms"],
+        1_785_600_683_061,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &raw,
+        &["graph", "build", "created_at_unix_micros"],
+        1_785_600_683_060_816,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &raw,
+        &["graph", "build", "completed_at_unix_ms"],
+        1_785_600_683_114,
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &raw,
+        &["status"],
+        &[
+            "attempt_id",
+            "attempt_status",
+            "build_id",
+            "cancellation_requested",
+            "fence",
+            "lease_owner",
+            "node_id",
+            "status",
+            "terminal_summary",
+        ],
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &raw,
+        &["status", "terminal_summary"],
+        &["exit_code", "result_sha256", "termination"],
+        "E_MCLOVING",
+    )?;
+    exact_u64(&raw, &["status", "fence"], 1, "E_MCLOVING")?;
+    exact_string(&raw, &["status", "status"], "succeeded", "E_MCLOVING")?;
+    exact_string(
+        &raw,
+        &["status", "attempt_status"],
+        "succeeded",
+        "E_MCLOVING",
+    )?;
+    exact_bool(
+        &raw,
+        &["status", "cancellation_requested"],
+        false,
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        &raw,
+        &["status", "lease_owner"],
+        "diff-001-agent",
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &raw,
+        &["status", "terminal_summary", "exit_code"],
+        0,
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        &raw,
+        &["status", "terminal_summary", "termination"],
+        "exited",
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        &raw,
+        &["status", "terminal_summary", "result_sha256"],
+        MCLOVING_RESULT_SHA256,
+        "E_MCLOVING",
+    )?;
+    let nodes = array(&raw, &["graph", "nodes"], "E_MCLOVING")?;
+    let attempts = array(&raw, &["graph", "attempts"], "E_MCLOVING")?;
+    let dependencies = array(&raw, &["graph", "dependencies"], "E_MCLOVING")?;
+    if nodes.len() != 1 || attempts.len() != 1 || !dependencies.is_empty() {
+        return Err(VerificationError::new("E_MCLOVING", "graph is not exact"));
+    }
+    exact_object_keys(
+        &nodes[0],
+        &[],
+        &[
+            "cancellation_requested",
+            "fail_fast",
+            "kind",
+            "logical_outcome",
+            "max_attempts",
+            "node_id",
+            "node_key",
+            "required_platform",
+            "required_trust_pool",
+            "status",
+        ],
+        "E_MCLOVING",
+    )?;
+    exact_string(&nodes[0], &["node_key"], "build", "E_MCLOVING")?;
+    exact_string(&nodes[0], &["kind"], "work", "E_MCLOVING")?;
+    exact_bool(&nodes[0], &["fail_fast"], true, "E_MCLOVING")?;
+    exact_string(&nodes[0], &["node_id"], MCLOVING_NODE_ID, "E_MCLOVING")?;
+    exact_string(&nodes[0], &["status"], "succeeded", "E_MCLOVING")?;
+    exact_string(&nodes[0], &["logical_outcome"], "succeeded", "E_MCLOVING")?;
+    exact_bool(&nodes[0], &["cancellation_requested"], false, "E_MCLOVING")?;
+    exact_u64(&nodes[0], &["max_attempts"], 1, "E_MCLOVING")?;
+    exact_string(&nodes[0], &["required_platform"], "linux", "E_MCLOVING")?;
+    exact_string(
+        &nodes[0],
+        &["required_trust_pool"],
+        "migration-deny-authority",
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &attempts[0],
+        &[],
+        &[
+            "attempt_id",
+            "completed_at_unix_ms",
+            "created_at_unix_ms",
+            "fence",
+            "lease_owner",
+            "node_id",
+            "ordinal",
+            "ready_at_unix_ms",
+            "retry_of",
+            "started_at_unix_ms",
+            "status",
+            "terminal_summary",
+        ],
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &attempts[0],
+        &["terminal_summary"],
+        &["exit_code", "result_sha256", "termination"],
+        "E_MCLOVING",
+    )?;
+    exact_u64(&attempts[0], &["ordinal"], 1, "E_MCLOVING")?;
+    exact_null(&attempts[0], &["retry_of"], "E_MCLOVING")?;
+    exact_string(
+        &attempts[0],
+        &["attempt_id"],
+        MCLOVING_ATTEMPT_ID,
+        "E_MCLOVING",
+    )?;
+    exact_string(&attempts[0], &["node_id"], MCLOVING_NODE_ID, "E_MCLOVING")?;
+    exact_string(
+        &attempts[0],
+        &["lease_owner"],
+        "diff-001-agent",
+        "E_MCLOVING",
+    )?;
+    exact_u64(&attempts[0], &["fence"], 1, "E_MCLOVING")?;
+    exact_string(&attempts[0], &["status"], "succeeded", "E_MCLOVING")?;
+    exact_u64(
+        &attempts[0],
+        &["created_at_unix_ms"],
+        1_785_600_683_062,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &attempts[0],
+        &["ready_at_unix_ms"],
+        1_785_600_683_062,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &attempts[0],
+        &["started_at_unix_ms"],
+        1_785_600_683_078,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &attempts[0],
+        &["completed_at_unix_ms"],
+        1_785_600_683_112,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &attempts[0],
+        &["terminal_summary", "exit_code"],
+        0,
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        &attempts[0],
+        &["terminal_summary", "termination"],
+        "exited",
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        &attempts[0],
+        &["terminal_summary", "result_sha256"],
+        MCLOVING_RESULT_SHA256,
+        "E_MCLOVING",
+    )?;
+    let logs = array(&raw, &["logs"], "E_MCLOVING")?;
+    if logs.len() != 2 {
+        return Err(VerificationError::new("E_MCLOVING", "logs are not exact"));
+    }
+    let stdout = &logs[0];
+    let stderr = &logs[1];
+    for (log, sequence, stream) in [(stdout, 0, "stdout"), (stderr, 1, "stderr")] {
+        exact_object_keys(
+            log,
+            &[],
+            &[
+                "attempt_id",
+                "content_hex",
+                "fence",
+                "sequence",
+                "sha256",
+                "stream",
+                "text",
+            ],
+            "E_MCLOVING",
+        )?;
+        exact_string(log, &["attempt_id"], MCLOVING_ATTEMPT_ID, "E_MCLOVING")?;
+        exact_u64(log, &["fence"], 1, "E_MCLOVING")?;
+        exact_u64(log, &["sequence"], sequence, "E_MCLOVING")?;
+        exact_string(log, &["stream"], stream, "E_MCLOVING")?;
+    }
+    exact_string(
+        stdout,
+        &["content_hex"],
+        "48656c6c6f20576f726c640a",
+        "E_MCLOVING",
+    )?;
+    exact_string(stdout, &["text"], "Hello World\n", "E_MCLOVING")?;
+    exact_string(
+        stdout,
+        &["sha256"],
+        "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26",
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        stderr,
+        &["content_hex"],
+        "2b206563686f2048656c6c6f20576f726c640a",
+        "E_MCLOVING",
+    )?;
+    exact_string(stderr, &["text"], "+ echo Hello World\n", "E_MCLOVING")?;
+    exact_string(
+        stderr,
+        &["sha256"],
+        "dd0b88f8948e42d79e88c9fee0a6825c96a07800d0d6cff497d60bf092d4609c",
+        "E_MCLOVING",
+    )?;
+    for field in ["artifacts", "tests", "approvals", "credential_grants"] {
+        exact_empty_array(&raw, &[field], "E_MCLOVING")?;
+    }
+    let checked: CanonicalTrace =
+        serde_json::from_slice(&read(root, "mcloving/mcloving-trace.json")?)
+            .map_err(|error| VerificationError::new("E_MCLOVING_TRACE", error.to_string()))?;
+    let expected = expected_trace();
+    if checked != expected {
+        return Err(VerificationError::new(
+            "E_MCLOVING_TRACE",
+            "checked trace does not match independently derived values",
+        ));
+    }
+    Ok(expected)
+}
+
+fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
+    verify_receipt_digests(
+        root,
+        &MCLOVING_CONTAINMENT_RECEIPTS,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    let network_inspect = json(root, "mcloving/network-inspect.json")?;
+    let network = first_object(&network_inspect, "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        network,
+        &["name"],
+        MCLOVING_NETWORK,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(network, &["driver"], "bridge", "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        network,
+        &["id"],
+        MCLOVING_NETWORK_ID,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        network,
+        &["network_interface"],
+        "podman1",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        network,
+        &["created"],
+        "2026-08-01T11:10:58.779792258-05:00",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_bool(network, &["internal"], true, "E_MCLOVING_CONTAINMENT")?;
+    exact_bool(network, &["ipv6_enabled"], false, "E_MCLOVING_CONTAINMENT")?;
+    exact_bool(network, &["dns_enabled"], true, "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        network,
+        &["ipam_options", "driver"],
+        "host-local",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    let subnets = array(network, &["subnets"], "E_MCLOVING_CONTAINMENT")?;
+    if subnets.len() != 1 {
+        return Err(VerificationError::new(
+            "E_MCLOVING_CONTAINMENT",
+            "network subnet set is not exact",
+        ));
+    }
+    exact_string(
+        &subnets[0],
+        &["subnet"],
+        "10.89.0.0/24",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        &subnets[0],
+        &["gateway"],
+        "10.89.0.1",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+
+    let pre = json(root, "mcloving/runner-inspect-pre.json")?;
+    let pre = first_object(&pre, "E_MCLOVING_CONTAINMENT")?;
+    verify_runner_contract(pre, false)?;
+    verify_network_attachment(pre, "", "", 0, "", "a9bcaa4cfcd9")?;
+    exact_empty_object(pre, &["NetworkSettings", "Ports"], "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        pre,
+        &["State", "Status"],
+        "created",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+
+    let post = json(root, "mcloving/runner-inspect-post.json")?;
+    let post = first_object(&post, "E_MCLOVING_CONTAINMENT")?;
+    verify_runner_contract(post, true)?;
+    verify_network_attachment(post, "", "", 0, "", "a9bcaa4cfcd9")?;
+    exact_empty_object(
+        post,
+        &["NetworkSettings", "Ports"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        post,
+        &["State", "Status"],
+        "exited",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_u64(post, &["State", "ExitCode"], 0, "E_MCLOVING_CONTAINMENT")?;
+    exact_bool(
+        post,
+        &["State", "OOMKilled"],
+        false,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+
+    let database = json(root, "mcloving/postgres-inspect.json")?;
+    let database = first_object(&database, "E_MCLOVING_CONTAINMENT")?;
+    verify_common_container(
+        database,
+        MCLOVING_DATABASE_IMAGE_SHA256,
+        2_147_483_648,
+        2_000_000_000,
+        256,
+    )?;
+    verify_network_attachment(
+        database,
+        "10.89.0.1",
+        "10.89.0.2",
+        24,
+        "52:d3:b4:70:ba:ea",
+        "0a2f87bcff0a",
+    )?;
+    exact_object_keys(
+        database,
+        &["NetworkSettings", "Ports"],
+        &["5432/tcp"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_null(
+        database,
+        &["NetworkSettings", "Ports", "5432/tcp"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["Id"],
+        "0a2f87bcff0a47c5ac6caa1d36a4fc4daa7cd3c6f0bda689bd06cf3c2e198644",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["Name"],
+        "mcloving-diff001-db-v33",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["Created"],
+        "2026-08-01T11:10:58.798598022-05:00",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["Path"],
+        "docker-entrypoint.sh",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(database, &["Args"], &["postgres"], "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        database,
+        &["Config", "Image"],
+        &format!("docker.io/library/postgres@sha256:{MCLOVING_DATABASE_IMAGE_SHA256}"),
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["ImageName"],
+        &format!("docker.io/library/postgres@sha256:{MCLOVING_DATABASE_IMAGE_SHA256}"),
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(database, &["Config", "User"], "", "E_MCLOVING_CONTAINMENT")?;
+    exact_string_array(
+        database,
+        &["Config", "Cmd"],
+        &["postgres"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["Config", "Entrypoint"],
+        "docker-entrypoint.sh",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["State", "Status"],
+        "running",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_bool(
+        database,
+        &["State", "Running"],
+        true,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_bool(
+        database,
+        &["State", "OOMKilled"],
+        false,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(
+        database,
+        &["Config", "Env"],
+        &[
+            "container=podman",
+            "PG_SHA256=e0630a3600aea27511715563259ec2111cd5f4353a4b040e0be827f94cd7a8b0",
+            "DOCKER_PG_LLVM_DEPS=llvm19-dev \t\tclang19",
+            "PG_MAJOR=17",
+            "POSTGRES_HOST_AUTH_METHOD=trust",
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PG_VERSION=17.6",
+            "PGDATA=/var/lib/postgresql/data",
+            "GOSU_VERSION=1.19",
+            "LANG=en_US.utf8",
+            "POSTGRES_USER=mcloving",
+            "POSTGRES_DB=mcloving",
+            "HOME=/root",
+            "HOSTNAME=0a2f87bcff0a",
+        ],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        database,
+        &["HostConfig", "CapAdd"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(
+        database,
+        &["HostConfig", "CapDrop"],
+        &[
+            "CAP_FSETID",
+            "CAP_KILL",
+            "CAP_NET_BIND_SERVICE",
+            "CAP_SETFCAP",
+            "CAP_SETPCAP",
+            "CAP_SYS_CHROOT",
+        ],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        database,
+        &["HostConfig", "GroupAdd"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_empty_array(database, &["Mounts"], "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        database,
+        &["HostConfig", "Tmpfs", "/var/lib/postgresql/data"],
+        "rw,nosuid,nodev,size=1g,rprivate,tmpcopyup",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(
+        database,
+        &["EffectiveCaps"],
+        &[
+            "CAP_CHOWN",
+            "CAP_DAC_OVERRIDE",
+            "CAP_FOWNER",
+            "CAP_SETGID",
+            "CAP_SETUID",
+        ],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(
+        database,
+        &["BoundingCaps"],
+        &[
+            "CAP_CHOWN",
+            "CAP_DAC_OVERRIDE",
+            "CAP_FOWNER",
+            "CAP_SETGID",
+            "CAP_SETUID",
+        ],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+
+    let runtime = text(root, "mcloving/runtime.txt")?;
+    let expected_runtime = format!(
+        "uid=1000(srikanth) gid=1000(1000) groups=1000(1000)\n\
+Linux a9bcaa4cfcd9 7.0.0-28-generic #28~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Wed Jul  1 15:50:57 UTC 2 x86_64 GNU/Linux\n\
+LANG=C.UTF-8\n\
+LANGUAGE=\n\
+LC_CTYPE=\"C.UTF-8\"\n\
+LC_NUMERIC=\"C.UTF-8\"\n\
+LC_TIME=\"C.UTF-8\"\n\
+LC_COLLATE=\"C.UTF-8\"\n\
+LC_MONETARY=\"C.UTF-8\"\n\
+LC_MESSAGES=\"C.UTF-8\"\n\
+LC_PAPER=\"C.UTF-8\"\n\
+LC_NAME=\"C.UTF-8\"\n\
+LC_ADDRESS=\"C.UTF-8\"\n\
+LC_TELEPHONE=\"C.UTF-8\"\n\
+LC_MEASUREMENT=\"C.UTF-8\"\n\
+LC_IDENTIFICATION=\"C.UTF-8\"\n\
+LC_ALL=C.UTF-8\n\
+{MCLOVING_TEST_BINARY_SHA256}  target/debug/deps/diff_001-3b7075192798a581\n\
+{MCLOVING_CONTROLLER_BINARY_SHA256}  target/debug/mcloving-controller\n"
+    );
+    if runtime != expected_runtime {
+        return Err(VerificationError::new(
+            "E_MCLOVING_CONTAINMENT",
+            "runner runtime receipt differs",
+        ));
+    }
+    const EXPECTED_TEST_OUTPUT: &str = "\nrunning 1 test\ntest admitted_jenkins_case_executes_with_a_canonical_trace ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s\n\n";
+    if text(root, "mcloving/database-integrity.txt")? != "mcloving|1\n"
+        || text(root, "mcloving/test-output.txt")? != EXPECTED_TEST_OUTPUT
+    {
+        return Err(VerificationError::new(
+            "E_MCLOVING_CONTAINMENT",
+            "database or test receipt differs",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_runner_contract(
+    container: &Value,
+    started_environment: bool,
+) -> Result<(), VerificationError> {
+    verify_common_container(
+        container,
+        MCLOVING_RUNNER_IMAGE_SHA256,
+        4_294_967_296,
+        4_000_000_000,
+        512,
+    )?;
+    exact_string(
+        container,
+        &["ImageName"],
+        MCLOVING_RUNNER_IMAGE_REFERENCE,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Config", "Image"],
+        MCLOVING_RUNNER_IMAGE_REFERENCE,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Config", "User"],
+        "1000:1000",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Id"],
+        MCLOVING_RUNNER_ID,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Name"],
+        MCLOVING_RUNNER_NAME,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Created"],
+        MCLOVING_RUNNER_CREATED,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["Config", "Cmd"],
+        &["bash", "-c", MCLOVING_RUNNER_COMMAND],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    let mut environment = vec![
+        "CARGO_HOME=/usr/local/cargo",
+        "LANG=C.UTF-8",
+        "LC_ALL=C.UTF-8",
+        "container=podman",
+        "RUSTUP_HOME=/usr/local/rustup",
+        "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v33:5432/mcloving",
+        "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
+        "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "RUST_VERSION=1.97.1",
+    ];
+    if started_environment {
+        environment.extend(["HOME=/work", "HOSTNAME=a9bcaa4cfcd9"]);
+    }
+    exact_string_array(
+        container,
+        &["Config", "Env"],
+        &environment,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Config", "Entrypoint"],
+        "",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        container,
+        &["HostConfig", "CapAdd"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        container,
+        &["HostConfig", "GroupAdd"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["HostConfig", "CapDrop"],
+        &[
+            "CAP_CHOWN",
+            "CAP_DAC_OVERRIDE",
+            "CAP_FOWNER",
+            "CAP_FSETID",
+            "CAP_KILL",
+            "CAP_NET_BIND_SERVICE",
+            "CAP_SETFCAP",
+            "CAP_SETGID",
+            "CAP_SETPCAP",
+            "CAP_SETUID",
+            "CAP_SYS_CHROOT",
+        ],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_null(container, &["EffectiveCaps"], "E_MCLOVING_CONTAINMENT")?;
+    exact_null(container, &["BoundingCaps"], "E_MCLOVING_CONTAINMENT")?;
+    let mounts = array(container, &["Mounts"], "E_MCLOVING_CONTAINMENT")?;
+    if mounts.len() != 2 {
+        return Err(VerificationError::new(
+            "E_MCLOVING_CONTAINMENT",
+            "runner mounts are not exact",
+        ));
+    }
+    for (source, destination, writable) in [
+        ("/sn8100/work/forge/McLoving-diff001", "/work", false),
+        (
+            "/sn8100/runs/mcloving/diff001-native-20260801T161200Z-v33/capture/mcloving",
+            "/evidence",
+            true,
+        ),
+    ] {
+        let mount = mounts
+            .iter()
+            .find(|mount| {
+                value(mount, &["Destination"]) == Some(&Value::String(destination.into()))
+            })
+            .ok_or_else(|| {
+                VerificationError::new(
+                    "E_MCLOVING_CONTAINMENT",
+                    format!("missing runner mount {destination}"),
+                )
+            })?;
+        exact_string(mount, &["Type"], "bind", "E_MCLOVING_CONTAINMENT")?;
+        exact_string(mount, &["Source"], source, "E_MCLOVING_CONTAINMENT")?;
+        exact_bool(mount, &["RW"], writable, "E_MCLOVING_CONTAINMENT")?;
+    }
+    Ok(())
+}
+
+fn verify_common_container(
+    container: &Value,
+    image_sha256: &str,
+    memory: u64,
+    nano_cpus: u64,
+    pids: u64,
+) -> Result<(), VerificationError> {
+    exact_string(
+        container,
+        &["ImageDigest"],
+        &format!("sha256:{image_sha256}"),
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_bool(
+        container,
+        &["HostConfig", "ReadonlyRootfs"],
+        true,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_bool(
+        container,
+        &["HostConfig", "Privileged"],
+        false,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["HostConfig", "SecurityOpt"],
+        &["no-new-privileges"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_empty_object(
+        container,
+        &["HostConfig", "PortBindings"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_bool(
+        container,
+        &["HostConfig", "PublishAllPorts"],
+        false,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_u64(
+        container,
+        &["HostConfig", "Memory"],
+        memory,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_u64(
+        container,
+        &["HostConfig", "MemorySwap"],
+        memory,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_u64(
+        container,
+        &["HostConfig", "NanoCpus"],
+        nano_cpus,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_u64(
+        container,
+        &["HostConfig", "PidsLimit"],
+        pids,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "NetworkMode"],
+        "bridge",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_object_keys(
+        container,
+        &["NetworkSettings", "Networks"],
+        &[MCLOVING_NETWORK],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    Ok(())
+}
+
+fn verify_network_attachment(
+    container: &Value,
+    gateway: &str,
+    address: &str,
+    prefix: u64,
+    mac_address: &str,
+    alias: &str,
+) -> Result<(), VerificationError> {
+    let attachment = value(
+        container,
+        &["NetworkSettings", "Networks", MCLOVING_NETWORK],
+    )
+    .ok_or_else(|| {
+        VerificationError::new("E_MCLOVING_CONTAINMENT", "missing network attachment")
+    })?;
+    exact_string(
+        attachment,
+        &["NetworkID"],
+        MCLOVING_NETWORK,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(attachment, &["EndpointID"], "", "E_MCLOVING_CONTAINMENT")?;
+    exact_string(attachment, &["Gateway"], gateway, "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        attachment,
+        &["IPAddress"],
+        address,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_u64(
+        attachment,
+        &["IPPrefixLen"],
+        prefix,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(attachment, &["IPv6Gateway"], "", "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        attachment,
+        &["GlobalIPv6Address"],
+        "",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_u64(
+        attachment,
+        &["GlobalIPv6PrefixLen"],
+        0,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        attachment,
+        &["MacAddress"],
+        mac_address,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_null(attachment, &["DriverOpts"], "E_MCLOVING_CONTAINMENT")?;
+    exact_null(attachment, &["IPAMConfig"], "E_MCLOVING_CONTAINMENT")?;
+    exact_null(attachment, &["Links"], "E_MCLOVING_CONTAINMENT")?;
+    exact_string_array(attachment, &["Aliases"], &[alias], "E_MCLOVING_CONTAINMENT")?;
+    Ok(())
+}
+
+fn verify_receipt_digests(
+    root: &Path,
+    receipts: &[(&str, &str)],
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    for (path, expected_digest) in receipts {
+        if sha256(&read(root, path)?) != *expected_digest {
+            return Err(VerificationError::new(
+                code,
+                format!("detached digest differs for {path}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn expected_trace() -> CanonicalTrace {
+    CanonicalTrace {
+        schema: TRACE_SCHEMA.to_owned(),
+        case: CASE.to_owned(),
+        source_sha256: SOURCE_SHA256.to_owned(),
+        pipeline_sha256: PIPELINE_SHA256.to_owned(),
+        stage_order: vec!["Build".to_owned()],
+        process: CanonicalProcess {
+            program: "/bin/sh".to_owned(),
+            args: vec![
+                "-xe".to_owned(),
+                "-c".to_owned(),
+                "echo \"Hello World\"".to_owned(),
+            ],
+        },
+        terminal_outcome: "success".to_owned(),
+        semantic_stdout_hex: "48656c6c6f20576f726c640a".to_owned(),
+        attempt_ordinals: vec![1],
+        workspace_entries: 0,
+        artifacts: 0,
+        tests: 0,
+        approvals: 0,
+        credential_grants: 0,
+        external_effects: 0,
+    }
+}
+
+fn read(root: &Path, name: &str) -> Result<Vec<u8>, VerificationError> {
+    validate_relative_path(name)?;
+    let path = root.join(name);
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| VerificationError::new("E_READ", format!("{name}: {error}")))?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_FILE_BYTES {
+        return Err(VerificationError::new(
+            "E_BOUNDS",
+            format!("{name} is not a bounded regular file"),
+        ));
+    }
+    fs::read(&path).map_err(|error| VerificationError::new("E_READ", format!("{name}: {error}")))
+}
+
+fn text(root: &Path, name: &str) -> Result<String, VerificationError> {
+    String::from_utf8(read(root, name)?)
+        .map_err(|error| VerificationError::new("E_TEXT", format!("{name}: {error}")))
+}
+
+fn json(root: &Path, name: &str) -> Result<Value, VerificationError> {
+    serde_json::from_slice(&read(root, name)?)
+        .map_err(|error| VerificationError::new("E_JSON", format!("{name}: {error}")))
+}
+
+fn validate_relative_path(name: &str) -> Result<(), VerificationError> {
+    let path = Path::new(name);
+    if name.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(VerificationError::new(
+            "E_PATH",
+            format!("unsafe evidence path {name:?}"),
+        ));
+    }
+    Ok(())
+}
+
+fn value<'a>(root: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter().try_fold(root, |current, key| current.get(key))
+}
+
+fn array<'a>(
+    root: &'a Value,
+    path: &[&str],
+    code: &'static str,
+) -> Result<&'a Vec<Value>, VerificationError> {
+    value(root, path)
+        .and_then(Value::as_array)
+        .ok_or_else(|| VerificationError::new(code, format!("missing array {}", path.join("."))))
+}
+
+fn first_object<'a>(root: &'a Value, code: &'static str) -> Result<&'a Value, VerificationError> {
+    root.as_array()
+        .and_then(|values| values.first())
+        .ok_or_else(|| VerificationError::new(code, "missing inspect object"))
+}
+
+fn exact_string(
+    root: &Value,
+    path: &[&str],
+    expected: &str,
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    if value(root, path).and_then(Value::as_str) != Some(expected) {
+        return Err(VerificationError::new(
+            code,
+            format!("{} is not {expected:?}", path.join(".")),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_u64(
+    root: &Value,
+    path: &[&str],
+    expected: u64,
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    if value(root, path).and_then(Value::as_u64) != Some(expected) {
+        return Err(VerificationError::new(
+            code,
+            format!("{} is not {expected}", path.join(".")),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_u64_array(
+    root: &Value,
+    path: &[&str],
+    expected: &[u64],
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    let actual = array(root, path, code)?
+        .iter()
+        .map(Value::as_u64)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| VerificationError::new(code, "array contains a non-u64"))?;
+    if actual != expected {
+        return Err(VerificationError::new(
+            code,
+            format!("{} u64 array differs", path.join(".")),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_bool(
+    root: &Value,
+    path: &[&str],
+    expected: bool,
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    if value(root, path).and_then(Value::as_bool) != Some(expected) {
+        return Err(VerificationError::new(
+            code,
+            format!("{} is not {expected}", path.join(".")),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_null(root: &Value, path: &[&str], code: &'static str) -> Result<(), VerificationError> {
+    if value(root, path) != Some(&Value::Null) {
+        return Err(VerificationError::new(
+            code,
+            format!("{} is not null", path.join(".")),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_string_array(
+    root: &Value,
+    path: &[&str],
+    expected: &[&str],
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    let actual = array(root, path, code)?;
+    let actual = actual
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| VerificationError::new(code, "array contains a non-string"))?;
+    if actual != expected {
+        return Err(VerificationError::new(
+            code,
+            format!("{} string array differs", path.join(".")),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_empty_object(
+    root: &Value,
+    path: &[&str],
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    if !value(root, path)
+        .and_then(Value::as_object)
+        .is_some_and(serde_json::Map::is_empty)
+    {
+        return Err(VerificationError::new(
+            code,
+            format!("{} is not an empty object", path.join(".")),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_object_keys(
+    root: &Value,
+    path: &[&str],
+    expected: &[&str],
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    let actual = value(root, path)
+        .and_then(Value::as_object)
+        .ok_or_else(|| VerificationError::new(code, "missing object"))?
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if actual != expected {
+        return Err(VerificationError::new(
+            code,
+            format!("{} object keys differ", path.join(".")),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_empty_array(
+    root: &Value,
+    path: &[&str],
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    if !array(root, path, code)?.is_empty() {
+        return Err(VerificationError::new(
+            code,
+            format!("{} is not empty", path.join(".")),
+        ));
+    }
+    Ok(())
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}

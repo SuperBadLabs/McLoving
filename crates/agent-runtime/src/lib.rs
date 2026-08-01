@@ -12,6 +12,9 @@ use thiserror::Error;
 
 pub mod executor;
 
+/// Hard aggregate stdout/stderr ceiling shared by every execution topology.
+pub const MAX_ATTEMPT_OUTPUT_BYTES: u64 = 64 * 1_048_576;
+
 const SCHEMA_VERSION: i64 = 2;
 const MAX_PROCESS_BIRTH_IDENTITY_BYTES: usize = 256;
 

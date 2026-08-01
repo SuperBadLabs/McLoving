@@ -7,7 +7,9 @@ use std::time::Duration;
 use mcloving_agent_runtime::executor::{
     ExecutionError, ExecutionMode, ExecutionRequest, Termination, execute_with_spawn_hook,
 };
-use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal, JournalError, SpoolEntry};
+use mcloving_agent_runtime::{
+    Acceptance, AttemptPhase, Journal, JournalError, MAX_ATTEMPT_OUTPUT_BYTES, SpoolEntry,
+};
 use mcloving_controller_store::{ClaimedAttempt, NewLogChunk, Store, StoreError, TerminalOutcome};
 use serde::Deserialize;
 use serde_json::json;
@@ -241,7 +243,7 @@ pub async fn run_claim(
             .iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect(),
-        output_limit_bytes: None,
+        output_limit_bytes: Some(MAX_ATTEMPT_OUTPUT_BYTES),
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };

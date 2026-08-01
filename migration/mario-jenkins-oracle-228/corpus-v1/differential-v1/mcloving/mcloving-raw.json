@@ -1,0 +1,128 @@
+{
+  "admission": {
+    "attempt_id": "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
+    "build_id": "94217bcc-59eb-4357-9622-937ab015c963",
+    "created": true,
+    "node_id": "1a6ca500-7c3d-4d51-92c1-0b19eb0526ce",
+    "pipeline_digest": "2a9b8b7bcd076950c67de874bd1e2b693af511ad55a7de3495d5c0b4210349d3"
+  },
+  "approvals": [],
+  "artifacts": [],
+  "credential_grants": [],
+  "graph": {
+    "attempts": [
+      {
+        "attempt_id": "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
+        "completed_at_unix_ms": 1785600683112,
+        "created_at_unix_ms": 1785600683062,
+        "fence": 1,
+        "lease_owner": "diff-001-agent",
+        "node_id": "1a6ca500-7c3d-4d51-92c1-0b19eb0526ce",
+        "ordinal": 1,
+        "ready_at_unix_ms": 1785600683062,
+        "retry_of": null,
+        "started_at_unix_ms": 1785600683078,
+        "status": "succeeded",
+        "terminal_summary": {
+          "exit_code": 0,
+          "result_sha256": "7b09726b2edfce62285608b12dbd89adc473bb4872ca72e2371dbb58e4d88cd4",
+          "termination": "exited"
+        }
+      }
+    ],
+    "build": {
+      "build_id": "94217bcc-59eb-4357-9622-937ab015c963",
+      "completed_at_unix_ms": 1785600683114,
+      "created_at_unix_micros": 1785600683060816,
+      "created_at_unix_ms": 1785600683061,
+      "dag_mode": true,
+      "pipeline_digest": [
+        42,
+        155,
+        139,
+        123,
+        205,
+        7,
+        105,
+        80,
+        198,
+        125,
+        232,
+        116,
+        189,
+        30,
+        43,
+        105,
+        58,
+        245,
+        17,
+        173,
+        85,
+        167,
+        222,
+        52,
+        149,
+        213,
+        192,
+        180,
+        33,
+        3,
+        73,
+        211
+      ],
+      "priority": 0,
+      "status": "succeeded"
+    },
+    "dependencies": [],
+    "nodes": [
+      {
+        "cancellation_requested": false,
+        "fail_fast": true,
+        "kind": "work",
+        "logical_outcome": "succeeded",
+        "max_attempts": 1,
+        "node_id": "1a6ca500-7c3d-4d51-92c1-0b19eb0526ce",
+        "node_key": "build",
+        "required_platform": "linux",
+        "required_trust_pool": "migration-deny-authority",
+        "status": "succeeded"
+      }
+    ]
+  },
+  "logs": [
+    {
+      "attempt_id": "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
+      "content_hex": "48656c6c6f20576f726c640a",
+      "fence": 1,
+      "sequence": 0,
+      "sha256": "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26",
+      "stream": "stdout",
+      "text": "Hello World\n"
+    },
+    {
+      "attempt_id": "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
+      "content_hex": "2b206563686f2048656c6c6f20576f726c640a",
+      "fence": 1,
+      "sequence": 1,
+      "sha256": "dd0b88f8948e42d79e88c9fee0a6825c96a07800d0d6cff497d60bf092d4609c",
+      "stream": "stderr",
+      "text": "+ echo Hello World\n"
+    }
+  ],
+  "status": {
+    "attempt_id": "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
+    "attempt_status": "succeeded",
+    "build_id": "94217bcc-59eb-4357-9622-937ab015c963",
+    "cancellation_requested": false,
+    "fence": 1,
+    "lease_owner": "diff-001-agent",
+    "node_id": "1a6ca500-7c3d-4d51-92c1-0b19eb0526ce",
+    "status": "succeeded",
+    "terminal_summary": {
+      "exit_code": 0,
+      "result_sha256": "7b09726b2edfce62285608b12dbd89adc473bb4872ca72e2371dbb58e4d88cd4",
+      "termination": "exited"
+    }
+  },
+  "tests": []
+}

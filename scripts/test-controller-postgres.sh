@@ -53,6 +53,7 @@ podman run --rm \
   'cargo test --locked -p mcloving-controller-store --test postgres_truth &&
    cargo test --locked -p mcloving-execution-spine --test real_spine &&
    cargo test --locked -p mcloving-controller --test deployable_runtime &&
+   cargo test --locked -p mcloving-controller --test diff_001 &&
    cargo build --locked -p mcloving-controller &&
    MCLOVING_CONTROLLER_BINARY=/work/target/debug/mcloving-controller \
      cargo test --locked -p mcloving-agent --test remote_work'

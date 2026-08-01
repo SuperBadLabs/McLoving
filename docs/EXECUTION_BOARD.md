@@ -683,7 +683,6 @@ boundary is too large or authority-sensitive to share a pull request safely.
 
 | Lane | Ticket or ordered chain | Class | Start gate | Streamlined execution rule |
 |---|---|---|---|---|
-| Native differential | `DIFF-001` | PARALLEL | `MIG-005` | Standalone execution-semantic evidence PR |
 | State/policy differential | `DIFF-002` | PARALLEL | `MIG-005A`, `IDP-001`, `AUTHZ-001`, `JOBSTATE-001` | Standalone state, identity, policy, and operational-state evidence PR |
 | Boundary differential | `DIFF-003` | SERIAL | All parity-substrate tickets | Final external-boundary differential after exact implementations are frozen |
 | Certification join | `MIG-006` -> `MIG-007` | SERIAL | `DIFF-001`, `DIFF-002`, `DIFF-003` | Aggregate closure first, reproducible migration package second; separate PRs |
@@ -698,14 +697,14 @@ boundary is too large or authority-sensitive to share a pull request safely.
 
 ### Dispatch discipline
 
-After `MIG-005` closure, the current three implementation slots are:
+After `DIFF-001` closure, the current three implementation slots are:
 
-1. `DIFF-001` — native execution-semantic differential lane, now unblocked by
-   the completed compiler and shared-library boundaries.
-2. `IDP-001` — longest remaining security critical path; `AUTHZ-001`,
+1. `IDP-001` — longest remaining security critical path; `AUTHZ-001`,
    `DISC-001`, `CONSUMER-001`, and `ADMIN-001` all wait behind it.
-3. `SCM-001` — independent contained-source boundary and prerequisite for
+2. `SCM-001` — independent contained-source boundary and prerequisite for
    `SECRET-001`, `DISC-001`, and `DEP-001`.
+3. `JOBSTATE-001` — independent operational-state fence and prerequisite for
+   `TRIG-001` plus the state/policy differential.
 
 The Windows persistent-host campaign continues independently as an isolated
 evidence lane. When a slot merges, select the earliest ready successor on the
@@ -786,7 +785,7 @@ dependency-ready.
 | MIG-004 | DONE | MIG-003 | Ship a versioned step and plugin mapping catalog to native processes, reusable components, connectors, and immutable staged agent-local inputs. Every mapping declares schema, types, effects, trust requirements, supported target profiles, and provenance; local-input mappings additionally bind canonical logical name, source path and origin, content digest, media type, confidentiality/taint, refresh generation, read-only destination path, and live freeze/rollback checks; mappings with lock, throttle, or shared-resource semantics additionally bind the canonical resource identity, coordination scope across jobs, queue and fairness policy, lease/release behavior, cancellation/restart recovery, and effect fencing; cache mappings bind key derivation, immutable generation/content digests, trust class, read/write policy, expiry, and cleanup. Floating mappings, undeclared host reads, and silent fallback are forbidden; substitution resistance and corpus-earned coverage are gated. |
 | MIG-005A | DONE | MIG-002, MIG-003, OPS-003, AUDIT-001 | Implement versioned, deterministic, idempotent forward and reverse state transforms for every admitted build-number, previous-result, per-build SCM provider/repository/ref/revision, previous-revision and canonical changelog/change-entry baseline, cross-build artifact, retained workspace, persistent-state dependency, retention policy/deadline, and active legal hold with its identity/scope/reason/provenance/generation/release authority. Bind immutable source export, transform implementation/configuration, destination state, record-level provenance, conflict policy, and verification digests; reject gaps, duplicate mappings, divergent replays, provenance substitution, unclassified state, deadline shortening, hold omission, and unauthorized release. Before `DONE`, execute both directions against disposable exact-profile Jenkins and McLoving instances with seeded history: include jobs whose `when { changeset ... }`, `when { changelog ... }`, or equivalent step consumes the prior SCM/change-set record plus records under shorter/longer/expired retention, multiple overlapping holds, and attempted unauthorized hold release; import state, prove equivalent-or-stronger retention and the union of active holds before reader or execution authority, deliver a pinned next revision with known canonical changes, prove the first destination build selects the same branches and effect intents from the transferred baseline, run a McLoving state-authoritative but externally effect-free build, freeze new work, reverse-reconcile its number, result, SCM revision/baseline/change entries, retention/holds, artifacts, retained workspace/state, and audit linkage, then deliver another pinned revision and prove Jenkins resumes with the same predicate decisions and without stale lookups, missing changes, missing artifacts, premature deletion, missing holds, duplicate mappings, or duplicate effects. Every stateful, SCM-baseline-dependent, retained, or held job requires a successful case-specific rehearsal before `CANARY-001` may grant production effect authority; the later receipt-only `MIG-008` closure cannot satisfy this pre-effect gate. |
 | MIG-005 | DONE | MIG-002, MIG-003 | Inventory and resolve Jenkins shared libraries by pinned SCM reference and content digest, including `vars`, `src`, and `resources`, while classifying load-time, runtime, sandbox, CPS, plugin, and credential dependencies. The worker ingests only owner-approved, prefetched, digest-verified read-only source and never receives direct SCM or credential authority. Arbitrary Groovy never runs in the controller; any future bounded isolated evaluation is owner-approved, meets the MIG-001 deny-authority boundary, and produces explicit unsupported receipts outside its admitted subset. |
-| DIFF-001 | PENDING | MIG-002, MIG-003, MIG-004, MIG-005 | Certify core execution semantics in separate independently tested deny-authority Jenkins and McLoving sandboxes with exact platform/image/locale/toolchain/input-fixture receipts and bounded CPU/memory/time/output. Run every admitted parameter, condition, matrix, timeout, retry, caught-error, unstable-result, cancellation, post, parallel, join, fail-fast, multi-build, shared-resource, agent-selection, approval, dependency, cache, artifact, test, stdout/stderr, and success/failure scenario. Compare canonical stage/step arguments, normalized node/stage/build outcomes, attempt lineage, concurrency/order, cancellation, workspace and published artifact digests/metadata/API retrieval, normalized tests, logs/gaps, and deterministic classification. Scripted/unsupported cases must remain non-executable with zero work, grant, or effect. |
+| DIFF-001 | DONE | MIG-002, MIG-003, MIG-004, MIG-005 | Certify core execution semantics in separate independently tested deny-authority Jenkins and McLoving sandboxes with exact platform/image/locale/toolchain/input-fixture receipts and bounded CPU/memory/time/output. Run every admitted parameter, condition, matrix, timeout, retry, caught-error, unstable-result, cancellation, post, parallel, join, fail-fast, multi-build, shared-resource, agent-selection, approval, dependency, cache, artifact, test, stdout/stderr, and success/failure scenario. Compare canonical stage/step arguments, normalized node/stage/build outcomes, attempt lineage, concurrency/order, cancellation, workspace and published artifact digests/metadata/API retrieval, normalized tests, logs/gaps, and deterministic classification. Scripted/unsupported cases must remain non-executable with zero work, grant, or effect. |
 | DIFF-002 | PENDING | MIG-005A, IDP-001, AUTHZ-001, JOBSTATE-001, AUDIT-001 | Certify identity, authorization, operational state, and persistent-history semantics. Compare immutable source-to-target principal mappings and positive/negative view/trigger/cancel/configure decisions; enabled/disabled generations and pre-queue denial; build-number/previous-result/SCM-changelog baselines; cross-build artifacts; retained workspace/state; retention and legal holds; approval identity/value/expiry behavior; retry/result history; first-authoritative-run decisions; and forward/reverse reconciliation. Include rename/collision/deleted-identity reuse, group changes, disable races, stale generations, history gaps, hold omission/release denial, restart, and rollback fixtures. |
 | DIFF-003 | PENDING | TRIG-001, SCM-001, SECRET-001, INPUT-001, PROV-001, EXT-001, OBS-001, DISC-001, DEP-001, CACHE-001, CONSUMER-001, ADMIN-001, REL-001 | Certify every live boundary through exact typed receipts and permission-negative fixtures: canonical trigger capture/replay, source acquisition and later revisions, secret consumer/taint eligibility, external runtime reads, dynamic provisioning, dependency/cache resolution, multibranch discovery, external read/write client migration, trusted release provenance, authoritative connector outcomes, and independently observed destination state. Compare implementation/configuration/account/resource/content/generation identities, downstream control flow, effect intents/outcomes, retry/ambiguity truth, observation freshness, and rollback restoration. Prove runner/connector/observer non-collusion, zero secret-marker disclosure, no residual Jenkins read/write client, no shadow production endpoint, substitution/replay/stale/outage denial, and zero duplicate effect. |
 | MIG-006 | PENDING | DIFF-001, DIFF-002, DIFF-003 | Close the exact committed-corpus differential gate by verifying and aggregating all three immutable evidence sets without rerunning alternative logic. Require complete per-case coverage, matching source/oracle/profile/compiler/mapping/component/release identities across the evidence sets, zero unclassified jobs or mismatches for certified cases, deterministic fail-closed receipts for scripted/unsupported cases, and stable mismatch/regression taxonomies. The migration package does not exist yet and is neither an input nor an acceptance condition here; `MIG-007` creates it and binds it to this exact closure. Report production-population coverage, parse reach, native runnable coverage, actionable migration, deterministic rejection coverage, and certified equivalence separately; no metric can borrow another metric's denominator or imply production authority. |
@@ -1041,8 +1040,65 @@ and pre-README-lock predecessor
 `a6671f966e3738e25135b33fc397b5fb21666ac60edb931b49e3b35672f5123b`
 remain immutable.
 The implementation and verification contract are documented in
-`docs/architecture/JENKINS_SHARED_LIBRARY_ADMISSION_V1.md`. `DIFF-001` is now
-the next ticket on this lane.
+`docs/architecture/JENKINS_SHARED_LIBRARY_ADMISSION_V1.md`.
+
+`DIFF-001` is complete at the exact current compiler boundary. The only Rust-
+admitted job in the 228-file corpus was executed independently in a pinned,
+networkless disposable Jenkins 2.568.1 controller on Mario and through the
+shipped McLoving controller/embedded Linux worker against fresh PostgreSQL on
+an internal-only Podman network. Both derive the same canonical one-stage,
+one-process, success trace with exact semantic stdout and zero user workspace,
+artifact, test, approval, credential-grant, or external-effect output. An
+independent bounded verifier checks the exact 30-file repository tree,
+including the verified 90-plugin profile, exact Jenkins console, three read-only
+bind sources, 2 GiB Jenkins-home and `/tmp` tmpfs ceilings, 16 MiB controller-log
+ceiling, dropped-capability, memory/swap, ulimit policy, and a 600-second GNU
+`timeout` controller watchdog with a 30-second TERM-to-KILL bound, plus two-sided
+containment, database integrity, coverage, raw observations, and trace
+equality. The raw McLoving admission/build digest, graph/build/node/attempt
+identity, fence, graph/status/attempt terminal-result agreement, and ordered log
+identity are cross-bound; the embedded worker enforces a 67,108,864-byte aggregate
+stdout/stderr ceiling; resealed semantic,
+identity, and authority mutations fail closed.
+The exact Jenkins initializer digest/body, source path, controller chronology,
+job/build identity, complete three-bind set, and bounded Jenkins-home tmpfs are
+cross-bound. The exact
+Jenkins container ID/name/creation/start identity, timeout/tini/jenkins.sh invocation,
+configured image/user, and complete UID/kernel/locale/Java/Jenkins runtime
+receipt are cross-bound. Build, workflow, stage, and step timestamps are
+exact-bound and cross-checked as nested intervals within the watchdog, and the
+hard-pinned 16-file capture-manifest digest closes the remaining raw Jenkins
+receipt surface. The exact
+McLoving runner container identity, invocation, entrypoint, complete mount set,
+and configured capability policy are identical across pre/post receipts and
+fail closed under resealed mutation.
+Certified equivalence is 1/1 admitted
+cases and 1/228 corpus cases. The remaining 227 cases and every unimplemented
+family remain non-admitted with zero authority. The exact contract is
+`docs/architecture/JENKINS_NATIVE_DIFFERENTIAL_V1.md`; expanding compiler
+admission requires a new differential version. The sealed external evidence
+is `/sn8100/runs/mcloving/diff001-native-20260801T173419Z-v44`, with a
+self-excluding 35-file manifest SHA-256 of
+`8cd2c506a7fc7438eae920c83b1089031e9b4fc763d2cb5bb596fe6ddfa00752`.
+Immutable v5 is a superseded no-McLoving-containment predecessor; immutable
+v10-v14 are rejected/superseded envelope iterations, v15 failed before
+execution, v17 is the review-superseded predecessor to v18, and v18 is the
+chronology-wording predecessor to v19, v19 is the identity-binding predecessor
+to v20, v20 is the runner/source/mount-binding predecessor to v21, and v21 is
+the Jenkins invocation/runtime-binding predecessor to v22. V22 is superseded
+because its worker output was unbounded; v23-v25 failed before execution, v26
+and v28 are exact-contract predecessors, v29/v30 are superseded 1 MiB-quota
+evidence, v31 failed on evidence-mount permissions, v32 failed on a host-built
+glibc mismatch, and the successful shared-64-MiB v33 capture was first
+incorporated into v34. V34 is superseded because its Jenkins controller lacked
+an enforced finite lifetime; v35-v37 are failed/provisional Jenkins recapture
+predecessors. Time-bounded v38/v39 remained output-unbounded; v40-v41 failed
+safely during bounded-home setup, and v42 proved a 1 GiB ceiling operationally
+insufficient. Successful time-and-output-bounded Jenkins v43 is combined with
+the unchanged McLoving v33 capture in v44; all predecessors
+contribute no authority.
+`DIFF-002` remains dependency-blocked; the next unblocked parity-substrate
+slice is selected after the DIFF-001 review/merge gate.
 
 `W2-C` is complete on `codex/wave2-agent-completion`. Production agents
 negotiate `work-delivery-v1`, cancel execution on lease-renewal loss, commit
