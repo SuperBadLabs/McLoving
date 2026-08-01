@@ -8,8 +8,8 @@ use std::{
 };
 
 use mcloving_state_transfer::{
-    BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy, DataBinding,
-    DataClassification, Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind,
+    AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy,
+    DataBinding, DataClassification, Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind,
     GraphNodeState, JobState, LegalHold, MaterializationLimits, ObjectKind, ObjectState,
     PersistentDependency, Protection, RecordProvenance, RetentionPolicy, RetrievalMetadata,
     STATE_TRANSFER_SCHEMA_V1, ScmState, SecretDisposition, SecretReference, StateBundle,
@@ -375,6 +375,34 @@ fn cyclic_graph_history_fails_closed() {
         transform(&bundle, &expected, &BTreeMap::new()),
         Err(TransferError::InvalidField(
             "graph nodes must be acyclic".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn graph_node_result_must_match_its_final_attempt() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
+        record: record("node:stateful:7:build", 70),
+        node_id: "build".to_owned(),
+        stage_path: "build".to_owned(),
+        node_kind: "stage".to_owned(),
+        parent_node_ids: Vec::new(),
+        result: BuildResult::Succeeded,
+        attempts: vec![AttemptState {
+            record: record("attempt:stateful:7:build:1", 71),
+            ordinal: 1,
+            result: BuildResult::Failed,
+            started_at_unix_ms: 1_100,
+            ended_at_unix_ms: 1_200,
+            audit_digest: digest(72),
+        }],
+    }];
+
+    assert_eq!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "graph node result must match its final attempt result".to_owned()
         ))
     );
 }

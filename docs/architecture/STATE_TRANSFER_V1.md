@@ -38,6 +38,8 @@ Nested state cannot weaken its container's trust boundary: every filesystem
 entry is at least as restrictive as the object that contains it. Persistent
 dependency keys are unique within a job, so replay and reconciliation never
 silently collapse two distinct dependencies onto one identity.
+For every graph node with attempts, the node result must equal its final
+attempt result; contradictory execution history is rejected before transfer.
 
 ## Persistence and reconciliation
 
@@ -92,12 +94,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `c337a9c22d7350b349ce118cef48fea3681cbca417cb7719c5e8678d535342ba`;
-- source-evidence manifest SHA-256 `2dfc8a6b47cc39e4e2efc5e786f0bad2916b809b8ef2b92e8d3a98ad394dcf68`;
-- forward bundle SHA-256 `d7a365115c8ca8bfd4e17a674fc1d0ad748b7611c3126c59a625f0f45fe2fa0f`;
-- reverse bundle SHA-256 `f5e05f57113d914e8f45e0fcd59a655ea6896dbc3d0ab9823ebb2f98bcc94abe`;
-- reverse-evidence manifest SHA-256 `5d7463c40d9a5332443740598ce37db7210da40168d681bf5d05f2feaf1d706b`;
-- sealed transform-evidence manifest SHA-256 `49049ccb3fa6edd1cf3ac2d140050a145cfeb41d2e69c2faf5ee5b822d7bcab7`.
+- transform binary SHA-256 `540a52744f8a5f5e23c5eacc3341ac5df49d467544cdae339252a7f9008f2e10`;
+- source-evidence manifest SHA-256 `db4d4d61c99ab05d006388e2b5198d1abc4c08b5a60ad9ddfafebf33944042a3`;
+- forward bundle SHA-256 `d50c0f8a17d196b9778c88f8cec1f25799b3acd5aeda774b56bdae56a04f7f0f`;
+- reverse bundle SHA-256 `6010a3c27cb10c08132b902536c8005b1c15d9603e4670af866581ff67a264d2`;
+- reverse-evidence manifest SHA-256 `5523e78d4742d45b41c4f861328e843d0e5919f36ebf03bf69bf8a99824b7bb6`;
+- sealed transform-evidence manifest SHA-256 `c60a749edf267bd72b5a57924a1d39a0dbaa303595c76be801d213c69a3a81e0`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 112 record-provenance rows, eight effective

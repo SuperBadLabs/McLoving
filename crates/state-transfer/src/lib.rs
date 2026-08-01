@@ -1283,6 +1283,15 @@ fn validate_graph_nodes(
             )?;
             validate_digest(attempt.audit_digest, "attempt audit digest")?;
         }
+        if node
+            .attempts
+            .last()
+            .is_some_and(|attempt| attempt.result != node.result)
+        {
+            return Err(TransferError::InvalidField(
+                "graph node result must match its final attempt result".to_owned(),
+            ));
+        }
         known_ids.insert(node.node_id.as_str());
     }
     for node in nodes {
