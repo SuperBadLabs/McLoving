@@ -920,17 +920,25 @@ and reverse state-transfer receipts, monotonic PostgreSQL protection truth,
 bounded no-follow filesystem materialization, and the disposable exact-profile
 Jenkins -> McLoving -> Jenkins rehearsal are documented in
 `docs/architecture/STATE_TRANSFER_V1.md`. The accepted successor rehearsal
-also removes direct runtime receipt/record/protection writes, derives change
-predicates only from immutable migration-writer SCM evidence bound to the exact
-receipt, project, live fenced agent attempt, and active restore epoch, and
-quota-bounds canonical serialization before cloning or secondary processing. It
+also removes direct runtime receipt/record/protection writes, derives transferred
+changes from bounded sealed Jenkins Git changelog bytes whose head and baseline
+bind the exact checkout, and evaluates predicates only from immutable
+migration-writer SCM evidence bound to the exact receipt, project, live fenced
+agent attempt, and active restore epoch. Approval decisions are constrained to
+their owning build windows, and canonical serialization is quota-bounded before
+cloning or secondary processing. It
 materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
-from Jenkins. Its source, transform, and reverse manifest SHA-256 values are
-`f932df8368a462cecbb932fcd3f7364b36532d503e10ff10bc000bfb74081250`,
-`8593e67d8a21e5675f37987246ae0eaea02591d5dc0ea4f507e6ecfe75cc861e`,
-and `2e4479960067904103c80fd6a8f2d02c35c2cc0d5da7930f32a9821862e38103`.
+from Jenkins. Its exact transform binary SHA-256 is
+`7e21e0fbbc508a8fd7b9743d697137094b14905eb71380b547fc7ddac6e8ed5f`.
+Its source, transform, and reverse manifest SHA-256 values are
+`4af1c5f6968d8517f075e156aacc04672c4eef149d00a7b01d6aa778c1d4da17`,
+`f384cdbe8c8cc4d866b981c574bc0a67d15dba6256934938a3697446d60f7fa1`,
+and `81a4a68570d114f95741346033b00eb48f11bd3c69d0fb33d55a5ca3ffd2301e`;
+the forward and reverse bundle SHA-256 values are
+`bf0fac61e39c6a42b5b9c6d56a20923c14be78d6a4283c897734caf06403c9a7`
+and `5f4eafcea98f93b3ab7d117e2cea60b0f3ab9ff8a0df294bb9d2588fab75dacf`.
 The source runtime is retained by default for the dependent phases and removed
 only by an explicit cleanup flag. `MIG-005` is next on its own branch
 and no longer waits for unrelated state-transfer work; both join only through

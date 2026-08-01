@@ -1207,7 +1207,12 @@ fn validate_build(
         build.started_at_unix_ms,
         build.ended_at_unix_ms,
     )?;
-    validate_approvals(&build.approvals, records)?;
+    validate_approvals(
+        &build.approvals,
+        records,
+        build.queued_at_unix_ms,
+        build.ended_at_unix_ms,
+    )?;
     validate_normalized_tests(&build.normalized_tests, records)?;
     validate_logs(&build.logs, records)?;
     validate_object_list(
@@ -1449,6 +1454,8 @@ fn validate_graph_nodes(
 fn validate_approvals(
     approvals: &[ApprovalState],
     records: &mut BTreeMap<String, Digest>,
+    build_queued_at_unix_ms: i64,
+    build_ended_at_unix_ms: i64,
 ) -> Result<(), TransferError> {
     let mut prior: Option<&str> = None;
     for approval in approvals {
@@ -1462,9 +1469,11 @@ fn validate_approvals(
         validate_text(&approval.approval_id, 512, "approval ID")?;
         validate_digest(approval.policy_digest, "approval policy digest")?;
         validate_text(&approval.approver_subject, 512, "approval subject")?;
-        if approval.decided_at_unix_ms < 0 {
+        if approval.decided_at_unix_ms < build_queued_at_unix_ms
+            || approval.decided_at_unix_ms > build_ended_at_unix_ms
+        {
             return Err(TransferError::InvalidField(
-                "approval decision time must be non-negative".to_owned(),
+                "approval decision time must be inside its build window".to_owned(),
             ));
         }
         for (name, digest) in &approval.submitted_value_digests {

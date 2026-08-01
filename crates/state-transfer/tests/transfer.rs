@@ -8,12 +8,12 @@ use std::{
 };
 
 use mcloving_state_transfer::{
-    AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy,
-    DataBinding, DataClassification, Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind,
-    GraphNodeState, JobState, LegalHold, MaterializationLimits, ObjectKind, ObjectState,
-    PersistentDependency, Protection, RecordProvenance, RetentionPolicy, RetrievalMetadata,
-    STATE_TRANSFER_SCHEMA_V1, ScmState, SecretDisposition, SecretReference, StateBundle,
-    SystemIdentity, TransferBinding, TransferDirection, TransferError, TriggerCause,
+    ApprovalState, AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate,
+    ConflictPolicy, DataBinding, DataClassification, Digest, ExpectedBinding, FilesystemEntry,
+    FilesystemEntryKind, GraphNodeState, JobState, LegalHold, MaterializationLimits, ObjectKind,
+    ObjectState, PersistentDependency, Protection, RecordProvenance, RetentionPolicy,
+    RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState, SecretDisposition, SecretReference,
+    StateBundle, SystemIdentity, TransferBinding, TransferDirection, TransferError, TriggerCause,
     canonical_bytes, evaluate_change_predicate, materialize_filesystem_entries, protections,
     sha256, transform,
 };
@@ -465,6 +465,29 @@ fn graph_node_attempts_must_stay_inside_the_build_window() {
             transform(&candidate, &expected, &BTreeMap::new()),
             Err(TransferError::InvalidField(field)) if field.contains("attempt timing")
         ));
+    }
+}
+
+#[test]
+fn approval_decisions_must_stay_inside_the_build_window() {
+    let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    for decided_at_unix_ms in [999, 1_201] {
+        let mut candidate = bundle.clone();
+        candidate.jobs[0].builds[0].approvals = vec![ApprovalState {
+            record: record("approval:stateful:7:production", 75),
+            approval_id: "production".to_owned(),
+            policy_digest: digest(76),
+            approver_subject: "oidc:release-owner".to_owned(),
+            submitted_value_digests: BTreeMap::new(),
+            decided_at_unix_ms,
+        }];
+
+        assert_eq!(
+            transform(&candidate, &expected, &BTreeMap::new()),
+            Err(TransferError::InvalidField(
+                "approval decision time must be inside its build window".to_owned()
+            ))
+        );
     }
 }
 
