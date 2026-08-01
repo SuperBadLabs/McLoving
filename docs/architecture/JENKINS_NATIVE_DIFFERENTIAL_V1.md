@@ -130,9 +130,9 @@ implication.
 The repository receipt is
 `migration/mario-jenkins-oracle-228/corpus-v1/differential-v1`. The sealed
 external evidence is
-`/sn8100/runs/mcloving/diff001-native-20260801T162027Z-v34`; its
+`/sn8100/runs/mcloving/diff001-native-20260801T171000Z-v39`; its
 self-excluding 35-file manifest SHA-256 is
-`9f5f28dd10f0b07bb56918a9ee74306d35e7a312566ff1a85ed6924329783cd1`.
+`0d0b6b4347c5754ca87997e1426a2b5ed93ccaca2d2fbc5025c62e0916dcafcc`.
 The immutable v5 envelope is superseded because it lacked McLoving containment
 receipts. The immutable v10 envelope is rejected because its outer manifest
 omitted the nested repository `SHA256SUMS`; v11 predates the final repository
@@ -155,4 +155,12 @@ then superseded because that ceiling contradicted the shared 64 MiB execution
 contract. V31 failed before execution on evidence-mount permissions and v32
 failed before execution on a host-built glibc mismatch. V33 is the successful
 shared-64-MiB capture incorporated byte-for-byte into v34.
+V34 is superseded because its Jenkins controller had no independently enforced
+finite lifetime. V35 failed on fresh-home permissions, v36 was an incomplete
+runtime capture, and v37 was a provisional receipt-format predecessor. V38 is
+the successful Jenkins capture with a 600-second GNU `timeout` controller
+watchdog and 30-second TERM-to-KILL bound; it is combined with the unchanged
+successful v33 McLoving capture in v39. The verifier exact-binds the watchdog,
+the complete Jenkins capture manifest, and nested build/workflow/stage/step
+chronology inside the controller interval.
 None of the predecessors contributes authority.

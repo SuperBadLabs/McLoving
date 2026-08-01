@@ -10,7 +10,11 @@ predating execution, later independently reverified without mismatch, and the
 oracle directory mounted from the pinned source path read-only. The container
 had no network, a read-only root filesystem, the exact
 dropped-capability set, synthetic local
-initialization, and bounded CPU, memory, PIDs, file descriptors, and time. The
+initialization, and bounded CPU, memory, PIDs, file descriptors, and time. GNU
+`timeout` was the captured container entrypoint and bounded the entire Jenkins
+controller lifetime to 600 seconds, with `TERM` followed by `KILL` after 30
+seconds; Tini ran as a child subreaper. The certified build completed inside
+that watchdog interval. The
 live Mario oracle was not mutated. The compiled strict-YAML pipeline was run
 through the shipped McLoving controller and embedded Linux worker against a
 fresh PostgreSQL database on an internal-only Podman network with no
@@ -25,13 +29,17 @@ Both disposable stacks were torn down after collection.
 The independent `mcloving-jenkins-differential` verifier checks the manifest,
 source, pipeline, image, and plugin-profile identities, the two raw receipts,
 the exact Jenkins console transcript and containment (including mount sources,
-tmpfs policy, dropped capabilities, memory/swap, and ulimits),
+tmpfs policy, dropped capabilities, memory/swap, ulimits, and the exact
+controller-watchdog invocation),
 McLoving runner/database/network containment and integrity,
 coverage/authority declarations, and the canonical trace. It compares stage
 order, literal process arguments, terminal outcome, attempt ordinal, semantic
 stdout, workspace entries, artifacts, tests, approvals, credential grants, and
 external effects. The graph build outcome, status summary, and attempt terminal
-summary must agree. Mutation tests reseal altered bundles and prove semantic,
+summary must agree. Jenkins container, build, workflow, stage, and step times
+are exact-bound and cross-checked as nested intervals inside the 600-second
+watchdog window. The hard-pinned 14-file Jenkins capture-manifest digest closes
+the remaining raw receipt surface. Mutation tests reseal altered bundles and prove semantic,
 containment, output, and coverage substitutions fail closed; exact-tree tests
 also reject extra files and symlinks.
 

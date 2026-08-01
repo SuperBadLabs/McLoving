@@ -42,6 +42,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_JENKINS_BUILD",
         ),
         (
+            "jenkins/build.json",
+            "\"executorUtilization\":0.27",
+            "\"executorUtilization\":0.99",
+            "E_JENKINS_CAPTURE_IDENTITY",
+        ),
+        (
             "jenkins/wfapi.json",
             "\"id\":\"1\"",
             "\"id\":\"2\"",
@@ -54,9 +60,21 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_JENKINS_WORKFLOW",
         ),
         (
+            "jenkins/wfapi.json",
+            "\"endTimeMillis\":1785603390984",
+            "\"endTimeMillis\":1785603388000",
+            "E_JENKINS_WORKFLOW",
+        ),
+        (
             "jenkins/stage-build.json",
             "\"id\":\"6\"",
             "\"id\":\"9\"",
+            "E_JENKINS_STAGE",
+        ),
+        (
+            "jenkins/stage-build.json",
+            "\"startTimeMillis\":1785603390537",
+            "\"startTimeMillis\":1785603392000",
             "E_JENKINS_STAGE",
         ),
         (
@@ -67,8 +85,14 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "jenkins/container-inspect.json",
-            "\"Path\": \"/usr/bin/tini\"",
+            "\"Path\": \"/usr/bin/timeout\"",
             "\"Path\": \"/bin/sh\"",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
+            "\"600s\"",
+            "\"0s\"",
             "E_JENKINS_CONTAINMENT",
         ),
         (
@@ -144,8 +168,14 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_JENKINS_CONTAINMENT",
         ),
         (
+            "jenkins/runtime.txt",
+            "controller_timeout_seconds=600",
+            "controller_timeout_seconds=0",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
             "jenkins/file-sha256.txt",
-            "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/evidence/jenkins/Jenkinsfile",
+            "/home/srikanth/mcloving-diff001-20260801T170000Z-v38/evidence/jenkins/Jenkinsfile",
             "/tmp/substituted-capture/Jenkinsfile",
             "E_JENKINS_CAPTURE_MANIFEST",
         ),
