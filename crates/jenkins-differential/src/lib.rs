@@ -1077,6 +1077,7 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
     ] {
         exact_string(&raw, path, expected, "E_MCLOVING")?;
     }
+    exact_bool(&raw, &["admission", "created"], true, "E_MCLOVING")?;
     exact_u64_array(
         &raw,
         &["graph", "build", "pipeline_digest"],
@@ -1134,6 +1135,7 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         return Err(VerificationError::new("E_MCLOVING", "graph is not exact"));
     }
     exact_string(&nodes[0], &["node_key"], "build", "E_MCLOVING")?;
+    exact_string(&nodes[0], &["kind"], "work", "E_MCLOVING")?;
     exact_string(&nodes[0], &["node_id"], MCLOVING_NODE_ID, "E_MCLOVING")?;
     exact_string(&nodes[0], &["status"], "succeeded", "E_MCLOVING")?;
     exact_string(&nodes[0], &["logical_outcome"], "succeeded", "E_MCLOVING")?;

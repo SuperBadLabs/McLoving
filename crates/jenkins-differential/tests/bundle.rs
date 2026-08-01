@@ -193,6 +193,18 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/mcloving-raw.json",
+            "\"created\": true",
+            "\"created\": false",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
+            "\"kind\": \"work\"",
+            "\"kind\": \"post\"",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
             "\"priority\": 0,\n      \"status\": \"succeeded\"",
             "\"priority\": 0,\n      \"status\": \"failed\"",
             "E_MCLOVING",
