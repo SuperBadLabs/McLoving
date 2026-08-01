@@ -75,17 +75,18 @@ substitution. It independently checks:
 - Jenkins build, stage, literal shell step, exact console transcript,
   workspace, and artifact observations;
 - McLoving image/runtime identities, internal network, runner/database
-  containment, database integrity, graph, platform, trust pool, attempt,
-  result, stdout/stderr, workspace, artifact, test, approval, and grant
-  observations;
+  containment, database integrity, admitted canonical-IR digest, graph/build/
+  node/attempt identity, platform, trust pool, fence, result, ordered log
+  sequence and stdout/stderr digests, workspace, artifact, test, approval, and
+  grant observations;
 - the strict-YAML coverage and zero-authority contract; and
 - equality of the independently derived canonical traces.
 
 Mutation tests alter and reseal the Jenkins result, network mode, memory/swap,
 ulimits, tmpfs, dropped capabilities, plugin mount source, plugin manifest,
-console output, McLoving output, McLoving read-only root filesystem, and
-admission denominator; unsafe paths, extra files, and symlinked evidence are
-also rejected.
+console output, McLoving output, admitted IR digest, attempt identity, log
+sequence, McLoving read-only root filesystem, and admission denominator; unsafe
+paths, extra files, and symlinked evidence are also rejected.
 
 ## Coverage truth
 
@@ -105,9 +106,9 @@ implication.
 The repository receipt is
 `migration/mario-jenkins-oracle-228/corpus-v1/differential-v1`. The sealed
 external evidence is
-`/sn8100/runs/mcloving/diff001-native-20260801T134200Z-v19`; its
+`/sn8100/runs/mcloving/diff001-native-20260801T134700Z-v20`; its
 self-excluding 34-file manifest SHA-256 is
-`7322f454d4ffad02f61b46c4e1112ac54764ccde43b9b2d0cb3fc9bbe5569bd4`.
+`21bf04aa5d6bb7dabb623b5ab0335313d9e406000fc904ed19f35ed4b0dd6fad`.
 The immutable v5 envelope is superseded because it lacked McLoving containment
 receipts. The immutable v10 envelope is rejected because its outer manifest
 omitted the nested repository `SHA256SUMS`; v11 predates the final repository
@@ -115,5 +116,6 @@ README lock; v12 used temporary receipt filenames; and v13 had an incomplete
 predecessor ledger. V14 was superseded by exact directory accounting, v15
 failed before execution on a glibc mismatch, and v17 was superseded by the
 review-driven exact plugin, console, and containment binding in v18; v18 was
-then superseded by v19's chronology-accurate plugin-verification wording. None
+then superseded by v19's chronology-accurate plugin-verification wording; v19
+was superseded by v20's raw IR, attempt, fence, and log identity binding. None
 contributes authority.

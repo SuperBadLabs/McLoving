@@ -26,6 +26,15 @@ pub const MCLOVING_DATABASE_IMAGE_SHA256: &str =
     "ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94";
 
 const MCLOVING_NETWORK: &str = "mcloving-diff001-net-v16";
+const MCLOVING_PIPELINE_DIGEST: &str =
+    "2a9b8b7bcd076950c67de874bd1e2b693af511ad55a7de3495d5c0b4210349d3";
+const MCLOVING_PIPELINE_DIGEST_BYTES: [u64; 32] = [
+    42, 155, 139, 123, 205, 7, 105, 80, 198, 125, 232, 116, 189, 30, 43, 105, 58, 245, 17, 173, 85,
+    167, 222, 52, 149, 213, 192, 180, 33, 3, 73, 211,
+];
+const MCLOVING_BUILD_ID: &str = "37c442ef-f740-4662-9aa9-3577ebcbec8c";
+const MCLOVING_NODE_ID: &str = "6ef240c4-dfe2-4532-8166-947de237c467";
+const MCLOVING_ATTEMPT_ID: &str = "76b55bd3-7040-40b9-8dcf-243b2b5f6f45";
 const MCLOVING_TEST_BINARY_SHA256: &str =
     "e843ecfa3c8acc71cc931634082a7098adf746e893c4493c617b96b5e2ffff1b";
 const MCLOVING_CONTROLLER_BINARY_SHA256: &str =
@@ -682,6 +691,28 @@ verification=sha256sum-strict-all-ok\n";
 fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationError> {
     verify_mcloving_containment(root)?;
     let raw = json(root, "mcloving/mcloving-raw.json")?;
+    for (path, expected) in [
+        (
+            &["admission", "pipeline_digest"][..],
+            MCLOVING_PIPELINE_DIGEST,
+        ),
+        (&["admission", "build_id"][..], MCLOVING_BUILD_ID),
+        (&["admission", "node_id"][..], MCLOVING_NODE_ID),
+        (&["admission", "attempt_id"][..], MCLOVING_ATTEMPT_ID),
+        (&["status", "build_id"][..], MCLOVING_BUILD_ID),
+        (&["status", "node_id"][..], MCLOVING_NODE_ID),
+        (&["status", "attempt_id"][..], MCLOVING_ATTEMPT_ID),
+        (&["graph", "build", "build_id"][..], MCLOVING_BUILD_ID),
+    ] {
+        exact_string(&raw, path, expected, "E_MCLOVING")?;
+    }
+    exact_u64_array(
+        &raw,
+        &["graph", "build", "pipeline_digest"],
+        &MCLOVING_PIPELINE_DIGEST_BYTES,
+        "E_MCLOVING",
+    )?;
+    exact_u64(&raw, &["status", "fence"], 1, "E_MCLOVING")?;
     exact_string(&raw, &["status", "status"], "succeeded", "E_MCLOVING")?;
     exact_string(
         &raw,
@@ -696,6 +727,7 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         return Err(VerificationError::new("E_MCLOVING", "graph is not exact"));
     }
     exact_string(&nodes[0], &["node_key"], "build", "E_MCLOVING")?;
+    exact_string(&nodes[0], &["node_id"], MCLOVING_NODE_ID, "E_MCLOVING")?;
     exact_string(&nodes[0], &["status"], "succeeded", "E_MCLOVING")?;
     exact_string(&nodes[0], &["required_platform"], "linux", "E_MCLOVING")?;
     exact_string(
@@ -705,6 +737,14 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         "E_MCLOVING",
     )?;
     exact_u64(&attempts[0], &["ordinal"], 1, "E_MCLOVING")?;
+    exact_string(
+        &attempts[0],
+        &["attempt_id"],
+        MCLOVING_ATTEMPT_ID,
+        "E_MCLOVING",
+    )?;
+    exact_string(&attempts[0], &["node_id"], MCLOVING_NODE_ID, "E_MCLOVING")?;
+    exact_u64(&attempts[0], &["fence"], 1, "E_MCLOVING")?;
     exact_string(&attempts[0], &["status"], "succeeded", "E_MCLOVING")?;
     exact_u64(
         &attempts[0],
@@ -722,24 +762,38 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
     if logs.len() != 2 {
         return Err(VerificationError::new("E_MCLOVING", "logs are not exact"));
     }
-    let stdout = logs
-        .iter()
-        .find(|log| value(log, &["stream"]) == Some(&Value::String("stdout".into())))
-        .ok_or_else(|| VerificationError::new("E_MCLOVING", "stdout is missing"))?;
-    let stderr = logs
-        .iter()
-        .find(|log| value(log, &["stream"]) == Some(&Value::String("stderr".into())))
-        .ok_or_else(|| VerificationError::new("E_MCLOVING", "stderr is missing"))?;
+    let stdout = &logs[0];
+    let stderr = &logs[1];
+    for (log, sequence, stream) in [(stdout, 0, "stdout"), (stderr, 1, "stderr")] {
+        exact_string(log, &["attempt_id"], MCLOVING_ATTEMPT_ID, "E_MCLOVING")?;
+        exact_u64(log, &["fence"], 1, "E_MCLOVING")?;
+        exact_u64(log, &["sequence"], sequence, "E_MCLOVING")?;
+        exact_string(log, &["stream"], stream, "E_MCLOVING")?;
+    }
     exact_string(
         stdout,
         &["content_hex"],
         "48656c6c6f20576f726c640a",
         "E_MCLOVING",
     )?;
+    exact_string(stdout, &["text"], "Hello World\n", "E_MCLOVING")?;
+    exact_string(
+        stdout,
+        &["sha256"],
+        "d2a84f4b8b650937ec8f73cd8be2c74add5a911ba64df27458ed8229da804a26",
+        "E_MCLOVING",
+    )?;
     exact_string(
         stderr,
         &["content_hex"],
         "2b206563686f2048656c6c6f20576f726c640a",
+        "E_MCLOVING",
+    )?;
+    exact_string(stderr, &["text"], "+ echo Hello World\n", "E_MCLOVING")?;
+    exact_string(
+        stderr,
+        &["sha256"],
+        "dd0b88f8948e42d79e88c9fee0a6825c96a07800d0d6cff497d60bf092d4609c",
         "E_MCLOVING",
     )?;
     for field in ["artifacts", "tests", "approvals", "credential_grants"] {
@@ -1078,6 +1132,26 @@ fn exact_u64(
         return Err(VerificationError::new(
             code,
             format!("{} is not {expected}", path.join(".")),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_u64_array(
+    root: &Value,
+    path: &[&str],
+    expected: &[u64],
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    let actual = array(root, path, code)?
+        .iter()
+        .map(Value::as_u64)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| VerificationError::new(code, "array contains a non-u64"))?;
+    if actual != expected {
+        return Err(VerificationError::new(
+            code,
+            format!("{} u64 array differs", path.join(".")),
         ));
     }
     Ok(())

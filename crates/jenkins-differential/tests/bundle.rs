@@ -84,6 +84,24 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_MCLOVING",
         ),
         (
+            "mcloving/mcloving-raw.json",
+            "2a9b8b7bcd076950c67de874bd1e2b693af511ad55a7de3495d5c0b4210349d3",
+            "3a9b8b7bcd076950c67de874bd1e2b693af511ad55a7de3495d5c0b4210349d3",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
+            "\"sequence\": 0",
+            "\"sequence\": 9",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
+            "76b55bd3-7040-40b9-8dcf-243b2b5f6f45",
+            "86b55bd3-7040-40b9-8dcf-243b2b5f6f45",
+            "E_MCLOVING",
+        ),
+        (
             "mcloving/runner-inspect-post.json",
             "\"ReadonlyRootfs\": true",
             "\"ReadonlyRootfs\": false",

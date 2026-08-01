@@ -1053,19 +1053,22 @@ independent bounded verifier checks the exact 30-file repository tree,
 including the verified 90-plugin profile, exact Jenkins console, mount sources,
 tmpfs, dropped-capability, memory/swap, and ulimit policy, plus two-sided
 containment, database integrity, coverage, raw observations, and trace
-equality; resealed semantic and authority mutations fail closed.
+equality. The raw McLoving admission/build digest, graph/build/node/attempt
+identity, fence, and ordered log identity are cross-bound; resealed semantic,
+identity, and authority mutations fail closed.
 Certified equivalence is 1/1 admitted
 cases and 1/228 corpus cases. The remaining 227 cases and every unimplemented
 family remain non-admitted with zero authority. The exact contract is
 `docs/architecture/JENKINS_NATIVE_DIFFERENTIAL_V1.md`; expanding compiler
 admission requires a new differential version. The sealed external evidence
-is `/sn8100/runs/mcloving/diff001-native-20260801T134200Z-v19`, with a
+is `/sn8100/runs/mcloving/diff001-native-20260801T134700Z-v20`, with a
 self-excluding 34-file manifest SHA-256 of
-`7322f454d4ffad02f61b46c4e1112ac54764ccde43b9b2d0cb3fc9bbe5569bd4`.
+`21bf04aa5d6bb7dabb623b5ab0335313d9e406000fc904ed19f35ed4b0dd6fad`.
 Immutable v5 is a superseded no-McLoving-containment predecessor; immutable
 v10-v14 are rejected/superseded envelope iterations, v15 failed before
 execution, v17 is the review-superseded predecessor to v18, and v18 is the
-chronology-wording predecessor to v19; they contribute no authority.
+chronology-wording predecessor to v19, and v19 is the identity-binding
+predecessor to v20; they contribute no authority.
 `DIFF-002` remains dependency-blocked; the next unblocked parity-substrate
 slice is selected after the DIFF-001 review/merge gate.
 
