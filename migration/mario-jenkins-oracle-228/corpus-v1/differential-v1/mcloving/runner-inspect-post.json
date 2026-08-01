@@ -1,7 +1,7 @@
 [
      {
-          "Id": "6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614",
-          "Created": "2026-08-01T08:11:05.433588704-05:00",
+          "Id": "fde98fe916ce4594bef0eaa2e0c39955f91702d981076a21fc4224d5b22d9a7b",
+          "Created": "2026-08-01T10:26:36.728544864-05:00",
           "Path": "bash",
           "Args": [
                "-c",
@@ -18,8 +18,8 @@
                "Pid": 0,
                "ExitCode": 0,
                "Error": "",
-               "StartedAt": "2026-08-01T08:11:05.518541202-05:00",
-               "FinishedAt": "2026-08-01T08:11:06.204727584-05:00",
+               "StartedAt": "2026-08-01T10:26:36.794403266-05:00",
+               "FinishedAt": "2026-08-01T10:26:37.453208856-05:00",
                "Health": {
                     "Status": "",
                     "FailingStreak": 0,
@@ -33,15 +33,15 @@
           "ImageName": "docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
           "Rootfs": "",
           "Pod": "",
-          "ResolvConfPath": "/run/user/1000/containers/overlay-containers/6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614/userdata/resolv.conf",
-          "HostnamePath": "/run/user/1000/containers/overlay-containers/6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614/userdata/hostname",
-          "HostsPath": "/run/user/1000/containers/overlay-containers/6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614/userdata/hosts",
-          "StaticDir": "/home/srikanth/.local/share/containers/storage/overlay-containers/6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614/userdata",
-          "OCIConfigPath": "/home/srikanth/.local/share/containers/storage/overlay-containers/6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614/userdata/config.json",
+          "ResolvConfPath": "/run/user/1000/containers/overlay-containers/fde98fe916ce4594bef0eaa2e0c39955f91702d981076a21fc4224d5b22d9a7b/userdata/resolv.conf",
+          "HostnamePath": "/run/user/1000/containers/overlay-containers/fde98fe916ce4594bef0eaa2e0c39955f91702d981076a21fc4224d5b22d9a7b/userdata/hostname",
+          "HostsPath": "/run/user/1000/containers/overlay-containers/fde98fe916ce4594bef0eaa2e0c39955f91702d981076a21fc4224d5b22d9a7b/userdata/hosts",
+          "StaticDir": "/home/srikanth/.local/share/containers/storage/overlay-containers/fde98fe916ce4594bef0eaa2e0c39955f91702d981076a21fc4224d5b22d9a7b/userdata",
+          "OCIConfigPath": "/home/srikanth/.local/share/containers/storage/overlay-containers/fde98fe916ce4594bef0eaa2e0c39955f91702d981076a21fc4224d5b22d9a7b/userdata/config.json",
           "OCIRuntime": "runc",
-          "ConmonPidFile": "/run/user/1000/containers/overlay-containers/6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614/userdata/conmon.pid",
-          "PidFile": "/run/user/1000/containers/overlay-containers/6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614/userdata/pidfile",
-          "Name": "mcloving-diff001-runner-v16",
+          "ConmonPidFile": "/run/user/1000/containers/overlay-containers/fde98fe916ce4594bef0eaa2e0c39955f91702d981076a21fc4224d5b22d9a7b/userdata/conmon.pid",
+          "PidFile": "/run/user/1000/containers/overlay-containers/fde98fe916ce4594bef0eaa2e0c39955f91702d981076a21fc4224d5b22d9a7b/userdata/pidfile",
+          "Name": "mcloving-diff001-runner-v29",
           "RestartCount": 0,
           "Driver": "overlay",
           "MountLabel": "",
@@ -53,12 +53,24 @@
           "GraphDriver": {
                "Name": "overlay",
                "Data": {
-                    "LowerDir": "/home/srikanth/.local/share/containers/storage/overlay/84cd569541471571d474373047cd629a18474651cbae84a15336ab48e9c1249a/diff:/home/srikanth/.local/share/containers/storage/overlay/6ed4daeb42f2357dc0b89953b899bda75557667fc332df7059b33fe652fd90be/diff:/home/srikanth/.local/share/containers/storage/overlay/a953769aed258014040812d20647d4d6081e3d363c090447570f659515d04183/diff:/home/srikanth/.local/share/containers/storage/overlay/1ca80c2bf88c3fca04d5b1f7ca345a9d6610997edfb4a3f2f0b642560209732e/diff:/home/srikanth/.local/share/containers/storage/overlay/b1a465965094b9af7fff87ee250ecbd82f7b5095ea2dfcc5c695a1b096f068b6/diff:/home/srikanth/.local/share/containers/storage/overlay/f2c42f900cb3b12d5456f76b4fa6454a52df3981323d3a1b1a17fe4c4955ab4a/diff",
-                    "UpperDir": "/home/srikanth/.local/share/containers/storage/overlay/c1417f3237fbc4b5edfb597f305a26c6ddc0b7a447181ae0eaa52dd7c5745cba/diff",
-                    "WorkDir": "/home/srikanth/.local/share/containers/storage/overlay/c1417f3237fbc4b5edfb597f305a26c6ddc0b7a447181ae0eaa52dd7c5745cba/work"
+                    "LowerDir": "/home/srikanth/.local/share/containers/storage/overlay/6ed4daeb42f2357dc0b89953b899bda75557667fc332df7059b33fe652fd90be/diff:/home/srikanth/.local/share/containers/storage/overlay/a953769aed258014040812d20647d4d6081e3d363c090447570f659515d04183/diff:/home/srikanth/.local/share/containers/storage/overlay/1ca80c2bf88c3fca04d5b1f7ca345a9d6610997edfb4a3f2f0b642560209732e/diff:/home/srikanth/.local/share/containers/storage/overlay/b1a465965094b9af7fff87ee250ecbd82f7b5095ea2dfcc5c695a1b096f068b6/diff:/home/srikanth/.local/share/containers/storage/overlay/f2c42f900cb3b12d5456f76b4fa6454a52df3981323d3a1b1a17fe4c4955ab4a/diff",
+                    "UpperDir": "/home/srikanth/.local/share/containers/storage/overlay/8ab304a80478e942335acb10374863f4de9ef777cb45d9f1866868d924f1c13b/diff",
+                    "WorkDir": "/home/srikanth/.local/share/containers/storage/overlay/8ab304a80478e942335acb10374863f4de9ef777cb45d9f1866868d924f1c13b/work"
                }
           },
           "Mounts": [
+               {
+                    "Type": "bind",
+                    "Source": "/sn8100/runs/mcloving/diff001-native-20260801T154500Z-v29/capture/mcloving",
+                    "Destination": "/evidence",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": true,
+                    "Propagation": "rprivate"
+               },
                {
                     "Type": "bind",
                     "Source": "/sn8100/work/forge/McLoving-diff001",
@@ -69,18 +81,6 @@
                          "rbind"
                     ],
                     "RW": false,
-                    "Propagation": "rprivate"
-               },
-               {
-                    "Type": "bind",
-                    "Source": "/sn8100/runs/mcloving/diff001-native-20260801T131300Z-v16/capture/mcloving",
-                    "Destination": "/evidence",
-                    "Driver": "",
-                    "Mode": "",
-                    "Options": [
-                         "rbind"
-                    ],
-                    "RW": true,
                     "Propagation": "rprivate"
                }
           ],
@@ -102,7 +102,7 @@
                "Ports": {},
                "SandboxKey": "",
                "Networks": {
-                    "mcloving-diff001-net-v16": {
+                    "mcloving-diff001-net-v29": {
                          "EndpointID": "",
                          "Gateway": "",
                          "IPAddress": "",
@@ -111,12 +111,12 @@
                          "GlobalIPv6Address": "",
                          "GlobalIPv6PrefixLen": 0,
                          "MacAddress": "",
-                         "NetworkID": "mcloving-diff001-net-v16",
+                         "NetworkID": "mcloving-diff001-net-v29",
                          "DriverOpts": null,
                          "IPAMConfig": null,
                          "Links": null,
                          "Aliases": [
-                              "6c58b760d4f6"
+                              "fde98fe916ce"
                          ]
                     }
                }
@@ -125,9 +125,9 @@
           "IsInfra": false,
           "IsService": false,
           "KubeExitCodePropagation": "invalid",
-          "lockNumber": 306,
+          "lockNumber": 319,
           "Config": {
-               "Hostname": "6c58b760d4f6",
+               "Hostname": "fde98fe916ce",
                "Domainname": "",
                "User": "1000:1000",
                "AttachStdin": false,
@@ -137,17 +137,17 @@
                "OpenStdin": false,
                "StdinOnce": false,
                "Env": [
-                    "LANG=C.UTF-8",
+                    "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v29:5432/mcloving",
                     "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "container=podman",
+                    "LANG=C.UTF-8",
+                    "LC_ALL=C.UTF-8",
+                    "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
                     "CARGO_HOME=/usr/local/cargo",
                     "RUST_VERSION=1.97.1",
-                    "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v16:5432/mcloving",
-                    "container=podman",
                     "RUSTUP_HOME=/usr/local/rustup",
-                    "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
-                    "LC_ALL=C.UTF-8",
                     "HOME=/work",
-                    "HOSTNAME=6c58b760d4f6"
+                    "HOSTNAME=fde98fe916ce"
                ],
                "Cmd": [
                     "bash",
@@ -172,14 +172,14 @@
                     "podman",
                     "create",
                     "--name",
-                    "mcloving-diff001-runner-v16",
+                    "mcloving-diff001-runner-v29",
                     "--network",
-                    "mcloving-diff001-net-v16",
+                    "mcloving-diff001-net-v29",
                     "--read-only",
-                    "--userns",
-                    "keep-id",
-                    "--user",
-                    "1000:1000",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--cap-drop",
+                    "all",
                     "--memory",
                     "4g",
                     "--memory-swap",
@@ -188,26 +188,24 @@
                     "4",
                     "--pids-limit",
                     "512",
-                    "--security-opt",
-                    "no-new-privileges",
-                    "--cap-drop",
-                    "all",
                     "--tmpfs",
                     "/tmp:rw,noexec,nosuid,nodev,size=1g",
-                    "--env",
-                    "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v16:5432/mcloving",
-                    "--env",
-                    "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
-                    "--env",
-                    "LANG=C.UTF-8",
-                    "--env",
-                    "LC_ALL=C.UTF-8",
+                    "--user",
+                    "1000:1000",
+                    "--workdir",
+                    "/work",
                     "--volume",
                     "/sn8100/work/forge/McLoving-diff001:/work:ro,Z",
                     "--volume",
-                    "/sn8100/runs/mcloving/diff001-native-20260801T131300Z-v16/capture/mcloving:/evidence:rw,Z",
-                    "--workdir",
-                    "/work",
+                    "/sn8100/runs/mcloving/diff001-native-20260801T154500Z-v29/capture/mcloving:/evidence:rw,Z",
+                    "-e",
+                    "LANG=C.UTF-8",
+                    "-e",
+                    "LC_ALL=C.UTF-8",
+                    "-e",
+                    "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v29:5432/mcloving",
+                    "-e",
+                    "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
                     "docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
                     "bash",
                     "-c",
@@ -221,8 +219,8 @@
           },
           "HostConfig": {
                "Binds": [
-                    "/sn8100/work/forge/McLoving-diff001:/work:ro,rprivate,rbind",
-                    "/sn8100/runs/mcloving/diff001-native-20260801T131300Z-v16/capture/mcloving:/evidence:rw,rprivate,rbind"
+                    "/sn8100/runs/mcloving/diff001-native-20260801T154500Z-v29/capture/mcloving:/evidence:rw,rprivate,rbind",
+                    "/sn8100/work/forge/McLoving-diff001:/work:ro,rprivate,rbind"
                ],
                "CgroupManager": "systemd",
                "CgroupMode": "private",
@@ -278,19 +276,7 @@
                     "/tmp": "rw,noexec,nosuid,nodev,size=1g,rprivate,tmpcopyup"
                },
                "UTSMode": "private",
-               "UsernsMode": "private",
-               "IDMappings": {
-                    "UidMap": [
-                         "0:1:1000",
-                         "1000:0:1",
-                         "1001:1001:64536"
-                    ],
-                    "GidMap": [
-                         "0:1:1000",
-                         "1000:0:1",
-                         "1001:1001:64536"
-                    ]
-               },
+               "UsernsMode": "",
                "ShmSize": 65536000,
                "Runtime": "oci",
                "ConsoleSize": [

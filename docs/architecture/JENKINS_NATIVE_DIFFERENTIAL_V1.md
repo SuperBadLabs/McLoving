@@ -54,7 +54,8 @@ embedded Linux worker against fresh PostgreSQL. Controller and database shared
 only an internal Podman network and published no ports. The non-root runner had
 a read-only root filesystem, no effective or bounding capabilities, no-new-
 privileges, a read-only source mount, and explicit CPU, memory, PID, time, and
-output bounds. PostgreSQL had a read-only root filesystem and only the five
+output bounds. The embedded worker enforces an exact 1,048,576-byte aggregate
+stdout/stderr ceiling. PostgreSQL had a read-only root filesystem and only the five
 startup capabilities required by its image entrypoint. The build used
 synthetic API identities, no production credential, and no external-effect
 authority. The disposable database, network, and runner were removed after
@@ -94,7 +95,8 @@ substitution. It independently checks:
   workspace, and artifact observations;
 - McLoving image/runtime identities, internal network, runner/database
   containment, database integrity, admitted canonical-IR digest, graph/build/
-  node/attempt identity, platform, trust pool, fence, result, ordered log
+  node/attempt identity, platform, trust pool, fence, graph/status/attempt
+  terminal-result agreement, ordered log
   sequence and stdout/stderr digests, workspace, artifact, test, approval, and
   grant observations, plus the runner's exact execution identity, invocation,
   capability policy, and complete mount set;
@@ -105,7 +107,8 @@ Mutation tests alter and reseal the Jenkins result, network mode, memory/swap,
 container invocation, canonical runtime, ulimits, tmpfs, dropped capabilities,
 plugin mount source, undeclared mount,
 plugin manifest, initializer source, console output, McLoving output, admitted
-IR digest, attempt identity, log sequence, runner command, added/dropped
+IR digest, attempt identity, graph/status/attempt result agreement, log sequence,
+runner command, runner configured image, added/dropped
 capabilities, McLoving read-only root filesystem, and admission denominator; unsafe
 paths, extra files, and symlinked evidence are also rejected.
 
@@ -127,9 +130,9 @@ implication.
 The repository receipt is
 `migration/mario-jenkins-oracle-228/corpus-v1/differential-v1`. The sealed
 external evidence is
-`/sn8100/runs/mcloving/diff001-native-20260801T142000Z-v22`; its
+`/sn8100/runs/mcloving/diff001-native-20260801T160000Z-v30`; its
 self-excluding 34-file manifest SHA-256 is
-`5235f8a2bef6add526c9ce1f3a8acaa1da68e7587b98fa7a4e177c3f5242c83d`.
+`52079f5f248bf47c3f5c7753edfeca4bcf7db51485186300113845365768bb61`.
 The immutable v5 envelope is superseded because it lacked McLoving containment
 receipts. The immutable v10 envelope is rejected because its outer manifest
 omitted the nested repository `SHA256SUMS`; v11 predates the final repository
@@ -141,5 +144,11 @@ then superseded by v19's chronology-accurate plugin-verification wording; v19
 was superseded by v20's raw IR, attempt, fence, and log identity binding; v20
 was superseded by v21's exact Jenkins source/job/mount and McLoving runner
 invocation/capability binding; and v21 was superseded by v22's exact Jenkins
-container invocation/identity and complete runtime binding. None contributes
-authority.
+container invocation/identity and complete runtime binding. V22 was superseded
+because its embedded worker binary had no aggregate output ceiling. V23-v25
+failed before execution on evidence-directory permissions, host ABI mismatch,
+and a login-shell PATH reset respectively. V26 was superseded because its
+reconstructed command omitted explicit memory/swap equality; v28 was
+superseded because an extra database network alias broadened the exact topology.
+V29 is the successful bounded capture incorporated byte-for-byte into v30.
+None of the predecessors contributes authority.

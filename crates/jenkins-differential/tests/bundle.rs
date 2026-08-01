@@ -163,8 +163,8 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/mcloving-raw.json",
-            "76b55bd3-7040-40b9-8dcf-243b2b5f6f45",
-            "86b55bd3-7040-40b9-8dcf-243b2b5f6f45",
+            "cafd49b4-541d-4079-8022-6f097244e623",
+            "dafd49b4-541d-4079-8022-6f097244e623",
             "E_MCLOVING",
         ),
         (
@@ -199,13 +199,13 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/runner-inspect-pre.json",
-            "\"NetworkID\": \"mcloving-diff001-net-v16\"",
+            "\"NetworkID\": \"mcloving-diff001-net-v29\"",
             "\"NetworkID\": \"external-bridge\"",
             "E_MCLOVING_CONTAINMENT",
         ),
         (
             "mcloving/runner-inspect-pre.json",
-            "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v16:5432/mcloving",
+            "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v29:5432/mcloving",
             "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@substituted-db:5432/mcloving",
             "E_MCLOVING_CONTAINMENT",
         ),
@@ -229,8 +229,8 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/runtime.txt",
-            "groups=1000(srikanth)",
-            "groups=1000(srikanth),0(root)",
+            "groups=1000(1000)",
+            "groups=1000(1000),0(root)",
             "E_MCLOVING_CONTAINMENT",
         ),
         (
@@ -241,8 +241,8 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/test-output.txt",
-            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s",
-            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s\ntest result: FAILED. 0 passed; 1 failed",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s\ntest result: FAILED. 0 passed; 1 failed",
             "E_MCLOVING_CONTAINMENT",
         ),
         (
@@ -271,7 +271,7 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/postgres-inspect.json",
-            "\"NetworkID\": \"mcloving-diff001-net-v16\"",
+            "\"NetworkID\": \"mcloving-diff001-net-v29\"",
             "\"NetworkID\": \"external-bridge\"",
             "E_MCLOVING_CONTAINMENT",
         ),
@@ -289,8 +289,8 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/postgres-inspect.json",
-            "80e472c559984c0dc1d2bccee1d0d753c7688eca39221ddcf45a0104bdbae57f",
-            "90e472c559984c0dc1d2bccee1d0d753c7688eca39221ddcf45a0104bdbae57f",
+            "bca0a0acdab4a209c448724c37be924c9091f06756b5487772f0a1da0497bf00",
+            "cca0a0acdab4a209c448724c37be924c9091f06756b5487772f0a1da0497bf00",
             "E_MCLOVING_CONTAINMENT",
         ),
         (

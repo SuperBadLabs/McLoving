@@ -20,7 +20,7 @@ The default text search configuration will be set to "english".
 
 Data page checksums are disabled.
 
-fixing permissions on existing directory /var/lib/postgresql/data/pgdata ... ok
+fixing permissions on existing directory /var/lib/postgresql/data ... ok
 creating subdirectories ... ok
 selecting dynamic shared memory implementation ... posix
 selecting default "max_connections" ... 100
@@ -29,7 +29,7 @@ selecting default time zone ... UTC
 creating configuration files ... ok
 running bootstrap script ... ok
 sh: locale: not found
-2026-08-01 13:11:04.426 UTC [43] WARNING:  no usable system locales were found
+2026-08-01 15:26:36.011 UTC [42] WARNING:  no usable system locales were found
 performing post-bootstrap initialization ... ok
 syncing data to disk ... ok
 
@@ -38,12 +38,12 @@ initdb: hint: You can change this by editing pg_hba.conf or using the option -A,
 
 Success. You can now start the database server using:
 
-    pg_ctl -D /var/lib/postgresql/data/pgdata -l logfile start
+    pg_ctl -D /var/lib/postgresql/data -l logfile start
 
-waiting for server to start....2026-08-01 13:11:04.566 UTC [49] LOG:  starting PostgreSQL 17.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 14.2.0) 14.2.0, 64-bit
-2026-08-01 13:11:04.566 UTC [49] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
-2026-08-01 13:11:04.567 UTC [52] LOG:  database system was shut down at 2026-08-01 13:11:04 UTC
-2026-08-01 13:11:04.568 UTC [49] LOG:  database system is ready to accept connections
+waiting for server to start....2026-08-01 15:26:36.156 UTC [53] LOG:  starting PostgreSQL 17.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 14.2.0) 14.2.0, 64-bit
+2026-08-01 15:26:36.156 UTC [53] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-08-01 15:26:36.156 UTC [56] LOG:  database system was shut down at 2026-08-01 15:26:36 UTC
+2026-08-01 15:26:36.158 UTC [53] LOG:  database system is ready to accept connections
  done
 server started
 CREATE DATABASE
@@ -51,21 +51,21 @@ CREATE DATABASE
 
 /usr/local/bin/docker-entrypoint.sh: ignoring /docker-entrypoint-initdb.d/*
 
-waiting for server to shut down....2026-08-01 13:11:04.679 UTC [49] LOG:  received fast shutdown request
-2026-08-01 13:11:04.679 UTC [49] LOG:  aborting any active transactions
-2026-08-01 13:11:04.681 UTC [49] LOG:  background worker "logical replication launcher" (PID 55) exited with exit code 1
-2026-08-01 13:11:04.681 UTC [50] LOG:  shutting down
-2026-08-01 13:11:04.681 UTC [50] LOG:  checkpoint starting: shutdown immediate
-2026-08-01 13:11:04.683 UTC [50] LOG:  checkpoint complete: wrote 925 buffers (5.6%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.003 s, sync=0.001 s, total=0.003 s; sync files=301, longest=0.001 s, average=0.000 s; distance=4255 kB, estimate=4255 kB; lsn=0/1915040, redo lsn=0/1915040
-2026-08-01 13:11:04.686 UTC [49] LOG:  database system is shut down
+waiting for server to shut down....2026-08-01 15:26:36.266 UTC [53] LOG:  received fast shutdown request
+2026-08-01 15:26:36.266 UTC [53] LOG:  aborting any active transactions
+2026-08-01 15:26:36.267 UTC [53] LOG:  background worker "logical replication launcher" (PID 59) exited with exit code 1
+2026-08-01 15:26:36.268 UTC [54] LOG:  shutting down
+2026-08-01 15:26:36.268 UTC [54] LOG:  checkpoint starting: shutdown immediate
+2026-08-01 15:26:36.270 UTC [54] LOG:  checkpoint complete: wrote 925 buffers (5.6%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.002 s, sync=0.001 s, total=0.003 s; sync files=301, longest=0.001 s, average=0.000 s; distance=4255 kB, estimate=4255 kB; lsn=0/1915040, redo lsn=0/1915040
+2026-08-01 15:26:36.272 UTC [53] LOG:  database system is shut down
  done
 server stopped
 
 PostgreSQL init process complete; ready for start up.
 
-2026-08-01 13:11:04.790 UTC [1] LOG:  starting PostgreSQL 17.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 14.2.0) 14.2.0, 64-bit
-2026-08-01 13:11:04.791 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
-2026-08-01 13:11:04.791 UTC [1] LOG:  listening on IPv6 address "::", port 5432
-2026-08-01 13:11:04.791 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
-2026-08-01 13:11:04.792 UTC [65] LOG:  database system was shut down at 2026-08-01 13:11:04 UTC
-2026-08-01 13:11:04.793 UTC [1] LOG:  database system is ready to accept connections
+2026-08-01 15:26:36.374 UTC [1] LOG:  starting PostgreSQL 17.6 on x86_64-pc-linux-musl, compiled by gcc (Alpine 14.2.0) 14.2.0, 64-bit
+2026-08-01 15:26:36.374 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-08-01 15:26:36.374 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-08-01 15:26:36.374 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-08-01 15:26:36.374 UTC [74] LOG:  database system was shut down at 2026-08-01 15:26:36 UTC
+2026-08-01 15:26:36.376 UTC [1] LOG:  database system is ready to accept connections

@@ -16,7 +16,9 @@ through the shipped McLoving controller and embedded Linux worker against a
 fresh PostgreSQL database on an internal-only Podman network with no
 production credential or effect authority. The non-root McLoving runner had a
 read-only root filesystem, no effective capabilities, no-new-privileges, no
-published ports, bounded resources, and a read-only source mount. The database
+published ports, bounded resources, a 1,048,576-byte aggregate stdout/stderr
+ceiling enforced by the embedded execution spine, and a read-only source
+mount. The database
 published no ports and retained only its five required startup capabilities.
 Both disposable stacks were torn down after collection.
 
@@ -28,7 +30,8 @@ McLoving runner/database/network containment and integrity,
 coverage/authority declarations, and the canonical trace. It compares stage
 order, literal process arguments, terminal outcome, attempt ordinal, semantic
 stdout, workspace entries, artifacts, tests, approvals, credential grants, and
-external effects. Mutation tests reseal altered bundles and prove semantic,
+external effects. The graph build outcome, status summary, and attempt terminal
+summary must agree. Mutation tests reseal altered bundles and prove semantic,
 containment, output, and coverage substitutions fail closed; exact-tree tests
 also reject extra files and symlinks.
 

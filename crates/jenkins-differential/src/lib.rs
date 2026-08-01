@@ -69,52 +69,52 @@ const MCLOVING_RUNNER_IMAGE_REFERENCE: &str = "docker.io/library/rust@sha256:77f
 pub const MCLOVING_DATABASE_IMAGE_SHA256: &str =
     "ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94";
 
-const MCLOVING_NETWORK: &str = "mcloving-diff001-net-v16";
+const MCLOVING_NETWORK: &str = "mcloving-diff001-net-v29";
 const MCLOVING_NETWORK_ID: &str =
-    "419ef843a49f10654293345dca7fde15e1363c5faf2a67f0d9a5d620fa28b3a5";
+    "75b2651ce8e7591418b17f4c7dbff75ebad8f5b273fba98c663a8e3b9f4729b8";
 const MCLOVING_PIPELINE_DIGEST: &str =
     "2a9b8b7bcd076950c67de874bd1e2b693af511ad55a7de3495d5c0b4210349d3";
 const MCLOVING_PIPELINE_DIGEST_BYTES: [u64; 32] = [
     42, 155, 139, 123, 205, 7, 105, 80, 198, 125, 232, 116, 189, 30, 43, 105, 58, 245, 17, 173, 85,
     167, 222, 52, 149, 213, 192, 180, 33, 3, 73, 211,
 ];
-const MCLOVING_BUILD_ID: &str = "37c442ef-f740-4662-9aa9-3577ebcbec8c";
-const MCLOVING_NODE_ID: &str = "6ef240c4-dfe2-4532-8166-947de237c467";
-const MCLOVING_ATTEMPT_ID: &str = "76b55bd3-7040-40b9-8dcf-243b2b5f6f45";
+const MCLOVING_BUILD_ID: &str = "b1c2dde8-64f2-4887-93c0-12c99df7b0fb";
+const MCLOVING_NODE_ID: &str = "80b74eb0-8fb2-45cb-bd7e-40fc421e34c8";
+const MCLOVING_ATTEMPT_ID: &str = "cafd49b4-541d-4079-8022-6f097244e623";
 const MCLOVING_RESULT_SHA256: &str =
     "7b09726b2edfce62285608b12dbd89adc473bb4872ca72e2371dbb58e4d88cd4";
 const MCLOVING_TEST_BINARY_SHA256: &str =
-    "e843ecfa3c8acc71cc931634082a7098adf746e893c4493c617b96b5e2ffff1b";
+    "b5e72b0971df1458412676558a756b541e61876a3202a39178fa82c59bf48b68";
 const MCLOVING_CONTROLLER_BINARY_SHA256: &str =
-    "c93970047f7f2ce169752448f3c0b96cd0b56038b2c8de4316ff14b8d11f8d0d";
-const MCLOVING_RUNNER_ID: &str = "6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614";
-const MCLOVING_RUNNER_NAME: &str = "mcloving-diff001-runner-v16";
-const MCLOVING_RUNNER_CREATED: &str = "2026-08-01T08:11:05.433588704-05:00";
+    "cbd81976cb2ddafab75770383428abc903c0d160b30357b97202f9143814b748";
+const MCLOVING_RUNNER_ID: &str = "fde98fe916ce4594bef0eaa2e0c39955f91702d981076a21fc4224d5b22d9a7b";
+const MCLOVING_RUNNER_NAME: &str = "mcloving-diff001-runner-v29";
+const MCLOVING_RUNNER_CREATED: &str = "2026-08-01T10:26:36.728544864-05:00";
 const MCLOVING_RUNNER_COMMAND: &str = "set -euo pipefail; { id; uname -a; locale; sha256sum 'target/debug/deps/diff_001-3b7075192798a581' target/debug/mcloving-controller; } > /evidence/runtime.txt; exec 'target/debug/deps/diff_001-3b7075192798a581' --nocapture";
 const MCLOVING_CONTAINMENT_RECEIPTS: [(&str, &str); 6] = [
     (
         "mcloving/network-inspect.json",
-        "94c82fff076d6b4ea81cc340104fc567f40143fa136c356e2c33dd299e5056f7",
+        "363d7d24317eb94b07713717a0be2859c7c9dc9311984483fffa4c4990b514b5",
     ),
     (
         "mcloving/runner-inspect-pre.json",
-        "b688f59c225ebd5edd328e93b2b56c2c802ec1d639e31bbd0595c9102b886a9b",
+        "67b7089fe70e81e0914bec2b29215120f1dfd78b3c1f972ea87407c88bb31563",
     ),
     (
         "mcloving/runner-inspect-post.json",
-        "719399e779166332e110e095509d76396edcd400d3097641d58434205afb16cd",
+        "c97bd179372b86841e43e3b55eaed5c1764d4bc6e80a7f7bf3a6433d39b258c1",
     ),
     (
         "mcloving/postgres-inspect.json",
-        "781d827073183bf80c13f5d19f659f74c083cce3cbd16694b06449d642f8ceca",
+        "cd6800cb710c0edebe4a516f36df450fd12d1139fbd8e5345a247567cb24a4de",
     ),
     (
         "mcloving/runtime.txt",
-        "f83e5ebd7e731e7ec1b65b7e58ed367c3d0bb0aa53225d90fbc28e86f0c558f0",
+        "5df7b6051cff2276fb8930a5079946f0aabba761ec9107d94a9c6a5cc43e6be1",
     ),
     (
         "mcloving/test-output.txt",
-        "941e9bbeb5201d454a821c88746b9dc27f6238614eb543ce756e79f2ba65104f",
+        "5f0c1e1e0efd0fd9ece4abfe243f5310f481fa94a22f4666acb9fcad170e16c5",
     ),
 ];
 
@@ -1200,7 +1200,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     exact_string(
         network,
         &["created"],
-        "2026-08-01T08:11:04.170254308-05:00",
+        "2026-08-01T10:26:35.798961446-05:00",
         "E_MCLOVING_CONTAINMENT",
     )?;
     exact_bool(network, &["internal"], true, "E_MCLOVING_CONTAINMENT")?;
@@ -1222,20 +1222,20 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     exact_string(
         &subnets[0],
         &["subnet"],
-        "10.89.0.0/24",
+        "10.91.0.0/24",
         "E_MCLOVING_CONTAINMENT",
     )?;
     exact_string(
         &subnets[0],
         &["gateway"],
-        "10.89.0.1",
+        "10.91.0.1",
         "E_MCLOVING_CONTAINMENT",
     )?;
 
     let pre = json(root, "mcloving/runner-inspect-pre.json")?;
     let pre = first_object(&pre, "E_MCLOVING_CONTAINMENT")?;
     verify_runner_contract(pre, false)?;
-    verify_network_attachment(pre, "", "", 0, "", "6c58b760d4f6")?;
+    verify_network_attachment(pre, "", "", 0, "", "fde98fe916ce")?;
     exact_empty_object(pre, &["NetworkSettings", "Ports"], "E_MCLOVING_CONTAINMENT")?;
     exact_string(
         pre,
@@ -1247,7 +1247,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     let post = json(root, "mcloving/runner-inspect-post.json")?;
     let post = first_object(&post, "E_MCLOVING_CONTAINMENT")?;
     verify_runner_contract(post, true)?;
-    verify_network_attachment(post, "", "", 0, "", "6c58b760d4f6")?;
+    verify_network_attachment(post, "", "", 0, "", "fde98fe916ce")?;
     exact_empty_object(
         post,
         &["NetworkSettings", "Ports"],
@@ -1278,11 +1278,11 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     )?;
     verify_network_attachment(
         database,
-        "10.89.0.1",
-        "10.89.0.2",
+        "10.91.0.1",
+        "10.91.0.2",
         24,
-        "62:4e:4f:34:09:2c",
-        "80e472c55998",
+        "5a:6e:9a:e8:78:5f",
+        "bca0a0acdab4",
     )?;
     exact_object_keys(
         database,
@@ -1298,19 +1298,19 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     exact_string(
         database,
         &["Id"],
-        "80e472c559984c0dc1d2bccee1d0d753c7688eca39221ddcf45a0104bdbae57f",
+        "bca0a0acdab4a209c448724c37be924c9091f06756b5487772f0a1da0497bf00",
         "E_MCLOVING_CONTAINMENT",
     )?;
     exact_string(
         database,
         &["Name"],
-        "mcloving-diff001-db-v16",
+        "mcloving-diff001-db-v29",
         "E_MCLOVING_CONTAINMENT",
     )?;
     exact_string(
         database,
         &["Created"],
-        "2026-08-01T08:11:04.203450178-05:00",
+        "2026-08-01T10:26:35.814518195-05:00",
         "E_MCLOVING_CONTAINMENT",
     )?;
     exact_string(
@@ -1323,6 +1323,12 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     exact_string(
         database,
         &["Config", "Image"],
+        &format!("docker.io/library/postgres@sha256:{MCLOVING_DATABASE_IMAGE_SHA256}"),
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["ImageName"],
         &format!("docker.io/library/postgres@sha256:{MCLOVING_DATABASE_IMAGE_SHA256}"),
         "E_MCLOVING_CONTAINMENT",
     )?;
@@ -1361,20 +1367,20 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         database,
         &["Config", "Env"],
         &[
-            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "container=podman",
-            "PGDATA=/var/lib/postgresql/data/pgdata",
-            "LANG=en_US.utf8",
             "PG_MAJOR=17",
             "PG_VERSION=17.6",
-            "POSTGRES_HOST_AUTH_METHOD=trust",
-            "GOSU_VERSION=1.19",
-            "PG_SHA256=e0630a3600aea27511715563259ec2111cd5f4353a4b040e0be827f94cd7a8b0",
             "DOCKER_PG_LLVM_DEPS=llvm19-dev \t\tclang19",
-            "POSTGRES_DB=mcloving",
             "POSTGRES_USER=mcloving",
+            "POSTGRES_DB=mcloving",
+            "PGDATA=/var/lib/postgresql/data",
+            "GOSU_VERSION=1.19",
+            "LANG=en_US.utf8",
+            "POSTGRES_HOST_AUTH_METHOD=trust",
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "container=podman",
+            "PG_SHA256=e0630a3600aea27511715563259ec2111cd5f4353a4b040e0be827f94cd7a8b0",
             "HOME=/root",
-            "HOSTNAME=80e472c55998",
+            "HOSTNAME=bca0a0acdab4",
         ],
         "E_MCLOVING_CONTAINMENT",
     )?;
@@ -1402,6 +1408,12 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         "E_MCLOVING_CONTAINMENT",
     )?;
     exact_empty_array(database, &["Mounts"], "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        database,
+        &["HostConfig", "Tmpfs", "/var/lib/postgresql/data"],
+        "rw,nosuid,nodev,size=1g,rprivate,tmpcopyup",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
     exact_string_array(
         database,
         &["EffectiveCaps"],
@@ -1429,8 +1441,8 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
 
     let runtime = text(root, "mcloving/runtime.txt")?;
     let expected_runtime = format!(
-        "uid=1000(srikanth) gid=1000(srikanth) groups=1000(srikanth)\n\
-Linux 6c58b760d4f6 7.0.0-28-generic #28~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Wed Jul  1 15:50:57 UTC 2 x86_64 GNU/Linux\n\
+        "uid=1000(srikanth) gid=1000(1000) groups=1000(1000)\n\
+Linux fde98fe916ce 7.0.0-28-generic #28~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Wed Jul  1 15:50:57 UTC 2 x86_64 GNU/Linux\n\
 LANG=C.UTF-8\n\
 LANGUAGE=\n\
 LC_CTYPE=\"C.UTF-8\"\n\
@@ -1455,7 +1467,7 @@ LC_ALL=C.UTF-8\n\
             "runner runtime receipt differs",
         ));
     }
-    const EXPECTED_TEST_OUTPUT: &str = "\nrunning 1 test\ntest admitted_jenkins_case_executes_with_a_canonical_trace ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s\n\n";
+    const EXPECTED_TEST_OUTPUT: &str = "\nrunning 1 test\ntest admitted_jenkins_case_executes_with_a_canonical_trace ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s\n\n";
     if text(root, "mcloving/database-integrity.txt")? != "mcloving|1\n"
         || text(root, "mcloving/test-output.txt")? != EXPECTED_TEST_OUTPUT
     {
@@ -1521,18 +1533,18 @@ fn verify_runner_contract(
         "E_MCLOVING_CONTAINMENT",
     )?;
     let mut environment = vec![
-        "LANG=C.UTF-8",
+        "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v29:5432/mcloving",
         "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "container=podman",
+        "LANG=C.UTF-8",
+        "LC_ALL=C.UTF-8",
+        "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
         "CARGO_HOME=/usr/local/cargo",
         "RUST_VERSION=1.97.1",
-        "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v16:5432/mcloving",
-        "container=podman",
         "RUSTUP_HOME=/usr/local/rustup",
-        "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
-        "LC_ALL=C.UTF-8",
     ];
     if started_environment {
-        environment.extend(["HOME=/work", "HOSTNAME=6c58b760d4f6"]);
+        environment.extend(["HOME=/work", "HOSTNAME=fde98fe916ce"]);
     }
     exact_string_array(
         container,
@@ -1586,7 +1598,7 @@ fn verify_runner_contract(
     for (source, destination, writable) in [
         ("/sn8100/work/forge/McLoving-diff001", "/work", false),
         (
-            "/sn8100/runs/mcloving/diff001-native-20260801T131300Z-v16/capture/mcloving",
+            "/sn8100/runs/mcloving/diff001-native-20260801T154500Z-v29/capture/mcloving",
             "/evidence",
             true,
         ),
