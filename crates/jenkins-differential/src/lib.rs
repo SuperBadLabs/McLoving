@@ -496,6 +496,12 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
     )?;
     exact_u64(
         container,
+        &["HostConfig", "MemorySwap"],
+        4_294_967_296,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_u64(
+        container,
         &["HostConfig", "NanoCpus"],
         2_000_000_000,
         "E_JENKINS_CONTAINMENT",
@@ -506,6 +512,30 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         512,
         "E_JENKINS_CONTAINMENT",
     )?;
+    let ulimits = array(
+        container,
+        &["HostConfig", "Ulimits"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    if ulimits.len() != 2 {
+        return Err(VerificationError::new(
+            "E_JENKINS_CONTAINMENT",
+            "Jenkins ulimit set is not exact",
+        ));
+    }
+    for (name, bound) in [("RLIMIT_NOFILE", 1_024), ("RLIMIT_NPROC", 127_781)] {
+        let limit = ulimits
+            .iter()
+            .find(|limit| value(limit, &["Name"]) == Some(&Value::String(name.into())))
+            .ok_or_else(|| {
+                VerificationError::new(
+                    "E_JENKINS_CONTAINMENT",
+                    format!("missing Jenkins ulimit {name}"),
+                )
+            })?;
+        exact_u64(limit, &["Soft"], bound, "E_JENKINS_CONTAINMENT")?;
+        exact_u64(limit, &["Hard"], bound, "E_JENKINS_CONTAINMENT")?;
+    }
     let mounts = array(container, &["Mounts"], "E_JENKINS_CONTAINMENT")?;
     for destination in [
         "/usr/share/jenkins/ref/plugins",

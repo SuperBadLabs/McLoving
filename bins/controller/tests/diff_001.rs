@@ -18,6 +18,7 @@ const SOURCE: &[u8] = include_bytes!(
     "../../../migration/mario-jenkins-oracle-228/corpus-v1/sources/cinqict_jenkinsdev.Jenkinsfile"
 );
 const SOURCE_SHA256: &str = "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100";
+const PIPELINE_SHA256: &str = "551d489ca13bf5d130bdc5c10ce35e5d3d988bdaa1c5488dd9bc79b30674acdc";
 
 #[tokio::test]
 async fn admitted_jenkins_case_executes_with_a_canonical_trace() {
@@ -26,6 +27,7 @@ async fn admitted_jenkins_case_executes_with_a_canonical_trace() {
         return;
     };
     assert_eq!(hex(&Sha256::digest(SOURCE)), SOURCE_SHA256);
+    assert_eq!(hex(&Sha256::digest(PIPELINE.as_bytes())), PIPELINE_SHA256);
     let runtime_url =
         migration_url.replacen("postgres://mcloving@", "postgres://mcloving_tenant@", 1);
     assert_ne!(migration_url, runtime_url, "expected split database roles");

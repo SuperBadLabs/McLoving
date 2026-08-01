@@ -36,6 +36,18 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_JENKINS_CONTAINMENT",
         ),
         (
+            "jenkins/container-inspect.json",
+            "\"MemorySwap\": 4294967296",
+            "\"MemorySwap\": 0",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
+            "\"Soft\": 1024",
+            "\"Soft\": 2048",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
             "mcloving/mcloving-raw.json",
             "48656c6c6f20576f726c640a",
             "476f6f6462796520576f726c640a",
