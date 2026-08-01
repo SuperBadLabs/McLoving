@@ -7,6 +7,7 @@ binding:
   job_graph_sha256: 76ae2e85d7d8a5a1410826b7b4556a36407bba726ac2baf6efe67062888b99ab
   runtime_dependencies_sha256: 238ed4cc59ff67bbb1dc40bb1bd3ec28dce914c4dffd701f1a8505d760ba11a4
   corpus_manifest_sha256: a28283de801854836887e9bc6cffd43c10bb078dbeff343fdf92d19b470a74c2
+  source_manifest_sha256: 3f95c70e04ef72dc107e7bb6f031679cfc56e5cf44e12948b89c98baacd7db06
 policy:
   scm_network: forbidden
   scm_credentials: forbidden

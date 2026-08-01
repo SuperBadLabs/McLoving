@@ -1008,16 +1008,18 @@ and host-ambiguous loads remain explicitly unsupported. Source verification
 does not grant Groovy, CPS, sandbox, plugin, controller, SCM, or credential
 authority; executable cases remain exactly zero. The ledger raw and semantic
 SHA-256 values are
-`3c9d79f73524d50ab62abb617d9863e0e897f1c6dd16c438e0f05d82f05cd4a5`
+`c38a4c7374bf5bd205bbd2c63d2c6092362d28ae05055583f1ca38e1c0a3e169`
 and
-`e9ba69753ac9507f0d459edae012f9d537576e45ffa8806dead1a20b02db69c6`.
-The authoritative README-locked external evidence is
-`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T104859Z-v2`; its
+`56be6a979931fa703ef815ffc5a7299235d6840e6e4d46471877d0fdc08d772a`.
+The authoritative full-corpus-locked external evidence is
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T110035Z-v3`; its
 self-excluding manifest SHA-256 is
+`f290fe2090dba32b2af907b8f55e60035fb14a14ce499a21d8560bce93a2daf7`
+and covers 522 files. The README-lock predecessor
 `ec598cbc26a39d8f2d69ebd3d8298f89dc5728dd5b91c5f8ea7215b4fd57b9cf`
-and covers 522 files. The first manifest
+and pre-README-lock predecessor
 `a6671f966e3738e25135b33fc397b5fb21666ac60edb931b49e3b35672f5123b`
-is preserved unchanged as the pre-README-lock predecessor.
+remain immutable.
 The implementation and verification contract are documented in
 `docs/architecture/JENKINS_SHARED_LIBRARY_ADMISSION_V1.md`. `DIFF-001` is now
 the next ticket on this lane.

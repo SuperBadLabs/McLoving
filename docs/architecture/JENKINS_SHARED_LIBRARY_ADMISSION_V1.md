@@ -28,6 +28,8 @@ The v1 ledger is bound to:
   `238ed4cc59ff67bbb1dc40bb1bd3ec28dce914c4dffd701f1a8505d760ba11a4`;
 - exact corpus manifest
   `a28283de801854836887e9bc6cffd43c10bb078dbeff343fdf92d19b470a74c2`.
+- exact 228-entry source manifest
+  `3f95c70e04ef72dc107e7bb6f031679cfc56e5cf44e12948b89c98baacd7db06`.
 
 The frozen scanner recorded 18 occurrences / 17 distinct reference strings.
 Source reconciliation classifies two of those occurrences as comment-only
@@ -62,14 +64,16 @@ The repository bundle is
 The sealed source root is
 `/sn8100/runs/mcloving/mig005-shared-libraries-20260801T103457Z/sources`.
 It contains 518 files / 1,400,368 bytes. The ledger raw SHA-256 is
-`3c9d79f73524d50ab62abb617d9863e0e897f1c6dd16c438e0f05d82f05cd4a5`;
+`c38a4c7374bf5bd205bbd2c63d2c6092362d28ae05055583f1ca38e1c0a3e169`;
 its canonical semantic SHA-256 is
-`e9ba69753ac9507f0d459edae012f9d537576e45ffa8806dead1a20b02db69c6`.
-The authoritative README-locked external evidence is
-`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T104859Z-v2`. Its
+`56be6a979931fa703ef815ffc5a7299235d6840e6e4d46471877d0fdc08d772a`.
+The authoritative full-corpus-locked external evidence is
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T110035Z-v3`. Its
 self-excluding manifest covers 522 files and has SHA-256
-`ec598cbc26a39d8f2d69ebd3d8298f89dc5728dd5b91c5f8ea7215b4fd57b9cf`.
-The pre-README-lock predecessor remains immutable at manifest
+`f290fe2090dba32b2af907b8f55e60035fb14a14ce499a21d8560bce93a2daf7`.
+The README-lock predecessor remains immutable at manifest
+`ec598cbc26a39d8f2d69ebd3d8298f89dc5728dd5b91c5f8ea7215b4fd57b9cf`;
+the pre-README-lock predecessor remains immutable at manifest
 `a6671f966e3738e25135b33fc397b5fb21666ac60edb931b49e3b35672f5123b`.
 
 ## Deliberate limits

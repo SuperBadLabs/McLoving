@@ -25,6 +25,8 @@ pub const RUNTIME_DEPENDENCIES_SHA256: &str =
     "238ed4cc59ff67bbb1dc40bb1bd3ec28dce914c4dffd701f1a8505d760ba11a4";
 pub const CORPUS_MANIFEST_SHA256: &str =
     "a28283de801854836887e9bc6cffd43c10bb078dbeff343fdf92d19b470a74c2";
+pub const SOURCE_MANIFEST_SHA256: &str =
+    "3f95c70e04ef72dc107e7bb6f031679cfc56e5cf44e12948b89c98baacd7db06";
 const MAX_LEDGER_BYTES: usize = 262_144;
 const MAX_LOCK_BYTES: usize = 16_384;
 const MAX_README_BYTES: usize = 65_536;
@@ -114,6 +116,7 @@ struct Binding {
     job_graph_sha256: String,
     runtime_dependencies_sha256: String,
     corpus_manifest_sha256: String,
+    source_manifest_sha256: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -267,6 +270,7 @@ struct LedgerLock {
     readme_sha256: String,
     inventory_manifest_sha256: String,
     corpus_manifest_sha256: String,
+    source_manifest_sha256: String,
 }
 
 pub fn digest_ledger_file(path: &Path) -> Result<(String, String), LibraryError> {
@@ -315,6 +319,7 @@ pub fn verify_corpus(
 ) -> Result<CorpusReceipt, LibraryError> {
     let (ledger, _receipt) = load_bundle(bundle_root)?;
     ensure_real_directory(corpus_root, "E_CORPUS_ENTRY")?;
+    verify_source_manifest(corpus_root)?;
     let mut source_files = BTreeSet::new();
     let mut locations = BTreeSet::new();
     for observation in &ledger.observations {
@@ -373,22 +378,6 @@ pub fn verify_corpus(
             ));
         }
         source_files.insert(observation.source_file.as_str());
-    }
-    let files = fs::read_dir(corpus_root)
-        .map_err(|error| LibraryError::new("E_CORPUS_IO", error.to_string()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| LibraryError::new("E_CORPUS_IO", error.to_string()))?;
-    if files.len() != 228
-        || files.iter().any(|entry| {
-            entry
-                .file_type()
-                .map_or(true, |kind| !kind.is_file() || kind.is_symlink())
-        })
-    {
-        return Err(LibraryError::new(
-            "E_CORPUS_COUNT",
-            "corpus is not the exact 228-file flat source set",
-        ));
     }
     Ok(CorpusReceipt {
         observations: ledger.observations.len(),
@@ -518,6 +507,90 @@ fn parse_and_validate(bytes: &[u8]) -> Result<Ledger, LibraryError> {
     Ok(ledger)
 }
 
+fn verify_source_manifest(corpus_root: &Path) -> Result<(), LibraryError> {
+    let parent = corpus_root.parent().ok_or_else(|| {
+        LibraryError::new("E_CORPUS_MANIFEST", "corpus source root has no parent")
+    })?;
+    let bytes = read_regular(parent.join("SOURCE_SHA256SUMS"), MAX_LEDGER_BYTES)?;
+    if sha256_hex(&bytes) != SOURCE_MANIFEST_SHA256 {
+        return Err(LibraryError::new(
+            "E_CORPUS_MANIFEST",
+            "source manifest does not match the sealed digest",
+        ));
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| LibraryError::new("E_CORPUS_MANIFEST", "source manifest is not UTF-8"))?;
+    let mut expected = BTreeMap::new();
+    let mut previous = None;
+    for line in text.lines() {
+        let (digest, path) = line
+            .split_once("  ")
+            .ok_or_else(|| LibraryError::new("E_CORPUS_MANIFEST", "invalid manifest line"))?;
+        validate_hex(digest, 64, "source manifest SHA-256")?;
+        let relative = path.strip_prefix("sources/").ok_or_else(|| {
+            LibraryError::new("E_CORPUS_MANIFEST", "manifest path is outside sources")
+        })?;
+        validate_relative(relative)?;
+        if relative.contains('/') || !relative.ends_with(".Jenkinsfile") {
+            return Err(LibraryError::new(
+                "E_CORPUS_MANIFEST",
+                "manifest source is not a flat Jenkinsfile",
+            ));
+        }
+        if previous.is_some_and(|value: &str| value >= relative)
+            || expected.insert(relative.to_owned(), digest).is_some()
+        {
+            return Err(LibraryError::new(
+                "E_CORPUS_MANIFEST",
+                "manifest paths are duplicate or not strictly sorted",
+            ));
+        }
+        previous = Some(relative);
+    }
+    if expected.len() != 228 {
+        return Err(LibraryError::new(
+            "E_CORPUS_MANIFEST",
+            "source manifest does not contain exactly 228 files",
+        ));
+    }
+    let mut actual = BTreeSet::new();
+    for entry in fs::read_dir(corpus_root)
+        .map_err(|error| LibraryError::new("E_CORPUS_IO", error.to_string()))?
+    {
+        let entry = entry.map_err(|error| LibraryError::new("E_CORPUS_IO", error.to_string()))?;
+        let kind = entry
+            .file_type()
+            .map_err(|error| LibraryError::new("E_CORPUS_IO", error.to_string()))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| LibraryError::new("E_CORPUS_ENTRY", "non-UTF-8 corpus filename"))?;
+        if !kind.is_file() || kind.is_symlink() || !expected.contains_key(&name) {
+            return Err(LibraryError::new(
+                "E_CORPUS_ENTRY",
+                "corpus contains an unexpected or non-regular entry",
+            ));
+        }
+        actual.insert(name);
+    }
+    if actual != expected.keys().cloned().collect() {
+        return Err(LibraryError::new(
+            "E_CORPUS_ENTRY",
+            "corpus source set does not match its sealed manifest",
+        ));
+    }
+    for (name, digest) in expected {
+        let source = read_regular(corpus_root.join(&name), MAX_LEDGER_BYTES)?;
+        if sha256_hex(&source) != digest {
+            return Err(LibraryError::new(
+                "E_CORPUS_DIGEST",
+                format!("{name} does not match the sealed source manifest"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_yaml<T: for<'de> Deserialize<'de>>(
     bytes: &[u8],
     code: &'static str,
@@ -557,6 +630,11 @@ fn validate_ledger(ledger: &Ledger) -> Result<(), LibraryError> {
         "binding.corpus_manifest_sha256",
         &ledger.binding.corpus_manifest_sha256,
         CORPUS_MANIFEST_SHA256,
+    )?;
+    exact(
+        "binding.source_manifest_sha256",
+        &ledger.binding.source_manifest_sha256,
+        SOURCE_MANIFEST_SHA256,
     )?;
     if ledger.policy.scm_network != Disposition::Forbidden
         || ledger.policy.scm_credentials != Disposition::Forbidden
@@ -786,6 +864,11 @@ fn validate_lock(
         "lock.corpus_manifest_sha256",
         &lock.corpus_manifest_sha256,
         CORPUS_MANIFEST_SHA256,
+    )?;
+    exact(
+        "lock.source_manifest_sha256",
+        &lock.source_manifest_sha256,
+        SOURCE_MANIFEST_SHA256,
     )
 }
 
@@ -1199,6 +1282,7 @@ mod tests {
                 job_graph_sha256: JOB_GRAPH_SHA256.to_owned(),
                 runtime_dependencies_sha256: RUNTIME_DEPENDENCIES_SHA256.to_owned(),
                 corpus_manifest_sha256: CORPUS_MANIFEST_SHA256.to_owned(),
+                source_manifest_sha256: SOURCE_MANIFEST_SHA256.to_owned(),
             },
             policy: Policy {
                 scm_network: Disposition::Forbidden,
@@ -1230,7 +1314,7 @@ mod tests {
         fs::write(root.join("README.md"), "# Test ledger\n").expect("write readme");
         fs::write(root.join("ledger.yaml"), &yaml).expect("write ledger");
         let lock = format!(
-            "schema: {LOCK_SCHEMA}\nledger_id: {LEDGER_ID}\nledger_version: 1\nledger_sha256: {}\nsemantic_sha256: {}\nreadme_sha256: {}\ninventory_manifest_sha256: {INVENTORY_MANIFEST_SHA256}\ncorpus_manifest_sha256: {CORPUS_MANIFEST_SHA256}\n",
+            "schema: {LOCK_SCHEMA}\nledger_id: {LEDGER_ID}\nledger_version: 1\nledger_sha256: {}\nsemantic_sha256: {}\nreadme_sha256: {}\ninventory_manifest_sha256: {INVENTORY_MANIFEST_SHA256}\ncorpus_manifest_sha256: {CORPUS_MANIFEST_SHA256}\nsource_manifest_sha256: {SOURCE_MANIFEST_SHA256}\n",
             sha256_hex(yaml.as_bytes()),
             semantic_digest(ledger).expect("semantic digest"),
             sha256_hex(b"# Test ledger\n")
@@ -1284,52 +1368,30 @@ mod tests {
     #[test]
     fn corpus_receipt_binds_lines_and_digests() {
         let temp = TempDir::new().expect("tempdir");
-        let bundle = temp.path().join("bundle");
         let corpus = temp.path().join("corpus");
-        fs::create_dir_all(&bundle).expect("bundle");
         fs::create_dir_all(&corpus).expect("corpus");
-        let mut digests = Vec::new();
-        for index in 0..228 {
-            let reference = if index < 20 {
-                if index < 8 {
-                    if index == 7 {
-                        "resolved-lib-6@main".to_owned()
-                    } else {
-                        format!("resolved-lib-{index}@main")
-                    }
-                } else {
-                    format!("unresolved-lib-{index}@main")
-                }
-            } else if index < 22 {
-                format!("comment-lib-{index}@main")
-            } else {
-                "pipeline { stages {} }".to_owned()
-            };
-            let contents = if (20..22).contains(&index) {
-                format!("// @Library('{reference}') _\n")
-            } else {
-                format!("@Library('{reference}') _\n")
-            };
-            fs::write(
-                corpus.join(format!("job-{index}.Jenkinsfile")),
-                contents.as_bytes(),
-            )
-            .expect("corpus file");
-            if index < 22 {
-                digests.push(sha256_hex(contents.as_bytes()));
-            }
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_root = workspace.join("migration/mario-jenkins-oracle-228/corpus-v1");
+        let bundle = source_root.join("shared-libraries-v1");
+        for entry in fs::read_dir(source_root.join("sources")).expect("source corpus") {
+            let entry = entry.expect("source entry");
+            fs::copy(entry.path(), corpus.join(entry.file_name())).expect("copy source fixture");
         }
-        write_bundle(&bundle, &ledger(&digests));
+        fs::copy(
+            source_root.join("SOURCE_SHA256SUMS"),
+            temp.path().join("SOURCE_SHA256SUMS"),
+        )
+        .expect("copy source manifest");
         let receipt = verify_corpus(&bundle, &corpus).expect("valid corpus");
-        assert_eq!((receipt.observations, receipt.files), (22, 22));
+        assert_eq!((receipt.observations, receipt.files), (22, 19));
         fs::write(
-            corpus.join("job-0.Jenkinsfile"),
-            b"@Library('substitution@main') _\n",
+            corpus.join("AmanPathak-DevOps_EKS-Terraform-GitHub-Actions.Jenkinsfile"),
+            b"@Library('hidden-substitution@main') _\n",
         )
         .expect("mutate corpus");
         assert_eq!(
             verify_corpus(&bundle, &corpus)
-                .expect_err("digest substitution")
+                .expect_err("unobserved source substitution")
                 .code,
             "E_CORPUS_DIGEST"
         );
