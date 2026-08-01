@@ -13,23 +13,64 @@ output_root=$4
 home="$runtime_root/jenkins-home"
 repository="$runtime_root/repository"
 job_home="$home/jobs/stateful"
-evidence="$output_root/evidence"
 image='docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02'
 container="mcloving-mig005a-reverse-$$"
 network="mcloving-mig005a-reverse-$$"
 port=$((19550 + ($$ % 400)))
-staging="$output_root/imported-build-3"
 reverse_bundle="$transform_root/reverse-bundle.json"
 rehearsal_summary="$transform_root/rehearsal-summary.json"
 
-if [[ -e "$staging" ]]; then
-  echo "refusing to reuse existing reverse-import staging path: $staging" >&2
+output_parent=$(realpath -e "$(dirname -- "$output_root")")
+output_leaf=$(basename -- "$output_root")
+if [[ "$output_parent" != "$(pwd -P)" \
+  || ! "$output_leaf" =~ ^reverse-v[0-9]+$ \
+  || -e "$output_root" ]]; then
+  echo "reverse output must be one new direct reverse-vN child of the working directory" >&2
   exit 73
 fi
+output_root="$output_parent/$output_leaf"
+evidence="$output_root/evidence"
+staging="$output_root/imported-build-3"
+
+test ! -e "$repository/docs/final.md"
+original_repository_head=$(git -C "$repository" rev-parse HEAD)
+repository_ref=$(git -C "$repository" symbolic-ref -q HEAD)
+test -n "$repository_ref"
+rollback_root=$(mktemp -d "$runtime_root/.mcloving-reverse-rollback.XXXXXX")
+podman unshare cp -a "$job_home/nextBuildNumber" "$rollback_root/nextBuildNumber"
+permalinks_existed=0
+if [[ -e "$job_home/builds/permalinks" ]]; then
+  podman unshare cp -a "$job_home/builds/permalinks" "$rollback_root/permalinks"
+  permalinks_existed=1
+fi
+completed=0
 
 cleanup() {
+  local status=$?
+  trap - EXIT
+  set +e
   podman rm -f "$container" >/dev/null 2>&1 || true
   podman network rm "$network" >/dev/null 2>&1 || true
+  if [[ "$completed" != 1 ]]; then
+    podman unshare rm -rf -- "$job_home/builds/3" "$job_home/builds/4"
+    podman unshare rm -f -- "$job_home/nextBuildNumber" "$job_home/builds/permalinks"
+    podman unshare cp -a "$rollback_root/nextBuildNumber" "$job_home/nextBuildNumber"
+    if [[ "$permalinks_existed" == 1 ]]; then
+      podman unshare cp -a "$rollback_root/permalinks" "$job_home/builds/permalinks"
+    fi
+    podman unshare chown -R 1000:1000 "$job_home/nextBuildNumber" \
+      "$job_home/builds/permalinks" 2>/dev/null || true
+    current_repository_head=$(git -C "$repository" rev-parse HEAD 2>/dev/null)
+    if [[ -n "$current_repository_head" && "$current_repository_head" != "$original_repository_head" ]]; then
+      git -C "$repository" update-ref "$repository_ref" \
+        "$original_repository_head" "$current_repository_head"
+    fi
+    git -C "$repository" read-tree "$original_repository_head"
+    rm -f -- "$repository/docs/final.md"
+    rm -rf -- "$output_root"
+  fi
+  rm -rf -- "$rollback_root"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -194,6 +235,11 @@ git -C "$repository" add docs/final.md
 git -C "$repository" commit -m 'final non-matching revision' >/dev/null
 revision_4=$(git -C "$repository" rev-parse HEAD)
 
+if [[ ${MCLOVING_REVERSE_FAIL_AFTER_INSTALL:-0} == 1 ]]; then
+  echo 'injected failure after reverse state installation' >&2
+  exit 86
+fi
+
 podman network create --internal "$network" >/dev/null
 podman run -d --name "$container" \
   --network "$network" \
@@ -309,3 +355,4 @@ find "$evidence" -type f ! -name SHA256SUMS -printf '%P\0' \
       sha256sum "$evidence/$path"
     done > "$evidence/SHA256SUMS"
 sha256sum -c "$evidence/SHA256SUMS"
+completed=1

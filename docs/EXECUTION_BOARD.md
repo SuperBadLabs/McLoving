@@ -933,12 +933,14 @@ build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its exact transform binary SHA-256 is
 `7e21e0fbbc508a8fd7b9743d697137094b14905eb71380b547fc7ddac6e8ed5f`.
 Its source, transform, and reverse manifest SHA-256 values are
-`4af1c5f6968d8517f075e156aacc04672c4eef149d00a7b01d6aa778c1d4da17`,
-`f384cdbe8c8cc4d866b981c574bc0a67d15dba6256934938a3697446d60f7fa1`,
-and `81a4a68570d114f95741346033b00eb48f11bd3c69d0fb33d55a5ca3ffd2301e`;
+`4a15a8bbc1517cffe6f91d91b495e1e5604fdfe6ce33e7d851c5edd75a7b794b`,
+`6bcc0dc5bbb2be7ebd90590e4609af9b56bcda6f4be50b605b301936a3ddd6a8`,
+and `8f7765018eee7c8cbe9cdaee4a6bed383574561f688b522d00a9d6bbd2d9d4fc`;
 the forward and reverse bundle SHA-256 values are
-`bf0fac61e39c6a42b5b9c6d56a20923c14be78d6a4283c897734caf06403c9a7`
-and `5f4eafcea98f93b3ab7d117e2cea60b0f3ab9ff8a0df294bb9d2588fab75dacf`.
+`340ef5b73593d6a961df77e0e886de8bc9d1a201728a4ab00b4a779e8ca6c905`
+and `fe9081527d5b52f4ecf4eb256dd28202e4872dc12fb044de7bdd472a442afd48`.
+An injected post-install failure restored repository, build, permalink, and
+next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed
 only by an explicit cleanup flag. `MIG-005` is next on its own branch
 and no longer waits for unrelated state-transfer work; both join only through

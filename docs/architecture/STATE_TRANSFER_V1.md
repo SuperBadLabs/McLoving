@@ -125,11 +125,11 @@ The accepted disposable rehearsal used:
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
 - transform binary SHA-256 `7e21e0fbbc508a8fd7b9743d697137094b14905eb71380b547fc7ddac6e8ed5f`;
-- source-evidence manifest SHA-256 `4af1c5f6968d8517f075e156aacc04672c4eef149d00a7b01d6aa778c1d4da17`;
-- forward bundle SHA-256 `bf0fac61e39c6a42b5b9c6d56a20923c14be78d6a4283c897734caf06403c9a7`;
-- reverse bundle SHA-256 `5f4eafcea98f93b3ab7d117e2cea60b0f3ab9ff8a0df294bb9d2588fab75dacf`;
-- reverse-evidence manifest SHA-256 `81a4a68570d114f95741346033b00eb48f11bd3c69d0fb33d55a5ca3ffd2301e`;
-- sealed transform-evidence manifest SHA-256 `f384cdbe8c8cc4d866b981c574bc0a67d15dba6256934938a3697446d60f7fa1`.
+- source-evidence manifest SHA-256 `4a15a8bbc1517cffe6f91d91b495e1e5604fdfe6ce33e7d851c5edd75a7b794b`;
+- forward bundle SHA-256 `340ef5b73593d6a961df77e0e886de8bc9d1a201728a4ab00b4a779e8ca6c905`;
+- reverse bundle SHA-256 `fe9081527d5b52f4ecf4eb256dd28202e4872dc12fb044de7bdd472a442afd48`;
+- reverse-evidence manifest SHA-256 `8f7765018eee7c8cbe9cdaee4a6bed383574561f688b522d00a9d6bbd2d9d4fc`;
+- sealed transform-evidence manifest SHA-256 `6bcc0dc5bbb2be7ebd90590e4609af9b56bcda6f4be50b605b301936a3ddd6a8`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 113 record-provenance rows, nine effective
@@ -137,6 +137,11 @@ protection rows, and eight outbox rows. Exact replay reused the forward receipt.
 The imported shorter/expired source protections were strengthened to deadline
 `2000000000000`; three overlapping active holds survived; a direct SQL hold
 release was denied.
+
+An injected failure after reverse state installation restored the original
+repository revision, build set, permalinks, and next-build number, removed the
+partial output, and allowed the same immutable inputs to complete on immediate
+retry.
 
 Jenkins build 1 established an empty first-build changelog. Build 2's changes
 were derived from bounded sealed Git changelog bytes whose head and baseline
