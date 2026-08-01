@@ -568,6 +568,8 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
         "diff-001-admitted #1",
         "E_JENKINS_BUILD",
     )?;
+    exact_string(&build, &["id"], "1", "E_JENKINS_BUILD")?;
+    exact_string(&build, &["displayName"], "#1", "E_JENKINS_BUILD")?;
     exact_string(
         &build,
         &["url"],
@@ -579,6 +581,14 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
     exact_empty_array(&build, &["artifacts"], "E_JENKINS_BUILD")?;
 
     let workflow = json(root, "jenkins/wfapi.json")?;
+    exact_string(&workflow, &["id"], "1", "E_JENKINS_WORKFLOW")?;
+    exact_string(&workflow, &["name"], "#1", "E_JENKINS_WORKFLOW")?;
+    exact_string(
+        &workflow,
+        &["_links", "self", "href"],
+        "/job/diff-001-admitted/1/wfapi/describe",
+        "E_JENKINS_WORKFLOW",
+    )?;
     exact_string(&workflow, &["status"], "SUCCESS", "E_JENKINS_WORKFLOW")?;
     let stages = array(&workflow, &["stages"], "E_JENKINS_WORKFLOW")?;
     if stages.len() != 1 {
@@ -588,9 +598,23 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
         ));
     }
     exact_string(&stages[0], &["name"], "Build", "E_JENKINS_WORKFLOW")?;
+    exact_string(&stages[0], &["id"], "6", "E_JENKINS_WORKFLOW")?;
+    exact_string(
+        &stages[0],
+        &["_links", "self", "href"],
+        "/job/diff-001-admitted/1/execution/node/6/wfapi/describe",
+        "E_JENKINS_WORKFLOW",
+    )?;
     exact_string(&stages[0], &["status"], "SUCCESS", "E_JENKINS_WORKFLOW")?;
 
     let stage = json(root, "jenkins/stage-build.json")?;
+    exact_string(&stage, &["id"], "6", "E_JENKINS_STAGE")?;
+    exact_string(
+        &stage,
+        &["_links", "self", "href"],
+        "/job/diff-001-admitted/1/execution/node/6/wfapi/describe",
+        "E_JENKINS_STAGE",
+    )?;
     exact_string(&stage, &["name"], "Build", "E_JENKINS_STAGE")?;
     exact_string(&stage, &["status"], "SUCCESS", "E_JENKINS_STAGE")?;
     let steps = array(&stage, &["stageFlowNodes"], "E_JENKINS_STAGE")?;
@@ -601,6 +625,23 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
         ));
     }
     exact_string(&steps[0], &["name"], "Shell Script", "E_JENKINS_STAGE")?;
+    exact_string(&steps[0], &["id"], "7", "E_JENKINS_STAGE")?;
+    for (link, expected) in [
+        (
+            "self",
+            "/job/diff-001-admitted/1/execution/node/7/wfapi/describe",
+        ),
+        ("log", "/job/diff-001-admitted/1/execution/node/7/wfapi/log"),
+        ("console", "/job/diff-001-admitted/1/execution/node/7/log"),
+    ] {
+        exact_string(
+            &steps[0],
+            &["_links", link, "href"],
+            expected,
+            "E_JENKINS_STAGE",
+        )?;
+    }
+    exact_string_array(&steps[0], &["parentNodes"], &["6"], "E_JENKINS_STAGE")?;
     exact_string(&steps[0], &["status"], "SUCCESS", "E_JENKINS_STAGE")?;
     exact_string(
         &steps[0],

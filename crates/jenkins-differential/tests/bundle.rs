@@ -30,6 +30,24 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_JENKINS_BUILD",
         ),
         (
+            "jenkins/wfapi.json",
+            "\"id\":\"1\"",
+            "\"id\":\"2\"",
+            "E_JENKINS_WORKFLOW",
+        ),
+        (
+            "jenkins/wfapi.json",
+            "/job/diff-001-admitted/1/wfapi/describe",
+            "/job/diff-001-admitted/2/wfapi/describe",
+            "E_JENKINS_WORKFLOW",
+        ),
+        (
+            "jenkins/stage-build.json",
+            "\"id\":\"6\"",
+            "\"id\":\"9\"",
+            "E_JENKINS_STAGE",
+        ),
+        (
             "jenkins/container-inspect.json",
             "\"NetworkMode\": \"none\"",
             "\"NetworkMode\": \"bridge\"",
@@ -141,6 +159,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "mcloving/mcloving-raw.json",
             "48656c6c6f20576f726c640a",
             "476f6f6462796520576f726c640a",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
+            "7b09726b2edfce62285608b12dbd89adc473bb4872ca72e2371dbb58e4d88cd4",
+            "8b09726b2edfce62285608b12dbd89adc473bb4872ca72e2371dbb58e4d88cd4",
             "E_MCLOVING",
         ),
         (
