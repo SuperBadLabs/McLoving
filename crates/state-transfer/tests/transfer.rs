@@ -632,7 +632,7 @@ fn succeeded_edge_requires_a_successful_parent_attempt() {
 }
 
 #[test]
-fn succeeded_edge_binds_to_the_first_successful_parent_attempt() {
+fn succeeded_edge_binds_to_the_final_successful_parent_attempt() {
     let (mut bundle, mut expected) = fixture(TransferDirection::JenkinsToMcLoving);
     bundle.jobs[0].builds[0].graph_nodes = vec![
         GraphNodeState {
@@ -641,12 +641,12 @@ fn succeeded_edge_binds_to_the_first_successful_parent_attempt() {
             stage_path: "a".to_owned(),
             node_kind: "stage".to_owned(),
             dependencies: Vec::new(),
-            result: BuildResult::Failed,
+            result: BuildResult::Succeeded,
             attempts: vec![
                 AttemptState {
                     record: record("attempt:stateful:7:a:1", 71),
                     ordinal: 1,
-                    result: BuildResult::Succeeded,
+                    result: BuildResult::Failed,
                     started_at_unix_ms: 1_100,
                     ended_at_unix_ms: 1_140,
                     audit_digest: digest(72),
@@ -654,9 +654,9 @@ fn succeeded_edge_binds_to_the_first_successful_parent_attempt() {
                 AttemptState {
                     record: record("attempt:stateful:7:a:2", 73),
                     ordinal: 2,
-                    result: BuildResult::Failed,
-                    started_at_unix_ms: 1_180,
-                    ended_at_unix_ms: 1_200,
+                    result: BuildResult::Succeeded,
+                    started_at_unix_ms: 1_160,
+                    ended_at_unix_ms: 1_180,
                     audit_digest: digest(74),
                 },
             ],
@@ -675,8 +675,8 @@ fn succeeded_edge_binds_to_the_first_successful_parent_attempt() {
                 record: record("attempt:stateful:7:b:1", 76),
                 ordinal: 1,
                 result: BuildResult::Succeeded,
-                started_at_unix_ms: 1_150,
-                ended_at_unix_ms: 1_170,
+                started_at_unix_ms: 1_180,
+                ended_at_unix_ms: 1_200,
                 audit_digest: digest(77),
             }],
         },
@@ -692,7 +692,45 @@ fn succeeded_edge_binds_to_the_first_successful_parent_attempt() {
     expected.input_bundle_digest = sha256(&canonical_bytes(&bundle).unwrap());
 
     transform(&bundle, &expected, &BTreeMap::new())
-        .expect("succeeded edge binds to the first successful parent attempt");
+        .expect("succeeded edge binds to the final successful parent attempt");
+}
+
+#[test]
+fn successful_graph_attempt_cannot_be_retried() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
+        record: record("node:stateful:7:a", 70),
+        node_id: "a".to_owned(),
+        stage_path: "a".to_owned(),
+        node_kind: "stage".to_owned(),
+        dependencies: Vec::new(),
+        result: BuildResult::Failed,
+        attempts: vec![
+            AttemptState {
+                record: record("attempt:stateful:7:a:1", 71),
+                ordinal: 1,
+                result: BuildResult::Succeeded,
+                started_at_unix_ms: 1_100,
+                ended_at_unix_ms: 1_140,
+                audit_digest: digest(72),
+            },
+            AttemptState {
+                record: record("attempt:stateful:7:a:2", 73),
+                ordinal: 2,
+                result: BuildResult::Failed,
+                started_at_unix_ms: 1_160,
+                ended_at_unix_ms: 1_200,
+                audit_digest: digest(74),
+            },
+        ],
+    }];
+
+    assert_eq!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "non-final graph attempts must be retry-eligible failures".to_owned()
+        ))
+    );
 }
 
 #[test]

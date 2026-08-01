@@ -1382,7 +1382,7 @@ fn validate_graph_nodes(
         }
         let mut expected_ordinal = 1_u32;
         let mut previous_attempt_end = None;
-        for attempt in &node.attempts {
+        for (attempt_index, attempt) in node.attempts.iter().enumerate() {
             insert_record(records, &attempt.record)?;
             if attempt.ordinal != expected_ordinal {
                 return Err(TransferError::InvalidField(
@@ -1412,6 +1412,11 @@ fn validate_graph_nodes(
             }
             previous_attempt_end = Some(attempt.ended_at_unix_ms);
             validate_digest(attempt.audit_digest, "attempt audit digest")?;
+            if attempt_index + 1 < node.attempts.len() && attempt.result != BuildResult::Failed {
+                return Err(TransferError::InvalidField(
+                    "non-final graph attempts must be retry-eligible failures".to_owned(),
+                ));
+            }
         }
         if node
             .attempts
@@ -1449,8 +1454,8 @@ fn validate_graph_nodes(
                     GraphDependencyCondition::Completed => parent.attempts.first(),
                     GraphDependencyCondition::Succeeded => parent
                         .attempts
-                        .iter()
-                        .find(|attempt| attempt.result == BuildResult::Succeeded),
+                        .last()
+                        .filter(|attempt| attempt.result == BuildResult::Succeeded),
                 };
                 if dependency.condition == GraphDependencyCondition::Succeeded
                     && satisfying_parent_attempt.is_none()

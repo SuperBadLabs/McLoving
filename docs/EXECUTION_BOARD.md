@@ -937,8 +937,10 @@ Graph dependencies retain their exact `succeeded` or `completed` condition,
 and imported Jenkins successors after observed non-successful stages use
 `completed` rather than fabricated `succeeded` edges. Child attempts cannot
 predate the first parent attempt that satisfies their exact condition;
-`succeeded` edges require an actual successful parent attempt, while later
-parent retries do not invalidate already-admitted descendants.
+`succeeded` edges require the final parent attempt to be successful, and every
+non-final attempt must be a retry-eligible failure. Later failed parent retries
+on `completed` edges do not invalidate already-admitted descendants, while an
+impossible retry after success fails closed.
 The reverse bridge verifies the full canonical build record byte-for-byte and
 independently checks Jenkins-native build fields, workflow-stage semantics,
 exact per-stage start times and durations, SCM changelog, log payloads,
@@ -949,14 +951,14 @@ materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its exact transform binary SHA-256 is
-`ebb39134a999de67d7a87ecf2413281553a44bb67e92360c6ad2c74e68a2d742`.
+`377409b63d064a1a9a0f4bd1beca7ef1cc21c24d11e5d1b7a1a0cd39cadf7930`.
 Its source, transform, and reverse manifest SHA-256 values are
-`1e02f30cae448b770999a943b81275c678cfcbd54a75db41f95cb222eae2aa72`,
-`19a05c1b215571305d7be4db1bb018ed83e2bd83680a9dc549af773beda2615c`,
-and `c462ffe03b3ac0171fd0a398d0126798ba8c3730be95896106edfe8a9a7e933b`;
+`87153720aa180ea90b73fd668866faaab471e631cfcb57f2cc264654d0f7d27a`,
+`e5142b6dbbc9acc8e93e273099ad5ead5c24c0589951d885a93ec5212e0ec81f`,
+and `c65e467e5693bfe3fbdffaa2fcce8cd8e7e127378427d49929543ac7b1b4294d`;
 the forward and reverse bundle SHA-256 values are
-`5fbdb1d027b4960ca4cc40737d744a26a761a9090b657fcd24f295905b84d090`
-and `5e018865d02a2c3a95063c52313119ec0a1179879a8469fba9ae77e45f0b8802`.
+`ffeb58f650841dde10789fde80c4cd7c14b2ea9022d22f0d4ef73b9ae90365af`
+and `b11a22436acd602c9dc4fb4264f40b4cf6611a53e9f96a8fcdb81b91f076b350`.
 An injected post-install failure restored repository, build, permalink, and
 next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed
