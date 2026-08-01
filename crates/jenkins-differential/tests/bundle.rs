@@ -43,7 +43,7 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "jenkins/build.json",
-            "\"executorUtilization\":0.27",
+            "\"executorUtilization\":0.24",
             "\"executorUtilization\":0.99",
             "E_JENKINS_CAPTURE_IDENTITY",
         ),
@@ -61,8 +61,8 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "jenkins/wfapi.json",
-            "\"endTimeMillis\":1785603390984",
-            "\"endTimeMillis\":1785603388000",
+            "\"endTimeMillis\":1785605100272",
+            "\"endTimeMillis\":1785605098000",
             "E_JENKINS_WORKFLOW",
         ),
         (
@@ -73,8 +73,8 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "jenkins/stage-build.json",
-            "\"startTimeMillis\":1785603390537",
-            "\"startTimeMillis\":1785603392000",
+            "\"startTimeMillis\":1785605099899",
+            "\"startTimeMillis\":1785605102000",
             "E_JENKINS_STAGE",
         ),
         (
@@ -111,6 +111,24 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "jenkins/container-inspect.json",
             "\"/tmp\": \"rw,noexec,nosuid,nodev,size=2g,rprivate,tmpcopyup\"",
             "\"/tmp\": \"rw,noexec,nosuid,nodev,size=1g,rprivate,tmpcopyup\"",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
+            "size=2147483648,mode=1777,rw,rprivate,nosuid,nodev,tmpcopyup",
+            "size=0,mode=1777,rw,rprivate,nosuid,nodev,tmpcopyup",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
+            "\"Type\": \"k8s-file\"",
+            "\"Type\": \"journald\"",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
+            "\"Size\": \"16MB\"",
+            "\"Size\": \"0B\"",
             "E_JENKINS_CONTAINMENT",
         ),
         (
@@ -174,8 +192,14 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_JENKINS_CONTAINMENT",
         ),
         (
+            "jenkins/runtime.txt",
+            "jenkins_home_ceiling_bytes=2147483648",
+            "jenkins_home_ceiling_bytes=0",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
             "jenkins/file-sha256.txt",
-            "/home/srikanth/mcloving-diff001-20260801T170000Z-v38/evidence/jenkins/Jenkinsfile",
+            "/home/srikanth/mcloving-diff001-20260801T174500Z-v43/evidence/jenkins/Jenkinsfile",
             "/tmp/substituted-capture/Jenkinsfile",
             "E_JENKINS_CAPTURE_MANIFEST",
         ),

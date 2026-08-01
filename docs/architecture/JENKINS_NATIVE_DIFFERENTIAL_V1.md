@@ -35,14 +35,16 @@ image digest
 The exact 90-plugin SHA-256 manifest and plugin files predated execution and
 were later independently reverified against the pinned oracle directory
 without mismatch; that directory, source, and initialization fixture were
-mounted from their exact captured source paths as one complete four-mount set,
-with only the isolated Jenkins home writable. The exact initializer digest and
+mounted from their exact captured source paths as one complete three-bind set.
+The isolated Jenkins home was a 2,147,483,648-byte tmpfs rather than an
+unbounded host bind. The exact initializer digest and
 body prove that `/fixture/Jenkinsfile` supplied the `CpsFlowDefinition` for
 `diff-001-admitted`; the controller log proves initializer, readiness, and
 build chronology, and the build receipt binds job name, number, and URL. The container
-had no network, a read-only root filesystem, the exact dropped-capability and
-2 GiB no-exec tmpfs policies, no privilege escalation, and explicit CPU,
-memory/swap, PID, file-descriptor, time, and output bounds. A negative
+had no network, a read-only root filesystem, the exact dropped-capability
+policy, a 2 GiB no-exec `/tmp`, a 2 GiB Jenkins-home tmpfs, no privilege
+escalation, and explicit CPU, memory/swap, PID, file-descriptor, time, 16 MiB
+controller-log, and aggregate Jenkins-home bounds. A negative
 external-network probe failed. The live Mario oracle remained healthy and
 unchanged after teardown.
 Its immutable container ID/name/creation/start identity, exact tini/jenkins.sh
@@ -80,7 +82,7 @@ capture and final evidence envelope are immutable.
 manifest and exact filesystem tree. Security-relevant Jenkins and McLoving
 image, container, network, runtime, negative-network, and test transcripts also
 carry compiled detached SHA-256 anchors, so resealing the bundle cannot make an
-unchecked receipt field authoritative. The original 14-entry Jenkins capture
+unchecked receipt field authoritative. The original 16-entry Jenkins capture
 manifest is independently parsed, required to use the exact capture root and
 file set, and reconciled byte-for-byte with the repository bundle. It rejects
 traversal, symlinks, special or
@@ -104,7 +106,8 @@ substitution. It independently checks:
 - equality of the independently derived canonical traces.
 
 Mutation tests alter and reseal the Jenkins result, network mode, memory/swap,
-container invocation, canonical runtime, ulimits, tmpfs, dropped capabilities,
+container invocation, canonical runtime, ulimits, tmpfs and Jenkins-home quota,
+controller log driver/ceiling, dropped capabilities,
 plugin mount source, undeclared mount,
 plugin manifest, initializer source, console output, McLoving output, admitted
 IR digest, attempt identity, graph/status/attempt result agreement, log sequence,
@@ -130,9 +133,9 @@ implication.
 The repository receipt is
 `migration/mario-jenkins-oracle-228/corpus-v1/differential-v1`. The sealed
 external evidence is
-`/sn8100/runs/mcloving/diff001-native-20260801T171000Z-v39`; its
+`/sn8100/runs/mcloving/diff001-native-20260801T173419Z-v44`; its
 self-excluding 35-file manifest SHA-256 is
-`0d0b6b4347c5754ca87997e1426a2b5ed93ccaca2d2fbc5025c62e0916dcafcc`.
+`8cd2c506a7fc7438eae920c83b1089031e9b4fc763d2cb5bb596fe6ddfa00752`.
 The immutable v5 envelope is superseded because it lacked McLoving containment
 receipts. The immutable v10 envelope is rejected because its outer manifest
 omitted the nested repository `SHA256SUMS`; v11 predates the final repository
@@ -157,10 +160,15 @@ failed before execution on a host-built glibc mismatch. V33 is the successful
 shared-64-MiB capture incorporated byte-for-byte into v34.
 V34 is superseded because its Jenkins controller had no independently enforced
 finite lifetime. V35 failed on fresh-home permissions, v36 was an incomplete
-runtime capture, and v37 was a provisional receipt-format predecessor. V38 is
-the successful Jenkins capture with a 600-second GNU `timeout` controller
-watchdog and 30-second TERM-to-KILL bound; it is combined with the unchanged
-successful v33 McLoving capture in v39. The verifier exact-binds the watchdog,
-the complete Jenkins capture manifest, and nested build/workflow/stage/step
-chronology inside the controller interval.
+runtime capture, and v37 was a provisional receipt-format predecessor. V38 and
+its v39 external envelope added the 600-second GNU `timeout` controller
+watchdog and 30-second TERM-to-KILL bound but are superseded because Jenkins
+home and controller output remained unbounded. V40 failed safely on tmpfs
+ownership, v41 failed before container creation on an unsupported mount option,
+and v42 was stopped when Jenkins's disk monitor correctly rejected the 1 GiB
+home ceiling. V43 is the successful Jenkins capture with the watchdog, a 2 GiB
+Jenkins-home tmpfs, and a 16 MiB controller-log ceiling; it is combined with the
+unchanged successful v33 McLoving capture in v44. The verifier exact-binds both
+output ceilings, the watchdog, the complete Jenkins capture manifest, and
+nested build/workflow/stage/step chronology inside the controller interval.
 None of the predecessors contributes authority.

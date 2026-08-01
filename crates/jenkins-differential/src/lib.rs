@@ -23,17 +23,18 @@ pub const JENKINS_PLUGIN_MANIFEST_SHA256: &str =
 pub const JENKINS_INIT_SHA256: &str =
     "59e1e8ee88116c0645e7e2e4ea5af0184ce85d75b94df39b02c76d66347fdc0a";
 const JENKINS_CONTAINER_ID: &str =
-    "e9bc97551aba3ac69d3cb396797c43d63b68118d5e02d9e264c0cc8221fcc7dd";
-const JENKINS_CONTAINER_NAME: &str = "mcloving-diff001-jenkins-v38";
-const JENKINS_CONTAINER_CREATED: &str = "2026-08-01T16:56:10.499006409Z";
-const JENKINS_CONTAINER_STARTED: &str = "2026-08-01T16:56:10.640553242Z";
-const JENKINS_CONTAINER_STARTED_UNIX_MILLIS: u64 = 1_785_603_370_640;
+    "70fda66b870bb443c0fceb6b9f3d8836a9a9356b0b69f2d08657e7c27ab688be";
+const JENKINS_CONTAINER_NAME: &str = "mcloving-diff001-jenkins-v43";
+const JENKINS_CONTAINER_CREATED: &str = "2026-08-01T17:24:40.33500311Z";
+const JENKINS_CONTAINER_STARTED: &str = "2026-08-01T17:24:40.43851937Z";
+const JENKINS_CONTAINER_STARTED_UNIX_MILLIS: u64 = 1_785_605_080_438;
 const JENKINS_CAPTURE_ROOT: &str =
-    "/home/srikanth/mcloving-diff001-20260801T170000Z-v38/evidence/jenkins";
+    "/home/srikanth/mcloving-diff001-20260801T174500Z-v43/evidence/jenkins";
 const JENKINS_CAPTURE_MANIFEST_SHA256: &str =
-    "78b8dce7997169a9ac72a941de44488c7606a04591672f2732f3289649aff96a";
-const JENKINS_CAPTURE_FILES: [&str; 14] = [
+    "0a2e33c75435776853e48ab5cca67cb1dc9231bc4972ec95d46643f8acc96654";
+const JENKINS_CAPTURE_FILES: [&str; 16] = [
     "Jenkinsfile",
+    "PLUGIN_SHA256SUMS",
     "build.json",
     "console.txt",
     "container-inspect.json",
@@ -41,6 +42,7 @@ const JENKINS_CAPTURE_FILES: [&str; 14] = [
     "external-network.txt",
     "image-inspect.json",
     "init.groovy",
+    "plugin-verification.txt",
     "queue.json",
     "runtime.txt",
     "stage-build.json",
@@ -51,7 +53,7 @@ const JENKINS_CAPTURE_FILES: [&str; 14] = [
 const JENKINS_CONTAINMENT_RECEIPTS: [(&str, &str); 4] = [
     (
         "jenkins/container-inspect.json",
-        "7d07d3430e8a4a4084cf32c99830bbb701942a8d275d2555fc4e73cd0d844836",
+        "774577164ccf3df31595c4377c83e1f87a7f27cb07c0bb45153cde45dcbde5c4",
     ),
     (
         "jenkins/image-inspect.json",
@@ -63,7 +65,7 @@ const JENKINS_CONTAINMENT_RECEIPTS: [(&str, &str); 4] = [
     ),
     (
         "jenkins/runtime.txt",
-        "46beaac3300e571d14e0a8a6d83b1f343d046acd15dcac47fe7f9783d3840b56",
+        "393b3eb6c1bd166f477c4e45056d30b831166599fea3a090f7a8eeb263f26013",
     ),
 ];
 pub const MCLOVING_RUNNER_IMAGE_SHA256: &str =
@@ -630,9 +632,9 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
     exact_bool(&build, &["inProgress"], false, "E_JENKINS_BUILD")?;
     exact_u64(&build, &["number"], 1, "E_JENKINS_BUILD")?;
     exact_u64(&build, &["queueId"], 1, "E_JENKINS_BUILD")?;
-    exact_u64(&build, &["timestamp"], 1_785_603_388_747, "E_JENKINS_BUILD")?;
-    exact_u64(&build, &["duration"], 2_229, "E_JENKINS_BUILD")?;
-    exact_u64(&build, &["estimatedDuration"], 2_229, "E_JENKINS_BUILD")?;
+    exact_u64(&build, &["timestamp"], 1_785_605_098_139, "E_JENKINS_BUILD")?;
+    exact_u64(&build, &["duration"], 2_130, "E_JENKINS_BUILD")?;
+    exact_u64(&build, &["estimatedDuration"], 2_130, "E_JENKINS_BUILD")?;
     exact_bool(&build, &["keepLog"], false, "E_JENKINS_BUILD")?;
     for field in ["description", "executor", "nextBuild", "previousBuild"] {
         exact_null(&build, &[field], "E_JENKINS_BUILD")?;
@@ -671,17 +673,17 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
     exact_u64(
         &workflow,
         &["startTimeMillis"],
-        1_785_603_388_755,
+        1_785_605_098_142,
         "E_JENKINS_WORKFLOW",
     )?;
     exact_u64(
         &workflow,
         &["endTimeMillis"],
-        1_785_603_390_984,
+        1_785_605_100_272,
         "E_JENKINS_WORKFLOW",
     )?;
-    exact_u64(&workflow, &["durationMillis"], 2_229, "E_JENKINS_WORKFLOW")?;
-    exact_u64(&workflow, &["queueDurationMillis"], 8, "E_JENKINS_WORKFLOW")?;
+    exact_u64(&workflow, &["durationMillis"], 2_130, "E_JENKINS_WORKFLOW")?;
+    exact_u64(&workflow, &["queueDurationMillis"], 3, "E_JENKINS_WORKFLOW")?;
     exact_u64(&workflow, &["pauseDurationMillis"], 0, "E_JENKINS_WORKFLOW")?;
     let stages = array(&workflow, &["stages"], "E_JENKINS_WORKFLOW")?;
     if stages.len() != 1 {
@@ -718,10 +720,10 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
     exact_u64(
         &stages[0],
         &["startTimeMillis"],
-        1_785_603_390_537,
+        1_785_605_099_899,
         "E_JENKINS_WORKFLOW",
     )?;
-    exact_u64(&stages[0], &["durationMillis"], 378, "E_JENKINS_WORKFLOW")?;
+    exact_u64(&stages[0], &["durationMillis"], 344, "E_JENKINS_WORKFLOW")?;
     exact_u64(
         &stages[0],
         &["pauseDurationMillis"],
@@ -759,10 +761,10 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
     exact_u64(
         &stage,
         &["startTimeMillis"],
-        1_785_603_390_537,
+        1_785_605_099_899,
         "E_JENKINS_STAGE",
     )?;
-    exact_u64(&stage, &["durationMillis"], 378, "E_JENKINS_STAGE")?;
+    exact_u64(&stage, &["durationMillis"], 344, "E_JENKINS_STAGE")?;
     exact_u64(&stage, &["pauseDurationMillis"], 0, "E_JENKINS_STAGE")?;
     let steps = array(&stage, &["stageFlowNodes"], "E_JENKINS_STAGE")?;
     if steps.len() != 1 {
@@ -811,10 +813,10 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
     exact_u64(
         &steps[0],
         &["startTimeMillis"],
-        1_785_603_390_593,
+        1_785_605_099_947,
         "E_JENKINS_STAGE",
     )?;
-    exact_u64(&steps[0], &["durationMillis"], 297, "E_JENKINS_STAGE")?;
+    exact_u64(&steps[0], &["durationMillis"], 286, "E_JENKINS_STAGE")?;
     exact_u64(&steps[0], &["pauseDurationMillis"], 0, "E_JENKINS_STAGE")?;
     exact_string(
         &steps[0],
@@ -1034,22 +1036,22 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         container,
         &["Config", "Env"],
         &[
-            "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-            "JENKINS_SLAVE_AGENT_PORT=50000",
-            "LANG=C.UTF-8",
-            "JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental",
-            "COPY_REFERENCE_FILE_LOG=/var/jenkins_home/copy_reference_file.log",
-            "container=podman",
-            "REF=/usr/share/jenkins/ref",
+            "JENKINS_HOME=/var/jenkins_home",
             "JAVA_HOME=/opt/java/openjdk",
+            "container=podman",
+            "COPY_REFERENCE_FILE_LOG=/var/jenkins_home/copy_reference_file.log",
+            "JENKINS_SLAVE_AGENT_PORT=50000",
+            "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals",
+            "JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Djava.awt.headless=true -Xms512m -Xmx2g",
+            "REF=/usr/share/jenkins/ref",
             "JENKINS_VERSION=2.568.1",
             "JENKINS_UC=https://updates.jenkins.io",
-            "JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals",
-            "JENKINS_HOME=/var/jenkins_home",
-            "JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Djava.awt.headless=true -Xms512m -Xmx2g",
+            "LANG=C.UTF-8",
             "TZ=UTC",
+            "JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental",
             "HOME=/var/jenkins_home",
-            "HOSTNAME=e9bc97551aba",
+            "HOSTNAME=70fda66b870b",
         ],
         "E_JENKINS_CONTAINMENT",
     )?;
@@ -1117,6 +1119,47 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         "rw,noexec,nosuid,nodev,size=2g,rprivate,tmpcopyup",
         "E_JENKINS_CONTAINMENT",
     )?;
+    exact_string(
+        container,
+        &["HostConfig", "Tmpfs", "/var/jenkins_home"],
+        "size=2147483648,mode=1777,rw,rprivate,nosuid,nodev,tmpcopyup",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_object_keys(
+        container,
+        &["HostConfig", "Tmpfs"],
+        &["/tmp", "/var/jenkins_home"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "LogConfig", "Type"],
+        "k8s-file",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_null(
+        container,
+        &["HostConfig", "LogConfig", "Config"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "LogConfig", "Path"],
+        "/home/srikanth/.local/share/containers/storage/overlay-containers/70fda66b870bb443c0fceb6b9f3d8836a9a9356b0b69f2d08657e7c27ab688be/userdata/ctr.log",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "LogConfig", "Tag"],
+        "",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "LogConfig", "Size"],
+        "16MB",
+        "E_JENKINS_CONTAINMENT",
+    )?;
     exact_empty_object(
         container,
         &["HostConfig", "PortBindings"],
@@ -1179,7 +1222,7 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         exact_u64(limit, &["Hard"], bound, "E_JENKINS_CONTAINMENT")?;
     }
     let mounts = array(container, &["Mounts"], "E_JENKINS_CONTAINMENT")?;
-    if mounts.len() != 4 {
+    if mounts.len() != 3 {
         return Err(VerificationError::new(
             "E_JENKINS_CONTAINMENT",
             "Jenkins mount set is not exact",
@@ -1192,17 +1235,12 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
             false,
         ),
         (
-            "/home/srikanth/mcloving-diff001-20260801T170000Z-v38/jenkins/home",
-            "/var/jenkins_home",
-            true,
-        ),
-        (
-            "/home/srikanth/mcloving-diff001-20260801T170000Z-v38/jenkins/fixture/Jenkinsfile",
+            "/home/srikanth/mcloving-diff001-20260801T174500Z-v43/jenkins/fixture/Jenkinsfile",
             "/fixture/Jenkinsfile",
             false,
         ),
         (
-            "/home/srikanth/mcloving-diff001-20260801T170000Z-v38/jenkins/fixture/99-diff001.groovy",
+            "/home/srikanth/mcloving-diff001-20260801T174500Z-v43/jenkins/fixture/99-diff001.groovy",
             "/usr/share/jenkins/ref/init.groovy.d/99-diff001.groovy",
             false,
         ),
@@ -1224,7 +1262,7 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
     }
     const EXPECTED_EXTERNAL_NETWORK: &str = "curl: (7) Failed to connect to 192.0.2.1 port 80 after 0 ms: Could not connect to server\nexit_code=7\n";
     const EXPECTED_RUNTIME: &str = "uid=1000(jenkins) gid=1000(jenkins) groups=1000(jenkins)\n\
-Linux e9bc97551aba 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 GNU/Linux\n\
+Linux 70fda66b870b 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 GNU/Linux\n\
 LANG=C.UTF-8\n\
 LANGUAGE=\n\
 LC_CTYPE=\"C.UTF-8\"\n\
@@ -1245,8 +1283,13 @@ OpenJDK Runtime Environment Temurin-21.0.11+10 (build 21.0.11+10-LTS)\n\
 OpenJDK 64-Bit Server VM Temurin-21.0.11+10 (build 21.0.11+10-LTS, mixed mode)\n\
 2.568.1\n\
 timeout (GNU coreutils) 9.7\n\
+Filesystem      1B-blocks      Used  Available Use% Mounted on\n\
+tmpfs          2147483648 383537152 1763946496  18% /var/jenkins_home\n\
 controller_timeout_seconds=600\n\
-controller_timeout_kill_after_seconds=30\n";
+controller_timeout_kill_after_seconds=30\n\
+jenkins_home_ceiling_bytes=2147483648\n\
+controller_log_ceiling_bytes=16777216\n\
+controller_log_observed_bytes=8721\n";
     if text(root, "jenkins/external-network.txt")? != EXPECTED_EXTERNAL_NETWORK
         || text(root, "jenkins/runtime.txt")? != EXPECTED_RUNTIME
     {
@@ -1302,9 +1345,9 @@ host=mario\n\
 plugin_root=/home/srikanth/jenkins-oracle-228/plugins\n\
 plugin_manifest_sha256=e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0\n\
 plugin_count=90\n\
-latest_plugin_mtime=2026-07-26T05:55:08.950484000Z\n\
-jenkins_execution_started_at=2026-08-01T16:56:10.499006409Z\n\
-verified_at=2026-08-01T16:56:46Z\n\
+latest_plugin_mtime_epoch=1785045308.9504840000\n\
+jenkins_execution_started_at=2026-08-01T17:24:40.33500311Z\n\
+verified_at=2026-08-01T17:26:25Z\n\
 verification=sha256sum-strict-all-ok\n";
     if text(root, "jenkins/plugin-verification.txt")? != EXPECTED_RECEIPT {
         return Err(VerificationError::new(

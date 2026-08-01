@@ -1050,8 +1050,9 @@ an internal-only Podman network. Both derive the same canonical one-stage,
 one-process, success trace with exact semantic stdout and zero user workspace,
 artifact, test, approval, credential-grant, or external-effect output. An
 independent bounded verifier checks the exact 30-file repository tree,
-including the verified 90-plugin profile, exact Jenkins console, mount sources,
-tmpfs, dropped-capability, memory/swap, ulimit policy, and a 600-second GNU
+including the verified 90-plugin profile, exact Jenkins console, three read-only
+bind sources, 2 GiB Jenkins-home and `/tmp` tmpfs ceilings, 16 MiB controller-log
+ceiling, dropped-capability, memory/swap, ulimit policy, and a 600-second GNU
 `timeout` controller watchdog with a 30-second TERM-to-KILL bound, plus two-sided
 containment, database integrity, coverage, raw observations, and trace
 equality. The raw McLoving admission/build digest, graph/build/node/attempt
@@ -1060,12 +1061,13 @@ identity are cross-bound; the embedded worker enforces a 67,108,864-byte aggrega
 stdout/stderr ceiling; resealed semantic,
 identity, and authority mutations fail closed.
 The exact Jenkins initializer digest/body, source path, controller chronology,
-job/build identity, and complete four-mount set are cross-bound. The exact
+job/build identity, complete three-bind set, and bounded Jenkins-home tmpfs are
+cross-bound. The exact
 Jenkins container ID/name/creation/start identity, timeout/tini/jenkins.sh invocation,
 configured image/user, and complete UID/kernel/locale/Java/Jenkins runtime
 receipt are cross-bound. Build, workflow, stage, and step timestamps are
 exact-bound and cross-checked as nested intervals within the watchdog, and the
-hard-pinned 14-file capture-manifest digest closes the remaining raw Jenkins
+hard-pinned 16-file capture-manifest digest closes the remaining raw Jenkins
 receipt surface. The exact
 McLoving runner container identity, invocation, entrypoint, complete mount set,
 and configured capability policy are identical across pre/post receipts and
@@ -1075,9 +1077,9 @@ cases and 1/228 corpus cases. The remaining 227 cases and every unimplemented
 family remain non-admitted with zero authority. The exact contract is
 `docs/architecture/JENKINS_NATIVE_DIFFERENTIAL_V1.md`; expanding compiler
 admission requires a new differential version. The sealed external evidence
-is `/sn8100/runs/mcloving/diff001-native-20260801T171000Z-v39`, with a
+is `/sn8100/runs/mcloving/diff001-native-20260801T173419Z-v44`, with a
 self-excluding 35-file manifest SHA-256 of
-`0d0b6b4347c5754ca87997e1426a2b5ed93ccaca2d2fbc5025c62e0916dcafcc`.
+`8cd2c506a7fc7438eae920c83b1089031e9b4fc763d2cb5bb596fe6ddfa00752`.
 Immutable v5 is a superseded no-McLoving-containment predecessor; immutable
 v10-v14 are rejected/superseded envelope iterations, v15 failed before
 execution, v17 is the review-superseded predecessor to v18, and v18 is the
@@ -1090,8 +1092,10 @@ evidence, v31 failed on evidence-mount permissions, v32 failed on a host-built
 glibc mismatch, and the successful shared-64-MiB v33 capture was first
 incorporated into v34. V34 is superseded because its Jenkins controller lacked
 an enforced finite lifetime; v35-v37 are failed/provisional Jenkins recapture
-predecessors, and successful time-bounded Jenkins v38 is combined with the
-unchanged McLoving v33 capture in v39; all predecessors
+predecessors. Time-bounded v38/v39 remained output-unbounded; v40-v41 failed
+safely during bounded-home setup, and v42 proved a 1 GiB ceiling operationally
+insufficient. Successful time-and-output-bounded Jenkins v43 is combined with
+the unchanged McLoving v33 capture in v44; all predecessors
 contribute no authority.
 `DIFF-002` remains dependency-blocked; the next unblocked parity-substrate
 slice is selected after the DIFF-001 review/merge gate.
