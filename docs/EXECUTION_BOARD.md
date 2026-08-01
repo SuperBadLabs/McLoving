@@ -659,7 +659,7 @@ boundary is too large or authority-sensitive to share a pull request safely.
 | Lane | Ticket or ordered chain | Class | Start gate | Streamlined execution rule |
 |---|---|---|---|---|
 | Windows evidence | `WIN-001` -> `WIN-002` -> `WIN-003` | SERIAL | Active | One persistent-Windows evidence generation at a time; the lane may run beside Linux/repository work |
-| Library compiler | `MIG-005` | PARALLEL | `MIG-002`, `MIG-003` are done | Separate worker/library PR; it no longer waits for unrelated state-transfer work |
+| Library compiler | `MIG-005` | DONE | `MIG-002`, `MIG-003` are done | Separate deny-authority worker/ledger PR; exact 228-file reconciliation and prefetched-source verification are complete |
 
 ### Parity substrate lanes
 
@@ -698,9 +698,10 @@ boundary is too large or authority-sensitive to share a pull request safely.
 
 ### Dispatch discipline
 
-After `MIG-005A` closure, the current three implementation slots are:
+After `MIG-005` closure, the current three implementation slots are:
 
-1. `MIG-005` — next shared-library/compiler lane.
+1. `DIFF-001` — native execution-semantic differential lane, now unblocked by
+   the completed compiler and shared-library boundaries.
 2. `IDP-001` — longest remaining security critical path; `AUTHZ-001`,
    `DISC-001`, `CONSUMER-001`, and `ADMIN-001` all wait behind it.
 3. `SCM-001` — independent contained-source boundary and prerequisite for
@@ -784,7 +785,7 @@ dependency-ready.
 | MIG-003 | DONE | MIG-001, MIG-002, IR-004 | Compile the admitted Jenkins Declarative subset into versioned McLoving IR and canonical strict YAML plus a separate versioned `JOBSTATE-001` operational-state record that preserves the source enabled/disabled state, generation, reason and provenance without making it mutable pipeline code. Preserve stage order, conditions, environment, public parameter schemas, invocation-only tainted secret-parameter references with no default/value persistence, matrices, post behavior, agent selection through an explicit normalized Jenkins-label-to-platform/capability/trust-pool mapping, typed immutable references for every admitted agent-local runtime input, admitted options including job-level concurrency and supersession, the parallel branch DAG and join semantics, fail-fast sibling cancellation, per-node/stage/build result semantics including caught errors and unstable outcomes, retry attempt identity and lineage, and interactive approval policy including allowed approvers, submitter restrictions, values, expiry, rejection, and cancellation; emit stable diagnostics for everything else; bind exact source/profile/compiler digests; and prove deterministic output with differential compiler fixtures. Rust independently reparses and validates every worker result before admission; adversarial worker-output gates reject malformed, unsupported, noncanonical, provenance- or profile-substituted IR/YAML or operational state, undeclared or mutable host-path access, and any secret default, literal, or taint downgrade. |
 | MIG-004 | DONE | MIG-003 | Ship a versioned step and plugin mapping catalog to native processes, reusable components, connectors, and immutable staged agent-local inputs. Every mapping declares schema, types, effects, trust requirements, supported target profiles, and provenance; local-input mappings additionally bind canonical logical name, source path and origin, content digest, media type, confidentiality/taint, refresh generation, read-only destination path, and live freeze/rollback checks; mappings with lock, throttle, or shared-resource semantics additionally bind the canonical resource identity, coordination scope across jobs, queue and fairness policy, lease/release behavior, cancellation/restart recovery, and effect fencing; cache mappings bind key derivation, immutable generation/content digests, trust class, read/write policy, expiry, and cleanup. Floating mappings, undeclared host reads, and silent fallback are forbidden; substitution resistance and corpus-earned coverage are gated. |
 | MIG-005A | DONE | MIG-002, MIG-003, OPS-003, AUDIT-001 | Implement versioned, deterministic, idempotent forward and reverse state transforms for every admitted build-number, previous-result, per-build SCM provider/repository/ref/revision, previous-revision and canonical changelog/change-entry baseline, cross-build artifact, retained workspace, persistent-state dependency, retention policy/deadline, and active legal hold with its identity/scope/reason/provenance/generation/release authority. Bind immutable source export, transform implementation/configuration, destination state, record-level provenance, conflict policy, and verification digests; reject gaps, duplicate mappings, divergent replays, provenance substitution, unclassified state, deadline shortening, hold omission, and unauthorized release. Before `DONE`, execute both directions against disposable exact-profile Jenkins and McLoving instances with seeded history: include jobs whose `when { changeset ... }`, `when { changelog ... }`, or equivalent step consumes the prior SCM/change-set record plus records under shorter/longer/expired retention, multiple overlapping holds, and attempted unauthorized hold release; import state, prove equivalent-or-stronger retention and the union of active holds before reader or execution authority, deliver a pinned next revision with known canonical changes, prove the first destination build selects the same branches and effect intents from the transferred baseline, run a McLoving state-authoritative but externally effect-free build, freeze new work, reverse-reconcile its number, result, SCM revision/baseline/change entries, retention/holds, artifacts, retained workspace/state, and audit linkage, then deliver another pinned revision and prove Jenkins resumes with the same predicate decisions and without stale lookups, missing changes, missing artifacts, premature deletion, missing holds, duplicate mappings, or duplicate effects. Every stateful, SCM-baseline-dependent, retained, or held job requires a successful case-specific rehearsal before `CANARY-001` may grant production effect authority; the later receipt-only `MIG-008` closure cannot satisfy this pre-effect gate. |
-| MIG-005 | PENDING | MIG-002, MIG-003 | Inventory and resolve Jenkins shared libraries by pinned SCM reference and content digest, including `vars`, `src`, and `resources`, while classifying load-time, runtime, sandbox, CPS, plugin, and credential dependencies. The worker ingests only owner-approved, prefetched, digest-verified read-only source and never receives direct SCM or credential authority. Arbitrary Groovy never runs in the controller; any future bounded isolated evaluation is owner-approved, meets the MIG-001 deny-authority boundary, and produces explicit unsupported receipts outside its admitted subset. |
+| MIG-005 | DONE | MIG-002, MIG-003 | Inventory and resolve Jenkins shared libraries by pinned SCM reference and content digest, including `vars`, `src`, and `resources`, while classifying load-time, runtime, sandbox, CPS, plugin, and credential dependencies. The worker ingests only owner-approved, prefetched, digest-verified read-only source and never receives direct SCM or credential authority. Arbitrary Groovy never runs in the controller; any future bounded isolated evaluation is owner-approved, meets the MIG-001 deny-authority boundary, and produces explicit unsupported receipts outside its admitted subset. |
 | DIFF-001 | PENDING | MIG-002, MIG-003, MIG-004, MIG-005 | Certify core execution semantics in separate independently tested deny-authority Jenkins and McLoving sandboxes with exact platform/image/locale/toolchain/input-fixture receipts and bounded CPU/memory/time/output. Run every admitted parameter, condition, matrix, timeout, retry, caught-error, unstable-result, cancellation, post, parallel, join, fail-fast, multi-build, shared-resource, agent-selection, approval, dependency, cache, artifact, test, stdout/stderr, and success/failure scenario. Compare canonical stage/step arguments, normalized node/stage/build outcomes, attempt lineage, concurrency/order, cancellation, workspace and published artifact digests/metadata/API retrieval, normalized tests, logs/gaps, and deterministic classification. Scripted/unsupported cases must remain non-executable with zero work, grant, or effect. |
 | DIFF-002 | PENDING | MIG-005A, IDP-001, AUTHZ-001, JOBSTATE-001, AUDIT-001 | Certify identity, authorization, operational state, and persistent-history semantics. Compare immutable source-to-target principal mappings and positive/negative view/trigger/cancel/configure decisions; enabled/disabled generations and pre-queue denial; build-number/previous-result/SCM-changelog baselines; cross-build artifacts; retained workspace/state; retention and legal holds; approval identity/value/expiry behavior; retry/result history; first-authoritative-run decisions; and forward/reverse reconciliation. Include rename/collision/deleted-identity reuse, group changes, disable races, stale generations, history gaps, hold omission/release denial, restart, and rollback fixtures. |
 | DIFF-003 | PENDING | TRIG-001, SCM-001, SECRET-001, INPUT-001, PROV-001, EXT-001, OBS-001, DISC-001, DEP-001, CACHE-001, CONSUMER-001, ADMIN-001, REL-001 | Certify every live boundary through exact typed receipts and permission-negative fixtures: canonical trigger capture/replay, source acquisition and later revisions, secret consumer/taint eligibility, external runtime reads, dynamic provisioning, dependency/cache resolution, multibranch discovery, external read/write client migration, trusted release provenance, authoritative connector outcomes, and independently observed destination state. Compare implementation/configuration/account/resource/content/generation identities, downstream control flow, effect intents/outcomes, retry/ambiguity truth, observation freshness, and rollback restoration. Prove runner/connector/observer non-collusion, zero secret-marker disclosure, no residual Jenkins read/write client, no shadow production endpoint, substitution/replay/stale/outage denial, and zero duplicate effect. |
@@ -992,6 +993,56 @@ and no longer waits for unrelated state-transfer work; both join only through
 their required differential evidence. `WIN-001`, `WIN-002`, and `WIN-003`
 remain a separate serial persistent-Windows evidence lane that may run in
 parallel with repository implementation.
+
+`MIG-005` is complete. The strict-YAML
+`mario-jenkins-oracle-228-shared-libraries-v1` ledger binds the frozen
+inventory, job graph, runtime-dependency inventory, and exact 228-file corpus.
+It reconciles 23 live loads plus two comment-only scanner false positives,
+including seven runtime calls absent from the frozen naive scanner. A bounded
+independent source walk finds the same 23 active load locations. Seven
+distinct public references covering eight live occurrences resolve to exact
+SCM commits. Their normalized `vars`, `src`, and `resources` inputs are sealed
+read-only outside the repository: 518 files and 1,400,368 bytes, with no
+symlink, hard-link, special-file, unexpected-namespace, writable-input, digest,
+or provenance escape. Certification is Unix-only and rejects platforms where
+a directory read-only attribute does not prove effective write denial;
+Windows source certification awaits an ACL-aware verifier. Simple-name,
+controller-mapped, dynamic, missing-ref,
+and host-ambiguous loads remain explicitly unsupported. Source verification
+does not grant Groovy, CPS, sandbox, plugin, controller, SCM, or credential
+authority; executable cases remain exactly zero. The ledger raw and semantic
+SHA-256 values are
+`fb6ff37c33aba6288e9632e5d0993adf634d840c5fe21f6345dea5350f28e35b`
+and
+`f925714595d48efcf29ea9c64696a99cd361b6a4a9b847c2d96b807a63add309`.
+Both digests are compiled into the verifier and independently reject a joint
+ledger/lock/source substitution.
+The authoritative platform-sealing-repaired external evidence is
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T120106Z-v10`; its
+self-excluding manifest SHA-256 is
+`6eb13730aa8827e890aeabe2133032eaa3007ce78f427d2936004f8a4151a418`
+and covers 522 files. The path-collision predecessor
+`971f0d6dc07c04257f54bb9757e1d26e557d62239282caa1b1bb11a5d0dc128f`,
+bounded-traversal predecessor
+`0f41561942d065d178a86aec82a8bd2db522ee66ac4e591ee531316de913f7e5`,
+trust-root predecessor
+`81ce26bd0335851b2e7deb7f292caa0a8cf725681afb947f5555a526c36cc44e`,
+complete-coverage predecessor
+`50bc61768682e225c6536d04db9dc940cf65a9ef164f956e336ca4f624448a5e`,
+non-recursive README predecessor
+`80032ba8401f0aa8b5ef974b043f5bb4172b887a5078842ee26bb982048a6f24`,
+review-repair predecessor
+`5387322af011b50fcb3d4200833d7a02b79a287518de4b55e62a412c33892517`,
+full-corpus-lock predecessor
+`f290fe2090dba32b2af907b8f55e60035fb14a14ce499a21d8560bce93a2daf7`,
+README-lock predecessor
+`ec598cbc26a39d8f2d69ebd3d8298f89dc5728dd5b91c5f8ea7215b4fd57b9cf`
+and pre-README-lock predecessor
+`a6671f966e3738e25135b33fc397b5fb21666ac60edb931b49e3b35672f5123b`
+remain immutable.
+The implementation and verification contract are documented in
+`docs/architecture/JENKINS_SHARED_LIBRARY_ADMISSION_V1.md`. `DIFF-001` is now
+the next ticket on this lane.
 
 `W2-C` is complete on `codex/wave2-agent-completion`. Production agents
 negotiate `work-delivery-v1`, cancel execution on lease-renewal loss, commit
