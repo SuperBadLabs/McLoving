@@ -1074,6 +1074,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     let pre = first_object(&pre, "E_MCLOVING_CONTAINMENT")?;
     verify_runner_contract(pre, false)?;
     verify_network_attachment(pre, "", "", 0, "", "6c58b760d4f6")?;
+    exact_empty_object(pre, &["NetworkSettings", "Ports"], "E_MCLOVING_CONTAINMENT")?;
     exact_string(
         pre,
         &["State", "Status"],
@@ -1085,6 +1086,11 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     let post = first_object(&post, "E_MCLOVING_CONTAINMENT")?;
     verify_runner_contract(post, true)?;
     verify_network_attachment(post, "", "", 0, "", "6c58b760d4f6")?;
+    exact_empty_object(
+        post,
+        &["NetworkSettings", "Ports"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
     exact_string(
         post,
         &["State", "Status"],
@@ -1115,6 +1121,17 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         24,
         "62:4e:4f:34:09:2c",
         "80e472c55998",
+    )?;
+    exact_object_keys(
+        database,
+        &["NetworkSettings", "Ports"],
+        &["5432/tcp"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_null(
+        database,
+        &["NetworkSettings", "Ports", "5432/tcp"],
+        "E_MCLOVING_CONTAINMENT",
     )?;
     exact_string(
         database,
@@ -1276,8 +1293,9 @@ LC_ALL=C.UTF-8\n\
             "runner runtime receipt differs",
         ));
     }
+    const EXPECTED_TEST_OUTPUT: &str = "\nrunning 1 test\ntest admitted_jenkins_case_executes_with_a_canonical_trace ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s\n\n";
     if text(root, "mcloving/database-integrity.txt")? != "mcloving|1\n"
-        || !text(root, "mcloving/test-output.txt")?.contains("test result: ok. 1 passed; 0 failed")
+        || text(root, "mcloving/test-output.txt")? != EXPECTED_TEST_OUTPUT
     {
         return Err(VerificationError::new(
             "E_MCLOVING_CONTAINMENT",
@@ -1451,6 +1469,12 @@ fn verify_common_container(
     exact_empty_object(
         container,
         &["HostConfig", "PortBindings"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_bool(
+        container,
+        &["HostConfig", "PublishAllPorts"],
+        false,
         "E_MCLOVING_CONTAINMENT",
     )?;
     exact_u64(

@@ -216,6 +216,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_MCLOVING_CONTAINMENT",
         ),
         (
+            "mcloving/test-output.txt",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s\ntest result: FAILED. 0 passed; 1 failed",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
             "mcloving/postgres-inspect.json",
             "\"CapAdd\": []",
             "\"CapAdd\": [\"CAP_SYS_ADMIN\"]",
@@ -225,6 +231,18 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "mcloving/postgres-inspect.json",
             "\"NetworkMode\": \"bridge\"",
             "\"NetworkMode\": \"host\"",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/postgres-inspect.json",
+            "\"PublishAllPorts\": false",
+            "\"PublishAllPorts\": true",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/postgres-inspect.json",
+            "\"5432/tcp\": null",
+            "\"5432/tcp\": [{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"49152\"}]",
             "E_MCLOVING_CONTAINMENT",
         ),
         (
