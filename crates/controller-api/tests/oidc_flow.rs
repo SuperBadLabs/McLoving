@@ -13,7 +13,10 @@ use axum::{Json, Router};
 use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mcloving_controller_api::{ApiState, OidcClientConfig, router};
-use mcloving_controller_store::{IdentityProviderWrite, NewHumanIdentity, Store};
+use mcloving_controller_store::{
+    IdentityProviderWrite, NewHumanIdentity, NewServiceCredential, NewServiceIdentity, Store,
+    authz::ServiceScope,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -167,6 +170,87 @@ async fn oidc_app(
             })
             .expect("configure contained OIDC client"),
     )
+}
+
+#[tokio::test]
+async fn durable_artifact_agent_token_cannot_reuse_an_api_credential() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    admin
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            Uuid::new_v4(),
+            "durable-artifact-agent-namespace",
+        )
+        .await
+        .expect("create artifact-agent namespace test tenant");
+    let identity_id = Uuid::new_v4();
+    admin
+        .provision_service_identity(&NewServiceIdentity {
+            organization_id,
+            identity_id,
+            subject: format!("service:{identity_id}"),
+            scopes: BTreeSet::from([ServiceScope::BuildSubmit]),
+            actor_subject: "bootstrap:test".to_owned(),
+        })
+        .await
+        .expect("provision durable API identity");
+    let shared = "shared-durable-artifact-token-32-bytes";
+    admin
+        .provision_service_credential(&NewServiceCredential {
+            organization_id,
+            credential_id: Uuid::new_v4(),
+            identity_id,
+            generation: 1,
+            token_digest: Sha256::digest(shared.as_bytes()).into(),
+            issued_at_unix_ms: 1,
+            expires_at_unix_ms: None,
+            actor_subject: "bootstrap:test".to_owned(),
+        })
+        .await
+        .expect("provision durable API credential");
+
+    let collision = ApiState::new_durable(runtime_store(&admin).await)
+        .with_durable_artifact_agent_token(shared, "agent-1", organization_id)
+        .await;
+    assert!(
+        collision.is_err(),
+        "durable API and artifact-agent credentials must be disjoint"
+    );
+    ApiState::new_durable(runtime_store(&admin).await)
+        .with_durable_artifact_agent_token(
+            "independent-artifact-agent-token-32-bytes",
+            "agent-1",
+            organization_id,
+        )
+        .await
+        .expect("an unbound artifact-agent credential is accepted");
+    ApiState::new_durable(runtime_store(&admin).await)
+        .with_durable_artifact_agent_token(
+            "independent-artifact-agent-token-32-bytes",
+            "agent-1",
+            organization_id,
+        )
+        .await
+        .expect("the exact reservation is idempotent across controller replicas");
+    admin
+        .provision_service_credential(&NewServiceCredential {
+            organization_id,
+            credential_id: Uuid::new_v4(),
+            identity_id,
+            generation: 2,
+            token_digest: Sha256::digest("independent-artifact-agent-token-32-bytes".as_bytes())
+                .into(),
+            issued_at_unix_ms: 2,
+            expires_at_unix_ms: None,
+            actor_subject: "bootstrap:test".to_owned(),
+        })
+        .await
+        .expect_err("a later API credential cannot reuse the durable reservation");
 }
 
 #[tokio::test]

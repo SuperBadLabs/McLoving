@@ -171,13 +171,14 @@ impl ApiState {
             ));
         }
         let token_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
-        let collides_with_api = match &self.authentication {
-            Authentication::Static(credentials) => credentials
-                .iter()
-                .any(|credential| constant_time_eq(&credential.token_digest, &token_digest)),
-            Authentication::Durable => false,
+        let Authentication::Static(credentials) = &self.authentication else {
+            return Err(ApiError::configuration(
+                "durable authentication requires a database-backed artifact-agent token check",
+            ));
         };
-        if collides_with_api
+        if credentials
+            .iter()
+            .any(|credential| constant_time_eq(&credential.token_digest, &token_digest))
             || self.artifact_agents.iter().any(|credential| {
                 credential.agent_id == agent_id
                     || constant_time_eq(&credential.token_digest, &token_digest)
@@ -187,6 +188,49 @@ impl ApiState {
                 "artifact agent IDs must be unique and bearer tokens must be globally unique",
             ));
         }
+        self.artifact_agents.push(ArtifactAgentCredential {
+            token_digest,
+            agent_id: agent_id.to_owned(),
+        });
+        Ok(self)
+    }
+
+    /// Binds an artifact-publishing agent after atomically reserving its bearer
+    /// digest outside every durable API credential namespace for this tenant.
+    pub async fn with_durable_artifact_agent_token(
+        mut self,
+        bearer_token: &str,
+        agent_id: &str,
+        organization_id: Uuid,
+    ) -> Result<Self, ApiError> {
+        validate_bearer_secret(bearer_token)?;
+        if agent_id.trim().is_empty() || agent_id.trim() != agent_id {
+            return Err(ApiError::configuration(
+                "artifact agent ID must be non-empty and canonical",
+            ));
+        }
+        if !matches!(self.authentication, Authentication::Durable) {
+            return Err(ApiError::configuration(
+                "database-backed artifact-agent token checks require durable authentication",
+            ));
+        }
+        let token_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
+        if self.artifact_agents.iter().any(|credential| {
+            credential.agent_id == agent_id
+                || constant_time_eq(&credential.token_digest, &token_digest)
+        }) {
+            return Err(ApiError::configuration(
+                "artifact agent IDs must be unique and bearer tokens must be globally unique",
+            ));
+        }
+        self.store
+            .reserve_artifact_agent_credential(organization_id, agent_id, token_digest)
+            .await
+            .map_err(|error| {
+                ApiError::configuration(format!(
+                    "reserve artifact-agent bearer in the durable credential namespace: {error}"
+                ))
+            })?;
         self.artifact_agents.push(ArtifactAgentCredential {
             token_digest,
             agent_id: agent_id.to_owned(),
@@ -3844,6 +3888,16 @@ mod tests {
                 .with_bearer_principal(shared, principal)
                 .is_err(),
             "an artifact-agent bearer cannot also authenticate an API principal"
+        );
+
+        let durable_pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("construct lazy pool");
+        assert!(
+            ApiState::new_durable(Store::new(durable_pool))
+                .with_artifact_agent_token(shared, "agent-1")
+                .is_err(),
+            "durable mode must fail closed unless the database namespace is checked"
         );
     }
 

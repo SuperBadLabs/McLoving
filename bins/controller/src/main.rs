@@ -159,7 +159,12 @@ async fn main() -> Result<()> {
     )
     .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
     let mut state = ApiState::new_durable(store.clone())
-        .with_artifact_agent_token(&artifact_agent_token, &worker.config.agent_id)
+        .with_durable_artifact_agent_token(
+            &artifact_agent_token,
+            &worker.config.agent_id,
+            worker.organization_id,
+        )
+        .await
         .context("configure artifact-agent authentication")?;
     if std::env::var_os("MCLOVING_API_PRINCIPALS_PATH").is_some() {
         bail!(

@@ -101,6 +101,9 @@ pub const IDENTITY_SESSION_REFRESH_V20: &str =
 /// Explicit session lineages for targeted refresh-reuse and logout revocation.
 pub const IDENTITY_SESSION_LINEAGE_V21: &str =
     include_str!("../migrations/0021_identity_session_lineage.sql");
+/// Durable reservation of non-API secrets in the global credential namespace.
+pub const CREDENTIAL_NAMESPACE_V22: &str =
+    include_str!("../migrations/0022_credential_namespace.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -493,6 +496,7 @@ impl Store {
         apply_migration(&mut tx, 19, IDENTITY_LIFECYCLE_V19).await?;
         apply_migration(&mut tx, 20, IDENTITY_SESSION_REFRESH_V20).await?;
         apply_migration(&mut tx, 21, IDENTITY_SESSION_LINEAGE_V21).await?;
+        apply_migration(&mut tx, 22, CREDENTIAL_NAMESPACE_V22).await?;
         tx.commit().await?;
         Ok(())
     }

@@ -566,6 +566,54 @@ impl Store {
         Ok(credential)
     }
 
+    /// Durably reserves an artifact-agent digest so it cannot be reused by a
+    /// human session or service credential on this or any other controller.
+    pub async fn reserve_artifact_agent_credential(
+        &self,
+        organization_id: Uuid,
+        agent_id: &str,
+        digest: [u8; 32],
+    ) -> Result<(), StoreError> {
+        validate_canonical(agent_id, "artifact agent ID", 512)?;
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        lock_credential_namespace(&mut tx, organization_id).await?;
+        let existing = sqlx::query_as::<_, (String, String)>(
+            "SELECT reservation_kind, reservation_subject
+             FROM credential_namespace_reservations
+             WHERE organization_id = $1 AND token_digest = $2",
+        )
+        .bind(organization_id)
+        .bind(digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some((kind, subject)) = existing {
+            if kind != "artifact_agent" || subject != agent_id {
+                return Err(StoreError::IdentityConflict(
+                    "credential digest is already reserved".to_owned(),
+                ));
+            }
+            tx.commit().await?;
+            return Ok(());
+        }
+        if identity_credential_digest_collision(&mut tx, organization_id, &digest).await? {
+            return Err(StoreError::IdentityConflict(
+                "credential digest is already bound".to_owned(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO credential_namespace_reservations(
+                 organization_id, token_digest, reservation_kind, reservation_subject
+             ) VALUES ($1,$2,'artifact_agent',$3)",
+        )
+        .bind(organization_id)
+        .bind(digest.as_slice())
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn record_oidc_login_attempt(&self, input: &LoginAttempt) -> Result<(), StoreError> {
         validate_canonical(&input.pkce_verifier, "PKCE verifier", 128)?;
         validate_canonical(&input.redirect_uri, "redirect URI", 2048)?;
@@ -1978,12 +2026,23 @@ async fn lock_session_family(
     Ok(())
 }
 
-async fn reject_credential_digest_collision(
+async fn lock_credential_namespace(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("mcloving.credential-namespace.{organization_id}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn identity_credential_digest_collision(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
     digest: &[u8; 32],
-) -> Result<(), StoreError> {
-    let collision = sqlx::query_scalar::<_, bool>(
+) -> Result<bool, StoreError> {
+    Ok(sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM identity_sessions WHERE organization_id = $1 AND token_digest = $2)
              OR EXISTS(SELECT 1 FROM identity_sessions WHERE organization_id = $1 AND refresh_token_digest = $2)
              OR EXISTS(SELECT 1 FROM service_credentials WHERE organization_id = $1 AND token_digest = $2)",
@@ -1991,8 +2050,28 @@ async fn reject_credential_digest_collision(
     .bind(organization_id)
     .bind(digest.as_slice())
     .fetch_one(&mut **tx)
+    .await?)
+}
+
+async fn reject_credential_digest_collision(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    digest: &[u8; 32],
+) -> Result<(), StoreError> {
+    lock_credential_namespace(tx, organization_id).await?;
+    let identity_collision =
+        identity_credential_digest_collision(tx, organization_id, digest).await?;
+    let collision = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM credential_namespace_reservations
+             WHERE organization_id = $1 AND token_digest = $2
+         )",
+    )
+    .bind(organization_id)
+    .bind(digest.as_slice())
+    .fetch_one(&mut **tx)
     .await?;
-    if collision {
+    if identity_collision || collision {
         return Err(StoreError::IdentityConflict(
             "credential digest is already bound".to_owned(),
         ));
@@ -2041,6 +2120,7 @@ async fn revoke_credential_record(
             &format!("credential:{record_id}"),
             json!({
                 "reason": reason,
+                "requested_revoked_at_unix_ms": now_unix_ms,
                 "revoked_at_unix_ms": effective_revoked_at_unix_ms,
             }),
         )

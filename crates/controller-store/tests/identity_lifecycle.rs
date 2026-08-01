@@ -1170,6 +1170,10 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         i64::MAX - 10,
         "audit must record the effective durable revocation timestamp"
     );
+    assert_eq!(
+        future_revocation.payload["requested_revoked_at_unix_ms"], 0,
+        "audit must retain the caller-requested revocation timestamp"
+    );
     let skewed_service_rotation = audit
         .events
         .iter()
