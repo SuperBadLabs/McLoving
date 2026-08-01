@@ -173,6 +173,100 @@ async fn controller_authentication_rollout_is_atomic() {
 }
 
 #[tokio::test]
+async fn concurrent_oidc_login_attempts_preserve_the_provider_cap() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    admin
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            Uuid::new_v4(),
+            "oidc-login-attempt-cap",
+        )
+        .await
+        .expect("create OIDC attempt-cap test tenant");
+    let provider_id = Uuid::new_v4();
+    admin
+        .provision_identity_provider(&IdentityProviderWrite {
+            organization_id,
+            provider_id,
+            issuer: "https://id.example.test".to_owned(),
+            audience: "mcloving".to_owned(),
+            authorization_endpoint: "https://id.example.test/authorize".to_owned(),
+            token_endpoint: "https://id.example.test/token".to_owned(),
+            jwks_uri: "https://id.example.test/jwks".to_owned(),
+            client_id: "mcloving".to_owned(),
+            group_claim: "groups".to_owned(),
+            configuration_generation: 1,
+            configuration_digest: digest("attempt-cap-provider-v1"),
+            jwks_generation: 1,
+            jwks_digest: digest("attempt-cap-jwks-v1"),
+            enabled: true,
+            actor_subject: "operator:identity".to_owned(),
+        })
+        .await
+        .expect("provision attempt-cap provider");
+    sqlx::query(
+        "INSERT INTO oidc_login_attempts(
+             organization_id, attempt_id, provider_id, state_digest,
+             nonce_digest, pkce_verifier, redirect_uri,
+             provider_configuration_generation, expires_at_unix_ms
+         )
+         SELECT $1, md5($1::text || ':' || seed::text)::uuid, $2,
+                decode(repeat(lpad(to_hex(seed), 8, '0'), 8), 'hex'),
+                decode(repeat(lpad(to_hex(seed + 2048), 8, '0'), 8), 'hex'),
+                repeat('A', 43), 'https://controller.example.test/callback', 1, $3
+         FROM generate_series(1, 1023) AS seed",
+    )
+    .bind(organization_id)
+    .bind(provider_id)
+    .bind(i64::MAX - 1)
+    .execute(admin.pool())
+    .await
+    .expect("seed one below the provider attempt cap");
+    let first = LoginAttempt {
+        organization_id,
+        attempt_id: Uuid::new_v4(),
+        provider_id,
+        state_digest: digest("concurrent-attempt-state-a"),
+        nonce_digest: digest("concurrent-attempt-nonce-a"),
+        pkce_verifier: "B".repeat(43),
+        redirect_uri: "https://controller.example.test/callback".to_owned(),
+        provider_configuration_generation: 1,
+        expires_at_unix_ms: i64::MAX - 1,
+    };
+    let second = LoginAttempt {
+        attempt_id: Uuid::new_v4(),
+        state_digest: digest("concurrent-attempt-state-b"),
+        nonce_digest: digest("concurrent-attempt-nonce-b"),
+        ..first.clone()
+    };
+    let (first_result, second_result) = tokio::join!(
+        admin.record_oidc_login_attempt(&first),
+        admin.record_oidc_login_attempt(&second),
+    );
+    first_result.expect("record first concurrent OIDC attempt");
+    second_result.expect("record second concurrent OIDC attempt");
+    let active = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM oidc_login_attempts
+         WHERE organization_id = $1 AND provider_id = $2
+           AND consumed_at_unix_ms IS NULL",
+    )
+    .bind(organization_id)
+    .bind(provider_id)
+    .fetch_one(admin.pool())
+    .await
+    .expect("count bounded OIDC attempts");
+    assert_eq!(
+        active, 1024,
+        "concurrent starts must preserve the exact cap"
+    );
+}
+
+#[tokio::test]
 async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     let Some(admin) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
@@ -536,6 +630,35 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             .await
             .is_err(),
         "refresh-token reuse revokes the active session family"
+    );
+    let refresh_reuse_audits = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM audit_events
+         WHERE organization_id = $1 AND action = 'oidc_refresh_reuse_detected'",
+    )
+    .bind(organization_id)
+    .fetch_one(admin.pool())
+    .await
+    .expect("count initial refresh-reuse audit event");
+    for now_unix_ms in [12_004, 12_005] {
+        assert!(
+            runtime
+                .refresh_session_provider(organization_id, digest("human-refresh-2"), now_unix_ms,)
+                .await
+                .is_err(),
+            "an already-handled refresh replay remains rejected"
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_events
+             WHERE organization_id = $1 AND action = 'oidc_refresh_reuse_detected'",
+        )
+        .bind(organization_id)
+        .fetch_one(admin.pool())
+        .await
+        .expect("count deduplicated refresh-reuse audit events"),
+        refresh_reuse_audits,
+        "repeated replay after family revocation must not grow the audit chain"
     );
 
     let independent_session_token = digest("independent-device-access");
@@ -908,6 +1031,29 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         .expect("read disabled identity provider");
     assert!(!disabled_provider.enabled);
     assert_eq!(disabled_provider.configuration_generation, 2);
+    let disabled_rollout = admin
+        .provision_identity_provider(&IdentityProviderWrite {
+            configuration_generation: 3,
+            configuration_digest: digest("provider-v3-while-disabled"),
+            jwks_generation: 2,
+            jwks_digest: digest("jwks-v2-while-disabled"),
+            enabled: true,
+            ..provider.clone()
+        })
+        .await
+        .expect("roll out provider configuration while emergency-disabled");
+    assert!(
+        !disabled_rollout.enabled,
+        "configuration rollout must preserve the explicit disabled state"
+    );
+    assert!(
+        !admin
+            .identity_provider_config(organization_id, provider_id)
+            .await
+            .expect("reload provider after disabled rollout")
+            .enabled,
+        "only the explicit status transition may reenable a provider"
+    );
     assert!(
         runtime
             .authenticate_api_token(organization_id, provider_fenced_token, 12_106)
@@ -920,14 +1066,14 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             .transition_identity_provider_enabled(
                 organization_id,
                 provider_id,
-                2,
+                3,
                 true,
                 "reviewed identity-provider recovery",
                 "operator:identity",
             )
             .await
             .expect("reenable identity provider through the supported operator path"),
-        3
+        4
     );
     assert!(
         runtime
@@ -940,7 +1086,8 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     runtime
         .issue_human_session(
             &OidcIdentityClaims {
-                provider_configuration_generation: 3,
+                provider_configuration_generation: 4,
+                provider_jwks_generation: 2,
                 id_token_digest: digest("id-token-lifecycle-fence"),
                 ..claims.clone()
             },

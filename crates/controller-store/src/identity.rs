@@ -576,6 +576,7 @@ impl Store {
             return invalid("OIDC login attempt bounds are invalid");
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_oidc_login_attempts(&mut tx, input.organization_id, input.provider_id).await?;
         sqlx::query(
             "DELETE FROM oidc_login_attempts
              WHERE organization_id = $1
@@ -1522,11 +1523,13 @@ async fn provision_identity_provider_in_transaction(
     .fetch_optional(&mut **tx)
     .await?;
 
+    let effective_enabled;
     if let Some(current) = current {
         let current = provider_from_row(current)?;
         if current == provider_from_write(input) {
             return Ok(current);
         }
+        effective_enabled = current.enabled;
         if input.issuer != current.issuer {
             return Err(StoreError::IdentityConflict(
                 "an identity-provider issuer is immutable; replacement requires a new provider and reviewed identity mappings"
@@ -1563,10 +1566,11 @@ async fn provision_identity_provider_in_transaction(
         .bind(input.configuration_digest.as_slice())
         .bind(input.jwks_generation)
         .bind(input.jwks_digest.as_slice())
-        .bind(input.enabled)
+        .bind(effective_enabled)
         .execute(&mut **tx)
         .await?;
     } else {
+        effective_enabled = input.enabled;
         if input.configuration_generation != 1 || input.jwks_generation != 1 {
             return Err(StoreError::IdentityConflict(
                 "a new identity provider must begin at generation one".to_owned(),
@@ -1593,7 +1597,7 @@ async fn provision_identity_provider_in_transaction(
         .bind(input.configuration_digest.as_slice())
         .bind(input.jwks_generation)
         .bind(input.jwks_digest.as_slice())
-        .bind(input.enabled)
+        .bind(effective_enabled)
         .execute(&mut **tx)
         .await?;
     }
@@ -1610,11 +1614,13 @@ async fn provision_identity_provider_in_transaction(
             "configuration_digest": hex::encode(input.configuration_digest),
             "jwks_generation": input.jwks_generation,
             "jwks_digest": hex::encode(input.jwks_digest),
-            "enabled": input.enabled,
+            "enabled": effective_enabled,
         }),
     )
     .await?;
-    Ok(provider_from_write(input))
+    let mut provider = provider_from_write(input);
+    provider.enabled = effective_enabled;
+    Ok(provider)
 }
 
 async fn provision_service_credential_in_transaction(
@@ -1829,6 +1835,20 @@ async fn lock_identity_provisioning(
     Ok(())
 }
 
+async fn lock_oidc_login_attempts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    provider_id: Uuid,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "mcloving.oidc-login-attempts.{organization_id}.{provider_id}"
+        ))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 async fn revoke_session_family_on_refresh_reuse(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
@@ -1872,6 +1892,9 @@ async fn revoke_session_family_on_refresh_reuse(
     .execute(&mut **tx)
     .await?
     .rows_affected();
+    if revoked == 0 {
+        return Ok(());
+    }
     append_audit_record(
         tx,
         organization_id,
