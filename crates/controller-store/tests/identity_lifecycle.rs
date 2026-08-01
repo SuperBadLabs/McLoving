@@ -465,7 +465,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         .await
         .expect("issue session for logout-versus-refresh race");
     let logout_successor_token = digest("logout-race-access-after-refresh");
-    runtime
+    let logout_successor = runtime
         .rotate_human_session(
             organization_id,
             digest("logout-race-refresh-before-refresh"),
@@ -480,6 +480,22 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         )
         .await
         .expect("commit refresh before delayed logout reaches the predecessor lock");
+    let logout_final_token = digest("logout-race-access-after-second-refresh");
+    runtime
+        .rotate_human_session(
+            organization_id,
+            digest("logout-race-refresh-after-refresh"),
+            &SessionIssue {
+                session_id: Uuid::new_v4(),
+                token_digest: logout_final_token,
+                refresh_token_digest: Some(digest("logout-race-final-refresh")),
+                issued_at_unix_ms: 13_100,
+                expires_at_unix_ms: 33_100,
+                refresh_expires_at_unix_ms: Some(63_100),
+            },
+        )
+        .await
+        .expect("commit a second refresh in the same lineage");
     assert!(
         runtime
             .revoke_session(
@@ -499,6 +515,14 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             .await
             .is_err(),
         "a refresh successor must not survive a racing logout"
+    );
+    assert_eq!(logout_successor.identity_id, human_identity.identity_id);
+    assert!(
+        runtime
+            .authenticate_api_token(organization_id, logout_final_token, 13_102)
+            .await
+            .is_err(),
+        "the newest descendant must not survive logout through its root"
     );
     runtime
         .authenticate_api_token(organization_id, independent_session_token, 13_102)
@@ -650,6 +674,44 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             )
             .await
             .expect("revoke fresh service credential")
+    );
+
+    let future_service_id = Uuid::new_v4();
+    admin
+        .provision_service_identity(&NewServiceIdentity {
+            organization_id,
+            identity_id: future_service_id,
+            subject: format!("service:{future_service_id}"),
+            scopes: BTreeSet::from([ServiceScope::ProjectRead]),
+            actor_subject: "operator:identity".to_owned(),
+        })
+        .await
+        .expect("provision service identity for clock-skew revocation");
+    admin
+        .provision_service_credential(&NewServiceCredential {
+            organization_id,
+            credential_id: Uuid::new_v4(),
+            identity_id: future_service_id,
+            generation: 1,
+            token_digest: digest("future-issued-service-token"),
+            issued_at_unix_ms: i64::MAX - 1,
+            expires_at_unix_ms: None,
+            actor_subject: "operator:identity".to_owned(),
+        })
+        .await
+        .expect("issue a credential ahead of the database clock");
+    assert_eq!(
+        admin
+            .transition_identity_lifecycle(
+                organization_id,
+                future_service_id,
+                1,
+                IdentityLifecycle::Disabled,
+                "operator:identity",
+            )
+            .await
+            .expect("emergency disable must tolerate a future-issued credential"),
+        2
     );
 
     let provider_fenced_token = digest("provider-fenced-session");

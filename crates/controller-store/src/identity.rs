@@ -1219,6 +1219,15 @@ impl Store {
             return invalid("refreshed session lifetime is invalid");
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
+        if let Some(family_id) = session_family_for_refresh_digest(
+            &mut tx,
+            organization_id,
+            &current_refresh_token_digest,
+        )
+        .await?
+        {
+            lock_session_family(&mut tx, organization_id, family_id).await?;
+        }
         let current = sqlx::query_as::<_, SessionRefreshRow>(
             "SELECT s.session_id, s.identity_id, i.subject,
                     s.provider_configuration_generation,
@@ -1399,8 +1408,22 @@ impl Store {
             return invalid("revocation timestamp is invalid");
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
-        let session = sqlx::query_as::<_, (Uuid, Option<String>)>(
-            "SELECT family_id, revocation_reason
+        let family_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT family_id
+             FROM identity_sessions
+             WHERE organization_id = $1 AND session_id = $2",
+        )
+        .bind(organization_id)
+        .bind(session_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(family_id) = family_id else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+        lock_session_family(&mut tx, organization_id, family_id).await?;
+        let revocation_reason = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT revocation_reason
              FROM identity_sessions
              WHERE organization_id = $1 AND session_id = $2
              FOR UPDATE",
@@ -1408,11 +1431,8 @@ impl Store {
         .bind(organization_id)
         .bind(session_id)
         .fetch_optional(&mut *tx)
-        .await?;
-        let Some((family_id, revocation_reason)) = session else {
-            tx.commit().await?;
-            return Ok(false);
-        };
+        .await?
+        .flatten();
         let changed = match revocation_reason.as_deref() {
             None => sqlx::query(
                 "UPDATE identity_sessions
@@ -1547,7 +1567,10 @@ impl Store {
             if current_state == IdentityLifecycle::Active && next != IdentityLifecycle::Active {
                 sqlx::query(
                     "UPDATE service_credentials
-                 SET revoked_at_unix_ms = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint,
+                 SET revoked_at_unix_ms = GREATEST(
+                         issued_at_unix_ms,
+                         (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
+                     ),
                      revocation_reason = 'identity_lifecycle_transition'
                  WHERE organization_id = $1 AND identity_id = $2
                    AND revoked_at_unix_ms IS NULL",
@@ -1771,8 +1794,14 @@ async fn revoke_session_family_on_refresh_reuse(
     refresh_token_digest: &[u8; 32],
     now_unix_ms: i64,
 ) -> Result<(), StoreError> {
-    let stale = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>)>(
-        "SELECT s.family_id, s.identity_id, i.subject, s.revocation_reason
+    let Some(family_id) =
+        session_family_for_refresh_digest(tx, organization_id, refresh_token_digest).await?
+    else {
+        return Ok(());
+    };
+    lock_session_family(tx, organization_id, family_id).await?;
+    let stale = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+        "SELECT s.identity_id, i.subject, s.revocation_reason
          FROM identity_sessions s
          JOIN identities i ON i.organization_id = s.organization_id
                           AND i.id = s.identity_id
@@ -1783,7 +1812,7 @@ async fn revoke_session_family_on_refresh_reuse(
     .bind(refresh_token_digest.as_slice())
     .fetch_optional(&mut **tx)
     .await?;
-    let Some((family_id, identity_id, subject, revocation_reason)) = stale else {
+    let Some((identity_id, subject, revocation_reason)) = stale else {
         return Ok(());
     };
     if revocation_reason.as_deref() != Some("refresh_rotation") {
@@ -1816,6 +1845,36 @@ async fn revoke_session_family_on_refresh_reuse(
         }),
     )
     .await?;
+    Ok(())
+}
+
+async fn session_family_for_refresh_digest(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    refresh_token_digest: &[u8; 32],
+) -> Result<Option<Uuid>, StoreError> {
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "SELECT family_id
+         FROM identity_sessions
+         WHERE organization_id = $1 AND refresh_token_digest = $2",
+    )
+    .bind(organization_id)
+    .bind(refresh_token_digest.as_slice())
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+async fn lock_session_family(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    family_id: Uuid,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "mcloving.identity-session-family.{organization_id}.{family_id}"
+        ))
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
