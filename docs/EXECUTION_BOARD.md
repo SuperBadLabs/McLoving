@@ -979,7 +979,11 @@ and `ac88c1dc6d8ff24de40b2b8b0b578e5294094566bc505d2175e23b7f9fdd8c32`.
 The final readiness repair keeps automatic and operator retries blocked until
 their active dependency generation is actually satisfied, and gives legacy
 runnable inserts a rolling-upgrade-safe readiness default without falsely
-readying blocked DAG attempts.
+readying blocked DAG attempts. It also fences the pre-v18 retry
+insert-then-node-reopen sequence, reclassifies that node from queued to blocked
+when its active dependency generation is not terminal, and validates exported
+dependency satisfaction against readiness rather than the later process-start
+time.
 An injected post-install failure restored repository, build, permalink, and
 next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed

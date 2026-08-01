@@ -33,6 +33,86 @@ BEFORE INSERT ON attempts
 FOR EACH ROW
 EXECUTE FUNCTION attempts_preserve_compatibility_readiness();
 
+-- Pre-v18 retry writers insert the new queued attempt while its node is still
+-- running/terminal, then move the node back to queued.  Translate that second
+-- statement under the same build-scoped lock used by v18 writers so a reopened
+-- dependency cannot leave the legacy retry prematurely ready.
+CREATE FUNCTION nodes_translate_compatibility_retry_readiness()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    dependencies_ready boolean;
+    compatibility_ready_at timestamptz;
+BEGIN
+    IF OLD.status IS NOT DISTINCT FROM NEW.status
+       OR NEW.status NOT IN ('queued', 'blocked') THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended('mcloving.dag.retry.' || NEW.build_id::text, 0)
+    );
+    SELECT NOT EXISTS (
+        SELECT 1
+        FROM node_dependencies AS dependency
+        JOIN nodes AS parent
+          ON parent.id = dependency.parent_node_id
+         AND parent.organization_id = dependency.organization_id
+        WHERE dependency.organization_id = NEW.organization_id
+          AND dependency.child_node_id = NEW.id
+          AND (
+              (
+                  dependency.condition = 'succeeded'
+                  AND parent.status <> 'succeeded'
+              )
+              OR (
+                  dependency.condition = 'completed'
+                  AND parent.status NOT IN (
+                      'succeeded', 'failed', 'aborted', 'skipped'
+                  )
+              )
+          )
+    ) INTO dependencies_ready;
+
+    IF NEW.status = 'blocked' OR NOT dependencies_ready THEN
+        NEW.status := 'blocked';
+        NEW.queued_at := OLD.queued_at;
+        UPDATE attempts AS attempt
+        SET ready_at = NULL
+        WHERE attempt.id = (
+            SELECT candidate.id
+            FROM attempts AS candidate
+            WHERE candidate.organization_id = NEW.organization_id
+              AND candidate.node_id = NEW.id
+              AND candidate.status = 'queued'
+            ORDER BY candidate.ordinal DESC
+            LIMIT 1
+        );
+    ELSE
+        compatibility_ready_at := clock_timestamp();
+        NEW.queued_at := compatibility_ready_at;
+        UPDATE attempts AS attempt
+        SET ready_at = GREATEST(attempt.created_at, compatibility_ready_at)
+        WHERE attempt.id = (
+            SELECT candidate.id
+            FROM attempts AS candidate
+            WHERE candidate.organization_id = NEW.organization_id
+              AND candidate.node_id = NEW.id
+              AND candidate.status = 'queued'
+            ORDER BY candidate.ordinal DESC
+            LIMIT 1
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER nodes_translate_compatibility_retry_readiness
+BEFORE UPDATE OF status ON nodes
+FOR EACH ROW
+EXECUTE FUNCTION nodes_translate_compatibility_retry_readiness();
+
 -- Historical running/terminal attempts predate explicit readiness.  The first
 -- durable running event is the narrowest safe reconstruction; attempts that
 -- never ran use completion as their generation decision point.  Currently

@@ -6797,6 +6797,99 @@ async fn rolling_upgrade_attempt_inserts_preserve_runnable_and_blocked_readiness
     .expect("read compatibility readiness");
     assert!(readiness.0, "legacy runnable attempt receives the default");
     assert!(readiness.1, "legacy blocked attempt remains unready");
+
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'failed', logical_outcome = 'failed'
+         WHERE organization_id = $1 AND id IN ($2, $3)",
+    )
+    .bind(organization_id)
+    .bind(admission.nodes["root"].node_id)
+    .bind(admission.nodes["child"].node_id)
+    .execute(store.pool())
+    .await
+    .expect("terminalize nodes before legacy retry sequence");
+    sqlx::query(
+        "UPDATE attempts
+         SET status = 'failed', completed_at = clock_timestamp()
+         WHERE organization_id = $1 AND id IN ($2, $3)",
+    )
+    .bind(organization_id)
+    .bind(runnable_attempt)
+    .bind(blocked_attempt)
+    .execute(store.pool())
+    .await
+    .expect("terminalize attempts before legacy retry sequence");
+
+    let legacy_parent_retry = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO attempts (
+             id, organization_id, node_id, ordinal, status, retry_of
+         )
+         VALUES ($1, $2, $3, 3, 'queued', $4)",
+    )
+    .bind(legacy_parent_retry)
+    .bind(organization_id)
+    .bind(admission.nodes["root"].node_id)
+    .bind(runnable_attempt)
+    .execute(store.pool())
+    .await
+    .expect("legacy parent retry insert omits readiness");
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'queued', logical_outcome = NULL
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.nodes["root"].node_id)
+    .execute(store.pool())
+    .await
+    .expect("legacy parent retry reopens node");
+
+    let legacy_child_retry = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO attempts (
+             id, organization_id, node_id, ordinal, status, retry_of
+         )
+         VALUES ($1, $2, $3, 3, 'queued', $4)",
+    )
+    .bind(legacy_child_retry)
+    .bind(organization_id)
+    .bind(admission.nodes["child"].node_id)
+    .bind(blocked_attempt)
+    .execute(store.pool())
+    .await
+    .expect("legacy child retry insert omits readiness");
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'queued', logical_outcome = NULL
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.nodes["child"].node_id)
+    .execute(store.pool())
+    .await
+    .expect("legacy child retry attempts to reopen node");
+
+    let legacy_retry_state: (String, bool, String, bool) = sqlx::query_as(
+        "SELECT
+             (SELECT status FROM nodes WHERE organization_id = $1 AND id = $2),
+             (SELECT ready_at IS NOT NULL FROM attempts WHERE id = $3),
+             (SELECT status FROM nodes WHERE organization_id = $1 AND id = $4),
+             (SELECT ready_at IS NULL FROM attempts WHERE id = $5)",
+    )
+    .bind(organization_id)
+    .bind(admission.nodes["root"].node_id)
+    .bind(legacy_parent_retry)
+    .bind(admission.nodes["child"].node_id)
+    .bind(legacy_child_retry)
+    .fetch_one(store.pool())
+    .await
+    .expect("read translated legacy retry state");
+    assert_eq!(
+        legacy_retry_state,
+        ("queued".to_owned(), true, "blocked".to_owned(), true)
+    );
 }
 
 #[tokio::test]

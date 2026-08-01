@@ -161,14 +161,18 @@ that follows an observed non-successful predecessor, including a `when`-skipped
 `succeeded` edge. Validation uses each child attempt's durable readiness time to
 select the latest parent generation already admitted for either dependency
 condition. It then requires that exact generation to be terminal for
-`completed`, successful for `succeeded`, and ended before the child starts.
+`completed`, successful for `succeeded`, and ended no later than the child's
+durable readiness transition.
 Automatic and operator retry creation reevaluate those predicates while
 holding the build-scoped DAG lock. A retry remains blocked with no readiness
 timestamp until the active parent generation satisfies its exact edge; the
 same transaction that advances the node records its readiness. The v18 schema
 also supplies readiness for runnable attempts inserted by a pre-v18 replica
 during the declared rolling-upgrade window while a trigger clears that default
-for legacy blocked-DAG inserts.
+for legacy blocked-DAG inserts. A second compatibility trigger serializes the
+legacy insert-then-node-reopen retry sequence under the build-scoped lock,
+reevaluates the exact dependency predicates, and translates an unsafe queued
+transition back to blocked with no readiness timestamp.
 This preserves children admitted before a later parent retry while rejecting
 children started during executing or terminal-only active retries. Every retry
 explicitly names its immediately preceding attempt and its

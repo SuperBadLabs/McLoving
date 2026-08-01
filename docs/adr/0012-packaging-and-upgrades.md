@@ -10,5 +10,8 @@ compatibility window. Database restoration is not normal rollback.
 Schema additions consumed as durable execution truth must remain safe while an
 older replica is still admitted. A compatibility default or trigger must cover
 legacy writes, including state-dependent exceptions such as blocked DAG
-attempts, and the migration must test both the runnable and blocked legacy
-insert paths before the new field becomes a validation requirement.
+attempts, and the migration must test both runnable/blocked legacy inserts and
+legacy multi-statement retry reopening before the new field becomes a
+validation requirement. Compatibility triggers that translate a retry must
+share the new writer's build-scoped serialization lock and reevaluate the exact
+dependency conditions before admitting readiness.

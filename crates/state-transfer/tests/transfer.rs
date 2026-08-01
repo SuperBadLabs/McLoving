@@ -472,7 +472,7 @@ fn graph_dependency_condition_is_canonical_and_round_trips() {
 }
 
 #[test]
-fn graph_child_attempt_cannot_predate_parent_completion() {
+fn graph_child_readiness_cannot_predate_parent_completion() {
     let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
     bundle.jobs[0].builds[0].graph_nodes = vec![
         GraphNodeState {
@@ -513,7 +513,7 @@ fn graph_child_attempt_cannot_predate_parent_completion() {
                 terminal_reason: None,
                 queued_at_unix_ms: 1_159,
                 ready_at_unix_ms: Some(1_159),
-                started_at_unix_ms: Some(1_159),
+                started_at_unix_ms: Some(1_170),
                 ended_at_unix_ms: 1_200,
                 audit_digest: digest(75),
             }],
@@ -522,7 +522,7 @@ fn graph_child_attempt_cannot_predate_parent_completion() {
     assert_eq!(
         transform(&bundle, &expected, &BTreeMap::new()),
         Err(TransferError::InvalidField(
-            "graph child attempt cannot start before its dependency is satisfied".to_owned()
+            "graph child attempt cannot become ready before its dependency is satisfied".to_owned()
         ))
     );
 }
@@ -692,7 +692,7 @@ fn completed_edge_reopened_child_waits_for_the_active_parent_retry() {
     assert_eq!(
         transform(&bundle, &expected, &BTreeMap::new()),
         Err(TransferError::InvalidField(
-            "graph child attempt cannot start before its dependency is satisfied".to_owned()
+            "graph child attempt cannot become ready before its dependency is satisfied".to_owned()
         ))
     );
 }
@@ -845,7 +845,7 @@ fn completed_edge_rejects_a_child_admitted_during_a_terminal_only_parent_retry()
     assert_eq!(
         transform(&bundle, &expected, &BTreeMap::new()),
         Err(TransferError::InvalidField(
-            "graph child attempt cannot start before its dependency is satisfied".to_owned()
+            "graph child attempt cannot become ready before its dependency is satisfied".to_owned()
         ))
     );
 }

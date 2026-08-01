@@ -1585,9 +1585,6 @@ fn validate_graph_nodes(
                 let child_ready_at_unix_ms = child_attempt
                     .ready_at_unix_ms
                     .expect("executing child attempt has a readiness time");
-                let child_started_at_unix_ms = child_attempt
-                    .started_at_unix_ms
-                    .expect("executing child attempt has a start time");
                 let active_parent_attempt = parent
                     .attempts
                     .iter()
@@ -1610,10 +1607,10 @@ fn validate_graph_nodes(
                     return Err(TransferError::InvalidField(message.to_owned()));
                 }
                 if satisfying_parent_attempt.is_some_and(|parent_attempt| {
-                    child_started_at_unix_ms < parent_attempt.ended_at_unix_ms
+                    child_ready_at_unix_ms < parent_attempt.ended_at_unix_ms
                 }) {
                     return Err(TransferError::InvalidField(
-                        "graph child attempt cannot start before its dependency is satisfied"
+                        "graph child attempt cannot become ready before its dependency is satisfied"
                             .to_owned(),
                     ));
                 }
