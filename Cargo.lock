@@ -1411,6 +1411,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-jenkins-shared-library"
+version = "0.0.0"
+dependencies = [
+ "libc",
+ "mcloving-pipeline-ir",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "mcloving-object-store"
 version = "0.0.0"
 dependencies = [

@@ -13,6 +13,7 @@ members = [
   "crates/jenkins-compiler-admission",
   "crates/jenkins-inventory",
   "crates/jenkins-mapping-catalog",
+  "crates/jenkins-shared-library",
   "crates/object-store",
   "crates/pipeline-ir",
   "crates/state-machine",

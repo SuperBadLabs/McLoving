@@ -1,0 +1,449 @@
+schema: mcloving.jenkins.shared-library-ledger/v1
+ledger_id: mario-jenkins-oracle-228-shared-libraries-v1
+ledger_version: 1
+binding:
+  controller_id: mario/jenkins-oracle-228
+  inventory_manifest_sha256: 8cf682d06522b050c97c504c1a516f33463bd906e4ee10c3d6a1c38c03c6ec07
+  job_graph_sha256: 76ae2e85d7d8a5a1410826b7b4556a36407bba726ac2baf6efe67062888b99ab
+  runtime_dependencies_sha256: 238ed4cc59ff67bbb1dc40bb1bd3ec28dce914c4dffd701f1a8505d760ba11a4
+  corpus_manifest_sha256: a28283de801854836887e9bc6cffd43c10bb078dbeff343fdf92d19b470a74c2
+policy:
+  scm_network: forbidden
+  scm_credentials: forbidden
+  groovy_evaluation: forbidden
+  controller_execution: forbidden
+  unresolved_library: unsupported
+  source_input: prefetched-digest-verified-read-only
+observations:
+  - observation_id: ableton-utils-0.29
+    job_id: Ableton_python-pipeline-utils
+    source_file: Ableton_python-pipeline-utils.Jenkinsfile
+    source_sha256: 541ede0e8e35b5c87c42af09c47f6b31c3e171dddbe51eeed9fa46b128cece1b
+    line: 1
+    syntax: runtime-call
+    evidence: live
+    reference: ableton-utils@0.29
+    load_phase: runtime
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: controller-mapping-required
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: simple library name requires unavailable Jenkins global-library SCM and credential mapping
+  - observation_id: ableton-groovylint-0.16
+    job_id: Ableton_python-pipeline-utils
+    source_file: Ableton_python-pipeline-utils.Jenkinsfile
+    source_sha256: 541ede0e8e35b5c87c42af09c47f6b31c3e171dddbe51eeed9fa46b128cece1b
+    line: 2
+    syntax: runtime-call
+    evidence: live
+    reference: groovylint@0.16
+    load_phase: runtime
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: controller-mapping-required
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: simple library name requires unavailable Jenkins global-library SCM and credential mapping
+  - observation_id: blazemeter-jenkins-library
+    job_id: Blazemeter_taurus
+    source_file: Blazemeter_taurus.Jenkinsfile
+    source_sha256: 074a0ee6c59965a517af59eabfc48d37fb2ee2b9d6735bad7ab6ca241c50bfdc
+    line: 1
+    syntax: static-annotation
+    evidence: live
+    reference: jenkins_library
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: controller-mapping-required
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: simple library name requires unavailable Jenkins global-library SCM and credential mapping
+  - observation_id: harisekhon-namedlibrary-comment
+    job_id: HariSekhon_Jenkins
+    source_file: HariSekhon_Jenkins.Jenkinsfile
+    source_sha256: 88e3b12724f73e68bc823ec10d72e9df9bbdb73f4cea074abdc0766e5ec387d3
+    line: 39
+    syntax: static-annotation
+    evidence: comment-false-positive
+    reference: namedlibrary@master
+    load_phase: not-applicable
+    sandbox: not-applicable
+    cps: not-applicable
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: not-applicable
+    resolution_id: null
+    disposition: comment-only
+    reason: frozen scanner matched a line comment; Jenkins does not load this library
+  - observation_id: harisekhon-jenkins-master
+    job_id: HariSekhon_Jenkins
+    source_file: HariSekhon_Jenkins.Jenkinsfile
+    source_sha256: 88e3b12724f73e68bc823ec10d72e9df9bbdb73f4cea074abdc0766e5ec387d3
+    line: 45
+    syntax: static-annotation
+    evidence: live
+    reference: github.com/harisekhon/jenkins@master
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: public-prefetched
+    resolution_id: harisekhon-jenkins
+    disposition: source-verified-unsupported
+    reason: source is pinned but Groovy, CPS, sandbox, plugin, and step execution are not certified
+  - observation_id: statemood-jenkins-library-dev
+    job_id: Statemood_jenkins-library
+    source_file: Statemood_jenkins-library.Jenkinsfile
+    source_sha256: f66ee69760ec268adb012b14e07241358653e9706e473ff8bfaeeb78ab94827e
+    line: 1
+    syntax: static-annotation
+    evidence: live
+    reference: github.com/Statemood/jenkins-library@dev
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: public-prefetched
+    resolution_id: statemood-jenkins-library
+    disposition: source-verified-unsupported
+    reason: source is pinned but Groovy, CPS, sandbox, plugin, and step execution are not certified
+  - observation_id: chrsoo-mylib-latest
+    job_id: chrsoo_microservices
+    source_file: chrsoo_microservices.Jenkinsfile
+    source_sha256: 14a17ebfce7c4911aa757fda4023aea548303544e6681768120cc223c7bac501
+    line: 1
+    syntax: static-annotation
+    evidence: live
+    reference: mylib@latest
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: controller-mapping-required
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: simple library name requires unavailable Jenkins global-library SCM and credential mapping
+  - observation_id: cloudogu-ces-build-lib-snapshot
+    job_id: cloudogu_ces-build-lib
+    source_file: cloudogu_ces-build-lib.Jenkinsfile
+    source_sha256: 10723adab4589a4d39d083ac7cc63e9f8d19ef4a5b0249fc06473556015b976e
+    line: 75
+    syntax: runtime-call
+    evidence: live
+    reference: ces-build-lib@snapshot
+    load_phase: runtime
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib, workflow-scm-step]
+    credential_dependency: controller-mapping-required
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: legacySCM inherits unavailable job SCM and credential authority and the requested snapshot ref is absent publicly
+  - observation_id: cloudogu-ces-build-lib-b49dce93
+    job_id: cloudogu_continuous-delivery-slides
+    source_file: cloudogu_continuous-delivery-slides.Jenkinsfile
+    source_sha256: 18336858a375c5bd556e582697a23121a2646eb413b1667ac39e2d1d20b6be55
+    line: 4
+    syntax: static-annotation
+    evidence: live
+    reference: github.com/cloudogu/ces-build-lib@b49dce93
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: public-prefetched
+    resolution_id: cloudogu-ces-build-lib-b49dce93
+    disposition: source-verified-unsupported
+    reason: source is pinned but Groovy, CPS, sandbox, plugin, and step execution are not certified
+  - observation_id: cloudogu-ces-build-lib-1.62.0
+    job_id: cloudogu_gitops-build-lib
+    source_file: cloudogu_gitops-build-lib.Jenkinsfile
+    source_sha256: b919e0cdb82e6afb7ab874bda04c95d87c46776ec96e8c109d43486669e613c3
+    line: 2
+    syntax: static-annotation
+    evidence: live
+    reference: github.com/cloudogu/ces-build-lib@1.62.0
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: public-prefetched
+    resolution_id: cloudogu-ces-build-lib-1.62.0
+    disposition: source-verified-unsupported
+    reason: source is pinned but Groovy, CPS, sandbox, plugin, and step execution are not certified
+  - observation_id: cloudogu-ces-build-lib-5.0.0
+    job_id: cloudogu_reveal.js-docker-example
+    source_file: cloudogu_reveal.js-docker-example.Jenkinsfile
+    source_sha256: 5f6e81afdf7bb6e7e5a3392135c543e8db20239581fb9748a9f35106838042c2
+    line: 4
+    syntax: static-annotation
+    evidence: live
+    reference: github.com/cloudogu/ces-build-lib@5.0.0
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: public-prefetched
+    resolution_id: cloudogu-ces-build-lib-5.0.0
+    disposition: source-verified-unsupported
+    reason: source is pinned but Groovy, CPS, sandbox, plugin, and step execution are not certified
+  - observation_id: darinpope-github-api-global-lib-master
+    job_id: darinpope_jenkinsfile-library
+    source_file: darinpope_jenkinsfile-library.Jenkinsfile
+    source_sha256: a3d655644fd87b7faaef8ac2024f689a35bb3d5d34d2e82ac284eeb7f7ba52c4
+    line: 2
+    syntax: static-annotation
+    evidence: live
+    reference: github.com/darinpope/github-api-global-lib@master
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: scm-reference-unresolved
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: requested master ref is absent; the existing main ref is not substituted
+  - observation_id: evry-ace-master
+    job_id: evry-ace_jenkins-ace-library
+    source_file: evry-ace_jenkins-ace-library.Jenkinsfile
+    source_sha256: 5fc3f77c99fe404393360807502a46e0b49136bc8d6a258ca74eb44f2a4b2e34
+    line: 2
+    syntax: static-annotation
+    evidence: live
+    reference: ace@master
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: controller-mapping-required
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: simple library name requires unavailable Jenkins global-library SCM and credential mapping
+  - observation_id: fabric8-pipeline-library-self
+    job_id: fabric8io_fabric8-pipeline-library
+    source_file: fabric8io_fabric8-pipeline-library.Jenkinsfile
+    source_sha256: 5bbebbc67332644e33394b15b4641d6f27d31e0103970e1aa2b0110b93513b46
+    line: 4
+    syntax: static-annotation
+    evidence: live
+    reference: github.com/fabric8io/fabric8-pipeline-library@master
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: public-prefetched
+    resolution_id: fabric8-pipeline-library
+    disposition: source-verified-unsupported
+    reason: source is pinned but Groovy, CPS, sandbox, plugin, and step execution are not certified
+  - observation_id: fabric8-pipeline-library-platform
+    job_id: fabric8io_fabric8-platform
+    source_file: fabric8io_fabric8-platform.Jenkinsfile
+    source_sha256: 852457ab7957b38a63fb9cd96422af2fd3646a56d93ea371fc44ed1c4e5a105b
+    line: 2
+    syntax: static-annotation
+    evidence: live
+    reference: github.com/fabric8io/fabric8-pipeline-library@master
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: public-prefetched
+    resolution_id: fabric8-pipeline-library
+    disposition: source-verified-unsupported
+    reason: source is pinned but Groovy, CPS, sandbox, plugin, and step execution are not certified
+  - observation_id: pipeline-logparser-comment
+    job_id: gdemengin_pipeline-logparser
+    source_file: gdemengin_pipeline-logparser.Jenkinsfile
+    source_sha256: b9426d412aea538ed9578e3a212fc1a3d6001af7cb5a4238cb625396f796bcb1
+    line: 30
+    syntax: static-annotation
+    evidence: comment-false-positive
+    reference: pipeline-logparser@3.2.1
+    load_phase: not-applicable
+    sandbox: not-applicable
+    cps: not-applicable
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: not-applicable
+    resolution_id: null
+    disposition: comment-only
+    reason: frozen scanner matched a line comment; Jenkins does not load this library
+  - observation_id: pipeline-logparser-dynamic
+    job_id: gdemengin_pipeline-logparser
+    source_file: gdemengin_pipeline-logparser.Jenkinsfile
+    source_sha256: b9426d412aea538ed9578e3a212fc1a3d6001af7cb5a4238cb625396f796bcb1
+    line: 34
+    syntax: runtime-call
+    evidence: live
+    reference: 'pipeline-logparser@${rev}'
+    load_phase: runtime
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: dynamic-unresolved
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: runtime-computed revision cannot be pinned from the frozen source alone
+  - observation_id: gfkse-shared-library-name
+    job_id: gfkse_jenkins-shared-library
+    source_file: gfkse_jenkins-shared-library.Jenkinsfile
+    source_sha256: 4f71168e15e063578d8af5c9a1aa44bad2353755be90ca1796b1262edb7b5cb8
+    line: 1
+    syntax: static-annotation
+    evidence: live
+    reference: shared-library-name
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: controller-mapping-required
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: simple library name requires unavailable Jenkins global-library SCM and credential mapping
+  - observation_id: griddynamics-mpl
+    job_id: griddynamics-archive_mpl
+    source_file: griddynamics-archive_mpl.Jenkinsfile
+    source_sha256: 6e3e96d496d55ad80f7c21445a7da03a166ed6b173af7ee89287936a9e2d2c12
+    line: 1
+    syntax: static-annotation
+    evidence: live
+    reference: mpl
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: controller-mapping-required
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: simple library name requires unavailable Jenkins global-library SCM and credential mapping
+  - observation_id: jalogut-basic-library
+    job_id: jalogut_jenkinsfile-shared-library-sample
+    source_file: jalogut_jenkinsfile-shared-library-sample.Jenkinsfile
+    source_sha256: 18ac32bcfffa69f9bb8a49d1d8bd58bc54a972293448cd2bf0f8f32f5ec33b5b
+    line: 1
+    syntax: static-annotation
+    evidence: live
+    reference: jalogut/jenkins-basic-shared-library-sample
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: controller-mapping-required
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: repository-like name omits an approved host and Jenkins global-library mapping
+  - observation_id: sidd-harth-slack-notifications
+    job_id: sidd-harth_apigee-cicd
+    source_file: sidd-harth_apigee-cicd.Jenkinsfile
+    source_sha256: d2cd4880977702e4b4fd0f52fd278f4cd91abd1bce9083f21fc2ab2d944c38c6
+    line: 3
+    syntax: static-annotation
+    evidence: live
+    reference: slackNotifications-shared-library@master
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: controller-mapping-required
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: simple library name requires unavailable Jenkins global-library SCM and credential mapping
+  - observation_id: stakater-pipeline-library-v2.16.24
+    job_id: stakater_GitWebhookProxy
+    source_file: stakater_GitWebhookProxy.Jenkinsfile
+    source_sha256: 4ce6a3c97a4c93da1cada8546bdfe3795846090984a60579c69ebbc6b7c7af48
+    line: 2
+    syntax: static-annotation
+    evidence: live
+    reference: github.com/stakater/stakater-pipeline-library@v2.16.24
+    load_phase: compile-time
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: public-prefetched
+    resolution_id: stakater-pipeline-library-2.16.24
+    disposition: source-verified-unsupported
+    reason: source is pinned but Groovy, CPS, sandbox, plugin, and step execution are not certified
+resolutions:
+  - resolution_id: harisekhon-jenkins
+    reference: github.com/harisekhon/jenkins@master
+    repository: https://github.com/harisekhon/jenkins.git
+    requested_ref: master
+    commit_sha1: 99c84dc210a8b340e37a81320b2caa0ef26bf120
+    tree_sha256: 297e2913a323ecdb454426c9e2a5c3a59cd39d8f30b03a6d4b4d61787454608e
+    namespaces:
+      - {name: vars, present: true, files: 130, bytes: 300960, sha256: c410611c8e6aec1a7ff65b9d32a4cc91579f1fa74d532acf9516a9b7e1e4ace3}
+      - {name: src, present: false, files: 0, bytes: 0, sha256: 476025fa10194a6844c5d32ea9b030a694fc6081fc64f4199ac783c597187442}
+      - {name: resources, present: true, files: 1, bytes: 5044, sha256: 56b20a297d6934e42d3a28b6213c332fba314c29dc9efd0c455024c88f548505}
+  - resolution_id: statemood-jenkins-library
+    reference: github.com/Statemood/jenkins-library@dev
+    repository: https://github.com/Statemood/jenkins-library.git
+    requested_ref: dev
+    commit_sha1: c6cb538f06b12b72833a0db78b404f17bd304495
+    tree_sha256: f92465228034be2682d8ba26a59562e301c8ec757ee50ffe08b88fb4b3fb2c45
+    namespaces:
+      - {name: vars, present: true, files: 8, bytes: 26807, sha256: d5206b6f01ab6a607521b7c405f127f4ed4c64cfaa7f5559614daaab576e5c56}
+      - {name: src, present: true, files: 23, bytes: 27889, sha256: bc7bb5314b28708f3db4afbbab667edf49ba5099d1076da5925e4ff223e61471}
+      - {name: resources, present: true, files: 12, bytes: 5542, sha256: a9b0cab927d97be4d6361b6e0d998d4178d80e2bc7e21402b71dc20841d661b7}
+  - resolution_id: cloudogu-ces-build-lib-b49dce93
+    reference: github.com/cloudogu/ces-build-lib@b49dce93
+    repository: https://github.com/cloudogu/ces-build-lib.git
+    requested_ref: b49dce93
+    commit_sha1: b49dce933d3ebe1bbee6f7b0c67d961f654df7d8
+    tree_sha256: 8ceca86da96326810a9efa5d6409ebac31ac074ef74b99f12804cca506730b5c
+    namespaces:
+      - {name: vars, present: true, files: 10, bytes: 3211, sha256: bbb822677895d34b7c420cc761278b6ed181bbef2ec8e522c44e7e5c6383c085}
+      - {name: src, present: true, files: 11, bytes: 60765, sha256: c84277ce02bd3746208e48d91b813bb1a1d48665baf3facb93f06a7f52c2658d}
+      - {name: resources, present: false, files: 0, bytes: 0, sha256: 32c1809229d29917864291261f2d57b15e1d12a163ad6dc1acf2def02224e269}
+  - resolution_id: cloudogu-ces-build-lib-1.62.0
+    reference: github.com/cloudogu/ces-build-lib@1.62.0
+    repository: https://github.com/cloudogu/ces-build-lib.git
+    requested_ref: 1.62.0
+    commit_sha1: 788460cb728babdbe267238b8058df2855b8b78f
+    tree_sha256: d8e7cc6f590e2e9a3f7acec9b12bd0eb94d9aabfbc62a7dd0903b29350a1dcce
+    namespaces:
+      - {name: vars, present: true, files: 14, bytes: 7337, sha256: 25382767924686340ecd45c5eb7facf1ca9e5943ed37a1d36653aecb25eb5abb}
+      - {name: src, present: true, files: 26, bytes: 131950, sha256: 4a1460a825b5278c94b00f6bd2c09c7aa6bebe3222a0a1987fe78212c29d8e56}
+      - {name: resources, present: false, files: 0, bytes: 0, sha256: 32c1809229d29917864291261f2d57b15e1d12a163ad6dc1acf2def02224e269}
+  - resolution_id: cloudogu-ces-build-lib-5.0.0
+    reference: github.com/cloudogu/ces-build-lib@5.0.0
+    repository: https://github.com/cloudogu/ces-build-lib.git
+    requested_ref: 5.0.0
+    commit_sha1: 15b22cac6917189a83639a2bd73e2ad52b6be9af
+    tree_sha256: b4e0e215e4f373917ee1545ce7565ee90297a2ee7883477d6febf886458967d4
+    namespaces:
+      - {name: vars, present: true, files: 16, bytes: 8081, sha256: bde1fefa61a839c2de817add2c08a9b05bd941d266ab1be0fa8c68e6266c899d}
+      - {name: src, present: true, files: 33, bytes: 162760, sha256: 59d383e5dbd42756bc3e5f06cafea10c8e75d52a7ad69f2fa44841dc79d33060}
+      - {name: resources, present: false, files: 0, bytes: 0, sha256: 32c1809229d29917864291261f2d57b15e1d12a163ad6dc1acf2def02224e269}
+  - resolution_id: fabric8-pipeline-library
+    reference: github.com/fabric8io/fabric8-pipeline-library@master
+    repository: https://github.com/fabric8io/fabric8-pipeline-library.git
+    requested_ref: master
+    commit_sha1: 8f3562d748d0fde2dfcb8b4d9600cfdce6d81e21
+    tree_sha256: a8b1f07d20fcbe12a7355c8bdd6bbb12a035e04519d62f3376e3f077e8330908
+    namespaces:
+      - {name: vars, present: true, files: 83, bytes: 167785, sha256: b5a34cdaafc0d36f200123a32816974cbf8903c15585872b21c098e2313c67bf}
+      - {name: src, present: true, files: 2, bytes: 55819, sha256: 08a4289746c7600823d24160bb80299c57af2a23e5fac3ad8002ad7a062fca63}
+      - {name: resources, present: false, files: 0, bytes: 0, sha256: 32c1809229d29917864291261f2d57b15e1d12a163ad6dc1acf2def02224e269}
+  - resolution_id: stakater-pipeline-library-2.16.24
+    reference: github.com/stakater/stakater-pipeline-library@v2.16.24
+    repository: https://github.com/stakater/stakater-pipeline-library.git
+    requested_ref: v2.16.24
+    commit_sha1: 803df75cfb52e9425a9ed9cdf4630f37835a1ef9
+    tree_sha256: 3a50f39210c33ae72d7e0f5b8f897d1c12ddcfb8200a1e441efd19a14ad67ef3
+    namespaces:
+      - {name: vars, present: true, files: 128, bytes: 324605, sha256: fb754f814fda522cc1fe14f1a50973e59f150ce6361ff2894a3d1c32ed8c3636}
+      - {name: src, present: true, files: 21, bytes: 111813, sha256: a098d034c31f1633cb5a705bf90d6f9adf480a38d4dea203eadb9e40c6be9a8e}
+      - {name: resources, present: false, files: 0, bytes: 0, sha256: 32c1809229d29917864291261f2d57b15e1d12a163ad6dc1acf2def02224e269}
+coverage:
+  corpus_sources: 228
+  indexed_occurrences: 18
+  indexed_distinct_references: 17
+  corrected_live_occurrences: 20
+  comment_false_positives: 2
+  resolved_references: 7
+  resolved_live_occurrences: 8
+  executable_cases: 0
