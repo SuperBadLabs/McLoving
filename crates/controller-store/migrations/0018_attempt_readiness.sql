@@ -2,7 +2,36 @@
 -- `created_at` remains admission history; blocked attempts stay NULL until
 -- their dependencies are satisfied.
 ALTER TABLE attempts
-ADD COLUMN ready_at timestamptz;
+ADD COLUMN ready_at timestamptz DEFAULT clock_timestamp();
+
+-- During the declared rolling-upgrade window, a pre-v18 controller omits the
+-- new column.  The default makes those runnable attempts ready.  A legacy DAG
+-- admission also omits the column for blocked attempts, so the compatibility
+-- trigger clears the generated default while the owning node is blocked.
+-- New controllers can still explicitly insert NULL for a dependency-blocked
+-- retry whose node transition occurs later in the same transaction.
+CREATE FUNCTION attempts_preserve_compatibility_readiness()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.status = 'queued' AND EXISTS (
+        SELECT 1
+        FROM nodes AS node
+        WHERE node.organization_id = NEW.organization_id
+          AND node.id = NEW.node_id
+          AND node.status = 'blocked'
+    ) THEN
+        NEW.ready_at := NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER attempts_preserve_compatibility_readiness
+BEFORE INSERT ON attempts
+FOR EACH ROW
+EXECUTE FUNCTION attempts_preserve_compatibility_readiness();
 
 -- Historical running/terminal attempts predate explicit readiness.  The first
 -- durable running event is the narrowest safe reconstruction; attempts that

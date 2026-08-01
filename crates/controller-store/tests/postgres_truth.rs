@@ -6722,6 +6722,412 @@ async fn operator_retry_reopens_a_terminal_dag_and_preserves_attempt_history() {
 }
 
 #[tokio::test]
+async fn rolling_upgrade_attempt_inserts_preserve_runnable_and_blocked_readiness() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "attempt-readiness-rolling-upgrade",
+        )
+        .await
+        .expect("create readiness compatibility project");
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "attempt-readiness-rolling-upgrade".to_owned(),
+            pipeline_digest: [0xd5; 32],
+            priority: 0,
+            nodes: vec![
+                dag_node("root", DagNodeKind::Work, vec![], "linux", "root"),
+                dag_node(
+                    "child",
+                    DagNodeKind::Work,
+                    vec![DagDependency {
+                        node_key: "root".to_owned(),
+                        condition: DependencyCondition::Succeeded,
+                    }],
+                    "linux",
+                    "child",
+                ),
+            ],
+        })
+        .await
+        .expect("admit readiness compatibility DAG");
+
+    let runnable_attempt = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO attempts (id, organization_id, node_id, ordinal, status)
+         VALUES ($1, $2, $3, 2, 'queued')",
+    )
+    .bind(runnable_attempt)
+    .bind(organization_id)
+    .bind(admission.nodes["root"].node_id)
+    .execute(store.pool())
+    .await
+    .expect("legacy runnable insert omits readiness");
+    let blocked_attempt = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO attempts (id, organization_id, node_id, ordinal, status)
+         VALUES ($1, $2, $3, 2, 'queued')",
+    )
+    .bind(blocked_attempt)
+    .bind(organization_id)
+    .bind(admission.nodes["child"].node_id)
+    .execute(store.pool())
+    .await
+    .expect("legacy blocked insert omits readiness");
+
+    let readiness: (bool, bool) = sqlx::query_as(
+        "SELECT
+             (SELECT ready_at IS NOT NULL FROM attempts WHERE id = $1),
+             (SELECT ready_at IS NULL FROM attempts WHERE id = $2)",
+    )
+    .bind(runnable_attempt)
+    .bind(blocked_attempt)
+    .fetch_one(store.pool())
+    .await
+    .expect("read compatibility readiness");
+    assert!(readiness.0, "legacy runnable attempt receives the default");
+    assert!(readiness.1, "legacy blocked attempt remains unready");
+}
+
+#[tokio::test]
+async fn automatic_retry_waits_for_a_reopened_completed_dependency() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "automatic-retry-readiness",
+        )
+        .await
+        .expect("create automatic retry readiness project");
+    let mut child = dag_node(
+        "child",
+        DagNodeKind::Work,
+        vec![DagDependency {
+            node_key: "parent".to_owned(),
+            condition: DependencyCondition::Completed,
+        }],
+        "linux",
+        "child",
+    );
+    child.max_attempts = 2;
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "automatic-retry-readiness".to_owned(),
+            pipeline_digest: [0xd6; 32],
+            priority: 0,
+            nodes: vec![
+                dag_node("parent", DagNodeKind::Work, vec![], "linux", "parent"),
+                child,
+            ],
+        })
+        .await
+        .expect("admit automatic retry readiness DAG");
+    let parent = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-parent",
+            "linux",
+            "parent",
+        ))
+        .await
+        .expect("claim parent")
+        .expect("parent is ready");
+    run_dag_claim(&store, &parent).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                parent.attempt_id,
+                parent.fence,
+                parent.restore_epoch,
+                &parent.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("fail parent")
+    );
+    let first_child = store
+        .claim_next(&dag_claim(organization_id, "agent-child", "linux", "child"))
+        .await
+        .expect("claim child")
+        .expect("completed edge releases child");
+    run_dag_claim(&store, &first_child).await;
+    assert!(matches!(
+        store
+            .schedule_retry(organization_id, parent.attempt_id, 2, "reopen parent")
+            .await
+            .expect("reopen parent"),
+        RetryDecision::Scheduled { created: true, .. }
+    ));
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                first_child.attempt_id,
+                first_child.fence,
+                first_child.restore_epoch,
+                &first_child.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("fail child and schedule automatic retry")
+    );
+    let child_state: (String, Option<i64>) = sqlx::query_as(
+        "SELECT n.status,
+                CASE WHEN a.ready_at IS NULL THEN NULL
+                     ELSE (EXTRACT(EPOCH FROM a.ready_at) * 1000)::bigint END
+         FROM nodes AS n
+         JOIN attempts AS a
+           ON a.organization_id = n.organization_id AND a.node_id = n.id
+         WHERE n.organization_id = $1
+           AND n.id = $2
+           AND a.ordinal = 2",
+    )
+    .bind(organization_id)
+    .bind(admission.nodes["child"].node_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read blocked automatic retry");
+    assert_eq!(child_state, ("blocked".to_owned(), None));
+    assert!(
+        store
+            .claim_next(&dag_claim(
+                organization_id,
+                "agent-child-early",
+                "linux",
+                "child",
+            ))
+            .await
+            .expect("probe blocked child")
+            .is_none()
+    );
+    let parent_retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-parent-retry",
+            "linux",
+            "parent",
+        ))
+        .await
+        .expect("claim parent retry")
+        .expect("parent retry is ready");
+    run_dag_claim(&store, &parent_retry).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                parent_retry.attempt_id,
+                parent_retry.fence,
+                parent_retry.restore_epoch,
+                &parent_retry.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"try": 2}),
+            )
+            .await
+            .expect("complete parent retry")
+    );
+    let child_retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-child-retry",
+            "linux",
+            "child",
+        ))
+        .await
+        .expect("claim child retry after dependency")
+        .expect("child retry becomes ready");
+    assert_ne!(child_retry.attempt_id, first_child.attempt_id);
+}
+
+#[tokio::test]
+async fn operator_retry_waits_for_a_reopened_completed_dependency() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "operator-retry-readiness",
+        )
+        .await
+        .expect("create operator retry readiness project");
+    let _admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "operator-retry-readiness".to_owned(),
+            pipeline_digest: [0xd7; 32],
+            priority: 0,
+            nodes: vec![
+                dag_node("parent", DagNodeKind::Work, vec![], "linux", "parent"),
+                dag_node(
+                    "child",
+                    DagNodeKind::Work,
+                    vec![DagDependency {
+                        node_key: "parent".to_owned(),
+                        condition: DependencyCondition::Completed,
+                    }],
+                    "linux",
+                    "child",
+                ),
+            ],
+        })
+        .await
+        .expect("admit operator retry readiness DAG");
+    let parent = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-parent",
+            "linux",
+            "parent",
+        ))
+        .await
+        .expect("claim parent")
+        .expect("parent is ready");
+    run_dag_claim(&store, &parent).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                parent.attempt_id,
+                parent.fence,
+                parent.restore_epoch,
+                &parent.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("fail parent")
+    );
+    let child = store
+        .claim_next(&dag_claim(organization_id, "agent-child", "linux", "child"))
+        .await
+        .expect("claim child")
+        .expect("completed edge releases child");
+    run_dag_claim(&store, &child).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                child.attempt_id,
+                child.fence,
+                child.restore_epoch,
+                &child.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("fail child")
+    );
+    assert!(matches!(
+        store
+            .schedule_retry(organization_id, parent.attempt_id, 2, "reopen parent")
+            .await
+            .expect("reopen parent"),
+        RetryDecision::Scheduled { created: true, .. }
+    ));
+    let child_retry_id = match store
+        .schedule_retry(organization_id, child.attempt_id, 2, "reopen child")
+        .await
+        .expect("reopen child")
+    {
+        RetryDecision::Scheduled {
+            attempt_id,
+            created: true,
+            ..
+        } => attempt_id,
+        decision => panic!("expected child retry, got {decision:?}"),
+    };
+    let child_state: (String, bool) = sqlx::query_as(
+        "SELECT n.status, a.ready_at IS NULL
+         FROM nodes AS n
+         JOIN attempts AS a
+           ON a.organization_id = n.organization_id AND a.node_id = n.id
+         WHERE n.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(child_retry_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read blocked operator retry");
+    assert_eq!(child_state, ("blocked".to_owned(), true));
+    assert!(
+        store
+            .claim_next(&dag_claim(
+                organization_id,
+                "agent-child-early",
+                "linux",
+                "child",
+            ))
+            .await
+            .expect("probe blocked operator retry")
+            .is_none()
+    );
+    let parent_retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-parent-retry",
+            "linux",
+            "parent",
+        ))
+        .await
+        .expect("claim parent retry")
+        .expect("parent retry is ready");
+    run_dag_claim(&store, &parent_retry).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                parent_retry.attempt_id,
+                parent_retry.fence,
+                parent_retry.restore_epoch,
+                &parent_retry.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"try": 2}),
+            )
+            .await
+            .expect("complete parent retry")
+    );
+    let child_retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-child-retry",
+            "linux",
+            "child",
+        ))
+        .await
+        .expect("claim operator retry after dependency")
+        .expect("operator retry becomes ready");
+    assert_eq!(child_retry.attempt_id, child_retry_id);
+}
+
+#[tokio::test]
 async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
     let Some(store) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

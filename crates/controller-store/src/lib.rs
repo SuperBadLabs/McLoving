@@ -2726,29 +2726,69 @@ impl Store {
         }
         let child_id = Uuid::new_v4();
         let child_ordinal = ordinal + 1;
-        sqlx::query(
-            "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
-             INSERT INTO attempts (
-                 id, organization_id, node_id, ordinal, status, retry_of,
-                 restore_epoch, created_at, ready_at
-             )
-             SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch,
-                    admitted_at, admitted_at
-             FROM controller_metadata, timing
-             WHERE singleton",
-        )
-        .bind(child_id)
-        .bind(organization_id)
-        .bind(node_id)
-        .bind(child_ordinal)
-        .bind(attempt_id)
-        .execute(&mut *tx)
-        .await?;
         if dag_mode {
             sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
                 .bind(format!("mcloving.dag.retry.{build_id}"))
                 .execute(&mut *tx)
                 .await?;
+            sqlx::query(
+                "WITH timing AS (
+                     SELECT clock_timestamp() AS admitted_at
+                 ), eligibility AS (
+                     SELECT NOT EXISTS (
+                         SELECT 1
+                         FROM node_dependencies AS dependency
+                         JOIN nodes AS parent
+                           ON parent.id = dependency.parent_node_id
+                          AND parent.organization_id = dependency.organization_id
+                         WHERE dependency.organization_id = $2
+                           AND dependency.child_node_id = $3
+                           AND (
+                               (
+                                   dependency.condition = 'succeeded'
+                                   AND parent.status <> 'succeeded'
+                               )
+                               OR (
+                                   dependency.condition = 'completed'
+                                   AND parent.status NOT IN (
+                                       'succeeded', 'failed', 'aborted', 'skipped'
+                                   )
+                               )
+                           )
+                     ) AS ready
+                 ), inserted AS (
+                     INSERT INTO attempts (
+                         id, organization_id, node_id, ordinal, status, retry_of,
+                         restore_epoch, created_at, ready_at
+                     )
+                     SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch,
+                            admitted_at,
+                            CASE WHEN eligibility.ready THEN admitted_at ELSE NULL END
+                     FROM controller_metadata, timing, eligibility
+                     WHERE singleton
+                     RETURNING ready_at
+                 )
+                 UPDATE nodes AS node
+                 SET status = CASE
+                         WHEN inserted.ready_at IS NULL THEN 'blocked'
+                         ELSE 'queued'
+                     END,
+                     logical_outcome = NULL,
+                     cancellation_requested_at = NULL,
+                     max_attempts = GREATEST(node.max_attempts, $6),
+                     queued_at = COALESCE(inserted.ready_at, node.queued_at)
+                 FROM inserted
+                 WHERE node.organization_id = $2
+                   AND node.id = $3",
+            )
+            .bind(child_id)
+            .bind(organization_id)
+            .bind(node_id)
+            .bind(child_ordinal)
+            .bind(attempt_id)
+            .bind(max_attempts)
+            .execute(&mut *tx)
+            .await?;
             let skipped_nodes = sqlx::query_as::<_, (Uuid, Uuid, i32)>(
                 "WITH RECURSIVE descendants(id) AS (
                      SELECT child_node_id
@@ -2841,21 +2881,25 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
             }
+        } else {
             sqlx::query(
-                "UPDATE nodes
-                 SET status = 'queued',
-                     logical_outcome = NULL,
-                     cancellation_requested_at = NULL,
-                     max_attempts = GREATEST(max_attempts, $3),
-                     queued_at = clock_timestamp()
-                 WHERE organization_id = $1 AND id = $2",
+                "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+                 INSERT INTO attempts (
+                     id, organization_id, node_id, ordinal, status, retry_of,
+                     restore_epoch, created_at, ready_at
+                 )
+                 SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch,
+                        admitted_at, admitted_at
+                 FROM controller_metadata, timing
+                 WHERE singleton",
             )
+            .bind(child_id)
             .bind(organization_id)
             .bind(node_id)
-            .bind(max_attempts)
+            .bind(child_ordinal)
+            .bind(attempt_id)
             .execute(&mut *tx)
             .await?;
-        } else {
             sqlx::query(
                 "UPDATE nodes
                  SET status = 'queued', queued_at = clock_timestamp()
