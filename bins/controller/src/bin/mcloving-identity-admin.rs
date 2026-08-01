@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
             let identity_id = command.uuid("identity")?;
             let expected_generation = command.positive_i64("expected-generation")?;
             let state = parse_lifecycle(&command.required("state")?)?;
+            let reason = command.required("reason")?;
             let actor = command.required("actor")?;
             command.finish()?;
             let generation = store
@@ -74,6 +75,7 @@ async fn main() -> Result<()> {
                     identity_id,
                     expected_generation,
                     state,
+                    &reason,
                     &actor,
                 )
                 .await
@@ -280,5 +282,18 @@ mod tests {
         assert!(parse_enabled("true").expect("true is canonical"));
         assert!(!parse_enabled("false").expect("false is canonical"));
         assert!(parse_enabled("TRUE").is_err());
+    }
+
+    #[test]
+    fn lifecycle_command_requires_an_operational_reason() {
+        let mut command = Command::parse([
+            "lifecycle".to_owned(),
+            "--state".to_owned(),
+            "disabled".to_owned(),
+            "--actor".to_owned(),
+            "operator:identity".to_owned(),
+        ])
+        .expect("parse lifecycle options");
+        assert!(command.required("reason").is_err());
     }
 }

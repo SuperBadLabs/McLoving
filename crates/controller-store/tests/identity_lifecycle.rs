@@ -314,6 +314,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
                 quarantined_legacy_human_id,
                 2,
                 IdentityLifecycle::Active,
+                "reviewed-legacy-binding-required",
                 "operator:identity",
             )
             .await
@@ -382,6 +383,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
                 quarantined_legacy_human_id,
                 2,
                 IdentityLifecycle::Active,
+                "reviewed-legacy-binding-complete",
                 "operator:identity",
             )
             .await
@@ -848,6 +850,20 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         .authenticate_api_token(organization_id, rotated_service_token, 12_051)
         .await
         .expect("the new service credential generation authenticates");
+    assert!(
+        admin
+            .transition_identity_lifecycle(
+                organization_id,
+                service_id,
+                1,
+                IdentityLifecycle::Disabled,
+                "",
+                "operator:identity",
+            )
+            .await
+            .is_err(),
+        "a lifecycle transition without a canonical operational reason must fail closed"
+    );
     assert_eq!(
         admin
             .transition_identity_lifecycle(
@@ -855,6 +871,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
                 service_id,
                 1,
                 IdentityLifecycle::Disabled,
+                "service-identity-emergency-disable",
                 "operator:identity",
             )
             .await
@@ -868,6 +885,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
                 service_id,
                 2,
                 IdentityLifecycle::Active,
+                "reviewed-service-reactivation",
                 "operator:identity",
             )
             .await
@@ -982,6 +1000,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
                 future_service_id,
                 1,
                 IdentityLifecycle::Disabled,
+                "future-clock-emergency-disable",
                 "operator:identity",
             )
             .await
@@ -1121,6 +1140,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             human_id,
             1,
             IdentityLifecycle::Disabled,
+            "suspected-account-compromise",
             "operator:identity",
         )
         .await
@@ -1137,6 +1157,31 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         .verify_audit_chain(organization_id)
         .await
         .expect("verify identity audit chain");
+    let future_revocation = audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "service_credential_revoked"
+                && event.subject == format!("credential:{}", future_second_credential.credential_id)
+        })
+        .expect("clock-skewed service revocation audit event");
+    assert_eq!(
+        future_revocation.payload["revoked_at_unix_ms"],
+        i64::MAX - 10,
+        "audit must record the effective durable revocation timestamp"
+    );
+    let human_disable = audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "identity_lifecycle_transitioned"
+                && event.subject == format!("identity:{human_id}")
+        })
+        .expect("human lifecycle audit event");
+    assert_eq!(
+        human_disable.payload["reason"], "suspected-account-compromise",
+        "lifecycle audit must preserve the canonical operational reason"
+    );
     for action in [
         "identity_provider_provisioned",
         "identity_provider_status_transitioned",

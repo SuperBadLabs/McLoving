@@ -1316,8 +1316,10 @@ impl Store {
         identity_id: Uuid,
         expected_generation: i64,
         next: IdentityLifecycle,
+        reason: &str,
         actor_subject: &str,
     ) -> Result<i64, StoreError> {
+        validate_canonical(reason, "identity lifecycle reason", 1024)?;
         validate_canonical(actor_subject, "actor subject", 512)?;
         if expected_generation <= 0 {
             return invalid("expected identity generation must be positive");
@@ -1392,6 +1394,7 @@ impl Store {
                 "from": current_state,
                 "to": next,
                 "generation": generation,
+                "reason": reason,
                 "revoked_service_credentials": revoked_service_credentials,
             }),
         )
@@ -1988,18 +1991,17 @@ async fn revoke_credential_record(
     let query = format!(
         "UPDATE {table}
          SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3), revocation_reason = $4
-         WHERE organization_id = $1 AND {key_column} = $2 AND revoked_at_unix_ms IS NULL"
+         WHERE organization_id = $1 AND {key_column} = $2 AND revoked_at_unix_ms IS NULL
+         RETURNING revoked_at_unix_ms"
     );
-    let changed = sqlx::query(&query)
+    let effective_revoked_at_unix_ms = sqlx::query_scalar::<_, i64>(&query)
         .bind(organization_id)
         .bind(record_id)
         .bind(now_unix_ms)
         .bind(reason)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-        == 1;
-    if changed {
+        .fetch_optional(&mut *tx)
+        .await?;
+    if let Some(effective_revoked_at_unix_ms) = effective_revoked_at_unix_ms {
         append_audit_record(
             &mut tx,
             organization_id,
@@ -2007,12 +2009,15 @@ async fn revoke_credential_record(
             actor_subject,
             action,
             &format!("credential:{record_id}"),
-            json!({"reason": reason, "revoked_at_unix_ms": now_unix_ms}),
+            json!({
+                "reason": reason,
+                "revoked_at_unix_ms": effective_revoked_at_unix_ms,
+            }),
         )
         .await?;
     }
     tx.commit().await?;
-    Ok(changed)
+    Ok(effective_revoked_at_unix_ms.is_some())
 }
 
 fn canonical_strings(values: &[String], label: &str) -> Result<Vec<String>, StoreError> {
