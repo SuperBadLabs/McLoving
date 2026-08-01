@@ -663,6 +663,20 @@ fn object_kinds_must_match_their_containing_lists() {
 }
 
 #[test]
+fn artifact_producer_must_match_its_containing_build() {
+    let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    for producer_build_number in [None, Some(8)] {
+        let mut candidate = bundle.clone();
+        candidate.jobs[0].builds[0].artifacts[0].producer_build_number = producer_build_number;
+        assert!(matches!(
+            transform(&candidate, &expected, &BTreeMap::new()),
+            Err(TransferError::InvalidField(field))
+                if field.contains("producer build number must match")
+        ));
+    }
+}
+
+#[test]
 fn persistent_dependency_keys_are_unique_within_a_job() {
     let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
     let mut duplicate = bundle.jobs[0].persistent_dependencies[0].clone();

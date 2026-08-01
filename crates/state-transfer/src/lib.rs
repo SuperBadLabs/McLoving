@@ -1075,6 +1075,7 @@ fn validate_job(
         records,
         "retained workspaces",
         ObjectKind::RetainedWorkspace,
+        None,
     )?;
     let mut previous_dependency: Option<&str> = None;
     let mut dependency_keys = BTreeSet::new();
@@ -1157,6 +1158,7 @@ fn validate_build(
         records,
         "build artifacts",
         ObjectKind::Artifact,
+        Some(build.number),
     )
 }
 
@@ -1487,6 +1489,7 @@ fn validate_object_list(
     records: &mut BTreeMap<String, Digest>,
     label: &str,
     expected_kind: ObjectKind,
+    expected_producer_build_number: Option<u64>,
 ) -> Result<(), TransferError> {
     let mut previous: Option<&str> = None;
     let mut logical_names = BTreeSet::new();
@@ -1510,7 +1513,13 @@ fn validate_object_list(
             )));
         }
         validate_digest(object.content_digest, "object content digest")?;
-        if object.producer_build_number == Some(0) {
+        if let Some(expected) = expected_producer_build_number {
+            if object.producer_build_number != Some(expected) {
+                return Err(TransferError::InvalidField(format!(
+                    "{label} producer build number must match its containing build"
+                )));
+            }
+        } else if object.producer_build_number == Some(0) {
             return Err(TransferError::InvalidField(
                 "object producer build number must be positive".to_owned(),
             ));

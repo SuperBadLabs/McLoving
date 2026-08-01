@@ -80,6 +80,18 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         .execute(&mut *sealed_append)
         .await
         .expect("bind sealed append tenant");
+    let deleted_outbox = sqlx::query(
+        "DELETE FROM outbox
+         WHERE organization_id = $1
+           AND topic = 'state_transfer.imported'
+           AND aggregate_id = $2",
+    )
+    .bind(organization_id)
+    .bind(first.id)
+    .execute(&mut *sealed_append)
+    .await
+    .expect("runtime role can delete the mutable outbox delivery row");
+    assert_eq!(deleted_outbox.rows_affected(), 1);
     let append_error = sqlx::query(
         "INSERT INTO state_transfer_records (
              organization_id, receipt_id, record_id, source_digest, provenance
@@ -90,7 +102,7 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
     .bind(vec![0x5a_u8; 32])
     .execute(&mut *sealed_append)
     .await
-    .expect_err("sealed state-transfer receipt rejects appended provenance");
+    .expect_err("immutable audit seal rejects appended provenance after outbox deletion");
     assert_eq!(
         append_error
             .as_database_error()

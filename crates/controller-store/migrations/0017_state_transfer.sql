@@ -434,10 +434,11 @@ AS $$
 BEGIN
     IF EXISTS (
         SELECT 1
-        FROM outbox
+        FROM audit_events
         WHERE organization_id = NEW.organization_id
-          AND topic = 'state_transfer.imported'
-          AND aggregate_id = NEW.receipt_id
+          AND category = 'migration'
+          AND action = 'state_transfer.imported'
+          AND payload ->> 'receipt_id' = NEW.receipt_id::text
     ) THEN
         RAISE EXCEPTION USING
             ERRCODE = '23514',
