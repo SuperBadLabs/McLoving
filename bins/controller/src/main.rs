@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
     if bearer_token == artifact_agent_token {
         bail!("MCLOVING_API_TOKEN and MCLOVING_ARTIFACT_AGENT_TOKEN must be distinct");
     }
+    let artifact_agent_digest: [u8; 32] = Sha256::digest(artifact_agent_token.as_bytes()).into();
     let listen = std::env::var("MCLOVING_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let worker = EmbeddedWorker::from_environment()?;
     let oidc = oidc_environment(worker.organization_id)?;
@@ -118,14 +119,25 @@ async fn main() -> Result<()> {
     };
     if let Some(oidc) = &oidc {
         migration_store
-            .provision_controller_authentication(&api_credential, &oidc.provider)
+            .provision_controller_authentication(
+                &api_credential,
+                &oidc.provider,
+                &worker.config.agent_id,
+                artifact_agent_digest,
+            )
             .await
-            .context("atomically provision public API credential and OIDC provider generation")?;
+            .context(
+                "atomically provision public API credential, OIDC provider, and artifact-agent reservation",
+            )?;
     } else {
         migration_store
-            .provision_service_credential(&api_credential)
+            .provision_controller_credential(
+                &api_credential,
+                &worker.config.agent_id,
+                artifact_agent_digest,
+            )
             .await
-            .context("provision durable public API service credential")?;
+            .context("atomically provision public API credential and artifact-agent reservation")?;
     }
     migration_pool.close().await;
 

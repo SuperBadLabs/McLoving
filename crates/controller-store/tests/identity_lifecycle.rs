@@ -145,6 +145,8 @@ async fn controller_authentication_rollout_is_atomic() {
                     configuration_digest: digest("atomic-provider-v2-rejected"),
                     ..provider.clone()
                 },
+                "agent-1",
+                digest("atomic-artifact-agent-token"),
             )
             .await
             .is_err(),
@@ -169,6 +171,45 @@ async fn controller_authentication_rollout_is_atomic() {
             .configuration_generation,
         1,
         "the provider generation must also remain unchanged"
+    );
+
+    assert!(
+        admin
+            .provision_controller_authentication(
+                &NewServiceCredential {
+                    organization_id,
+                    credential_id: Uuid::new_v4(),
+                    identity_id,
+                    generation: 2,
+                    token_digest: digest("atomic-api-token-v2-artifact-collision"),
+                    issued_at_unix_ms: 10_200,
+                    expires_at_unix_ms: None,
+                    actor_subject: "bootstrap:controller".to_owned(),
+                },
+                &IdentityProviderWrite {
+                    configuration_generation: 2,
+                    configuration_digest: digest("atomic-provider-v2-artifact-collision"),
+                    ..provider.clone()
+                },
+                "agent-1",
+                original_token,
+            )
+            .await
+            .is_err(),
+        "an artifact-agent collision must roll back the whole authentication bundle"
+    );
+    admin
+        .authenticate_api_token(organization_id, original_token, 10_201)
+        .await
+        .expect("the original API credential survives a rejected artifact reservation");
+    assert_eq!(
+        admin
+            .identity_provider_config(organization_id, provider.provider_id)
+            .await
+            .expect("load provider after rejected artifact reservation")
+            .configuration_generation,
+        1,
+        "the provider generation remains unchanged after reservation failure"
     );
 }
 

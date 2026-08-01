@@ -227,18 +227,52 @@ impl Store {
         &self,
         credential: &NewServiceCredential,
         provider: &IdentityProviderWrite,
+        artifact_agent_id: &str,
+        artifact_agent_digest: [u8; 32],
     ) -> Result<(ServiceCredential, IdentityProviderConfig), StoreError> {
         if credential.organization_id != provider.organization_id {
             return invalid("service credential and identity provider must share an organization");
         }
         validate_service_credential(credential)?;
         validate_provider(provider)?;
+        validate_canonical(artifact_agent_id, "artifact agent ID", 512)?;
         let mut tx = self.tenant_transaction(credential.organization_id).await?;
         lock_identity_provisioning(&mut tx, credential.organization_id).await?;
+        reserve_artifact_agent_credential_in_transaction(
+            &mut tx,
+            credential.organization_id,
+            artifact_agent_id,
+            &artifact_agent_digest,
+        )
+        .await?;
         let provider = provision_identity_provider_in_transaction(&mut tx, provider).await?;
         let credential = provision_service_credential_in_transaction(&mut tx, credential).await?;
         tx.commit().await?;
         Ok((credential, provider))
+    }
+
+    /// Atomically rolls out the public API credential and artifact-agent
+    /// namespace reservation when OIDC is not configured.
+    pub async fn provision_controller_credential(
+        &self,
+        credential: &NewServiceCredential,
+        artifact_agent_id: &str,
+        artifact_agent_digest: [u8; 32],
+    ) -> Result<ServiceCredential, StoreError> {
+        validate_service_credential(credential)?;
+        validate_canonical(artifact_agent_id, "artifact agent ID", 512)?;
+        let mut tx = self.tenant_transaction(credential.organization_id).await?;
+        lock_identity_provisioning(&mut tx, credential.organization_id).await?;
+        reserve_artifact_agent_credential_in_transaction(
+            &mut tx,
+            credential.organization_id,
+            artifact_agent_id,
+            &artifact_agent_digest,
+        )
+        .await?;
+        let credential = provision_service_credential_in_transaction(&mut tx, credential).await?;
+        tx.commit().await?;
+        Ok(credential)
     }
 
     pub async fn transition_identity_provider_enabled(
@@ -576,39 +610,12 @@ impl Store {
     ) -> Result<(), StoreError> {
         validate_canonical(agent_id, "artifact agent ID", 512)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
-        lock_credential_namespace(&mut tx, organization_id).await?;
-        let existing = sqlx::query_as::<_, (String, String)>(
-            "SELECT reservation_kind, reservation_subject
-             FROM credential_namespace_reservations
-             WHERE organization_id = $1 AND token_digest = $2",
+        reserve_artifact_agent_credential_in_transaction(
+            &mut tx,
+            organization_id,
+            agent_id,
+            &digest,
         )
-        .bind(organization_id)
-        .bind(digest.as_slice())
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some((kind, subject)) = existing {
-            if kind != "artifact_agent" || subject != agent_id {
-                return Err(StoreError::IdentityConflict(
-                    "credential digest is already reserved".to_owned(),
-                ));
-            }
-            tx.commit().await?;
-            return Ok(());
-        }
-        if identity_credential_digest_collision(&mut tx, organization_id, &digest).await? {
-            return Err(StoreError::IdentityConflict(
-                "credential digest is already bound".to_owned(),
-            ));
-        }
-        sqlx::query(
-            "INSERT INTO credential_namespace_reservations(
-                 organization_id, token_digest, reservation_kind, reservation_subject
-             ) VALUES ($1,$2,'artifact_agent',$3)",
-        )
-        .bind(organization_id)
-        .bind(digest.as_slice())
-        .bind(agent_id)
-        .execute(&mut *tx)
         .await?;
         tx.commit().await?;
         Ok(())
@@ -2034,6 +2041,48 @@ async fn lock_credential_namespace(
         .bind(format!("mcloving.credential-namespace.{organization_id}"))
         .execute(&mut **tx)
         .await?;
+    Ok(())
+}
+
+async fn reserve_artifact_agent_credential_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    agent_id: &str,
+    digest: &[u8; 32],
+) -> Result<(), StoreError> {
+    lock_credential_namespace(tx, organization_id).await?;
+    let existing = sqlx::query_as::<_, (String, String)>(
+        "SELECT reservation_kind, reservation_subject
+         FROM credential_namespace_reservations
+         WHERE organization_id = $1 AND token_digest = $2",
+    )
+    .bind(organization_id)
+    .bind(digest.as_slice())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some((kind, subject)) = existing {
+        if kind == "artifact_agent" && subject == agent_id {
+            return Ok(());
+        }
+        return Err(StoreError::IdentityConflict(
+            "credential digest is already reserved".to_owned(),
+        ));
+    }
+    if identity_credential_digest_collision(tx, organization_id, digest).await? {
+        return Err(StoreError::IdentityConflict(
+            "credential digest is already bound".to_owned(),
+        ));
+    }
+    sqlx::query(
+        "INSERT INTO credential_namespace_reservations(
+             organization_id, token_digest, reservation_kind, reservation_subject
+         ) VALUES ($1,$2,'artifact_agent',$3)",
+    )
+    .bind(organization_id)
+    .bind(digest.as_slice())
+    .bind(agent_id)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
