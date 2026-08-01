@@ -1062,6 +1062,33 @@ verification=sha256sum-strict-all-ok\n";
 fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationError> {
     verify_mcloving_containment(root)?;
     let raw = json(root, "mcloving/mcloving-raw.json")?;
+    exact_object_keys(
+        &raw,
+        &[],
+        &[
+            "admission",
+            "approvals",
+            "artifacts",
+            "credential_grants",
+            "graph",
+            "logs",
+            "status",
+            "tests",
+        ],
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &raw,
+        &["admission"],
+        &[
+            "attempt_id",
+            "build_id",
+            "created",
+            "node_id",
+            "pipeline_digest",
+        ],
+        "E_MCLOVING",
+    )?;
     for (path, expected) in [
         (
             &["admission", "pipeline_digest"][..],
@@ -1078,6 +1105,27 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         exact_string(&raw, path, expected, "E_MCLOVING")?;
     }
     exact_bool(&raw, &["admission", "created"], true, "E_MCLOVING")?;
+    exact_object_keys(
+        &raw,
+        &["graph"],
+        &["attempts", "build", "dependencies", "nodes"],
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &raw,
+        &["graph", "build"],
+        &[
+            "build_id",
+            "completed_at_unix_ms",
+            "created_at_unix_micros",
+            "created_at_unix_ms",
+            "dag_mode",
+            "pipeline_digest",
+            "priority",
+            "status",
+        ],
+        "E_MCLOVING",
+    )?;
     exact_u64_array(
         &raw,
         &["graph", "build", "pipeline_digest"],
@@ -1088,6 +1136,48 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         &raw,
         &["graph", "build", "status"],
         "succeeded",
+        "E_MCLOVING",
+    )?;
+    exact_bool(&raw, &["graph", "build", "dag_mode"], true, "E_MCLOVING")?;
+    exact_u64(&raw, &["graph", "build", "priority"], 0, "E_MCLOVING")?;
+    exact_u64(
+        &raw,
+        &["graph", "build", "created_at_unix_ms"],
+        1_785_600_683_061,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &raw,
+        &["graph", "build", "created_at_unix_micros"],
+        1_785_600_683_060_816,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &raw,
+        &["graph", "build", "completed_at_unix_ms"],
+        1_785_600_683_114,
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &raw,
+        &["status"],
+        &[
+            "attempt_id",
+            "attempt_status",
+            "build_id",
+            "cancellation_requested",
+            "fence",
+            "lease_owner",
+            "node_id",
+            "status",
+            "terminal_summary",
+        ],
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &raw,
+        &["status", "terminal_summary"],
+        &["exit_code", "result_sha256", "termination"],
         "E_MCLOVING",
     )?;
     exact_u64(&raw, &["status", "fence"], 1, "E_MCLOVING")?;
@@ -1134,8 +1224,26 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
     if nodes.len() != 1 || attempts.len() != 1 || !dependencies.is_empty() {
         return Err(VerificationError::new("E_MCLOVING", "graph is not exact"));
     }
+    exact_object_keys(
+        &nodes[0],
+        &[],
+        &[
+            "cancellation_requested",
+            "fail_fast",
+            "kind",
+            "logical_outcome",
+            "max_attempts",
+            "node_id",
+            "node_key",
+            "required_platform",
+            "required_trust_pool",
+            "status",
+        ],
+        "E_MCLOVING",
+    )?;
     exact_string(&nodes[0], &["node_key"], "build", "E_MCLOVING")?;
     exact_string(&nodes[0], &["kind"], "work", "E_MCLOVING")?;
+    exact_bool(&nodes[0], &["fail_fast"], true, "E_MCLOVING")?;
     exact_string(&nodes[0], &["node_id"], MCLOVING_NODE_ID, "E_MCLOVING")?;
     exact_string(&nodes[0], &["status"], "succeeded", "E_MCLOVING")?;
     exact_string(&nodes[0], &["logical_outcome"], "succeeded", "E_MCLOVING")?;
@@ -1146,6 +1254,31 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         &nodes[0],
         &["required_trust_pool"],
         "migration-deny-authority",
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &attempts[0],
+        &[],
+        &[
+            "attempt_id",
+            "completed_at_unix_ms",
+            "created_at_unix_ms",
+            "fence",
+            "lease_owner",
+            "node_id",
+            "ordinal",
+            "ready_at_unix_ms",
+            "retry_of",
+            "started_at_unix_ms",
+            "status",
+            "terminal_summary",
+        ],
+        "E_MCLOVING",
+    )?;
+    exact_object_keys(
+        &attempts[0],
+        &["terminal_summary"],
+        &["exit_code", "result_sha256", "termination"],
         "E_MCLOVING",
     )?;
     exact_u64(&attempts[0], &["ordinal"], 1, "E_MCLOVING")?;
@@ -1165,6 +1298,30 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
     )?;
     exact_u64(&attempts[0], &["fence"], 1, "E_MCLOVING")?;
     exact_string(&attempts[0], &["status"], "succeeded", "E_MCLOVING")?;
+    exact_u64(
+        &attempts[0],
+        &["created_at_unix_ms"],
+        1_785_600_683_062,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &attempts[0],
+        &["ready_at_unix_ms"],
+        1_785_600_683_062,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &attempts[0],
+        &["started_at_unix_ms"],
+        1_785_600_683_078,
+        "E_MCLOVING",
+    )?;
+    exact_u64(
+        &attempts[0],
+        &["completed_at_unix_ms"],
+        1_785_600_683_112,
+        "E_MCLOVING",
+    )?;
     exact_u64(
         &attempts[0],
         &["terminal_summary", "exit_code"],
@@ -1190,6 +1347,20 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
     let stdout = &logs[0];
     let stderr = &logs[1];
     for (log, sequence, stream) in [(stdout, 0, "stdout"), (stderr, 1, "stderr")] {
+        exact_object_keys(
+            log,
+            &[],
+            &[
+                "attempt_id",
+                "content_hex",
+                "fence",
+                "sequence",
+                "sha256",
+                "stream",
+                "text",
+            ],
+            "E_MCLOVING",
+        )?;
         exact_string(log, &["attempt_id"], MCLOVING_ATTEMPT_ID, "E_MCLOVING")?;
         exact_u64(log, &["fence"], 1, "E_MCLOVING")?;
         exact_u64(log, &["sequence"], sequence, "E_MCLOVING")?;

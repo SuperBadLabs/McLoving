@@ -199,6 +199,18 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/mcloving-raw.json",
+            "\"dag_mode\": true",
+            "\"dag_mode\": false",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
+            "\"fail_fast\": true",
+            "\"fail_fast\": false",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
             "\"kind\": \"work\"",
             "\"kind\": \"post\"",
             "E_MCLOVING",
