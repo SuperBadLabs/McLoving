@@ -57,7 +57,7 @@ jq --exit-status '
                  and .result == "succeeded")] | length) == 2
   and ([.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3)
         | .artifacts[].logical_name] | sort)
-      == ["changelog.intent", "changeset.intent", "persistent.state"]
+      == ["changelog.intent", "changeset.intent", "persistent.state", "workspace.input"]
 ' "$reverse_bundle" >/dev/null
 
 build_number=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .number' "$reverse_bundle")
@@ -142,6 +142,7 @@ old_persistent_md5=$(md5sum "$staging/archive/persistent.state" | awk '{print $1
 materialize_artifact changeset.intent
 materialize_artifact changelog.intent
 materialize_artifact persistent.state
+materialize_artifact workspace.input
 new_persistent_md5=$(md5sum "$staging/archive/persistent.state" | awk '{print $1}')
 
 sed -i \
@@ -175,6 +176,7 @@ rg --quiet "<result>${jenkins_result}</result>" "$staging/build.xml"
 test "$(cat "$staging/archive/persistent.state")" = 'build=3'
 test "$(cat "$staging/archive/changeset.intent")" = 'selected'
 test "$(cat "$staging/archive/changelog.intent")" = 'selected'
+cmp "$staging/archive/workspace.input" "$fixture_root/repo/first.target"
 
 printf '%s\n' "$next_build_number" > "$output_root/nextBuildNumber"
 printf '%s\n' \
@@ -238,6 +240,16 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 cmp "$evidence/imported-persistent.state" "$transform_root/mcloving-persistent.state"
+for _ in $(seq 1 60); do
+  if curl --fail --silent --show-error \
+    "http://127.0.0.1:${port}/job/stateful/3/artifact/workspace.input" \
+    -o "$evidence/imported-workspace.input" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+cmp "$evidence/imported-workspace.input" "$transform_root/mcloving-workspace.input"
+cmp "$evidence/imported-workspace.input" "$fixture_root/repo/first.target"
 
 triggered=0
 for _ in $(seq 1 60); do

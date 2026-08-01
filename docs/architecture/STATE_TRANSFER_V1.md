@@ -85,6 +85,10 @@ change predicate decision from those committed records. It then executes the
 first McLoving build through the real controller state machine with
 external-effect authority explicitly false and exports the resulting history
 through the same versioned reverse transform.
+The source harness retains its exact stopped runtime by default because the
+transform and reverse-reconciliation commands consume that runtime. Cleanup is
+explicit through `CLEAN_MIG005A_RUNTIME=1`; an ordinary successful source run
+never silently deletes the next phase's inputs.
 
 ## Filesystem and secret boundary
 
@@ -112,15 +116,15 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `5baa52ddf8ef1ed9a23a660c232e63488b182d284992c70bb3065eecd07c613e`;
-- source-evidence manifest SHA-256 `0f8374a152bbb9d49d18605e120371b8b43238e7ecc30989e64597ea3c0dd773`;
-- forward bundle SHA-256 `a719a763c8c58406addd3e9da25ffc3041cf7f9ff21e759efb35be95220275bd`;
-- reverse bundle SHA-256 `ef237e01c2123bac35c330f6ca4ba01654c3e0e420d9b1682f2e97b4abf38259`;
-- reverse-evidence manifest SHA-256 `f3b3e67d7b01daa5ed18bec01f67b8926b3cdd056e68c311fffa6c7fdc2817c6`;
-- sealed transform-evidence manifest SHA-256 `abe0fd06530d5a11506f613a125618fbb24b0a3daf44ba50d0963d136de5e802`.
+- transform binary SHA-256 `f867f9d7230a89781dd1a6322f249020630d5e7f4e3ad1bf9dc2624bc08c07b2`;
+- source-evidence manifest SHA-256 `26176f86b6c5fadd935b26df9bb3db4aff57f3ba60122510042a0e1880baa83c`;
+- forward bundle SHA-256 `8755955c075b9a17b2fb93f74ca8e22b71df657f8d702611189f4578cc371994`;
+- reverse bundle SHA-256 `addc0e38649de868d70e7eaf03a7f736e9327347680d1e70249e405a6d42b40a`;
+- reverse-evidence manifest SHA-256 `d04806bb0e7a41ce1c8c0a893c2a6764b010065000a4b1ec17941c68fa651c17`;
+- sealed transform-evidence manifest SHA-256 `f5c92cbe53316e960faa67ad35502d1ebda1f227b238f8e50432ff9a603dc964`.
 
 The exact database contained three receipts (destination protection seed,
-forward import, reverse import), 115 record-provenance rows, eight effective
+forward import, reverse import), 116 record-provenance rows, nine effective
 protection rows, and eight outbox rows. Exact replay reused the forward receipt.
 The imported shorter/expired source protections were strengthened to deadline
 `2000000000000`; three overlapping active holds survived; a direct SQL hold
@@ -139,8 +143,15 @@ and authenticated its `build=2` payload at SHA-256
 consumed that value to produce `build=3`, and reverse-exported both the updated
 dependency and artifact at SHA-256
 `929f7d96cf9c8afd8517b80afadeb4a7f01f95107f4e83fc1cfb7c5ccb58e61b`.
-Jenkins then loaded reverse-imported build 3,
-retrieved its exact artifact, used its revision as the next changelog
+The same committed forward receipt carried the retained `stateful` workspace.
+McLoving reconstructed its complete classified inventory through the bounded
+no-follow materializer, emitted an exact materialization receipt, consumed
+`src/first.target` as build 3 input at SHA-256
+`b5cc31e2377133418f4f7589df551ce558a4b8820eb7c5c88583bf57e06d0c1a`,
+and bound those exact bytes to build 3's `workspace.input` artifact. Jenkins
+then loaded reverse-imported build 3, retrieved and independently compared both
+the persistent-state and workspace-input artifacts, used its revision as the
+next changelog
 baseline, and ran build 4 on a nonmatching revision. Both predicate stages were
 skipped, only `persistent.state` was archived, builds 1–4 were unique, and
 `nextBuildNumber` became 5. Both Jenkins epochs were internal-network-only.

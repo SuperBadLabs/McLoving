@@ -919,7 +919,16 @@ included in successor corpus manifest
 and reverse state-transfer receipts, monotonic PostgreSQL protection truth,
 bounded no-follow filesystem materialization, and the disposable exact-profile
 Jenkins -> McLoving -> Jenkins rehearsal are documented in
-`docs/architecture/STATE_TRANSFER_V1.md`. `MIG-005` is next on its own branch
+`docs/architecture/STATE_TRANSFER_V1.md`. The accepted successor rehearsal
+materializes the sealed retained-workspace inventory, makes its exact
+`src/first.target` bytes a build-3 input, reverse-exports those bytes as a
+build-owned artifact, and independently retrieves and compares that artifact
+from Jenkins. Its source, transform, and reverse manifest SHA-256 values are
+`26176f86b6c5fadd935b26df9bb3db4aff57f3ba60122510042a0e1880baa83c`,
+`f5c92cbe53316e960faa67ad35502d1ebda1f227b238f8e50432ff9a603dc964`,
+and `d04806bb0e7a41ce1c8c0a893c2a6764b010065000a4b1ec17941c68fa651c17`.
+The source runtime is retained by default for the dependent phases and removed
+only by an explicit cleanup flag. `MIG-005` is next on its own branch
 and no longer waits for unrelated state-transfer work; both join only through
 their required differential evidence. `WIN-001`, `WIN-002`, and `WIN-003`
 remain a separate serial persistent-Windows evidence lane that may run in

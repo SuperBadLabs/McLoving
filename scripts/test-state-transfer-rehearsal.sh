@@ -21,7 +21,7 @@ evidence="$output_root/evidence"
 cleanup() {
   podman rm -f "$container" >/dev/null 2>&1 || true
   podman network rm "$network" >/dev/null 2>&1 || true
-  if [[ ${KEEP_MIG005A_RUNTIME:-0} != 1 ]]; then
+  if [[ ${CLEAN_MIG005A_RUNTIME:-0} == 1 ]]; then
     rm -rf "$runtime_root"
   else
     echo "kept runtime at $runtime_root" >&2
@@ -145,9 +145,3 @@ find "$evidence" -type f ! -name SHA256SUMS -printf '%P\0' \
       sha256sum "$evidence/$path"
     done > "$evidence/SHA256SUMS"
 sha256sum -c "$evidence/SHA256SUMS"
-
-if [[ ${KEEP_MIG005A_RUNTIME:-0} == 1 ]]; then
-  trap - EXIT
-  podman rm -f "$container" >/dev/null 2>&1 || true
-  podman network rm "$network" >/dev/null 2>&1 || true
-fi

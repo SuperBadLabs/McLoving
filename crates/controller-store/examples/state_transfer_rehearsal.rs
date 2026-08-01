@@ -9,10 +9,11 @@ use mcloving_controller_store::{
 use mcloving_state_transfer::{
     AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy,
     DataBinding, DataClassification, Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind,
-    GraphNodeState, JobState, LegalHold, LogState, ObjectKind, ObjectState, PersistentDependency,
-    Protection, RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1,
-    ScmState, StateBundle, SystemIdentity, TransferBinding, TransferDirection, canonical_bytes,
-    record_provenance, sha256, transform,
+    GraphNodeState, JobState, LegalHold, LogState, MaterializationLimits, ObjectKind, ObjectState,
+    PersistentDependency, Protection, RecordProvenance, RetentionPolicy, RetrievalMetadata,
+    STATE_TRANSFER_SCHEMA_V1, ScmState, StateBundle, SystemIdentity, TransferBinding,
+    TransferDirection, canonical_bytes, materialize_filesystem_entries, record_provenance, sha256,
+    transform,
 };
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
@@ -133,6 +134,8 @@ async fn main() -> Result<(), AnyError> {
     let revision_3 = read_trimmed(&evidence.join("revision-3.txt"))?;
     let revision_2 = read_trimmed(&evidence.join("revision-2.txt"))?;
     let restored_state = restore_persistent_dependency(&stored_forward, jenkins_home, output)?;
+    let restored_workspace_input =
+        restore_retained_workspace(&stored_forward, jenkins_home, output)?;
     let build_2_end = stored_forward.jobs[0].builds[1].ended_at_unix_ms;
     let build_3 = mcloving_build_three(
         output,
@@ -140,6 +143,7 @@ async fn main() -> Result<(), AnyError> {
         &revision_3,
         build_2_end,
         &restored_state,
+        &restored_workspace_input,
     )?;
     let predicate = ChangePredicate {
         path_suffixes: vec![".target".to_owned()],
@@ -250,6 +254,10 @@ async fn main() -> Result<(), AnyError> {
             "persistent_dependency_source_digest": hex::encode(sha256(&restored_state)),
             "persistent_dependency_output_digest": hex::encode(sha256(&updated_state)),
             "persistent_dependency_consumed": true,
+            "retained_workspace_logical_name": "stateful",
+            "retained_workspace_consumed_path": "src/first.target",
+            "retained_workspace_consumed_digest": hex::encode(sha256(&restored_workspace_input)),
+            "retained_workspace_consumed": true,
             "external_effects": 0,
             "unauthorized_hold_release": "denied",
             "forward_retrieval_verified": true,
@@ -388,6 +396,101 @@ fn restore_persistent_dependency(
     }
     fs::write(output.join("restored-persistent.state"), &bytes)?;
     Ok(bytes)
+}
+
+fn restore_retained_workspace(
+    bundle: &StateBundle,
+    jenkins_home: &Path,
+    output: &Path,
+) -> Result<Vec<u8>, AnyError> {
+    let job = bundle
+        .jobs
+        .iter()
+        .find(|job| job.source_job_id == "stateful")
+        .ok_or("stored transfer is missing the stateful job")?;
+    if job.retained_workspaces.len() != 1 {
+        return Err("stored transfer must contain exactly one retained workspace".into());
+    }
+    let workspace = &job.retained_workspaces[0];
+    if workspace.kind != ObjectKind::RetainedWorkspace || workspace.logical_name != "stateful" {
+        return Err("stored transfer has an unexpected retained workspace".into());
+    }
+
+    let source_root = jenkins_home.join("workspace/stateful");
+    let mut payloads = BTreeMap::new();
+    let mut expected_digests = BTreeMap::new();
+    let mut expected_files = 0_usize;
+    let mut expected_bytes = 0_u64;
+    for entry in &workspace.filesystem_entries {
+        if entry.kind == FilesystemEntryKind::RegularFile {
+            let bytes = fs::read(source_root.join(&entry.path))?;
+            let digest = sha256(&bytes);
+            if entry.content_digest != Some(digest) || entry.bytes != bytes.len() as u64 {
+                return Err(
+                    format!("workspace payload differs from inventory: {}", entry.path).into(),
+                );
+            }
+            expected_files += 1;
+            expected_bytes = expected_bytes
+                .checked_add(entry.bytes)
+                .ok_or("workspace byte count overflow")?;
+            expected_digests.insert(entry.path.clone(), digest);
+            payloads.insert(entry.path.clone(), bytes);
+        }
+    }
+    if expected_bytes != workspace.bytes {
+        return Err("workspace inventory total differs from retained object".into());
+    }
+
+    let restored_root = output.join("restored-workspace");
+    if restored_root.exists() {
+        return Err("refusing to reuse retained-workspace staging directory".into());
+    }
+    fs::create_dir(&restored_root)?;
+    let receipt = materialize_filesystem_entries(
+        &restored_root,
+        &workspace.filesystem_entries,
+        &payloads,
+        MaterializationLimits {
+            max_entries: 4_096,
+            max_file_bytes: 16 * 1024 * 1024,
+            max_total_bytes: 256 * 1024 * 1024,
+        },
+    )?;
+    if receipt.entry_count != workspace.filesystem_entries.len()
+        || receipt.file_count != expected_files
+        || receipt.total_bytes != expected_bytes
+        || receipt.content_digests != expected_digests
+    {
+        return Err("retained-workspace materialization receipt differs from inventory".into());
+    }
+
+    let consumed_path = "src/first.target";
+    let consumed = fs::read(restored_root.join(consumed_path))?;
+    let consumed_digest = sha256(&consumed);
+    if expected_digests.get(consumed_path) != Some(&consumed_digest) {
+        return Err("retained-workspace build input is not bound to the inventory".into());
+    }
+    let receipt_digests = receipt
+        .content_digests
+        .iter()
+        .map(|(path, digest)| (path.clone(), hex::encode(digest)))
+        .collect::<BTreeMap<_, _>>();
+    fs::write(
+        output.join("workspace-materialization-receipt.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "mcloving.workspace-materialization-receipt/v1",
+            "logical_name": workspace.logical_name,
+            "object_digest": hex::encode(workspace.content_digest),
+            "entry_count": receipt.entry_count,
+            "file_count": receipt.file_count,
+            "total_bytes": receipt.total_bytes,
+            "content_digests": receipt_digests,
+            "consumed_path": consumed_path,
+            "consumed_digest": hex::encode(consumed_digest),
+        }))?,
+    )?;
+    Ok(consumed)
 }
 
 fn parse_persistent_build_number(bytes: &[u8]) -> Result<u64, AnyError> {
@@ -640,6 +743,7 @@ fn mcloving_build_three(
     revision: &str,
     prior_end: i64,
     restored_state: &[u8],
+    restored_workspace_input: &[u8],
 ) -> Result<BuildState, AnyError> {
     let intent = b"selected\n";
     let restored_build = parse_persistent_build_number(restored_state)?;
@@ -653,10 +757,15 @@ fn mcloving_build_three(
     fs::write(output.join("mcloving-changeset.intent"), intent)?;
     fs::write(output.join("mcloving-changelog.intent"), intent)?;
     fs::write(output.join("mcloving-persistent.state"), &state)?;
+    fs::write(
+        output.join("mcloving-workspace.input"),
+        restored_workspace_input,
+    )?;
     let mut artifacts: Vec<_> = [
         ("changeset.intent", intent.as_slice()),
         ("changelog.intent", intent.as_slice()),
         ("persistent.state", state.as_slice()),
+        ("workspace.input", restored_workspace_input),
     ]
     .into_iter()
     .map(|(name, bytes)| {
