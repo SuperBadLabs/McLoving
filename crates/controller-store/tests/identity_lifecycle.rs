@@ -436,7 +436,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         BTreeSet::from([ServiceScope::ProjectRead, ServiceScope::BuildSubmit])
     );
     let rotated_service_token = digest("service-token-2");
-    let rotated_credential = admin
+    let _rotated_credential = admin
         .provision_service_credential(&NewServiceCredential {
             credential_id: Uuid::new_v4(),
             generation: 2,
@@ -457,25 +457,160 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         .authenticate_api_token(organization_id, rotated_service_token, 12_051)
         .await
         .expect("the new service credential generation authenticates");
+    assert_eq!(
+        admin
+            .transition_identity_lifecycle(
+                organization_id,
+                service_id,
+                1,
+                IdentityLifecycle::Disabled,
+                "operator:identity",
+            )
+            .await
+            .expect("disable service identity"),
+        2
+    );
+    assert_eq!(
+        admin
+            .transition_identity_lifecycle(
+                organization_id,
+                service_id,
+                2,
+                IdentityLifecycle::Active,
+                "operator:identity",
+            )
+            .await
+            .expect("reactivate service identity"),
+        3
+    );
+    assert!(
+        runtime
+            .authenticate_api_token(organization_id, rotated_service_token, 12_100)
+            .await
+            .is_err(),
+        "reactivation must not resurrect a credential revoked by disable"
+    );
+    let final_service_token = digest("service-token-3");
+    let final_credential = admin
+        .provision_service_credential(&NewServiceCredential {
+            credential_id: Uuid::new_v4(),
+            generation: 3,
+            token_digest: final_service_token,
+            issued_at_unix_ms: 12_101,
+            ..service_credential.clone()
+        })
+        .await
+        .expect("issue a fresh credential after reviewed reactivation");
+    runtime
+        .authenticate_api_token(organization_id, final_service_token, 12_102)
+        .await
+        .expect("fresh post-reactivation credential authenticates");
     assert!(
         runtime
             .revoke_service_credential(
                 organization_id,
-                rotated_credential.credential_id,
-                12_100,
+                final_credential.credential_id,
+                12_103,
                 "rotation",
                 "operator:identity",
             )
             .await
-            .expect("revoke service credential")
+            .expect("revoke fresh service credential")
+    );
+
+    let provider_fenced_token = digest("provider-fenced-session");
+    runtime
+        .issue_human_session(
+            &OidcIdentityClaims {
+                id_token_digest: digest("id-token-provider-fence"),
+                ..claims.clone()
+            },
+            &SessionIssue {
+                session_id: Uuid::new_v4(),
+                token_digest: provider_fenced_token,
+                refresh_token_digest: None,
+                issued_at_unix_ms: 12_104,
+                expires_at_unix_ms: 32_104,
+                refresh_expires_at_unix_ms: None,
+            },
+        )
+        .await
+        .expect("issue a session before emergency provider shutdown");
+    runtime
+        .authenticate_api_token(organization_id, provider_fenced_token, 12_105)
+        .await
+        .expect("pre-shutdown provider session authenticates");
+    assert_eq!(
+        admin
+            .transition_identity_provider_enabled(
+                organization_id,
+                provider_id,
+                1,
+                false,
+                "emergency identity-provider shutdown",
+                "operator:identity",
+            )
+            .await
+            .expect("disable identity provider through the supported operator path"),
+        2
+    );
+    let disabled_provider = admin
+        .identity_provider_config(organization_id, provider_id)
+        .await
+        .expect("read disabled identity provider");
+    assert!(!disabled_provider.enabled);
+    assert_eq!(disabled_provider.configuration_generation, 2);
+    assert!(
+        runtime
+            .authenticate_api_token(organization_id, provider_fenced_token, 12_106)
+            .await
+            .is_err(),
+        "provider disable must immediately fence every session"
+    );
+    assert_eq!(
+        admin
+            .transition_identity_provider_enabled(
+                organization_id,
+                provider_id,
+                2,
+                true,
+                "reviewed identity-provider recovery",
+                "operator:identity",
+            )
+            .await
+            .expect("reenable identity provider through the supported operator path"),
+        3
     );
     assert!(
         runtime
-            .authenticate_api_token(organization_id, rotated_service_token, 12_101)
+            .authenticate_api_token(organization_id, provider_fenced_token, 12_107)
             .await
-            .is_err()
+            .is_err(),
+        "provider reenable must not resurrect a session from an older trust generation"
     );
-
+    let lifecycle_fenced_token = digest("lifecycle-fenced-session");
+    runtime
+        .issue_human_session(
+            &OidcIdentityClaims {
+                provider_configuration_generation: 3,
+                id_token_digest: digest("id-token-lifecycle-fence"),
+                ..claims.clone()
+            },
+            &SessionIssue {
+                session_id: Uuid::new_v4(),
+                token_digest: lifecycle_fenced_token,
+                refresh_token_digest: None,
+                issued_at_unix_ms: 12_108,
+                expires_at_unix_ms: 32_108,
+                refresh_expires_at_unix_ms: None,
+            },
+        )
+        .await
+        .expect("issue a session after reviewed provider recovery");
+    runtime
+        .authenticate_api_token(organization_id, lifecycle_fenced_token, 12_109)
+        .await
+        .expect("post-recovery provider session authenticates");
     let lifecycle_generation = admin
         .transition_identity_lifecycle(
             organization_id,
@@ -489,7 +624,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     assert_eq!(lifecycle_generation, 2);
     assert!(
         runtime
-            .authenticate_api_token(organization_id, refreshed_token, 12_200)
+            .authenticate_api_token(organization_id, lifecycle_fenced_token, 12_110)
             .await
             .is_err(),
         "identity disable must immediately fence every session"
@@ -500,6 +635,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         .expect("verify identity audit chain");
     for action in [
         "identity_provider_provisioned",
+        "identity_provider_status_transitioned",
         "human_identity_provisioned",
         "oidc_session_issued",
         "oidc_session_refreshed",

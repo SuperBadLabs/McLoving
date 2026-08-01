@@ -94,6 +94,8 @@ must use HTTPS; loopback HTTP exists solely for contained protocol tests.
 
 Identity administration is an offline migration-role operation rather than a
 public route. Operators use the shipped `mcloving-identity-admin` binary for
-reviewed human provenance binding, compare-and-swap lifecycle changes, and
-service-credential revocation. The binary accepts identifiers, provenance
+reviewed human provenance binding, compare-and-swap lifecycle changes,
+compare-and-swap identity-provider enable/disable, and service-credential revocation.
+Provider status changes advance its configuration generation and fence existing sessions.
+The binary accepts identifiers, provenance
 digests, actors, and revocation reasons, never raw credential values.

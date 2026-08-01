@@ -60,12 +60,15 @@ gain public API authority.
 
 ## Operator and retention boundary
 
-Human provisioning, lifecycle transitions, and service-credential revocation
+Human provisioning, lifecycle transitions, identity-provider enable/disable, and service-credential revocation
 are intentionally absent from the public API. The shipped
 `mcloving-identity-admin` binary performs those audited operations offline with
 `MCLOVING_MIGRATION_DATABASE_URL`. It requires explicit organization,
 identity/provider or credential UUIDs, immutable source/provenance SHA-256
-digests, compare-and-swap lifecycle generations, actor, and reason fields. It
+digests, compare-and-swap lifecycle/provider generations, actor, and reason fields. Provider
+status changes advance the provider configuration generation, immediately fencing existing
+sessions and login attempts. Disabling a service identity atomically revokes its active
+credentials so reactivation cannot resurrect them. It
 does not accept raw access, refresh, or service-token values.
 
 OIDC start is limited per source address to 60 attempts per minute with a
@@ -82,7 +85,8 @@ one-time state and ID-token replay rejection, PKCE exchange, exact JWKS and
 claim validation, cross-tenant denial, group-generation fencing, refresh
 rotation/replay denial, logout, service provisioning idempotence,
 absolute refresh expiry and reuse-family revocation, atomic service rotation,
-legacy-human binding, scope resolution, credential revocation, identity disable, audit-chain
+legacy-human binding, scope resolution, credential revocation, service disable/reactivation
+fencing, identity and provider disable, audit-chain
 integrity, and the shipped controller/remote-agent PostgreSQL spine. The final
 ticket close additionally requires rollback/restore evidence and independent
 security review; until those receipts are attached, the board remains ACTIVE.

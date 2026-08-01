@@ -785,7 +785,7 @@ fn openapi_document() -> Value {
                     "type": "object",
                     "required": ["refresh_token"],
                     "properties": {
-                        "refresh_token": {"type": "string", "minLength": 1, "maxLength": 4096}
+                        "refresh_token": {"type": "string", "minLength": 32, "maxLength": 512}
                     },
                     "additionalProperties": false
                 },

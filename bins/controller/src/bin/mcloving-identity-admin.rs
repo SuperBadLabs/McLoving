@@ -98,8 +98,31 @@ async fn main() -> Result<()> {
                 .context("revoke service credential")?;
             println!("credential_id={credential_id} revoked={revoked}");
         }
+        "provider-status" => {
+            let organization_id = command.uuid("organization")?;
+            let provider_id = command.uuid("provider")?;
+            let expected_generation = command.positive_i64("expected-generation")?;
+            let enabled = parse_enabled(&command.required("enabled")?)?;
+            let reason = command.required("reason")?;
+            let actor = command.required("actor")?;
+            command.finish()?;
+            let generation = store
+                .transition_identity_provider_enabled(
+                    organization_id,
+                    provider_id,
+                    expected_generation,
+                    enabled,
+                    &reason,
+                    &actor,
+                )
+                .await
+                .context("transition identity-provider status")?;
+            println!(
+                "provider_id={provider_id} enabled={enabled} configuration_generation={generation}"
+            );
+        }
         action => bail!(
-            "unsupported identity-admin action {action:?}; expected provision-human, lifecycle, or revoke-service-credential"
+            "unsupported identity-admin action {action:?}; expected provision-human, lifecycle, revoke-service-credential, or provider-status"
         ),
     }
     pool.close().await;
@@ -186,6 +209,14 @@ fn parse_lifecycle(value: &str) -> Result<IdentityLifecycle> {
     }
 }
 
+fn parse_enabled(value: &str) -> Result<bool> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => bail!("--enabled must be true or false"),
+    }
+}
+
 fn parse_sha256(value: &str) -> Result<[u8; 32]> {
     if value.len() != 64 {
         bail!("digest length is not 64");
@@ -246,5 +277,8 @@ mod tests {
             IdentityLifecycle::Disabled
         ));
         assert!(parse_lifecycle("enabled").is_err());
+        assert!(parse_enabled("true").expect("true is canonical"));
+        assert!(!parse_enabled("false").expect("false is canonical"));
+        assert!(parse_enabled("TRUE").is_err());
     }
 }

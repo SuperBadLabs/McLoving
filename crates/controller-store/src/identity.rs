@@ -319,6 +319,77 @@ impl Store {
         Ok(provider_from_write(input))
     }
 
+    pub async fn transition_identity_provider_enabled(
+        &self,
+        organization_id: Uuid,
+        provider_id: Uuid,
+        expected_configuration_generation: i64,
+        enabled: bool,
+        reason: &str,
+        actor_subject: &str,
+    ) -> Result<i64, StoreError> {
+        validate_canonical(reason, "provider status reason", 1024)?;
+        validate_canonical(actor_subject, "actor subject", 512)?;
+        if expected_configuration_generation <= 0 {
+            return invalid("expected provider configuration generation must be positive");
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let current = sqlx::query_as::<_, (i64, bool)>(
+            "SELECT configuration_generation, enabled
+             FROM identity_providers
+             WHERE organization_id = $1 AND provider_id = $2
+             FOR UPDATE",
+        )
+        .bind(organization_id)
+        .bind(provider_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::IdentityConflict("OIDC provider is unknown".to_owned()))?;
+        if current.0 != expected_configuration_generation {
+            return Err(StoreError::IdentityConflict(
+                "identity-provider configuration generation is stale".to_owned(),
+            ));
+        }
+        if current.1 == enabled {
+            tx.commit().await?;
+            return Ok(current.0);
+        }
+        let generation = current.0.checked_add(1).ok_or_else(|| {
+            StoreError::InvalidIdentityOperation(
+                "identity-provider configuration generation overflow".to_owned(),
+            )
+        })?;
+        sqlx::query(
+            "UPDATE identity_providers
+             SET enabled = $3, configuration_generation = $4,
+                 updated_at = clock_timestamp()
+             WHERE organization_id = $1 AND provider_id = $2",
+        )
+        .bind(organization_id)
+        .bind(provider_id)
+        .bind(enabled)
+        .bind(generation)
+        .execute(&mut *tx)
+        .await?;
+        append_audit_record(
+            &mut tx,
+            organization_id,
+            "identity",
+            actor_subject,
+            "identity_provider_status_transitioned",
+            &format!("identity-provider:{provider_id}"),
+            json!({
+                "from_enabled": current.1,
+                "to_enabled": enabled,
+                "configuration_generation": generation,
+                "reason": reason,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(generation)
+    }
+
     pub async fn provision_human_identity(
         &self,
         input: &NewHumanIdentity,
@@ -1371,6 +1442,23 @@ impl Store {
         .bind(generation)
         .execute(&mut *tx)
         .await?;
+        let revoked_service_credentials =
+            if current_state == IdentityLifecycle::Active && next != IdentityLifecycle::Active {
+                sqlx::query(
+                    "UPDATE service_credentials
+                 SET revoked_at_unix_ms = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint,
+                     revocation_reason = 'identity_lifecycle_transition'
+                 WHERE organization_id = $1 AND identity_id = $2
+                   AND revoked_at_unix_ms IS NULL",
+                )
+                .bind(organization_id)
+                .bind(identity_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+            } else {
+                0
+            };
         append_audit_record(
             &mut tx,
             organization_id,
@@ -1378,7 +1466,12 @@ impl Store {
             actor_subject,
             "identity_lifecycle_transitioned",
             &format!("identity:{identity_id}"),
-            json!({"from": current_state, "to": next, "generation": generation}),
+            json!({
+                "from": current_state,
+                "to": next,
+                "generation": generation,
+                "revoked_service_credentials": revoked_service_credentials,
+            }),
         )
         .await?;
         tx.commit().await?;
