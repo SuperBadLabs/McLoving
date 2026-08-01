@@ -2,7 +2,7 @@
 
 This strict-YAML ledger reconciles every shared-library observation in the
 sealed 228-file Mario oracle. It corrects two comment-only scanner matches and
-adds four live runtime loads missed by the frozen inventory scanner.
+adds seven live runtime loads missed by the frozen inventory scanner.
 
 Seven distinct public references (eight live occurrences) are pinned to exact
 SCM commits and normalized `vars`, `src`, and `resources` digests. The worker
@@ -10,7 +10,7 @@ may ingest only those prefetched, read-only trees. It receives no network or
 credential authority and performs no Groovy, CPS, sandbox, plugin, or
 controller execution.
 
-Source verification is not execution certification. All 20 live observations
+Source verification is not execution certification. All 23 live observations
 remain explicitly unsupported and `executable_cases` is exactly zero.
 
 The immutable prefetched source tree originated at

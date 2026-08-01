@@ -322,6 +322,7 @@ pub fn verify_corpus(
     verify_source_manifest(corpus_root)?;
     let mut source_files = BTreeSet::new();
     let mut locations = BTreeSet::new();
+    let mut live_locations = BTreeSet::new();
     for observation in &ledger.observations {
         validate_relative(&observation.source_file)?;
         if !locations.insert((observation.source_file.as_str(), observation.line)) {
@@ -377,7 +378,16 @@ pub fn verify_corpus(
                 "live observation is on a comment line",
             ));
         }
+        if observation.evidence == Evidence::Live {
+            live_locations.insert((observation.source_file.clone(), observation.line));
+        }
         source_files.insert(observation.source_file.as_str());
+    }
+    if live_locations != discover_live_library_locations(corpus_root)? {
+        return Err(LibraryError::new(
+            "E_CORPUS_COVERAGE",
+            "live library locations do not match the independently discovered corpus calls",
+        ));
     }
     Ok(CorpusReceipt {
         observations: ledger.observations.len(),
@@ -589,6 +599,37 @@ fn verify_source_manifest(corpus_root: &Path) -> Result<(), LibraryError> {
         }
     }
     Ok(())
+}
+
+fn discover_live_library_locations(
+    corpus_root: &Path,
+) -> Result<BTreeSet<(String, u64)>, LibraryError> {
+    let mut locations = BTreeSet::new();
+    for entry in fs::read_dir(corpus_root)
+        .map_err(|error| LibraryError::new("E_CORPUS_IO", error.to_string()))?
+    {
+        let entry = entry.map_err(|error| LibraryError::new("E_CORPUS_IO", error.to_string()))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| LibraryError::new("E_CORPUS_ENTRY", "non-UTF-8 corpus filename"))?;
+        let bytes = read_regular(entry.path(), MAX_LEDGER_BYTES)?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|_| LibraryError::new("E_CORPUS_UTF8", "corpus source is not UTF-8"))?;
+        for (index, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let runtime_call = trimmed.strip_prefix("library").is_some_and(|rest| {
+                rest.starts_with('(') || rest.chars().next().is_some_and(char::is_whitespace)
+            });
+            if trimmed.starts_with("@Library(") || runtime_call {
+                let line = u64::try_from(index + 1).map_err(|_| {
+                    LibraryError::new("E_CORPUS_LINE", "source line number overflow")
+                })?;
+                locations.insert((name.clone(), line));
+            }
+        }
+    }
+    Ok(locations)
 }
 
 fn parse_yaml<T: for<'de> Deserialize<'de>>(
@@ -832,9 +873,9 @@ fn validate_ledger(ledger: &Ledger) -> Result<(), LibraryError> {
         || coverage.resolved_references != ledger.resolutions.len() as u64
         || coverage.resolved_live_occurrences != resolved_live
         || coverage.executable_cases != 0
-        || live != 20
+        || live != 23
         || comments != 2
-        || references.len() != 21
+        || references.len() != 24
     {
         return Err(LibraryError::new(
             "E_COVERAGE",
@@ -1217,7 +1258,7 @@ mod tests {
 
     fn observation(index: usize, source_sha256: String) -> Observation {
         let (evidence, reference, resolution_id, disposition, dependency, phase, requirement) =
-            if index >= 20 {
+            if index >= 23 {
                 (
                     Evidence::CommentFalsePositive,
                     format!("comment-lib-{index}@main"),
@@ -1293,7 +1334,7 @@ mod tests {
                 unresolved_library: Disposition::Unsupported,
                 source_input: "prefetched-digest-verified-read-only".to_owned(),
             },
-            observations: (0..22)
+            observations: (0..25)
                 .map(|index| observation(index, source_digests[index].clone()))
                 .collect(),
             resolutions: (0..7).map(resolution).collect(),
@@ -1301,7 +1342,7 @@ mod tests {
                 corpus_sources: 228,
                 indexed_occurrences: 18,
                 indexed_distinct_references: 17,
-                corrected_live_occurrences: 20,
+                corrected_live_occurrences: 23,
                 comment_false_positives: 2,
                 resolved_references: 7,
                 resolved_live_occurrences: 8,
@@ -1326,7 +1367,7 @@ mod tests {
     #[test]
     fn exact_bundle_is_accepted_and_extra_entry_is_rejected() {
         let temp = TempDir::new().expect("tempdir");
-        let digests = vec![sha256_hex(b"fixture"); 22];
+        let digests = vec![sha256_hex(b"fixture"); 25];
         write_bundle(temp.path(), &ledger(&digests));
         let receipt = verify_bundle(temp.path()).expect("valid bundle");
         assert_eq!(
@@ -1336,7 +1377,7 @@ mod tests {
                 receipt.resolutions,
                 receipt.executable
             ),
-            (22, 20, 7, 0)
+            (25, 23, 7, 0)
         );
         fs::write(temp.path().join("unexpected"), b"no").expect("extra entry");
         assert_eq!(
@@ -1347,7 +1388,7 @@ mod tests {
 
     #[test]
     fn coverage_and_policy_fail_closed() {
-        let digests = vec![sha256_hex(b"fixture"); 22];
+        let digests = vec![sha256_hex(b"fixture"); 25];
         let mut candidate = ledger(&digests);
         candidate.coverage.executable_cases = 1;
         assert_eq!(
@@ -1384,6 +1425,22 @@ mod tests {
     }
 
     #[test]
+    fn independent_discovery_covers_every_live_library_form() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_root = workspace.join("migration/mario-jenkins-oracle-228/corpus-v1/sources");
+        let locations =
+            discover_live_library_locations(&source_root).expect("discover live library calls");
+        assert_eq!(locations.len(), 23);
+        for expected in [
+            ("Ableton_python-pipeline-utils.Jenkinsfile", 4),
+            ("concur_jenkins-yml-workflowLibs.Jenkinsfile", 2),
+            ("jenkins-zh_jenkins-cli.Jenkinsfile", 1),
+        ] {
+            assert!(locations.contains(&(expected.0.to_owned(), expected.1)));
+        }
+    }
+
+    #[test]
     fn corpus_receipt_binds_lines_and_digests() {
         let temp = TempDir::new().expect("tempdir");
         let corpus = temp.path().join("corpus");
@@ -1401,7 +1458,7 @@ mod tests {
         )
         .expect("copy source manifest");
         let receipt = verify_corpus(&bundle, &corpus).expect("valid corpus");
-        assert_eq!((receipt.observations, receipt.files), (22, 19));
+        assert_eq!((receipt.observations, receipt.files), (25, 21));
         fs::write(
             corpus.join("AmanPathak-DevOps_EKS-Terraform-GitHub-Actions.Jenkinsfile"),
             b"@Library('hidden-substitution@main') _\n",

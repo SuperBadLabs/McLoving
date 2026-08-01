@@ -997,8 +997,9 @@ parallel with repository implementation.
 `MIG-005` is complete. The strict-YAML
 `mario-jenkins-oracle-228-shared-libraries-v1` ledger binds the frozen
 inventory, job graph, runtime-dependency inventory, and exact 228-file corpus.
-It reconciles 20 live loads plus two comment-only scanner false positives,
-including four runtime calls absent from the frozen naive scanner. Seven
+It reconciles 23 live loads plus two comment-only scanner false positives,
+including seven runtime calls absent from the frozen naive scanner. A bounded
+independent source walk finds the same 23 active load locations. Seven
 distinct public references covering eight live occurrences resolve to exact
 SCM commits. Their normalized `vars`, `src`, and `resources` inputs are sealed
 read-only outside the repository: 518 files and 1,400,368 bytes, with no
@@ -1008,14 +1009,16 @@ and host-ambiguous loads remain explicitly unsupported. Source verification
 does not grant Groovy, CPS, sandbox, plugin, controller, SCM, or credential
 authority; executable cases remain exactly zero. The ledger raw and semantic
 SHA-256 values are
-`c38a4c7374bf5bd205bbd2c63d2c6092362d28ae05055583f1ca38e1c0a3e169`
+`fb6ff37c33aba6288e9632e5d0993adf634d840c5fe21f6345dea5350f28e35b`
 and
-`56be6a979931fa703ef815ffc5a7299235d6840e6e4d46471877d0fdc08d772a`.
+`f925714595d48efcf29ea9c64696a99cd361b6a4a9b847c2d96b807a63add309`.
 The authoritative review-repaired external evidence is
-`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T110935Z-v5`; its
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T111705Z-v6`; its
 self-excluding manifest SHA-256 is
-`80032ba8401f0aa8b5ef974b043f5bb4172b887a5078842ee26bb982048a6f24`
-and covers 522 files. The review-repair predecessor
+`50bc61768682e225c6536d04db9dc940cf65a9ef164f956e336ca4f624448a5e`
+and covers 522 files. The non-recursive README predecessor
+`80032ba8401f0aa8b5ef974b043f5bb4172b887a5078842ee26bb982048a6f24`,
+review-repair predecessor
 `5387322af011b50fcb3d4200833d7a02b79a287518de4b55e62a412c33892517`,
 full-corpus-lock predecessor
 `f290fe2090dba32b2af907b8f55e60035fb14a14ce499a21d8560bce93a2daf7`,

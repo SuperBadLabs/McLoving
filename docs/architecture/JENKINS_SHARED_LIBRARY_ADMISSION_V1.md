@@ -33,9 +33,11 @@ The v1 ledger is bound to:
 
 The frozen scanner recorded 18 occurrences / 17 distinct reference strings.
 Source reconciliation classifies two of those occurrences as comment-only
-false positives and finds four additional live runtime calls. The resulting
-denominator is 20 live observations plus two comment-only observations across
-19 source files and 21 distinct reference strings.
+false positives and finds seven additional live runtime calls. The resulting
+denominator is 23 live observations plus two comment-only observations across
+21 source files and 24 distinct reference strings. A separate bounded source
+walk discovers all 23 active `@Library` annotations and `library` calls and
+must match the ledger's live source locations exactly.
 
 Seven distinct public references, covering eight live observations, resolve
 to exact commits. Every observation records source file, source byte digest,
@@ -64,14 +66,16 @@ The repository bundle is
 The sealed source root is
 `/sn8100/runs/mcloving/mig005-shared-libraries-20260801T103457Z/sources`.
 It contains 518 files / 1,400,368 bytes. The ledger raw SHA-256 is
-`c38a4c7374bf5bd205bbd2c63d2c6092362d28ae05055583f1ca38e1c0a3e169`;
+`fb6ff37c33aba6288e9632e5d0993adf634d840c5fe21f6345dea5350f28e35b`;
 its canonical semantic SHA-256 is
-`56be6a979931fa703ef815ffc5a7299235d6840e6e4d46471877d0fdc08d772a`.
+`f925714595d48efcf29ea9c64696a99cd361b6a4a9b847c2d96b807a63add309`.
 The authoritative review-repaired external evidence is
-`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T110935Z-v5`. Its
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T111705Z-v6`. Its
 self-excluding manifest covers 522 files and has SHA-256
-`80032ba8401f0aa8b5ef974b043f5bb4172b887a5078842ee26bb982048a6f24`.
-The review-repair predecessor remains immutable at manifest
+`50bc61768682e225c6536d04db9dc940cf65a9ef164f956e336ca4f624448a5e`.
+The non-recursive README predecessor remains immutable at manifest
+`80032ba8401f0aa8b5ef974b043f5bb4172b887a5078842ee26bb982048a6f24`;
+the review-repair predecessor remains immutable at manifest
 `5387322af011b50fcb3d4200833d7a02b79a287518de4b55e62a412c33892517`;
 the full-corpus-lock predecessor remains immutable at manifest
 `f290fe2090dba32b2af907b8f55e60035fb14a14ce499a21d8560bce93a2daf7`;

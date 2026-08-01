@@ -48,6 +48,22 @@ observations:
     resolution_id: null
     disposition: unresolved-unsupported
     reason: simple library name requires unavailable Jenkins global-library SCM and credential mapping
+  - observation_id: ableton-python-utils-dynamic
+    job_id: Ableton_python-pipeline-utils
+    source_file: Ableton_python-pipeline-utils.Jenkinsfile
+    source_sha256: 541ede0e8e35b5c87c42af09c47f6b31c3e171dddbe51eeed9fa46b128cece1b
+    line: 4
+    syntax: runtime-call
+    evidence: live
+    reference: 'python-utils@${params.JENKINS_COMMIT}'
+    load_phase: runtime
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: dynamic-unresolved
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: runtime-computed parameter revision cannot be pinned from the frozen source alone
   - observation_id: blazemeter-jenkins-library
     job_id: Blazemeter_taurus
     source_file: Blazemeter_taurus.Jenkinsfile
@@ -192,6 +208,22 @@ observations:
     resolution_id: cloudogu-ces-build-lib-5.0.0
     disposition: source-verified-unsupported
     reason: source is pinned but Groovy, CPS, sandbox, plugin, and step execution are not certified
+  - observation_id: concur-plworkflowlibs-dynamic
+    job_id: concur_jenkins-yml-workflowLibs
+    source_file: concur_jenkins-yml-workflowLibs.Jenkinsfile
+    source_sha256: 5f3ff6c25b67bc3df0104d1c205b6297174974c308dafd501f27fc62096b4931
+    line: 2
+    syntax: runtime-call
+    evidence: live
+    reference: 'plWorkflowLibs@$BRANCH_NAME'
+    load_phase: runtime
+    sandbox: required
+    cps: required
+    plugin_dependencies: [pipeline-groovy-lib]
+    credential_dependency: dynamic-unresolved
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: runtime-computed branch revision cannot be pinned from the frozen source alone
   - observation_id: darinpope-github-api-global-lib-master
     job_id: darinpope_jenkinsfile-library
     source_file: darinpope_jenkinsfile-library.Jenkinsfile
@@ -336,6 +368,22 @@ observations:
     resolution_id: null
     disposition: unresolved-unsupported
     reason: repository-like name omits an approved host and Jenkins global-library mapping
+  - observation_id: jenkins-zh-modern-scm-empty-ref
+    job_id: jenkins-zh_jenkins-cli
+    source_file: jenkins-zh_jenkins-cli.Jenkinsfile
+    source_sha256: e8f9ccd76aff24c7ef2371265fef02dd2a3b5859aaa428cc9b2b6fda2b6e7544
+    line: 1
+    syntax: runtime-call
+    evidence: live
+    reference: jenkins_zh@
+    load_phase: runtime
+    sandbox: required
+    cps: required
+    plugin_dependencies: [git, pipeline-groovy-lib, scm-api]
+    credential_dependency: scm-reference-unresolved
+    resolution_id: null
+    disposition: unresolved-unsupported
+    reason: explicit public modernSCM remote has an empty requested ref and requires unavailable Jenkins SCM/plugin resolution
   - observation_id: sidd-harth-slack-notifications
     job_id: sidd-harth_apigee-cicd
     source_file: sidd-harth_apigee-cicd.Jenkinsfile
@@ -443,7 +491,7 @@ coverage:
   corpus_sources: 228
   indexed_occurrences: 18
   indexed_distinct_references: 17
-  corrected_live_occurrences: 20
+  corrected_live_occurrences: 23
   comment_false_positives: 2
   resolved_references: 7
   resolved_live_occurrences: 8
