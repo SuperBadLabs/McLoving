@@ -30,6 +30,18 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_JENKINS_BUILD",
         ),
         (
+            "jenkins/build.json",
+            "\"building\":false",
+            "\"building\":true",
+            "E_JENKINS_BUILD",
+        ),
+        (
+            "jenkins/build.json",
+            "\"inProgress\":false",
+            "\"inProgress\":true",
+            "E_JENKINS_BUILD",
+        ),
+        (
             "jenkins/wfapi.json",
             "\"id\":\"1\"",
             "\"id\":\"2\"",
@@ -183,6 +195,18 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "mcloving/mcloving-raw.json",
             "\"priority\": 0,\n      \"status\": \"succeeded\"",
             "\"priority\": 0,\n      \"status\": \"failed\"",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
+            "\"logical_outcome\": \"succeeded\"",
+            "\"logical_outcome\": \"failed\"",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
+            "\"retry_of\": null",
+            "\"retry_of\": \"00000000-0000-0000-0000-000000000001\"",
             "E_MCLOVING",
         ),
         (

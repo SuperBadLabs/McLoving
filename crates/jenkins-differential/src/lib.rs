@@ -577,6 +577,8 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
         "E_JENKINS_BUILD",
     )?;
     exact_string(&build, &["result"], "SUCCESS", "E_JENKINS_BUILD")?;
+    exact_bool(&build, &["building"], false, "E_JENKINS_BUILD")?;
+    exact_bool(&build, &["inProgress"], false, "E_JENKINS_BUILD")?;
     exact_u64(&build, &["number"], 1, "E_JENKINS_BUILD")?;
     exact_empty_array(&build, &["artifacts"], "E_JENKINS_BUILD")?;
 
@@ -1122,6 +1124,7 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
     exact_string(&nodes[0], &["node_key"], "build", "E_MCLOVING")?;
     exact_string(&nodes[0], &["node_id"], MCLOVING_NODE_ID, "E_MCLOVING")?;
     exact_string(&nodes[0], &["status"], "succeeded", "E_MCLOVING")?;
+    exact_string(&nodes[0], &["logical_outcome"], "succeeded", "E_MCLOVING")?;
     exact_string(&nodes[0], &["required_platform"], "linux", "E_MCLOVING")?;
     exact_string(
         &nodes[0],
@@ -1130,6 +1133,7 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         "E_MCLOVING",
     )?;
     exact_u64(&attempts[0], &["ordinal"], 1, "E_MCLOVING")?;
+    exact_null(&attempts[0], &["retry_of"], "E_MCLOVING")?;
     exact_string(
         &attempts[0],
         &["attempt_id"],
