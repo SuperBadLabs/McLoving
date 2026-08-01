@@ -1,0 +1,2205 @@
+//! Deterministic, lossless Jenkins/McLoving persistent-state transforms.
+//!
+//! The transfer boundary is deliberately pure. It validates an immutable source
+//! export against an independently pinned binding, merges only stronger
+//! destination protections, and returns canonical bytes plus a verification
+//! digest. Persistence and execution authority remain separate concerns.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::{self, Write},
+    path::Path,
+};
+
+#[cfg(target_os = "linux")]
+use std::fs::File;
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+
+pub const STATE_TRANSFER_SCHEMA_V1: &str = "mcloving.state-transfer/v1";
+pub const MAX_TRANSFER_JOBS: usize = 10_000;
+pub const MAX_TRANSFER_RECORDS: usize = 1_000_000;
+pub const MAX_CANONICAL_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_CANONICAL_BINDING_BYTES: usize = 1024 * 1024;
+pub const MAX_FILESYSTEM_ENTRIES_PER_OBJECT: usize = 1_000_000;
+pub const MAX_FILESYSTEM_PATH_BYTES: usize = 4_096;
+pub type Digest = [u8; 32];
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferDirection {
+    JenkinsToMcLoving,
+    McLovingToJenkins,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictPolicy {
+    RejectDivergence,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SystemIdentity {
+    pub kind: String,
+    pub instance_id: String,
+    pub generation: String,
+    pub configuration_digest: Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TransferBinding {
+    pub schema: String,
+    pub direction: TransferDirection,
+    pub source: SystemIdentity,
+    pub destination: SystemIdentity,
+    pub source_export_digest: Digest,
+    pub transform_implementation_digest: Digest,
+    pub transform_configuration_digest: Digest,
+    pub conflict_policy: ConflictPolicy,
+    pub provenance: String,
+}
+
+/// Independently pinned identities required before source bytes are trusted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpectedBinding {
+    pub direction: TransferDirection,
+    pub source: SystemIdentity,
+    pub destination: SystemIdentity,
+    pub source_export_digest: Digest,
+    /// Canonical digest independently pinned by the source-export boundary.
+    pub input_bundle_digest: Digest,
+    pub transform_implementation_digest: Digest,
+    pub transform_configuration_digest: Digest,
+    pub conflict_policy: ConflictPolicy,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecordProvenance {
+    pub id: String,
+    pub source_digest: Digest,
+    pub provenance: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildResult {
+    Succeeded,
+    Failed,
+    Aborted,
+    Unstable,
+    NotBuilt,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RetentionPolicy {
+    pub policy_id: String,
+    pub policy_version: String,
+    pub policy_digest: Digest,
+    pub retain_until_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LegalHold {
+    pub record: RecordProvenance,
+    pub hold_id: String,
+    pub scope: String,
+    pub reason: String,
+    pub placed_at_unix_ms: i64,
+    pub generation: u64,
+    pub release_authority: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Protection {
+    pub retention: RetentionPolicy,
+    /// Only active holds cross the boundary. A transfer can never release one.
+    pub active_holds: Vec<LegalHold>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ChangeEntry {
+    pub record: RecordProvenance,
+    pub commit: String,
+    pub author: String,
+    pub message_digest: Digest,
+    pub paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ScmState {
+    pub record: RecordProvenance,
+    pub provider: String,
+    pub repository: String,
+    pub reference: String,
+    pub revision: String,
+    pub previous_revision: Option<String>,
+    pub changes: Vec<ChangeEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectKind {
+    Artifact,
+    RetainedWorkspace,
+    PersistentState,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DataClassification {
+    Public,
+    Internal,
+    Confidential,
+    SecretMaterial,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SecretReference {
+    pub provider: String,
+    pub reference: String,
+    pub version: String,
+    pub keyed_digest: Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HeldEvidence {
+    pub custodian: String,
+    pub reference: String,
+    pub content_digest: Digest,
+    pub release_authority: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SecretDisposition {
+    Reference(SecretReference),
+    HeldEvidence(HeldEvidence),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DataBinding {
+    pub classification: DataClassification,
+    pub secret_disposition: Option<SecretDisposition>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemEntryKind {
+    Directory,
+    RegularFile,
+}
+
+/// A canonical, non-following filesystem inventory. Symlinks, hard links,
+/// devices, sockets and FIFOs are intentionally not representable.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FilesystemEntry {
+    pub path: String,
+    pub kind: FilesystemEntryKind,
+    pub content_digest: Option<Digest>,
+    pub bytes: u64,
+    pub data_binding: DataBinding,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ObjectState {
+    pub record: RecordProvenance,
+    pub kind: ObjectKind,
+    pub logical_name: String,
+    pub content_digest: Digest,
+    pub bytes: u64,
+    pub producer_build_number: Option<u64>,
+    pub retrieval: RetrievalMetadata,
+    pub data_binding: DataBinding,
+    pub filesystem_entries: Vec<FilesystemEntry>,
+    pub protection: Protection,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PersistentDependency {
+    pub record: RecordProvenance,
+    pub key: String,
+    pub value_digest: Digest,
+    pub data_binding: DataBinding,
+    pub protection: Protection,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RetrievalMetadata {
+    pub media_type: String,
+    pub logical_locator: String,
+    pub content_digest: Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TriggerCause {
+    pub record: RecordProvenance,
+    pub trigger_kind: String,
+    pub external_id: String,
+    pub actor_subject: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InvocationParameter {
+    pub record: RecordProvenance,
+    pub name: String,
+    pub type_name: String,
+    pub public_value_digest: Option<Digest>,
+    pub data_binding: DataBinding,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AttemptState {
+    pub record: RecordProvenance,
+    pub ordinal: u32,
+    pub retry: Option<AttemptRetryState>,
+    pub result: BuildResult,
+    pub terminal_reason: Option<AttemptTerminalReason>,
+    pub queued_at_unix_ms: i64,
+    /// When this attempt's dependency generation became eligible to run.
+    /// Blocked or skipped attempts can remain unready.
+    pub ready_at_unix_ms: Option<i64>,
+    pub started_at_unix_ms: Option<i64>,
+    pub ended_at_unix_ms: i64,
+    pub audit_digest: Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AttemptRetryState {
+    pub previous_ordinal: u32,
+    pub reason: AttemptRetryReason,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptRetryReason {
+    Failed,
+    DependencyNotSucceeded,
+    FailFastSkipped,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptTerminalReason {
+    CancelledBeforeExecution,
+    DagCancelledBeforeExecution,
+    DependencyNotSucceeded,
+    FailFastSkipped,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GraphDependencyState {
+    pub parent_node_id: String,
+    pub condition: GraphDependencyCondition,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphDependencyCondition {
+    Succeeded,
+    Completed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GraphNodeState {
+    pub record: RecordProvenance,
+    pub node_id: String,
+    pub stage_path: String,
+    pub node_kind: String,
+    pub dependencies: Vec<GraphDependencyState>,
+    pub result: BuildResult,
+    pub attempts: Vec<AttemptState>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ApprovalState {
+    pub record: RecordProvenance,
+    pub approval_id: String,
+    pub policy_digest: Digest,
+    pub approver_subject: String,
+    pub submitted_value_digests: BTreeMap<String, Digest>,
+    pub decided_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NormalizedTestState {
+    pub record: RecordProvenance,
+    pub suite: String,
+    pub name: String,
+    pub status: String,
+    pub duration_ms: u64,
+    pub details_digest: Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LogState {
+    pub record: RecordProvenance,
+    pub sequence: u64,
+    pub content_digest: Digest,
+    pub bytes: u64,
+    pub data_binding: DataBinding,
+    pub retrieval: RetrievalMetadata,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BuildState {
+    pub record: RecordProvenance,
+    pub source_queue_id: String,
+    pub source_build_id: String,
+    pub trigger: TriggerCause,
+    pub invocation_parameters: Vec<InvocationParameter>,
+    pub number: u64,
+    pub result: BuildResult,
+    pub queued_at_unix_ms: i64,
+    pub started_at_unix_ms: i64,
+    pub ended_at_unix_ms: i64,
+    pub checkouts: Vec<ScmState>,
+    pub graph_nodes: Vec<GraphNodeState>,
+    pub approvals: Vec<ApprovalState>,
+    pub normalized_tests: Vec<NormalizedTestState>,
+    pub logs: Vec<LogState>,
+    pub artifacts: Vec<ObjectState>,
+    pub protection: Protection,
+    pub audit_digest: Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct JobState {
+    pub record: RecordProvenance,
+    pub source_job_id: String,
+    pub target_pipeline_id: String,
+    pub next_build_number: u64,
+    pub previous_result: Option<BuildResult>,
+    pub builds: Vec<BuildState>,
+    pub retained_workspaces: Vec<ObjectState>,
+    pub persistent_dependencies: Vec<PersistentDependency>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StateBundle {
+    pub binding: TransferBinding,
+    /// Complete record denominator from the immutable source export.
+    pub expected_record_ids: Vec<String>,
+    pub jobs: Vec<JobState>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferPlan {
+    pub bundle: StateBundle,
+    pub binding_digest: Digest,
+    pub bundle_digest: Digest,
+    pub canonical_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangePredicate {
+    pub path_suffixes: Vec<String>,
+    pub message_digests: Vec<Digest>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PredicateDecision {
+    pub selected: bool,
+    pub matched_change_record_ids: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaterializationLimits {
+    pub max_entries: usize,
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaterializationReceipt {
+    pub entry_count: usize,
+    pub file_count: usize,
+    pub total_bytes: u64,
+    pub content_digests: BTreeMap<String, Digest>,
+}
+
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum TransferError {
+    #[error("unsupported state-transfer schema {0}")]
+    UnsupportedSchema(String),
+    #[error("state-transfer binding mismatch: {0}")]
+    BindingMismatch(&'static str),
+    #[error("invalid state-transfer field {0}")]
+    InvalidField(String),
+    #[error("duplicate state-transfer record {0}")]
+    DuplicateRecord(String),
+    #[error("missing state-transfer records: {0:?}")]
+    MissingRecords(Vec<String>),
+    #[error("unexpected state-transfer records: {0:?}")]
+    UnexpectedRecords(Vec<String>),
+    #[error("duplicate state-transfer job identity {0}")]
+    DuplicateJob(String),
+    #[error("build sequence gap for job {job}: expected {expected}, found {found}")]
+    BuildGap {
+        job: String,
+        expected: u64,
+        found: u64,
+    },
+    #[error("previous-result mismatch for job {0}")]
+    PreviousResultMismatch(String),
+    #[error("SCM baseline mismatch for job {job} build {build}")]
+    ScmBaselineMismatch { job: String, build: u64 },
+    #[error("divergent active legal hold {0}")]
+    DivergentHold(String),
+    #[error("equal retention deadline has divergent policy for subject {0:?}")]
+    DivergentRetention(Digest),
+    #[error("protection records diverged for subject {0:?}")]
+    DivergentProtection(Digest),
+    #[error("canonical state serialization failed: {0}")]
+    Serialization(String),
+    #[error("state-transfer materialization failed: {0}")]
+    Materialization(String),
+    #[error("safe state-transfer materialization is unsupported on this platform")]
+    UnsupportedMaterializationPlatform,
+}
+
+/// Validates and transforms one immutable bundle.
+///
+/// `existing_protections` is keyed by the protected record's source digest.
+/// Retention is merged monotonically and active holds are unioned. The same
+/// inputs always produce byte-identical output.
+pub fn transform(
+    bundle: &StateBundle,
+    expected: &ExpectedBinding,
+    existing_protections: &BTreeMap<Digest, Protection>,
+) -> Result<TransferPlan, TransferError> {
+    validate_bundle(bundle, expected)?;
+    let input_bundle_digest = sha256(&canonical_bytes(bundle)?);
+    validate_digest(expected.input_bundle_digest, "expected input bundle digest")?;
+    if input_bundle_digest != expected.input_bundle_digest {
+        return Err(TransferError::BindingMismatch("input bundle digest"));
+    }
+    for (subject, protection) in existing_protections {
+        validate_digest(*subject, "existing protection subject digest")?;
+        validate_protection(protection)?;
+    }
+
+    let mut transformed = bundle.clone();
+    for job in &mut transformed.jobs {
+        for build in &mut job.builds {
+            merge_existing(
+                build.record.source_digest,
+                &mut build.protection,
+                existing_protections,
+            )?;
+            for artifact in &mut build.artifacts {
+                merge_existing(
+                    artifact.record.source_digest,
+                    &mut artifact.protection,
+                    existing_protections,
+                )?;
+            }
+        }
+        for workspace in &mut job.retained_workspaces {
+            merge_existing(
+                workspace.record.source_digest,
+                &mut workspace.protection,
+                existing_protections,
+            )?;
+        }
+        for dependency in &mut job.persistent_dependencies {
+            merge_existing(
+                dependency.record.source_digest,
+                &mut dependency.protection,
+                existing_protections,
+            )?;
+        }
+    }
+    let protected_subjects = protected_subjects(&transformed);
+    let mut expected_records: BTreeSet<_> = transformed.expected_record_ids.drain(..).collect();
+    for subject in protected_subjects {
+        if let Some(protection) = existing_protections.get(&subject) {
+            expected_records.extend(
+                protection
+                    .active_holds
+                    .iter()
+                    .map(|hold| hold.record.id.clone()),
+            );
+        }
+    }
+    transformed.expected_record_ids = expected_records.into_iter().collect();
+    validate_bundle(&transformed, expected)?;
+    let canonical_bytes = canonical_bytes(&transformed)?;
+    if canonical_bytes.len() > MAX_CANONICAL_BUNDLE_BYTES {
+        return Err(TransferError::InvalidField(
+            "canonical bundle exceeds byte limit".to_owned(),
+        ));
+    }
+    let bundle_digest = sha256(&canonical_bytes);
+    let binding_digest = sha256(&canonical_binding_bytes(&transformed.binding)?);
+    Ok(TransferPlan {
+        bundle: transformed,
+        binding_digest,
+        bundle_digest,
+        canonical_bytes,
+    })
+}
+
+fn protected_subjects(bundle: &StateBundle) -> BTreeSet<Digest> {
+    let mut subjects = BTreeSet::new();
+    for job in &bundle.jobs {
+        for build in &job.builds {
+            subjects.insert(build.record.source_digest);
+            subjects.extend(
+                build
+                    .artifacts
+                    .iter()
+                    .map(|artifact| artifact.record.source_digest),
+            );
+        }
+        subjects.extend(
+            job.retained_workspaces
+                .iter()
+                .map(|workspace| workspace.record.source_digest),
+        );
+        subjects.extend(
+            job.persistent_dependencies
+                .iter()
+                .map(|dependency| dependency.record.source_digest),
+        );
+    }
+    subjects
+}
+
+pub fn canonical_bytes(bundle: &StateBundle) -> Result<Vec<u8>, TransferError> {
+    canonical_bytes_of(
+        bundle,
+        MAX_CANONICAL_BUNDLE_BYTES,
+        "canonical bundle exceeds byte limit",
+    )
+}
+
+pub fn canonical_binding_bytes(binding: &TransferBinding) -> Result<Vec<u8>, TransferError> {
+    canonical_bytes_of(
+        binding,
+        MAX_CANONICAL_BINDING_BYTES,
+        "canonical binding exceeds byte limit",
+    )
+}
+
+/// Evaluates the transferred canonical change entries used by Jenkins
+/// `changeset`/`changelog` conditions. Mapping code resolves Jenkins patterns
+/// and regexes into these exact suffix/message-digest predicates before this
+/// state boundary is invoked.
+pub fn evaluate_change_predicate(
+    checkout: &ScmState,
+    predicate: &ChangePredicate,
+) -> Result<PredicateDecision, TransferError> {
+    validate_sorted_unique_strings(&predicate.path_suffixes, "predicate path suffixes")?;
+    if predicate.path_suffixes.is_empty() && predicate.message_digests.is_empty() {
+        return Err(TransferError::InvalidField(
+            "change predicate must contain at least one matcher".to_owned(),
+        ));
+    }
+    let mut previous_digest: Option<Digest> = None;
+    for digest in &predicate.message_digests {
+        validate_digest(*digest, "predicate message digest")?;
+        if previous_digest.is_some_and(|previous| previous >= *digest) {
+            return Err(TransferError::InvalidField(
+                "predicate message digests must be strictly sorted and unique".to_owned(),
+            ));
+        }
+        previous_digest = Some(*digest);
+    }
+    let mut matched = Vec::new();
+    for change in &checkout.changes {
+        let path_match = change.paths.iter().any(|path| {
+            predicate
+                .path_suffixes
+                .iter()
+                .any(|suffix| path.ends_with(suffix))
+        });
+        let message_match = predicate
+            .message_digests
+            .binary_search(&change.message_digest)
+            .is_ok();
+        if path_match || message_match {
+            matched.push(change.record.id.clone());
+        }
+    }
+    Ok(PredicateDecision {
+        selected: !matched.is_empty(),
+        matched_change_record_ids: matched,
+    })
+}
+
+/// Validates one independently authenticated checkout payload before any of
+/// its change records are allowed to influence predicate execution.
+pub fn validate_scm_checkout(checkout: &ScmState) -> Result<(), TransferError> {
+    validate_scm(checkout, &mut BTreeMap::new())
+}
+
+/// Returns all record-level provenance in canonical record-ID order.
+pub fn record_provenance(bundle: &StateBundle) -> Vec<RecordProvenance> {
+    let mut records = BTreeMap::new();
+    for job in &bundle.jobs {
+        collect_record(&mut records, &job.record);
+        for build in &job.builds {
+            collect_record(&mut records, &build.record);
+            collect_record(&mut records, &build.trigger.record);
+            for parameter in &build.invocation_parameters {
+                collect_record(&mut records, &parameter.record);
+            }
+            collect_hold_records(&mut records, &build.protection);
+            for scm in &build.checkouts {
+                collect_record(&mut records, &scm.record);
+                for change in &scm.changes {
+                    collect_record(&mut records, &change.record);
+                }
+            }
+            for node in &build.graph_nodes {
+                collect_record(&mut records, &node.record);
+                for attempt in &node.attempts {
+                    collect_record(&mut records, &attempt.record);
+                }
+            }
+            for approval in &build.approvals {
+                collect_record(&mut records, &approval.record);
+            }
+            for test in &build.normalized_tests {
+                collect_record(&mut records, &test.record);
+            }
+            for log in &build.logs {
+                collect_record(&mut records, &log.record);
+            }
+            for artifact in &build.artifacts {
+                collect_record(&mut records, &artifact.record);
+                collect_hold_records(&mut records, &artifact.protection);
+            }
+        }
+        for workspace in &job.retained_workspaces {
+            collect_record(&mut records, &workspace.record);
+            collect_hold_records(&mut records, &workspace.protection);
+        }
+        for dependency in &job.persistent_dependencies {
+            collect_record(&mut records, &dependency.record);
+            collect_hold_records(&mut records, &dependency.protection);
+        }
+    }
+    records.into_values().collect()
+}
+
+/// Returns effective protections keyed by the protected record digest.
+pub fn protections(bundle: &StateBundle) -> Result<BTreeMap<Digest, Protection>, TransferError> {
+    let mut protections = BTreeMap::new();
+    for job in &bundle.jobs {
+        for build in &job.builds {
+            insert_protection(
+                &mut protections,
+                build.record.source_digest,
+                &build.protection,
+            )?;
+            for artifact in &build.artifacts {
+                insert_protection(
+                    &mut protections,
+                    artifact.record.source_digest,
+                    &artifact.protection,
+                )?;
+            }
+        }
+        for workspace in &job.retained_workspaces {
+            insert_protection(
+                &mut protections,
+                workspace.record.source_digest,
+                &workspace.protection,
+            )?;
+        }
+        for dependency in &job.persistent_dependencies {
+            insert_protection(
+                &mut protections,
+                dependency.record.source_digest,
+                &dependency.protection,
+            )?;
+        }
+    }
+    Ok(protections)
+}
+
+pub fn sha256(bytes: &[u8]) -> Digest {
+    Sha256::digest(bytes).into()
+}
+
+/// Materializes a validated inventory without following filesystem links.
+///
+/// The destination root must already exist. On Linux every path component is
+/// resolved relative to an open directory descriptor with `openat2(2)` using
+/// `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS |
+/// RESOLVE_NO_XDEV`. Files are created exclusively, so existing files,
+/// hardlinks, devices, FIFOs and sockets are denied rather than overwritten.
+/// Secret material is never accepted as a literal payload.
+pub fn materialize_filesystem_entries(
+    root: &Path,
+    entries: &[FilesystemEntry],
+    payloads: &BTreeMap<String, Vec<u8>>,
+    limits: MaterializationLimits,
+) -> Result<MaterializationReceipt, TransferError> {
+    validate_materialization_request(entries, payloads, limits)?;
+    materialize_filesystem_entries_platform(root, entries, payloads)
+}
+
+fn validate_materialization_request(
+    entries: &[FilesystemEntry],
+    payloads: &BTreeMap<String, Vec<u8>>,
+    limits: MaterializationLimits,
+) -> Result<(), TransferError> {
+    if limits.max_entries == 0 || limits.max_file_bytes == 0 || limits.max_total_bytes == 0 {
+        return Err(TransferError::Materialization(
+            "materialization limits must be positive".to_owned(),
+        ));
+    }
+    if entries.len() > limits.max_entries {
+        return Err(TransferError::Materialization(
+            "filesystem entry quota exceeded".to_owned(),
+        ));
+    }
+
+    let mut prior: Option<&str> = None;
+    let mut regular_files = BTreeSet::new();
+    let mut expected_payloads = BTreeSet::new();
+    let mut total_bytes = 0_u64;
+    for entry in entries {
+        validate_relative_path(&entry.path)?;
+        if prior.is_some_and(|value| value >= entry.path.as_str()) {
+            return Err(TransferError::Materialization(
+                "filesystem entries must be strictly sorted by path".to_owned(),
+            ));
+        }
+        prior = Some(&entry.path);
+        if has_regular_file_ancestor(&entry.path, &regular_files) {
+            return Err(TransferError::Materialization(format!(
+                "regular file is an ancestor of filesystem entry {}",
+                entry.path
+            )));
+        }
+        validate_data_binding(&entry.data_binding)?;
+        match entry.kind {
+            FilesystemEntryKind::Directory => {
+                if entry.content_digest.is_some() || entry.bytes != 0 {
+                    return Err(TransferError::Materialization(
+                        "directory entry must not carry content".to_owned(),
+                    ));
+                }
+            }
+            FilesystemEntryKind::RegularFile => {
+                if entry.data_binding.classification == DataClassification::SecretMaterial {
+                    return Err(TransferError::Materialization(
+                        "secret material must be resolved through a credential grant, not imported as literal bytes"
+                            .to_owned(),
+                    ));
+                }
+                if entry.bytes > limits.max_file_bytes {
+                    return Err(TransferError::Materialization(
+                        "per-file byte quota exceeded".to_owned(),
+                    ));
+                }
+                total_bytes = total_bytes.checked_add(entry.bytes).ok_or_else(|| {
+                    TransferError::Materialization("filesystem byte count overflow".to_owned())
+                })?;
+                if total_bytes > limits.max_total_bytes {
+                    return Err(TransferError::Materialization(
+                        "total byte quota exceeded".to_owned(),
+                    ));
+                }
+                let expected_digest = entry.content_digest.ok_or_else(|| {
+                    TransferError::Materialization(
+                        "regular file entry requires a content digest".to_owned(),
+                    )
+                })?;
+                let payload = payloads.get(&entry.path).ok_or_else(|| {
+                    TransferError::Materialization(format!("missing payload for {}", entry.path))
+                })?;
+                if payload.len() as u64 != entry.bytes || sha256(payload) != expected_digest {
+                    return Err(TransferError::Materialization(format!(
+                        "payload size or digest mismatch for {}",
+                        entry.path
+                    )));
+                }
+                expected_payloads.insert(entry.path.as_str());
+                regular_files.insert(entry.path.as_str());
+            }
+        }
+    }
+    if payloads
+        .keys()
+        .any(|path| !expected_payloads.contains(path.as_str()))
+    {
+        return Err(TransferError::Materialization(
+            "unclassified payload is not present in the filesystem inventory".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn materialize_filesystem_entries_platform(
+    root: &Path,
+    entries: &[FilesystemEntry],
+    payloads: &BTreeMap<String, Vec<u8>>,
+) -> Result<MaterializationReceipt, TransferError> {
+    use rustix::fs::{Dir, Mode, OFlags, ResolveFlags, mkdirat, open, openat2};
+    use rustix::io::{Errno, dup};
+
+    let root_fd = open(
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| materialization_io("open destination root", error))?;
+    let root_entries = Dir::read_from(&root_fd)
+        .map_err(|error| materialization_io("inspect destination root", error))?;
+    for entry in root_entries {
+        let entry = entry.map_err(|error| materialization_io("inspect destination root", error))?;
+        if !matches!(entry.file_name().to_bytes(), b"." | b"..") {
+            return Err(TransferError::Materialization(
+                "destination root must be an empty staging directory".to_owned(),
+            ));
+        }
+    }
+    let resolve = ResolveFlags::BENEATH
+        | ResolveFlags::NO_SYMLINKS
+        | ResolveFlags::NO_MAGICLINKS
+        | ResolveFlags::NO_XDEV;
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+
+    let open_directory =
+        |parent: &rustix::fd::OwnedFd, name: &str| -> Result<rustix::fd::OwnedFd, TransferError> {
+            match openat2(parent, name, directory_flags, Mode::empty(), resolve) {
+                Ok(fd) => Ok(fd),
+                Err(Errno::NOENT) => {
+                    mkdirat(parent, name, Mode::from_bits_truncate(0o700))
+                        .map_err(|error| materialization_io("create directory", error))?;
+                    openat2(parent, name, directory_flags, Mode::empty(), resolve)
+                        .map_err(|error| materialization_io("open created directory", error))
+                }
+                Err(error) => Err(materialization_io("open directory component", error)),
+            }
+        };
+
+    let mut receipt = MaterializationReceipt {
+        entry_count: entries.len(),
+        file_count: 0,
+        total_bytes: 0,
+        content_digests: BTreeMap::new(),
+    };
+    for entry in entries {
+        let components = entry.path.split('/').collect::<Vec<_>>();
+        let mut parent = dup(&root_fd)
+            .map_err(|error| materialization_io("duplicate root descriptor", error))?;
+        for component in &components[..components.len() - 1] {
+            parent = open_directory(&parent, component)?;
+        }
+        let leaf = components[components.len() - 1];
+        match entry.kind {
+            FilesystemEntryKind::Directory => {
+                open_directory(&parent, leaf)?;
+            }
+            FilesystemEntryKind::RegularFile => {
+                let payload = &payloads[&entry.path];
+                let fd = openat2(
+                    &parent,
+                    leaf,
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::from_bits_truncate(0o600),
+                    resolve,
+                )
+                .map_err(|error| materialization_io("create regular file", error))?;
+                let mut file = File::from(fd);
+                file.write_all(payload)
+                    .map_err(|error| materialization_std_io("write regular file", error))?;
+                file.sync_all()
+                    .map_err(|error| materialization_std_io("sync regular file", error))?;
+                receipt.file_count += 1;
+                receipt.total_bytes += entry.bytes;
+                receipt.content_digests.insert(
+                    entry.path.clone(),
+                    entry.content_digest.expect("validated digest"),
+                );
+            }
+        }
+    }
+    Ok(receipt)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn materialize_filesystem_entries_platform(
+    _root: &Path,
+    _entries: &[FilesystemEntry],
+    _payloads: &BTreeMap<String, Vec<u8>>,
+) -> Result<MaterializationReceipt, TransferError> {
+    Err(TransferError::UnsupportedMaterializationPlatform)
+}
+
+#[cfg(target_os = "linux")]
+fn materialization_io(label: &str, error: rustix::io::Errno) -> TransferError {
+    TransferError::Materialization(format!("{label}: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn materialization_std_io(label: &str, error: std::io::Error) -> TransferError {
+    TransferError::Materialization(format!("{label}: {error}"))
+}
+
+struct LimitedCanonicalWriter {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    exceeded: bool,
+}
+
+impl Write for LimitedCanonicalWriter {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(input.len())
+            .ok_or_else(|| io::Error::other("canonical byte count overflow"))?;
+        if next > self.max_bytes {
+            self.exceeded = true;
+            return Err(io::Error::other("canonical byte limit exceeded"));
+        }
+        self.bytes.extend_from_slice(input);
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn canonical_bytes_of<T: Serialize>(
+    value: &T,
+    max_bytes: usize,
+    limit_message: &'static str,
+) -> Result<Vec<u8>, TransferError> {
+    let mut writer = LimitedCanonicalWriter {
+        bytes: Vec::new(),
+        max_bytes,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if writer.exceeded {
+            return Err(TransferError::InvalidField(limit_message.to_owned()));
+        }
+        return Err(TransferError::Serialization(error.to_string()));
+    }
+    Ok(writer.bytes)
+}
+
+fn validate_bundle(bundle: &StateBundle, expected: &ExpectedBinding) -> Result<(), TransferError> {
+    validate_binding(&bundle.binding, expected)?;
+    validate_sorted_unique_strings(&bundle.expected_record_ids, "expected record IDs")?;
+    if bundle.expected_record_ids.is_empty() {
+        return Err(TransferError::InvalidField(
+            "expected record IDs must not be empty".to_owned(),
+        ));
+    }
+
+    let mut records = BTreeMap::new();
+    if bundle.jobs.len() > MAX_TRANSFER_JOBS {
+        return Err(TransferError::InvalidField(
+            "bundle exceeds job limit".to_owned(),
+        ));
+    }
+    let mut source_jobs = BTreeSet::new();
+    let mut target_jobs = BTreeSet::new();
+    let mut prior_source_job: Option<&str> = None;
+    for job in &bundle.jobs {
+        validate_job(job, &mut records)?;
+        if prior_source_job.is_some_and(|prior| prior >= job.source_job_id.as_str()) {
+            return Err(TransferError::InvalidField(
+                "jobs must be strictly sorted by source_job_id".to_owned(),
+            ));
+        }
+        prior_source_job = Some(&job.source_job_id);
+        if !source_jobs.insert(&job.source_job_id) {
+            return Err(TransferError::DuplicateJob(job.source_job_id.clone()));
+        }
+        if !target_jobs.insert(&job.target_pipeline_id) {
+            return Err(TransferError::DuplicateJob(job.target_pipeline_id.clone()));
+        }
+    }
+
+    let expected: BTreeSet<_> = bundle.expected_record_ids.iter().cloned().collect();
+    if expected.len() > MAX_TRANSFER_RECORDS {
+        return Err(TransferError::InvalidField(
+            "bundle exceeds record limit".to_owned(),
+        ));
+    }
+    let actual: BTreeSet<_> = records.into_keys().collect();
+    let missing: Vec<_> = expected.difference(&actual).cloned().collect();
+    if !missing.is_empty() {
+        return Err(TransferError::MissingRecords(missing));
+    }
+    let unexpected: Vec<_> = actual.difference(&expected).cloned().collect();
+    if !unexpected.is_empty() {
+        return Err(TransferError::UnexpectedRecords(unexpected));
+    }
+    Ok(())
+}
+
+fn validate_binding(
+    binding: &TransferBinding,
+    expected: &ExpectedBinding,
+) -> Result<(), TransferError> {
+    if binding.schema != STATE_TRANSFER_SCHEMA_V1 {
+        return Err(TransferError::UnsupportedSchema(binding.schema.clone()));
+    }
+    if binding.direction != expected.direction {
+        return Err(TransferError::BindingMismatch("direction"));
+    }
+    if binding.source != expected.source {
+        return Err(TransferError::BindingMismatch("source identity"));
+    }
+    if binding.destination != expected.destination {
+        return Err(TransferError::BindingMismatch("destination identity"));
+    }
+    if binding.source_export_digest != expected.source_export_digest {
+        return Err(TransferError::BindingMismatch("source export digest"));
+    }
+    if binding.transform_implementation_digest != expected.transform_implementation_digest {
+        return Err(TransferError::BindingMismatch(
+            "transform implementation digest",
+        ));
+    }
+    if binding.transform_configuration_digest != expected.transform_configuration_digest {
+        return Err(TransferError::BindingMismatch(
+            "transform configuration digest",
+        ));
+    }
+    if binding.conflict_policy != expected.conflict_policy {
+        return Err(TransferError::BindingMismatch("conflict policy"));
+    }
+    validate_system_identity(&binding.source, "source")?;
+    validate_system_identity(&binding.destination, "destination")?;
+    if binding.source == binding.destination {
+        return Err(TransferError::InvalidField(
+            "source and destination identities must differ".to_owned(),
+        ));
+    }
+    validate_digest(binding.source_export_digest, "source export digest")?;
+    validate_digest(
+        binding.transform_implementation_digest,
+        "transform implementation digest",
+    )?;
+    validate_digest(
+        binding.transform_configuration_digest,
+        "transform configuration digest",
+    )?;
+    validate_text(&binding.provenance, 4096, "binding provenance")
+}
+
+fn validate_system_identity(identity: &SystemIdentity, role: &str) -> Result<(), TransferError> {
+    validate_text(&identity.kind, 64, &format!("{role} system kind"))?;
+    validate_text(&identity.instance_id, 512, &format!("{role} instance ID"))?;
+    validate_text(&identity.generation, 512, &format!("{role} generation"))?;
+    validate_digest(
+        identity.configuration_digest,
+        &format!("{role} configuration digest"),
+    )
+}
+
+fn validate_job(
+    job: &JobState,
+    records: &mut BTreeMap<String, Digest>,
+) -> Result<(), TransferError> {
+    insert_record(records, &job.record)?;
+    validate_text(&job.source_job_id, 512, "source job ID")?;
+    validate_text(&job.target_pipeline_id, 512, "target pipeline ID")?;
+    if job.next_build_number == 0 {
+        return Err(TransferError::InvalidField(format!(
+            "job {} next build number must be positive",
+            job.source_job_id
+        )));
+    }
+
+    let mut previous_build: Option<&BuildState> = None;
+    for build in &job.builds {
+        if let Some(previous) = previous_build {
+            let expected = previous.number.checked_add(1).ok_or_else(|| {
+                TransferError::InvalidField(format!(
+                    "job {} build number overflow",
+                    job.source_job_id
+                ))
+            })?;
+            if build.number != expected {
+                return Err(TransferError::BuildGap {
+                    job: job.source_job_id.clone(),
+                    expected,
+                    found: build.number,
+                });
+            }
+            validate_scm_baseline(&job.source_job_id, previous, build)?;
+        }
+        validate_build(build, records)?;
+        previous_build = Some(build);
+    }
+    match job.builds.last() {
+        Some(last) => {
+            let expected_next = last.number.checked_add(1).ok_or_else(|| {
+                TransferError::InvalidField(format!(
+                    "job {} next build number overflow",
+                    job.source_job_id
+                ))
+            })?;
+            if job.next_build_number != expected_next {
+                return Err(TransferError::BuildGap {
+                    job: job.source_job_id.clone(),
+                    expected: expected_next,
+                    found: job.next_build_number,
+                });
+            }
+            if job.previous_result != Some(last.result) {
+                return Err(TransferError::PreviousResultMismatch(
+                    job.source_job_id.clone(),
+                ));
+            }
+        }
+        None if job.previous_result.is_some() => {
+            return Err(TransferError::PreviousResultMismatch(
+                job.source_job_id.clone(),
+            ));
+        }
+        None => {}
+    }
+    validate_object_list(
+        &job.retained_workspaces,
+        records,
+        "retained workspaces",
+        ObjectKind::RetainedWorkspace,
+        None,
+    )?;
+    let mut previous_dependency: Option<&str> = None;
+    let mut dependency_keys = BTreeSet::new();
+    for dependency in &job.persistent_dependencies {
+        if previous_dependency.is_some_and(|previous| previous >= dependency.record.id.as_str()) {
+            return Err(TransferError::InvalidField(
+                "persistent dependencies must be strictly sorted by record ID".to_owned(),
+            ));
+        }
+        previous_dependency = Some(&dependency.record.id);
+        insert_record(records, &dependency.record)?;
+        validate_text(&dependency.key, 512, "persistent dependency key")?;
+        if !dependency_keys.insert(dependency.key.as_str()) {
+            return Err(TransferError::InvalidField(
+                "persistent dependency keys must be unique within a job".to_owned(),
+            ));
+        }
+        validate_digest(dependency.value_digest, "persistent dependency digest")?;
+        validate_data_binding(&dependency.data_binding)?;
+        validate_protection(&dependency.protection)?;
+        insert_hold_records(records, &dependency.protection)?;
+    }
+    Ok(())
+}
+
+fn validate_build(
+    build: &BuildState,
+    records: &mut BTreeMap<String, Digest>,
+) -> Result<(), TransferError> {
+    insert_record(records, &build.record)?;
+    validate_text(&build.source_queue_id, 512, "source queue ID")?;
+    validate_text(&build.source_build_id, 512, "source build ID")?;
+    validate_trigger(&build.trigger, records)?;
+    validate_invocation_parameters(&build.invocation_parameters, records)?;
+    if build.number == 0 {
+        return Err(TransferError::InvalidField(
+            "build number must be positive".to_owned(),
+        ));
+    }
+    validate_digest(build.audit_digest, "build audit digest")?;
+    validate_time_range(
+        build.queued_at_unix_ms,
+        build.started_at_unix_ms,
+        build.ended_at_unix_ms,
+        "build timing",
+    )?;
+    validate_protection(&build.protection)?;
+    insert_hold_records(records, &build.protection)?;
+    let mut prior_checkout: Option<&str> = None;
+    let mut checkout_identities = BTreeSet::new();
+    for scm in &build.checkouts {
+        if prior_checkout.is_some_and(|value| value >= scm.record.id.as_str()) {
+            return Err(TransferError::InvalidField(
+                "SCM checkouts must be strictly sorted by record ID".to_owned(),
+            ));
+        }
+        prior_checkout = Some(&scm.record.id);
+        if !checkout_identities.insert((
+            scm.provider.as_str(),
+            scm.repository.as_str(),
+            scm.reference.as_str(),
+        )) {
+            return Err(TransferError::InvalidField(
+                "SCM checkout identities must be unique within a build".to_owned(),
+            ));
+        }
+        validate_scm(scm, records)?;
+    }
+    validate_graph_nodes(
+        &build.graph_nodes,
+        records,
+        build.queued_at_unix_ms,
+        build.started_at_unix_ms,
+        build.ended_at_unix_ms,
+    )?;
+    validate_approvals(
+        &build.approvals,
+        records,
+        build.queued_at_unix_ms,
+        build.ended_at_unix_ms,
+    )?;
+    validate_normalized_tests(&build.normalized_tests, records)?;
+    validate_logs(&build.logs, records)?;
+    validate_object_list(
+        &build.artifacts,
+        records,
+        "build artifacts",
+        ObjectKind::Artifact,
+        Some(build.number),
+    )
+}
+
+fn validate_scm(
+    scm: &ScmState,
+    records: &mut BTreeMap<String, Digest>,
+) -> Result<(), TransferError> {
+    insert_record(records, &scm.record)?;
+    validate_text(&scm.provider, 128, "SCM provider")?;
+    validate_text(&scm.repository, 2048, "SCM repository")?;
+    validate_text(&scm.reference, 512, "SCM reference")?;
+    validate_text(&scm.revision, 512, "SCM revision")?;
+    if let Some(previous) = &scm.previous_revision {
+        validate_text(previous, 512, "SCM previous revision")?;
+    }
+    let mut prior: Option<&str> = None;
+    for change in &scm.changes {
+        if prior.is_some_and(|value| value >= change.record.id.as_str()) {
+            return Err(TransferError::InvalidField(
+                "SCM changes must be strictly sorted by record ID".to_owned(),
+            ));
+        }
+        prior = Some(&change.record.id);
+        insert_record(records, &change.record)?;
+        validate_text(&change.commit, 512, "change commit")?;
+        validate_text(&change.author, 512, "change author")?;
+        validate_digest(change.message_digest, "change message digest")?;
+        validate_sorted_unique_strings(&change.paths, "change paths")?;
+    }
+    Ok(())
+}
+
+fn validate_scm_baseline(
+    job: &str,
+    previous: &BuildState,
+    current: &BuildState,
+) -> Result<(), TransferError> {
+    for current_scm in &current.checkouts {
+        let previous_scm = previous.checkouts.iter().find(|candidate| {
+            candidate.provider == current_scm.provider
+                && candidate.repository == current_scm.repository
+                && candidate.reference == current_scm.reference
+        });
+        match previous_scm {
+            Some(previous_scm)
+                if current_scm.previous_revision.as_deref()
+                    != Some(previous_scm.revision.as_str()) =>
+            {
+                return Err(TransferError::ScmBaselineMismatch {
+                    job: job.to_owned(),
+                    build: current.number,
+                });
+            }
+            None if current_scm.previous_revision.is_some() => {
+                return Err(TransferError::ScmBaselineMismatch {
+                    job: job.to_owned(),
+                    build: current.number,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_trigger(
+    trigger: &TriggerCause,
+    records: &mut BTreeMap<String, Digest>,
+) -> Result<(), TransferError> {
+    insert_record(records, &trigger.record)?;
+    validate_text(&trigger.trigger_kind, 128, "trigger kind")?;
+    validate_text(&trigger.external_id, 512, "trigger external ID")?;
+    validate_text(&trigger.actor_subject, 512, "trigger actor subject")
+}
+
+fn validate_invocation_parameters(
+    parameters: &[InvocationParameter],
+    records: &mut BTreeMap<String, Digest>,
+) -> Result<(), TransferError> {
+    let mut prior: Option<&str> = None;
+    for parameter in parameters {
+        if prior.is_some_and(|value| value >= parameter.name.as_str()) {
+            return Err(TransferError::InvalidField(
+                "invocation parameters must be strictly sorted by name".to_owned(),
+            ));
+        }
+        prior = Some(&parameter.name);
+        insert_record(records, &parameter.record)?;
+        validate_text(&parameter.name, 256, "invocation parameter name")?;
+        validate_text(&parameter.type_name, 128, "invocation parameter type")?;
+        validate_data_binding(&parameter.data_binding)?;
+        match parameter.data_binding.classification {
+            DataClassification::SecretMaterial if parameter.public_value_digest.is_some() => {
+                return Err(TransferError::InvalidField(
+                    "secret invocation parameter must not persist a public value".to_owned(),
+                ));
+            }
+            DataClassification::SecretMaterial => {}
+            _ => validate_digest(
+                parameter.public_value_digest.ok_or_else(|| {
+                    TransferError::InvalidField(
+                        "public invocation parameter requires a resolved value digest".to_owned(),
+                    )
+                })?,
+                "invocation parameter public value digest",
+            )?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_graph_nodes(
+    nodes: &[GraphNodeState],
+    records: &mut BTreeMap<String, Digest>,
+    build_queued_at_unix_ms: i64,
+    build_started_at_unix_ms: i64,
+    build_ended_at_unix_ms: i64,
+) -> Result<(), TransferError> {
+    let mut prior: Option<&str> = None;
+    let mut known_ids = BTreeSet::new();
+    for node in nodes {
+        if prior.is_some_and(|value| value >= node.node_id.as_str()) {
+            return Err(TransferError::InvalidField(
+                "graph nodes must be strictly sorted by node ID".to_owned(),
+            ));
+        }
+        prior = Some(&node.node_id);
+        insert_record(records, &node.record)?;
+        validate_text(&node.node_id, 512, "graph node ID")?;
+        validate_text(&node.stage_path, 1024, "graph node stage path")?;
+        validate_text(&node.node_kind, 128, "graph node kind")?;
+        let mut previous_parent: Option<&str> = None;
+        for dependency in &node.dependencies {
+            validate_text(
+                &dependency.parent_node_id,
+                512,
+                "graph dependency parent node ID",
+            )?;
+            if previous_parent
+                .is_some_and(|parent: &str| parent >= dependency.parent_node_id.as_str())
+            {
+                return Err(TransferError::InvalidField(
+                    "graph dependencies must be strictly sorted by parent node ID".to_owned(),
+                ));
+            }
+            previous_parent = Some(dependency.parent_node_id.as_str());
+        }
+        let mut expected_ordinal = 1_u32;
+        let mut previous_attempt_end = None;
+        for (attempt_index, attempt) in node.attempts.iter().enumerate() {
+            insert_record(records, &attempt.record)?;
+            if attempt.ordinal != expected_ordinal {
+                return Err(TransferError::InvalidField(
+                    "attempt ordinals must be contiguous from one".to_owned(),
+                ));
+            }
+            expected_ordinal = expected_ordinal.checked_add(1).ok_or_else(|| {
+                TransferError::InvalidField("attempt ordinal overflow".to_owned())
+            })?;
+            match (attempt.ordinal, &attempt.retry) {
+                (1, None) => {}
+                (1, Some(_)) => {
+                    return Err(TransferError::InvalidField(
+                        "first graph attempt cannot have retry lineage".to_owned(),
+                    ));
+                }
+                (_, Some(retry)) if retry.previous_ordinal == attempt.ordinal - 1 => {}
+                _ => {
+                    return Err(TransferError::InvalidField(
+                        "graph retry lineage must name the immediately preceding attempt"
+                            .to_owned(),
+                    ));
+                }
+            }
+            match (
+                attempt.ready_at_unix_ms,
+                attempt.started_at_unix_ms,
+                attempt.terminal_reason,
+            ) {
+                (Some(ready_at_unix_ms), Some(started_at_unix_ms), None) => {
+                    validate_time_range(
+                        ready_at_unix_ms,
+                        started_at_unix_ms,
+                        attempt.ended_at_unix_ms,
+                        "attempt timing",
+                    )?;
+                }
+                (_, None, Some(_)) if attempt.result == BuildResult::Aborted => {
+                    if attempt.ended_at_unix_ms < build_started_at_unix_ms {
+                        return Err(TransferError::InvalidField(
+                            "terminal-only attempt must end inside its build window".to_owned(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(TransferError::InvalidField(
+                        "attempt execution timing and terminal reason are inconsistent".to_owned(),
+                    ));
+                }
+            }
+            if attempt.queued_at_unix_ms < build_queued_at_unix_ms
+                || attempt.queued_at_unix_ms > attempt.ended_at_unix_ms
+                || attempt.ready_at_unix_ms.is_some_and(|ready_at_unix_ms| {
+                    ready_at_unix_ms < attempt.queued_at_unix_ms
+                        || ready_at_unix_ms > attempt.ended_at_unix_ms
+                })
+                || attempt
+                    .started_at_unix_ms
+                    .is_some_and(|started_at_unix_ms| {
+                        attempt
+                            .ready_at_unix_ms
+                            .is_none_or(|ready_at_unix_ms| ready_at_unix_ms > started_at_unix_ms)
+                    })
+            {
+                return Err(TransferError::InvalidField(
+                    "attempt timing must keep queue/readiness inside the build and before execution and terminal time".to_owned(),
+                ));
+            }
+            if attempt.ended_at_unix_ms > build_ended_at_unix_ms {
+                return Err(TransferError::InvalidField(
+                    "attempt timing must remain within its build window".to_owned(),
+                ));
+            }
+            let attempt_ordering_time = attempt
+                .started_at_unix_ms
+                .unwrap_or(attempt.ended_at_unix_ms);
+            if previous_attempt_end
+                .is_some_and(|ended_at_unix_ms| attempt_ordering_time < ended_at_unix_ms)
+            {
+                return Err(TransferError::InvalidField(
+                    "attempt timing must be ordered and non-overlapping".to_owned(),
+                ));
+            }
+            if attempt_index > 0
+                && previous_attempt_end
+                    .is_some_and(|ended_at_unix_ms| attempt.queued_at_unix_ms < ended_at_unix_ms)
+            {
+                return Err(TransferError::InvalidField(
+                    "graph retry cannot be queued before its predecessor ends".to_owned(),
+                ));
+            }
+            previous_attempt_end = Some(attempt.ended_at_unix_ms);
+            validate_digest(attempt.audit_digest, "attempt audit digest")?;
+            if let Some(next_attempt) = node.attempts.get(attempt_index + 1) {
+                let expected_reason = match attempt.result {
+                    BuildResult::Failed if attempt.terminal_reason.is_none() => {
+                        AttemptRetryReason::Failed
+                    }
+                    BuildResult::Aborted
+                        if attempt.terminal_reason
+                            == Some(AttemptTerminalReason::FailFastSkipped) =>
+                    {
+                        AttemptRetryReason::FailFastSkipped
+                    }
+                    BuildResult::Aborted
+                        if attempt.terminal_reason
+                            == Some(AttemptTerminalReason::DependencyNotSucceeded) =>
+                    {
+                        AttemptRetryReason::DependencyNotSucceeded
+                    }
+                    _ => {
+                        return Err(TransferError::InvalidField(
+                            "non-final graph attempt result is not retry-eligible".to_owned(),
+                        ));
+                    }
+                };
+                if next_attempt.retry.as_ref().map(|retry| retry.reason) != Some(expected_reason) {
+                    return Err(TransferError::InvalidField(
+                        "graph retry reason must match the preceding attempt outcome".to_owned(),
+                    ));
+                }
+            }
+        }
+        if node.attempts.last().is_some_and(|attempt| {
+            let expected_node_result = match attempt.terminal_reason {
+                Some(
+                    AttemptTerminalReason::FailFastSkipped
+                    | AttemptTerminalReason::DependencyNotSucceeded,
+                ) => BuildResult::NotBuilt,
+                Some(
+                    AttemptTerminalReason::CancelledBeforeExecution
+                    | AttemptTerminalReason::DagCancelledBeforeExecution,
+                ) => BuildResult::Aborted,
+                None => attempt.result,
+            };
+            expected_node_result != node.result
+        }) {
+            return Err(TransferError::InvalidField(
+                "graph node result must match its final attempt result".to_owned(),
+            ));
+        }
+        known_ids.insert(node.node_id.as_str());
+    }
+    for node in nodes {
+        for dependency in &node.dependencies {
+            if !known_ids.contains(dependency.parent_node_id.as_str()) {
+                return Err(TransferError::InvalidField(
+                    "graph node parent must name another node in the same build".to_owned(),
+                ));
+            }
+            if dependency.parent_node_id == node.node_id {
+                return Err(TransferError::InvalidField(
+                    "graph node cannot depend on itself".to_owned(),
+                ));
+            }
+            let Some(parent) = nodes
+                .iter()
+                .find(|candidate| candidate.node_id == dependency.parent_node_id)
+            else {
+                return Err(TransferError::InvalidField(
+                    "graph node parent must name another node in the same build".to_owned(),
+                ));
+            };
+            for child_attempt in node
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.started_at_unix_ms.is_some())
+            {
+                let child_ready_at_unix_ms = child_attempt
+                    .ready_at_unix_ms
+                    .expect("executing child attempt has a readiness time");
+                let active_parent_attempt = parent
+                    .attempts
+                    .iter()
+                    .rev()
+                    .find(|attempt| attempt.queued_at_unix_ms <= child_ready_at_unix_ms);
+                let satisfying_parent_attempt = match dependency.condition {
+                    GraphDependencyCondition::Completed => active_parent_attempt,
+                    GraphDependencyCondition::Succeeded => active_parent_attempt
+                        .filter(|attempt| attempt.result == BuildResult::Succeeded),
+                };
+                if satisfying_parent_attempt.is_none() {
+                    let message = match dependency.condition {
+                        GraphDependencyCondition::Succeeded => {
+                            "graph succeeded dependency requires a successful parent attempt"
+                        }
+                        GraphDependencyCondition::Completed => {
+                            "graph completed dependency requires a completed parent attempt"
+                        }
+                    };
+                    return Err(TransferError::InvalidField(message.to_owned()));
+                }
+                if satisfying_parent_attempt.is_some_and(|parent_attempt| {
+                    child_ready_at_unix_ms < parent_attempt.ended_at_unix_ms
+                }) {
+                    return Err(TransferError::InvalidField(
+                        "graph child attempt cannot become ready before its dependency is satisfied"
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+        for attempt in node.attempts.iter().filter(|attempt| {
+            attempt.terminal_reason == Some(AttemptTerminalReason::DependencyNotSucceeded)
+        }) {
+            let has_failed_dependency = node.dependencies.iter().any(|dependency| {
+                if dependency.condition != GraphDependencyCondition::Succeeded {
+                    return false;
+                }
+                nodes
+                    .iter()
+                    .find(|candidate| candidate.node_id == dependency.parent_node_id)
+                    .and_then(|parent| {
+                        parent.attempts.iter().rev().find(|parent_attempt| {
+                            parent_attempt.queued_at_unix_ms <= attempt.ended_at_unix_ms
+                        })
+                    })
+                    .is_some_and(|parent_attempt| {
+                        parent_attempt.result != BuildResult::Succeeded
+                            && parent_attempt.ended_at_unix_ms <= attempt.ended_at_unix_ms
+                    })
+            });
+            if !has_failed_dependency {
+                return Err(TransferError::InvalidField(
+                    "dependency-skipped attempt requires an unsatisfied succeeded dependency"
+                        .to_owned(),
+                ));
+            }
+        }
+    }
+    let mut remaining_parents = nodes
+        .iter()
+        .map(|node| (node.node_id.as_str(), node.dependencies.len()))
+        .collect::<BTreeMap<_, _>>();
+    let mut children = BTreeMap::<&str, Vec<&str>>::new();
+    for node in nodes {
+        for dependency in &node.dependencies {
+            children
+                .entry(dependency.parent_node_id.as_str())
+                .or_default()
+                .push(node.node_id.as_str());
+        }
+    }
+    let mut ready = remaining_parents
+        .iter()
+        .filter_map(|(node, parents)| (*parents == 0).then_some(*node))
+        .collect::<BTreeSet<_>>();
+    let mut visited = 0_usize;
+    while let Some(node) = ready.pop_first() {
+        visited = visited
+            .checked_add(1)
+            .ok_or_else(|| TransferError::InvalidField("graph node count overflow".to_owned()))?;
+        for child in children.get(node).into_iter().flatten() {
+            let parents = remaining_parents.get_mut(child).ok_or_else(|| {
+                TransferError::InvalidField(
+                    "graph child must name a node in the same build".to_owned(),
+                )
+            })?;
+            *parents = parents.checked_sub(1).ok_or_else(|| {
+                TransferError::InvalidField("graph parent count underflow".to_owned())
+            })?;
+            if *parents == 0 {
+                ready.insert(child);
+            }
+        }
+    }
+    if visited != nodes.len() {
+        return Err(TransferError::InvalidField(
+            "graph nodes must be acyclic".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_approvals(
+    approvals: &[ApprovalState],
+    records: &mut BTreeMap<String, Digest>,
+    build_queued_at_unix_ms: i64,
+    build_ended_at_unix_ms: i64,
+) -> Result<(), TransferError> {
+    let mut prior: Option<&str> = None;
+    for approval in approvals {
+        if prior.is_some_and(|value| value >= approval.approval_id.as_str()) {
+            return Err(TransferError::InvalidField(
+                "approvals must be strictly sorted by approval ID".to_owned(),
+            ));
+        }
+        prior = Some(&approval.approval_id);
+        insert_record(records, &approval.record)?;
+        validate_text(&approval.approval_id, 512, "approval ID")?;
+        validate_digest(approval.policy_digest, "approval policy digest")?;
+        validate_text(&approval.approver_subject, 512, "approval subject")?;
+        if approval.decided_at_unix_ms < build_queued_at_unix_ms
+            || approval.decided_at_unix_ms > build_ended_at_unix_ms
+        {
+            return Err(TransferError::InvalidField(
+                "approval decision time must be inside its build window".to_owned(),
+            ));
+        }
+        for (name, digest) in &approval.submitted_value_digests {
+            validate_text(name, 256, "approval submitted value name")?;
+            validate_digest(*digest, "approval submitted value digest")?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_normalized_tests(
+    tests: &[NormalizedTestState],
+    records: &mut BTreeMap<String, Digest>,
+) -> Result<(), TransferError> {
+    let mut prior: Option<&str> = None;
+    for test in tests {
+        if prior.is_some_and(|value| value >= test.record.id.as_str()) {
+            return Err(TransferError::InvalidField(
+                "normalized tests must be strictly sorted by record ID".to_owned(),
+            ));
+        }
+        prior = Some(&test.record.id);
+        insert_record(records, &test.record)?;
+        validate_text(&test.suite, 512, "test suite")?;
+        validate_text(&test.name, 1024, "test name")?;
+        validate_text(&test.status, 64, "test status")?;
+        validate_digest(test.details_digest, "test details digest")?;
+    }
+    Ok(())
+}
+
+fn validate_logs(
+    logs: &[LogState],
+    records: &mut BTreeMap<String, Digest>,
+) -> Result<(), TransferError> {
+    for (expected_sequence, log) in logs.iter().enumerate() {
+        if log.sequence != expected_sequence as u64 {
+            return Err(TransferError::InvalidField(
+                "log sequence must be contiguous from zero".to_owned(),
+            ));
+        }
+        insert_record(records, &log.record)?;
+        validate_digest(log.content_digest, "log content digest")?;
+        validate_data_binding(&log.data_binding)?;
+        validate_retrieval(&log.retrieval)?;
+        if log.content_digest != log.retrieval.content_digest {
+            return Err(TransferError::InvalidField(
+                "log retrieval digest mismatch".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_time_range(
+    queued: i64,
+    started: i64,
+    ended: i64,
+    label: &str,
+) -> Result<(), TransferError> {
+    if queued < 0 || queued > started || started > ended {
+        return Err(TransferError::InvalidField(label.to_owned()));
+    }
+    Ok(())
+}
+
+fn validate_retrieval(retrieval: &RetrievalMetadata) -> Result<(), TransferError> {
+    validate_text(&retrieval.media_type, 256, "retrieval media type")?;
+    validate_text(
+        &retrieval.logical_locator,
+        2048,
+        "retrieval logical locator",
+    )?;
+    validate_digest(retrieval.content_digest, "retrieval content digest")
+}
+
+fn validate_object_list(
+    objects: &[ObjectState],
+    records: &mut BTreeMap<String, Digest>,
+    label: &str,
+    expected_kind: ObjectKind,
+    expected_producer_build_number: Option<u64>,
+) -> Result<(), TransferError> {
+    let mut previous: Option<&str> = None;
+    let mut logical_names = BTreeSet::new();
+    for object in objects {
+        if object.kind != expected_kind {
+            return Err(TransferError::InvalidField(format!(
+                "{label} must contain only {expected_kind:?} objects"
+            )));
+        }
+        if previous.is_some_and(|value| value >= object.record.id.as_str()) {
+            return Err(TransferError::InvalidField(format!(
+                "{label} must be strictly sorted by record ID"
+            )));
+        }
+        previous = Some(&object.record.id);
+        insert_record(records, &object.record)?;
+        validate_text(&object.logical_name, 1024, "object logical name")?;
+        if !logical_names.insert(object.logical_name.as_str()) {
+            return Err(TransferError::InvalidField(format!(
+                "{label} logical names must be unique"
+            )));
+        }
+        validate_digest(object.content_digest, "object content digest")?;
+        if let Some(expected) = expected_producer_build_number {
+            if object.producer_build_number != Some(expected) {
+                return Err(TransferError::InvalidField(format!(
+                    "{label} producer build number must match its containing build"
+                )));
+            }
+        } else if object.producer_build_number == Some(0) {
+            return Err(TransferError::InvalidField(
+                "object producer build number must be positive".to_owned(),
+            ));
+        }
+        validate_retrieval(&object.retrieval)?;
+        if object.content_digest != object.retrieval.content_digest {
+            return Err(TransferError::InvalidField(
+                "object retrieval digest mismatch".to_owned(),
+            ));
+        }
+        validate_data_binding(&object.data_binding)?;
+        validate_filesystem_entries(object)?;
+        validate_protection(&object.protection)?;
+        insert_hold_records(records, &object.protection)?;
+    }
+    Ok(())
+}
+
+fn validate_filesystem_entries(object: &ObjectState) -> Result<(), TransferError> {
+    if object.filesystem_entries.len() > MAX_FILESYSTEM_ENTRIES_PER_OBJECT {
+        return Err(TransferError::InvalidField(
+            "object exceeds filesystem entry limit".to_owned(),
+        ));
+    }
+    let mut prior: Option<&str> = None;
+    let mut regular_files = BTreeSet::new();
+    let mut total_bytes = 0_u64;
+    for entry in &object.filesystem_entries {
+        validate_relative_path(&entry.path)?;
+        if prior.is_some_and(|value| value >= entry.path.as_str()) {
+            return Err(TransferError::InvalidField(
+                "filesystem entries must be strictly sorted by path".to_owned(),
+            ));
+        }
+        prior = Some(&entry.path);
+        if has_regular_file_ancestor(&entry.path, &regular_files) {
+            return Err(TransferError::InvalidField(
+                "regular file must not be an ancestor of another filesystem entry".to_owned(),
+            ));
+        }
+        validate_data_binding(&entry.data_binding)?;
+        if classification_rank(entry.data_binding.classification)
+            < classification_rank(object.data_binding.classification)
+        {
+            return Err(TransferError::InvalidField(
+                "filesystem entry classification must be at least as restrictive as its object"
+                    .to_owned(),
+            ));
+        }
+        match entry.kind {
+            FilesystemEntryKind::Directory => {
+                if entry.content_digest.is_some() || entry.bytes != 0 {
+                    return Err(TransferError::InvalidField(
+                        "directory entry must not carry content".to_owned(),
+                    ));
+                }
+            }
+            FilesystemEntryKind::RegularFile => {
+                let digest = entry.content_digest.ok_or_else(|| {
+                    TransferError::InvalidField(
+                        "regular file entry requires content digest".to_owned(),
+                    )
+                })?;
+                validate_digest(digest, "filesystem entry content digest")?;
+                total_bytes = total_bytes.checked_add(entry.bytes).ok_or_else(|| {
+                    TransferError::InvalidField("filesystem byte count overflow".to_owned())
+                })?;
+                regular_files.insert(entry.path.as_str());
+            }
+        }
+    }
+    if !object.filesystem_entries.is_empty() && total_bytes != object.bytes {
+        return Err(TransferError::InvalidField(
+            "filesystem entry byte total does not match object bytes".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn classification_rank(classification: DataClassification) -> u8 {
+    match classification {
+        DataClassification::Public => 0,
+        DataClassification::Internal => 1,
+        DataClassification::Confidential => 2,
+        DataClassification::SecretMaterial => 3,
+    }
+}
+
+fn has_regular_file_ancestor(path: &str, regular_files: &BTreeSet<&str>) -> bool {
+    path.match_indices('/')
+        .any(|(separator, _)| regular_files.contains(&path[..separator]))
+}
+
+fn validate_relative_path(path: &str) -> Result<(), TransferError> {
+    validate_text(path, MAX_FILESYSTEM_PATH_BYTES, "filesystem entry path")?;
+    if path.starts_with('/')
+        || path.contains('\\')
+        || path
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(TransferError::InvalidField(
+            "filesystem entry path must be canonical and relative".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_data_binding(binding: &DataBinding) -> Result<(), TransferError> {
+    match (&binding.classification, &binding.secret_disposition) {
+        (DataClassification::SecretMaterial, Some(disposition)) => {
+            validate_secret_disposition(disposition)
+        }
+        (DataClassification::SecretMaterial, None) => Err(TransferError::InvalidField(
+            "secret material requires a reference or held-evidence disposition".to_owned(),
+        )),
+        (_, Some(_)) => Err(TransferError::InvalidField(
+            "non-secret data must not carry a secret disposition".to_owned(),
+        )),
+        (_, None) => Ok(()),
+    }
+}
+
+fn validate_secret_disposition(disposition: &SecretDisposition) -> Result<(), TransferError> {
+    match disposition {
+        SecretDisposition::Reference(reference) => {
+            validate_text(&reference.provider, 256, "secret reference provider")?;
+            validate_text(&reference.reference, 2048, "secret reference")?;
+            validate_text(&reference.version, 512, "secret reference version")?;
+            validate_digest(reference.keyed_digest, "secret reference keyed digest")
+        }
+        SecretDisposition::HeldEvidence(evidence) => {
+            validate_text(&evidence.custodian, 512, "held-evidence custodian")?;
+            validate_text(&evidence.reference, 2048, "held-evidence reference")?;
+            validate_digest(evidence.content_digest, "held-evidence content digest")?;
+            validate_text(
+                &evidence.release_authority,
+                512,
+                "held-evidence release authority",
+            )
+        }
+    }
+}
+
+fn insert_record(
+    records: &mut BTreeMap<String, Digest>,
+    record: &RecordProvenance,
+) -> Result<(), TransferError> {
+    insert_record_with_limit(records, record, MAX_TRANSFER_RECORDS)
+}
+
+fn insert_record_with_limit(
+    records: &mut BTreeMap<String, Digest>,
+    record: &RecordProvenance,
+    limit: usize,
+) -> Result<(), TransferError> {
+    validate_text(&record.id, 1024, "record ID")?;
+    validate_digest(record.source_digest, "record source digest")?;
+    validate_text(&record.provenance, 4096, "record provenance")?;
+    if records.contains_key(&record.id) {
+        return Err(TransferError::DuplicateRecord(record.id.clone()));
+    }
+    if records.len() >= limit {
+        return Err(TransferError::InvalidField(
+            "bundle exceeds record limit".to_owned(),
+        ));
+    }
+    records.insert(record.id.clone(), record.source_digest);
+    Ok(())
+}
+
+fn collect_record(records: &mut BTreeMap<String, RecordProvenance>, record: &RecordProvenance) {
+    records.insert(record.id.clone(), record.clone());
+}
+
+fn collect_hold_records(records: &mut BTreeMap<String, RecordProvenance>, protection: &Protection) {
+    for hold in &protection.active_holds {
+        collect_record(records, &hold.record);
+    }
+}
+
+fn insert_protection(
+    protections: &mut BTreeMap<Digest, Protection>,
+    subject: Digest,
+    protection: &Protection,
+) -> Result<(), TransferError> {
+    match protections.get(&subject) {
+        Some(existing) if existing != protection => {
+            Err(TransferError::DivergentProtection(subject))
+        }
+        Some(_) => Ok(()),
+        None => {
+            protections.insert(subject, protection.clone());
+            Ok(())
+        }
+    }
+}
+
+fn insert_hold_records(
+    records: &mut BTreeMap<String, Digest>,
+    protection: &Protection,
+) -> Result<(), TransferError> {
+    for hold in &protection.active_holds {
+        insert_record(records, &hold.record)?;
+    }
+    Ok(())
+}
+
+fn validate_protection(protection: &Protection) -> Result<(), TransferError> {
+    validate_text(&protection.retention.policy_id, 512, "retention policy ID")?;
+    validate_text(
+        &protection.retention.policy_version,
+        128,
+        "retention policy version",
+    )?;
+    validate_digest(
+        protection.retention.policy_digest,
+        "retention policy digest",
+    )?;
+    if protection.retention.retain_until_unix_ms < 0 {
+        return Err(TransferError::InvalidField(
+            "retention deadline must be non-negative".to_owned(),
+        ));
+    }
+    let mut prior: Option<&str> = None;
+    for hold in &protection.active_holds {
+        if prior.is_some_and(|value| value >= hold.hold_id.as_str()) {
+            return Err(TransferError::InvalidField(
+                "active legal holds must be strictly sorted by hold ID".to_owned(),
+            ));
+        }
+        prior = Some(&hold.hold_id);
+        validate_record(&hold.record)?;
+        validate_text(&hold.hold_id, 256, "legal hold ID")?;
+        validate_text(&hold.scope, 1024, "legal hold scope")?;
+        validate_text(&hold.reason, 1024, "legal hold reason")?;
+        if hold.placed_at_unix_ms < 0 {
+            return Err(TransferError::InvalidField(
+                "legal hold placement time must be non-negative".to_owned(),
+            ));
+        }
+        if hold.generation == 0 {
+            return Err(TransferError::InvalidField(
+                "legal hold generation must be positive".to_owned(),
+            ));
+        }
+        validate_text(&hold.release_authority, 512, "legal hold release authority")?;
+    }
+    Ok(())
+}
+
+fn validate_record(record: &RecordProvenance) -> Result<(), TransferError> {
+    validate_text(&record.id, 1024, "record ID")?;
+    validate_digest(record.source_digest, "record source digest")?;
+    validate_text(&record.provenance, 4096, "record provenance")
+}
+
+fn merge_existing(
+    subject: Digest,
+    incoming: &mut Protection,
+    existing: &BTreeMap<Digest, Protection>,
+) -> Result<(), TransferError> {
+    let Some(existing) = existing.get(&subject) else {
+        return Ok(());
+    };
+    incoming.retention = merge_retention(subject, &incoming.retention, &existing.retention)?;
+    incoming.active_holds = merge_holds(&incoming.active_holds, &existing.active_holds)?;
+    Ok(())
+}
+
+fn merge_retention(
+    subject: Digest,
+    incoming: &RetentionPolicy,
+    existing: &RetentionPolicy,
+) -> Result<RetentionPolicy, TransferError> {
+    match incoming
+        .retain_until_unix_ms
+        .cmp(&existing.retain_until_unix_ms)
+    {
+        std::cmp::Ordering::Greater => Ok(incoming.clone()),
+        std::cmp::Ordering::Less => Ok(existing.clone()),
+        std::cmp::Ordering::Equal if incoming == existing => Ok(incoming.clone()),
+        std::cmp::Ordering::Equal => Err(TransferError::DivergentRetention(subject)),
+    }
+}
+
+fn merge_holds(
+    incoming: &[LegalHold],
+    existing: &[LegalHold],
+) -> Result<Vec<LegalHold>, TransferError> {
+    let mut holds = BTreeMap::new();
+    for hold in incoming.iter().chain(existing) {
+        match holds.get(&hold.hold_id) {
+            Some(prior) if prior != hold => {
+                return Err(TransferError::DivergentHold(hold.hold_id.clone()));
+            }
+            Some(_) => {}
+            None => {
+                holds.insert(hold.hold_id.clone(), hold.clone());
+            }
+        }
+    }
+    Ok(holds.into_values().collect())
+}
+
+fn validate_sorted_unique_strings(values: &[String], label: &str) -> Result<(), TransferError> {
+    let mut prior: Option<&str> = None;
+    for value in values {
+        validate_text(value, 2048, label)?;
+        if prior.is_some_and(|previous| previous >= value.as_str()) {
+            return Err(TransferError::InvalidField(format!(
+                "{label} must be strictly sorted and unique"
+            )));
+        }
+        prior = Some(value);
+    }
+    Ok(())
+}
+
+fn validate_text(value: &str, max_bytes: usize, field: &str) -> Result<(), TransferError> {
+    if value.is_empty()
+        || value.len() > max_bytes
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return Err(TransferError::InvalidField(field.to_owned()));
+    }
+    Ok(())
+}
+
+fn validate_digest(digest: Digest, field: &str) -> Result<(), TransferError> {
+    if digest == [0; 32] {
+        return Err(TransferError::InvalidField(field.to_owned()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod canonical_writer_tests {
+    use std::collections::BTreeMap;
+
+    use super::{
+        RecordProvenance, TransferError, canonical_bytes_of, insert_record_with_limit, sha256,
+    };
+
+    #[test]
+    fn canonical_writer_fails_at_the_bound_without_materializing_the_tail() {
+        let value = vec!["0123456789"; 64];
+        assert_eq!(
+            canonical_bytes_of(&value, 32, "bounded canonical payload"),
+            Err(TransferError::InvalidField(
+                "bounded canonical payload".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn record_limit_is_enforced_before_cloning_the_overflow_record() {
+        let first = RecordProvenance {
+            id: "first".to_owned(),
+            source_digest: sha256(b"first"),
+            provenance: "first record".to_owned(),
+        };
+        let overflow = RecordProvenance {
+            id: "overflow".to_owned(),
+            source_digest: sha256(b"overflow"),
+            provenance: "overflow record".to_owned(),
+        };
+        let mut records = BTreeMap::new();
+        insert_record_with_limit(&mut records, &first, 1).expect("first record fits");
+        assert_eq!(
+            insert_record_with_limit(&mut records, &overflow, 1),
+            Err(TransferError::InvalidField(
+                "bundle exceeds record limit".to_owned()
+            ))
+        );
+        assert_eq!(records.len(), 1);
+        assert!(!records.contains_key("overflow"));
+    }
+}

@@ -139,10 +139,15 @@ pub struct AttemptView {
     pub attempt_id: Uuid,
     pub node_id: Uuid,
     pub ordinal: i32,
+    pub retry_of: Option<Uuid>,
     pub status: String,
     pub fence: i64,
     pub lease_owner: Option<String>,
     pub terminal_summary: Option<Value>,
+    pub created_at_unix_ms: i64,
+    pub ready_at_unix_ms: Option<i64>,
+    pub started_at_unix_ms: Option<i64>,
+    pub completed_at_unix_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -778,8 +783,28 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         let attempts = sqlx::query(
-            "SELECT a.id, a.node_id, a.ordinal, a.status, a.fence,
-                    a.lease_owner, a.terminal_summary
+            "SELECT a.id, a.node_id, a.ordinal, a.retry_of, a.status, a.fence,
+                    a.lease_owner, a.terminal_summary,
+                    (EXTRACT(EPOCH FROM a.created_at) * 1000)::bigint AS created_ms,
+                    CASE WHEN a.ready_at IS NULL THEN NULL
+                         ELSE (EXTRACT(EPOCH FROM a.ready_at) * 1000)::bigint
+                    END AS ready_ms,
+                    (
+                        SELECT (EXTRACT(EPOCH FROM e.created_at) * 1000)::bigint
+                        FROM build_events AS e
+                        WHERE e.organization_id = a.organization_id
+                          AND e.build_id = n.build_id
+                          AND e.kind = 'attempt.running'
+                          AND e.payload @> jsonb_build_object(
+                              'attempt_id', a.id,
+                              'fence', a.fence
+                          )
+                        ORDER BY e.id
+                        LIMIT 1
+                    ) AS started_ms,
+                    CASE WHEN a.completed_at IS NULL THEN NULL
+                         ELSE (EXTRACT(EPOCH FROM a.completed_at) * 1000)::bigint
+                    END AS completed_ms
              FROM attempts AS a
              JOIN nodes AS n
                ON n.organization_id = a.organization_id
@@ -828,10 +853,15 @@ impl Store {
                         attempt_id: row.try_get("id")?,
                         node_id: row.try_get("node_id")?,
                         ordinal: row.try_get("ordinal")?,
+                        retry_of: row.try_get("retry_of")?,
                         status: row.try_get("status")?,
                         fence: row.try_get("fence")?,
                         lease_owner: row.try_get("lease_owner")?,
                         terminal_summary: row.try_get("terminal_summary")?,
+                        created_at_unix_ms: row.try_get("created_ms")?,
+                        ready_at_unix_ms: row.try_get("ready_ms")?,
+                        started_at_unix_ms: row.try_get("started_ms")?,
+                        completed_at_unix_ms: row.try_get("completed_ms")?,
                     })
                 })
                 .collect::<Result<Vec<_>, StoreError>>()?,

@@ -10,7 +10,16 @@ use mcloving_controller_store::{
     PipelineWrite, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
     TerminalOutcome, TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
-use serde_json::json;
+use mcloving_state_transfer::{
+    BuildResult as TransferBuildResult, BuildState as TransferBuildState, ConflictPolicy,
+    DataBinding as TransferDataBinding, DataClassification as TransferDataClassification,
+    ExpectedBinding, JobState as TransferJobState, LegalHold as TransferLegalHold,
+    ObjectKind as TransferObjectKind, ObjectState as TransferObjectState,
+    Protection as TransferProtection, RecordProvenance, RetentionPolicy,
+    RetrievalMetadata as TransferRetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, StateBundle,
+    SystemIdentity, TransferBinding, TransferDirection, TriggerCause as TransferTriggerCause,
+};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
@@ -25,6 +34,917 @@ async fn test_store() -> Option<Store> {
     let store = Store::new(pool);
     store.migrate().await.expect("install controller schema");
     Some(store)
+}
+
+#[tokio::test]
+async fn state_transfer_is_idempotent_monotonic_and_audited() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "state-transfer",
+        )
+        .await
+        .expect("create state-transfer tenant");
+
+    let (bundle, expected) = transfer_bundle(20);
+    let migration_store = store.clone();
+    let first = migration_store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &bundle,
+            &expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("import first state-transfer bundle");
+    assert!(first.created);
+    assert_eq!(first.record_count, 5);
+    assert_eq!(first.protection_count, 2);
+
+    let runtime_store = unprivileged_store(&store).await;
+    for (table, privilege) in [
+        ("state_transfer_receipts", "INSERT"),
+        ("state_transfer_records", "INSERT"),
+        ("state_transfer_protections", "INSERT"),
+        ("state_transfer_protections", "UPDATE"),
+        ("state_transfer_scm_evidence", "INSERT"),
+        ("state_transfer_scm_evidence", "UPDATE"),
+        ("state_transfer_scm_evidence", "DELETE"),
+    ] {
+        let granted: bool =
+            sqlx::query_scalar("SELECT has_table_privilege('mcloving_tenant', $1, $2)")
+                .bind(table)
+                .bind(privilege)
+                .fetch_one(store.pool())
+                .await
+                .expect("inspect runtime state-transfer write privilege");
+        assert!(!granted, "runtime unexpectedly has {privilege} on {table}");
+    }
+    let (runtime_bundle, runtime_expected) = transfer_bundle(29);
+    let runtime_insert_error = runtime_store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &runtime_bundle,
+            &runtime_expected,
+            "runtime-counterfeit@example.test",
+        )
+        .await
+        .expect_err("runtime tenant cannot directly insert transfer truth");
+    assert_eq!(
+        match runtime_insert_error {
+            StoreError::Database(error) => error
+                .as_database_error()
+                .and_then(|database| database.code())
+                .map(|code| code.into_owned()),
+            _ => None,
+        }
+        .as_deref(),
+        Some("42501")
+    );
+    let mut forged_scm = runtime_store
+        .pool()
+        .begin()
+        .await
+        .expect("begin forged SCM evidence insert");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *forged_scm)
+        .await
+        .expect("set forged SCM evidence tenant");
+    let forged_canonical = br#"{"schema":"mcloving.scm-checkout-evidence/v1"}"#;
+    let forged_error = sqlx::query(
+        "INSERT INTO state_transfer_scm_evidence (
+             organization_id, project_id, receipt_id, attempt_id,
+             fence, restore_epoch, agent_id, evidence_key,
+             canonical_evidence, evidence_digest, actor_subject
+         )
+         VALUES ($1, $2, $3, $4, 1, 0, 'forged-agent', 'scm.checkout/forged',
+                 $5, $6, 'runtime-counterfeit@example.test')",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(first.id)
+    .bind(Uuid::new_v4())
+    .bind(forged_canonical.as_slice())
+    .bind(Sha256::digest(forged_canonical).as_slice())
+    .execute(&mut *forged_scm)
+    .await
+    .expect_err("runtime tenant cannot fabricate SCM evidence");
+    assert_eq!(
+        forged_error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .map(|code| code.into_owned())
+            .as_deref(),
+        Some("42501")
+    );
+    forged_scm
+        .rollback()
+        .await
+        .expect("rollback forged SCM evidence insert");
+
+    let mut sealed_append = migration_store
+        .pool()
+        .begin()
+        .await
+        .expect("begin sealed provenance append");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *sealed_append)
+        .await
+        .expect("bind sealed append tenant");
+    let deleted_outbox = sqlx::query(
+        "DELETE FROM outbox
+         WHERE organization_id = $1
+           AND topic = 'state_transfer.imported'
+           AND aggregate_id = $2",
+    )
+    .bind(organization_id)
+    .bind(first.id)
+    .execute(&mut *sealed_append)
+    .await
+    .expect("runtime role can delete the mutable outbox delivery row");
+    assert_eq!(deleted_outbox.rows_affected(), 1);
+    let append_error = sqlx::query(
+        "INSERT INTO state_transfer_records (
+             organization_id, receipt_id, record_id, source_digest, provenance
+         ) VALUES ($1, $2, 'counterfeit:appended', $3, 'counterfeit append')",
+    )
+    .bind(organization_id)
+    .bind(first.id)
+    .bind(vec![0x5a_u8; 32])
+    .execute(&mut *sealed_append)
+    .await
+    .expect_err("immutable audit seal rejects appended provenance after outbox deletion");
+    assert_eq!(
+        append_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    assert!(append_error.as_database_error().is_some_and(|error| {
+        error
+            .message()
+            .contains("sealed against provenance appends")
+    }));
+    drop(sealed_append);
+
+    let counterfeit_project_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO projects (id, organization_id, slug) VALUES ($1, $2, $3)")
+        .bind(counterfeit_project_id)
+        .bind(organization_id)
+        .bind("state-transfer-counterfeit")
+        .execute(store.pool())
+        .await
+        .expect("create counterfeit-receipt test project");
+    let counterfeit_receipt_id = Uuid::new_v4();
+    let mut counterfeit = migration_store
+        .pool()
+        .begin()
+        .await
+        .expect("begin direct runtime receipt insert");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *counterfeit)
+        .await
+        .expect("bind direct runtime insert tenant");
+    sqlx::query(
+        "INSERT INTO state_transfer_receipts (
+             id, organization_id, project_id, direction,
+             source_kind, source_instance_id, source_generation,
+             source_configuration_digest,
+             destination_kind, destination_instance_id,
+             destination_generation, destination_configuration_digest,
+             source_export_digest, transform_implementation_digest,
+             transform_configuration_digest, binding_digest, canonical_binding,
+             input_bundle_digest, bundle_digest, canonical_bundle, actor_subject
+         )
+         SELECT $1, organization_id, $2, direction,
+                source_kind, source_instance_id, source_generation,
+                source_configuration_digest,
+                destination_kind, destination_instance_id,
+                destination_generation, destination_configuration_digest,
+                source_export_digest, transform_implementation_digest,
+                transform_configuration_digest, binding_digest, canonical_binding,
+                input_bundle_digest, bundle_digest, canonical_bundle, actor_subject
+         FROM state_transfer_receipts
+         WHERE organization_id = $3 AND id = $4",
+    )
+    .bind(counterfeit_receipt_id)
+    .bind(counterfeit_project_id)
+    .bind(organization_id)
+    .bind(first.id)
+    .execute(&mut *counterfeit)
+    .await
+    .expect("direct runtime insert reaches the deferred completeness fence");
+    sqlx::query(
+        "INSERT INTO state_transfer_records (
+             organization_id, receipt_id, record_id, source_digest, provenance
+         )
+         SELECT organization_id, $1, record_id, source_digest, provenance
+         FROM state_transfer_records
+         WHERE organization_id = $2 AND receipt_id = $3",
+    )
+    .bind(counterfeit_receipt_id)
+    .bind(organization_id)
+    .bind(first.id)
+    .execute(&mut *counterfeit)
+    .await
+    .expect("copy exact provenance rows but omit effective protections");
+    sqlx::query(
+        "INSERT INTO outbox (organization_id, topic, aggregate_id, payload)
+         SELECT organization_id, 'state_transfer.imported', id,
+                jsonb_build_object(
+                    'receipt_id', id,
+                    'project_id', project_id,
+                    'direction', direction,
+                    'binding_digest', encode(binding_digest, 'hex'),
+                    'bundle_digest', encode(bundle_digest, 'hex'),
+                    'source_export_digest', encode(source_export_digest, 'hex'),
+                    'record_count', (
+                        SELECT count(*)
+                        FROM state_transfer_records
+                        WHERE organization_id = $2 AND receipt_id = $1
+                    ),
+                    'protection_count', 0
+                )
+         FROM state_transfer_receipts
+         WHERE organization_id = $2 AND id = $1",
+    )
+    .bind(counterfeit_receipt_id)
+    .bind(organization_id)
+    .execute(&mut *counterfeit)
+    .await
+    .expect("fabricate an otherwise exact outbox proof with zero protections");
+    sqlx::query(
+        "INSERT INTO audit_events (
+             organization_id, sequence, event_id, category, actor_subject,
+             action, subject, payload, occurred_at_unix_ms,
+             previous_hash, event_hash
+         )
+         SELECT receipt.organization_id,
+                (SELECT COALESCE(max(sequence), 0) + 1
+                 FROM audit_events
+                 WHERE organization_id = receipt.organization_id),
+                $3, 'migration', receipt.actor_subject,
+                'state_transfer.imported',
+                format(
+                    'project:%s:state-transfer:%s',
+                    receipt.project_id,
+                    receipt.id
+                ),
+                outbox.payload, 0,
+                decode(repeat('7a', 32), 'hex'),
+                decode(repeat('7b', 32), 'hex')
+         FROM state_transfer_receipts AS receipt
+         JOIN outbox
+           ON outbox.organization_id = receipt.organization_id
+          AND outbox.topic = 'state_transfer.imported'
+          AND outbox.aggregate_id = receipt.id
+         WHERE receipt.organization_id = $2 AND receipt.id = $1",
+    )
+    .bind(counterfeit_receipt_id)
+    .bind(organization_id)
+    .bind(Uuid::new_v4())
+    .execute(&mut *counterfeit)
+    .await
+    .expect("fabricate an otherwise exact audit proof with zero protections");
+    let counterfeit_error = counterfeit
+        .commit()
+        .await
+        .expect_err("runtime role cannot commit a receipt without effective protections");
+    assert_eq!(
+        counterfeit_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    assert!(
+        counterfeit_error
+            .as_database_error()
+            .is_some_and(|error| error.message().contains("protection rows"))
+    );
+
+    let empty_project_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO projects (id, organization_id, slug) VALUES ($1, $2, $3)")
+        .bind(empty_project_id)
+        .bind(organization_id)
+        .bind("state-transfer-empty-counterfeit")
+        .execute(store.pool())
+        .await
+        .expect("create empty counterfeit-receipt test project");
+    let mut empty_counterfeit = migration_store
+        .pool()
+        .begin()
+        .await
+        .expect("begin empty direct runtime receipt insert");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *empty_counterfeit)
+        .await
+        .expect("bind empty direct runtime insert tenant");
+    sqlx::query(
+        "WITH source AS (
+             SELECT *,
+                    jsonb_set(
+                        jsonb_set(
+                            convert_from(canonical_bundle, 'UTF8')::jsonb,
+                            '{expected_record_ids}',
+                            '[]'::jsonb
+                        ),
+                        '{jobs}',
+                        '[]'::jsonb
+                    ) AS empty_bundle
+             FROM state_transfer_receipts
+             WHERE organization_id = $3 AND id = $4
+         )
+         INSERT INTO state_transfer_receipts (
+             id, organization_id, project_id, direction,
+             source_kind, source_instance_id, source_generation,
+             source_configuration_digest,
+             destination_kind, destination_instance_id,
+             destination_generation, destination_configuration_digest,
+             source_export_digest, transform_implementation_digest,
+             transform_configuration_digest, binding_digest, canonical_binding,
+             input_bundle_digest, bundle_digest, canonical_bundle, actor_subject
+         )
+         SELECT $1, organization_id, $2, direction,
+                source_kind, source_instance_id, source_generation,
+                source_configuration_digest,
+                destination_kind, destination_instance_id,
+                destination_generation, destination_configuration_digest,
+                source_export_digest, transform_implementation_digest,
+                transform_configuration_digest, binding_digest, canonical_binding,
+                sha256(convert_to(empty_bundle::text, 'UTF8')),
+                sha256(convert_to(empty_bundle::text, 'UTF8')),
+                convert_to(empty_bundle::text, 'UTF8'), actor_subject
+         FROM source",
+    )
+    .bind(Uuid::new_v4())
+    .bind(empty_project_id)
+    .bind(organization_id)
+    .bind(first.id)
+    .execute(&mut *empty_counterfeit)
+    .await
+    .expect("empty direct runtime insert reaches the deferred completeness fence");
+    let empty_error = sqlx::query("SET CONSTRAINTS state_transfer_receipts_complete IMMEDIATE")
+        .execute(&mut *empty_counterfeit)
+        .await
+        .expect_err("runtime role cannot commit an empty state-transfer receipt");
+    assert_eq!(
+        empty_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    assert!(
+        empty_error
+            .as_database_error()
+            .is_some_and(|error| error.message().contains("expected record set"))
+    );
+    drop(empty_counterfeit);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT has_function_privilege(
+                 'mcloving_tenant',
+                 'mcloving_state_transfer_holds_valid(jsonb)',
+                 'EXECUTE'
+             )",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("inspect runtime hold-validator privilege")
+    );
+    let replay = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &bundle,
+            &expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("replay exact state-transfer bundle");
+    assert!(!replay.created);
+    assert_eq!(first.id, replay.id);
+    assert_eq!(
+        store
+            .state_transfer_bundle(organization_id, first.id)
+            .await
+            .expect("read canonical transfer bytes"),
+        Some(mcloving_state_transfer::canonical_bytes(&bundle).unwrap())
+    );
+
+    let (mut stronger, mut stronger_expected) = transfer_bundle(21);
+    let build_protection = &mut stronger.jobs[0].builds[0].protection;
+    build_protection.retention.retain_until_unix_ms = 20_000;
+    build_protection
+        .active_holds
+        .push(transfer_hold("case-b", 16));
+    stronger.expected_record_ids.push("hold:case-b".to_owned());
+    stronger.expected_record_ids.sort();
+    stronger_expected.input_bundle_digest = mcloving_state_transfer::sha256(
+        &mcloving_state_transfer::canonical_bytes(&stronger).unwrap(),
+    );
+    let stronger_receipt = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &stronger,
+            &stronger_expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("import stronger destination protections");
+    assert!(stronger_receipt.created);
+
+    let replay_after_strengthening = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &bundle,
+            &expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("replay remains exact after later protections strengthen");
+    assert!(!replay_after_strengthening.created);
+    assert_eq!(replay_after_strengthening.id, first.id);
+
+    let subject = bundle.jobs[0].builds[0].record.source_digest;
+    sqlx::query(
+        "UPDATE state_transfer_protections
+         SET active_holds = (
+             SELECT jsonb_agg(value ORDER BY value ->> 'hold_id' DESC)
+             FROM jsonb_array_elements(active_holds)
+         )
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect("database permits a semantically equivalent hold-array reorder");
+
+    let (regression_source, regression_expected) = transfer_bundle(22);
+    let monotonic = store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &regression_source,
+            &regression_expected,
+            "migration-operator@example.test",
+        )
+        .await
+        .expect("merge weaker source with stronger destination protections");
+    assert!(monotonic.created);
+    let canonical = store
+        .state_transfer_bundle(organization_id, monotonic.id)
+        .await
+        .expect("read monotonic transfer")
+        .expect("monotonic transfer exists");
+    let persisted: StateBundle = serde_json::from_slice(&canonical).expect("decode stored bundle");
+    let persisted_protection = &persisted.jobs[0].builds[0].protection;
+    assert_eq!(persisted_protection.retention.retain_until_unix_ms, 20_000);
+    assert_eq!(
+        persisted_protection
+            .active_holds
+            .iter()
+            .map(|hold| hold.hold_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["case-a", "case-b"]
+    );
+
+    let mut divergent = regression_source;
+    divergent.jobs[0].builds[0].audit_digest = transfer_digest(99);
+    assert!(matches!(
+        store
+            .import_state_transfer(
+                organization_id,
+                project_id,
+                &divergent,
+                &regression_expected,
+                "migration-operator@example.test",
+            )
+            .await,
+        Err(StoreError::InvalidStateTransfer(message))
+            if message.contains("input bundle digest")
+    ));
+
+    let duplicate_hold = sqlx::query(
+        "UPDATE state_transfer_protections
+         SET active_holds = active_holds || jsonb_build_array(
+             (active_holds -> 0) || jsonb_build_object('reason', 'substituted')
+         )
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects duplicate legal-hold identity");
+    assert_eq!(
+        duplicate_hold
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    for (hold_id, invalid_digest) in [
+        (
+            "invalid-null-digest",
+            serde_json::Value::Array(vec![serde_json::Value::Null; 32]),
+        ),
+        (
+            "invalid-out-of-range-digest",
+            serde_json::Value::Array(vec![serde_json::Value::from(256); 32]),
+        ),
+    ] {
+        let invalid_hold = sqlx::query(
+            "UPDATE state_transfer_protections
+             SET active_holds = active_holds || jsonb_build_array(
+                 (active_holds -> 0) || jsonb_build_object(
+                     'hold_id', $4,
+                     'record', (active_holds -> 0 -> 'record') ||
+                         jsonb_build_object('source_digest', $5::jsonb)
+                 )
+             )
+             WHERE organization_id = $1
+               AND project_id = $2
+               AND subject_digest = $3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(subject.as_slice())
+        .bind(hold_id)
+        .bind(invalid_digest)
+        .execute(store.pool())
+        .await
+        .expect_err("database rejects a non-byte legal-hold source digest");
+        assert_eq!(
+            invalid_hold
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("23514")
+        );
+    }
+
+    for (hold_id, field, invalid_value) in [
+        ("fractional-placed-at", "placed_at_unix_ms", json!(1.5)),
+        (
+            "out-of-range-placed-at",
+            "placed_at_unix_ms",
+            serde_json::from_str("9223372036854775808").unwrap(),
+        ),
+        ("fractional-generation", "generation", json!(1.5)),
+        (
+            "out-of-range-generation",
+            "generation",
+            serde_json::from_str("18446744073709551616").unwrap(),
+        ),
+    ] {
+        let invalid_hold = sqlx::query(
+            "UPDATE state_transfer_protections
+             SET active_holds = active_holds || jsonb_build_array(
+                 (active_holds -> 0) || jsonb_build_object(
+                     'hold_id', $4,
+                     $5, $6::jsonb
+                 )
+             )
+             WHERE organization_id = $1
+               AND project_id = $2
+               AND subject_digest = $3",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(subject.as_slice())
+        .bind(hold_id)
+        .bind(field)
+        .bind(invalid_value)
+        .execute(store.pool())
+        .await
+        .expect_err("database rejects legal-hold integers outside Rust's exact domain");
+        assert_eq!(
+            invalid_hold
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("23514")
+        );
+    }
+
+    let substituted_protection_digest = sqlx::query(
+        "UPDATE state_transfer_protections
+         SET protection_digest = decode(repeat('11', 32), 'hex')
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects a substituted protection digest");
+    assert_eq!(
+        substituted_protection_digest
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let substituted_receipt = sqlx::query(
+        "UPDATE state_transfer_protections
+         SET receipt_id = $4
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .bind(first.id)
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects protection lineage absent from the named receipt");
+    assert_eq!(
+        substituted_receipt
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let zero_subject = sqlx::query(
+        "INSERT INTO state_transfer_protections (
+             organization_id, project_id, subject_digest,
+             retention_policy_id, retention_policy_version, retention_policy_digest,
+             retain_until_unix_ms, active_holds, protection_digest, receipt_id
+         )
+         SELECT organization_id, project_id, decode(repeat('00', 32), 'hex'),
+                retention_policy_id, retention_policy_version, retention_policy_digest,
+                retain_until_unix_ms, active_holds, protection_digest, receipt_id
+         FROM state_transfer_protections
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects a zero protection subject digest");
+    assert_eq!(
+        zero_subject
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let omitted_hold = sqlx::query(
+        "UPDATE state_transfer_protections
+         SET active_holds = '[]'::jsonb
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects legal-hold omission");
+    assert_eq!(
+        omitted_hold
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let deleted_protection = sqlx::query(
+        "DELETE FROM state_transfer_protections
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND subject_digest = $3",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(subject.as_slice())
+    .execute(store.pool())
+    .await
+    .expect_err("database rejects effective-protection deletion");
+    assert_eq!(
+        deleted_protection
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    let mutated_receipt = sqlx::query(
+        "UPDATE state_transfer_receipts
+         SET actor_subject = 'rewritten@example.test'
+         WHERE id = $1",
+    )
+    .bind(first.id)
+    .execute(store.pool())
+    .await
+    .expect_err("receipt history is immutable");
+    assert_eq!(
+        mutated_receipt
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+
+    let outbox_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM outbox
+         WHERE organization_id = $1
+           AND topic = 'state_transfer.imported'",
+    )
+    .bind(organization_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count state-transfer outbox records");
+    assert_eq!(outbox_count, 3);
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM audit_events
+         WHERE organization_id = $1
+           AND action = 'state_transfer.imported'",
+    )
+    .bind(organization_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count state-transfer audit records");
+    assert_eq!(audit_count, 3);
+}
+
+fn transfer_digest(byte: u8) -> [u8; 32] {
+    [byte; 32]
+}
+
+fn transfer_record(id: &str, byte: u8) -> RecordProvenance {
+    RecordProvenance {
+        id: id.to_owned(),
+        source_digest: transfer_digest(byte),
+        provenance: format!("sealed PostgreSQL fixture record {id}"),
+    }
+}
+
+fn transfer_hold(id: &str, byte: u8) -> TransferLegalHold {
+    TransferLegalHold {
+        record: transfer_record(&format!("hold:{id}"), byte),
+        hold_id: id.to_owned(),
+        scope: "job:stateful/build:3".to_owned(),
+        reason: format!("preserve {id}"),
+        placed_at_unix_ms: 1_000,
+        generation: 1,
+        release_authority: "legal@example.test".to_owned(),
+    }
+}
+
+fn transfer_protection(deadline: i64, holds: Vec<TransferLegalHold>) -> TransferProtection {
+    TransferProtection {
+        retention: RetentionPolicy {
+            policy_id: "migration-retention".to_owned(),
+            policy_version: "v1".to_owned(),
+            policy_digest: transfer_digest(70),
+            retain_until_unix_ms: deadline,
+        },
+        active_holds: holds,
+    }
+}
+
+fn transfer_bundle(source_generation: u8) -> (StateBundle, ExpectedBinding) {
+    let source = SystemIdentity {
+        kind: "jenkins".to_owned(),
+        instance_id: "jenkins/postgres-fixture".to_owned(),
+        generation: format!("source-generation-{source_generation}"),
+        configuration_digest: transfer_digest(1),
+    };
+    let destination = SystemIdentity {
+        kind: "mcloving".to_owned(),
+        instance_id: "mcloving/postgres-fixture".to_owned(),
+        generation: "destination-generation-1".to_owned(),
+        configuration_digest: transfer_digest(2),
+    };
+    let binding = TransferBinding {
+        schema: STATE_TRANSFER_SCHEMA_V1.to_owned(),
+        direction: TransferDirection::JenkinsToMcLoving,
+        source: source.clone(),
+        destination: destination.clone(),
+        source_export_digest: transfer_digest(source_generation),
+        transform_implementation_digest: transfer_digest(3),
+        transform_configuration_digest: transfer_digest(4),
+        conflict_policy: ConflictPolicy::RejectDivergence,
+        provenance: "sealed PostgreSQL fixture export".to_owned(),
+    };
+    let mut expected_record_ids = vec![
+        "artifact:stateful:3",
+        "build:stateful:3",
+        "hold:case-a",
+        "job:stateful",
+        "trigger:stateful:3",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    expected_record_ids.sort();
+    let bundle = StateBundle {
+        binding,
+        expected_record_ids,
+        jobs: vec![TransferJobState {
+            record: transfer_record("job:stateful", 10),
+            source_job_id: "stateful".to_owned(),
+            target_pipeline_id: "stateful".to_owned(),
+            next_build_number: 4,
+            previous_result: Some(TransferBuildResult::Failed),
+            builds: vec![TransferBuildState {
+                record: transfer_record("build:stateful:3", 11),
+                source_queue_id: "queue:stateful:3".to_owned(),
+                source_build_id: "stateful#3".to_owned(),
+                trigger: TransferTriggerCause {
+                    record: transfer_record("trigger:stateful:3", 16),
+                    trigger_kind: "manual".to_owned(),
+                    external_id: "fixture-trigger-3".to_owned(),
+                    actor_subject: "user:fixture".to_owned(),
+                },
+                invocation_parameters: Vec::new(),
+                number: 3,
+                result: TransferBuildResult::Failed,
+                queued_at_unix_ms: 1_000,
+                started_at_unix_ms: 1_100,
+                ended_at_unix_ms: 1_200,
+                checkouts: Vec::new(),
+                graph_nodes: Vec::new(),
+                approvals: Vec::new(),
+                normalized_tests: Vec::new(),
+                logs: Vec::new(),
+                artifacts: vec![TransferObjectState {
+                    record: transfer_record("artifact:stateful:3", 12),
+                    kind: TransferObjectKind::Artifact,
+                    logical_name: "state.tar.zst".to_owned(),
+                    content_digest: transfer_digest(13),
+                    bytes: 4096,
+                    producer_build_number: Some(3),
+                    retrieval: TransferRetrievalMetadata {
+                        media_type: "application/zstd".to_owned(),
+                        logical_locator: "artifacts/stateful/3/state.tar.zst".to_owned(),
+                        content_digest: transfer_digest(13),
+                    },
+                    data_binding: TransferDataBinding {
+                        classification: TransferDataClassification::Internal,
+                        secret_disposition: None,
+                    },
+                    filesystem_entries: Vec::new(),
+                    protection: transfer_protection(10_000, Vec::new()),
+                }],
+                protection: transfer_protection(10_000, vec![transfer_hold("case-a", 14)]),
+                audit_digest: transfer_digest(15),
+            }],
+            retained_workspaces: Vec::new(),
+            persistent_dependencies: Vec::new(),
+        }],
+    };
+    let expected = ExpectedBinding {
+        direction: bundle.binding.direction,
+        source,
+        destination,
+        source_export_digest: bundle.binding.source_export_digest,
+        input_bundle_digest: mcloving_state_transfer::sha256(
+            &mcloving_state_transfer::canonical_bytes(&bundle).unwrap(),
+        ),
+        transform_implementation_digest: bundle.binding.transform_implementation_digest,
+        transform_configuration_digest: bundle.binding.transform_configuration_digest,
+        conflict_policy: bundle.binding.conflict_policy,
+    };
+    (bundle, expected)
 }
 
 fn dag_node(
@@ -5621,8 +6541,8 @@ async fn operator_retry_reopens_fail_fast_skipped_independent_siblings() {
             .await
             .expect("fail fail-fast attempt")
     );
-    let skipped: (Uuid, String, String) = sqlx::query_as(
-        "SELECT n.id, n.status, a.status
+    let skipped: (Uuid, String, String, Uuid) = sqlx::query_as(
+        "SELECT n.id, n.status, a.status, a.id
          FROM nodes AS n
          JOIN attempts AS a
            ON a.organization_id = n.organization_id
@@ -5663,6 +6583,28 @@ async fn operator_retry_reopens_fail_fast_skipped_independent_siblings() {
         .await
         .expect("read reopened sibling ordinal");
     assert_eq!(sibling_ordinal, 2);
+    let graph = store
+        .build_graph(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read fail-fast retried DAG")
+        .expect("fail-fast retried DAG exists");
+    let sibling_attempts = graph
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.node_id == skipped.0)
+        .collect::<Vec<_>>();
+    assert_eq!(sibling_attempts.len(), 2);
+    assert_eq!(sibling_attempts[0].attempt_id, skipped.3);
+    assert_eq!(sibling_attempts[0].status, "aborted");
+    assert_eq!(
+        sibling_attempts[0]
+            .terminal_summary
+            .as_ref()
+            .and_then(|summary| summary.get("reason"))
+            .and_then(Value::as_str),
+        Some("fail_fast_skipped")
+    );
+    assert_eq!(sibling_attempts[1].retry_of, Some(skipped.3));
 }
 
 #[tokio::test]
@@ -5776,6 +6718,506 @@ async fn operator_retry_reopens_a_terminal_dag_and_preserves_attempt_history() {
     assert_eq!(graph.attempts.len(), 2);
     assert_eq!(graph.attempts[0].status, "failed");
     assert_eq!(graph.attempts[1].status, "succeeded");
+    assert_eq!(graph.attempts[1].retry_of, Some(first.attempt_id));
+}
+
+#[tokio::test]
+async fn rolling_upgrade_attempt_inserts_preserve_runnable_and_blocked_readiness() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "attempt-readiness-rolling-upgrade",
+        )
+        .await
+        .expect("create readiness compatibility project");
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "attempt-readiness-rolling-upgrade".to_owned(),
+            pipeline_digest: [0xd5; 32],
+            priority: 0,
+            nodes: vec![
+                dag_node("root", DagNodeKind::Work, vec![], "linux", "root"),
+                dag_node(
+                    "child",
+                    DagNodeKind::Work,
+                    vec![DagDependency {
+                        node_key: "root".to_owned(),
+                        condition: DependencyCondition::Succeeded,
+                    }],
+                    "linux",
+                    "child",
+                ),
+            ],
+        })
+        .await
+        .expect("admit readiness compatibility DAG");
+
+    let runnable_attempt = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO attempts (id, organization_id, node_id, ordinal, status)
+         VALUES ($1, $2, $3, 2, 'queued')",
+    )
+    .bind(runnable_attempt)
+    .bind(organization_id)
+    .bind(admission.nodes["root"].node_id)
+    .execute(store.pool())
+    .await
+    .expect("legacy runnable insert omits readiness");
+    let blocked_attempt = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO attempts (id, organization_id, node_id, ordinal, status)
+         VALUES ($1, $2, $3, 2, 'queued')",
+    )
+    .bind(blocked_attempt)
+    .bind(organization_id)
+    .bind(admission.nodes["child"].node_id)
+    .execute(store.pool())
+    .await
+    .expect("legacy blocked insert omits readiness");
+
+    let readiness: (bool, bool) = sqlx::query_as(
+        "SELECT
+             (SELECT ready_at IS NOT NULL FROM attempts WHERE id = $1),
+             (SELECT ready_at IS NULL FROM attempts WHERE id = $2)",
+    )
+    .bind(runnable_attempt)
+    .bind(blocked_attempt)
+    .fetch_one(store.pool())
+    .await
+    .expect("read compatibility readiness");
+    assert!(readiness.0, "legacy runnable attempt receives the default");
+    assert!(readiness.1, "legacy blocked attempt remains unready");
+
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'failed', logical_outcome = 'failed'
+         WHERE organization_id = $1 AND id IN ($2, $3)",
+    )
+    .bind(organization_id)
+    .bind(admission.nodes["root"].node_id)
+    .bind(admission.nodes["child"].node_id)
+    .execute(store.pool())
+    .await
+    .expect("terminalize nodes before legacy retry sequence");
+    sqlx::query(
+        "UPDATE attempts
+         SET status = 'failed', completed_at = clock_timestamp()
+         WHERE organization_id = $1 AND id IN ($2, $3)",
+    )
+    .bind(organization_id)
+    .bind(runnable_attempt)
+    .bind(blocked_attempt)
+    .execute(store.pool())
+    .await
+    .expect("terminalize attempts before legacy retry sequence");
+
+    let legacy_parent_retry = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO attempts (
+             id, organization_id, node_id, ordinal, status, retry_of
+         )
+         VALUES ($1, $2, $3, 3, 'queued', $4)",
+    )
+    .bind(legacy_parent_retry)
+    .bind(organization_id)
+    .bind(admission.nodes["root"].node_id)
+    .bind(runnable_attempt)
+    .execute(store.pool())
+    .await
+    .expect("legacy parent retry insert omits readiness");
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'queued', logical_outcome = NULL
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.nodes["root"].node_id)
+    .execute(store.pool())
+    .await
+    .expect("legacy parent retry reopens node");
+
+    let legacy_child_retry = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO attempts (
+             id, organization_id, node_id, ordinal, status, retry_of
+         )
+         VALUES ($1, $2, $3, 3, 'queued', $4)",
+    )
+    .bind(legacy_child_retry)
+    .bind(organization_id)
+    .bind(admission.nodes["child"].node_id)
+    .bind(blocked_attempt)
+    .execute(store.pool())
+    .await
+    .expect("legacy child retry insert omits readiness");
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'queued', logical_outcome = NULL
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(admission.nodes["child"].node_id)
+    .execute(store.pool())
+    .await
+    .expect("legacy child retry attempts to reopen node");
+
+    let legacy_retry_state: (String, bool, String, bool) = sqlx::query_as(
+        "SELECT
+             (SELECT status FROM nodes WHERE organization_id = $1 AND id = $2),
+             (SELECT ready_at IS NOT NULL FROM attempts WHERE id = $3),
+             (SELECT status FROM nodes WHERE organization_id = $1 AND id = $4),
+             (SELECT ready_at IS NULL FROM attempts WHERE id = $5)",
+    )
+    .bind(organization_id)
+    .bind(admission.nodes["root"].node_id)
+    .bind(legacy_parent_retry)
+    .bind(admission.nodes["child"].node_id)
+    .bind(legacy_child_retry)
+    .fetch_one(store.pool())
+    .await
+    .expect("read translated legacy retry state");
+    assert_eq!(
+        legacy_retry_state,
+        ("queued".to_owned(), true, "blocked".to_owned(), true)
+    );
+}
+
+#[tokio::test]
+async fn automatic_retry_waits_for_a_reopened_completed_dependency() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "automatic-retry-readiness",
+        )
+        .await
+        .expect("create automatic retry readiness project");
+    let mut child = dag_node(
+        "child",
+        DagNodeKind::Work,
+        vec![DagDependency {
+            node_key: "parent".to_owned(),
+            condition: DependencyCondition::Completed,
+        }],
+        "linux",
+        "child",
+    );
+    child.max_attempts = 2;
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "automatic-retry-readiness".to_owned(),
+            pipeline_digest: [0xd6; 32],
+            priority: 0,
+            nodes: vec![
+                dag_node("parent", DagNodeKind::Work, vec![], "linux", "parent"),
+                child,
+            ],
+        })
+        .await
+        .expect("admit automatic retry readiness DAG");
+    let parent = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-parent",
+            "linux",
+            "parent",
+        ))
+        .await
+        .expect("claim parent")
+        .expect("parent is ready");
+    run_dag_claim(&store, &parent).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                parent.attempt_id,
+                parent.fence,
+                parent.restore_epoch,
+                &parent.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("fail parent")
+    );
+    let first_child = store
+        .claim_next(&dag_claim(organization_id, "agent-child", "linux", "child"))
+        .await
+        .expect("claim child")
+        .expect("completed edge releases child");
+    run_dag_claim(&store, &first_child).await;
+    assert!(matches!(
+        store
+            .schedule_retry(organization_id, parent.attempt_id, 2, "reopen parent")
+            .await
+            .expect("reopen parent"),
+        RetryDecision::Scheduled { created: true, .. }
+    ));
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                first_child.attempt_id,
+                first_child.fence,
+                first_child.restore_epoch,
+                &first_child.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("fail child and schedule automatic retry")
+    );
+    let child_state: (String, Option<i64>) = sqlx::query_as(
+        "SELECT n.status,
+                CASE WHEN a.ready_at IS NULL THEN NULL
+                     ELSE (EXTRACT(EPOCH FROM a.ready_at) * 1000)::bigint END
+         FROM nodes AS n
+         JOIN attempts AS a
+           ON a.organization_id = n.organization_id AND a.node_id = n.id
+         WHERE n.organization_id = $1
+           AND n.id = $2
+           AND a.ordinal = 2",
+    )
+    .bind(organization_id)
+    .bind(admission.nodes["child"].node_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read blocked automatic retry");
+    assert_eq!(child_state, ("blocked".to_owned(), None));
+    assert!(
+        store
+            .claim_next(&dag_claim(
+                organization_id,
+                "agent-child-early",
+                "linux",
+                "child",
+            ))
+            .await
+            .expect("probe blocked child")
+            .is_none()
+    );
+    let parent_retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-parent-retry",
+            "linux",
+            "parent",
+        ))
+        .await
+        .expect("claim parent retry")
+        .expect("parent retry is ready");
+    run_dag_claim(&store, &parent_retry).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                parent_retry.attempt_id,
+                parent_retry.fence,
+                parent_retry.restore_epoch,
+                &parent_retry.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"try": 2}),
+            )
+            .await
+            .expect("complete parent retry")
+    );
+    let child_retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-child-retry",
+            "linux",
+            "child",
+        ))
+        .await
+        .expect("claim child retry after dependency")
+        .expect("child retry becomes ready");
+    assert_ne!(child_retry.attempt_id, first_child.attempt_id);
+}
+
+#[tokio::test]
+async fn operator_retry_waits_for_a_reopened_completed_dependency() {
+    let Some(store) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "operator-retry-readiness",
+        )
+        .await
+        .expect("create operator retry readiness project");
+    let _admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "operator-retry-readiness".to_owned(),
+            pipeline_digest: [0xd7; 32],
+            priority: 0,
+            nodes: vec![
+                dag_node("parent", DagNodeKind::Work, vec![], "linux", "parent"),
+                dag_node(
+                    "child",
+                    DagNodeKind::Work,
+                    vec![DagDependency {
+                        node_key: "parent".to_owned(),
+                        condition: DependencyCondition::Completed,
+                    }],
+                    "linux",
+                    "child",
+                ),
+            ],
+        })
+        .await
+        .expect("admit operator retry readiness DAG");
+    let parent = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-parent",
+            "linux",
+            "parent",
+        ))
+        .await
+        .expect("claim parent")
+        .expect("parent is ready");
+    run_dag_claim(&store, &parent).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                parent.attempt_id,
+                parent.fence,
+                parent.restore_epoch,
+                &parent.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("fail parent")
+    );
+    let child = store
+        .claim_next(&dag_claim(organization_id, "agent-child", "linux", "child"))
+        .await
+        .expect("claim child")
+        .expect("completed edge releases child");
+    run_dag_claim(&store, &child).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                child.attempt_id,
+                child.fence,
+                child.restore_epoch,
+                &child.agent_id,
+                TerminalOutcome::Failed,
+                json!({"try": 1}),
+            )
+            .await
+            .expect("fail child")
+    );
+    assert!(matches!(
+        store
+            .schedule_retry(organization_id, parent.attempt_id, 2, "reopen parent")
+            .await
+            .expect("reopen parent"),
+        RetryDecision::Scheduled { created: true, .. }
+    ));
+    let child_retry_id = match store
+        .schedule_retry(organization_id, child.attempt_id, 2, "reopen child")
+        .await
+        .expect("reopen child")
+    {
+        RetryDecision::Scheduled {
+            attempt_id,
+            created: true,
+            ..
+        } => attempt_id,
+        decision => panic!("expected child retry, got {decision:?}"),
+    };
+    let child_state: (String, bool) = sqlx::query_as(
+        "SELECT n.status, a.ready_at IS NULL
+         FROM nodes AS n
+         JOIN attempts AS a
+           ON a.organization_id = n.organization_id AND a.node_id = n.id
+         WHERE n.organization_id = $1 AND a.id = $2",
+    )
+    .bind(organization_id)
+    .bind(child_retry_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read blocked operator retry");
+    assert_eq!(child_state, ("blocked".to_owned(), true));
+    assert!(
+        store
+            .claim_next(&dag_claim(
+                organization_id,
+                "agent-child-early",
+                "linux",
+                "child",
+            ))
+            .await
+            .expect("probe blocked operator retry")
+            .is_none()
+    );
+    let parent_retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-parent-retry",
+            "linux",
+            "parent",
+        ))
+        .await
+        .expect("claim parent retry")
+        .expect("parent retry is ready");
+    run_dag_claim(&store, &parent_retry).await;
+    assert!(
+        store
+            .finalize_attempt(
+                organization_id,
+                parent_retry.attempt_id,
+                parent_retry.fence,
+                parent_retry.restore_epoch,
+                &parent_retry.agent_id,
+                TerminalOutcome::Succeeded,
+                json!({"try": 2}),
+            )
+            .await
+            .expect("complete parent retry")
+    );
+    let child_retry = store
+        .claim_next(&dag_claim(
+            organization_id,
+            "agent-child-retry",
+            "linux",
+            "child",
+        ))
+        .await
+        .expect("claim operator retry after dependency")
+        .expect("operator retry becomes ready");
+    assert_eq!(child_retry.attempt_id, child_retry_id);
 }
 
 #[tokio::test]
@@ -5995,6 +7437,31 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
             )
             .await
             .expect("terminalize Linux retry")
+    );
+
+    let graph_after_retry = store
+        .build_graph(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read graph after automatic retry")
+        .expect("retried graph exists");
+    let join_attempt = graph_after_retry
+        .attempts
+        .iter()
+        .find(|attempt| attempt.node_id == admission.nodes["join"].node_id)
+        .expect("join attempt exists before it runs");
+    let retry_attempt = graph_after_retry
+        .attempts
+        .iter()
+        .find(|attempt| attempt.attempt_id == retry.attempt_id)
+        .expect("automatic parent retry is exported");
+    assert!(join_attempt.created_at_unix_ms <= retry_attempt.created_at_unix_ms);
+    assert!(
+        join_attempt
+            .ready_at_unix_ms
+            .expect("blocked join gains durable readiness")
+            >= retry_attempt
+                .completed_at_unix_ms
+                .expect("parent retry completed before join became ready")
     );
 
     let restarted = Store::new(store.pool().clone());

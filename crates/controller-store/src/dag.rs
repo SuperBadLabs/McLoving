@@ -255,14 +255,19 @@ impl Store {
             .execute(&mut *tx)
             .await?;
             sqlx::query(
-                "INSERT INTO attempts (
-                     id, organization_id, node_id, ordinal, status
+                "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+                 INSERT INTO attempts (
+                     id, organization_id, node_id, ordinal, status,
+                     created_at, ready_at
                  )
-                 VALUES ($1, $2, $3, 1, 'queued')",
+                 SELECT $1, $2, $3, 1, 'queued', admitted_at,
+                        CASE WHEN $4 THEN admitted_at ELSE NULL END
+                 FROM timing",
             )
             .bind(attempt_id)
             .bind(input.organization_id)
             .bind(node_id)
+            .bind(node.dependencies.is_empty())
             .execute(&mut *tx)
             .await?;
             nodes.insert(
@@ -350,6 +355,10 @@ pub(crate) async fn advance_dag_after_attempt(
     if !dag_mode {
         return Ok(false);
     }
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("mcloving.dag.retry.{build_id}"))
+        .execute(&mut **tx)
+        .await?;
     let cancelled: bool = row.try_get("cancelled")?;
     let node_key: String = row.try_get("node_key")?;
     let fail_fast: bool = row.try_get("fail_fast")?;
@@ -373,28 +382,57 @@ pub(crate) async fn advance_dag_after_attempt(
         if !has_non_idempotent_effect {
             let retry_id = Uuid::new_v4();
             sqlx::query(
-                "INSERT INTO attempts (
-                     id, organization_id, node_id, ordinal, status, retry_of
+                "WITH timing AS (
+                     SELECT clock_timestamp() AS admitted_at
+                 ), eligibility AS (
+                     SELECT NOT EXISTS (
+                         SELECT 1
+                         FROM node_dependencies AS dependency
+                         JOIN nodes AS parent
+                           ON parent.id = dependency.parent_node_id
+                          AND parent.organization_id = dependency.organization_id
+                         WHERE dependency.organization_id = $2
+                           AND dependency.child_node_id = $3
+                           AND (
+                               (
+                                   dependency.condition = 'succeeded'
+                                   AND parent.status <> 'succeeded'
+                               )
+                               OR (
+                                   dependency.condition = 'completed'
+                                   AND parent.status NOT IN (
+                                       'succeeded', 'failed', 'aborted', 'skipped'
+                                   )
+                               )
+                           )
+                     ) AS ready
+                 ), inserted AS (
+                     INSERT INTO attempts (
+                         id, organization_id, node_id, ordinal, status, retry_of,
+                         created_at, ready_at
+                     )
+                     SELECT $1, $2, $3, $4, 'queued', $5, admitted_at,
+                            CASE WHEN eligibility.ready THEN admitted_at ELSE NULL END
+                     FROM timing, eligibility
+                     RETURNING ready_at
                  )
-                 VALUES ($1, $2, $3, $4, 'queued', $5)",
+                 UPDATE nodes AS node
+                 SET status = CASE
+                         WHEN inserted.ready_at IS NULL THEN 'blocked'
+                         ELSE 'queued'
+                     END,
+                     cancellation_requested_at = NULL,
+                     queued_at = COALESCE(inserted.ready_at, node.queued_at)
+                 FROM inserted
+                 WHERE node.organization_id = $2
+                   AND node.id = $3
+                   AND node.logical_outcome IS NULL",
             )
             .bind(retry_id)
             .bind(organization_id)
             .bind(node_id)
             .bind(ordinal + 1)
             .bind(attempt_id)
-            .execute(&mut **tx)
-            .await?;
-            sqlx::query(
-                "UPDATE nodes
-                 SET status = 'queued',
-                     cancellation_requested_at = NULL
-                 WHERE organization_id = $1
-                   AND id = $2
-                   AND logical_outcome IS NULL",
-            )
-            .bind(organization_id)
-            .bind(node_id)
             .execute(&mut **tx)
             .await?;
             append_event_and_outbox(
@@ -701,6 +739,24 @@ async fn advance_blocked_nodes(
         .execute(&mut **tx)
         .await?
         .rows_affected();
+        if readied > 0 {
+            sqlx::query(
+                "UPDATE attempts AS attempt
+                 SET ready_at = node.queued_at
+                 FROM nodes AS node
+                 WHERE attempt.organization_id = $1
+                   AND node.organization_id = attempt.organization_id
+                   AND node.build_id = $2
+                   AND node.id = attempt.node_id
+                   AND node.status = 'queued'
+                   AND attempt.status = 'queued'
+                   AND attempt.ready_at IS NULL",
+            )
+            .bind(organization_id)
+            .bind(build_id)
+            .execute(&mut **tx)
+            .await?;
+        }
         if skipped == 0 && readied == 0 {
             break;
         }

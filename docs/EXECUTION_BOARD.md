@@ -659,7 +659,6 @@ boundary is too large or authority-sensitive to share a pull request safely.
 | Lane | Ticket or ordered chain | Class | Start gate | Streamlined execution rule |
 |---|---|---|---|---|
 | Windows evidence | `WIN-001` -> `WIN-002` -> `WIN-003` | SERIAL | Active | One persistent-Windows evidence generation at a time; the lane may run beside Linux/repository work |
-| State transfer | `MIG-005A` | SERIAL | Active | One persistence/evidence PR; no shared-library changes or authority actions in the branch |
 | Library compiler | `MIG-005` | PARALLEL | `MIG-002`, `MIG-003` are done | Separate worker/library PR; it no longer waits for unrelated state-transfer work |
 
 ### Parity substrate lanes
@@ -699,12 +698,13 @@ boundary is too large or authority-sensitive to share a pull request safely.
 
 ### Dispatch discipline
 
-The current three implementation slots are:
+After `MIG-005A` closure, the current three implementation slots are:
 
-1. `MIG-005A` — active serial state-transfer lane.
-2. `MIG-005` — newly unblocked parallel shared-library/compiler lane.
-3. `IDP-001` — longest remaining security critical path; `AUTHZ-001`,
+1. `MIG-005` — next shared-library/compiler lane.
+2. `IDP-001` — longest remaining security critical path; `AUTHZ-001`,
    `DISC-001`, `CONSUMER-001`, and `ADMIN-001` all wait behind it.
+3. `SCM-001` — independent contained-source boundary and prerequisite for
+   `SECRET-001`, `DISC-001`, and `DEP-001`.
 
 The Windows persistent-host campaign continues independently as an isolated
 evidence lane. When a slot merges, select the earliest ready successor on the
@@ -783,7 +783,7 @@ dependency-ready.
 | MIG-002 | DONE | MIG-000, MIG-001 | Commit the exact secret-scanned Jenkins migration corpus and oracle manifest, stratified from the reconciled production inventory plus pinned OSS fixtures, with source hashes, licenses, provenance, reviewed typed redaction references and protected-evidence digests instead of embedded values, Jenkins/plugin target profile, every referenced effective controller-global setting and value/configuration digest, each job's enabled/disabled operational-state receipt, both execution platforms, agent label/image/capability/trust-pool mappings, toolchain identities, and immutable fixture mappings for every admitted mutable agent-local runtime input, plus expected parse, validation, and execution traces. For every behavior-changing public or secret parameter, condition, matrix, timeout, retry, cancellation, `catchError`, unstable-stage/result, post path, parallel branch, join, fail-fast sibling-cancellation path, job-level concurrency/supersession option, enabled/disabled transition, interactive approval/input path, cross-job shared-resource mapping, agent selection, mutable agent-local runtime input, cache mapping, authorization policy, workload dependency resolution, and persistent cross-build state/history dependency, define bounded equivalence classes and success/failure scenarios rather than one default execution. Secret-parameter cases require an explicit invocation-only tainted secret mapping or deterministic fail-closed classification, never a stored default/value, and inject unique markers whose absence is scanned across corpus/canonical bytes, diagnostics, logs, artifacts, tests, audit, and every API/UI/CLI response. Multi-build cases must cover simultaneous triggers, queue/start order, serialization, abort-previous behavior, cancellation propagation, and effect authority; operational-state cases must prove disabled jobs reject manual/API/upstream/webhook/schedule ingress before queue materialization and emit no scheduled work, credential grant, or effect, while reviewed re-enable and rollback restore exact generation and denial/acceptance behavior; retry/result cases must cover each failed/successful attempt, retry lineage, caught errors, node/stage/build result divergence, and eventual success or exhaustion; multi-job cases must cover contention, release, cancellation, restart, and effect authority; agent cases must cover label matches/misses, required capabilities, trust-pool selection, and denial of under- or over-privileged pools; local-input cases must cover exact staged content, missing input, path/content/origin substitution, declared refresh, undeclared mutation, and deterministic unsupported classification; approval cases must cover allowed and denied identities, submitter restrictions, submitted values, rejection, expiry, timeout, and cancellation; authorization cases must cover positive and negative view/trigger/cancel/configure decisions for effective principals; dependency cases must cover locked resolution, repository or artifact substitution, missing content, and mutable-resolution rejection; cache cases must cover cold, valid-hit, corrupt, key-substitution, untrusted-write/trusted-read, generation rotation, and cleanup paths; transition cases must seed Jenkins history and prove build-number mapping, previous-result lookup, cross-build artifact retrieval, retained-workspace handling, and the first authoritative McLoving execution. Classify every case as native, mappable, scripted, or unsupported; preserve immutable result deltas; and report production-population coverage, parse reach, native runnable coverage, actionable migration, and certified equivalence separately. |
 | MIG-003 | DONE | MIG-001, MIG-002, IR-004 | Compile the admitted Jenkins Declarative subset into versioned McLoving IR and canonical strict YAML plus a separate versioned `JOBSTATE-001` operational-state record that preserves the source enabled/disabled state, generation, reason and provenance without making it mutable pipeline code. Preserve stage order, conditions, environment, public parameter schemas, invocation-only tainted secret-parameter references with no default/value persistence, matrices, post behavior, agent selection through an explicit normalized Jenkins-label-to-platform/capability/trust-pool mapping, typed immutable references for every admitted agent-local runtime input, admitted options including job-level concurrency and supersession, the parallel branch DAG and join semantics, fail-fast sibling cancellation, per-node/stage/build result semantics including caught errors and unstable outcomes, retry attempt identity and lineage, and interactive approval policy including allowed approvers, submitter restrictions, values, expiry, rejection, and cancellation; emit stable diagnostics for everything else; bind exact source/profile/compiler digests; and prove deterministic output with differential compiler fixtures. Rust independently reparses and validates every worker result before admission; adversarial worker-output gates reject malformed, unsupported, noncanonical, provenance- or profile-substituted IR/YAML or operational state, undeclared or mutable host-path access, and any secret default, literal, or taint downgrade. |
 | MIG-004 | DONE | MIG-003 | Ship a versioned step and plugin mapping catalog to native processes, reusable components, connectors, and immutable staged agent-local inputs. Every mapping declares schema, types, effects, trust requirements, supported target profiles, and provenance; local-input mappings additionally bind canonical logical name, source path and origin, content digest, media type, confidentiality/taint, refresh generation, read-only destination path, and live freeze/rollback checks; mappings with lock, throttle, or shared-resource semantics additionally bind the canonical resource identity, coordination scope across jobs, queue and fairness policy, lease/release behavior, cancellation/restart recovery, and effect fencing; cache mappings bind key derivation, immutable generation/content digests, trust class, read/write policy, expiry, and cleanup. Floating mappings, undeclared host reads, and silent fallback are forbidden; substitution resistance and corpus-earned coverage are gated. |
-| MIG-005A | ACTIVE | MIG-002, MIG-003, OPS-003, AUDIT-001 | Implement versioned, deterministic, idempotent forward and reverse state transforms for every admitted build-number, previous-result, per-build SCM provider/repository/ref/revision, previous-revision and canonical changelog/change-entry baseline, cross-build artifact, retained workspace, persistent-state dependency, retention policy/deadline, and active legal hold with its identity/scope/reason/provenance/generation/release authority. Bind immutable source export, transform implementation/configuration, destination state, record-level provenance, conflict policy, and verification digests; reject gaps, duplicate mappings, divergent replays, provenance substitution, unclassified state, deadline shortening, hold omission, and unauthorized release. Before `DONE`, execute both directions against disposable exact-profile Jenkins and McLoving instances with seeded history: include jobs whose `when { changeset ... }`, `when { changelog ... }`, or equivalent step consumes the prior SCM/change-set record plus records under shorter/longer/expired retention, multiple overlapping holds, and attempted unauthorized hold release; import state, prove equivalent-or-stronger retention and the union of active holds before reader or execution authority, deliver a pinned next revision with known canonical changes, prove the first destination build selects the same branches and effect intents from the transferred baseline, run a McLoving state-authoritative but externally effect-free build, freeze new work, reverse-reconcile its number, result, SCM revision/baseline/change entries, retention/holds, artifacts, retained workspace/state, and audit linkage, then deliver another pinned revision and prove Jenkins resumes with the same predicate decisions and without stale lookups, missing changes, missing artifacts, premature deletion, missing holds, duplicate mappings, or duplicate effects. Every stateful, SCM-baseline-dependent, retained, or held job requires a successful case-specific rehearsal before `CANARY-001` may grant production effect authority; the later receipt-only `MIG-008` closure cannot satisfy this pre-effect gate. |
+| MIG-005A | DONE | MIG-002, MIG-003, OPS-003, AUDIT-001 | Implement versioned, deterministic, idempotent forward and reverse state transforms for every admitted build-number, previous-result, per-build SCM provider/repository/ref/revision, previous-revision and canonical changelog/change-entry baseline, cross-build artifact, retained workspace, persistent-state dependency, retention policy/deadline, and active legal hold with its identity/scope/reason/provenance/generation/release authority. Bind immutable source export, transform implementation/configuration, destination state, record-level provenance, conflict policy, and verification digests; reject gaps, duplicate mappings, divergent replays, provenance substitution, unclassified state, deadline shortening, hold omission, and unauthorized release. Before `DONE`, execute both directions against disposable exact-profile Jenkins and McLoving instances with seeded history: include jobs whose `when { changeset ... }`, `when { changelog ... }`, or equivalent step consumes the prior SCM/change-set record plus records under shorter/longer/expired retention, multiple overlapping holds, and attempted unauthorized hold release; import state, prove equivalent-or-stronger retention and the union of active holds before reader or execution authority, deliver a pinned next revision with known canonical changes, prove the first destination build selects the same branches and effect intents from the transferred baseline, run a McLoving state-authoritative but externally effect-free build, freeze new work, reverse-reconcile its number, result, SCM revision/baseline/change entries, retention/holds, artifacts, retained workspace/state, and audit linkage, then deliver another pinned revision and prove Jenkins resumes with the same predicate decisions and without stale lookups, missing changes, missing artifacts, premature deletion, missing holds, duplicate mappings, or duplicate effects. Every stateful, SCM-baseline-dependent, retained, or held job requires a successful case-specific rehearsal before `CANARY-001` may grant production effect authority; the later receipt-only `MIG-008` closure cannot satisfy this pre-effect gate. |
 | MIG-005 | PENDING | MIG-002, MIG-003 | Inventory and resolve Jenkins shared libraries by pinned SCM reference and content digest, including `vars`, `src`, and `resources`, while classifying load-time, runtime, sandbox, CPS, plugin, and credential dependencies. The worker ingests only owner-approved, prefetched, digest-verified read-only source and never receives direct SCM or credential authority. Arbitrary Groovy never runs in the controller; any future bounded isolated evaluation is owner-approved, meets the MIG-001 deny-authority boundary, and produces explicit unsupported receipts outside its admitted subset. |
 | DIFF-001 | PENDING | MIG-002, MIG-003, MIG-004, MIG-005 | Certify core execution semantics in separate independently tested deny-authority Jenkins and McLoving sandboxes with exact platform/image/locale/toolchain/input-fixture receipts and bounded CPU/memory/time/output. Run every admitted parameter, condition, matrix, timeout, retry, caught-error, unstable-result, cancellation, post, parallel, join, fail-fast, multi-build, shared-resource, agent-selection, approval, dependency, cache, artifact, test, stdout/stderr, and success/failure scenario. Compare canonical stage/step arguments, normalized node/stage/build outcomes, attempt lineage, concurrency/order, cancellation, workspace and published artifact digests/metadata/API retrieval, normalized tests, logs/gaps, and deterministic classification. Scripted/unsupported cases must remain non-executable with zero work, grant, or effect. |
 | DIFF-002 | PENDING | MIG-005A, IDP-001, AUTHZ-001, JOBSTATE-001, AUDIT-001 | Certify identity, authorization, operational state, and persistent-history semantics. Compare immutable source-to-target principal mappings and positive/negative view/trigger/cancel/configure decisions; enabled/disabled generations and pre-queue denial; build-number/previous-result/SCM-changelog baselines; cross-build artifacts; retained workspace/state; retention and legal holds; approval identity/value/expiry behavior; retry/result history; first-authoritative-run decisions; and forward/reverse reconciliation. Include rename/collision/deleted-identity reuse, group changes, disable races, stale generations, history gaps, hold omission/release denial, restart, and rollback fixtures. |
@@ -839,9 +839,9 @@ unbounded “later Wave 5” escape hatch.
 
 ## Current state and dispatch queue
 
-Protected `main` is `759b633d55c670a730a6f1e7c414af284789743e` after
-PR #19 completed `W4-B`. Dispatch follows the three-slot topology above:
-`MIG-005A`, `MIG-005`, and `IDP-001`. The persistent-Windows campaign remains
+Protected `main` is `4980247824eae70c8ecc42f3305274811534ff14` after
+PR #20 streamlined the execution topology. Dispatch follows the three-slot
+topology above: `MIG-005`, `IDP-001`, and `SCM-001`. The persistent-Windows campaign remains
 an isolated evidence lane. A slot advances to its earliest dependency-critical
 successor after protected-main merge and exact-head verification; it does not
 wait for the other independent slots.
@@ -915,8 +915,79 @@ YAML/schema admission and adversarial substitution gates pass. The catalog is
 included in successor corpus manifest
 `a28283de801854836887e9bc6cffd43c10bb078dbeff343fdf92d19b470a74c2`.
 
-`W4-C` is deliberately split. `MIG-005A` remains the active serial
-persistent-state transform. `MIG-005` is independently ready on its own branch
+`W4-C` is deliberately split. `MIG-005A` is complete: deterministic forward
+and reverse state-transfer receipts, monotonic PostgreSQL protection truth,
+bounded no-follow filesystem materialization, and the disposable exact-profile
+Jenkins -> McLoving -> Jenkins rehearsal are documented in
+`docs/architecture/STATE_TRANSFER_V1.md`. The accepted successor rehearsal
+also removes direct runtime receipt/record/protection writes, derives transferred
+changes from bounded sealed Jenkins Git changelog bytes whose head and baseline
+bind the exact checkout, and evaluates predicates only from immutable
+migration-writer SCM evidence bound to the exact receipt, project, live fenced
+agent attempt, and active restore epoch. Approval decisions are constrained to
+their owning build windows, and canonical serialization is quota-bounded before
+cloning or secondary processing. Jenkins graph history is derived from the
+sealed native workflow API rather than fabricated stage names or build-wide
+timestamps. McLoving build 3 is a five-node PostgreSQL DAG whose graph,
+per-attempt timestamps and terminal outcomes, committed logs, available-artifact
+inventory, and fenced checkout are reread from controller truth before export.
+Attempt creation and dependency-readiness are distinct durable PostgreSQL
+fields, while executing-attempt starts come from durable `attempt.running`
+events. Automatic and operator retry paths atomically establish each new
+generation's readiness; initially blocked attempts remain unready until their
+dependencies are satisfied. Fail-fast skips,
+unsatisfied-dependency skips, and queued
+pre-execution cancellations are typed terminal-only attempts with no fabricated
+start time; terminal timestamps remain monotonic, and logs are exported in the
+global controller commit-cursor order.
+Graph dependencies retain their exact `succeeded` or `completed` condition,
+and imported Jenkins successors after observed non-successful stages use
+`completed` rather than fabricated `succeeded` edges. Child attempts cannot
+predate the first parent attempt that satisfies their exact condition;
+`succeeded` edges require the final parent attempt to be successful, and child
+chronology uses the first actually executing attempt rather than an earlier
+terminal-only skipped placeholder. `completed` and `succeeded` edges bind to
+the latest parent generation admitted at the child attempt's readiness time,
+preserving both reopened-parent waits
+and children completed before a later retry. Every retry
+names its immediately preceding attempt and reason: `failed` for failed
+predecessors, `fail_fast_skipped` for fail-fast-aborted predecessors, and
+`dependency_not_succeeded` only when an actual active non-successful parent
+generation supports the skip.
+Missing, reordered, mismatched, and post-success lineage fails closed. Later
+failed parent retries on `completed` edges do not invalidate already-admitted
+descendants.
+The reverse bridge verifies the full canonical build record byte-for-byte and
+independently checks Jenkins-native build fields, workflow-stage semantics,
+exact per-stage start times and durations, SCM changelog, log payloads,
+artifacts, the complete canonical retry sidecar, four exact multi-attempt
+histories, and a dedicated persisted
+retention/legal-hold boundary. Actual record collection also fails before
+cloning any record beyond the one-million-record bound. It
+materializes the sealed retained-workspace inventory, makes its exact
+`src/first.target` bytes a build-3 input, reverse-exports those bytes as a
+build-owned artifact, and independently retrieves and compares that artifact
+from Jenkins. Its exact transform binary SHA-256 is
+`549ec832edb138cea2895cf02fc39a3e4ec244f8a0aec378473be8f952dfe4c9`.
+Its source, transform, and reverse manifest SHA-256 values are
+`0304557a39a7c2a58ff9e1f110bc1bd4ca3bb2df16b28d54cc3c94262b7f47c6`,
+`e28b47d2aa70ec2ad8cdaa2c48e1100c8862c9a47765d22a355c1660e96cafe7`,
+and `2063b41b982f2821d494bfba96d43125382ea39fb12a601fbed3ce0fd8a77e05`;
+the forward and reverse bundle SHA-256 values are
+`af172be8893e282b72fc20b820382c8236e18c7b981bc3b4acbf57884ead55e4`
+and `1a66f2c6354011abd23f45671674291e0b22faeea1043791920fc5ee0123ef52`.
+The final readiness repair keeps automatic and operator retries blocked until
+their active dependency generation is actually satisfied, and gives legacy
+runnable inserts a rolling-upgrade-safe readiness default without falsely
+readying blocked DAG attempts. It also fences the pre-v18 retry
+insert-then-node-reopen sequence, reclassifies that node from queued to blocked
+when its active dependency generation is not terminal, and validates exported
+dependency satisfaction against readiness rather than the later process-start
+time.
+An injected post-install failure restored repository, build, permalink, and
+next-build-number truth, removed partial evidence, and passed immediate replay.
+The source runtime is retained by default for the dependent phases and removed
+only by an explicit cleanup flag. `MIG-005` is next on its own branch
 and no longer waits for unrelated state-transfer work; both join only through
 their required differential evidence. `WIN-001`, `WIN-002`, and `WIN-003`
 remain a separate serial persistent-Windows evidence lane that may run in

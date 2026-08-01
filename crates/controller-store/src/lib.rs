@@ -12,6 +12,7 @@ mod dag;
 mod product;
 mod scheduler;
 mod security;
+mod state_transfer;
 mod test_results;
 
 pub use audit::{
@@ -31,6 +32,7 @@ pub use product::{
 };
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 pub use security::{CredentialDelivery, NewCredentialGrant, NewEnvironmentApproval};
+pub use state_transfer::{ScmCheckoutEvidenceRef, StateTransferReceipt};
 pub use test_results::{
     DEFAULT_MAX_JUNIT_BYTES, DEFAULT_MAX_JUNIT_CASES, DEFAULT_MAX_JUNIT_SUITES, JunitLimits,
     NormalizedTestCase, NormalizedTestReport, NormalizedTestSuite,
@@ -81,6 +83,10 @@ pub const OBJECT_PUBLICATION_FENCE_V14: &str =
 pub const PRODUCT_SURFACE_V15: &str = include_str!("../migrations/0015_product_surface.sql");
 /// Monotonic cross-node ordering for resumable build-log pages.
 pub const GLOBAL_LOG_ORDER_V16: &str = include_str!("../migrations/0016_global_log_order.sql");
+/// Immutable, replay-safe Jenkins/McLoving persistent-state transfer records.
+pub const STATE_TRANSFER_V17: &str = include_str!("../migrations/0017_state_transfer.sql");
+/// Durable per-attempt dependency-generation readiness.
+pub const ATTEMPT_READINESS_V18: &str = include_str!("../migrations/0018_attempt_readiness.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -407,6 +413,10 @@ pub enum StoreError {
     InvalidProductOperation(String),
     #[error("product catalog conflict: {0}")]
     ProductConflict(String),
+    #[error("invalid state transfer: {0}")]
+    InvalidStateTransfer(String),
+    #[error("state-transfer conflict: {0}")]
+    StateTransferConflict(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -460,6 +470,8 @@ impl Store {
         apply_migration(&mut tx, 14, OBJECT_PUBLICATION_FENCE_V14).await?;
         apply_migration(&mut tx, 15, PRODUCT_SURFACE_V15).await?;
         apply_migration(&mut tx, 16, GLOBAL_LOG_ORDER_V16).await?;
+        apply_migration(&mut tx, 17, STATE_TRANSFER_V17).await?;
+        apply_migration(&mut tx, 18, ATTEMPT_READINESS_V18).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1215,10 +1227,13 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "INSERT INTO attempts (
-                 id, organization_id, node_id, ordinal, status
+            "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+             INSERT INTO attempts (
+                 id, organization_id, node_id, ordinal, status,
+                 created_at, ready_at
              )
-             VALUES ($1, $2, $3, 1, 'queued')",
+             SELECT $1, $2, $3, 1, 'queued', admitted_at, admitted_at
+             FROM timing",
         )
         .bind(attempt_id)
         .bind(input.organization_id)
@@ -1486,7 +1501,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Reads committed log chunks in deterministic sequence order.
+    /// Reads current-fence committed log chunks in global commit order.
     pub async fn build_logs(
         &self,
         organization_id: Uuid,
@@ -1508,7 +1523,7 @@ impl Store {
                AND b.project_id = $2
                AND b.id = $3
                AND l.fence = a.fence
-             ORDER BY a.ordinal, l.sequence, l.stream, l.attempt_id",
+             ORDER BY l.cursor_id",
         )
         .bind(organization_id)
         .bind(project_id)
@@ -1535,6 +1550,82 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Returns the exact immutable checkout evidence committed by one fenced
+    /// attempt in a project build. The stored canonical bytes, rather than a
+    /// caller-supplied checkout, are the export authority.
+    pub async fn state_transfer_scm_checkout(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        evidence_key: &str,
+    ) -> Result<Option<mcloving_state_transfer::ScmState>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let evidence = sqlx::query_as::<_, (Vec<u8>, Vec<u8>)>(
+            "SELECT e.canonical_evidence, e.evidence_digest
+             FROM state_transfer_scm_evidence AS e
+             JOIN attempts AS a
+               ON a.organization_id = e.organization_id
+              AND a.id = e.attempt_id
+              AND a.fence = e.fence
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             JOIN builds AS b
+               ON b.organization_id = n.organization_id
+              AND b.id = n.build_id
+             WHERE e.organization_id = $1
+               AND e.project_id = $2
+               AND b.id = $3
+               AND e.attempt_id = $4
+               AND e.fence = $5
+               AND e.evidence_key = $6",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(evidence_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        evidence
+            .map(|(bytes, digest)| {
+                let actual_digest: [u8; 32] = Sha256::digest(&bytes).into();
+                if actual_digest.as_slice() != digest.as_slice() {
+                    return Err(StoreError::InvalidStateTransfer(
+                        "stored SCM checkout evidence digest is invalid".to_owned(),
+                    ));
+                }
+                let evidence: Value = serde_json::from_slice(&bytes).map_err(|error| {
+                    StoreError::InvalidStateTransfer(format!(
+                        "stored SCM checkout evidence is not canonical JSON: {error}"
+                    ))
+                })?;
+                if evidence.get("schema").and_then(Value::as_str)
+                    != Some("mcloving.scm-checkout-evidence/v1")
+                {
+                    return Err(StoreError::InvalidStateTransfer(
+                        "stored SCM checkout evidence schema is unsupported".to_owned(),
+                    ));
+                }
+                serde_json::from_value(evidence.get("checkout").cloned().ok_or_else(|| {
+                    StoreError::InvalidStateTransfer(
+                        "stored SCM checkout evidence has no checkout".to_owned(),
+                    )
+                })?)
+                .map_err(|error| {
+                    StoreError::InvalidStateTransfer(format!(
+                        "stored SCM checkout is invalid: {error}"
+                    ))
+                })
+            })
+            .transpose()
     }
 
     /// Returns one immutable, stable page of current-fence build logs.
@@ -2635,27 +2726,69 @@ impl Store {
         }
         let child_id = Uuid::new_v4();
         let child_ordinal = ordinal + 1;
-        sqlx::query(
-            "INSERT INTO attempts (
-                 id, organization_id, node_id, ordinal, status, retry_of,
-                 restore_epoch
-             )
-             SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch
-             FROM controller_metadata
-             WHERE singleton",
-        )
-        .bind(child_id)
-        .bind(organization_id)
-        .bind(node_id)
-        .bind(child_ordinal)
-        .bind(attempt_id)
-        .execute(&mut *tx)
-        .await?;
         if dag_mode {
             sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
                 .bind(format!("mcloving.dag.retry.{build_id}"))
                 .execute(&mut *tx)
                 .await?;
+            sqlx::query(
+                "WITH timing AS (
+                     SELECT clock_timestamp() AS admitted_at
+                 ), eligibility AS (
+                     SELECT NOT EXISTS (
+                         SELECT 1
+                         FROM node_dependencies AS dependency
+                         JOIN nodes AS parent
+                           ON parent.id = dependency.parent_node_id
+                          AND parent.organization_id = dependency.organization_id
+                         WHERE dependency.organization_id = $2
+                           AND dependency.child_node_id = $3
+                           AND (
+                               (
+                                   dependency.condition = 'succeeded'
+                                   AND parent.status <> 'succeeded'
+                               )
+                               OR (
+                                   dependency.condition = 'completed'
+                                   AND parent.status NOT IN (
+                                       'succeeded', 'failed', 'aborted', 'skipped'
+                                   )
+                               )
+                           )
+                     ) AS ready
+                 ), inserted AS (
+                     INSERT INTO attempts (
+                         id, organization_id, node_id, ordinal, status, retry_of,
+                         restore_epoch, created_at, ready_at
+                     )
+                     SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch,
+                            admitted_at,
+                            CASE WHEN eligibility.ready THEN admitted_at ELSE NULL END
+                     FROM controller_metadata, timing, eligibility
+                     WHERE singleton
+                     RETURNING ready_at
+                 )
+                 UPDATE nodes AS node
+                 SET status = CASE
+                         WHEN inserted.ready_at IS NULL THEN 'blocked'
+                         ELSE 'queued'
+                     END,
+                     logical_outcome = NULL,
+                     cancellation_requested_at = NULL,
+                     max_attempts = GREATEST(node.max_attempts, $6),
+                     queued_at = COALESCE(inserted.ready_at, node.queued_at)
+                 FROM inserted
+                 WHERE node.organization_id = $2
+                   AND node.id = $3",
+            )
+            .bind(child_id)
+            .bind(organization_id)
+            .bind(node_id)
+            .bind(child_ordinal)
+            .bind(attempt_id)
+            .bind(max_attempts)
+            .execute(&mut *tx)
+            .await?;
             let skipped_nodes = sqlx::query_as::<_, (Uuid, Uuid, i32)>(
                 "WITH RECURSIVE descendants(id) AS (
                      SELECT child_node_id
@@ -2700,12 +2833,20 @@ impl Store {
             .await?;
             for (skipped_node_id, previous_attempt_id, previous_ordinal) in &skipped_nodes {
                 sqlx::query(
-                    "INSERT INTO attempts (
+                    "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+                     INSERT INTO attempts (
                          id, organization_id, node_id, ordinal, status, retry_of,
-                         restore_epoch
+                         restore_epoch, created_at, ready_at
                      )
-                     SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch
-                     FROM controller_metadata
+                     SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch,
+                            admitted_at,
+                            CASE WHEN EXISTS (
+                                SELECT 1
+                                FROM node_dependencies AS dependency
+                                WHERE dependency.organization_id = $2
+                                  AND dependency.child_node_id = $3
+                            ) THEN NULL ELSE admitted_at END
+                     FROM controller_metadata, timing
                      WHERE singleton",
                 )
                 .bind(Uuid::new_v4())
@@ -2740,21 +2881,25 @@ impl Store {
                 .execute(&mut *tx)
                 .await?;
             }
+        } else {
             sqlx::query(
-                "UPDATE nodes
-                 SET status = 'queued',
-                     logical_outcome = NULL,
-                     cancellation_requested_at = NULL,
-                     max_attempts = GREATEST(max_attempts, $3),
-                     queued_at = clock_timestamp()
-                 WHERE organization_id = $1 AND id = $2",
+                "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+                 INSERT INTO attempts (
+                     id, organization_id, node_id, ordinal, status, retry_of,
+                     restore_epoch, created_at, ready_at
+                 )
+                 SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch,
+                        admitted_at, admitted_at
+                 FROM controller_metadata, timing
+                 WHERE singleton",
             )
+            .bind(child_id)
             .bind(organization_id)
             .bind(node_id)
-            .bind(max_attempts)
+            .bind(child_ordinal)
+            .bind(attempt_id)
             .execute(&mut *tx)
             .await?;
-        } else {
             sqlx::query(
                 "UPDATE nodes
                  SET status = 'queued', queued_at = clock_timestamp()

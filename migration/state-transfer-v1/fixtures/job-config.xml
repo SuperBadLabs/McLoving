@@ -1,0 +1,55 @@
+<?xml version="1.1" encoding="UTF-8"?>
+<flow-definition plugin="workflow-job">
+  <actions/>
+  <description>MIG-005A exact-profile reversible state rehearsal</description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+    <jenkins.model.BuildDiscarderProperty>
+      <strategy class="hudson.tasks.LogRotator">
+        <daysToKeep>30</daysToKeep>
+        <numToKeep>20</numToKeep>
+        <artifactDaysToKeep>30</artifactDaysToKeep>
+        <artifactNumToKeep>20</artifactNumToKeep>
+      </strategy>
+    </jenkins.model.BuildDiscarderProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">
+    <script><![CDATA[
+pipeline {
+  agent any
+  stages {
+    stage('checkout') {
+      steps {
+        sh 'rm -f -- changeset.intent changelog.intent'
+        checkout([$class: 'GitSCM',
+          branches: [[name: 'refs/heads/main']],
+          userRemoteConfigs: [[url: 'file:///fixture/repo']]])
+      }
+    }
+    stage('changeset-predicate') {
+      when { changeset pattern: '**/*.target', caseSensitive: true }
+      steps { writeFile file: 'changeset.intent', text: 'selected\n' }
+    }
+    stage('changelog-predicate') {
+      when { changelog 'MIG005A-MATCH' }
+      steps { writeFile file: 'changelog.intent', text: 'selected\n' }
+    }
+    stage('effect-free-state') {
+      steps {
+        writeFile file: 'persistent.state', text: "build=${env.BUILD_NUMBER}\n"
+      }
+    }
+  }
+  post {
+    always {
+      archiveArtifacts artifacts: '*.intent,persistent.state', allowEmptyArchive: false,
+        fingerprint: true
+    }
+  }
+}
+    ]]></script>
+    <sandbox>false</sandbox>
+  </definition>
+  <triggers/>
+  <disabled>false</disabled>
+</flow-definition>

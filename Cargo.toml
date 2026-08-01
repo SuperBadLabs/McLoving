@@ -16,6 +16,7 @@ members = [
   "crates/object-store",
   "crates/pipeline-ir",
   "crates/state-machine",
+  "crates/state-transfer",
   "crates/windows-job",
 ]
 
