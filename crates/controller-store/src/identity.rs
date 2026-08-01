@@ -213,6 +213,7 @@ impl Store {
     ) -> Result<IdentityProviderConfig, StoreError> {
         validate_provider(input)?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_identity_provisioning(&mut tx, input.organization_id).await?;
         let current = sqlx::query_as::<_, ProviderRow>(
             "SELECT provider_id, issuer, audience, authorization_endpoint,
                     token_endpoint, jwks_uri, client_id, group_claim,
@@ -403,6 +404,7 @@ impl Store {
         }
         let aliases = canonical_strings(&input.alias_history, "alias")?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_identity_provisioning(&mut tx, input.organization_id).await?;
         let legacy = sqlx::query_as::<_, (Uuid, String, String, String, i64, Option<Uuid>)>(
             "SELECT id, subject, kind, lifecycle_state, lifecycle_generation, provider_id
              FROM identities
@@ -532,6 +534,7 @@ impl Store {
             return invalid("service identity must have at least one explicit scope");
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_identity_provisioning(&mut tx, input.organization_id).await?;
         let existing = sqlx::query_as::<_, (Uuid, String, String, String)>(
             "SELECT id, subject, kind, lifecycle_state FROM identities
              WHERE organization_id = $1 AND (id = $2 OR subject = $3)
@@ -618,6 +621,7 @@ impl Store {
             return invalid("service credential expiry must follow issuance");
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_identity_provisioning(&mut tx, input.organization_id).await?;
         let existing =
             sqlx::query_as::<_, (Uuid, Uuid, i64, Vec<u8>, i64, Option<i64>, Option<i64>)>(
                 "SELECT credential_id, identity_id, generation, token_digest, issued_at_unix_ms,
@@ -1653,14 +1657,25 @@ async fn prune_identity_security_history(
     Ok(())
 }
 
+async fn lock_identity_provisioning(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("mcloving.identity-provisioning.{organization_id}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 async fn revoke_session_family_on_refresh_reuse(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
     refresh_token_digest: &[u8; 32],
     now_unix_ms: i64,
 ) -> Result<(), StoreError> {
-    let stale = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT s.identity_id, i.subject
+    let stale = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+        "SELECT s.identity_id, i.subject, s.revocation_reason
          FROM identity_sessions s
          JOIN identities i ON i.organization_id = s.organization_id
                           AND i.id = s.identity_id
@@ -1671,9 +1686,12 @@ async fn revoke_session_family_on_refresh_reuse(
     .bind(refresh_token_digest.as_slice())
     .fetch_optional(&mut **tx)
     .await?;
-    let Some((identity_id, subject)) = stale else {
+    let Some((identity_id, subject, revocation_reason)) = stale else {
         return Ok(());
     };
+    if revocation_reason.as_deref() != Some("refresh_rotation") {
+        return Ok(());
+    }
     let revoked = sqlx::query(
         "UPDATE identity_sessions
          SET revoked_at_unix_ms = $3, revocation_reason = 'refresh_reuse_detected'

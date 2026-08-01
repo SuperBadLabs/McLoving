@@ -118,26 +118,31 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     );
 
     let provider_id = Uuid::new_v4();
-    admin
-        .provision_identity_provider(&IdentityProviderWrite {
-            organization_id,
-            provider_id,
-            issuer: "https://id.example.test".to_owned(),
-            audience: "mcloving".to_owned(),
-            authorization_endpoint: "https://id.example.test/authorize".to_owned(),
-            token_endpoint: "https://id.example.test/token".to_owned(),
-            jwks_uri: "https://id.example.test/jwks".to_owned(),
-            client_id: "mcloving".to_owned(),
-            group_claim: "groups".to_owned(),
-            configuration_generation: 1,
-            configuration_digest: digest("provider-v1"),
-            jwks_generation: 1,
-            jwks_digest: digest("jwks-v1"),
-            enabled: true,
-            actor_subject: "operator:identity".to_owned(),
-        })
-        .await
-        .expect("provision exact provider");
+    let provider = IdentityProviderWrite {
+        organization_id,
+        provider_id,
+        issuer: "https://id.example.test".to_owned(),
+        audience: "mcloving".to_owned(),
+        authorization_endpoint: "https://id.example.test/authorize".to_owned(),
+        token_endpoint: "https://id.example.test/token".to_owned(),
+        jwks_uri: "https://id.example.test/jwks".to_owned(),
+        client_id: "mcloving".to_owned(),
+        group_claim: "groups".to_owned(),
+        configuration_generation: 1,
+        configuration_digest: digest("provider-v1"),
+        jwks_generation: 1,
+        jwks_digest: digest("jwks-v1"),
+        enabled: true,
+        actor_subject: "operator:identity".to_owned(),
+    };
+    let (first_provider, concurrent_provider) = tokio::join!(
+        admin.provision_identity_provider(&provider),
+        admin.provision_identity_provider(&provider),
+    );
+    assert_eq!(
+        first_provider.expect("first concurrent provider provision"),
+        concurrent_provider.expect("second concurrent provider provision")
+    );
     admin
         .provision_human_identity(&NewHumanIdentity {
             organization_id,
@@ -315,6 +320,28 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             .is_err(),
         "credential must not cross tenant boundaries"
     );
+    assert!(
+        runtime
+            .rotate_human_session(
+                organization_id,
+                digest("human-refresh-1"),
+                &SessionIssue {
+                    session_id: Uuid::new_v4(),
+                    token_digest: digest("stale-group-refresh-session"),
+                    refresh_token_digest: Some(digest("stale-group-refresh-token")),
+                    issued_at_unix_ms: 11_101,
+                    expires_at_unix_ms: 31_101,
+                    refresh_expires_at_unix_ms: Some(61_101),
+                },
+            )
+            .await
+            .is_err(),
+        "a refresh token from a stale group generation must be rejected"
+    );
+    runtime
+        .authenticate_api_token(organization_id, second_token, 11_102)
+        .await
+        .expect("a stale-group refresh must not revoke a newer session");
 
     let refreshed_token = digest("human-session-3");
     let refreshed_session = runtime
@@ -382,14 +409,12 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         scopes: BTreeSet::from([ServiceScope::ProjectRead, ServiceScope::BuildSubmit]),
         actor_subject: "operator:identity".to_owned(),
     };
-    admin
-        .provision_service_identity(&service_identity)
-        .await
-        .expect("provision scoped service identity");
-    admin
-        .provision_service_identity(&service_identity)
-        .await
-        .expect("exact service identity provisioning is restart-idempotent");
+    let (first_service, concurrent_service) = tokio::join!(
+        admin.provision_service_identity(&service_identity),
+        admin.provision_service_identity(&service_identity),
+    );
+    first_service.expect("first concurrent service-identity provision");
+    concurrent_service.expect("second concurrent service-identity provision");
     let service_token = digest("service-token-1");
     let service_credential = NewServiceCredential {
         organization_id,
@@ -401,10 +426,15 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         expires_at_unix_ms: Some(40_000),
         actor_subject: "operator:identity".to_owned(),
     };
-    let credential = admin
-        .provision_service_credential(&service_credential)
-        .await
-        .expect("provision independent service credential");
+    let (first_credential, concurrent_credential) = tokio::join!(
+        admin.provision_service_credential(&service_credential),
+        admin.provision_service_credential(&service_credential),
+    );
+    let credential = first_credential.expect("first concurrent service-credential provision");
+    assert_eq!(
+        credential,
+        concurrent_credential.expect("second concurrent service-credential provision")
+    );
     assert_eq!(
         admin
             .provision_service_credential(&NewServiceCredential {

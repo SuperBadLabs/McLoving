@@ -71,6 +71,13 @@ sessions and login attempts. Disabling a service identity atomically revokes its
 credentials so reactivation cannot resurrect them. It
 does not accept raw access, refresh, or service-token values.
 
+Identity/provider/service-credential provisioning is serialized per tenant with a
+transaction-scoped advisory lock, making exact active-active bootstrap idempotent even
+when the durable row does not yet exist. Refresh-token family revocation occurs only
+when a credential previously revoked by successful rotation is presented again; unknown,
+expired, lifecycle-fenced, group-fenced, or provider-fenced credentials fail closed without
+revoking an unrelated newer session.
+
 OIDC start is limited per source address to 60 attempts per minute with a
 bounded 4,096-client in-memory index. PostgreSQL retains at most 1,024 live
 attempt rows per tenant/provider by expiring or evicting the oldest attempt.
