@@ -143,6 +143,18 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         first_provider.expect("first concurrent provider provision"),
         concurrent_provider.expect("second concurrent provider provision")
     );
+    assert!(
+        admin
+            .provision_identity_provider(&IdentityProviderWrite {
+                issuer: "https://replacement-id.example.test".to_owned(),
+                configuration_generation: 2,
+                configuration_digest: digest("replacement-provider-v2"),
+                ..provider.clone()
+            })
+            .await
+            .is_err(),
+        "an existing provider ID cannot be rebound to a replacement issuer"
+    );
     admin
         .provision_human_identity(&NewHumanIdentity {
             organization_id,

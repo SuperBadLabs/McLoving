@@ -234,6 +234,12 @@ impl Store {
                 tx.commit().await?;
                 return Ok(current);
             }
+            if input.issuer != current.issuer {
+                return Err(StoreError::IdentityConflict(
+                    "an identity-provider issuer is immutable; replacement requires a new provider and reviewed identity mappings"
+                        .to_owned(),
+                ));
+            }
             if input.configuration_generation != current.configuration_generation + 1
                 || input.jwks_generation < current.jwks_generation
             {

@@ -73,7 +73,9 @@ does not accept raw access, refresh, or service-token values.
 
 Identity/provider/service-credential provisioning is serialized per tenant with a
 transaction-scoped advisory lock, making exact active-active bootstrap idempotent even
-when the durable row does not yet exist. Refresh-token family revocation occurs only
+when the durable row does not yet exist. A provider ID's issuer is immutable; issuer
+replacement requires a new provider ID and explicitly reviewed human identity mappings.
+Refresh-token family revocation occurs only
 when a credential previously revoked by successful rotation is presented again; unknown,
 expired, lifecycle-fenced, group-fenced, or provider-fenced credentials fail closed without
 revoking an unrelated newer session.
