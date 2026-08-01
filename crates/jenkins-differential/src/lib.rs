@@ -20,6 +20,8 @@ pub const JENKINS_IMAGE_SHA256: &str =
     "f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02";
 pub const JENKINS_PLUGIN_MANIFEST_SHA256: &str =
     "e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0";
+pub const JENKINS_INIT_SHA256: &str =
+    "59e1e8ee88116c0645e7e2e4ea5af0184ce85d75b94df39b02c76d66347fdc0a";
 pub const MCLOVING_RUNNER_IMAGE_SHA256: &str =
     "77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa";
 pub const MCLOVING_DATABASE_IMAGE_SHA256: &str =
@@ -39,6 +41,10 @@ const MCLOVING_TEST_BINARY_SHA256: &str =
     "e843ecfa3c8acc71cc931634082a7098adf746e893c4493c617b96b5e2ffff1b";
 const MCLOVING_CONTROLLER_BINARY_SHA256: &str =
     "c93970047f7f2ce169752448f3c0b96cd0b56038b2c8de4316ff14b8d11f8d0d";
+const MCLOVING_RUNNER_ID: &str = "6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614";
+const MCLOVING_RUNNER_NAME: &str = "mcloving-diff001-runner-v16";
+const MCLOVING_RUNNER_CREATED: &str = "2026-08-01T08:11:05.433588704-05:00";
+const MCLOVING_RUNNER_COMMAND: &str = "set -euo pipefail; { id; uname -a; locale; sha256sum 'target/debug/deps/diff_001-3b7075192798a581' target/debug/mcloving-controller; } > /evidence/runtime.txt; exec 'target/debug/deps/diff_001-3b7075192798a581' --nocapture";
 
 const MAX_FILES: usize = 32;
 const MAX_FILE_BYTES: u64 = 262_144;
@@ -175,6 +181,7 @@ struct CoverageAuthority {
 pub fn verify_bundle(root: &Path) -> Result<VerificationReceipt, VerificationError> {
     verify_manifest(root)?;
     verify_source_and_pipeline(root)?;
+    verify_jenkins_job_definition(root)?;
     verify_jenkins_plugin_profile(root)?;
     let coverage = verify_coverage(root)?;
     let jenkins = derive_jenkins_trace(root)?;
@@ -328,6 +335,36 @@ fn verify_source_and_pipeline(root: &Path) -> Result<(), VerificationError> {
     Ok(())
 }
 
+fn verify_jenkins_job_definition(root: &Path) -> Result<(), VerificationError> {
+    let init = read(root, "jenkins/init.groovy")?;
+    if sha256(&init) != JENKINS_INIT_SHA256 {
+        return Err(VerificationError::new(
+            "E_JENKINS_SOURCE",
+            "Jenkins initializer does not install the admitted source exactly",
+        ));
+    }
+
+    let controller_log = text(root, "jenkins/controller.log")?;
+    let init_position = controller_log
+        .find("Executing /var/jenkins_home/init.groovy.d/99-diff001.groovy")
+        .ok_or_else(|| {
+            VerificationError::new("E_JENKINS_SOURCE", "initializer execution is absent")
+        })?;
+    let ready_position = controller_log
+        .find("Jenkins is fully up and running")
+        .ok_or_else(|| VerificationError::new("E_JENKINS_SOURCE", "ready event is absent"))?;
+    let build_position = controller_log
+        .find("diff-001-admitted #1")
+        .ok_or_else(|| VerificationError::new("E_JENKINS_SOURCE", "build event is absent"))?;
+    if !(init_position < ready_position && ready_position < build_position) {
+        return Err(VerificationError::new(
+            "E_JENKINS_SOURCE",
+            "initializer, readiness, and build chronology differs",
+        ));
+    }
+    Ok(())
+}
+
 fn verify_coverage(root: &Path) -> Result<Coverage, VerificationError> {
     let bytes = read(root, "coverage.yaml")?;
     let text = std::str::from_utf8(&bytes)
@@ -392,6 +429,18 @@ fn verify_coverage(root: &Path) -> Result<Coverage, VerificationError> {
 
 fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError> {
     let build = json(root, "jenkins/build.json")?;
+    exact_string(
+        &build,
+        &["fullDisplayName"],
+        "diff-001-admitted #1",
+        "E_JENKINS_BUILD",
+    )?;
+    exact_string(
+        &build,
+        &["url"],
+        "http://127.0.0.1:8080/job/diff-001-admitted/1/",
+        "E_JENKINS_BUILD",
+    )?;
     exact_string(&build, &["result"], "SUCCESS", "E_JENKINS_BUILD")?;
     exact_u64(&build, &["number"], 1, "E_JENKINS_BUILD")?;
     exact_empty_array(&build, &["artifacts"], "E_JENKINS_BUILD")?;
@@ -588,18 +637,32 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         exact_u64(limit, &["Hard"], bound, "E_JENKINS_CONTAINMENT")?;
     }
     let mounts = array(container, &["Mounts"], "E_JENKINS_CONTAINMENT")?;
-    for (source, destination) in [
+    if mounts.len() != 4 {
+        return Err(VerificationError::new(
+            "E_JENKINS_CONTAINMENT",
+            "Jenkins mount set is not exact",
+        ));
+    }
+    for (source, destination, writable) in [
         (
             "/home/srikanth/jenkins-oracle-228/plugins",
             "/usr/share/jenkins/ref/plugins",
+            false,
+        ),
+        (
+            "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/home",
+            "/var/jenkins_home",
+            true,
         ),
         (
             "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/fixture/Jenkinsfile",
             "/fixture/Jenkinsfile",
+            false,
         ),
         (
             "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/fixture/99-diff001.groovy",
             "/usr/share/jenkins/ref/init.groovy.d/99-diff001.groovy",
+            false,
         ),
     ] {
         let mount = mounts
@@ -610,10 +673,11 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
             .ok_or_else(|| {
                 VerificationError::new(
                     "E_JENKINS_CONTAINMENT",
-                    format!("missing read-only mount {destination}"),
+                    format!("missing Jenkins mount {destination}"),
                 )
             })?;
-        exact_bool(mount, &["RW"], false, "E_JENKINS_CONTAINMENT")?;
+        exact_string(mount, &["Type"], "bind", "E_JENKINS_CONTAINMENT")?;
+        exact_bool(mount, &["RW"], writable, "E_JENKINS_CONTAINMENT")?;
         exact_string(mount, &["Source"], source, "E_JENKINS_CONTAINMENT")?;
     }
     let external = text(root, "jenkins/external-network.txt")?;
@@ -925,6 +989,59 @@ fn verify_runner_contract(container: &Value) -> Result<(), VerificationError> {
         "1000:1000",
         "E_MCLOVING_CONTAINMENT",
     )?;
+    exact_string(
+        container,
+        &["Id"],
+        MCLOVING_RUNNER_ID,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Name"],
+        MCLOVING_RUNNER_NAME,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Created"],
+        MCLOVING_RUNNER_CREATED,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["Config", "Cmd"],
+        &["bash", "-c", MCLOVING_RUNNER_COMMAND],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Config", "Entrypoint"],
+        "",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_empty_array(
+        container,
+        &["HostConfig", "CapAdd"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["HostConfig", "CapDrop"],
+        &[
+            "CAP_CHOWN",
+            "CAP_DAC_OVERRIDE",
+            "CAP_FOWNER",
+            "CAP_FSETID",
+            "CAP_KILL",
+            "CAP_NET_BIND_SERVICE",
+            "CAP_SETFCAP",
+            "CAP_SETGID",
+            "CAP_SETPCAP",
+            "CAP_SETUID",
+            "CAP_SYS_CHROOT",
+        ],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
     exact_null(container, &["EffectiveCaps"], "E_MCLOVING_CONTAINMENT")?;
     exact_null(container, &["BoundingCaps"], "E_MCLOVING_CONTAINMENT")?;
     let mounts = array(container, &["Mounts"], "E_MCLOVING_CONTAINMENT")?;
@@ -934,7 +1051,14 @@ fn verify_runner_contract(container: &Value) -> Result<(), VerificationError> {
             "runner mounts are not exact",
         ));
     }
-    for (destination, writable) in [("/work", false), ("/evidence", true)] {
+    for (source, destination, writable) in [
+        ("/sn8100/work/forge/McLoving-diff001", "/work", false),
+        (
+            "/sn8100/runs/mcloving/diff001-native-20260801T131300Z-v16/capture/mcloving",
+            "/evidence",
+            true,
+        ),
+    ] {
         let mount = mounts
             .iter()
             .find(|mount| {
@@ -946,6 +1070,8 @@ fn verify_runner_contract(container: &Value) -> Result<(), VerificationError> {
                     format!("missing runner mount {destination}"),
                 )
             })?;
+        exact_string(mount, &["Type"], "bind", "E_MCLOVING_CONTAINMENT")?;
+        exact_string(mount, &["Source"], source, "E_MCLOVING_CONTAINMENT")?;
         exact_bool(mount, &["RW"], writable, "E_MCLOVING_CONTAINMENT")?;
     }
     Ok(())

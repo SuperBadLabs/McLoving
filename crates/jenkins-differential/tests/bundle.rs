@@ -78,6 +78,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_JENKINS_PLUGINS",
         ),
         (
+            "jenkins/init.groovy",
+            "new File('/fixture/Jenkinsfile')",
+            "new File('/fixture/Otherfile')",
+            "E_JENKINS_SOURCE",
+        ),
+        (
             "mcloving/mcloving-raw.json",
             "48656c6c6f20576f726c640a",
             "476f6f6462796520576f726c640a",
@@ -108,6 +114,24 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_MCLOVING_CONTAINMENT",
         ),
         (
+            "mcloving/runner-inspect-pre.json",
+            "exec 'target/debug/deps/diff_001-3b7075192798a581' --nocapture",
+            "exec 'target/debug/mcloving-controller' --help",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/runner-inspect-pre.json",
+            "\"CapAdd\": []",
+            "\"CapAdd\": [\"CAP_SYS_ADMIN\"]",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/runner-inspect-pre.json",
+            "\"CAP_SYS_CHROOT\"",
+            "\"CAP_SYS_ADMIN\"",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
             "coverage.yaml",
             "admitted_cases: 1",
             "admitted_cases: 2",
@@ -125,6 +149,34 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         let error = verify_bundle(temporary.path()).expect_err("mutation must fail closed");
         assert_eq!(error.code, code, "unexpected error for {path}: {error}");
     }
+}
+
+#[test]
+fn undeclared_jenkins_mount_fails_closed() {
+    let temporary = tempfile::tempdir().expect("create mutation root");
+    copy_tree(&fixture(), temporary.path());
+    let target = temporary.path().join("jenkins/container-inspect.json");
+    let mut inspect: serde_json::Value =
+        serde_json::from_slice(&fs::read(&target).expect("read inspect")).expect("parse inspect");
+    let container = inspect
+        .as_array_mut()
+        .and_then(|values| values.first_mut())
+        .expect("inspect container");
+    let mounts = container["Mounts"].as_array_mut().expect("inspect mounts");
+    let mut injected = mounts[0].clone();
+    injected["Source"] = "/run/user/1000/podman/podman.sock".into();
+    injected["Destination"] = "/run/podman/podman.sock".into();
+    mounts.push(injected);
+    fs::write(
+        &target,
+        serde_json::to_vec_pretty(&inspect).expect("serialize inspect"),
+    )
+    .expect("write inspect");
+    reseal(temporary.path());
+    assert_eq!(
+        verify_bundle(temporary.path()).unwrap_err().code,
+        "E_JENKINS_CONTAINMENT"
+    );
 }
 
 #[test]

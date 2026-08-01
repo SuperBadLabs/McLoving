@@ -35,7 +35,11 @@ image digest
 The exact 90-plugin SHA-256 manifest and plugin files predated execution and
 were later independently reverified against the pinned oracle directory
 without mismatch; that directory, source, and initialization fixture were
-mounted read-only from their exact captured source paths. The container
+mounted from their exact captured source paths as one complete four-mount set,
+with only the isolated Jenkins home writable. The exact initializer digest and
+body prove that `/fixture/Jenkinsfile` supplied the `CpsFlowDefinition` for
+`diff-001-admitted`; the controller log proves initializer, readiness, and
+build chronology, and the build receipt binds job name, number, and URL. The container
 had no network, a read-only root filesystem, the exact dropped-capability and
 2 GiB no-exec tmpfs policies, no privilege escalation, and explicit CPU,
 memory/swap, PID, file-descriptor, time, and output bounds. A negative
@@ -52,6 +56,9 @@ startup capabilities required by its image entrypoint. The build used
 synthetic API identities, no production credential, and no external-effect
 authority. The disposable database, network, and runner were removed after
 evidence collection; the database receipt proves the one authoritative build.
+The runner's immutable container ID, name, creation timestamp, exact test
+command, entrypoint, complete two-mount set, and configured empty-added/exactly-
+dropped capability policy are identical across its created and exited receipts.
 
 Failed predecessors are excluded from semantic evidence. Jenkins' first
 container was stopped before execution after the disk monitor rejected a
@@ -71,21 +78,24 @@ oversized files, unmanifested/missing/additional entries, and digest
 substitution. It independently checks:
 
 - source, compiled-pipeline, Jenkins image, exact 90-plugin manifest and
-  verification receipt, runtime, locale, and containment;
-- Jenkins build, stage, literal shell step, exact console transcript,
+  verification receipt, initializer/source installation, controller chronology,
+  runtime, locale, and complete containment/mount set;
+- Jenkins exact job/build identity, stage, literal shell step, exact console transcript,
   workspace, and artifact observations;
 - McLoving image/runtime identities, internal network, runner/database
   containment, database integrity, admitted canonical-IR digest, graph/build/
   node/attempt identity, platform, trust pool, fence, result, ordered log
   sequence and stdout/stderr digests, workspace, artifact, test, approval, and
-  grant observations;
+  grant observations, plus the runner's exact execution identity, invocation,
+  capability policy, and complete mount set;
 - the strict-YAML coverage and zero-authority contract; and
 - equality of the independently derived canonical traces.
 
 Mutation tests alter and reseal the Jenkins result, network mode, memory/swap,
-ulimits, tmpfs, dropped capabilities, plugin mount source, plugin manifest,
-console output, McLoving output, admitted IR digest, attempt identity, log
-sequence, McLoving read-only root filesystem, and admission denominator; unsafe
+ulimits, tmpfs, dropped capabilities, plugin mount source, undeclared mount,
+plugin manifest, initializer source, console output, McLoving output, admitted
+IR digest, attempt identity, log sequence, runner command, added/dropped
+capabilities, McLoving read-only root filesystem, and admission denominator; unsafe
 paths, extra files, and symlinked evidence are also rejected.
 
 ## Coverage truth
@@ -106,9 +116,9 @@ implication.
 The repository receipt is
 `migration/mario-jenkins-oracle-228/corpus-v1/differential-v1`. The sealed
 external evidence is
-`/sn8100/runs/mcloving/diff001-native-20260801T134700Z-v20`; its
+`/sn8100/runs/mcloving/diff001-native-20260801T140000Z-v21`; its
 self-excluding 34-file manifest SHA-256 is
-`21bf04aa5d6bb7dabb623b5ab0335313d9e406000fc904ed19f35ed4b0dd6fad`.
+`6e48eb5f4a523cce976509de9480e0fee0a0f2e92cb6aebb0ecb51c8f79f4c80`.
 The immutable v5 envelope is superseded because it lacked McLoving containment
 receipts. The immutable v10 envelope is rejected because its outer manifest
 omitted the nested repository `SHA256SUMS`; v11 predates the final repository
@@ -117,5 +127,7 @@ predecessor ledger. V14 was superseded by exact directory accounting, v15
 failed before execution on a glibc mismatch, and v17 was superseded by the
 review-driven exact plugin, console, and containment binding in v18; v18 was
 then superseded by v19's chronology-accurate plugin-verification wording; v19
-was superseded by v20's raw IR, attempt, fence, and log identity binding. None
+was superseded by v20's raw IR, attempt, fence, and log identity binding; v20
+was superseded by v21's exact Jenkins source/job/mount and McLoving runner
+invocation/capability binding. None
 contributes authority.
