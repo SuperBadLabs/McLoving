@@ -43,7 +43,9 @@ attempt result; contradictory execution history is rejected before transfer.
 Each import also requires an independently supplied digest of the complete
 canonical input bundle, so a claimed source-export identity cannot authenticate
 substituted semantic content. Artifact and retained-workspace logical names are
-unique within their destination lists.
+unique within their destination lists, and each object kind must match its
+containing list. Graph-node attempts are contiguous, ordered, non-overlapping,
+and bounded by their owning build's start and end timestamps.
 
 ## Persistence and reconciliation
 
@@ -60,9 +62,11 @@ also binds the raw canonical bundle and binding hashes to every indexed binding
 column; a deferred constraint requires the exact record-provenance set and
 the exact effective-protection set plus matching audit/outbox proof before
 commit, so a direct runtime insert cannot publish partial or counterfeit
-committed truth. The constraint flattens each canonical record and protection
-set once before set comparison; receipt validation is linear rather than a
-record-by-record recursive rescan.
+committed truth. Provenance is inserted in bounded 512-row batches; once the
+matching audit/outbox proof seals a receipt, a separate trigger rejects every
+later provenance append. The constraint flattens each canonical record and
+protection set once before set comparison; receipt validation is linear rather
+than a record-by-record recursive rescan.
 The database completeness fence independently rejects an empty record
 denominator, an empty or structurally malformed job set, and therefore cannot
 publish a vacuously complete counterfeit receipt.
@@ -101,12 +105,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `594d66e9277189a68ea868f9c6be6125eb96cee8b51e0a0e9fee5c0bd4a57cb7`;
-- source-evidence manifest SHA-256 `7966976db037e1363290f04740427e44c0cba2dd3b3b7d25a21450c9587d1bc6`;
-- forward bundle SHA-256 `f000a8325e5fbb74bec9fac40910f70b3c19525163cf7e14867b31ecbf0547f6`;
-- reverse bundle SHA-256 `a1031e308ffd725d11986b27db8bd8e1a4f8597e168d931e731e35d33d8664c6`;
-- reverse-evidence manifest SHA-256 `a038d0379fb0e12d7e341cb5e01c28dc93f1e9dd976896c2fc3dce2275d2648d`;
-- sealed transform-evidence manifest SHA-256 `4ae32d4c30b4ab9b13034d9abe1361d1fbe1667c11348429a4aba08b42016cea`.
+- transform binary SHA-256 `e5274b445b8df66bce69780083ede975966f6e5633a758ad3b36ad88c5135139`;
+- source-evidence manifest SHA-256 `c493a1bb9d1eeca69dcdf81b5af399fdba492b913b6b0a68401b06a18ae092bc`;
+- forward bundle SHA-256 `f270f94116f72d3503dacd4da7dfd14f69abf034dbfe0cb65c0389af650132a5`;
+- reverse bundle SHA-256 `e00db726b5858ef784ee141d4288b9c8a9c35e5886d8f8a3c6cdafe83c4555a1`;
+- reverse-evidence manifest SHA-256 `997829a299b56dd1074c1e4fb9d9082f9661954588708ec7f6fba642ca2d40ed`;
+- sealed transform-evidence manifest SHA-256 `8ed25952c2f042ffb8d1b8423925dc7a3f2ff947a1ee064a50dc9194b6110b66`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 115 record-provenance rows, eight effective

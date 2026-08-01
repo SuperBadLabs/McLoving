@@ -6,10 +6,12 @@ use mcloving_state_transfer::{
     evaluate_change_predicate, record_provenance, sha256, transform,
 };
 use serde_json::{Value, json};
-use sqlx::{Row, postgres::PgRow};
+use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
 
 use super::{Store, StoreError, audit, validate_audit_actor};
+
+const STATE_TRANSFER_RECORD_INSERT_BATCH: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateTransferReceipt {
@@ -200,21 +202,21 @@ impl Store {
             return Ok(receipt);
         };
 
-        for record in &records {
-            sqlx::query(
+        for batch in records.chunks(STATE_TRANSFER_RECORD_INSERT_BATCH) {
+            let mut query = QueryBuilder::<Postgres>::new(
                 "INSERT INTO state_transfer_records (
                      organization_id, receipt_id, record_id,
                      source_digest, provenance
-                 )
-                 VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(organization_id)
-            .bind(receipt_id)
-            .bind(&record.id)
-            .bind(record.source_digest.as_slice())
-            .bind(&record.provenance)
-            .execute(&mut *tx)
-            .await?;
+                 ) ",
+            );
+            query.push_values(batch, |mut row, record| {
+                row.push_bind(organization_id)
+                    .push_bind(receipt_id)
+                    .push_bind(&record.id)
+                    .push_bind(record.source_digest.as_slice())
+                    .push_bind(&record.provenance);
+            });
+            query.build().execute(&mut *tx).await?;
         }
 
         for (subject, protection) in &protections {

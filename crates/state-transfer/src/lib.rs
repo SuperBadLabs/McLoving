@@ -1070,7 +1070,12 @@ fn validate_job(
         }
         None => {}
     }
-    validate_object_list(&job.retained_workspaces, records, "retained workspaces")?;
+    validate_object_list(
+        &job.retained_workspaces,
+        records,
+        "retained workspaces",
+        ObjectKind::RetainedWorkspace,
+    )?;
     let mut previous_dependency: Option<&str> = None;
     let mut dependency_keys = BTreeSet::new();
     for dependency in &job.persistent_dependencies {
@@ -1138,11 +1143,21 @@ fn validate_build(
         }
         validate_scm(scm, records)?;
     }
-    validate_graph_nodes(&build.graph_nodes, records)?;
+    validate_graph_nodes(
+        &build.graph_nodes,
+        records,
+        build.started_at_unix_ms,
+        build.ended_at_unix_ms,
+    )?;
     validate_approvals(&build.approvals, records)?;
     validate_normalized_tests(&build.normalized_tests, records)?;
     validate_logs(&build.logs, records)?;
-    validate_object_list(&build.artifacts, records, "build artifacts")
+    validate_object_list(
+        &build.artifacts,
+        records,
+        "build artifacts",
+        ObjectKind::Artifact,
+    )
 }
 
 fn validate_scm(
@@ -1256,6 +1271,8 @@ fn validate_invocation_parameters(
 fn validate_graph_nodes(
     nodes: &[GraphNodeState],
     records: &mut BTreeMap<String, Digest>,
+    build_started_at_unix_ms: i64,
+    build_ended_at_unix_ms: i64,
 ) -> Result<(), TransferError> {
     let mut prior: Option<&str> = None;
     let mut known_ids = BTreeSet::new();
@@ -1272,6 +1289,7 @@ fn validate_graph_nodes(
         validate_text(&node.node_kind, 128, "graph node kind")?;
         validate_sorted_unique_strings(&node.parent_node_ids, "parent node IDs")?;
         let mut expected_ordinal = 1_u32;
+        let mut previous_attempt_end = None;
         for attempt in &node.attempts {
             insert_record(records, &attempt.record)?;
             if attempt.ordinal != expected_ordinal {
@@ -1283,11 +1301,24 @@ fn validate_graph_nodes(
                 TransferError::InvalidField("attempt ordinal overflow".to_owned())
             })?;
             validate_time_range(
-                attempt.started_at_unix_ms,
+                build_started_at_unix_ms,
                 attempt.started_at_unix_ms,
                 attempt.ended_at_unix_ms,
                 "attempt timing",
             )?;
+            if attempt.ended_at_unix_ms > build_ended_at_unix_ms {
+                return Err(TransferError::InvalidField(
+                    "attempt timing must remain within its build window".to_owned(),
+                ));
+            }
+            if previous_attempt_end
+                .is_some_and(|ended_at_unix_ms| attempt.started_at_unix_ms < ended_at_unix_ms)
+            {
+                return Err(TransferError::InvalidField(
+                    "attempt timing must be ordered and non-overlapping".to_owned(),
+                ));
+            }
+            previous_attempt_end = Some(attempt.ended_at_unix_ms);
             validate_digest(attempt.audit_digest, "attempt audit digest")?;
         }
         if node
@@ -1455,10 +1486,16 @@ fn validate_object_list(
     objects: &[ObjectState],
     records: &mut BTreeMap<String, Digest>,
     label: &str,
+    expected_kind: ObjectKind,
 ) -> Result<(), TransferError> {
     let mut previous: Option<&str> = None;
     let mut logical_names = BTreeSet::new();
     for object in objects {
+        if object.kind != expected_kind {
+            return Err(TransferError::InvalidField(format!(
+                "{label} must contain only {expected_kind:?} objects"
+            )));
+        }
         if previous.is_some_and(|value| value >= object.record.id.as_str()) {
             return Err(TransferError::InvalidField(format!(
                 "{label} must be strictly sorted by record ID"

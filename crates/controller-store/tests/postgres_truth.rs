@@ -70,6 +70,41 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
     assert_eq!(first.record_count, 5);
     assert_eq!(first.protection_count, 2);
 
+    let mut sealed_append = tenant_store
+        .pool()
+        .begin()
+        .await
+        .expect("begin sealed provenance append");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *sealed_append)
+        .await
+        .expect("bind sealed append tenant");
+    let append_error = sqlx::query(
+        "INSERT INTO state_transfer_records (
+             organization_id, receipt_id, record_id, source_digest, provenance
+         ) VALUES ($1, $2, 'counterfeit:appended', $3, 'counterfeit append')",
+    )
+    .bind(organization_id)
+    .bind(first.id)
+    .bind(vec![0x5a_u8; 32])
+    .execute(&mut *sealed_append)
+    .await
+    .expect_err("sealed state-transfer receipt rejects appended provenance");
+    assert_eq!(
+        append_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+    assert!(append_error.as_database_error().is_some_and(|error| {
+        error
+            .message()
+            .contains("sealed against provenance appends")
+    }));
+    drop(sealed_append);
+
     let counterfeit_project_id = Uuid::new_v4();
     sqlx::query("INSERT INTO projects (id, organization_id, slug) VALUES ($1, $2, $3)")
         .bind(counterfeit_project_id)

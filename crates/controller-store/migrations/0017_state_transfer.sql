@@ -426,6 +426,33 @@ CREATE TRIGGER state_transfer_records_immutable
 BEFORE UPDATE OR DELETE ON state_transfer_records
 FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_receipt_immutable();
 
+CREATE FUNCTION mcloving_state_transfer_record_insert_open()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM outbox
+        WHERE organization_id = NEW.organization_id
+          AND topic = 'state_transfer.imported'
+          AND aggregate_id = NEW.receipt_id
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer receipt is sealed against provenance appends';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_state_transfer_record_insert_open() FROM PUBLIC;
+
+CREATE TRIGGER state_transfer_records_insert_open
+BEFORE INSERT ON state_transfer_records
+FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_record_insert_open();
+
 CREATE FUNCTION mcloving_state_transfer_protection_monotonic()
 RETURNS trigger
 LANGUAGE plpgsql

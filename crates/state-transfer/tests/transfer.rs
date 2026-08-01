@@ -440,6 +440,73 @@ fn graph_node_result_must_match_its_final_attempt() {
 }
 
 #[test]
+fn graph_node_attempts_must_stay_inside_the_build_window() {
+    let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    for (started_at_unix_ms, ended_at_unix_ms) in [(1_099, 1_150), (1_150, 1_201)] {
+        let mut candidate = bundle.clone();
+        candidate.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
+            record: record("node:stateful:7:build", 70),
+            node_id: "build".to_owned(),
+            stage_path: "build".to_owned(),
+            node_kind: "stage".to_owned(),
+            parent_node_ids: Vec::new(),
+            result: BuildResult::Succeeded,
+            attempts: vec![AttemptState {
+                record: record("attempt:stateful:7:build:1", 71),
+                ordinal: 1,
+                result: BuildResult::Succeeded,
+                started_at_unix_ms,
+                ended_at_unix_ms,
+                audit_digest: digest(72),
+            }],
+        }];
+
+        assert!(matches!(
+            transform(&candidate, &expected, &BTreeMap::new()),
+            Err(TransferError::InvalidField(field)) if field.contains("attempt timing")
+        ));
+    }
+}
+
+#[test]
+fn graph_node_attempts_must_be_ordered_and_non_overlapping() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
+        record: record("node:stateful:7:build", 70),
+        node_id: "build".to_owned(),
+        stage_path: "build".to_owned(),
+        node_kind: "stage".to_owned(),
+        parent_node_ids: Vec::new(),
+        result: BuildResult::Succeeded,
+        attempts: vec![
+            AttemptState {
+                record: record("attempt:stateful:7:build:1", 71),
+                ordinal: 1,
+                result: BuildResult::Failed,
+                started_at_unix_ms: 1_100,
+                ended_at_unix_ms: 1_160,
+                audit_digest: digest(72),
+            },
+            AttemptState {
+                record: record("attempt:stateful:7:build:2", 73),
+                ordinal: 2,
+                result: BuildResult::Succeeded,
+                started_at_unix_ms: 1_150,
+                ended_at_unix_ms: 1_200,
+                audit_digest: digest(74),
+            },
+        ],
+    }];
+
+    assert_eq!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "attempt timing must be ordered and non-overlapping".to_owned()
+        ))
+    );
+}
+
+#[test]
 fn provenance_and_scm_substitution_fail_closed() {
     let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
     let mut substituted_binding = bundle.clone();
@@ -573,6 +640,25 @@ fn filesystem_entries_cannot_weaken_their_object_classification() {
     assert!(matches!(
         transform(&bundle, &expected, &BTreeMap::new()),
         Err(TransferError::InvalidField(field)) if field.contains("at least as restrictive")
+    ));
+}
+
+#[test]
+fn object_kinds_must_match_their_containing_lists() {
+    let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+
+    let mut artifact_as_workspace = bundle.clone();
+    artifact_as_workspace.jobs[0].builds[0].artifacts[0].kind = ObjectKind::RetainedWorkspace;
+    assert!(matches!(
+        transform(&artifact_as_workspace, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(field)) if field.contains("build artifacts")
+    ));
+
+    let mut workspace_as_artifact = bundle;
+    workspace_as_artifact.jobs[0].retained_workspaces[0].kind = ObjectKind::Artifact;
+    assert!(matches!(
+        transform(&workspace_as_artifact, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(field)) if field.contains("retained workspaces")
     ));
 }
 
