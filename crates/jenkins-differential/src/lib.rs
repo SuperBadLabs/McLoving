@@ -81,6 +81,8 @@ const MCLOVING_PIPELINE_DIGEST_BYTES: [u64; 32] = [
 const MCLOVING_BUILD_ID: &str = "37c442ef-f740-4662-9aa9-3577ebcbec8c";
 const MCLOVING_NODE_ID: &str = "6ef240c4-dfe2-4532-8166-947de237c467";
 const MCLOVING_ATTEMPT_ID: &str = "76b55bd3-7040-40b9-8dcf-243b2b5f6f45";
+const MCLOVING_RESULT_SHA256: &str =
+    "7b09726b2edfce62285608b12dbd89adc473bb4872ca72e2371dbb58e4d88cd4";
 const MCLOVING_TEST_BINARY_SHA256: &str =
     "e843ecfa3c8acc71cc931634082a7098adf746e893c4493c617b96b5e2ffff1b";
 const MCLOVING_CONTROLLER_BINARY_SHA256: &str =
@@ -1052,6 +1054,24 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         "succeeded",
         "E_MCLOVING",
     )?;
+    exact_u64(
+        &raw,
+        &["status", "terminal_summary", "exit_code"],
+        0,
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        &raw,
+        &["status", "terminal_summary", "termination"],
+        "exited",
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        &raw,
+        &["status", "terminal_summary", "result_sha256"],
+        MCLOVING_RESULT_SHA256,
+        "E_MCLOVING",
+    )?;
     let nodes = array(&raw, &["graph", "nodes"], "E_MCLOVING")?;
     let attempts = array(&raw, &["graph", "attempts"], "E_MCLOVING")?;
     let dependencies = array(&raw, &["graph", "dependencies"], "E_MCLOVING")?;
@@ -1088,6 +1108,12 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         &attempts[0],
         &["terminal_summary", "termination"],
         "exited",
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        &attempts[0],
+        &["terminal_summary", "result_sha256"],
+        MCLOVING_RESULT_SHA256,
         "E_MCLOVING",
     )?;
     let logs = array(&raw, &["logs"], "E_MCLOVING")?;

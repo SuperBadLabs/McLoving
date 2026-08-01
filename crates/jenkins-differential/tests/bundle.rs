@@ -330,6 +330,28 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
 }
 
 #[test]
+fn contradictory_status_terminal_summary_fails_closed() {
+    let temporary = tempfile::tempdir().expect("create mutation root");
+    copy_tree(&fixture(), temporary.path());
+    let target = temporary.path().join("mcloving/mcloving-raw.json");
+    let mut raw: serde_json::Value =
+        serde_json::from_slice(&fs::read(&target).expect("read raw receipt"))
+            .expect("parse raw receipt");
+    raw["status"]["terminal_summary"]["exit_code"] = 23.into();
+    raw["status"]["terminal_summary"]["termination"] = "timed_out".into();
+    fs::write(
+        &target,
+        serde_json::to_vec_pretty(&raw).expect("serialize raw receipt"),
+    )
+    .expect("write raw receipt");
+    reseal(temporary.path());
+    assert_eq!(
+        verify_bundle(temporary.path()).unwrap_err().code,
+        "E_MCLOVING"
+    );
+}
+
+#[test]
 fn undeclared_jenkins_mount_fails_closed() {
     let temporary = tempfile::tempdir().expect("create mutation root");
     copy_tree(&fixture(), temporary.path());

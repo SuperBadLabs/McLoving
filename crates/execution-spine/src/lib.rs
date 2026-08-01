@@ -16,6 +16,9 @@ use tokio::fs;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+/// Hard aggregate stdout/stderr ceiling for the embedded execution boundary.
+pub const MAX_EXECUTION_OUTPUT_BYTES: u64 = 1_048_576;
+
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
     pub agent_id: String,
@@ -241,7 +244,7 @@ pub async fn run_claim(
             .iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect(),
-        output_limit_bytes: None,
+        output_limit_bytes: Some(MAX_EXECUTION_OUTPUT_BYTES),
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
