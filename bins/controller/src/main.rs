@@ -343,39 +343,41 @@ fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
         .context("MCLOVING_OIDC_CONFIGURATION_GENERATION is too large")?;
     let jwks_generation =
         i64::try_from(jwks_generation).context("MCLOVING_OIDC_JWKS_GENERATION is too large")?;
-    Ok(Some(OidcEnvironment {
-        provider: IdentityProviderWrite {
-            organization_id,
-            provider_id,
-            issuer,
-            audience,
-            authorization_endpoint,
-            token_endpoint,
-            jwks_uri,
-            client_id,
-            group_claim,
-            configuration_generation,
-            configuration_digest,
-            jwks_generation,
-            jwks_digest,
-            enabled: true,
-            actor_subject: "bootstrap:controller".to_owned(),
-        },
-        client: OidcClientConfig {
-            organization_id,
-            provider_id,
-            configuration_generation,
-            configuration_digest,
-            client_secret,
-            allowed_redirect_uris,
-            session_ttl: Duration::from_secs(session_ttl_seconds),
-            refresh_ttl: Duration::from_secs(refresh_ttl_seconds),
-            request_timeout: Duration::from_secs(request_timeout_seconds),
-            clock_skew: Duration::from_secs(clock_skew_seconds),
-            max_jwks_bytes,
-            allow_insecure_loopback_for_tests: false,
-        },
-    }))
+    let provider = IdentityProviderWrite {
+        organization_id,
+        provider_id,
+        issuer,
+        audience,
+        authorization_endpoint,
+        token_endpoint,
+        jwks_uri,
+        client_id,
+        group_claim,
+        configuration_generation,
+        configuration_digest,
+        jwks_generation,
+        jwks_digest,
+        enabled: true,
+        actor_subject: "bootstrap:controller".to_owned(),
+    };
+    let client = OidcClientConfig {
+        organization_id,
+        provider_id,
+        configuration_generation,
+        configuration_digest,
+        client_secret,
+        allowed_redirect_uris,
+        session_ttl: Duration::from_secs(session_ttl_seconds),
+        refresh_ttl: Duration::from_secs(refresh_ttl_seconds),
+        request_timeout: Duration::from_secs(request_timeout_seconds),
+        clock_skew: Duration::from_secs(clock_skew_seconds),
+        max_jwks_bytes,
+        allow_insecure_loopback_for_tests: false,
+    };
+    client
+        .validate_with_provider(&provider)
+        .context("validate complete OIDC runtime client before persistence")?;
+    Ok(Some(OidcEnvironment { provider, client }))
 }
 
 #[allow(clippy::too_many_arguments)]

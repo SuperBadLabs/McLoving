@@ -735,7 +735,7 @@ impl Store {
         .await?;
         let superseded = sqlx::query(
             "UPDATE service_credentials
-             SET revoked_at_unix_ms = $4,
+             SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $4),
                  revocation_reason = 'superseded_generation'
              WHERE organization_id = $1 AND identity_id = $2
                AND credential_id <> $3 AND revoked_at_unix_ms IS NULL",
@@ -1281,7 +1281,8 @@ impl Store {
         reject_credential_digest_collision(&mut tx, organization_id, &next_refresh_digest).await?;
         sqlx::query(
             "UPDATE identity_sessions
-             SET revoked_at_unix_ms = $3, revocation_reason = 'refresh_rotation'
+             SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3),
+                 revocation_reason = 'refresh_rotation'
              WHERE organization_id = $1 AND session_id = $2",
         )
         .bind(organization_id)
@@ -1436,7 +1437,8 @@ impl Store {
         let changed = match revocation_reason.as_deref() {
             None => sqlx::query(
                 "UPDATE identity_sessions
-                     SET revoked_at_unix_ms = $3, revocation_reason = $4
+                     SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3),
+                         revocation_reason = $4
                      WHERE organization_id = $1 AND session_id = $2
                        AND revoked_at_unix_ms IS NULL",
             )
@@ -1456,7 +1458,8 @@ impl Store {
                 // of that same generation without affecting another device.
                 sqlx::query(
                     "UPDATE identity_sessions
-                     SET revoked_at_unix_ms = $3, revocation_reason = $4
+                     SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3),
+                         revocation_reason = $4
                      WHERE organization_id = $1 AND family_id = $2
                        AND revoked_at_unix_ms IS NULL",
                 )
@@ -1820,7 +1823,8 @@ async fn revoke_session_family_on_refresh_reuse(
     }
     let revoked = sqlx::query(
         "UPDATE identity_sessions
-         SET revoked_at_unix_ms = $3, revocation_reason = 'refresh_reuse_detected'
+         SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3),
+             revocation_reason = 'refresh_reuse_detected'
          WHERE organization_id = $1 AND family_id = $2
            AND revoked_at_unix_ms IS NULL",
     )
@@ -1919,7 +1923,8 @@ async fn revoke_credential_record(
     }
     let mut tx = store.tenant_transaction(organization_id).await?;
     let query = format!(
-        "UPDATE {table} SET revoked_at_unix_ms = $3, revocation_reason = $4
+        "UPDATE {table}
+         SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3), revocation_reason = $4
          WHERE organization_id = $1 AND {key_column} = $2 AND revoked_at_unix_ms IS NULL"
     );
     let changed = sqlx::query(&query)

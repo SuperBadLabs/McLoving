@@ -411,8 +411,8 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
                     session_id: Uuid::new_v4(),
                     token_digest: digest("refresh-replay-access"),
                     refresh_token_digest: Some(digest("refresh-replay-next")),
-                    issued_at_unix_ms: 12_002,
-                    expires_at_unix_ms: 32_002,
+                    issued_at_unix_ms: 11_900,
+                    expires_at_unix_ms: 31_900,
                     refresh_expires_at_unix_ms: Some(62_002),
                 },
             )
@@ -489,8 +489,8 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
                 session_id: Uuid::new_v4(),
                 token_digest: logout_final_token,
                 refresh_token_digest: Some(digest("logout-race-final-refresh")),
-                issued_at_unix_ms: 13_100,
-                expires_at_unix_ms: 33_100,
+                issued_at_unix_ms: 13_050,
+                expires_at_unix_ms: 33_050,
                 refresh_expires_at_unix_ms: Some(63_100),
             },
         )
@@ -501,7 +501,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             .revoke_session(
                 organization_id,
                 logout_predecessor.session_id,
-                13_101,
+                12_900,
                 "logout",
                 &human_identity.subject,
             )
@@ -687,19 +687,61 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         })
         .await
         .expect("provision service identity for clock-skew revocation");
-    admin
+    let future_first_credential = admin
         .provision_service_credential(&NewServiceCredential {
             organization_id,
             credential_id: Uuid::new_v4(),
             identity_id: future_service_id,
             generation: 1,
             token_digest: digest("future-issued-service-token"),
-            issued_at_unix_ms: i64::MAX - 1,
+            issued_at_unix_ms: i64::MAX - 3,
             expires_at_unix_ms: None,
             actor_subject: "operator:identity".to_owned(),
         })
         .await
         .expect("issue a credential ahead of the database clock");
+    let future_second_credential = admin
+        .provision_service_credential(&NewServiceCredential {
+            organization_id,
+            credential_id: Uuid::new_v4(),
+            identity_id: future_service_id,
+            generation: 2,
+            token_digest: digest("behind-clock-service-token"),
+            issued_at_unix_ms: i64::MAX - 10,
+            expires_at_unix_ms: None,
+            actor_subject: "operator:identity".to_owned(),
+        })
+        .await
+        .expect("rotate despite a caller clock behind the previous issuer");
+    assert!(
+        admin
+            .revoke_service_credential(
+                organization_id,
+                future_second_credential.credential_id,
+                0,
+                "clock-skew-test",
+                "operator:identity",
+            )
+            .await
+            .expect("standalone revocation must clamp a behind-clock timestamp")
+    );
+    assert_ne!(
+        future_first_credential.credential_id,
+        future_second_credential.credential_id
+    );
+    admin
+        .provision_service_credential(&NewServiceCredential {
+            organization_id,
+            credential_id: Uuid::new_v4(),
+            identity_id: future_service_id,
+            generation: 3,
+            token_digest: digest("future-lifecycle-service-token"),
+            issued_at_unix_ms: i64::MAX - 1,
+            expires_at_unix_ms: None,
+            actor_subject: "operator:identity".to_owned(),
+        })
+        .await
+        .expect("issue a live future credential for lifecycle revocation");
     assert_eq!(
         admin
             .transition_identity_lifecycle(

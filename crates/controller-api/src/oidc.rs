@@ -12,7 +12,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use mcloving_controller_store::{
-    IdentityProviderConfig, LoginAttempt, OidcIdentityClaims, SessionIssue, StoreError,
+    IdentityProviderConfig, IdentityProviderWrite, LoginAttempt, OidcIdentityClaims, SessionIssue,
+    StoreError,
 };
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -45,6 +46,30 @@ pub struct OidcClientConfig {
     pub clock_skew: Duration,
     pub max_jwks_bytes: usize,
     pub allow_insecure_loopback_for_tests: bool,
+}
+
+impl OidcClientConfig {
+    /// Constructs the complete runtime client and validates its exact provider
+    /// binding before a durable provider generation is persisted.
+    pub fn validate_with_provider(&self, provider: &IdentityProviderWrite) -> Result<(), ApiError> {
+        if self.organization_id != provider.organization_id
+            || self.provider_id != provider.provider_id
+            || self.configuration_generation != provider.configuration_generation
+            || self.configuration_digest != provider.configuration_digest
+        {
+            return Err(ApiError::configuration(
+                "OIDC client and provider generation binding do not match",
+            ));
+        }
+        validate_provider_url_values(
+            &provider.issuer,
+            &provider.authorization_endpoint,
+            &provider.token_endpoint,
+            &provider.jwks_uri,
+            self.allow_insecure_loopback_for_tests,
+        )?;
+        OidcClient::new(self.clone()).map(|_| ())
+    }
 }
 
 #[derive(Clone)]
@@ -493,18 +518,34 @@ fn validate_provider_urls(
     provider: &IdentityProviderConfig,
     allow_insecure_loopback: bool,
 ) -> Result<(), ApiError> {
-    secure_url(&provider.issuer, "OIDC issuer", allow_insecure_loopback)?;
-    secure_url(
+    validate_provider_url_values(
+        &provider.issuer,
         &provider.authorization_endpoint,
+        &provider.token_endpoint,
+        &provider.jwks_uri,
+        allow_insecure_loopback,
+    )
+}
+
+fn validate_provider_url_values(
+    issuer: &str,
+    authorization_endpoint: &str,
+    token_endpoint: &str,
+    jwks_uri: &str,
+    allow_insecure_loopback: bool,
+) -> Result<(), ApiError> {
+    secure_url(issuer, "OIDC issuer", allow_insecure_loopback)?;
+    secure_url(
+        authorization_endpoint,
         "OIDC authorization endpoint",
         allow_insecure_loopback,
     )?;
     secure_url(
-        &provider.token_endpoint,
+        token_endpoint,
         "OIDC token endpoint",
         allow_insecure_loopback,
     )?;
-    secure_url(&provider.jwks_uri, "OIDC JWKS URI", allow_insecure_loopback)?;
+    secure_url(jwks_uri, "OIDC JWKS URI", allow_insecure_loopback)?;
     Ok(())
 }
 
@@ -775,6 +816,63 @@ fn oidc_bad_request(code: &'static str, message: impl Into<String>) -> ApiError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn validation_fixture() -> (OidcClientConfig, IdentityProviderWrite) {
+        let organization_id = Uuid::new_v4();
+        let provider_id = Uuid::new_v4();
+        let configuration_digest = [7_u8; 32];
+        (
+            OidcClientConfig {
+                organization_id,
+                provider_id,
+                configuration_generation: 1,
+                configuration_digest,
+                client_secret: Some("client-secret".to_owned()),
+                allowed_redirect_uris: BTreeSet::from([
+                    "https://controller.example.test/oidc/callback".to_owned(),
+                ]),
+                session_ttl: Duration::from_secs(900),
+                refresh_ttl: Duration::from_secs(3_600),
+                request_timeout: Duration::from_secs(10),
+                clock_skew: Duration::from_secs(60),
+                max_jwks_bytes: 256 * 1024,
+                allow_insecure_loopback_for_tests: false,
+            },
+            IdentityProviderWrite {
+                organization_id,
+                provider_id,
+                issuer: "https://identity.example.test".to_owned(),
+                audience: "mcloving".to_owned(),
+                authorization_endpoint: "https://identity.example.test/authorize".to_owned(),
+                token_endpoint: "https://identity.example.test/token".to_owned(),
+                jwks_uri: "https://identity.example.test/jwks".to_owned(),
+                client_id: "mcloving".to_owned(),
+                group_claim: "groups".to_owned(),
+                configuration_generation: 1,
+                configuration_digest,
+                jwks_generation: 1,
+                jwks_digest: [8_u8; 32],
+                enabled: true,
+                actor_subject: "test:operator".to_owned(),
+            },
+        )
+    }
+
+    #[test]
+    fn runtime_client_and_provider_are_validated_as_one_generation() {
+        let (client, provider) = validation_fixture();
+        client
+            .validate_with_provider(&provider)
+            .expect("valid runtime/provider binding");
+
+        let mut invalid_url = provider.clone();
+        invalid_url.token_endpoint = "not-an-absolute-url".to_owned();
+        assert!(client.validate_with_provider(&invalid_url).is_err());
+
+        let mut stale_provider = provider;
+        stale_provider.configuration_generation = 2;
+        assert!(client.validate_with_provider(&stale_provider).is_err());
+    }
 
     #[test]
     fn authorized_party_is_required_for_multiple_audiences_and_exact_when_present() {
