@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
 use std::net::SocketAddr;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,8 +14,6 @@ use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mcloving_controller_api::{ApiState, OidcClientConfig, router};
 use mcloving_controller_store::{IdentityProviderWrite, NewHumanIdentity, Store};
-use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding};
-use rsa::traits::PublicKeyParts;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -147,12 +147,8 @@ async fn oidc_pkce_refresh_group_fencing_and_logout_are_end_to_end() {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
     };
-    let private_key = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048)
-        .expect("generate contained test RSA key");
-    let jwk_n =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(private_key.n().to_bytes_be());
-    let jwk_e =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(private_key.e().to_bytes_be());
+    let (private_key_pem, jwk_n) = generated_rsa_key();
+    let jwk_e = "AQAB";
     let jwks_bytes = serde_json::to_vec(&json!({
         "keys": [{
             "kty": "RSA",
@@ -164,11 +160,6 @@ async fn oidc_pkce_refresh_group_fencing_and_logout_are_end_to_end() {
         }]
     }))
     .expect("serialize contained JWKS");
-    let private_key_pem = private_key
-        .to_pkcs1_pem(LineEnding::LF)
-        .expect("encode contained test RSA key")
-        .as_bytes()
-        .to_vec();
     let expected = Arc::new(Mutex::new(None));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -470,4 +461,66 @@ fn unix_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn generated_rsa_key() -> (Vec<u8>, String) {
+    let generated = Command::new("openssl")
+        .args([
+            "genpkey",
+            "-algorithm",
+            "RSA",
+            "-pkeyopt",
+            "rsa_keygen_bits:2048",
+            "-pkeyopt",
+            "rsa_keygen_pubexp:65537",
+        ])
+        .output()
+        .expect("run OpenSSL test-key generator");
+    assert!(
+        generated.status.success(),
+        "OpenSSL test-key generation failed: {}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let private_key_pem = openssl_with_input(&["rsa", "-traditional"], &generated.stdout);
+    let modulus = openssl_with_input(&["rsa", "-noout", "-modulus"], &private_key_pem);
+    let modulus = std::str::from_utf8(&modulus)
+        .expect("OpenSSL modulus is UTF-8")
+        .trim()
+        .strip_prefix("Modulus=")
+        .expect("OpenSSL modulus prefix");
+    assert_eq!(modulus.len() % 2, 0, "OpenSSL modulus has complete bytes");
+    let modulus = (0..modulus.len())
+        .step_by(2)
+        .map(|index| {
+            u8::from_str_radix(&modulus[index..index + 2], 16)
+                .expect("OpenSSL modulus is hexadecimal")
+        })
+        .collect::<Vec<_>>();
+    (
+        private_key_pem,
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(modulus),
+    )
+}
+
+fn openssl_with_input(arguments: &[&str], input: &[u8]) -> Vec<u8> {
+    let mut child = Command::new("openssl")
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start OpenSSL test-key command");
+    child
+        .stdin
+        .take()
+        .expect("OpenSSL stdin")
+        .write_all(input)
+        .expect("write generated key to OpenSSL");
+    let output = child.wait_with_output().expect("wait for OpenSSL");
+    assert!(
+        output.status.success(),
+        "OpenSSL test-key command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
 }
