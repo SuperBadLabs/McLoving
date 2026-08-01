@@ -76,7 +76,10 @@ capture and final evidence envelope are immutable.
 ## Fail-closed verifier
 
 `mcloving-jenkins-differential` accepts only the exact 30-file self-excluding
-manifest and exact filesystem tree. It rejects traversal, symlinks, special or
+manifest and exact filesystem tree. Security-relevant Jenkins and McLoving
+image, container, network, runtime, negative-network, and test transcripts also
+carry compiled detached SHA-256 anchors, so resealing the bundle cannot make an
+unchecked receipt field authoritative. It rejects traversal, symlinks, special or
 oversized files, unmanifested/missing/additional entries, and digest
 substitution. It independently checks:
 

@@ -27,6 +27,24 @@ const JENKINS_CONTAINER_ID: &str =
 const JENKINS_CONTAINER_NAME: &str = "mcloving-diff001-jenkins";
 const JENKINS_CONTAINER_CREATED: &str = "2026-08-01T12:15:43.236541506Z";
 const JENKINS_CONTAINER_STARTED: &str = "2026-08-01T12:15:43.401795528Z";
+const JENKINS_CONTAINMENT_RECEIPTS: [(&str, &str); 4] = [
+    (
+        "jenkins/container-inspect.json",
+        "b9d05fb960d405cb542f03ec17cda6e93c390f46cf3977c1f4d501462c0042c1",
+    ),
+    (
+        "jenkins/image-inspect.json",
+        "815d3caf3cb5162342a9d306b86f542e324d80877da4e3e5dd709e2f71dec84d",
+    ),
+    (
+        "jenkins/external-network.txt",
+        "45dd0df6458bac2014624ee99a377ec34edb834e90bd4213c07742a51f891c55",
+    ),
+    (
+        "jenkins/runtime.txt",
+        "972ab89d083d225cd5fd0dae1d10c3bab83a57d75ae953281d0c39d752aac18c",
+    ),
+];
 pub const MCLOVING_RUNNER_IMAGE_SHA256: &str =
     "77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa";
 pub const MCLOVING_DATABASE_IMAGE_SHA256: &str =
@@ -52,6 +70,32 @@ const MCLOVING_RUNNER_ID: &str = "6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebf
 const MCLOVING_RUNNER_NAME: &str = "mcloving-diff001-runner-v16";
 const MCLOVING_RUNNER_CREATED: &str = "2026-08-01T08:11:05.433588704-05:00";
 const MCLOVING_RUNNER_COMMAND: &str = "set -euo pipefail; { id; uname -a; locale; sha256sum 'target/debug/deps/diff_001-3b7075192798a581' target/debug/mcloving-controller; } > /evidence/runtime.txt; exec 'target/debug/deps/diff_001-3b7075192798a581' --nocapture";
+const MCLOVING_CONTAINMENT_RECEIPTS: [(&str, &str); 6] = [
+    (
+        "mcloving/network-inspect.json",
+        "94c82fff076d6b4ea81cc340104fc567f40143fa136c356e2c33dd299e5056f7",
+    ),
+    (
+        "mcloving/runner-inspect-pre.json",
+        "b688f59c225ebd5edd328e93b2b56c2c802ec1d639e31bbd0595c9102b886a9b",
+    ),
+    (
+        "mcloving/runner-inspect-post.json",
+        "719399e779166332e110e095509d76396edcd400d3097641d58434205afb16cd",
+    ),
+    (
+        "mcloving/postgres-inspect.json",
+        "781d827073183bf80c13f5d19f659f74c083cce3cbd16694b06449d642f8ceca",
+    ),
+    (
+        "mcloving/runtime.txt",
+        "f83e5ebd7e731e7ec1b65b7e58ed367c3d0bb0aa53225d90fbc28e86f0c558f0",
+    ),
+    (
+        "mcloving/test-output.txt",
+        "941e9bbeb5201d454a821c88746b9dc27f6238614eb543ce756e79f2ba65104f",
+    ),
+];
 
 const MAX_FILES: usize = 32;
 const MAX_FILE_BYTES: u64 = 262_144;
@@ -518,6 +562,7 @@ Finished: SUCCESS\n";
 }
 
 fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
+    verify_receipt_digests(root, &JENKINS_CONTAINMENT_RECEIPTS, "E_JENKINS_CONTAINMENT")?;
     let image_inspect = json(root, "jenkins/image-inspect.json")?;
     let image = first_object(&image_inspect, "E_JENKINS_CONTAINMENT")?;
     exact_string(
@@ -1014,6 +1059,11 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
 }
 
 fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
+    verify_receipt_digests(
+        root,
+        &MCLOVING_CONTAINMENT_RECEIPTS,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
     let network_inspect = json(root, "mcloving/network-inspect.json")?;
     let network = first_object(&network_inspect, "E_MCLOVING_CONTAINMENT")?;
     exact_string(
@@ -1574,6 +1624,22 @@ fn verify_network_attachment(
     exact_null(attachment, &["IPAMConfig"], "E_MCLOVING_CONTAINMENT")?;
     exact_null(attachment, &["Links"], "E_MCLOVING_CONTAINMENT")?;
     exact_string_array(attachment, &["Aliases"], &[alias], "E_MCLOVING_CONTAINMENT")?;
+    Ok(())
+}
+
+fn verify_receipt_digests(
+    root: &Path,
+    receipts: &[(&str, &str)],
+    code: &'static str,
+) -> Result<(), VerificationError> {
+    for (path, expected_digest) in receipts {
+        if sha256(&read(root, path)?) != *expected_digest {
+            return Err(VerificationError::new(
+                code,
+                format!("detached digest differs for {path}"),
+            ));
+        }
+    }
     Ok(())
 }
 
