@@ -968,14 +968,14 @@ materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its exact transform binary SHA-256 is
-`3bc93a2c23597e08a75ea95f7ef8af9a1b8c88f132821944d3629cfec11c2376`.
+`549ec832edb138cea2895cf02fc39a3e4ec244f8a0aec378473be8f952dfe4c9`.
 Its source, transform, and reverse manifest SHA-256 values are
-`461dfc60b19d349dfc52b36dbecd9da0b41fd3195840562e636a617a12e933a4`,
-`b42624f228df5c91ae99870221dafa1e10786b6cf96656ba6d5afab20b09dc74`,
-and `8850858e751df14d662a5f13dfdec402188fcff4e9092f4ea9e52d076369ba49`;
+`0304557a39a7c2a58ff9e1f110bc1bd4ca3bb2df16b28d54cc3c94262b7f47c6`,
+`e28b47d2aa70ec2ad8cdaa2c48e1100c8862c9a47765d22a355c1660e96cafe7`,
+and `2063b41b982f2821d494bfba96d43125382ea39fb12a601fbed3ce0fd8a77e05`;
 the forward and reverse bundle SHA-256 values are
-`d88252f58bc26b8ef7cbd2a30d0ae9eddaa66773f79c8b95a01134b7cdfc6fb4`
-and `ac88c1dc6d8ff24de40b2b8b0b578e5294094566bc505d2175e23b7f9fdd8c32`.
+`af172be8893e282b72fc20b820382c8236e18c7b981bc3b4acbf57884ead55e4`
+and `1a66f2c6354011abd23f45671674291e0b22faeea1043791920fc5ee0123ef52`.
 The final readiness repair keeps automatic and operator retries blocked until
 their active dependency generation is actually satisfied, and gives legacy
 runnable inserts a rolling-upgrade-safe readiness default without falsely

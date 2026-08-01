@@ -138,15 +138,16 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `3bc93a2c23597e08a75ea95f7ef8af9a1b8c88f132821944d3629cfec11c2376`;
-- source-evidence manifest SHA-256 `461dfc60b19d349dfc52b36dbecd9da0b41fd3195840562e636a617a12e933a4`;
-- forward bundle SHA-256 `d88252f58bc26b8ef7cbd2a30d0ae9eddaa66773f79c8b95a01134b7cdfc6fb4`;
-- reverse bundle SHA-256 `ac88c1dc6d8ff24de40b2b8b0b578e5294094566bc505d2175e23b7f9fdd8c32`;
-- reverse-evidence manifest SHA-256 `8850858e751df14d662a5f13dfdec402188fcff4e9092f4ea9e52d076369ba49`;
-- sealed transform-evidence manifest SHA-256 `b42624f228df5c91ae99870221dafa1e10786b6cf96656ba6d5afab20b09dc74`;
-- full imported-build verification receipt SHA-256 `207f1eafa47877c80bd120a7ee7e699d79389c1ca35e7220a092df1ceeb113bd`;
+- transform binary SHA-256 `549ec832edb138cea2895cf02fc39a3e4ec244f8a0aec378473be8f952dfe4c9`;
+- source-evidence manifest SHA-256 `0304557a39a7c2a58ff9e1f110bc1bd4ca3bb2df16b28d54cc3c94262b7f47c6`;
+- forward bundle SHA-256 `af172be8893e282b72fc20b820382c8236e18c7b981bc3b4acbf57884ead55e4`;
+- reverse bundle SHA-256 `1a66f2c6354011abd23f45671674291e0b22faeea1043791920fc5ee0123ef52`;
+- reverse-evidence manifest SHA-256 `2063b41b982f2821d494bfba96d43125382ea39fb12a601fbed3ce0fd8a77e05`;
+- sealed transform-evidence manifest SHA-256 `e28b47d2aa70ec2ad8cdaa2c48e1100c8862c9a47765d22a355c1660e96cafe7`;
+- repair-verification receipt SHA-256 `aaf5bad61ca1b14a7bf542a71fea76291ac868d175863b3f310fffbaedcf0d5a`;
+- full imported-build verification receipt SHA-256 `0e85104bdf06d4b797c9d8221087b75b98767f90b3917cafe76dc660146d7f98`;
 - imported protection-record SHA-256 `ae301c2fe1fa002fcc1d9b583ccd9a56f8c6a50f59911545356b5affcd0b285e`;
-- imported retry-history receipt SHA-256 `f82c60e79e54af12c087df464448bb4a43b7ab36f914fc6656ff4b33b1a02419`.
+- imported retry-history receipt SHA-256 `81b5fca8af93d25ce18d78474e26211b0f8568bcc1506eb401c52929a5c196cc`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 147 record-provenance rows, nine effective
