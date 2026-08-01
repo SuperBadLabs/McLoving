@@ -1229,21 +1229,23 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?
         .flatten();
-        let changed = match revocation_reason.as_deref() {
-            None => sqlx::query(
-                "UPDATE identity_sessions
+        let effective_revocations = match revocation_reason.as_deref() {
+            None => {
+                sqlx::query_scalar::<_, i64>(
+                    "UPDATE identity_sessions
                      SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3),
                          revocation_reason = $4
                      WHERE organization_id = $1 AND session_id = $2
-                       AND revoked_at_unix_ms IS NULL",
-            )
-            .bind(organization_id)
-            .bind(session_id)
-            .bind(now_unix_ms)
-            .bind(reason)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected(),
+                       AND revoked_at_unix_ms IS NULL
+                     RETURNING revoked_at_unix_ms",
+                )
+                .bind(organization_id)
+                .bind(session_id)
+                .bind(now_unix_ms)
+                .bind(reason)
+                .fetch_all(&mut *tx)
+                .await?
+            }
             Some("refresh_rotation") => {
                 // A refresh may commit after API authentication but before
                 // logout reaches this row lock. In that ordering the access
@@ -1251,24 +1253,34 @@ impl Store {
                 // the active descendants in that session lineage. The shared
                 // predecessor row lock serializes this update against rotation
                 // of that same generation without affecting another device.
-                sqlx::query(
+                sqlx::query_scalar::<_, i64>(
                     "UPDATE identity_sessions
                      SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3),
                          revocation_reason = $4
                      WHERE organization_id = $1 AND family_id = $2
-                       AND revoked_at_unix_ms IS NULL",
+                       AND revoked_at_unix_ms IS NULL
+                     RETURNING revoked_at_unix_ms",
                 )
                 .bind(organization_id)
                 .bind(family_id)
                 .bind(now_unix_ms)
                 .bind(reason)
-                .execute(&mut *tx)
+                .fetch_all(&mut *tx)
                 .await?
-                .rows_affected()
             }
-            Some(_) => 0,
+            Some(_) => Vec::new(),
         };
-        if changed > 0 {
+        if !effective_revocations.is_empty() {
+            let effective_min = effective_revocations
+                .iter()
+                .min()
+                .copied()
+                .expect("non-empty revocation timestamps have a minimum");
+            let effective_max = effective_revocations
+                .iter()
+                .max()
+                .copied()
+                .expect("non-empty revocation timestamps have a maximum");
             append_audit_record(
                 &mut tx,
                 organization_id,
@@ -1278,14 +1290,16 @@ impl Store {
                 &format!("credential:{session_id}"),
                 json!({
                     "reason": reason,
-                    "revoked_at_unix_ms": now_unix_ms,
-                    "revoked_sessions": changed,
+                    "requested_at_unix_ms": now_unix_ms,
+                    "effective_revoked_at_unix_ms_min": effective_min,
+                    "effective_revoked_at_unix_ms_max": effective_max,
+                    "revoked_sessions": effective_revocations.len(),
                 }),
             )
             .await?;
         }
         tx.commit().await?;
-        Ok(changed > 0)
+        Ok(!effective_revocations.is_empty())
     }
 
     pub async fn revoke_service_credential(
@@ -1884,22 +1898,32 @@ async fn revoke_session_family_on_refresh_reuse(
     if revocation_reason.as_deref() != Some("refresh_rotation") {
         return Ok(());
     }
-    let revoked = sqlx::query(
+    let effective_revocations = sqlx::query_scalar::<_, i64>(
         "UPDATE identity_sessions
          SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3),
              revocation_reason = 'refresh_reuse_detected'
          WHERE organization_id = $1 AND family_id = $2
-           AND revoked_at_unix_ms IS NULL",
+           AND revoked_at_unix_ms IS NULL
+         RETURNING revoked_at_unix_ms",
     )
     .bind(organization_id)
     .bind(family_id)
     .bind(now_unix_ms)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
-    if revoked == 0 {
+    .fetch_all(&mut **tx)
+    .await?;
+    if effective_revocations.is_empty() {
         return Ok(());
     }
+    let effective_min = effective_revocations
+        .iter()
+        .min()
+        .copied()
+        .expect("non-empty revocation timestamps have a minimum");
+    let effective_max = effective_revocations
+        .iter()
+        .max()
+        .copied()
+        .expect("non-empty revocation timestamps have a maximum");
     append_audit_record(
         tx,
         organization_id,
@@ -1910,8 +1934,10 @@ async fn revoke_session_family_on_refresh_reuse(
         json!({
             "identity_id": identity_id,
             "session_family_id": family_id,
-            "revoked_sessions": revoked,
+            "revoked_sessions": effective_revocations.len(),
             "detected_at_unix_ms": now_unix_ms,
+            "effective_revoked_at_unix_ms_min": effective_min,
+            "effective_revoked_at_unix_ms_max": effective_max,
         }),
     )
     .await?;

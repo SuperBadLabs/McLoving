@@ -1170,6 +1170,27 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         i64::MAX - 10,
         "audit must record the effective durable revocation timestamp"
     );
+    let logout = audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "oidc_session_revoked"
+                && event.subject == format!("credential:{}", logout_predecessor.session_id)
+        })
+        .expect("rotated-family logout audit event");
+    assert_eq!(logout.payload["requested_at_unix_ms"], 12_900);
+    assert_eq!(
+        logout.payload["effective_revoked_at_unix_ms_min"], 13_050,
+        "logout audit must expose the earliest effective durable family timestamp"
+    );
+    assert_eq!(
+        logout.payload["effective_revoked_at_unix_ms_max"], 13_050,
+        "logout audit must expose the latest effective durable family timestamp"
+    );
+    assert_eq!(
+        logout.payload["revoked_sessions"], 1,
+        "the already refresh-revoked predecessor is not a logout mutation"
+    );
     let human_disable = audit
         .events
         .iter()
