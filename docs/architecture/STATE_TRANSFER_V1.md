@@ -60,8 +60,8 @@ retention and active holds before publishing the receipt, appends audit truth,
 and writes the transactional outbox. Database triggers deny receipt/record
 mutation, protection deletion, deadline shortening, hold omission, and hold
 substitution even if a privileged migration caller bypasses the Rust API. The
-runtime tenant has read-only access to transfer receipts, records, and
-protections; it has no direct insert/update authority. The separately
+runtime tenant has read-only access to transfer receipts, records, protections,
+and migration SCM evidence; it has no direct insert/update authority. The separately
 privileged import path first applies the complete Rust schema and semantic
 validator. Receipt insertion then binds the raw canonical bundle and binding
 hashes to every indexed binding column, and a deferred constraint requires the
@@ -83,11 +83,13 @@ build/workspace trees and job configuration, and only then deterministically
 constructs the canonical input bundle. A post-export live-configuration
 substitution is rejected before bundle construction. The rehearsal then reloads
 and independently revalidates the committed receipt and resolves the exact prior
-SCM checkout. New change records are accepted only from an immutable `applied`,
-idempotent effect checkpoint on a live fenced attempt in the current restore
-epoch; conflicting payload replay is denied. The controller checks that this
-authenticated checkout continues the transferred revision and derives the
-change predicate decision from the durable evidence. It then executes the
+SCM checkout. New change records are accepted only from an immutable canonical
+evidence row written by the separately privileged migration writer and fenced
+to the exact receipt, project, live attempt, agent lease, and current restore
+epoch. The ordinary runtime role cannot insert, update, or delete that evidence;
+PostgreSQL verifies its canonical-byte digest and conflicting replay is denied.
+The controller checks that this authenticated checkout continues the transferred
+revision and derives the change predicate decision from the durable evidence. It then executes the
 first McLoving build through the real controller state machine with
 external-effect authority explicitly false and exports the resulting history
 through the same versioned reverse transform.
@@ -122,12 +124,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `ccb7876e841e8449e88fad5d2ebd485b68ddcf9ed2c2d43330c4ad37a781cc68`;
-- source-evidence manifest SHA-256 `07b0640ebb47092803448de3f09a5bed7f2cf8de2003bce5626fa0593479a290`;
-- forward bundle SHA-256 `a133a2c23ea1368a74f2f762d72665f1ce665e0246cde1323ecad1f0e35169e3`;
-- reverse bundle SHA-256 `eb73b5ae55a62b6005539c1ac0769cc65b63844f31e61df0fa9300fbdc77f0a6`;
-- reverse-evidence manifest SHA-256 `6b4d8a4445d40c28250ea70d5e992b9c387cb228606a826e352b882ad92abcaf`;
-- sealed transform-evidence manifest SHA-256 `ea4972b69ada868d74764a1f66f16cd1e4c14441207dbe4adc721caced27a7d6`.
+- transform binary SHA-256 `2fbde964db1768eb4ba1d73dc020862ce71d511bd68afd57edad2d66f5576834`;
+- source-evidence manifest SHA-256 `f932df8368a462cecbb932fcd3f7364b36532d503e10ff10bc000bfb74081250`;
+- forward bundle SHA-256 `1b85e862049632062dfafd7cab605a96579036c97d5bc310d0c609098c2f6f89`;
+- reverse bundle SHA-256 `21f2811ee2a2747731395fe5bc4ce0369e9d856ed149777b6777b4e62d23fb79`;
+- reverse-evidence manifest SHA-256 `2e4479960067904103c80fd6a8f2d02c35c2cc0d5da7930f32a9821862e38103`;
+- sealed transform-evidence manifest SHA-256 `8593e67d8a21e5675f37987246ae0eaea02591d5dc0ea4f507e6ecfe75cc861e`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 116 record-provenance rows, nine effective

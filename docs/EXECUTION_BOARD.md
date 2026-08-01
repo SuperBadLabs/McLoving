@@ -921,15 +921,16 @@ bounded no-follow filesystem materialization, and the disposable exact-profile
 Jenkins -> McLoving -> Jenkins rehearsal are documented in
 `docs/architecture/STATE_TRANSFER_V1.md`. The accepted successor rehearsal
 also removes direct runtime receipt/record/protection writes, derives change
-predicates only from an applied SCM checkpoint on a live fenced attempt, and
+predicates only from immutable migration-writer SCM evidence bound to the exact
+receipt, project, live fenced agent attempt, and active restore epoch, and
 quota-bounds canonical serialization before cloning or secondary processing. It
 materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its source, transform, and reverse manifest SHA-256 values are
-`07b0640ebb47092803448de3f09a5bed7f2cf8de2003bce5626fa0593479a290`,
-`ea4972b69ada868d74764a1f66f16cd1e4c14441207dbe4adc721caced27a7d6`,
-and `6b4d8a4445d40c28250ea70d5e992b9c387cb228606a826e352b882ad92abcaf`.
+`f932df8368a462cecbb932fcd3f7364b36532d503e10ff10bc000bfb74081250`,
+`8593e67d8a21e5675f37987246ae0eaea02591d5dc0ea4f507e6ecfe75cc861e`,
+and `2e4479960067904103c80fd6a8f2d02c35c2cc0d5da7930f32a9821862e38103`.
 The source runtime is retained by default for the dependent phases and removed
 only by an explicit cleanup flag. `MIG-005` is next on its own branch
 and no longer waits for unrelated state-transfer work; both join only through

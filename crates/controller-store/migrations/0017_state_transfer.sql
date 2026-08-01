@@ -404,6 +404,76 @@ CREATE TABLE state_transfer_protections (
         REFERENCES state_transfer_receipts(id, organization_id, project_id)
 );
 
+-- SCM change records used by the migration rehearsal are a separate,
+-- migration-writer-owned authority surface. The ordinary controller runtime
+-- may read these rows but cannot create, replace, or delete them. Canonical
+-- bytes are retained so PostgreSQL can enforce their exact digest without
+-- depending on jsonb rendering details.
+CREATE TABLE state_transfer_scm_evidence (
+    organization_id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    receipt_id uuid NOT NULL,
+    attempt_id uuid NOT NULL,
+    fence bigint NOT NULL CHECK (fence >= 0),
+    restore_epoch bigint NOT NULL CHECK (restore_epoch >= 0),
+    agent_id text NOT NULL CHECK (length(agent_id) BETWEEN 1 AND 512),
+    evidence_key text NOT NULL CHECK (length(evidence_key) BETWEEN 1 AND 256),
+    canonical_evidence bytea NOT NULL CHECK (
+        octet_length(canonical_evidence) BETWEEN 1 AND 1048576
+    ),
+    evidence_digest bytea NOT NULL CHECK (
+        octet_length(evidence_digest) = 32
+        AND evidence_digest = sha256(canonical_evidence)
+    ),
+    actor_subject text NOT NULL CHECK (length(actor_subject) BETWEEN 1 AND 512),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (organization_id, attempt_id, fence, evidence_key),
+    FOREIGN KEY (receipt_id, organization_id, project_id)
+        REFERENCES state_transfer_receipts(id, organization_id, project_id),
+    FOREIGN KEY (attempt_id, organization_id)
+        REFERENCES attempts(id, organization_id)
+);
+
+CREATE FUNCTION mcloving_state_transfer_scm_evidence_fenced()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM attempts AS a
+        JOIN nodes AS n
+          ON n.organization_id = a.organization_id
+         AND n.id = a.node_id
+        JOIN builds AS b
+          ON b.organization_id = n.organization_id
+         AND b.id = n.build_id
+        CROSS JOIN controller_metadata AS m
+        WHERE a.organization_id = NEW.organization_id
+          AND a.id = NEW.attempt_id
+          AND a.fence = NEW.fence
+          AND a.restore_epoch = NEW.restore_epoch
+          AND a.lease_owner = NEW.agent_id
+          AND a.lease_expires_at > clock_timestamp()
+          AND a.status IN ('running', 'finalizing')
+          AND a.restore_epoch = m.restore_epoch
+          AND b.project_id = NEW.project_id
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer SCM evidence lacks active fenced authority';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_state_transfer_scm_evidence_fenced() FROM PUBLIC;
+
+CREATE TRIGGER state_transfer_scm_evidence_fenced
+BEFORE INSERT ON state_transfer_scm_evidence
+FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_scm_evidence_fenced();
+
 CREATE FUNCTION mcloving_state_transfer_receipt_immutable()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -424,6 +494,10 @@ FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_receipt_immutable();
 
 CREATE TRIGGER state_transfer_records_immutable
 BEFORE UPDATE OR DELETE ON state_transfer_records
+FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_receipt_immutable();
+
+CREATE TRIGGER state_transfer_scm_evidence_immutable
+BEFORE UPDATE OR DELETE ON state_transfer_scm_evidence
 FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_receipt_immutable();
 
 CREATE FUNCTION mcloving_state_transfer_record_insert_open()
@@ -768,7 +842,7 @@ FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_receipt_complete();
 -- migration connection only after the Rust validator has accepted the complete
 -- canonical schema and semantic invariants.
 GRANT SELECT ON state_transfer_receipts, state_transfer_records,
-    state_transfer_protections
+    state_transfer_protections, state_transfer_scm_evidence
 TO mcloving_tenant;
 GRANT EXECUTE ON FUNCTION mcloving_state_transfer_holds_valid(jsonb)
 TO mcloving_tenant;
@@ -798,6 +872,19 @@ CREATE POLICY state_transfer_receipts_tenant_policy ON state_transfer_receipts
 ALTER TABLE state_transfer_records ENABLE ROW LEVEL SECURITY;
 ALTER TABLE state_transfer_records FORCE ROW LEVEL SECURITY;
 CREATE POLICY state_transfer_records_tenant_policy ON state_transfer_records
+    USING (
+        organization_id =
+        NULLIF(current_setting('mcloving.organization_id', true), '')::uuid
+    )
+    WITH CHECK (
+        organization_id =
+        NULLIF(current_setting('mcloving.organization_id', true), '')::uuid
+    );
+
+ALTER TABLE state_transfer_scm_evidence ENABLE ROW LEVEL SECURITY;
+ALTER TABLE state_transfer_scm_evidence FORCE ROW LEVEL SECURITY;
+CREATE POLICY state_transfer_scm_evidence_tenant_policy
+ON state_transfer_scm_evidence
     USING (
         organization_id =
         NULLIF(current_setting('mcloving.organization_id', true), '')::uuid

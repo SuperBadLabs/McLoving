@@ -76,6 +76,9 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         ("state_transfer_records", "INSERT"),
         ("state_transfer_protections", "INSERT"),
         ("state_transfer_protections", "UPDATE"),
+        ("state_transfer_scm_evidence", "INSERT"),
+        ("state_transfer_scm_evidence", "UPDATE"),
+        ("state_transfer_scm_evidence", "DELETE"),
     ] {
         let granted: bool =
             sqlx::query_scalar("SELECT has_table_privilege('mcloving_tenant', $1, $2)")
@@ -108,6 +111,47 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         .as_deref(),
         Some("42501")
     );
+    let mut forged_scm = runtime_store
+        .pool()
+        .begin()
+        .await
+        .expect("begin forged SCM evidence insert");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *forged_scm)
+        .await
+        .expect("set forged SCM evidence tenant");
+    let forged_canonical = br#"{"schema":"mcloving.scm-checkout-evidence/v1"}"#;
+    let forged_error = sqlx::query(
+        "INSERT INTO state_transfer_scm_evidence (
+             organization_id, project_id, receipt_id, attempt_id,
+             fence, restore_epoch, agent_id, evidence_key,
+             canonical_evidence, evidence_digest, actor_subject
+         )
+         VALUES ($1, $2, $3, $4, 1, 0, 'forged-agent', 'scm.checkout/forged',
+                 $5, $6, 'runtime-counterfeit@example.test')",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .bind(first.id)
+    .bind(Uuid::new_v4())
+    .bind(forged_canonical.as_slice())
+    .bind(Sha256::digest(forged_canonical).as_slice())
+    .execute(&mut *forged_scm)
+    .await
+    .expect_err("runtime tenant cannot fabricate SCM evidence");
+    assert_eq!(
+        forged_error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .map(|code| code.into_owned())
+            .as_deref(),
+        Some("42501")
+    );
+    forged_scm
+        .rollback()
+        .await
+        .expect("rollback forged SCM evidence insert");
 
     let mut sealed_append = migration_store
         .pool()

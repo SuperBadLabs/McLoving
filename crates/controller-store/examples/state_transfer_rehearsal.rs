@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mcloving_controller_store::{
-    ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk, ScmCheckoutEvidenceRef,
-    StateTransferReceipt, Store, StoreError, TerminalOutcome,
+    ClaimRequest, NewBuild, NewLogChunk, ScmCheckoutEvidenceRef, StateTransferReceipt, Store,
+    StoreError, TerminalOutcome,
 };
 use mcloving_state_transfer::{
     AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy,
@@ -862,7 +862,7 @@ async fn run_effect_free_build(
     next_checkout: &ScmState,
     predicate: &ChangePredicate,
 ) -> Result<mcloving_state_transfer::PredicateDecision, StoreError> {
-    const CHECKOUT_EFFECT_KEY: &str = "scm.checkout/stateful";
+    const CHECKOUT_EVIDENCE_KEY: &str = "scm.checkout/stateful";
     let admission = store
         .admit_build(&NewBuild {
             organization_id,
@@ -877,7 +877,7 @@ async fn run_effect_free_build(
                 "external_effect_authority": false,
                 "state_transfer_receipt_id": receipt.id,
                 "source_job_id": source_job_id,
-                "scm_checkout_effect_key": CHECKOUT_EFFECT_KEY,
+                "scm_checkout_evidence_key": CHECKOUT_EVIDENCE_KEY,
             }),
         })
         .await?;
@@ -918,36 +918,20 @@ async fn run_effect_free_build(
             "effect-free build could not enter running state".to_owned(),
         ));
     }
-    let checkout_evidence = json!({
-        "schema": "mcloving.scm-checkout-evidence/v1",
-        "checkout": next_checkout,
-    });
     if !store
-        .checkpoint_effect(
+        .record_state_transfer_scm_checkout_evidence(
             organization_id,
+            project_id,
+            receipt.id,
             claim.attempt_id,
             claim.fence,
             claim.restore_epoch,
             "mig005a-agent",
-            CHECKOUT_EFFECT_KEY,
-            EffectClass::Idempotent,
-            EffectStatus::Prepared,
-            &checkout_evidence,
+            CHECKOUT_EVIDENCE_KEY,
+            next_checkout,
+            "migration:rehearsal",
         )
         .await?
-        || !store
-            .checkpoint_effect(
-                organization_id,
-                claim.attempt_id,
-                claim.fence,
-                claim.restore_epoch,
-                "mig005a-agent",
-                CHECKOUT_EFFECT_KEY,
-                EffectClass::Idempotent,
-                EffectStatus::Applied,
-                &checkout_evidence,
-            )
-            .await?
     {
         return Err(StoreError::InvalidStateTransfer(
             "SCM checkout evidence could not be durably authenticated".to_owned(),
@@ -955,21 +939,18 @@ async fn run_effect_free_build(
     }
     let mut substituted = next_checkout.clone();
     substituted.changes[0].paths = vec!["src/counterfeit.target".to_owned()];
-    let substituted_evidence = json!({
-        "schema": "mcloving.scm-checkout-evidence/v1",
-        "checkout": substituted,
-    });
     if store
-        .checkpoint_effect(
+        .record_state_transfer_scm_checkout_evidence(
             organization_id,
+            project_id,
+            receipt.id,
             claim.attempt_id,
             claim.fence,
             claim.restore_epoch,
             "mig005a-agent",
-            CHECKOUT_EFFECT_KEY,
-            EffectClass::Idempotent,
-            EffectStatus::Applied,
-            &substituted_evidence,
+            CHECKOUT_EVIDENCE_KEY,
+            &substituted,
+            "migration:rehearsal",
         )
         .await?
     {
@@ -985,7 +966,7 @@ async fn run_effect_free_build(
             ScmCheckoutEvidenceRef {
                 attempt_id: claim.attempt_id,
                 fence: claim.fence,
-                effect_key: CHECKOUT_EFFECT_KEY,
+                evidence_key: CHECKOUT_EVIDENCE_KEY,
             },
             predicate,
         )
