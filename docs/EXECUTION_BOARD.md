@@ -926,19 +926,26 @@ bind the exact checkout, and evaluates predicates only from immutable
 migration-writer SCM evidence bound to the exact receipt, project, live fenced
 agent attempt, and active restore epoch. Approval decisions are constrained to
 their owning build windows, and canonical serialization is quota-bounded before
-cloning or secondary processing. It
+cloning or secondary processing. Jenkins graph history is derived from the
+sealed native workflow API rather than fabricated stage names or build-wide
+timestamps. McLoving build 3 is a five-node PostgreSQL DAG whose graph,
+per-attempt timestamps and terminal outcomes, committed logs, available-artifact
+inventory, and fenced checkout are reread from controller truth before export.
+The reverse bridge verifies the full canonical build record byte-for-byte and
+independently checks Jenkins-native build fields, workflow-stage semantics,
+SCM changelog, log payloads, and artifacts. It
 materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its exact transform binary SHA-256 is
-`7e21e0fbbc508a8fd7b9743d697137094b14905eb71380b547fc7ddac6e8ed5f`.
+`9b30a5218012ec46cf29ac9f2758e19ca2ad7123e87fec453e320ba28f66ab56`.
 Its source, transform, and reverse manifest SHA-256 values are
-`4a15a8bbc1517cffe6f91d91b495e1e5604fdfe6ce33e7d851c5edd75a7b794b`,
-`6bcc0dc5bbb2be7ebd90590e4609af9b56bcda6f4be50b605b301936a3ddd6a8`,
-and `8f7765018eee7c8cbe9cdaee4a6bed383574561f688b522d00a9d6bbd2d9d4fc`;
+`66bc739f25079abc455bb28072fcc7b747aac20594d1acd91d2879f9d307582b`,
+`d1159befcc9e9a17ccb10b8250c228ac810d3b1e0db1753a40955c5432eb7c30`,
+and `06eaed0f12272feaf2ae7998910140deae5449feeffb61feaeb98a16da758b68`;
 the forward and reverse bundle SHA-256 values are
-`340ef5b73593d6a961df77e0e886de8bc9d1a201728a4ab00b4a779e8ca6c905`
-and `fe9081527d5b52f4ecf4eb256dd28202e4872dc12fb044de7bdd472a442afd48`.
+`a4b1179a6f3671f56d5f1fb5549e54b3904567c1012eaac1008c8a47ebbc74f4`
+and `ec4dd8f75ef567a7f2cc35ca915e1f8d359c095dc74ffcdab004f3c6b18a147a`.
 An injected post-install failure restored repository, build, permalink, and
 next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed

@@ -143,6 +143,8 @@ pub struct AttemptView {
     pub fence: i64,
     pub lease_owner: Option<String>,
     pub terminal_summary: Option<Value>,
+    pub created_at_unix_ms: i64,
+    pub completed_at_unix_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -779,7 +781,11 @@ impl Store {
         .await?;
         let attempts = sqlx::query(
             "SELECT a.id, a.node_id, a.ordinal, a.status, a.fence,
-                    a.lease_owner, a.terminal_summary
+                    a.lease_owner, a.terminal_summary,
+                    (EXTRACT(EPOCH FROM a.created_at) * 1000)::bigint AS created_ms,
+                    CASE WHEN a.completed_at IS NULL THEN NULL
+                         ELSE (EXTRACT(EPOCH FROM a.completed_at) * 1000)::bigint
+                    END AS completed_ms
              FROM attempts AS a
              JOIN nodes AS n
                ON n.organization_id = a.organization_id
@@ -832,6 +838,8 @@ impl Store {
                         fence: row.try_get("fence")?,
                         lease_owner: row.try_get("lease_owner")?,
                         terminal_summary: row.try_get("terminal_summary")?,
+                        created_at_unix_ms: row.try_get("created_ms")?,
+                        completed_at_unix_ms: row.try_get("completed_ms")?,
                     })
                 })
                 .collect::<Result<Vec<_>, StoreError>>()?,

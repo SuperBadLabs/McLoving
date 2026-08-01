@@ -4,8 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mcloving_controller_store::{
-    ClaimRequest, NewBuild, NewLogChunk, ScmCheckoutEvidenceRef, StateTransferReceipt, Store,
-    StoreError, TerminalOutcome,
+    ClaimRequest, DagDependency, DagNodeKind, DependencyCondition, NewDagBuild, NewDagNode,
+    NewLogChunk, ObjectStatus, ScmCheckoutEvidenceRef, StateTransferReceipt, Store, StoreError,
+    TerminalOutcome,
 };
 use mcloving_state_transfer::{
     AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy,
@@ -139,7 +140,7 @@ async fn main() -> Result<(), AnyError> {
     let restored_workspace_input =
         restore_retained_workspace(&stored_forward, jenkins_home, output)?;
     let build_2_end = stored_forward.jobs[0].builds[1].ended_at_unix_ms;
-    let build_3 = mcloving_build_three(
+    let build_3_inputs = mcloving_build_three(
         output,
         &revision_2,
         &revision_3,
@@ -151,13 +152,14 @@ async fn main() -> Result<(), AnyError> {
         path_suffixes: vec![".target".to_owned()],
         message_digests: vec![sha256(b"MIG005A-MATCH second predicate revision")],
     };
-    let decision = run_effect_free_build(
+    let (decision, build_3) = run_effect_free_build(
         &store,
         organization_id,
         project_id,
         &forward_receipt,
         "stateful",
-        &build_3.checkouts[0],
+        output,
+        &build_3_inputs,
         &predicate,
     )
     .await?;
@@ -812,7 +814,7 @@ fn jenkins_build(
             previous_revision: previous_revision.map(str::to_owned),
             changes: changelog.changes,
         }],
-        graph_nodes: graph_nodes(number, timestamp, duration, number == 2),
+        graph_nodes: jenkins_graph_nodes(evidence, number)?,
         approvals: Vec::new(),
         normalized_tests: Vec::new(),
         logs: vec![LogState {
@@ -847,55 +849,73 @@ fn jenkins_build(
     })
 }
 
-fn graph_nodes(number: u64, start: i64, duration: i64, selected: bool) -> Vec<GraphNodeState> {
-    let mut names = vec!["checkout", "effect-free-state"];
-    if selected {
-        names.insert(1, "changelog-predicate");
-        names.insert(1, "changeset-predicate");
-    }
-    names
-        .into_iter()
-        .enumerate()
-        .map(|(index, name)| GraphNodeState {
-            record: record(
-                &format!("node:stateful:{number}:{index}"),
-                format!("{number}:{name}").as_bytes(),
-            ),
-            node_id: format!("{index:02}-{name}"),
-            stage_path: name.to_owned(),
-            node_kind: "stage".to_owned(),
-            parent_node_ids: if index == 0 {
-                Vec::new()
-            } else {
-                vec![format!(
-                    "{:02}-{}",
-                    index - 1,
-                    names_for_index(selected, index - 1)
-                )]
-            },
-            result: BuildResult::Succeeded,
-            attempts: vec![AttemptState {
-                record: record(
-                    &format!("attempt:stateful:{number}:{index}:1"),
-                    format!("{number}:{index}:1").as_bytes(),
-                ),
-                ordinal: 1,
-                result: BuildResult::Succeeded,
-                started_at_unix_ms: start,
-                ended_at_unix_ms: start + duration,
-                audit_digest: sha256(format!("audit:{number}:{index}").as_bytes()),
-            }],
-        })
-        .collect()
+fn jenkins_graph_nodes(evidence: &Path, number: u64) -> Result<Vec<GraphNodeState>, AnyError> {
+    let workflow = read_json(&evidence.join(format!("jenkins-build-{number}-workflow.json")))?;
+    parse_jenkins_workflow(&workflow, number)
 }
 
-fn names_for_index(selected: bool, index: usize) -> &'static str {
-    match (selected, index) {
-        (_, 0) => "checkout",
-        (true, 1) => "changeset-predicate",
-        (true, 2) => "changelog-predicate",
-        _ => "effect-free-state",
+fn parse_jenkins_workflow(workflow: &Value, number: u64) -> Result<Vec<GraphNodeState>, AnyError> {
+    let stages = workflow
+        .get("stages")
+        .and_then(Value::as_array)
+        .ok_or("sealed Jenkins workflow has no stage array")?;
+    if stages.is_empty() || stages.len() > 64 {
+        return Err("sealed Jenkins workflow stage count is outside the bound".into());
     }
+    let mut nodes = Vec::with_capacity(stages.len());
+    let mut prior = None;
+    let mut seen = BTreeSet::new();
+    for (index, stage) in stages.iter().enumerate() {
+        let id = stage
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("sealed Jenkins workflow stage has no ID")?;
+        let name = stage
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("sealed Jenkins workflow stage has no name")?;
+        if id.is_empty() || name.is_empty() || !seen.insert(id.to_owned()) {
+            return Err("sealed Jenkins workflow stage identity is invalid".into());
+        }
+        let start = required_i64(stage, "startTimeMillis")?;
+        let duration = required_i64(stage, "durationMillis")?;
+        if duration < 0 {
+            return Err("sealed Jenkins workflow stage duration is negative".into());
+        }
+        let result = match stage.get("status").and_then(Value::as_str) {
+            Some("SUCCESS") => BuildResult::Succeeded,
+            Some("FAILED") => BuildResult::Failed,
+            Some("ABORTED") => BuildResult::Aborted,
+            Some("UNSTABLE") => BuildResult::Unstable,
+            Some("NOT_EXECUTED") => BuildResult::NotBuilt,
+            other => return Err(format!("unsupported Jenkins stage result {other:?}").into()),
+        };
+        let stage_bytes = serde_json::to_vec(stage)?;
+        let exported_id = format!("{index:02}-{id}");
+        nodes.push(GraphNodeState {
+            record: record(&format!("node:stateful:{number}:{id}"), &stage_bytes),
+            node_id: exported_id.clone(),
+            stage_path: name.to_owned(),
+            node_kind: "stage".to_owned(),
+            parent_node_ids: prior.iter().cloned().collect(),
+            result,
+            attempts: vec![AttemptState {
+                record: record(&format!("attempt:stateful:{number}:{id}:1"), &stage_bytes),
+                ordinal: 1,
+                result,
+                started_at_unix_ms: start,
+                ended_at_unix_ms: start
+                    .checked_add(duration)
+                    .ok_or("Jenkins workflow stage time overflow")?,
+                audit_digest: sha256(&stage_bytes),
+            }],
+        });
+        prior = Some(exported_id);
+        if index + 1 != nodes.len() {
+            return Err("Jenkins workflow stage ordering failed".into());
+        }
+    }
+    Ok(nodes)
 }
 
 fn artifact_objects(root: &Path, number: u64) -> Result<Vec<ObjectState>, AnyError> {
@@ -1069,7 +1089,7 @@ fn mcloving_build_three(
                 paths: vec!["src/second.target".to_owned()],
             }],
         }],
-        graph_nodes: graph_nodes(3, start, 1_000, true),
+        graph_nodes: Vec::new(),
         approvals: Vec::new(),
         normalized_tests: Vec::new(),
         logs: vec![LogState {
@@ -1097,206 +1117,472 @@ fn mcloving_build_three(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_effect_free_build(
     store: &Store,
     organization_id: Uuid,
     project_id: Uuid,
     receipt: &StateTransferReceipt,
     source_job_id: &str,
-    next_checkout: &ScmState,
+    output: &Path,
+    inputs: &BuildState,
     predicate: &ChangePredicate,
-) -> Result<mcloving_state_transfer::PredicateDecision, StoreError> {
+) -> Result<(mcloving_state_transfer::PredicateDecision, BuildState), StoreError> {
     const CHECKOUT_EVIDENCE_KEY: &str = "scm.checkout/stateful";
-    let admission = store
-        .admit_build(&NewBuild {
-            organization_id,
-            project_id,
-            idempotency_key: "mig005a-effect-free-build-3".to_owned(),
-            pipeline_digest: receipt.bundle_digest,
-            node_key: "predicate-intents".to_owned(),
+    const STAGES: [&str; 5] = [
+        "checkout",
+        "changeset-predicate",
+        "changelog-predicate",
+        "effect-free-state",
+        "post-actions",
+    ];
+    let nodes = STAGES
+        .iter()
+        .enumerate()
+        .map(|(index, node_key)| NewDagNode {
+            node_key: (*node_key).to_owned(),
+            kind: if index == STAGES.len() - 1 {
+                DagNodeKind::Post
+            } else {
+                DagNodeKind::Work
+            },
+            dependencies: if index == 0 {
+                Vec::new()
+            } else {
+                vec![DagDependency {
+                    node_key: STAGES[index - 1].to_owned(),
+                    condition: if *node_key == "post-actions" {
+                        DependencyCondition::Completed
+                    } else {
+                        DependencyCondition::Succeeded
+                    },
+                }]
+            },
             required_capabilities: vec!["linux".to_owned()],
+            required_platform: "linux".to_owned(),
             required_trust_pool: "isolated-rehearsal".to_owned(),
             priority: 0,
             execution_spec: json!({
                 "external_effect_authority": false,
+                "stage_path": node_key,
                 "state_transfer_receipt_id": receipt.id,
                 "source_job_id": source_job_id,
                 "scm_checkout_evidence_key": CHECKOUT_EVIDENCE_KEY,
             }),
+            fail_fast: true,
+            max_attempts: 1,
+        })
+        .collect();
+    let admission = store
+        .admit_dag(&NewDagBuild {
+            organization_id,
+            project_id,
+            idempotency_key: "mig005a-effect-free-build-3".to_owned(),
+            pipeline_digest: receipt.bundle_digest,
+            priority: 0,
+            nodes,
         })
         .await?;
-    let claim = store
-        .claim_next(&ClaimRequest {
-            organization_id,
-            scheduler_id: "mig005a-scheduler".to_owned(),
-            agent_id: "mig005a-agent".to_owned(),
-            capabilities: vec!["linux".to_owned()],
-            trust_pool: "isolated-rehearsal".to_owned(),
-            lease_seconds: 30,
-            fairness_seed: 0,
-        })
-        .await?
-        .ok_or_else(|| {
-            StoreError::InvalidStateTransfer("effect-free build was not claimable".to_owned())
-        })?;
-    if !store
-        .accept_offer(
-            organization_id,
-            claim.attempt_id,
-            claim.fence,
-            claim.restore_epoch,
-            "mig005a-agent",
-        )
-        .await?
-        || !store
-            .mark_attempt_running(
+    let checkout = inputs.checkouts.first().ok_or_else(|| {
+        StoreError::InvalidStateTransfer("build three has no checkout input".to_owned())
+    })?;
+    let mut decision = None;
+    let mut checkout_attempt = None;
+    for stage in STAGES {
+        let claim = store
+            .claim_next(&ClaimRequest {
                 organization_id,
-                claim.attempt_id,
-                claim.fence,
-                claim.restore_epoch,
-                "mig005a-agent",
-            )
+                scheduler_id: "mig005a-scheduler".to_owned(),
+                agent_id: "mig005a-agent".to_owned(),
+                capabilities: vec!["linux".to_owned(), "platform:linux".to_owned()],
+                trust_pool: "isolated-rehearsal".to_owned(),
+                lease_seconds: 30,
+                fairness_seed: 0,
+            })
             .await?
-    {
-        return Err(StoreError::InvalidStateTransfer(
-            "effect-free build could not enter running state".to_owned(),
-        ));
-    }
-    if !store
-        .record_state_transfer_scm_checkout_evidence(
-            organization_id,
-            project_id,
-            receipt.id,
-            claim.attempt_id,
-            claim.fence,
-            claim.restore_epoch,
-            "mig005a-agent",
-            CHECKOUT_EVIDENCE_KEY,
-            next_checkout,
-            "migration:rehearsal",
-        )
-        .await?
-    {
-        return Err(StoreError::InvalidStateTransfer(
-            "SCM checkout evidence could not be durably authenticated".to_owned(),
-        ));
-    }
-    let mut substituted = next_checkout.clone();
-    substituted.changes[0].paths = vec!["src/counterfeit.target".to_owned()];
-    if store
-        .record_state_transfer_scm_checkout_evidence(
-            organization_id,
-            project_id,
-            receipt.id,
-            claim.attempt_id,
-            claim.fence,
-            claim.restore_epoch,
-            "mig005a-agent",
-            CHECKOUT_EVIDENCE_KEY,
-            &substituted,
-            "migration:rehearsal",
-        )
-        .await?
-    {
-        return Err(StoreError::InvalidStateTransfer(
-            "conflicting SCM checkout evidence was accepted".to_owned(),
-        ));
-    }
-    let decision = store
-        .state_transfer_change_decision(
-            organization_id,
-            receipt.id,
-            source_job_id,
-            ScmCheckoutEvidenceRef {
+            .ok_or_else(|| {
+                StoreError::InvalidStateTransfer(format!("stage {stage} was not claimable"))
+            })?;
+        let expected_node = admission.nodes.get(stage).ok_or_else(|| {
+            StoreError::InvalidStateTransfer(format!("stage {stage} was not admitted"))
+        })?;
+        if claim.node_id != expected_node.node_id
+            || !store
+                .accept_offer(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "mig005a-agent",
+                )
+                .await?
+            || !store
+                .mark_attempt_running(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "mig005a-agent",
+                )
+                .await?
+        {
+            return Err(StoreError::InvalidStateTransfer(format!(
+                "stage {stage} could not enter running state"
+            )));
+        }
+        if stage == "checkout" {
+            if !store
+                .record_state_transfer_scm_checkout_evidence(
+                    organization_id,
+                    project_id,
+                    receipt.id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "mig005a-agent",
+                    CHECKOUT_EVIDENCE_KEY,
+                    checkout,
+                    "migration:rehearsal",
+                )
+                .await?
+            {
+                return Err(StoreError::InvalidStateTransfer(
+                    "SCM checkout evidence could not be durably authenticated".to_owned(),
+                ));
+            }
+            let mut substituted = checkout.clone();
+            substituted.changes[0].paths = vec!["src/counterfeit.target".to_owned()];
+            if store
+                .record_state_transfer_scm_checkout_evidence(
+                    organization_id,
+                    project_id,
+                    receipt.id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "mig005a-agent",
+                    CHECKOUT_EVIDENCE_KEY,
+                    &substituted,
+                    "migration:rehearsal",
+                )
+                .await?
+            {
+                return Err(StoreError::InvalidStateTransfer(
+                    "conflicting SCM checkout evidence was accepted".to_owned(),
+                ));
+            }
+            checkout_attempt = Some((claim.attempt_id, claim.fence));
+        }
+        if matches!(stage, "changeset-predicate" | "changelog-predicate") {
+            checkout_attempt.ok_or_else(|| {
+                StoreError::InvalidStateTransfer("predicate ran before checkout".to_owned())
+            })?;
+            if !store
+                .record_state_transfer_scm_checkout_evidence(
+                    organization_id,
+                    project_id,
+                    receipt.id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "mig005a-agent",
+                    CHECKOUT_EVIDENCE_KEY,
+                    checkout,
+                    "migration:rehearsal",
+                )
+                .await?
+            {
+                return Err(StoreError::InvalidStateTransfer(format!(
+                    "stage {stage} could not bind the authenticated checkout"
+                )));
+            }
+            let current = store
+                .state_transfer_change_decision(
+                    organization_id,
+                    receipt.id,
+                    source_job_id,
+                    ScmCheckoutEvidenceRef {
+                        attempt_id: claim.attempt_id,
+                        fence: claim.fence,
+                        evidence_key: CHECKOUT_EVIDENCE_KEY,
+                    },
+                    predicate,
+                )
+                .await?;
+            if !current.selected {
+                return Err(StoreError::InvalidStateTransfer(format!(
+                    "stage {stage} did not select the transferred change"
+                )));
+            }
+            decision = Some(current);
+        }
+        if stage == "post-actions" {
+            for artifact in &inputs.artifacts {
+                if !store
+                    .register_artifact(
+                        organization_id,
+                        admission.build_id,
+                        claim.node_id,
+                        claim.attempt_id,
+                        claim.fence,
+                        claim.restore_epoch,
+                        "mig005a-agent",
+                        &artifact.logical_name,
+                        artifact.content_digest,
+                        artifact.bytes as i64,
+                        &artifact.retrieval.media_type,
+                        365 * 24 * 60 * 60,
+                    )
+                    .await?
+                    || !store
+                        .mark_artifact_available(
+                            organization_id,
+                            admission.build_id,
+                            claim.node_id,
+                            claim.attempt_id,
+                            claim.fence,
+                            &artifact.logical_name,
+                            artifact.content_digest,
+                            artifact.bytes as i64,
+                            &artifact.retrieval.media_type,
+                            365 * 24 * 60 * 60,
+                        )
+                        .await?
+                {
+                    return Err(StoreError::InvalidStateTransfer(format!(
+                        "artifact {} was not durably committed",
+                        artifact.logical_name
+                    )));
+                }
+            }
+        }
+        let content = format!("{stage} completed\n");
+        if !store
+            .append_log(&NewLogChunk {
+                organization_id,
                 attempt_id: claim.attempt_id,
                 fence: claim.fence,
-                evidence_key: CHECKOUT_EVIDENCE_KEY,
-            },
-            predicate,
-        )
-        .await?;
-    let log = NewLogChunk {
-        organization_id,
-        attempt_id: claim.attempt_id,
-        fence: claim.fence,
-        restore_epoch: claim.restore_epoch,
-        agent_id: "mig005a-agent",
-        sequence: 0,
-        stream: "stdout",
-        content: b"effect-free predicates selected\n",
-    };
-    if !store.append_log(&log).await?
-        || !store
-            .finalize_attempt(
-                organization_id,
-                claim.attempt_id,
-                claim.fence,
-                claim.restore_epoch,
-                "mig005a-agent",
-                TerminalOutcome::Succeeded,
-                json!({
-                    "external_effects": 0,
-                    "state_transfer_receipt_id": receipt.id,
-                    "predicate_selected": decision.selected,
-                    "predicate_matches": decision.matched_change_record_ids,
-                }),
-            )
+                restore_epoch: claim.restore_epoch,
+                agent_id: "mig005a-agent",
+                sequence: 0,
+                stream: "stdout",
+                content: content.as_bytes(),
+            })
             .await?
-    {
+            || !store
+                .finalize_attempt(
+                    organization_id,
+                    claim.attempt_id,
+                    claim.fence,
+                    claim.restore_epoch,
+                    "mig005a-agent",
+                    TerminalOutcome::Succeeded,
+                    json!({
+                        "external_effects": 0,
+                        "stage_path": stage,
+                        "state_transfer_receipt_id": receipt.id,
+                        "predicate_selected": decision.as_ref().map(|value| value.selected),
+                    }),
+                )
+                .await?
+        {
+            return Err(StoreError::InvalidStateTransfer(format!(
+                "stage {stage} could not publish terminal state"
+            )));
+        }
+    }
+
+    let graph = store
+        .build_graph(organization_id, project_id, admission.build_id)
+        .await?
+        .ok_or_else(|| StoreError::InvalidStateTransfer("build three disappeared".to_owned()))?;
+    if graph.build.status != "succeeded" || graph.nodes.len() != STAGES.len() {
         return Err(StoreError::InvalidStateTransfer(
-            "effect-free build could not publish terminal state".to_owned(),
+            "durable build three graph is incomplete".to_owned(),
         ));
     }
-    if !store
-        .record_state_transfer_scm_checkout_evidence(
+    let mut node_ids = BTreeMap::new();
+    for (index, stage) in STAGES.iter().enumerate() {
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.node_key == *stage)
+            .ok_or_else(|| StoreError::InvalidStateTransfer(format!("missing stage {stage}")))?;
+        node_ids.insert(node.node_id, format!("{index:02}-{stage}"));
+    }
+    let mut graph_nodes = Vec::new();
+    for (index, stage) in STAGES.iter().enumerate() {
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.node_key == *stage)
+            .ok_or_else(|| StoreError::InvalidStateTransfer(format!("missing stage {stage}")))?;
+        let attempt = graph
+            .attempts
+            .iter()
+            .find(|attempt| attempt.node_id == node.node_id)
+            .ok_or_else(|| StoreError::InvalidStateTransfer(format!("missing attempt {stage}")))?;
+        let ended = attempt.completed_at_unix_ms.ok_or_else(|| {
+            StoreError::InvalidStateTransfer(format!("stage {stage} has no terminal time"))
+        })?;
+        let parents = graph
+            .dependencies
+            .iter()
+            .filter(|edge| edge.child_node_id == node.node_id)
+            .map(|edge| {
+                node_ids.get(&edge.parent_node_id).cloned().ok_or_else(|| {
+                    StoreError::InvalidStateTransfer("graph parent is unknown".to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let attempt_bytes = serde_json::to_vec(attempt).map_err(|error| {
+            StoreError::InvalidStateTransfer(format!("attempt serialization failed: {error}"))
+        })?;
+        graph_nodes.push(GraphNodeState {
+            record: record(&format!("node:stateful:3:{stage}"), node.node_id.as_bytes()),
+            node_id: format!("{index:02}-{stage}"),
+            stage_path: if *stage == "post-actions" {
+                "Declarative: Post Actions".to_owned()
+            } else {
+                (*stage).to_owned()
+            },
+            node_kind: node.kind.clone(),
+            parent_node_ids: parents,
+            result: build_result(&node.status)?,
+            attempts: vec![AttemptState {
+                record: record(
+                    &format!("attempt:stateful:3:{stage}:1"),
+                    attempt.attempt_id.as_bytes(),
+                ),
+                ordinal: attempt.ordinal as u32,
+                result: build_result(&attempt.status)?,
+                started_at_unix_ms: attempt.created_at_unix_ms,
+                ended_at_unix_ms: ended,
+                audit_digest: sha256(&attempt_bytes),
+            }],
+        });
+    }
+    let logs = store
+        .build_logs(organization_id, project_id, admission.build_id)
+        .await?;
+    let mut exported_logs = Vec::new();
+    for (sequence, log) in logs.iter().enumerate() {
+        let path = format!("mcloving-log-{sequence}.txt");
+        fs::write(output.join(&path), &log.content).map_err(|error| {
+            StoreError::InvalidStateTransfer(format!("could not stage log payload: {error}"))
+        })?;
+        exported_logs.push(LogState {
+            record: record(&format!("log:stateful:3:{sequence}"), &log.content),
+            sequence: sequence as u64,
+            content_digest: log.digest,
+            bytes: log.content.len() as u64,
+            data_binding: internal_data(),
+            retrieval: RetrievalMetadata {
+                media_type: "text/plain".to_owned(),
+                logical_locator: format!("logs/stateful/3/{sequence}"),
+                content_digest: log.digest,
+            },
+        });
+    }
+    let metadata = store
+        .build_artifacts(organization_id, project_id, admission.build_id)
+        .await?;
+    if metadata.len() != inputs.artifacts.len()
+        || metadata
+            .iter()
+            .any(|item| item.status != ObjectStatus::Available)
+    {
+        return Err(StoreError::InvalidStateTransfer(
+            "durable artifact inventory is incomplete".to_owned(),
+        ));
+    }
+    for artifact in &inputs.artifacts {
+        if !metadata.iter().any(|item| {
+            item.name == artifact.logical_name
+                && item.digest == artifact.content_digest
+                && item.bytes == artifact.bytes as i64
+        }) {
+            return Err(StoreError::InvalidStateTransfer(format!(
+                "durable artifact {} differs from staged bytes",
+                artifact.logical_name
+            )));
+        }
+    }
+    let (checkout_attempt_id, checkout_fence) = checkout_attempt.ok_or_else(|| {
+        StoreError::InvalidStateTransfer("checkout evidence owner was not recorded".to_owned())
+    })?;
+    let stored_checkout = store
+        .state_transfer_scm_checkout(
             organization_id,
             project_id,
-            receipt.id,
-            claim.attempt_id,
-            claim.fence,
-            claim.restore_epoch,
-            "mig005a-agent",
+            admission.build_id,
+            checkout_attempt_id,
+            checkout_fence,
             CHECKOUT_EVIDENCE_KEY,
-            next_checkout,
-            "migration:rehearsal",
         )
-        .await?
-    {
-        return Err(StoreError::InvalidStateTransfer(
-            "exact SCM evidence replay failed after attempt completion".to_owned(),
-        ));
-    }
-    if store
-        .record_state_transfer_scm_checkout_evidence(
-            organization_id,
-            project_id,
-            receipt.id,
-            claim.attempt_id,
-            claim.fence,
-            claim.restore_epoch,
-            "mig005a-agent",
-            CHECKOUT_EVIDENCE_KEY,
-            &substituted,
-            "migration:rehearsal",
-        )
-        .await?
-    {
-        return Err(StoreError::InvalidStateTransfer(
-            "conflicting SCM evidence replay was accepted after attempt completion".to_owned(),
-        ));
-    }
-    let snapshot = store
-        .build_snapshot(organization_id, project_id, admission.build_id)
         .await?
         .ok_or_else(|| {
-            StoreError::InvalidStateTransfer("effect-free build disappeared".to_owned())
+            StoreError::InvalidStateTransfer("stored checkout evidence disappeared".to_owned())
         })?;
-    if snapshot.build_status != "succeeded" {
+    if &stored_checkout != checkout {
         return Err(StoreError::InvalidStateTransfer(
-            "effect-free build did not finish successfully".to_owned(),
+            "stored checkout evidence differs from the admitted input".to_owned(),
         ));
     }
-    Ok(decision)
+    let ended_at_unix_ms = graph.build.completed_at_unix_ms.ok_or_else(|| {
+        StoreError::InvalidStateTransfer("build three has no completion time".to_owned())
+    })?;
+    let graph_bytes = serde_json::to_vec(&graph).map_err(|error| {
+        StoreError::InvalidStateTransfer(format!("graph serialization failed: {error}"))
+    })?;
+    let build = BuildState {
+        record: record("build:stateful:3", admission.build_id.as_bytes()),
+        source_queue_id: format!("mcloving-build:{}", admission.build_id),
+        source_build_id: admission.build_id.to_string(),
+        trigger: mcloving_state_transfer::TriggerCause {
+            record: record("trigger:stateful:3", admission.build_id.as_bytes()),
+            trigger_kind: "migration-rehearsal".to_owned(),
+            external_id: "mig005a-effect-free-build-3".to_owned(),
+            actor_subject: "migration:rehearsal".to_owned(),
+        },
+        invocation_parameters: Vec::new(),
+        number: 3,
+        result: build_result(&graph.build.status)?,
+        queued_at_unix_ms: graph.build.created_at_unix_ms,
+        started_at_unix_ms: graph_nodes
+            .iter()
+            .flat_map(|node| node.attempts.iter())
+            .map(|attempt| attempt.started_at_unix_ms)
+            .min()
+            .ok_or_else(|| StoreError::InvalidStateTransfer("build has no attempt".to_owned()))?,
+        ended_at_unix_ms,
+        checkouts: vec![stored_checkout],
+        graph_nodes,
+        approvals: Vec::new(),
+        normalized_tests: Vec::new(),
+        logs: exported_logs,
+        artifacts: inputs.artifacts.clone(),
+        protection: inputs.protection.clone(),
+        audit_digest: sha256(&graph_bytes),
+    };
+    Ok((
+        decision.ok_or_else(|| {
+            StoreError::InvalidStateTransfer("predicate decision was not recorded".to_owned())
+        })?,
+        build,
+    ))
+}
+
+fn build_result(status: &str) -> Result<BuildResult, StoreError> {
+    match status {
+        "succeeded" => Ok(BuildResult::Succeeded),
+        "failed" => Ok(BuildResult::Failed),
+        "aborted" => Ok(BuildResult::Aborted),
+        "skipped" => Ok(BuildResult::NotBuilt),
+        other => Err(StoreError::InvalidStateTransfer(format!(
+            "unsupported terminal status {other}"
+        ))),
+    }
 }
 
 async fn prove_unauthorized_hold_release_denied(
@@ -1363,7 +1649,8 @@ fn hold(id: &str, placed_at_unix_ms: i64) -> LegalHold {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_jenkins_git_changelog, sha256};
+    use super::{BuildResult, parse_jenkins_git_changelog, parse_jenkins_workflow, sha256};
+    use serde_json::json;
 
     const CHANGELOG: &str = concat!(
         "commit 1111111111111111111111111111111111111111\n",
@@ -1429,6 +1716,46 @@ mod tests {
     fn changelog_path_traversal_is_rejected() {
         let traversal = CHANGELOG.replace("src/first.target", "../escape");
         assert!(parse_jenkins_git_changelog(traversal.as_bytes(), 2).is_err());
+    }
+
+    #[test]
+    fn sealed_workflow_drives_stage_identity_result_and_time() {
+        let workflow = json!({
+            "stages": [
+                {
+                    "id": "6",
+                    "name": "checkout",
+                    "status": "SUCCESS",
+                    "startTimeMillis": 1000,
+                    "durationMillis": 25
+                },
+                {
+                    "id": "12",
+                    "name": "predicate",
+                    "status": "NOT_EXECUTED",
+                    "startTimeMillis": 1025,
+                    "durationMillis": 5
+                }
+            ]
+        });
+        let graph = parse_jenkins_workflow(&workflow, 2).expect("parse sealed workflow");
+        assert_eq!(graph.len(), 2);
+        assert_eq!(graph[0].node_id, "00-6");
+        assert_eq!(graph[1].parent_node_ids, ["00-6"]);
+        assert_eq!(graph[1].result, BuildResult::NotBuilt);
+        assert_eq!(graph[0].attempts[0].started_at_unix_ms, 1000);
+        assert_eq!(graph[0].attempts[0].ended_at_unix_ms, 1025);
+    }
+
+    #[test]
+    fn duplicate_workflow_node_ids_fail_closed() {
+        let workflow = json!({
+            "stages": [
+                {"id":"6","name":"one","status":"SUCCESS","startTimeMillis":1,"durationMillis":1},
+                {"id":"6","name":"two","status":"SUCCESS","startTimeMillis":2,"durationMillis":1}
+            ]
+        });
+        assert!(parse_jenkins_workflow(&workflow, 2).is_err());
     }
 }
 

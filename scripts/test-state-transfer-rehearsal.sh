@@ -93,11 +93,17 @@ run_build() {
 }
 
 run_build 1
+curl --fail --silent --show-error \
+  "http://127.0.0.1:${port}/job/stateful/1/wfapi/describe" \
+  -o "$evidence/jenkins-build-1-workflow.json"
 cp "$fixture_root/repo/first.target" "$repository/src/first.target"
 git -C "$repository" add src/first.target
 git -C "$repository" commit -m 'MIG005A-MATCH first predicate revision' >/dev/null
 revision_2=$(git -C "$repository" rev-parse HEAD)
 run_build 2
+curl --fail --silent --show-error \
+  "http://127.0.0.1:${port}/job/stateful/2/wfapi/describe" \
+  -o "$evidence/jenkins-build-2-workflow.json"
 
 test ! -e "$home/jobs/stateful/builds/1/archive/changeset.intent"
 test ! -e "$home/jobs/stateful/builds/1/archive/changelog.intent"

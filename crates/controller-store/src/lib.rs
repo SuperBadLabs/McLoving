@@ -1546,6 +1546,82 @@ impl Store {
             .collect()
     }
 
+    /// Returns the exact immutable checkout evidence committed by one fenced
+    /// attempt in a project build. The stored canonical bytes, rather than a
+    /// caller-supplied checkout, are the export authority.
+    pub async fn state_transfer_scm_checkout(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        build_id: Uuid,
+        attempt_id: Uuid,
+        fence: i64,
+        evidence_key: &str,
+    ) -> Result<Option<mcloving_state_transfer::ScmState>, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let evidence = sqlx::query_as::<_, (Vec<u8>, Vec<u8>)>(
+            "SELECT e.canonical_evidence, e.evidence_digest
+             FROM state_transfer_scm_evidence AS e
+             JOIN attempts AS a
+               ON a.organization_id = e.organization_id
+              AND a.id = e.attempt_id
+              AND a.fence = e.fence
+             JOIN nodes AS n
+               ON n.organization_id = a.organization_id
+              AND n.id = a.node_id
+             JOIN builds AS b
+               ON b.organization_id = n.organization_id
+              AND b.id = n.build_id
+             WHERE e.organization_id = $1
+               AND e.project_id = $2
+               AND b.id = $3
+               AND e.attempt_id = $4
+               AND e.fence = $5
+               AND e.evidence_key = $6",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(build_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(evidence_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        evidence
+            .map(|(bytes, digest)| {
+                let actual_digest: [u8; 32] = Sha256::digest(&bytes).into();
+                if actual_digest.as_slice() != digest.as_slice() {
+                    return Err(StoreError::InvalidStateTransfer(
+                        "stored SCM checkout evidence digest is invalid".to_owned(),
+                    ));
+                }
+                let evidence: Value = serde_json::from_slice(&bytes).map_err(|error| {
+                    StoreError::InvalidStateTransfer(format!(
+                        "stored SCM checkout evidence is not canonical JSON: {error}"
+                    ))
+                })?;
+                if evidence.get("schema").and_then(Value::as_str)
+                    != Some("mcloving.scm-checkout-evidence/v1")
+                {
+                    return Err(StoreError::InvalidStateTransfer(
+                        "stored SCM checkout evidence schema is unsupported".to_owned(),
+                    ));
+                }
+                serde_json::from_value(evidence.get("checkout").cloned().ok_or_else(|| {
+                    StoreError::InvalidStateTransfer(
+                        "stored SCM checkout evidence has no checkout".to_owned(),
+                    )
+                })?)
+                .map_err(|error| {
+                    StoreError::InvalidStateTransfer(format!(
+                        "stored SCM checkout is invalid: {error}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
     /// Returns one immutable, stable page of current-fence build logs.
     ///
     /// The cursor is the exact last `(attempt, fence, sequence, stream)` tuple

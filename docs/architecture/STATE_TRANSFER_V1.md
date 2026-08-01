@@ -124,16 +124,22 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `7e21e0fbbc508a8fd7b9743d697137094b14905eb71380b547fc7ddac6e8ed5f`;
-- source-evidence manifest SHA-256 `4a15a8bbc1517cffe6f91d91b495e1e5604fdfe6ce33e7d851c5edd75a7b794b`;
-- forward bundle SHA-256 `340ef5b73593d6a961df77e0e886de8bc9d1a201728a4ab00b4a779e8ca6c905`;
-- reverse bundle SHA-256 `fe9081527d5b52f4ecf4eb256dd28202e4872dc12fb044de7bdd472a442afd48`;
-- reverse-evidence manifest SHA-256 `8f7765018eee7c8cbe9cdaee4a6bed383574561f688b522d00a9d6bbd2d9d4fc`;
-- sealed transform-evidence manifest SHA-256 `6bcc0dc5bbb2be7ebd90590e4609af9b56bcda6f4be50b605b301936a3ddd6a8`.
+- transform binary SHA-256 `9b30a5218012ec46cf29ac9f2758e19ca2ad7123e87fec453e320ba28f66ab56`;
+- source-evidence manifest SHA-256 `66bc739f25079abc455bb28072fcc7b747aac20594d1acd91d2879f9d307582b`;
+- forward bundle SHA-256 `a4b1179a6f3671f56d5f1fb5549e54b3904567c1012eaac1008c8a47ebbc74f4`;
+- reverse bundle SHA-256 `ec4dd8f75ef567a7f2cc35ca915e1f8d359c095dc74ffcdab004f3c6b18a147a`;
+- reverse-evidence manifest SHA-256 `06eaed0f12272feaf2ae7998910140deae5449feeffb61feaeb98a16da758b68`;
+- sealed transform-evidence manifest SHA-256 `d1159befcc9e9a17ccb10b8250c228ac810d3b1e0db1753a40955c5432eb7c30`;
+- full imported-build verification receipt SHA-256 `ace08538925ffb47b81326efb7b72b8ed4cef6a0b5462d3afc87d001eabfdcc4`.
 
 The exact database contained three receipts (destination protection seed,
-forward import, reverse import), 113 record-provenance rows, nine effective
-protection rows, and eight outbox rows. Exact replay reused the forward receipt.
+forward import, reverse import), 143 record-provenance rows, nine effective
+protection rows, three fenced SCM-evidence rows, and 37 outbox rows. Exact
+replay reused the forward receipt. Jenkins workflow stages came from sealed
+native workflow responses. McLoving build 3 was exported only after rereading
+its durable five-node graph, attempts, logs, artifacts, and checkout; the
+reverse Jenkins import matched the full canonical record and independently
+verified native build/workflow/log/artifact/SCM semantics.
 The imported shorter/expired source protections were strengthened to deadline
 `2000000000000`; three overlapping active holds survived; a direct SQL hold
 release was denied.

@@ -93,9 +93,11 @@ jq --exit-status '
   and (.jobs | length) == 1
   and ([.jobs[] | select(.source_job_id == "stateful")] | length) == 1
   and ([.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3)] | length) == 1
-  and ([.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .graph_nodes[]
-        | select((.node_id == "01-changeset-predicate" or .node_id == "02-changelog-predicate")
-                 and .result == "succeeded")] | length) == 2
+  and ([.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3)
+        | .graph_nodes[].stage_path] | sort)
+      == ["Declarative: Post Actions", "changelog-predicate", "changeset-predicate", "checkout", "effect-free-state"]
+  and ([.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3)
+        | .graph_nodes[] | select(.result == "succeeded")] | length) == 5
   and ([.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3)
         | .artifacts[].logical_name] | sort)
       == ["changelog.intent", "changeset.intent", "persistent.state", "workspace.input"]
@@ -106,6 +108,9 @@ next_build_number=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .nex
 revision_2=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .checkouts[0].previous_revision' "$reverse_bundle")
 revision_3=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .checkouts[0].revision' "$reverse_bundle")
 reverse_result=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .result' "$reverse_bundle")
+build_started=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .started_at_unix_ms' "$reverse_bundle")
+build_ended=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .ended_at_unix_ms' "$reverse_bundle")
+build_duration=$((build_ended - build_started))
 test "$build_number" = 3
 test "$next_build_number" = 4
 case "$reverse_result" in
@@ -179,6 +184,10 @@ materialize_artifact() {
 mkdir -p "$evidence"
 cp -r "$job_home/builds/2" "$staging"
 chmod -R u+rwX "$staging"
+jq --sort-keys '
+  .jobs[] | select(.source_job_id == "stateful")
+  | .builds[] | select(.number == 3)
+' "$reverse_bundle" > "$staging/mcloving-state-transfer-build.json"
 old_persistent_md5=$(md5sum "$staging/archive/persistent.state" | awk '{print $1}')
 materialize_artifact changeset.intent
 materialize_artifact changelog.intent
@@ -186,10 +195,13 @@ materialize_artifact persistent.state
 materialize_artifact workspace.input
 new_persistent_md5=$(md5sum "$staging/archive/persistent.state" | awk '{print $1}')
 
-sed -i \
+sed -E -i \
   -e "s/$revision_2/$revision_3/g" \
   -e "s#<hudsonBuildNumber>2</hudsonBuildNumber>#<hudsonBuildNumber>${build_number}</hudsonBuildNumber>#g" \
-  -e 's#<queueId>3</queueId>#<queueId>4</queueId>#g' \
+  -e 's#<queueId>[0-9]+</queueId>#<queueId>5</queueId>#g' \
+  -e "s#<timestamp>[0-9]+</timestamp>#<timestamp>${build_started}</timestamp>#g" \
+  -e "s#<duration>[0-9]+</duration>#<duration>${build_duration}</duration>#g" \
+  -e "s#<result>[^<]+</result>#<result>${jenkins_result}</result>#g" \
   -e "s#/builds/2/#/builds/${build_number}/#g" \
   -e "s/$old_persistent_md5/$new_persistent_md5/g" \
   "$staging/build.xml"
@@ -203,17 +215,46 @@ sed -i \
   -e 's/MIG005A-MATCH first predicate revision/MIG005A-MATCH second predicate revision/g' \
   -e 's#src/first.target#src/second.target#g' \
   "$changelog"
-sed -i \
-  -e "s/$revision_2/$revision_3/g" \
-  -e "s/$revision_1/$revision_2/g" \
-  -e 's/MIG005A-MATCH first predicate revision/MIG005A-MATCH second predicate revision/g' \
-  -e 's#src/first.target#src/second.target#g' \
-  "$staging/log"
+
+: > "$staging/log"
+log_count=$(jq -r '.jobs[] | select(.source_job_id == "stateful") | .builds[] | select(.number == 3) | .logs | length' "$reverse_bundle")
+for sequence in $(seq 0 $((log_count - 1))); do
+  payload="$transform_root/mcloving-log-${sequence}.txt"
+  test -f "$payload"
+  expected_log_digest=$(jq -r --argjson sequence "$sequence" '
+    .jobs[] | select(.source_job_id == "stateful")
+    | .builds[] | select(.number == 3)
+    | .logs[] | select(.sequence == $sequence)
+    | .content_digest[]
+  ' "$reverse_bundle" | awk '{printf "%02x", $1} END {print ""}')
+  expected_log_bytes=$(jq -r --argjson sequence "$sequence" '
+    .jobs[] | select(.source_job_id == "stateful")
+    | .builds[] | select(.number == 3)
+    | .logs[] | select(.sequence == $sequence)
+    | .bytes
+  ' "$reverse_bundle")
+  test "$(sha256sum "$payload" | awk '{print $1}')" = "$expected_log_digest"
+  test "$(wc -c < "$payload" | tr -d ' ')" = "$expected_log_bytes"
+  cat "$payload" >> "$staging/log"
+done
+
+old_workflow_start=$(jq -r '.timestamp' "$transform_root/../source/evidence/jenkins-build-2.json" 2>/dev/null || true)
+if [[ -z "$old_workflow_start" || "$old_workflow_start" == null ]]; then
+  old_workflow_start=$(sed -n 's#.*<timestamp>\([0-9][0-9]*\)</timestamp>.*#\1#p' "$job_home/builds/2/build.xml" | head -n 1)
+fi
+test -n "$old_workflow_start"
+workflow_delta=$((build_started - old_workflow_start))
+WORKFLOW_DELTA=$workflow_delta perl -0pi -e '
+  my $delta = $ENV{WORKFLOW_DELTA};
+  s{<startTime>([0-9]+)</startTime>}{"<startTime>" . ($1 + $delta) . "</startTime>"}ge;
+' "$staging/workflow-completed/flowNodeStore.xml"
 
 rg --quiet "<sha1>$revision_3</sha1>" "$staging/build.xml"
 rg --quiet "<hudsonBuildNumber>${build_number}</hudsonBuildNumber>" "$staging/build.xml"
 rg --quiet "/builds/${build_number}/" "$staging/build.xml"
 rg --quiet "<result>${jenkins_result}</result>" "$staging/build.xml"
+rg --quiet "<timestamp>${build_started}</timestamp>" "$staging/build.xml"
+rg --quiet "<duration>${build_duration}</duration>" "$staging/build.xml"
 test "$(cat "$staging/archive/persistent.state")" = 'build=3'
 test "$(cat "$staging/archive/changeset.intent")" = 'selected'
 test "$(cat "$staging/archive/changelog.intent")" = 'selected'
@@ -275,8 +316,72 @@ for _ in $(seq 1 180); do
   sleep 1
 done
 jq --exit-status --argjson number "$build_number" --arg result "$jenkins_result" \
-  '.number == $number and .result == $result and .building == false' \
+  --argjson started "$build_started" --argjson duration "$build_duration" '
+  .number == $number
+  and .result == $result
+  and .building == false
+  and .timestamp == $started
+  and .duration == $duration
+  and .queueId == 5
+' \
   "$evidence/jenkins-imported-build-3.json" >/dev/null
+curl --fail --silent --show-error \
+  "http://127.0.0.1:${port}/job/stateful/3/wfapi/describe" \
+  -o "$evidence/jenkins-imported-build-3-workflow.json"
+jq --exit-status '
+  .status == "SUCCESS"
+  and ([.stages[].name] | sort)
+      == ["Declarative: Post Actions", "changelog-predicate", "changeset-predicate", "checkout", "effect-free-state"]
+  and ([.stages[] | select(.status == "SUCCESS")] | length) == 5
+' "$evidence/jenkins-imported-build-3-workflow.json" >/dev/null
+jq --sort-keys '
+  .jobs[] | select(.source_job_id == "stateful")
+  | .builds[] | select(.number == 3)
+' "$reverse_bundle" > "$evidence/expected-build-3.json"
+podman unshare cp "$job_home/builds/3/mcloving-state-transfer-build.json" \
+  "$evidence/observed-build-3.json"
+cmp "$evidence/expected-build-3.json" "$evidence/observed-build-3.json"
+cat "$transform_root"/mcloving-log-*.txt > "$evidence/expected-build-3.log"
+podman unshare cp "$job_home/builds/3/log" "$evidence/observed-build-3.log"
+cmp "$evidence/expected-build-3.log" "$evidence/observed-build-3.log"
+jq -n --sort-keys \
+  --slurpfile expected "$evidence/expected-build-3.json" \
+  --slurpfile api "$evidence/jenkins-imported-build-3.json" \
+  --slurpfile workflow "$evidence/jenkins-imported-build-3-workflow.json" '
+  {
+    schema: "mcloving.jenkins-import-verification/v1",
+    canonical_record_equal: true,
+    native_build: {
+      number: $api[0].number,
+      queue_id: $api[0].queueId,
+      result: $api[0].result,
+      timestamp: $api[0].timestamp,
+      duration: $api[0].duration
+    },
+    canonical_build: {
+      number: $expected[0].number,
+      result: $expected[0].result,
+      queued_at_unix_ms: $expected[0].queued_at_unix_ms,
+      started_at_unix_ms: $expected[0].started_at_unix_ms,
+      ended_at_unix_ms: $expected[0].ended_at_unix_ms,
+      source_queue_id: $expected[0].source_queue_id,
+      source_build_id: $expected[0].source_build_id,
+      trigger: $expected[0].trigger,
+      checkouts: $expected[0].checkouts,
+      graph_nodes: $expected[0].graph_nodes,
+      approvals: $expected[0].approvals,
+      normalized_tests: $expected[0].normalized_tests,
+      logs: $expected[0].logs,
+      artifacts: $expected[0].artifacts,
+      protection: $expected[0].protection,
+      audit_digest: $expected[0].audit_digest
+    },
+    native_workflow_stages: [$workflow[0].stages[] | {id, name, status, startTimeMillis, durationMillis}],
+    log_payload_equal: true,
+    artifact_payloads_equal: true,
+    scm_changelog_rewritten_from_canonical_checkout: true
+  }
+' > "$evidence/jenkins-imported-build-3-verification.json"
 for _ in $(seq 1 60); do
   if curl --fail --silent --show-error \
     "http://127.0.0.1:${port}/job/stateful/3/artifact/persistent.state" \
