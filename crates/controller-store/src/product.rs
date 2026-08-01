@@ -139,6 +139,7 @@ pub struct AttemptView {
     pub attempt_id: Uuid,
     pub node_id: Uuid,
     pub ordinal: i32,
+    pub retry_of: Option<Uuid>,
     pub status: String,
     pub fence: i64,
     pub lease_owner: Option<String>,
@@ -781,7 +782,7 @@ impl Store {
         .fetch_all(&mut *tx)
         .await?;
         let attempts = sqlx::query(
-            "SELECT a.id, a.node_id, a.ordinal, a.status, a.fence,
+            "SELECT a.id, a.node_id, a.ordinal, a.retry_of, a.status, a.fence,
                     a.lease_owner, a.terminal_summary,
                     (EXTRACT(EPOCH FROM a.created_at) * 1000)::bigint AS created_ms,
                     (
@@ -848,6 +849,7 @@ impl Store {
                         attempt_id: row.try_get("id")?,
                         node_id: row.try_get("node_id")?,
                         ordinal: row.try_get("ordinal")?,
+                        retry_of: row.try_get("retry_of")?,
                         status: row.try_get("status")?,
                         fence: row.try_get("fence")?,
                         lease_owner: row.try_get("lease_owner")?,

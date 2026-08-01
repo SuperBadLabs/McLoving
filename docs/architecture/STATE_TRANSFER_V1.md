@@ -124,13 +124,13 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `377409b63d064a1a9a0f4bd1beca7ef1cc21c24d11e5d1b7a1a0cd39cadf7930`;
-- source-evidence manifest SHA-256 `87153720aa180ea90b73fd668866faaab471e631cfcb57f2cc264654d0f7d27a`;
-- forward bundle SHA-256 `ffeb58f650841dde10789fde80c4cd7c14b2ea9022d22f0d4ef73b9ae90365af`;
-- reverse bundle SHA-256 `b11a22436acd602c9dc4fb4264f40b4cf6611a53e9f96a8fcdb81b91f076b350`;
-- reverse-evidence manifest SHA-256 `c65e467e5693bfe3fbdffaa2fcce8cd8e7e127378427d49929543ac7b1b4294d`;
-- sealed transform-evidence manifest SHA-256 `e5142b6dbbc9acc8e93e273099ad5ead5c24c0589951d885a93ec5212e0ec81f`;
-- full imported-build verification receipt SHA-256 `4b87688e8d80e96d1e1dac7dd1f8046ad01d652d6c958064b4e124ab907350a4`;
+- transform binary SHA-256 `347b07fee50e3ea485551af367ba5a9884cbc16e56bd694bca2782022280e4ab`;
+- source-evidence manifest SHA-256 `6ea4167dbc1eeb616208d103c975803e4c7b56513894c2df57c22a60b7c8a553`;
+- forward bundle SHA-256 `93e15df99d037fdf8aabee274fcf7bcb5efe8665c05be87e0caca43540ca78f9`;
+- reverse bundle SHA-256 `60a2119091b8d140dd46a8c8ff1a962ffea2d8598a9bf5e954bfa70c085823ba`;
+- reverse-evidence manifest SHA-256 `960eeacef48c7be63eaa7556db457ce1ba3443b29abcfaaeab938d9cd6981f12`;
+- sealed transform-evidence manifest SHA-256 `1ace759d9549dcb4af46b2b5b811a598767c69e6a6995b042d2ab6099f05a5d8`;
+- full imported-build verification receipt SHA-256 `9203e08bfa48952b47d17dacb465890859fc225aa15403196ee0e33c6ff519e6`;
 - imported protection-record SHA-256 `ae301c2fe1fa002fcc1d9b583ccd9a56f8c6a50f59911545356b5affcd0b285e`.
 
 The exact database contained three receipts (destination protection seed,
@@ -146,9 +146,11 @@ that follows an observed non-successful predecessor, including a `when`-skipped
 `succeeded` edge. Validation binds a `completed` edge to the first completed
 parent attempt and a `succeeded` edge to the final successful parent attempt;
 it rejects a child that starts before that event or has no successful parent
-attempt. Every non-final attempt must be a retry-eligible failure. Later failed
-parent retries on `completed` edges therefore do not invalidate already-admitted
-descendants, while an impossible retry after success fails closed. The reverse
+attempt. Every retry explicitly names its immediately preceding attempt and its
+reason. A failed predecessor requires `failed`; an aborted predecessor is
+eligible only as `fail_fast_skipped`; missing, reordered, mismatched, and
+post-success lineage fails closed. Later failed parent retries on `completed`
+edges therefore do not invalidate already-admitted descendants. The reverse
 Jenkins import matched the full canonical record and independently verified
 native build/workflow/log/artifact/SCM semantics; all five native workflow
 stage start times and durations matched the canonical attempt intervals exactly.

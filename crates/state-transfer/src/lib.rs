@@ -252,10 +252,24 @@ pub struct InvocationParameter {
 pub struct AttemptState {
     pub record: RecordProvenance,
     pub ordinal: u32,
+    pub retry: Option<AttemptRetryState>,
     pub result: BuildResult,
     pub started_at_unix_ms: i64,
     pub ended_at_unix_ms: i64,
     pub audit_digest: Digest,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AttemptRetryState {
+    pub previous_ordinal: u32,
+    pub reason: AttemptRetryReason,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptRetryReason {
+    Failed,
+    FailFastSkipped,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1392,6 +1406,21 @@ fn validate_graph_nodes(
             expected_ordinal = expected_ordinal.checked_add(1).ok_or_else(|| {
                 TransferError::InvalidField("attempt ordinal overflow".to_owned())
             })?;
+            match (attempt.ordinal, &attempt.retry) {
+                (1, None) => {}
+                (1, Some(_)) => {
+                    return Err(TransferError::InvalidField(
+                        "first graph attempt cannot have retry lineage".to_owned(),
+                    ));
+                }
+                (_, Some(retry)) if retry.previous_ordinal == attempt.ordinal - 1 => {}
+                _ => {
+                    return Err(TransferError::InvalidField(
+                        "graph retry lineage must name the immediately preceding attempt"
+                            .to_owned(),
+                    ));
+                }
+            }
             validate_time_range(
                 build_started_at_unix_ms,
                 attempt.started_at_unix_ms,
@@ -1412,10 +1441,21 @@ fn validate_graph_nodes(
             }
             previous_attempt_end = Some(attempt.ended_at_unix_ms);
             validate_digest(attempt.audit_digest, "attempt audit digest")?;
-            if attempt_index + 1 < node.attempts.len() && attempt.result != BuildResult::Failed {
-                return Err(TransferError::InvalidField(
-                    "non-final graph attempts must be retry-eligible failures".to_owned(),
-                ));
+            if let Some(next_attempt) = node.attempts.get(attempt_index + 1) {
+                let expected_reason = match attempt.result {
+                    BuildResult::Failed => AttemptRetryReason::Failed,
+                    BuildResult::Aborted => AttemptRetryReason::FailFastSkipped,
+                    _ => {
+                        return Err(TransferError::InvalidField(
+                            "non-final graph attempt result is not retry-eligible".to_owned(),
+                        ));
+                    }
+                };
+                if next_attempt.retry.as_ref().map(|retry| retry.reason) != Some(expected_reason) {
+                    return Err(TransferError::InvalidField(
+                        "graph retry reason must match the preceding attempt outcome".to_owned(),
+                    ));
+                }
             }
         }
         if node

@@ -19,7 +19,7 @@ use mcloving_state_transfer::{
     RetrievalMetadata as TransferRetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, StateBundle,
     SystemIdentity, TransferBinding, TransferDirection, TriggerCause as TransferTriggerCause,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
@@ -6541,8 +6541,8 @@ async fn operator_retry_reopens_fail_fast_skipped_independent_siblings() {
             .await
             .expect("fail fail-fast attempt")
     );
-    let skipped: (Uuid, String, String) = sqlx::query_as(
-        "SELECT n.id, n.status, a.status
+    let skipped: (Uuid, String, String, Uuid) = sqlx::query_as(
+        "SELECT n.id, n.status, a.status, a.id
          FROM nodes AS n
          JOIN attempts AS a
            ON a.organization_id = n.organization_id
@@ -6583,6 +6583,28 @@ async fn operator_retry_reopens_fail_fast_skipped_independent_siblings() {
         .await
         .expect("read reopened sibling ordinal");
     assert_eq!(sibling_ordinal, 2);
+    let graph = store
+        .build_graph(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read fail-fast retried DAG")
+        .expect("fail-fast retried DAG exists");
+    let sibling_attempts = graph
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.node_id == skipped.0)
+        .collect::<Vec<_>>();
+    assert_eq!(sibling_attempts.len(), 2);
+    assert_eq!(sibling_attempts[0].attempt_id, skipped.3);
+    assert_eq!(sibling_attempts[0].status, "aborted");
+    assert_eq!(
+        sibling_attempts[0]
+            .terminal_summary
+            .as_ref()
+            .and_then(|summary| summary.get("reason"))
+            .and_then(Value::as_str),
+        Some("fail_fast_skipped")
+    );
+    assert_eq!(sibling_attempts[1].retry_of, Some(skipped.3));
 }
 
 #[tokio::test]
@@ -6696,6 +6718,7 @@ async fn operator_retry_reopens_a_terminal_dag_and_preserves_attempt_history() {
     assert_eq!(graph.attempts.len(), 2);
     assert_eq!(graph.attempts[0].status, "failed");
     assert_eq!(graph.attempts[1].status, "succeeded");
+    assert_eq!(graph.attempts[1].retry_of, Some(first.attempt_id));
 }
 
 #[tokio::test]

@@ -8,14 +8,15 @@ use std::{
 };
 
 use mcloving_state_transfer::{
-    ApprovalState, AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate,
-    ConflictPolicy, DataBinding, DataClassification, Digest, ExpectedBinding, FilesystemEntry,
-    FilesystemEntryKind, GraphDependencyCondition, GraphDependencyState, GraphNodeState, JobState,
-    LegalHold, MaterializationLimits, ObjectKind, ObjectState, PersistentDependency, Protection,
-    RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState,
-    SecretDisposition, SecretReference, StateBundle, SystemIdentity, TransferBinding,
-    TransferDirection, TransferError, TriggerCause, canonical_bytes, evaluate_change_predicate,
-    materialize_filesystem_entries, protections, sha256, transform,
+    ApprovalState, AttemptRetryReason, AttemptRetryState, AttemptState, BuildResult, BuildState,
+    ChangeEntry, ChangePredicate, ConflictPolicy, DataBinding, DataClassification, Digest,
+    ExpectedBinding, FilesystemEntry, FilesystemEntryKind, GraphDependencyCondition,
+    GraphDependencyState, GraphNodeState, JobState, LegalHold, MaterializationLimits, ObjectKind,
+    ObjectState, PersistentDependency, Protection, RecordProvenance, RetentionPolicy,
+    RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState, SecretDisposition, SecretReference,
+    StateBundle, SystemIdentity, TransferBinding, TransferDirection, TransferError, TriggerCause,
+    canonical_bytes, evaluate_change_predicate, materialize_filesystem_entries, protections,
+    sha256, transform,
 };
 
 fn digest(byte: u8) -> Digest {
@@ -484,6 +485,7 @@ fn graph_child_attempt_cannot_predate_parent_completion() {
             attempts: vec![AttemptState {
                 record: record("attempt:stateful:7:a:1", 71),
                 ordinal: 1,
+                retry: None,
                 result: BuildResult::Succeeded,
                 started_at_unix_ms: 1_100,
                 ended_at_unix_ms: 1_160,
@@ -503,6 +505,7 @@ fn graph_child_attempt_cannot_predate_parent_completion() {
             attempts: vec![AttemptState {
                 record: record("attempt:stateful:7:b:1", 74),
                 ordinal: 1,
+                retry: None,
                 result: BuildResult::Succeeded,
                 started_at_unix_ms: 1_159,
                 ended_at_unix_ms: 1_200,
@@ -533,6 +536,7 @@ fn completed_edge_child_can_precede_a_later_parent_retry() {
                 AttemptState {
                     record: record("attempt:stateful:7:a:1", 71),
                     ordinal: 1,
+                    retry: None,
                     result: BuildResult::Failed,
                     started_at_unix_ms: 1_100,
                     ended_at_unix_ms: 1_140,
@@ -541,6 +545,10 @@ fn completed_edge_child_can_precede_a_later_parent_retry() {
                 AttemptState {
                     record: record("attempt:stateful:7:a:2", 73),
                     ordinal: 2,
+                    retry: Some(AttemptRetryState {
+                        previous_ordinal: 1,
+                        reason: AttemptRetryReason::Failed,
+                    }),
                     result: BuildResult::Succeeded,
                     started_at_unix_ms: 1_180,
                     ended_at_unix_ms: 1_200,
@@ -561,6 +569,7 @@ fn completed_edge_child_can_precede_a_later_parent_retry() {
             attempts: vec![AttemptState {
                 record: record("attempt:stateful:7:b:1", 76),
                 ordinal: 1,
+                retry: None,
                 result: BuildResult::Succeeded,
                 started_at_unix_ms: 1_150,
                 ended_at_unix_ms: 1_170,
@@ -596,6 +605,7 @@ fn succeeded_edge_requires_a_successful_parent_attempt() {
             attempts: vec![AttemptState {
                 record: record("attempt:stateful:7:a:1", 71),
                 ordinal: 1,
+                retry: None,
                 result: BuildResult::Failed,
                 started_at_unix_ms: 1_100,
                 ended_at_unix_ms: 1_140,
@@ -615,6 +625,7 @@ fn succeeded_edge_requires_a_successful_parent_attempt() {
             attempts: vec![AttemptState {
                 record: record("attempt:stateful:7:b:1", 74),
                 ordinal: 1,
+                retry: None,
                 result: BuildResult::Succeeded,
                 started_at_unix_ms: 1_150,
                 ended_at_unix_ms: 1_200,
@@ -646,6 +657,7 @@ fn succeeded_edge_binds_to_the_final_successful_parent_attempt() {
                 AttemptState {
                     record: record("attempt:stateful:7:a:1", 71),
                     ordinal: 1,
+                    retry: None,
                     result: BuildResult::Failed,
                     started_at_unix_ms: 1_100,
                     ended_at_unix_ms: 1_140,
@@ -654,6 +666,10 @@ fn succeeded_edge_binds_to_the_final_successful_parent_attempt() {
                 AttemptState {
                     record: record("attempt:stateful:7:a:2", 73),
                     ordinal: 2,
+                    retry: Some(AttemptRetryState {
+                        previous_ordinal: 1,
+                        reason: AttemptRetryReason::Failed,
+                    }),
                     result: BuildResult::Succeeded,
                     started_at_unix_ms: 1_160,
                     ended_at_unix_ms: 1_180,
@@ -674,6 +690,7 @@ fn succeeded_edge_binds_to_the_final_successful_parent_attempt() {
             attempts: vec![AttemptState {
                 record: record("attempt:stateful:7:b:1", 76),
                 ordinal: 1,
+                retry: None,
                 result: BuildResult::Succeeded,
                 started_at_unix_ms: 1_180,
                 ended_at_unix_ms: 1_200,
@@ -709,6 +726,7 @@ fn successful_graph_attempt_cannot_be_retried() {
             AttemptState {
                 record: record("attempt:stateful:7:a:1", 71),
                 ordinal: 1,
+                retry: None,
                 result: BuildResult::Succeeded,
                 started_at_unix_ms: 1_100,
                 ended_at_unix_ms: 1_140,
@@ -717,6 +735,10 @@ fn successful_graph_attempt_cannot_be_retried() {
             AttemptState {
                 record: record("attempt:stateful:7:a:2", 73),
                 ordinal: 2,
+                retry: Some(AttemptRetryState {
+                    previous_ordinal: 1,
+                    reason: AttemptRetryReason::Failed,
+                }),
                 result: BuildResult::Failed,
                 started_at_unix_ms: 1_160,
                 ended_at_unix_ms: 1_200,
@@ -728,7 +750,66 @@ fn successful_graph_attempt_cannot_be_retried() {
     assert_eq!(
         transform(&bundle, &expected, &BTreeMap::new()),
         Err(TransferError::InvalidField(
-            "non-final graph attempts must be retry-eligible failures".to_owned()
+            "non-final graph attempt result is not retry-eligible".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn fail_fast_skipped_graph_attempt_can_be_reopened() {
+    let (mut bundle, mut expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
+        record: record("node:stateful:7:a", 70),
+        node_id: "a".to_owned(),
+        stage_path: "a".to_owned(),
+        node_kind: "stage".to_owned(),
+        dependencies: Vec::new(),
+        result: BuildResult::Succeeded,
+        attempts: vec![
+            AttemptState {
+                record: record("attempt:stateful:7:a:1", 71),
+                ordinal: 1,
+                retry: None,
+                result: BuildResult::Aborted,
+                started_at_unix_ms: 1_100,
+                ended_at_unix_ms: 1_140,
+                audit_digest: digest(72),
+            },
+            AttemptState {
+                record: record("attempt:stateful:7:a:2", 73),
+                ordinal: 2,
+                retry: Some(AttemptRetryState {
+                    previous_ordinal: 1,
+                    reason: AttemptRetryReason::FailFastSkipped,
+                }),
+                result: BuildResult::Succeeded,
+                started_at_unix_ms: 1_160,
+                ended_at_unix_ms: 1_200,
+                audit_digest: digest(74),
+            },
+        ],
+    }];
+    bundle.expected_record_ids.extend([
+        "attempt:stateful:7:a:1".to_owned(),
+        "attempt:stateful:7:a:2".to_owned(),
+        "node:stateful:7:a".to_owned(),
+    ]);
+    bundle.expected_record_ids.sort();
+    expected.input_bundle_digest = sha256(&canonical_bytes(&bundle).unwrap());
+
+    transform(&bundle, &expected, &BTreeMap::new())
+        .expect("fail-fast-skipped attempt has explicit retry lineage");
+
+    let mut substituted = bundle;
+    substituted.jobs[0].builds[0].graph_nodes[0].attempts[1]
+        .retry
+        .as_mut()
+        .unwrap()
+        .reason = AttemptRetryReason::Failed;
+    assert_eq!(
+        transform(&substituted, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "graph retry reason must match the preceding attempt outcome".to_owned()
         ))
     );
 }
@@ -746,6 +827,7 @@ fn graph_node_result_must_match_its_final_attempt() {
         attempts: vec![AttemptState {
             record: record("attempt:stateful:7:build:1", 71),
             ordinal: 1,
+            retry: None,
             result: BuildResult::Failed,
             started_at_unix_ms: 1_100,
             ended_at_unix_ms: 1_200,
@@ -776,6 +858,7 @@ fn graph_node_attempts_must_stay_inside_the_build_window() {
             attempts: vec![AttemptState {
                 record: record("attempt:stateful:7:build:1", 71),
                 ordinal: 1,
+                retry: None,
                 result: BuildResult::Succeeded,
                 started_at_unix_ms,
                 ended_at_unix_ms,
@@ -827,6 +910,7 @@ fn graph_node_attempts_must_be_ordered_and_non_overlapping() {
             AttemptState {
                 record: record("attempt:stateful:7:build:1", 71),
                 ordinal: 1,
+                retry: None,
                 result: BuildResult::Failed,
                 started_at_unix_ms: 1_100,
                 ended_at_unix_ms: 1_160,
@@ -835,6 +919,10 @@ fn graph_node_attempts_must_be_ordered_and_non_overlapping() {
             AttemptState {
                 record: record("attempt:stateful:7:build:2", 73),
                 ordinal: 2,
+                retry: Some(AttemptRetryState {
+                    previous_ordinal: 1,
+                    reason: AttemptRetryReason::Failed,
+                }),
                 result: BuildResult::Succeeded,
                 started_at_unix_ms: 1_150,
                 ended_at_unix_ms: 1_200,

@@ -9,13 +9,14 @@ use mcloving_controller_store::{
     TerminalOutcome,
 };
 use mcloving_state_transfer::{
-    AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy,
-    DataBinding, DataClassification, Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind,
-    GraphDependencyCondition, GraphDependencyState, GraphNodeState, JobState, LegalHold, LogState,
-    MaterializationLimits, ObjectKind, ObjectState, PersistentDependency, Protection,
-    RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState,
-    StateBundle, SystemIdentity, TransferBinding, TransferDirection, canonical_bytes,
-    materialize_filesystem_entries, record_provenance, sha256, transform,
+    AttemptRetryReason, AttemptRetryState, AttemptState, BuildResult, BuildState, ChangeEntry,
+    ChangePredicate, ConflictPolicy, DataBinding, DataClassification, Digest, ExpectedBinding,
+    FilesystemEntry, FilesystemEntryKind, GraphDependencyCondition, GraphDependencyState,
+    GraphNodeState, JobState, LegalHold, LogState, MaterializationLimits, ObjectKind, ObjectState,
+    PersistentDependency, Protection, RecordProvenance, RetentionPolicy, RetrievalMetadata,
+    STATE_TRANSFER_SCHEMA_V1, ScmState, StateBundle, SystemIdentity, TransferBinding,
+    TransferDirection, canonical_bytes, materialize_filesystem_entries, record_provenance, sha256,
+    transform,
 };
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
@@ -914,6 +915,7 @@ fn parse_jenkins_workflow(workflow: &Value, number: u64) -> Result<Vec<GraphNode
             attempts: vec![AttemptState {
                 record: record(&format!("attempt:stateful:{number}:{id}:1"), &stage_bytes),
                 ordinal: 1,
+                retry: None,
                 result,
                 started_at_unix_ms: start,
                 ended_at_unix_ms: start
@@ -1423,30 +1425,22 @@ async fn run_effect_free_build(
         node_ids.insert(node.node_id, format!("{index:02}-{stage}"));
     }
     let mut graph_nodes = Vec::new();
-    let mut previous_stage_end = None;
     for (index, stage) in STAGES.iter().enumerate() {
         let node = graph
             .nodes
             .iter()
             .find(|node| node.node_key == *stage)
             .ok_or_else(|| StoreError::InvalidStateTransfer(format!("missing stage {stage}")))?;
-        let attempt = graph
+        let attempts = graph
             .attempts
             .iter()
-            .find(|attempt| attempt.node_id == node.node_id)
-            .ok_or_else(|| StoreError::InvalidStateTransfer(format!("missing attempt {stage}")))?;
-        let ended = attempt.completed_at_unix_ms.ok_or_else(|| {
-            StoreError::InvalidStateTransfer(format!("stage {stage} has no terminal time"))
-        })?;
-        let started = attempt.started_at_unix_ms.ok_or_else(|| {
-            StoreError::InvalidStateTransfer(format!("stage {stage} has no running time"))
-        })?;
-        if previous_stage_end.is_some_and(|ended| started < ended) {
+            .filter(|attempt| attempt.node_id == node.node_id)
+            .collect::<Vec<_>>();
+        if attempts.is_empty() {
             return Err(StoreError::InvalidStateTransfer(format!(
-                "stage {stage} started before its dependency completed"
+                "missing attempt {stage}"
             )));
         }
-        previous_stage_end = Some(ended);
         let dependencies = graph
             .dependencies
             .iter()
@@ -1471,9 +1465,84 @@ async fn run_effect_free_build(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let attempt_bytes = serde_json::to_vec(attempt).map_err(|error| {
-            StoreError::InvalidStateTransfer(format!("attempt serialization failed: {error}"))
-        })?;
+        let mut exported_attempts = Vec::with_capacity(attempts.len());
+        for (attempt_index, attempt) in attempts.iter().enumerate() {
+            let ordinal = u32::try_from(attempt.ordinal).map_err(|_| {
+                StoreError::InvalidStateTransfer(format!(
+                    "stage {stage} attempt ordinal is not positive"
+                ))
+            })?;
+            let attempt_started = attempt.started_at_unix_ms.ok_or_else(|| {
+                StoreError::InvalidStateTransfer(format!(
+                    "stage {stage} attempt {} has no running time",
+                    attempt.ordinal
+                ))
+            })?;
+            let attempt_ended = attempt.completed_at_unix_ms.ok_or_else(|| {
+                StoreError::InvalidStateTransfer(format!(
+                    "stage {stage} attempt {} has no terminal time",
+                    attempt.ordinal
+                ))
+            })?;
+            let retry = if attempt_index == 0 {
+                if attempt.retry_of.is_some() {
+                    return Err(StoreError::InvalidStateTransfer(format!(
+                        "stage {stage} first attempt has retry lineage"
+                    )));
+                }
+                None
+            } else {
+                let previous = attempts[attempt_index - 1];
+                if attempt.retry_of != Some(previous.attempt_id) {
+                    return Err(StoreError::InvalidStateTransfer(format!(
+                        "stage {stage} attempt {} does not retry its immediate predecessor",
+                        attempt.ordinal
+                    )));
+                }
+                let reason = match build_result(&previous.status)? {
+                    BuildResult::Failed => AttemptRetryReason::Failed,
+                    BuildResult::Aborted
+                        if previous
+                            .terminal_summary
+                            .as_ref()
+                            .and_then(|summary| summary.get("reason"))
+                            .and_then(Value::as_str)
+                            == Some("fail_fast_skipped") =>
+                    {
+                        AttemptRetryReason::FailFastSkipped
+                    }
+                    _ => {
+                        return Err(StoreError::InvalidStateTransfer(format!(
+                            "stage {stage} attempt {} has unsupported retry lineage",
+                            attempt.ordinal
+                        )));
+                    }
+                };
+                Some(AttemptRetryState {
+                    previous_ordinal: u32::try_from(previous.ordinal).map_err(|_| {
+                        StoreError::InvalidStateTransfer(format!(
+                            "stage {stage} predecessor ordinal is not positive"
+                        ))
+                    })?,
+                    reason,
+                })
+            };
+            let attempt_bytes = serde_json::to_vec(attempt).map_err(|error| {
+                StoreError::InvalidStateTransfer(format!("attempt serialization failed: {error}"))
+            })?;
+            exported_attempts.push(AttemptState {
+                record: record(
+                    &format!("attempt:stateful:3:{stage}:{}", attempt.ordinal),
+                    attempt.attempt_id.as_bytes(),
+                ),
+                ordinal,
+                retry,
+                result: build_result(&attempt.status)?,
+                started_at_unix_ms: attempt_started,
+                ended_at_unix_ms: attempt_ended,
+                audit_digest: sha256(&attempt_bytes),
+            });
+        }
         graph_nodes.push(GraphNodeState {
             record: record(&format!("node:stateful:3:{stage}"), node.node_id.as_bytes()),
             node_id: format!("{index:02}-{stage}"),
@@ -1485,17 +1554,7 @@ async fn run_effect_free_build(
             node_kind: node.kind.clone(),
             dependencies,
             result: build_result(&node.status)?,
-            attempts: vec![AttemptState {
-                record: record(
-                    &format!("attempt:stateful:3:{stage}:1"),
-                    attempt.attempt_id.as_bytes(),
-                ),
-                ordinal: attempt.ordinal as u32,
-                result: build_result(&attempt.status)?,
-                started_at_unix_ms: started,
-                ended_at_unix_ms: ended,
-                audit_digest: sha256(&attempt_bytes),
-            }],
+            attempts: exported_attempts,
         });
     }
     let logs = store
