@@ -20,7 +20,8 @@ use mcloving_agent_runtime::executor::{
     execute_with_spawn_hook_and_redactions, is_link_or_reparse_point, sync_directory,
 };
 use mcloving_agent_runtime::{
-    Acceptance, AttemptPhase, Finalization, Journal, ProcessIdentity, SpoolEntry,
+    Acceptance, AttemptPhase, Finalization, Journal, MAX_ATTEMPT_OUTPUT_BYTES, ProcessIdentity,
+    SpoolEntry,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -34,7 +35,6 @@ use uuid::Uuid;
 use crate::{AgentConfig, AgentError, process_birth_identity_for};
 
 const MAX_LOG_CHUNK_BYTES: usize = 1_048_576;
-const MAX_TOTAL_LOG_SPOOL_BYTES: u64 = 64 * 1_048_576;
 const MAX_LOG_CHUNKS_PER_ATTEMPT: u64 = 66;
 const MAX_RESULT_SPOOL_BYTES: u64 = 65_536;
 const MAX_EXECUTION_TIMEOUT_SECONDS: u64 = 7 * 24 * 60 * 60;
@@ -698,7 +698,7 @@ async fn run_assignment(
             .into_iter()
             .map(|(key, value)| (OsString::from(key), OsString::from(value)))
             .collect(),
-        output_limit_bytes: Some(MAX_TOTAL_LOG_SPOOL_BYTES),
+        output_limit_bytes: Some(MAX_ATTEMPT_OUTPUT_BYTES),
         timeout: Duration::from_secs(process.timeout_seconds.unwrap_or(3_600)),
         termination_grace: config.termination_grace,
     };
@@ -1250,7 +1250,7 @@ async fn publish_spool(
     entry: &SpoolEntry,
     first_sequence: u64,
 ) -> Result<u64, AgentError> {
-    if entry.bytes > MAX_TOTAL_LOG_SPOOL_BYTES {
+    if entry.bytes > MAX_ATTEMPT_OUTPUT_BYTES {
         return Err(AgentError::InvalidAssignment(
             "durable log spool exceeds the per-attempt quota".to_owned(),
         ));
@@ -1744,7 +1744,7 @@ fn validate_log_spool_quota(entries: &[SpoolEntry]) -> Result<(), AgentError> {
             AgentError::InvalidAssignment("durable log spool exceeds its quota".to_owned())
         })
     })?;
-    if total > MAX_TOTAL_LOG_SPOOL_BYTES {
+    if total > MAX_ATTEMPT_OUTPUT_BYTES {
         return Err(AgentError::InvalidAssignment(
             "durable log spool exceeds its per-attempt quota".to_owned(),
         ));
@@ -2446,12 +2446,12 @@ mod tests {
             bytes,
         };
         validate_log_spool_quota(&[
-            entry(0, MAX_TOTAL_LOG_SPOOL_BYTES / 2),
-            entry(1, MAX_TOTAL_LOG_SPOOL_BYTES / 2),
+            entry(0, MAX_ATTEMPT_OUTPUT_BYTES / 2),
+            entry(1, MAX_ATTEMPT_OUTPUT_BYTES / 2),
         ])
         .unwrap();
         assert!(matches!(
-            validate_log_spool_quota(&[entry(0, MAX_TOTAL_LOG_SPOOL_BYTES), entry(1, 1)]),
+            validate_log_spool_quota(&[entry(0, MAX_ATTEMPT_OUTPUT_BYTES), entry(1, 1)]),
             Err(AgentError::InvalidAssignment(_))
         ));
     }

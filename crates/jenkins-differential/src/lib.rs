@@ -1125,6 +1125,7 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
     exact_string(&nodes[0], &["node_id"], MCLOVING_NODE_ID, "E_MCLOVING")?;
     exact_string(&nodes[0], &["status"], "succeeded", "E_MCLOVING")?;
     exact_string(&nodes[0], &["logical_outcome"], "succeeded", "E_MCLOVING")?;
+    exact_u64(&nodes[0], &["max_attempts"], 1, "E_MCLOVING")?;
     exact_string(&nodes[0], &["required_platform"], "linux", "E_MCLOVING")?;
     exact_string(
         &nodes[0],

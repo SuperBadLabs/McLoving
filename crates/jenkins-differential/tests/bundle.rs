@@ -205,6 +205,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/mcloving-raw.json",
+            "\"max_attempts\": 1",
+            "\"max_attempts\": 2",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
             "\"retry_of\": null",
             "\"retry_of\": \"00000000-0000-0000-0000-000000000001\"",
             "E_MCLOVING",
