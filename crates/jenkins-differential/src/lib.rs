@@ -1048,6 +1048,68 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         2_000_000_000,
         256,
     )?;
+    exact_string(
+        database,
+        &["Id"],
+        "80e472c559984c0dc1d2bccee1d0d753c7688eca39221ddcf45a0104bdbae57f",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["Name"],
+        "mcloving-diff001-db-v16",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["Created"],
+        "2026-08-01T08:11:04.203450178-05:00",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["Path"],
+        "docker-entrypoint.sh",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string_array(database, &["Args"], &["postgres"], "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        database,
+        &["Config", "Image"],
+        &format!("docker.io/library/postgres@sha256:{MCLOVING_DATABASE_IMAGE_SHA256}"),
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(database, &["Config", "User"], "", "E_MCLOVING_CONTAINMENT")?;
+    exact_string_array(
+        database,
+        &["Config", "Cmd"],
+        &["postgres"],
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["Config", "Entrypoint"],
+        "docker-entrypoint.sh",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        database,
+        &["State", "Status"],
+        "running",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_bool(
+        database,
+        &["State", "Running"],
+        true,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_bool(
+        database,
+        &["State", "OOMKilled"],
+        false,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
     exact_string_array(
         database,
         &["Config", "Env"],
@@ -1092,6 +1154,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         &["HostConfig", "GroupAdd"],
         "E_MCLOVING_CONTAINMENT",
     )?;
+    exact_empty_array(database, &["Mounts"], "E_MCLOVING_CONTAINMENT")?;
     exact_string_array(
         database,
         &["EffectiveCaps"],
@@ -1118,15 +1181,28 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     )?;
 
     let runtime = text(root, "mcloving/runtime.txt")?;
-    if runtime.lines().next() != Some("uid=1000(srikanth) gid=1000(srikanth) groups=1000(srikanth)")
-        || !runtime.contains("LANG=C.UTF-8\n")
-        || !runtime.contains(&format!(
-            "{MCLOVING_TEST_BINARY_SHA256}  target/debug/deps/diff_001-3b7075192798a581\n"
-        ))
-        || !runtime.ends_with(&format!(
-            "{MCLOVING_CONTROLLER_BINARY_SHA256}  target/debug/mcloving-controller\n"
-        ))
-    {
+    let expected_runtime = format!(
+        "uid=1000(srikanth) gid=1000(srikanth) groups=1000(srikanth)\n\
+Linux 6c58b760d4f6 7.0.0-28-generic #28~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Wed Jul  1 15:50:57 UTC 2 x86_64 GNU/Linux\n\
+LANG=C.UTF-8\n\
+LANGUAGE=\n\
+LC_CTYPE=\"C.UTF-8\"\n\
+LC_NUMERIC=\"C.UTF-8\"\n\
+LC_TIME=\"C.UTF-8\"\n\
+LC_COLLATE=\"C.UTF-8\"\n\
+LC_MONETARY=\"C.UTF-8\"\n\
+LC_MESSAGES=\"C.UTF-8\"\n\
+LC_PAPER=\"C.UTF-8\"\n\
+LC_NAME=\"C.UTF-8\"\n\
+LC_ADDRESS=\"C.UTF-8\"\n\
+LC_TELEPHONE=\"C.UTF-8\"\n\
+LC_MEASUREMENT=\"C.UTF-8\"\n\
+LC_IDENTIFICATION=\"C.UTF-8\"\n\
+LC_ALL=C.UTF-8\n\
+{MCLOVING_TEST_BINARY_SHA256}  target/debug/deps/diff_001-3b7075192798a581\n\
+{MCLOVING_CONTROLLER_BINARY_SHA256}  target/debug/mcloving-controller\n"
+    );
+    if runtime != expected_runtime {
         return Err(VerificationError::new(
             "E_MCLOVING_CONTAINMENT",
             "runner runtime receipt differs",
@@ -1331,6 +1407,12 @@ fn verify_common_container(
         container,
         &["HostConfig", "PidsLimit"],
         pids,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "NetworkMode"],
+        "bridge",
         "E_MCLOVING_CONTAINMENT",
     )?;
     exact_object_keys(

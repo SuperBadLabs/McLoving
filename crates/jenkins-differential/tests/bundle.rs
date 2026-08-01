@@ -151,6 +151,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/runner-inspect-pre.json",
+            "\"NetworkMode\": \"bridge\"",
+            "\"NetworkMode\": \"host\"",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/runner-inspect-pre.json",
             "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v16:5432/mcloving",
             "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@substituted-db:5432/mcloving",
             "E_MCLOVING_CONTAINMENT",
@@ -180,9 +186,33 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_MCLOVING_CONTAINMENT",
         ),
         (
+            "mcloving/runtime.txt",
+            "7.0.0-28-generic",
+            "7.0.0-29-generic",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
             "mcloving/postgres-inspect.json",
             "\"CapAdd\": []",
             "\"CapAdd\": [\"CAP_SYS_ADMIN\"]",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/postgres-inspect.json",
+            "\"NetworkMode\": \"bridge\"",
+            "\"NetworkMode\": \"host\"",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/postgres-inspect.json",
+            "\"Mounts\": []",
+            "\"Mounts\": [{\"Type\":\"bind\",\"Source\":\"/run/podman/podman.sock\",\"Destination\":\"/run/podman/podman.sock\",\"RW\":true}]",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/postgres-inspect.json",
+            "80e472c559984c0dc1d2bccee1d0d753c7688eca39221ddcf45a0104bdbae57f",
+            "90e472c559984c0dc1d2bccee1d0d753c7688eca39221ddcf45a0104bdbae57f",
             "E_MCLOVING_CONTAINMENT",
         ),
         (
