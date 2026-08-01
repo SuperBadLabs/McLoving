@@ -1058,6 +1058,9 @@ identity, fence, and ordered log identity are cross-bound; resealed semantic,
 identity, and authority mutations fail closed.
 The exact Jenkins initializer digest/body, source path, controller chronology,
 job/build identity, and complete four-mount set are cross-bound. The exact
+Jenkins container ID/name/creation/start identity, tini/jenkins.sh invocation,
+configured image/user, and complete UID/kernel/locale/Java/Jenkins runtime
+receipt are cross-bound. The exact
 McLoving runner container identity, invocation, entrypoint, complete mount set,
 and configured capability policy are identical across pre/post receipts and
 fail closed under resealed mutation.
@@ -1066,14 +1069,15 @@ cases and 1/228 corpus cases. The remaining 227 cases and every unimplemented
 family remain non-admitted with zero authority. The exact contract is
 `docs/architecture/JENKINS_NATIVE_DIFFERENTIAL_V1.md`; expanding compiler
 admission requires a new differential version. The sealed external evidence
-is `/sn8100/runs/mcloving/diff001-native-20260801T140000Z-v21`, with a
+is `/sn8100/runs/mcloving/diff001-native-20260801T142000Z-v22`, with a
 self-excluding 34-file manifest SHA-256 of
-`6e48eb5f4a523cce976509de9480e0fee0a0f2e92cb6aebb0ecb51c8f79f4c80`.
+`5235f8a2bef6add526c9ce1f3a8acaa1da68e7587b98fa7a4e177c3f5242c83d`.
 Immutable v5 is a superseded no-McLoving-containment predecessor; immutable
 v10-v14 are rejected/superseded envelope iterations, v15 failed before
 execution, v17 is the review-superseded predecessor to v18, and v18 is the
 chronology-wording predecessor to v19, v19 is the identity-binding predecessor
-to v20, and v20 is the runner/source/mount-binding predecessor to v21; they
+to v20, v20 is the runner/source/mount-binding predecessor to v21, and v21 is
+the Jenkins invocation/runtime-binding predecessor to v22; they
 contribute no authority.
 `DIFF-002` remains dependency-blocked; the next unblocked parity-substrate
 slice is selected after the DIFF-001 review/merge gate.

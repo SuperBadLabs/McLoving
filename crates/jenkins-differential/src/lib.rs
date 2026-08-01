@@ -22,6 +22,11 @@ pub const JENKINS_PLUGIN_MANIFEST_SHA256: &str =
     "e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0";
 pub const JENKINS_INIT_SHA256: &str =
     "59e1e8ee88116c0645e7e2e4ea5af0184ce85d75b94df39b02c76d66347fdc0a";
+const JENKINS_CONTAINER_ID: &str =
+    "b64bb5ef3f6ec2e148d61d9593f5d1ab0a407fd632b5f51c36b559e4e85ab9a3";
+const JENKINS_CONTAINER_NAME: &str = "mcloving-diff001-jenkins";
+const JENKINS_CONTAINER_CREATED: &str = "2026-08-01T12:15:43.236541506Z";
+const JENKINS_CONTAINER_STARTED: &str = "2026-08-01T12:15:43.401795528Z";
 pub const MCLOVING_RUNNER_IMAGE_SHA256: &str =
     "77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa";
 pub const MCLOVING_DATABASE_IMAGE_SHA256: &str =
@@ -518,6 +523,79 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         .ok_or_else(|| VerificationError::new("E_JENKINS_CONTAINMENT", "missing container"))?;
     exact_string(
         container,
+        &["Id"],
+        JENKINS_CONTAINER_ID,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Name"],
+        JENKINS_CONTAINER_NAME,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Created"],
+        JENKINS_CONTAINER_CREATED,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["State", "StartedAt"],
+        JENKINS_CONTAINER_STARTED,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["State", "Status"],
+        "running",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_bool(
+        container,
+        &["State", "Running"],
+        true,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_bool(
+        container,
+        &["State", "OOMKilled"],
+        false,
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Path"],
+        "/usr/bin/tini",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["Args"],
+        &["--", "/usr/local/bin/jenkins.sh"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Config", "Entrypoint"],
+        "/usr/bin/tini -- /usr/local/bin/jenkins.sh",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_null(container, &["Config", "Cmd"], "E_JENKINS_CONTAINMENT")?;
+    exact_string(
+        container,
+        &["Config", "User"],
+        "jenkins",
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["Config", "Image"],
+        &format!("docker.io/jenkins/jenkins@sha256:{JENKINS_IMAGE_SHA256}"),
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
         &["ImageDigest"],
         &format!("sha256:{JENKINS_IMAGE_SHA256}"),
         "E_JENKINS_CONTAINMENT",
@@ -681,11 +759,29 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         exact_string(mount, &["Source"], source, "E_JENKINS_CONTAINMENT")?;
     }
     let external = text(root, "jenkins/external-network.txt")?;
-    let runtime = text(root, "jenkins/runtime.txt")?;
+    const EXPECTED_RUNTIME: &str = "uid=1000(jenkins) gid=1000(jenkins) groups=1000(jenkins)\n\
+Linux b64bb5ef3f6e 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 GNU/Linux\n\
+LANG=C.UTF-8\n\
+LANGUAGE=\n\
+LC_CTYPE=\"C.UTF-8\"\n\
+LC_NUMERIC=\"C.UTF-8\"\n\
+LC_TIME=\"C.UTF-8\"\n\
+LC_COLLATE=\"C.UTF-8\"\n\
+LC_MONETARY=\"C.UTF-8\"\n\
+LC_MESSAGES=\"C.UTF-8\"\n\
+LC_PAPER=\"C.UTF-8\"\n\
+LC_NAME=\"C.UTF-8\"\n\
+LC_ADDRESS=\"C.UTF-8\"\n\
+LC_TELEPHONE=\"C.UTF-8\"\n\
+LC_MEASUREMENT=\"C.UTF-8\"\n\
+LC_IDENTIFICATION=\"C.UTF-8\"\n\
+LC_ALL=\n\
+openjdk version \"21.0.11\" 2026-04-21 LTS\n\
+OpenJDK Runtime Environment Temurin-21.0.11+10 (build 21.0.11+10-LTS)\n\
+OpenJDK 64-Bit Server VM Temurin-21.0.11+10 (build 21.0.11+10-LTS, mixed mode)\n\
+2.568.1\n";
     if !external.ends_with("exit_code=7\n")
-        || !runtime.contains("uid=1000(jenkins)")
-        || !runtime.contains("LANG=C.UTF-8")
-        || !runtime.ends_with("2.568.1\n")
+        || text(root, "jenkins/runtime.txt")? != EXPECTED_RUNTIME
     {
         return Err(VerificationError::new(
             "E_JENKINS_CONTAINMENT",

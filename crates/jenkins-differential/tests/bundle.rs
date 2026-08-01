@@ -37,6 +37,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "jenkins/container-inspect.json",
+            "\"Path\": \"/usr/bin/tini\"",
+            "\"Path\": \"/bin/sh\"",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
             "\"MemorySwap\": 4294967296",
             "\"MemorySwap\": 0",
             "E_JENKINS_CONTAINMENT",
@@ -70,6 +76,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "Hello World\n[Pipeline] }",
             "Hello World\nunexpected output\n[Pipeline] }",
             "E_JENKINS_LOG",
+        ),
+        (
+            "jenkins/runtime.txt",
+            "openjdk version \"21.0.11\"",
+            "openjdk version \"22.0.0\"",
+            "E_JENKINS_CONTAINMENT",
         ),
         (
             "jenkins/PLUGIN_SHA256SUMS",

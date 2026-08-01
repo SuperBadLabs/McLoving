@@ -45,6 +45,9 @@ had no network, a read-only root filesystem, the exact dropped-capability and
 memory/swap, PID, file-descriptor, time, and output bounds. A negative
 external-network probe failed. The live Mario oracle remained healthy and
 unchanged after teardown.
+Its immutable container ID/name/creation/start identity, exact tini/jenkins.sh
+invocation, configured image/user, and complete canonical UID/kernel/locale/
+Java/Jenkins runtime receipt are verifier-bound.
 
 McLoving ran the exact compiled bytes through the shipped controller and
 embedded Linux worker against fresh PostgreSQL. Controller and database shared
@@ -79,7 +82,8 @@ substitution. It independently checks:
 
 - source, compiled-pipeline, Jenkins image, exact 90-plugin manifest and
   verification receipt, initializer/source installation, controller chronology,
-  runtime, locale, and complete containment/mount set;
+  exact container identity/invocation and canonical runtime, locale, Java,
+  kernel, and complete containment/mount set;
 - Jenkins exact job/build identity, stage, literal shell step, exact console transcript,
   workspace, and artifact observations;
 - McLoving image/runtime identities, internal network, runner/database
@@ -92,7 +96,8 @@ substitution. It independently checks:
 - equality of the independently derived canonical traces.
 
 Mutation tests alter and reseal the Jenkins result, network mode, memory/swap,
-ulimits, tmpfs, dropped capabilities, plugin mount source, undeclared mount,
+container invocation, canonical runtime, ulimits, tmpfs, dropped capabilities,
+plugin mount source, undeclared mount,
 plugin manifest, initializer source, console output, McLoving output, admitted
 IR digest, attempt identity, log sequence, runner command, added/dropped
 capabilities, McLoving read-only root filesystem, and admission denominator; unsafe
@@ -116,9 +121,9 @@ implication.
 The repository receipt is
 `migration/mario-jenkins-oracle-228/corpus-v1/differential-v1`. The sealed
 external evidence is
-`/sn8100/runs/mcloving/diff001-native-20260801T140000Z-v21`; its
+`/sn8100/runs/mcloving/diff001-native-20260801T142000Z-v22`; its
 self-excluding 34-file manifest SHA-256 is
-`6e48eb5f4a523cce976509de9480e0fee0a0f2e92cb6aebb0ecb51c8f79f4c80`.
+`5235f8a2bef6add526c9ce1f3a8acaa1da68e7587b98fa7a4e177c3f5242c83d`.
 The immutable v5 envelope is superseded because it lacked McLoving containment
 receipts. The immutable v10 envelope is rejected because its outer manifest
 omitted the nested repository `SHA256SUMS`; v11 predates the final repository
@@ -129,5 +134,6 @@ review-driven exact plugin, console, and containment binding in v18; v18 was
 then superseded by v19's chronology-accurate plugin-verification wording; v19
 was superseded by v20's raw IR, attempt, fence, and log identity binding; v20
 was superseded by v21's exact Jenkins source/job/mount and McLoving runner
-invocation/capability binding. None
-contributes authority.
+invocation/capability binding; and v21 was superseded by v22's exact Jenkins
+container invocation/identity and complete runtime binding. None contributes
+authority.
