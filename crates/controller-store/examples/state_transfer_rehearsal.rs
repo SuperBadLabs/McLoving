@@ -663,22 +663,81 @@ fn parse_git_signature(line: &str, prefix: &str) -> Result<String, AnyError> {
     let timestamp = signature[close + 1..]
         .strip_prefix(' ')
         .ok_or("Jenkins changelog signature timestamp is missing")?;
-    let mut fields = timestamp.split(' ');
-    let epoch = fields
-        .next()
-        .ok_or("Jenkins changelog signature epoch is missing")?;
-    let timezone = fields
-        .next()
-        .ok_or("Jenkins changelog signature timezone is missing")?;
-    if fields.next().is_some()
-        || epoch.parse::<i64>().is_err()
-        || timezone.len() != 5
-        || !matches!(timezone.as_bytes().first(), Some(b'+') | Some(b'-'))
-        || !timezone[1..].bytes().all(|byte| byte.is_ascii_digit())
-    {
+    let fields = timestamp.split(' ').collect::<Vec<_>>();
+    let valid = match fields.as_slice() {
+        [epoch, timezone] => epoch.parse::<i64>().is_ok() && valid_git_timezone(timezone),
+        [date, time, timezone] => {
+            valid_git_iso_date(date) && valid_git_iso_time(time) && valid_git_timezone(timezone)
+        }
+        _ => false,
+    };
+    if !valid {
         return Err("Jenkins changelog signature timestamp is invalid".into());
     }
     Ok(email.to_owned())
+}
+
+fn valid_git_timezone(value: &str) -> bool {
+    if value.len() != 5
+        || !matches!(value.as_bytes().first(), Some(b'+') | Some(b'-'))
+        || !value[1..].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let hour = value[1..3].parse::<u8>().ok();
+    let minute = value[3..5].parse::<u8>().ok();
+    matches!((hour, minute), (Some(0..=23), Some(0..=59)))
+}
+
+fn valid_git_iso_date(value: &str) -> bool {
+    if value.len() != 10
+        || value.as_bytes()[4] != b'-'
+        || value.as_bytes()[7] != b'-'
+        || !value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let Some(year) = value[0..4].parse::<u16>().ok() else {
+        return false;
+    };
+    let Some(month) = value[5..7].parse::<u8>().ok() else {
+        return false;
+    };
+    let Some(day) = value[8..10].parse::<u8>().ok() else {
+        return false;
+    };
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=max_day).contains(&day)
+}
+
+fn valid_git_iso_time(value: &str) -> bool {
+    if value.len() != 8
+        || value.as_bytes()[2] != b':'
+        || value.as_bytes()[5] != b':'
+        || !value
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 2 | 5) || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let hour = value[0..2].parse::<u8>().ok();
+    let minute = value[3..5].parse::<u8>().ok();
+    let second = value[6..8].parse::<u8>().ok();
+    matches!(
+        (hour, minute, second),
+        (Some(0..=23), Some(0..=59), Some(0..=59))
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1310,8 +1369,8 @@ mod tests {
         "commit 1111111111111111111111111111111111111111\n",
         "tree 2222222222222222222222222222222222222222\n",
         "parent 3333333333333333333333333333333333333333\n",
-        "author Fixture Author <fixture@example.test> 1 +0000\n",
-        "committer Fixture Author <fixture@example.test> 1 +0000\n",
+        "author Fixture Author <fixture@example.test> 2026-08-01 04:17:52 +0000\n",
+        "committer Fixture Author <fixture@example.test> 2026-08-01 04:17:52 +0000\n",
         "\n",
         "    MIG005A-MATCH sealed message\n",
         "\n",
@@ -1346,6 +1405,24 @@ mod tests {
             sha256(b"MIG005A-MATCH sealed message")
         );
         assert_eq!(change.paths, ["src/first.target"]);
+    }
+
+    #[test]
+    fn epoch_git_signature_remains_accepted() {
+        let changelog = CHANGELOG.replace("2026-08-01 04:17:52 +0000", "1 +0000");
+        assert!(parse_jenkins_git_changelog(changelog.as_bytes(), 2).is_ok());
+    }
+
+    #[test]
+    fn malformed_git_iso_signature_is_rejected() {
+        for timestamp in [
+            "2026-02-30 04:17:52 +0000",
+            "2026-08-01 24:17:52 +0000",
+            "2026-08-01 04:17:52 +2460",
+        ] {
+            let changelog = CHANGELOG.replace("2026-08-01 04:17:52 +0000", timestamp);
+            assert!(parse_jenkins_git_changelog(changelog.as_bytes(), 2).is_err());
+        }
     }
 
     #[test]
