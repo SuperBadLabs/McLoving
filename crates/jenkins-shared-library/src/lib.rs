@@ -276,6 +276,10 @@ pub fn digest_ledger_file(path: &Path) -> Result<(String, String), LibraryError>
 }
 
 pub fn verify_bundle(root: &Path) -> Result<LedgerReceipt, LibraryError> {
+    load_bundle(root).map(|(_, receipt)| receipt)
+}
+
+fn load_bundle(root: &Path) -> Result<(Ledger, LedgerReceipt), LibraryError> {
     validate_exact_entries(root, &BUNDLE_FILES)?;
     let readme = read_regular(root.join("README.md"), MAX_README_BYTES)?;
     let ledger_bytes = read_regular(root.join("ledger.yaml"), MAX_LEDGER_BYTES)?;
@@ -290,7 +294,7 @@ pub fn verify_bundle(root: &Path) -> Result<LedgerReceipt, LibraryError> {
         &semantic_sha256,
         &sha256_hex(&readme),
     )?;
-    Ok(LedgerReceipt {
+    let receipt = LedgerReceipt {
         observations: ledger.observations.len(),
         live_observations: ledger
             .observations
@@ -301,17 +305,16 @@ pub fn verify_bundle(root: &Path) -> Result<LedgerReceipt, LibraryError> {
         executable: ledger.coverage.executable_cases,
         ledger_sha256,
         semantic_sha256,
-    })
+    };
+    Ok((ledger, receipt))
 }
 
 pub fn verify_corpus(
     bundle_root: &Path,
     corpus_root: &Path,
 ) -> Result<CorpusReceipt, LibraryError> {
-    let _receipt = verify_bundle(bundle_root)?;
+    let (ledger, _receipt) = load_bundle(bundle_root)?;
     ensure_real_directory(corpus_root, "E_CORPUS_ENTRY")?;
-    let ledger_bytes = read_regular(bundle_root.join("ledger.yaml"), MAX_LEDGER_BYTES)?;
-    let ledger = parse_and_validate(&ledger_bytes)?;
     let mut source_files = BTreeSet::new();
     let mut locations = BTreeSet::new();
     for observation in &ledger.observations {
@@ -397,10 +400,8 @@ pub fn verify_sources(
     bundle_root: &Path,
     sources_root: &Path,
 ) -> Result<SourceReceipt, LibraryError> {
-    let _receipt = verify_bundle(bundle_root)?;
+    let (ledger, _receipt) = load_bundle(bundle_root)?;
     ensure_read_only_directory(sources_root)?;
-    let ledger_bytes = read_regular(bundle_root.join("ledger.yaml"), MAX_LEDGER_BYTES)?;
-    let ledger = parse_and_validate(&ledger_bytes)?;
     let expected = ledger
         .resolutions
         .iter()
