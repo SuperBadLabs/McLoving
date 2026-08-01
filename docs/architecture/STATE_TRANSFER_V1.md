@@ -138,15 +138,15 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `d6bef40c7bc5cb0809c5afd992bf8aa1e0b407f128073c14cf14c6f397ac5ca6`;
-- source-evidence manifest SHA-256 `a5117eaf0b5e6f9adfaa02e0a2e7299f654888063baf8e52da632f6484c1932a`;
-- forward bundle SHA-256 `af55724f12d3bb608ee7bd6f47f0e9d7ce5c4d8f1473be124cb0b5fe23aaf1bc`;
-- reverse bundle SHA-256 `a456495fd852a3a9c33ef08e9c947d437a92900e4fa54785a38c02328e2e5da5`;
-- reverse-evidence manifest SHA-256 `1dae46fa73c9c72992dac313c4650e967164634a3c2a6057c2ff12e96f55d070`;
-- sealed transform-evidence manifest SHA-256 `42ec8b8a482223e88a2fe98632cc60dc628314ea399bff8054966681432ad06f`;
-- full imported-build verification receipt SHA-256 `402ca8a862d6886d08421f416d8fe7d6974785cb051cebb24f50f2772b669b9b`;
+- transform binary SHA-256 `3bc93a2c23597e08a75ea95f7ef8af9a1b8c88f132821944d3629cfec11c2376`;
+- source-evidence manifest SHA-256 `461dfc60b19d349dfc52b36dbecd9da0b41fd3195840562e636a617a12e933a4`;
+- forward bundle SHA-256 `d88252f58bc26b8ef7cbd2a30d0ae9eddaa66773f79c8b95a01134b7cdfc6fb4`;
+- reverse bundle SHA-256 `ac88c1dc6d8ff24de40b2b8b0b578e5294094566bc505d2175e23b7f9fdd8c32`;
+- reverse-evidence manifest SHA-256 `8850858e751df14d662a5f13dfdec402188fcff4e9092f4ea9e52d076369ba49`;
+- sealed transform-evidence manifest SHA-256 `b42624f228df5c91ae99870221dafa1e10786b6cf96656ba6d5afab20b09dc74`;
+- full imported-build verification receipt SHA-256 `207f1eafa47877c80bd120a7ee7e699d79389c1ca35e7220a092df1ceeb113bd`;
 - imported protection-record SHA-256 `ae301c2fe1fa002fcc1d9b583ccd9a56f8c6a50f59911545356b5affcd0b285e`;
-- imported retry-history receipt SHA-256 `17cf65b5e1bd72f82929f10e56a01ce1911cf11bcb293c4472da209abbcea8ee`.
+- imported retry-history receipt SHA-256 `f82c60e79e54af12c087df464448bb4a43b7ab36f914fc6656ff4b33b1a02419`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 147 record-provenance rows, nine effective
@@ -162,6 +162,13 @@ that follows an observed non-successful predecessor, including a `when`-skipped
 select the latest parent generation already admitted for either dependency
 condition. It then requires that exact generation to be terminal for
 `completed`, successful for `succeeded`, and ended before the child starts.
+Automatic and operator retry creation reevaluate those predicates while
+holding the build-scoped DAG lock. A retry remains blocked with no readiness
+timestamp until the active parent generation satisfies its exact edge; the
+same transaction that advances the node records its readiness. The v18 schema
+also supplies readiness for runnable attempts inserted by a pre-v18 replica
+during the declared rolling-upgrade window while a trigger clears that default
+for legacy blocked-DAG inserts.
 This preserves children admitted before a later parent retry while rejecting
 children started during executing or terminal-only active retries. Every retry
 explicitly names its immediately preceding attempt and its
