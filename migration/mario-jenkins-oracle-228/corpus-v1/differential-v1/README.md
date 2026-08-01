@@ -16,7 +16,7 @@ through the shipped McLoving controller and embedded Linux worker against a
 fresh PostgreSQL database on an internal-only Podman network with no
 production credential or effect authority. The non-root McLoving runner had a
 read-only root filesystem, no effective capabilities, no-new-privileges, no
-published ports, bounded resources, a 1,048,576-byte aggregate stdout/stderr
+published ports, bounded resources, a 67,108,864-byte aggregate stdout/stderr
 ceiling enforced by the embedded execution spine, and a read-only source
 mount. The database
 published no ports and retained only its five required startup capabilities.
@@ -45,7 +45,10 @@ The first Jenkins attempt was safely discarded before execution because a
 The successful run used a bounded 2 GiB `/tmp`. McLoving's first isolated
 launch was denied when the Rust shim attempted a network toolchain check, and
 the next launch correctly exposed the invalid abstract `any` scheduler token.
-The final run used the already pinned/prebuilt test binary and the concrete
-Linux platform. Later containment-tightening attempts that failed before
-execution are also excluded. No failed or superseded predecessor contributes
-semantic evidence.
+The final authoritative run used the already pinned/prebuilt test binary, the
+concrete Linux platform, and the shared 67,108,864-byte output ceiling. Its
+immediate v30 predecessor used a review-rejected 1,048,576-byte embedded-worker
+ceiling. The v31 attempt could not write its evidence mount and v32 could not
+start the host-built controller against the pinned runner image's older glibc;
+both failed before product execution. No failed or superseded predecessor
+contributes semantic evidence.

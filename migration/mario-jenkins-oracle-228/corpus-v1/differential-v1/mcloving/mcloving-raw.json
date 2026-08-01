@@ -1,9 +1,9 @@
 {
   "admission": {
-    "attempt_id": "cafd49b4-541d-4079-8022-6f097244e623",
-    "build_id": "b1c2dde8-64f2-4887-93c0-12c99df7b0fb",
+    "attempt_id": "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
+    "build_id": "94217bcc-59eb-4357-9622-937ab015c963",
     "created": true,
-    "node_id": "80b74eb0-8fb2-45cb-bd7e-40fc421e34c8",
+    "node_id": "1a6ca500-7c3d-4d51-92c1-0b19eb0526ce",
     "pipeline_digest": "2a9b8b7bcd076950c67de874bd1e2b693af511ad55a7de3495d5c0b4210349d3"
   },
   "approvals": [],
@@ -12,16 +12,16 @@
   "graph": {
     "attempts": [
       {
-        "attempt_id": "cafd49b4-541d-4079-8022-6f097244e623",
-        "completed_at_unix_ms": 1785597997420,
-        "created_at_unix_ms": 1785597997373,
+        "attempt_id": "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
+        "completed_at_unix_ms": 1785600683112,
+        "created_at_unix_ms": 1785600683062,
         "fence": 1,
         "lease_owner": "diff-001-agent",
-        "node_id": "80b74eb0-8fb2-45cb-bd7e-40fc421e34c8",
+        "node_id": "1a6ca500-7c3d-4d51-92c1-0b19eb0526ce",
         "ordinal": 1,
-        "ready_at_unix_ms": 1785597997373,
+        "ready_at_unix_ms": 1785600683062,
         "retry_of": null,
-        "started_at_unix_ms": 1785597997387,
+        "started_at_unix_ms": 1785600683078,
         "status": "succeeded",
         "terminal_summary": {
           "exit_code": 0,
@@ -31,10 +31,10 @@
       }
     ],
     "build": {
-      "build_id": "b1c2dde8-64f2-4887-93c0-12c99df7b0fb",
-      "completed_at_unix_ms": 1785597997422,
-      "created_at_unix_micros": 1785597997372043,
-      "created_at_unix_ms": 1785597997372,
+      "build_id": "94217bcc-59eb-4357-9622-937ab015c963",
+      "completed_at_unix_ms": 1785600683114,
+      "created_at_unix_micros": 1785600683060816,
+      "created_at_unix_ms": 1785600683061,
       "dag_mode": true,
       "pipeline_digest": [
         42,
@@ -81,7 +81,7 @@
         "kind": "work",
         "logical_outcome": "succeeded",
         "max_attempts": 1,
-        "node_id": "80b74eb0-8fb2-45cb-bd7e-40fc421e34c8",
+        "node_id": "1a6ca500-7c3d-4d51-92c1-0b19eb0526ce",
         "node_key": "build",
         "required_platform": "linux",
         "required_trust_pool": "migration-deny-authority",
@@ -91,7 +91,7 @@
   },
   "logs": [
     {
-      "attempt_id": "cafd49b4-541d-4079-8022-6f097244e623",
+      "attempt_id": "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
       "content_hex": "48656c6c6f20576f726c640a",
       "fence": 1,
       "sequence": 0,
@@ -100,7 +100,7 @@
       "text": "Hello World\n"
     },
     {
-      "attempt_id": "cafd49b4-541d-4079-8022-6f097244e623",
+      "attempt_id": "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
       "content_hex": "2b206563686f2048656c6c6f20576f726c640a",
       "fence": 1,
       "sequence": 1,
@@ -110,13 +110,13 @@
     }
   ],
   "status": {
-    "attempt_id": "cafd49b4-541d-4079-8022-6f097244e623",
+    "attempt_id": "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
     "attempt_status": "succeeded",
-    "build_id": "b1c2dde8-64f2-4887-93c0-12c99df7b0fb",
+    "build_id": "94217bcc-59eb-4357-9622-937ab015c963",
     "cancellation_requested": false,
     "fence": 1,
     "lease_owner": "diff-001-agent",
-    "node_id": "80b74eb0-8fb2-45cb-bd7e-40fc421e34c8",
+    "node_id": "1a6ca500-7c3d-4d51-92c1-0b19eb0526ce",
     "status": "succeeded",
     "terminal_summary": {
       "exit_code": 0,

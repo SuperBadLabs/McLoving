@@ -229,8 +229,8 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/mcloving-raw.json",
-            "cafd49b4-541d-4079-8022-6f097244e623",
-            "dafd49b4-541d-4079-8022-6f097244e623",
+            "e3ea476a-96b0-4b0b-8109-19fc2931b12f",
+            "f3ea476a-96b0-4b0b-8109-19fc2931b12f",
             "E_MCLOVING",
         ),
         (
@@ -265,13 +265,13 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/runner-inspect-pre.json",
-            "\"NetworkID\": \"mcloving-diff001-net-v29\"",
+            "\"NetworkID\": \"mcloving-diff001-net-v33\"",
             "\"NetworkID\": \"external-bridge\"",
             "E_MCLOVING_CONTAINMENT",
         ),
         (
             "mcloving/runner-inspect-pre.json",
-            "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v29:5432/mcloving",
+            "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v33:5432/mcloving",
             "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@substituted-db:5432/mcloving",
             "E_MCLOVING_CONTAINMENT",
         ),
@@ -337,7 +337,7 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/postgres-inspect.json",
-            "\"NetworkID\": \"mcloving-diff001-net-v29\"",
+            "\"NetworkID\": \"mcloving-diff001-net-v33\"",
             "\"NetworkID\": \"external-bridge\"",
             "E_MCLOVING_CONTAINMENT",
         ),
@@ -355,8 +355,8 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/postgres-inspect.json",
-            "bca0a0acdab4a209c448724c37be924c9091f06756b5487772f0a1da0497bf00",
-            "cca0a0acdab4a209c448724c37be924c9091f06756b5487772f0a1da0497bf00",
+            "0a2f87bcff0a47c5ac6caa1d36a4fc4daa7cd3c6f0bda689bd06cf3c2e198644",
+            "1a2f87bcff0a47c5ac6caa1d36a4fc4daa7cd3c6f0bda689bd06cf3c2e198644",
             "E_MCLOVING_CONTAINMENT",
         ),
         (
