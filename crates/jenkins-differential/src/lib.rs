@@ -1097,6 +1097,18 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         "succeeded",
         "E_MCLOVING",
     )?;
+    exact_bool(
+        &raw,
+        &["status", "cancellation_requested"],
+        false,
+        "E_MCLOVING",
+    )?;
+    exact_string(
+        &raw,
+        &["status", "lease_owner"],
+        "diff-001-agent",
+        "E_MCLOVING",
+    )?;
     exact_u64(
         &raw,
         &["status", "terminal_summary", "exit_code"],
@@ -1125,6 +1137,7 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
     exact_string(&nodes[0], &["node_id"], MCLOVING_NODE_ID, "E_MCLOVING")?;
     exact_string(&nodes[0], &["status"], "succeeded", "E_MCLOVING")?;
     exact_string(&nodes[0], &["logical_outcome"], "succeeded", "E_MCLOVING")?;
+    exact_bool(&nodes[0], &["cancellation_requested"], false, "E_MCLOVING")?;
     exact_u64(&nodes[0], &["max_attempts"], 1, "E_MCLOVING")?;
     exact_string(&nodes[0], &["required_platform"], "linux", "E_MCLOVING")?;
     exact_string(
@@ -1142,6 +1155,12 @@ fn derive_mcloving_trace(root: &Path) -> Result<CanonicalTrace, VerificationErro
         "E_MCLOVING",
     )?;
     exact_string(&attempts[0], &["node_id"], MCLOVING_NODE_ID, "E_MCLOVING")?;
+    exact_string(
+        &attempts[0],
+        &["lease_owner"],
+        "diff-001-agent",
+        "E_MCLOVING",
+    )?;
     exact_u64(&attempts[0], &["fence"], 1, "E_MCLOVING")?;
     exact_string(&attempts[0], &["status"], "succeeded", "E_MCLOVING")?;
     exact_u64(

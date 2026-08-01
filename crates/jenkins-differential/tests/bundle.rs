@@ -211,6 +211,18 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/mcloving-raw.json",
+            "\"cancellation_requested\": false",
+            "\"cancellation_requested\": true",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
+            "\"lease_owner\": \"diff-001-agent\"",
+            "\"lease_owner\": \"substituted-agent\"",
+            "E_MCLOVING",
+        ),
+        (
+            "mcloving/mcloving-raw.json",
             "\"retry_of\": null",
             "\"retry_of\": \"00000000-0000-0000-0000-000000000001\"",
             "E_MCLOVING",
