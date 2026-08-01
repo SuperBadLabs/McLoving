@@ -21,6 +21,7 @@ use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 type AnyError = Box<dyn std::error::Error + Send + Sync>;
+const MAX_JENKINS_CHANGELOG_BYTES: u64 = 1_048_576;
 
 #[tokio::main]
 async fn main() -> Result<(), AnyError> {
@@ -277,24 +278,13 @@ fn jenkins_bundle(
 ) -> Result<StateBundle, AnyError> {
     let revision_1 = read_trimmed(&evidence.join("revision-1.txt"))?;
     let revision_2 = read_trimmed(&evidence.join("revision-2.txt"))?;
-    let build_1 = jenkins_build(
-        evidence,
-        jenkins_home,
-        1,
-        &revision_1,
-        None,
-        "initial non-matching revision",
-        "README.md",
-        Vec::new(),
-    )?;
+    let build_1 = jenkins_build(evidence, jenkins_home, 1, &revision_1, None, Vec::new())?;
     let build_2 = jenkins_build(
         evidence,
         jenkins_home,
         2,
         &revision_2,
         Some(&revision_1),
-        "MIG005A-MATCH first predicate revision",
-        "src/first.target",
         vec![hold("source-case-a", 1_000), hold("source-case-b", 1_500)],
     )?;
     let binding = TransferBinding {
@@ -506,6 +496,191 @@ fn parse_persistent_build_number(bytes: &[u8]) -> Result<u64, AnyError> {
     Ok(number.parse()?)
 }
 
+struct ParsedJenkinsChangelog {
+    changes: Vec<ChangeEntry>,
+    head_commit: Option<String>,
+    baseline_parent: Option<String>,
+}
+
+fn read_jenkins_changelog(
+    evidence: &Path,
+    number: u64,
+) -> Result<ParsedJenkinsChangelog, AnyError> {
+    let path = evidence.join(format!("jenkins-build-{number}-changelog.xml"));
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_JENKINS_CHANGELOG_BYTES {
+        return Err("sealed Jenkins changelog is not a bounded regular file".into());
+    }
+    parse_jenkins_git_changelog(&fs::read(path)?, number)
+}
+
+fn parse_jenkins_git_changelog(
+    bytes: &[u8],
+    number: u64,
+) -> Result<ParsedJenkinsChangelog, AnyError> {
+    if bytes.len() as u64 > MAX_JENKINS_CHANGELOG_BYTES || bytes.contains(&0) {
+        return Err("Jenkins changelog exceeds its bound or contains NUL".into());
+    }
+    let content = std::str::from_utf8(bytes)?;
+    if content.contains('\r') {
+        return Err("Jenkins changelog is not canonical LF text".into());
+    }
+    if content.is_empty() {
+        return Ok(ParsedJenkinsChangelog {
+            changes: Vec::new(),
+            head_commit: None,
+            baseline_parent: None,
+        });
+    }
+    if !content.starts_with("commit ") {
+        return Err("Jenkins changelog does not start with a commit record".into());
+    }
+
+    let mut changes = Vec::new();
+    let mut commits = Vec::new();
+    let mut parent_sets = Vec::new();
+    let mut seen_commits = BTreeSet::new();
+    for (index, section) in content.split("\ncommit ").enumerate() {
+        let body = if index == 0 {
+            section
+                .strip_prefix("commit ")
+                .ok_or("Jenkins changelog commit prefix is malformed")?
+        } else {
+            section
+        };
+        let mut lines = body.lines();
+        let commit = lines
+            .next()
+            .ok_or("Jenkins changelog commit is missing")?
+            .to_owned();
+        validate_git_object_id(&commit, "commit")?;
+        if !seen_commits.insert(commit.clone()) {
+            return Err("Jenkins changelog repeats a commit".into());
+        }
+
+        let mut saw_tree = false;
+        let mut author = None;
+        let mut saw_committer = false;
+        let mut parents = Vec::new();
+        let mut in_body = false;
+        let mut message_lines = Vec::new();
+        let mut paths = BTreeSet::new();
+        for line in lines {
+            if !in_body {
+                if line.is_empty() {
+                    in_body = true;
+                } else if let Some(tree) = line.strip_prefix("tree ") {
+                    validate_git_object_id(tree, "tree")?;
+                    saw_tree = true;
+                } else if let Some(parent) = line.strip_prefix("parent ") {
+                    validate_git_object_id(parent, "parent")?;
+                    parents.push(parent.to_owned());
+                } else if line.starts_with("author ") {
+                    author = Some(parse_git_signature(line, "author ")?);
+                } else if line.starts_with("committer ") {
+                    parse_git_signature(line, "committer ")?;
+                    saw_committer = true;
+                } else {
+                    return Err("Jenkins changelog contains an unknown commit header".into());
+                }
+            } else if line.starts_with(':') {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                if !(2..=3).contains(&fields.len()) {
+                    return Err("Jenkins changelog raw diff is malformed".into());
+                }
+                for path in &fields[1..] {
+                    validate_relative_path(path)?;
+                    paths.insert((*path).to_owned());
+                }
+            } else if let Some(message) = line.strip_prefix("    ") {
+                message_lines.push(message);
+            } else if !line.is_empty() {
+                return Err("Jenkins changelog body is not canonical".into());
+            }
+        }
+        if !saw_tree || !saw_committer || author.is_none() || message_lines.is_empty() {
+            return Err("Jenkins changelog commit metadata is incomplete".into());
+        }
+        if paths.is_empty() {
+            return Err("Jenkins changelog commit has no changed paths".into());
+        }
+        let message = message_lines.join("\n");
+        let canonical_record = format!("commit {body}");
+        changes.push(ChangeEntry {
+            record: record(
+                &format!("change:stateful:{number}:{}", index + 1),
+                canonical_record.as_bytes(),
+            ),
+            commit: commit.clone(),
+            author: author.expect("author was validated"),
+            message_digest: sha256(message.as_bytes()),
+            paths: paths.into_iter().collect(),
+        });
+        commits.push(commit);
+        parent_sets.push(parents);
+    }
+
+    let baseline_parent = parent_sets
+        .last()
+        .and_then(|parents| (parents.len() == 1).then(|| parents[0].clone()));
+    Ok(ParsedJenkinsChangelog {
+        head_commit: commits.first().cloned(),
+        baseline_parent,
+        changes,
+    })
+}
+
+fn validate_git_object_id(value: &str, label: &str) -> Result<(), AnyError> {
+    if value.len() != 40
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(format!("Jenkins changelog {label} is not a canonical Git object ID").into());
+    }
+    Ok(())
+}
+
+fn parse_git_signature(line: &str, prefix: &str) -> Result<String, AnyError> {
+    let signature = line
+        .strip_prefix(prefix)
+        .ok_or("Jenkins changelog signature prefix is malformed")?;
+    let open = signature
+        .rfind(" <")
+        .ok_or("Jenkins changelog signature has no email")?;
+    let close = signature[open + 2..]
+        .find('>')
+        .map(|index| open + 2 + index)
+        .ok_or("Jenkins changelog signature email is unterminated")?;
+    let email = &signature[open + 2..close];
+    if email.is_empty()
+        || email.len() > 320
+        || email.chars().any(char::is_whitespace)
+        || signature[..open].is_empty()
+    {
+        return Err("Jenkins changelog signature identity is invalid".into());
+    }
+    let timestamp = signature[close + 1..]
+        .strip_prefix(' ')
+        .ok_or("Jenkins changelog signature timestamp is missing")?;
+    let mut fields = timestamp.split(' ');
+    let epoch = fields
+        .next()
+        .ok_or("Jenkins changelog signature epoch is missing")?;
+    let timezone = fields
+        .next()
+        .ok_or("Jenkins changelog signature timezone is missing")?;
+    if fields.next().is_some()
+        || epoch.parse::<i64>().is_err()
+        || timezone.len() != 5
+        || !matches!(timezone.as_bytes().first(), Some(b'+') | Some(b'-'))
+        || !timezone[1..].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("Jenkins changelog signature timestamp is invalid".into());
+    }
+    Ok(email.to_owned())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn jenkins_build(
     evidence: &Path,
@@ -513,8 +688,6 @@ fn jenkins_build(
     number: u64,
     revision: &str,
     previous_revision: Option<&str>,
-    message: &str,
-    changed_path: &str,
     holds: Vec<LegalHold>,
 ) -> Result<BuildState, AnyError> {
     let api = read_json(&evidence.join(format!("jenkins-build-{number}.json")))?;
@@ -527,16 +700,28 @@ fn jenkins_build(
     };
     let build_root = jenkins_home.join(format!("jobs/stateful/builds/{number}"));
     let log = fs::read(build_root.join("log"))?;
-    let changes = vec![ChangeEntry {
-        record: record(
-            &format!("change:stateful:{number}:1"),
-            format!("{revision}:{message}:{changed_path}").as_bytes(),
-        ),
-        commit: revision.to_owned(),
-        author: "mig005a@example.test".to_owned(),
-        message_digest: sha256(message.as_bytes()),
-        paths: vec![changed_path.to_owned()],
-    }];
+    let changelog = read_jenkins_changelog(evidence, number)?;
+    match previous_revision {
+        None => {
+            if !changelog.changes.is_empty()
+                || changelog.head_commit.is_some()
+                || changelog.baseline_parent.is_some()
+            {
+                return Err("first Jenkins build unexpectedly has a changelog".into());
+            }
+        }
+        Some(previous) => {
+            if changelog.changes.is_empty()
+                || changelog.head_commit.as_deref() != Some(revision)
+                || changelog.baseline_parent.as_deref() != Some(previous)
+            {
+                return Err(
+                    "sealed Jenkins changelog does not bind the checkout revision and baseline"
+                        .into(),
+                );
+            }
+        }
+    }
     Ok(BuildState {
         record: record(
             &format!("build:stateful:{number}"),
@@ -566,7 +751,7 @@ fn jenkins_build(
             reference: "refs/heads/main".to_owned(),
             revision: revision.to_owned(),
             previous_revision: previous_revision.map(str::to_owned),
-            changes,
+            changes: changelog.changes,
         }],
         graph_nodes: graph_nodes(number, timestamp, duration, number == 2),
         approvals: Vec::new(),
@@ -1115,6 +1300,59 @@ fn retention(id: &str, deadline: i64) -> RetentionPolicy {
 
 fn hold(id: &str, placed_at_unix_ms: i64) -> LegalHold {
     hold_placement(id, "source", placed_at_unix_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_jenkins_git_changelog, sha256};
+
+    const CHANGELOG: &str = concat!(
+        "commit 1111111111111111111111111111111111111111\n",
+        "tree 2222222222222222222222222222222222222222\n",
+        "parent 3333333333333333333333333333333333333333\n",
+        "author Fixture Author <fixture@example.test> 1 +0000\n",
+        "committer Fixture Author <fixture@example.test> 1 +0000\n",
+        "\n",
+        "    MIG005A-MATCH sealed message\n",
+        "\n",
+        ":000000 100644 0000000000000000000000000000000000000000 ",
+        "4444444444444444444444444444444444444444 A\tsrc/first.target\n",
+    );
+
+    #[test]
+    fn empty_first_build_changelog_has_no_synthetic_change() {
+        let parsed = parse_jenkins_git_changelog(b"", 1).expect("parse empty changelog");
+        assert!(parsed.changes.is_empty());
+        assert!(parsed.head_commit.is_none());
+        assert!(parsed.baseline_parent.is_none());
+    }
+
+    #[test]
+    fn sealed_git_changelog_drives_change_entry_fields() {
+        let parsed = parse_jenkins_git_changelog(CHANGELOG.as_bytes(), 2).expect("parse changelog");
+        assert_eq!(
+            parsed.head_commit.as_deref(),
+            Some("1111111111111111111111111111111111111111")
+        );
+        assert_eq!(
+            parsed.baseline_parent.as_deref(),
+            Some("3333333333333333333333333333333333333333")
+        );
+        assert_eq!(parsed.changes.len(), 1);
+        let change = &parsed.changes[0];
+        assert_eq!(change.author, "fixture@example.test");
+        assert_eq!(
+            change.message_digest,
+            sha256(b"MIG005A-MATCH sealed message")
+        );
+        assert_eq!(change.paths, ["src/first.target"]);
+    }
+
+    #[test]
+    fn changelog_path_traversal_is_rejected() {
+        let traversal = CHANGELOG.replace("src/first.target", "../escape");
+        assert!(parse_jenkins_git_changelog(traversal.as_bytes(), 2).is_err());
+    }
 }
 
 fn hold_placement(id: &str, placement: &str, placed_at_unix_ms: i64) -> LegalHold {

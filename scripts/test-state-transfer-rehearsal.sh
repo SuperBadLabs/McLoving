@@ -122,9 +122,18 @@ cp "$home/jobs/stateful/config.xml" "$evidence/jenkins-job-config.xml"
 cp "$home/jobs/stateful/nextBuildNumber" "$evidence/jenkins-next-build-number.txt"
 cp "$home/jobs/stateful/builds/1/build.xml" "$evidence/jenkins-build-1.xml"
 cp "$home/jobs/stateful/builds/2/build.xml" "$evidence/jenkins-build-2.xml"
-if [[ -f "$home/jobs/stateful/builds/2/changelog.xml" ]]; then
-  cp "$home/jobs/stateful/builds/2/changelog.xml" "$evidence/jenkins-build-2-changelog.xml"
-fi
+for number in 1 2; do
+  changelogs=()
+  while IFS= read -r -d '' changelog; do
+    changelogs+=("$changelog")
+  done < <(find "$home/jobs/stateful/builds/$number" -maxdepth 1 -type f \
+    -name 'changelog*.xml' -print0 | sort -z)
+  if [[ ${#changelogs[@]} -ne 1 ]]; then
+    echo "expected exactly one Jenkins changelog for build $number" >&2
+    exit 65
+  fi
+  cp "${changelogs[0]}" "$evidence/jenkins-build-${number}-changelog.xml"
+done
 find "$home/jobs/stateful/builds" -type f -print0 \
   | sort -z \
   | xargs -0 sha256sum > "$evidence/jenkins-build-tree.sha256"
