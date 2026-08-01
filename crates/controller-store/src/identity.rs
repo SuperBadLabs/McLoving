@@ -1526,7 +1526,9 @@ async fn provision_identity_provider_in_transaction(
     let effective_enabled;
     if let Some(current) = current {
         let current = provider_from_row(current)?;
-        if current == provider_from_write(input) {
+        let mut requested = provider_from_write(input);
+        requested.enabled = current.enabled;
+        if current == requested {
             return Ok(current);
         }
         effective_enabled = current.enabled;

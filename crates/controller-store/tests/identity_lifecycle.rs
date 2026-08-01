@@ -1031,20 +1031,29 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         .expect("read disabled identity provider");
     assert!(!disabled_provider.enabled);
     assert_eq!(disabled_provider.configuration_generation, 2);
+    let disabled_rollout_input = IdentityProviderWrite {
+        configuration_generation: 3,
+        configuration_digest: digest("provider-v3-while-disabled"),
+        jwks_generation: 2,
+        jwks_digest: digest("jwks-v2-while-disabled"),
+        enabled: true,
+        ..provider.clone()
+    };
     let disabled_rollout = admin
-        .provision_identity_provider(&IdentityProviderWrite {
-            configuration_generation: 3,
-            configuration_digest: digest("provider-v3-while-disabled"),
-            jwks_generation: 2,
-            jwks_digest: digest("jwks-v2-while-disabled"),
-            enabled: true,
-            ..provider.clone()
-        })
+        .provision_identity_provider(&disabled_rollout_input)
         .await
         .expect("roll out provider configuration while emergency-disabled");
     assert!(
         !disabled_rollout.enabled,
         "configuration rollout must preserve the explicit disabled state"
+    );
+    assert_eq!(
+        admin
+            .provision_identity_provider(&disabled_rollout_input)
+            .await
+            .expect("a second replica retries the same disabled-provider rollout"),
+        disabled_rollout,
+        "preserved status must remain exact-retry idempotent across replicas"
     );
     assert!(
         !admin
