@@ -694,6 +694,7 @@ fn validate_materialization_request(
     }
 
     let mut prior: Option<&str> = None;
+    let mut regular_files = BTreeSet::new();
     let mut expected_payloads = BTreeSet::new();
     let mut total_bytes = 0_u64;
     for entry in entries {
@@ -704,6 +705,12 @@ fn validate_materialization_request(
             ));
         }
         prior = Some(&entry.path);
+        if has_regular_file_ancestor(&entry.path, &regular_files) {
+            return Err(TransferError::Materialization(format!(
+                "regular file is an ancestor of filesystem entry {}",
+                entry.path
+            )));
+        }
         validate_data_binding(&entry.data_binding)?;
         match entry.kind {
             FilesystemEntryKind::Directory => {
@@ -748,6 +755,7 @@ fn validate_materialization_request(
                     )));
                 }
                 expected_payloads.insert(entry.path.as_str());
+                regular_files.insert(entry.path.as_str());
             }
         }
     }
@@ -1463,6 +1471,7 @@ fn validate_filesystem_entries(object: &ObjectState) -> Result<(), TransferError
         ));
     }
     let mut prior: Option<&str> = None;
+    let mut regular_files = BTreeSet::new();
     let mut total_bytes = 0_u64;
     for entry in &object.filesystem_entries {
         validate_relative_path(&entry.path)?;
@@ -1472,6 +1481,11 @@ fn validate_filesystem_entries(object: &ObjectState) -> Result<(), TransferError
             ));
         }
         prior = Some(&entry.path);
+        if has_regular_file_ancestor(&entry.path, &regular_files) {
+            return Err(TransferError::InvalidField(
+                "regular file must not be an ancestor of another filesystem entry".to_owned(),
+            ));
+        }
         validate_data_binding(&entry.data_binding)?;
         match entry.kind {
             FilesystemEntryKind::Directory => {
@@ -1491,6 +1505,7 @@ fn validate_filesystem_entries(object: &ObjectState) -> Result<(), TransferError
                 total_bytes = total_bytes.checked_add(entry.bytes).ok_or_else(|| {
                     TransferError::InvalidField("filesystem byte count overflow".to_owned())
                 })?;
+                regular_files.insert(entry.path.as_str());
             }
         }
     }
@@ -1500,6 +1515,11 @@ fn validate_filesystem_entries(object: &ObjectState) -> Result<(), TransferError
         ));
     }
     Ok(())
+}
+
+fn has_regular_file_ancestor(path: &str, regular_files: &BTreeSet<&str>) -> bool {
+    path.match_indices('/')
+        .any(|(separator, _)| regular_files.contains(&path[..separator]))
 }
 
 fn validate_relative_path(path: &str) -> Result<(), TransferError> {

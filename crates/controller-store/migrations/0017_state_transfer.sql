@@ -500,8 +500,9 @@ AS $$
 DECLARE
     bundle_value jsonb;
     expected_record_count bigint;
-    actual_record_count bigint;
+    record_sets_match boolean;
     actual_protection_count bigint;
+    protection_sets_match boolean;
     expected_payload jsonb;
 BEGIN
     bundle_value := convert_from(NEW.canonical_bundle, 'UTF8')::jsonb;
@@ -525,69 +526,141 @@ BEGIN
             ERRCODE = '23514',
             MESSAGE = 'mcloving state-transfer expected record set is invalid';
     END IF;
-    expected_record_count := jsonb_array_length(
-        bundle_value -> 'expected_record_ids'
-    );
-    IF (
-           SELECT count(*)
-           FROM jsonb_path_query(
-               bundle_value,
-               'strict $.**.record'
-           ) AS item(record_value)
-       ) <> expected_record_count
-       OR EXISTS (
-           SELECT 1
-           FROM jsonb_array_elements_text(
-               bundle_value -> 'expected_record_ids'
-           ) AS expected(record_id)
-           WHERE (
-               SELECT count(*)
-               FROM jsonb_path_query(
-                   bundle_value,
-                   'strict $.**.record'
-               ) AS item(record_value)
-               WHERE record_value ->> 'id' = expected.record_id
-           ) <> 1
-       )
-    THEN
-        RAISE EXCEPTION USING
-            ERRCODE = '23514',
-            MESSAGE = 'mcloving state-transfer canonical record set is invalid';
-    END IF;
-    SELECT count(*)
-    INTO actual_record_count
-    FROM state_transfer_records
-    WHERE organization_id = NEW.organization_id
-      AND receipt_id = NEW.id;
-    IF actual_record_count <> expected_record_count
-       OR EXISTS (
-           SELECT 1
-           FROM state_transfer_records AS stored
-           WHERE stored.organization_id = NEW.organization_id
-             AND stored.receipt_id = NEW.id
-             AND NOT EXISTS (
-                 SELECT 1
-                 FROM jsonb_path_query(
-                     bundle_value,
-                     'strict $.**.record'
-                 ) AS item(record_value)
-                 WHERE record_value ->> 'id' = stored.record_id
-                   AND record_value ->> 'provenance' = stored.provenance
-                   AND record_value -> 'source_digest' =
-                       mcloving_state_transfer_digest_json(stored.source_digest)
-             )
-       )
-    THEN
+    WITH expected_ids AS MATERIALIZED (
+        SELECT value AS record_id
+        FROM jsonb_array_elements_text(
+            bundle_value -> 'expected_record_ids'
+        ) AS item(value)
+    ),
+    canonical_records AS MATERIALIZED (
+        SELECT record_value ->> 'id' AS record_id,
+               record_value -> 'source_digest' AS source_digest,
+               record_value ->> 'provenance' AS provenance
+        FROM jsonb_path_query(
+            bundle_value,
+            'strict $.**.record'
+        ) AS item(record_value)
+    ),
+    stored_records AS MATERIALIZED (
+        SELECT record_id,
+               mcloving_state_transfer_digest_json(source_digest) AS source_digest,
+               provenance
+        FROM state_transfer_records
+        WHERE organization_id = NEW.organization_id
+          AND receipt_id = NEW.id
+    )
+    SELECT (SELECT count(*) FROM expected_ids),
+           (SELECT count(*) FROM canonical_records) =
+               (SELECT count(*) FROM expected_ids)
+           AND (SELECT count(*) FROM stored_records) =
+               (SELECT count(*) FROM expected_ids)
+           AND NOT EXISTS (
+               SELECT record_id FROM expected_ids
+               EXCEPT
+               SELECT record_id FROM canonical_records
+           )
+           AND NOT EXISTS (
+               SELECT record_id FROM canonical_records
+               EXCEPT
+               SELECT record_id FROM expected_ids
+           )
+           AND NOT EXISTS (
+               SELECT record_id, source_digest, provenance FROM canonical_records
+               EXCEPT
+               SELECT record_id, source_digest, provenance FROM stored_records
+           )
+           AND NOT EXISTS (
+               SELECT record_id, source_digest, provenance FROM stored_records
+               EXCEPT
+               SELECT record_id, source_digest, provenance FROM canonical_records
+           )
+    INTO expected_record_count, record_sets_match;
+    IF NOT record_sets_match THEN
         RAISE EXCEPTION USING
             ERRCODE = '23514',
             MESSAGE = 'mcloving state-transfer provenance rows are incomplete';
     END IF;
-    SELECT count(*)
-    INTO actual_protection_count
-    FROM state_transfer_protections
-    WHERE organization_id = NEW.organization_id
-      AND project_id = NEW.project_id
-      AND receipt_id = NEW.id;
+    WITH candidates AS MATERIALIZED (
+        SELECT build.value AS entity
+        FROM jsonb_array_elements(bundle_value -> 'jobs') AS job(value)
+        CROSS JOIN LATERAL jsonb_array_elements(
+            job.value -> 'builds'
+        ) AS build(value)
+        UNION ALL
+        SELECT artifact.value
+        FROM jsonb_array_elements(bundle_value -> 'jobs') AS job(value)
+        CROSS JOIN LATERAL jsonb_array_elements(
+            job.value -> 'builds'
+        ) AS build(value)
+        CROSS JOIN LATERAL jsonb_array_elements(
+            build.value -> 'artifacts'
+        ) AS artifact(value)
+        UNION ALL
+        SELECT workspace.value
+        FROM jsonb_array_elements(bundle_value -> 'jobs') AS job(value)
+        CROSS JOIN LATERAL jsonb_array_elements(
+            job.value -> 'retained_workspaces'
+        ) AS workspace(value)
+        UNION ALL
+        SELECT dependency.value
+        FROM jsonb_array_elements(bundle_value -> 'jobs') AS job(value)
+        CROSS JOIN LATERAL jsonb_array_elements(
+            job.value -> 'persistent_dependencies'
+        ) AS dependency(value)
+    ),
+    expected_protections AS MATERIALIZED (
+        SELECT DISTINCT jsonb_build_object(
+            'subject_digest', entity -> 'record' -> 'source_digest',
+            'retention_policy_id',
+                entity -> 'protection' -> 'retention' -> 'policy_id',
+            'retention_policy_version',
+                entity -> 'protection' -> 'retention' -> 'policy_version',
+            'retention_policy_digest',
+                entity -> 'protection' -> 'retention' -> 'policy_digest',
+            'retain_until_unix_ms',
+                entity -> 'protection' -> 'retention' -> 'retain_until_unix_ms',
+            'active_holds', mcloving_state_transfer_normalize_holds(
+                entity -> 'protection' -> 'active_holds'
+            )
+        ) AS protection
+        FROM candidates
+    ),
+    stored_protections AS MATERIALIZED (
+        SELECT jsonb_build_object(
+            'subject_digest',
+                mcloving_state_transfer_digest_json(subject_digest),
+            'retention_policy_id', retention_policy_id,
+            'retention_policy_version', retention_policy_version,
+            'retention_policy_digest',
+                mcloving_state_transfer_digest_json(retention_policy_digest),
+            'retain_until_unix_ms', retain_until_unix_ms,
+            'active_holds',
+                mcloving_state_transfer_normalize_holds(active_holds)
+        ) AS protection
+        FROM state_transfer_protections
+        WHERE organization_id = NEW.organization_id
+          AND project_id = NEW.project_id
+          AND receipt_id = NEW.id
+    )
+    SELECT (SELECT count(*) FROM stored_protections),
+           (SELECT count(*) FROM expected_protections) =
+               (SELECT count(*) FROM stored_protections)
+           AND NOT EXISTS (
+               SELECT protection FROM expected_protections
+               EXCEPT
+               SELECT protection FROM stored_protections
+           )
+           AND NOT EXISTS (
+               SELECT protection FROM stored_protections
+               EXCEPT
+               SELECT protection FROM expected_protections
+           )
+    INTO actual_protection_count, protection_sets_match;
+    IF NOT protection_sets_match THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer protection rows are incomplete';
+    END IF;
     expected_payload := jsonb_build_object(
         'receipt_id', NEW.id,
         'project_id', NEW.project_id,
@@ -595,7 +668,7 @@ BEGIN
         'binding_digest', encode(NEW.binding_digest, 'hex'),
         'bundle_digest', encode(NEW.bundle_digest, 'hex'),
         'source_export_digest', encode(NEW.source_export_digest, 'hex'),
-        'record_count', actual_record_count,
+        'record_count', expected_record_count,
         'protection_count', actual_protection_count
     );
     IF (

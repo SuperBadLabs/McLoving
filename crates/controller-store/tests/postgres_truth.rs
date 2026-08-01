@@ -118,16 +118,93 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
     .execute(&mut *counterfeit)
     .await
     .expect("direct runtime insert reaches the deferred completeness fence");
+    sqlx::query(
+        "INSERT INTO state_transfer_records (
+             organization_id, receipt_id, record_id, source_digest, provenance
+         )
+         SELECT organization_id, $1, record_id, source_digest, provenance
+         FROM state_transfer_records
+         WHERE organization_id = $2 AND receipt_id = $3",
+    )
+    .bind(counterfeit_receipt_id)
+    .bind(organization_id)
+    .bind(first.id)
+    .execute(&mut *counterfeit)
+    .await
+    .expect("copy exact provenance rows but omit effective protections");
+    sqlx::query(
+        "INSERT INTO outbox (organization_id, topic, aggregate_id, payload)
+         SELECT organization_id, 'state_transfer.imported', id,
+                jsonb_build_object(
+                    'receipt_id', id,
+                    'project_id', project_id,
+                    'direction', direction,
+                    'binding_digest', encode(binding_digest, 'hex'),
+                    'bundle_digest', encode(bundle_digest, 'hex'),
+                    'source_export_digest', encode(source_export_digest, 'hex'),
+                    'record_count', (
+                        SELECT count(*)
+                        FROM state_transfer_records
+                        WHERE organization_id = $2 AND receipt_id = $1
+                    ),
+                    'protection_count', 0
+                )
+         FROM state_transfer_receipts
+         WHERE organization_id = $2 AND id = $1",
+    )
+    .bind(counterfeit_receipt_id)
+    .bind(organization_id)
+    .execute(&mut *counterfeit)
+    .await
+    .expect("fabricate an otherwise exact outbox proof with zero protections");
+    sqlx::query(
+        "INSERT INTO audit_events (
+             organization_id, sequence, event_id, category, actor_subject,
+             action, subject, payload, occurred_at_unix_ms,
+             previous_hash, event_hash
+         )
+         SELECT receipt.organization_id,
+                (SELECT COALESCE(max(sequence), 0) + 1
+                 FROM audit_events
+                 WHERE organization_id = receipt.organization_id),
+                $3, 'migration', receipt.actor_subject,
+                'state_transfer.imported',
+                format(
+                    'project:%s:state-transfer:%s',
+                    receipt.project_id,
+                    receipt.id
+                ),
+                outbox.payload, 0,
+                decode(repeat('7a', 32), 'hex'),
+                decode(repeat('7b', 32), 'hex')
+         FROM state_transfer_receipts AS receipt
+         JOIN outbox
+           ON outbox.organization_id = receipt.organization_id
+          AND outbox.topic = 'state_transfer.imported'
+          AND outbox.aggregate_id = receipt.id
+         WHERE receipt.organization_id = $2 AND receipt.id = $1",
+    )
+    .bind(counterfeit_receipt_id)
+    .bind(organization_id)
+    .bind(Uuid::new_v4())
+    .execute(&mut *counterfeit)
+    .await
+    .expect("fabricate an otherwise exact audit proof with zero protections");
     let counterfeit_error = counterfeit
         .commit()
         .await
-        .expect_err("runtime role cannot commit a receipt without provenance/audit/outbox proof");
+        .expect_err("runtime role cannot commit a receipt without effective protections");
     assert_eq!(
         counterfeit_error
             .as_database_error()
             .and_then(|error| error.code())
             .as_deref(),
         Some("23514")
+    );
+    assert!(
+        counterfeit_error
+            .as_database_error()
+            .is_some_and(|error| error.message().contains("protection rows"))
     );
     assert!(
         sqlx::query_scalar::<_, bool>(

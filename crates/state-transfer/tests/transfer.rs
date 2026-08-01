@@ -636,6 +636,25 @@ fn no_follow_materializer_rejects_a_nonempty_staging_root() {
 
 #[test]
 #[cfg(target_os = "linux")]
+fn materializer_rejects_a_regular_file_ancestor_before_writing() {
+    let root = materialization_root("file-ancestor");
+    let entries = vec![file_entry("a", b"parent"), file_entry("a/b", b"descendant")];
+    let payloads = BTreeMap::from([
+        ("a".to_owned(), b"parent".to_vec()),
+        ("a/b".to_owned(), b"descendant".to_vec()),
+    ]);
+
+    assert!(matches!(
+        materialize_filesystem_entries(&root, &entries, &payloads, materialization_limits()),
+        Err(TransferError::Materialization(message))
+            if message.contains("regular file is an ancestor")
+    ));
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 fn no_follow_materializer_denies_traversal_symlink_hardlink_and_special_inode() {
     let outside = materialization_root("outside");
     let root = materialization_root("hostile");
