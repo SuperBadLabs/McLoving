@@ -597,6 +597,89 @@ fn completed_edge_child_can_precede_a_later_parent_retry() {
 }
 
 #[test]
+fn completed_edge_reopened_child_waits_for_the_active_parent_retry() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![
+        GraphNodeState {
+            record: record("node:stateful:7:a", 70),
+            node_id: "a".to_owned(),
+            stage_path: "a".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: Vec::new(),
+            result: BuildResult::Succeeded,
+            attempts: vec![
+                AttemptState {
+                    record: record("attempt:stateful:7:a:1", 71),
+                    ordinal: 1,
+                    retry: None,
+                    result: BuildResult::Aborted,
+                    terminal_reason: Some(AttemptTerminalReason::FailFastSkipped),
+                    started_at_unix_ms: None,
+                    ended_at_unix_ms: 1_140,
+                    audit_digest: digest(72),
+                },
+                AttemptState {
+                    record: record("attempt:stateful:7:a:2", 73),
+                    ordinal: 2,
+                    retry: Some(AttemptRetryState {
+                        previous_ordinal: 1,
+                        reason: AttemptRetryReason::FailFastSkipped,
+                    }),
+                    result: BuildResult::Succeeded,
+                    terminal_reason: None,
+                    started_at_unix_ms: Some(1_150),
+                    ended_at_unix_ms: 1_190,
+                    audit_digest: digest(74),
+                },
+            ],
+        },
+        GraphNodeState {
+            record: record("node:stateful:7:b", 75),
+            node_id: "b".to_owned(),
+            stage_path: "b".to_owned(),
+            node_kind: "post".to_owned(),
+            dependencies: vec![GraphDependencyState {
+                parent_node_id: "a".to_owned(),
+                condition: GraphDependencyCondition::Completed,
+            }],
+            result: BuildResult::Succeeded,
+            attempts: vec![
+                AttemptState {
+                    record: record("attempt:stateful:7:b:1", 76),
+                    ordinal: 1,
+                    retry: None,
+                    result: BuildResult::Aborted,
+                    terminal_reason: Some(AttemptTerminalReason::FailFastSkipped),
+                    started_at_unix_ms: None,
+                    ended_at_unix_ms: 1_145,
+                    audit_digest: digest(77),
+                },
+                AttemptState {
+                    record: record("attempt:stateful:7:b:2", 78),
+                    ordinal: 2,
+                    retry: Some(AttemptRetryState {
+                        previous_ordinal: 1,
+                        reason: AttemptRetryReason::FailFastSkipped,
+                    }),
+                    result: BuildResult::Succeeded,
+                    terminal_reason: None,
+                    started_at_unix_ms: Some(1_170),
+                    ended_at_unix_ms: 1_200,
+                    audit_digest: digest(79),
+                },
+            ],
+        },
+    ];
+
+    assert_eq!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "graph child attempt cannot start before its dependency is satisfied".to_owned()
+        ))
+    );
+}
+
+#[test]
 fn succeeded_edge_requires_a_successful_parent_attempt() {
     let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
     bundle.jobs[0].builds[0].graph_nodes = vec![
@@ -865,6 +948,163 @@ fn fail_fast_skipped_graph_attempt_can_be_reopened() {
         transform(&substituted, &expected, &BTreeMap::new()),
         Err(TransferError::InvalidField(
             "graph retry reason must match the preceding attempt outcome".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn every_terminal_only_attempt_reason_has_exact_final_node_semantics() {
+    for (terminal_reason, node_result) in [
+        (
+            AttemptTerminalReason::FailFastSkipped,
+            BuildResult::NotBuilt,
+        ),
+        (
+            AttemptTerminalReason::DependencyNotSucceeded,
+            BuildResult::NotBuilt,
+        ),
+        (
+            AttemptTerminalReason::CancelledBeforeExecution,
+            BuildResult::Aborted,
+        ),
+        (
+            AttemptTerminalReason::DagCancelledBeforeExecution,
+            BuildResult::Aborted,
+        ),
+    ] {
+        let (mut bundle, mut expected) = fixture(TransferDirection::JenkinsToMcLoving);
+        bundle.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
+            record: record("node:stateful:7:terminal-only", 80),
+            node_id: "terminal-only".to_owned(),
+            stage_path: "terminal-only".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: Vec::new(),
+            result: node_result,
+            attempts: vec![AttemptState {
+                record: record("attempt:stateful:7:terminal-only:1", 81),
+                ordinal: 1,
+                retry: None,
+                result: BuildResult::Aborted,
+                terminal_reason: Some(terminal_reason),
+                started_at_unix_ms: None,
+                ended_at_unix_ms: 1_140,
+                audit_digest: digest(82),
+            }],
+        }];
+        bundle.expected_record_ids.extend([
+            "attempt:stateful:7:terminal-only:1".to_owned(),
+            "node:stateful:7:terminal-only".to_owned(),
+        ]);
+        bundle.expected_record_ids.sort();
+        expected.input_bundle_digest = sha256(&canonical_bytes(&bundle).unwrap());
+
+        transform(&bundle, &expected, &BTreeMap::new())
+            .expect("terminal-only reason has an exact final node result");
+    }
+}
+
+#[test]
+fn dependency_skipped_graph_attempt_can_be_reopened_with_exact_lineage() {
+    let (mut bundle, mut expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
+        record: record("node:stateful:7:dependency-retry", 80),
+        node_id: "dependency-retry".to_owned(),
+        stage_path: "dependency-retry".to_owned(),
+        node_kind: "stage".to_owned(),
+        dependencies: Vec::new(),
+        result: BuildResult::Succeeded,
+        attempts: vec![
+            AttemptState {
+                record: record("attempt:stateful:7:dependency-retry:1", 81),
+                ordinal: 1,
+                retry: None,
+                result: BuildResult::Aborted,
+                terminal_reason: Some(AttemptTerminalReason::DependencyNotSucceeded),
+                started_at_unix_ms: None,
+                ended_at_unix_ms: 1_140,
+                audit_digest: digest(82),
+            },
+            AttemptState {
+                record: record("attempt:stateful:7:dependency-retry:2", 83),
+                ordinal: 2,
+                retry: Some(AttemptRetryState {
+                    previous_ordinal: 1,
+                    reason: AttemptRetryReason::DependencyNotSucceeded,
+                }),
+                result: BuildResult::Succeeded,
+                terminal_reason: None,
+                started_at_unix_ms: Some(1_150),
+                ended_at_unix_ms: 1_180,
+                audit_digest: digest(84),
+            },
+        ],
+    }];
+    bundle.expected_record_ids.extend([
+        "attempt:stateful:7:dependency-retry:1".to_owned(),
+        "attempt:stateful:7:dependency-retry:2".to_owned(),
+        "node:stateful:7:dependency-retry".to_owned(),
+    ]);
+    bundle.expected_record_ids.sort();
+    expected.input_bundle_digest = sha256(&canonical_bytes(&bundle).unwrap());
+
+    transform(&bundle, &expected, &BTreeMap::new())
+        .expect("dependency-skipped attempt has explicit retry lineage");
+
+    let mut substituted = bundle;
+    substituted.jobs[0].builds[0].graph_nodes[0].attempts[1]
+        .retry
+        .as_mut()
+        .unwrap()
+        .reason = AttemptRetryReason::FailFastSkipped;
+    assert_eq!(
+        transform(&substituted, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "graph retry reason must match the preceding attempt outcome".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn terminal_only_attempt_cannot_end_before_its_predecessor() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
+        record: record("node:stateful:7:terminal-order", 80),
+        node_id: "terminal-order".to_owned(),
+        stage_path: "terminal-order".to_owned(),
+        node_kind: "stage".to_owned(),
+        dependencies: Vec::new(),
+        result: BuildResult::NotBuilt,
+        attempts: vec![
+            AttemptState {
+                record: record("attempt:stateful:7:terminal-order:1", 81),
+                ordinal: 1,
+                retry: None,
+                result: BuildResult::Failed,
+                terminal_reason: None,
+                started_at_unix_ms: Some(1_100),
+                ended_at_unix_ms: 1_160,
+                audit_digest: digest(82),
+            },
+            AttemptState {
+                record: record("attempt:stateful:7:terminal-order:2", 83),
+                ordinal: 2,
+                retry: Some(AttemptRetryState {
+                    previous_ordinal: 1,
+                    reason: AttemptRetryReason::Failed,
+                }),
+                result: BuildResult::Aborted,
+                terminal_reason: Some(AttemptTerminalReason::FailFastSkipped),
+                started_at_unix_ms: None,
+                ended_at_unix_ms: 1_150,
+                audit_digest: digest(84),
+            },
+        ],
+    }];
+
+    assert_eq!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "attempt timing must be ordered and non-overlapping".to_owned()
         ))
     );
 }

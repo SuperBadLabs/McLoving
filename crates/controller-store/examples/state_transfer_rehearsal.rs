@@ -1576,6 +1576,16 @@ async fn run_effect_free_build(
                     {
                         AttemptRetryReason::FailFastSkipped
                     }
+                    BuildResult::Aborted
+                        if previous
+                            .terminal_summary
+                            .as_ref()
+                            .and_then(|summary| summary.get("reason"))
+                            .and_then(Value::as_str)
+                            == Some("dependency_not_succeeded") =>
+                    {
+                        AttemptRetryReason::DependencyNotSucceeded
+                    }
                     _ => {
                         return Err(StoreError::InvalidStateTransfer(format!(
                             "stage {stage} attempt {} has unsupported retry lineage",
@@ -1601,6 +1611,15 @@ async fn run_effect_free_build(
                 .and_then(|summary| summary.get("reason"))
                 .and_then(Value::as_str)
             {
+                Some("cancelled_before_execution") => {
+                    Some(AttemptTerminalReason::CancelledBeforeExecution)
+                }
+                Some("dag_cancelled_before_execution") => {
+                    Some(AttemptTerminalReason::DagCancelledBeforeExecution)
+                }
+                Some("dependency_not_succeeded") => {
+                    Some(AttemptTerminalReason::DependencyNotSucceeded)
+                }
                 Some("fail_fast_skipped") => Some(AttemptTerminalReason::FailFastSkipped),
                 _ => None,
             };

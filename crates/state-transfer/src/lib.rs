@@ -270,12 +270,16 @@ pub struct AttemptRetryState {
 #[serde(rename_all = "snake_case")]
 pub enum AttemptRetryReason {
     Failed,
+    DependencyNotSucceeded,
     FailFastSkipped,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptTerminalReason {
+    CancelledBeforeExecution,
+    DagCancelledBeforeExecution,
+    DependencyNotSucceeded,
     FailFastSkipped,
 }
 
@@ -1435,9 +1439,7 @@ fn validate_graph_nodes(
                     attempt.ended_at_unix_ms,
                     "attempt timing",
                 )?,
-                (None, Some(AttemptTerminalReason::FailFastSkipped))
-                    if attempt.result == BuildResult::Aborted =>
-                {
+                (None, Some(_)) if attempt.result == BuildResult::Aborted => {
                     if attempt.ended_at_unix_ms < build_started_at_unix_ms {
                         return Err(TransferError::InvalidField(
                             "terminal-only attempt must end inside its build window".to_owned(),
@@ -1455,9 +1457,11 @@ fn validate_graph_nodes(
                     "attempt timing must remain within its build window".to_owned(),
                 ));
             }
-            if let Some(started_at_unix_ms) = attempt.started_at_unix_ms
-                && previous_attempt_end
-                    .is_some_and(|ended_at_unix_ms| started_at_unix_ms < ended_at_unix_ms)
+            let attempt_ordering_time = attempt
+                .started_at_unix_ms
+                .unwrap_or(attempt.ended_at_unix_ms);
+            if previous_attempt_end
+                .is_some_and(|ended_at_unix_ms| attempt_ordering_time < ended_at_unix_ms)
             {
                 return Err(TransferError::InvalidField(
                     "attempt timing must be ordered and non-overlapping".to_owned(),
@@ -1476,6 +1480,12 @@ fn validate_graph_nodes(
                     {
                         AttemptRetryReason::FailFastSkipped
                     }
+                    BuildResult::Aborted
+                        if attempt.terminal_reason
+                            == Some(AttemptTerminalReason::DependencyNotSucceeded) =>
+                    {
+                        AttemptRetryReason::DependencyNotSucceeded
+                    }
                     _ => {
                         return Err(TransferError::InvalidField(
                             "non-final graph attempt result is not retry-eligible".to_owned(),
@@ -1490,10 +1500,18 @@ fn validate_graph_nodes(
             }
         }
         if node.attempts.last().is_some_and(|attempt| {
-            attempt.result != node.result
-                && !(attempt.result == BuildResult::Aborted
-                    && attempt.terminal_reason == Some(AttemptTerminalReason::FailFastSkipped)
-                    && node.result == BuildResult::NotBuilt)
+            let expected_node_result = match attempt.terminal_reason {
+                Some(
+                    AttemptTerminalReason::FailFastSkipped
+                    | AttemptTerminalReason::DependencyNotSucceeded,
+                ) => BuildResult::NotBuilt,
+                Some(
+                    AttemptTerminalReason::CancelledBeforeExecution
+                    | AttemptTerminalReason::DagCancelledBeforeExecution,
+                ) => BuildResult::Aborted,
+                None => attempt.result,
+            };
+            expected_node_result != node.result
         }) {
             return Err(TransferError::InvalidField(
                 "graph node result must match its final attempt result".to_owned(),
@@ -1526,25 +1544,36 @@ fn validate_graph_nodes(
                 .iter()
                 .find(|attempt| attempt.started_at_unix_ms.is_some())
             {
+                let child_started_at_unix_ms = child_attempt
+                    .started_at_unix_ms
+                    .expect("executing child attempt has a start time");
                 let satisfying_parent_attempt = match dependency.condition {
-                    GraphDependencyCondition::Completed => parent.attempts.first(),
+                    GraphDependencyCondition::Completed => {
+                        parent.attempts.iter().rev().find(|attempt| {
+                            attempt.started_at_unix_ms.map_or(
+                                attempt.ended_at_unix_ms <= child_started_at_unix_ms,
+                                |started_at_unix_ms| started_at_unix_ms <= child_started_at_unix_ms,
+                            )
+                        })
+                    }
                     GraphDependencyCondition::Succeeded => parent
                         .attempts
                         .last()
                         .filter(|attempt| attempt.result == BuildResult::Succeeded),
                 };
-                if dependency.condition == GraphDependencyCondition::Succeeded
-                    && satisfying_parent_attempt.is_none()
-                {
-                    return Err(TransferError::InvalidField(
-                        "graph succeeded dependency requires a successful parent attempt"
-                            .to_owned(),
-                    ));
+                if satisfying_parent_attempt.is_none() {
+                    let message = match dependency.condition {
+                        GraphDependencyCondition::Succeeded => {
+                            "graph succeeded dependency requires a successful parent attempt"
+                        }
+                        GraphDependencyCondition::Completed => {
+                            "graph completed dependency requires a completed parent attempt"
+                        }
+                    };
+                    return Err(TransferError::InvalidField(message.to_owned()));
                 }
                 if satisfying_parent_attempt.is_some_and(|parent_attempt| {
-                    child_attempt
-                        .started_at_unix_ms
-                        .is_some_and(|started_at| started_at < parent_attempt.ended_at_unix_ms)
+                    child_started_at_unix_ms < parent_attempt.ended_at_unix_ms
                 }) {
                     return Err(TransferError::InvalidField(
                         "graph child attempt cannot start before its dependency is satisfied"
