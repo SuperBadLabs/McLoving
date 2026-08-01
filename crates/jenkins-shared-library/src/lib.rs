@@ -34,6 +34,8 @@ const MAX_LEDGER_BYTES: usize = 262_144;
 const MAX_LOCK_BYTES: usize = 16_384;
 const MAX_README_BYTES: usize = 65_536;
 const MAX_SOURCE_FILES: u64 = 20_000;
+const MAX_SOURCE_DIRECTORIES: u64 = 20_000;
+const MAX_SOURCE_DEPTH: usize = 64;
 const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
 const BUNDLE_FILES: [&str; 3] = ["README.md", "ledger.lock.yaml", "ledger.yaml"];
 
@@ -959,7 +961,8 @@ fn digest_namespace(
     ensure_read_only_directory(&path)?;
     let mut files = Vec::new();
     let mut bytes = 0_u64;
-    collect_files(&path, &path, &mut files, &mut bytes)?;
+    let mut directories = 1_u64;
+    collect_files(&path, &path, &mut files, &mut bytes, &mut directories, 0)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
     let mut hasher = Sha256::new();
     hasher.update(b"mcloving.shared-library.namespace/v1\0");
@@ -985,13 +988,38 @@ fn collect_files(
     current: &Path,
     output: &mut Vec<(String, Vec<u8>)>,
     total_bytes: &mut u64,
-) -> Result<(), LibraryError> {
-    let mut entries = fs::read_dir(current)
+    total_directories: &mut u64,
+    depth: usize,
+) -> Result<bool, LibraryError> {
+    if depth > MAX_SOURCE_DEPTH {
+        return Err(LibraryError::new(
+            "E_SOURCE_LIMIT",
+            "source tree exceeds its directory depth limit",
+        ));
+    }
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(current)
         .map_err(|error| LibraryError::new("E_SOURCE_IO", error.to_string()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| LibraryError::new("E_SOURCE_IO", error.to_string()))?;
+    {
+        if entries.len() as u64 >= MAX_SOURCE_FILES + MAX_SOURCE_DIRECTORIES {
+            return Err(LibraryError::new(
+                "E_SOURCE_LIMIT",
+                "source directory contains too many entries",
+            ));
+        }
+        entries.push(entry.map_err(|error| LibraryError::new("E_SOURCE_IO", error.to_string()))?);
+    }
     entries.sort_by_key(|entry| entry.file_name());
+    let mut contains_file = false;
     for entry in entries {
+        let entry_path = entry.path();
+        let relative = entry_path
+            .strip_prefix(root)
+            .map_err(|_| LibraryError::new("E_SOURCE_ENTRY", "source path escaped namespace"))?
+            .to_str()
+            .ok_or_else(|| LibraryError::new("E_SOURCE_ENTRY", "source path is not UTF-8"))?
+            .replace('\\', "/");
+        validate_relative(&relative)?;
         let metadata = entry
             .metadata()
             .map_err(|error| LibraryError::new("E_SOURCE_IO", error.to_string()))?;
@@ -1006,7 +1034,29 @@ fn collect_files(
         }
         ensure_read_only_metadata(&metadata)?;
         if file_type.is_dir() {
-            collect_files(root, &entry.path(), output, total_bytes)?;
+            *total_directories = total_directories.checked_add(1).ok_or_else(|| {
+                LibraryError::new("E_SOURCE_LIMIT", "source directory count overflow")
+            })?;
+            if *total_directories > MAX_SOURCE_DIRECTORIES {
+                return Err(LibraryError::new(
+                    "E_SOURCE_LIMIT",
+                    "too many source directories",
+                ));
+            }
+            if !collect_files(
+                root,
+                &entry_path,
+                output,
+                total_bytes,
+                total_directories,
+                depth + 1,
+            )? {
+                return Err(LibraryError::new(
+                    "E_SOURCE_ENTRY",
+                    "source tree contains an empty directory",
+                ));
+            }
+            contains_file = true;
         } else {
             if output.len() as u64 >= MAX_SOURCE_FILES {
                 return Err(LibraryError::new("E_SOURCE_LIMIT", "too many source files"));
@@ -1030,21 +1080,14 @@ fn collect_files(
                     ));
                 }
             }
-            let relative = entry
-                .path()
-                .strip_prefix(root)
-                .map_err(|_| LibraryError::new("E_SOURCE_ENTRY", "source path escaped namespace"))?
-                .to_str()
-                .ok_or_else(|| LibraryError::new("E_SOURCE_ENTRY", "source path is not UTF-8"))?
-                .replace('\\', "/");
-            validate_relative(&relative)?;
             output.push((
                 relative,
-                read_regular(entry.path(), MAX_SOURCE_BYTES as usize)?,
+                read_regular(entry_path, MAX_SOURCE_BYTES as usize)?,
             ));
+            contains_file = true;
         }
     }
-    Ok(())
+    Ok(contains_file)
 }
 
 fn tree_digest(namespaces: &[NamespaceDigest]) -> String {
@@ -1231,6 +1274,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -1521,5 +1566,68 @@ mod tests {
                 .code,
             "E_SOURCE_ENTRY"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_traversal_rejects_empty_non_utf8_and_overdeep_directories() {
+        let empty_fixture = TempDir::new().expect("empty fixture");
+        let vars = empty_fixture.path().join("vars");
+        let empty = vars.join("empty");
+        fs::create_dir_all(&empty).expect("empty directory");
+        fs::set_permissions(&empty, fs::Permissions::from_mode(0o555)).expect("seal empty");
+        fs::set_permissions(&vars, fs::Permissions::from_mode(0o555)).expect("seal vars");
+        assert_eq!(
+            digest_namespace(empty_fixture.path(), Namespace::Vars, true)
+                .expect_err("empty directory")
+                .code,
+            "E_SOURCE_ENTRY"
+        );
+        fs::set_permissions(&vars, fs::Permissions::from_mode(0o755)).expect("unseal vars");
+        fs::set_permissions(&empty, fs::Permissions::from_mode(0o755)).expect("unseal empty");
+
+        let non_utf8_fixture = TempDir::new().expect("non-UTF-8 fixture");
+        let vars = non_utf8_fixture.path().join("vars");
+        fs::create_dir(&vars).expect("vars directory");
+        let invalid = vars.join(std::ffi::OsString::from_vec(vec![0xff]));
+        fs::create_dir(&invalid).expect("non-UTF-8 directory");
+        fs::set_permissions(&invalid, fs::Permissions::from_mode(0o555)).expect("seal invalid");
+        fs::set_permissions(&vars, fs::Permissions::from_mode(0o555)).expect("seal vars");
+        assert_eq!(
+            digest_namespace(non_utf8_fixture.path(), Namespace::Vars, true)
+                .expect_err("non-UTF-8 directory")
+                .code,
+            "E_SOURCE_ENTRY"
+        );
+        fs::set_permissions(&vars, fs::Permissions::from_mode(0o755)).expect("unseal vars");
+        fs::set_permissions(&invalid, fs::Permissions::from_mode(0o755)).expect("unseal invalid");
+
+        let deep_fixture = TempDir::new().expect("deep fixture");
+        let vars = deep_fixture.path().join("vars");
+        fs::create_dir(&vars).expect("vars directory");
+        let mut directories = vec![vars.clone()];
+        let mut current = vars;
+        for index in 0..=MAX_SOURCE_DEPTH {
+            current = current.join(format!("d{index}"));
+            fs::create_dir(&current).expect("nested directory");
+            directories.push(current.clone());
+        }
+        let source = current.join("value.groovy");
+        fs::write(&source, b"def call() { true }\n").expect("source file");
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o444)).expect("seal source");
+        for directory in directories.iter().rev() {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o555))
+                .expect("seal nested directory");
+        }
+        assert_eq!(
+            digest_namespace(deep_fixture.path(), Namespace::Vars, true)
+                .expect_err("overdeep tree")
+                .code,
+            "E_SOURCE_LIMIT"
+        );
+        for directory in &directories {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o755))
+                .expect("unseal nested directory");
+        }
     }
 }

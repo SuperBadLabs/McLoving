@@ -71,11 +71,13 @@ its canonical semantic SHA-256 is
 `f925714595d48efcf29ea9c64696a99cd361b6a4a9b847c2d96b807a63add309`.
 Both values are compiled into the verifier as independent trust roots, so a
 joint ledger/lock/source substitution cannot create a newly trusted bundle.
-The authoritative review-repaired external evidence is
-`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T112304Z-v7`. Its
+The authoritative bounded-traversal external evidence is
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T113730Z-v8`. Its
 self-excluding manifest covers 522 files and has SHA-256
-`81ce26bd0335851b2e7deb7f292caa0a8cf725681afb947f5555a526c36cc44e`.
-The complete-coverage predecessor remains immutable at manifest
+`0f41561942d065d178a86aec82a8bd2db522ee66ac4e591ee531316de913f7e5`.
+The trust-root predecessor remains immutable at manifest
+`81ce26bd0335851b2e7deb7f292caa0a8cf725681afb947f5555a526c36cc44e`;
+the complete-coverage predecessor remains immutable at manifest
 `50bc61768682e225c6536d04db9dc940cf65a9ef164f956e336ca4f624448a5e`;
 the non-recursive README predecessor remains immutable at manifest
 `80032ba8401f0aa8b5ef974b043f5bb4172b887a5078842ee26bb982048a6f24`;
