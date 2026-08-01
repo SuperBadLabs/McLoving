@@ -1052,8 +1052,8 @@ impl Store {
                  provider_configuration_generation, provider_jwks_generation,
                  identity_lifecycle_generation, group_generation,
                  issued_at_unix_ms, expires_at_unix_ms, last_seen_at_unix_ms,
-                 refresh_token_digest, refresh_expires_at_unix_ms
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9,$11,$12)",
+                 refresh_token_digest, refresh_expires_at_unix_ms, family_id
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9,$11,$12,$2)",
         )
         .bind(claims.organization_id)
         .bind(issue.session_id)
@@ -1224,7 +1224,7 @@ impl Store {
                     s.provider_configuration_generation,
                     s.provider_jwks_generation,
                     s.identity_lifecycle_generation, s.group_generation,
-                    s.refresh_expires_at_unix_ms
+                    s.family_id, s.refresh_expires_at_unix_ms
              FROM identity_sessions s
              JOIN identities i ON i.organization_id = s.organization_id
                               AND i.id = s.identity_id
@@ -1259,7 +1259,7 @@ impl Store {
                 "refresh credential is unknown, stale, expired, or revoked".to_owned(),
             ));
         };
-        let absolute_refresh_expiry = current.7.ok_or_else(|| {
+        let absolute_refresh_expiry = current.8.ok_or_else(|| {
             StoreError::IdentityConflict("refresh credential has no absolute expiry".to_owned())
         })?;
         if issue.expires_at_unix_ms >= absolute_refresh_expiry {
@@ -1286,8 +1286,8 @@ impl Store {
                  provider_configuration_generation, provider_jwks_generation,
                  identity_lifecycle_generation, group_generation,
                  issued_at_unix_ms, expires_at_unix_ms, last_seen_at_unix_ms,
-                 refresh_token_digest, refresh_expires_at_unix_ms
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9,$11,$12)",
+                 refresh_token_digest, refresh_expires_at_unix_ms, family_id
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9,$11,$12,$13)",
         )
         .bind(organization_id)
         .bind(issue.session_id)
@@ -1301,6 +1301,7 @@ impl Store {
         .bind(issue.expires_at_unix_ms)
         .bind(next_refresh_digest.as_slice())
         .bind(absolute_refresh_expiry)
+        .bind(current.7)
         .execute(&mut *tx)
         .await?;
         append_audit_record(
@@ -1399,7 +1400,7 @@ impl Store {
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
         let session = sqlx::query_as::<_, (Uuid, Option<String>)>(
-            "SELECT identity_id, revocation_reason
+            "SELECT family_id, revocation_reason
              FROM identity_sessions
              WHERE organization_id = $1 AND session_id = $2
              FOR UPDATE",
@@ -1408,7 +1409,7 @@ impl Store {
         .bind(session_id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some((identity_id, revocation_reason)) = session else {
+        let Some((family_id, revocation_reason)) = session else {
             tx.commit().await?;
             return Ok(false);
         };
@@ -1429,18 +1430,18 @@ impl Store {
             Some("refresh_rotation") => {
                 // A refresh may commit after API authentication but before
                 // logout reaches this row lock. In that ordering the access
-                // token identifies the rotated predecessor, so revoke the
-                // active identity-wide session family just as refresh-reuse
-                // detection does. The shared predecessor row lock serializes
-                // this update against rotation of that same generation.
+                // token identifies the rotated predecessor, so revoke only
+                // the active descendants in that session lineage. The shared
+                // predecessor row lock serializes this update against rotation
+                // of that same generation without affecting another device.
                 sqlx::query(
                     "UPDATE identity_sessions
                      SET revoked_at_unix_ms = $3, revocation_reason = $4
-                     WHERE organization_id = $1 AND identity_id = $2
+                     WHERE organization_id = $1 AND family_id = $2
                        AND revoked_at_unix_ms IS NULL",
                 )
                 .bind(organization_id)
-                .bind(identity_id)
+                .bind(family_id)
                 .bind(now_unix_ms)
                 .bind(reason)
                 .execute(&mut *tx)
@@ -1608,7 +1609,7 @@ type LoginRow = (
 type IdentityRow = (Uuid, String, String, String, i64, i64, Vec<u8>);
 type SessionAuthRow = (Uuid, Uuid, String, String, String, i64, i64);
 type ServiceAuthRow = (Uuid, Uuid, String, String, String, i64, i64);
-type SessionRefreshRow = (Uuid, Uuid, String, i64, i64, i64, i64, Option<i64>);
+type SessionRefreshRow = (Uuid, Uuid, String, i64, i64, i64, i64, Uuid, Option<i64>);
 
 fn provider_from_write(input: &IdentityProviderWrite) -> IdentityProviderConfig {
     IdentityProviderConfig {
@@ -1770,8 +1771,8 @@ async fn revoke_session_family_on_refresh_reuse(
     refresh_token_digest: &[u8; 32],
     now_unix_ms: i64,
 ) -> Result<(), StoreError> {
-    let stale = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
-        "SELECT s.identity_id, i.subject, s.revocation_reason
+    let stale = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>)>(
+        "SELECT s.family_id, s.identity_id, i.subject, s.revocation_reason
          FROM identity_sessions s
          JOIN identities i ON i.organization_id = s.organization_id
                           AND i.id = s.identity_id
@@ -1782,7 +1783,7 @@ async fn revoke_session_family_on_refresh_reuse(
     .bind(refresh_token_digest.as_slice())
     .fetch_optional(&mut **tx)
     .await?;
-    let Some((identity_id, subject, revocation_reason)) = stale else {
+    let Some((family_id, identity_id, subject, revocation_reason)) = stale else {
         return Ok(());
     };
     if revocation_reason.as_deref() != Some("refresh_rotation") {
@@ -1791,11 +1792,11 @@ async fn revoke_session_family_on_refresh_reuse(
     let revoked = sqlx::query(
         "UPDATE identity_sessions
          SET revoked_at_unix_ms = $3, revocation_reason = 'refresh_reuse_detected'
-         WHERE organization_id = $1 AND identity_id = $2
+         WHERE organization_id = $1 AND family_id = $2
            AND revoked_at_unix_ms IS NULL",
     )
     .bind(organization_id)
-    .bind(identity_id)
+    .bind(family_id)
     .bind(now_unix_ms)
     .execute(&mut **tx)
     .await?
@@ -1806,8 +1807,13 @@ async fn revoke_session_family_on_refresh_reuse(
         "authentication",
         &subject,
         "oidc_refresh_reuse_detected",
-        &format!("identity:{identity_id}"),
-        json!({"revoked_sessions": revoked, "detected_at_unix_ms": now_unix_ms}),
+        &format!("identity-session-family:{family_id}"),
+        json!({
+            "identity_id": identity_id,
+            "session_family_id": family_id,
+            "revoked_sessions": revoked,
+            "detected_at_unix_ms": now_unix_ms,
+        }),
     )
     .await?;
     Ok(())

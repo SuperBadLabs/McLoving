@@ -428,6 +428,25 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         "refresh-token reuse revokes the active session family"
     );
 
+    let independent_session_token = digest("independent-device-access");
+    runtime
+        .issue_human_session(
+            &OidcIdentityClaims {
+                id_token_digest: digest("id-token-independent-device"),
+                ..changed_groups.clone()
+            },
+            &SessionIssue {
+                session_id: Uuid::new_v4(),
+                token_digest: independent_session_token,
+                refresh_token_digest: Some(digest("independent-device-refresh")),
+                issued_at_unix_ms: 12_900,
+                expires_at_unix_ms: 32_900,
+                refresh_expires_at_unix_ms: Some(62_900),
+            },
+        )
+        .await
+        .expect("issue an independent device session");
+
     let logout_predecessor = runtime
         .issue_human_session(
             &OidcIdentityClaims {
@@ -481,6 +500,10 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             .is_err(),
         "a refresh successor must not survive a racing logout"
     );
+    runtime
+        .authenticate_api_token(organization_id, independent_session_token, 13_102)
+        .await
+        .expect("racing logout must preserve an independent device session");
 
     let service_id = Uuid::new_v4();
     let service_identity = NewServiceIdentity {

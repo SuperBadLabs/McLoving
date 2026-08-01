@@ -98,6 +98,9 @@ pub const IDENTITY_LIFECYCLE_V19: &str = include_str!("../migrations/0019_identi
 /// One-time rotating refresh credentials for durable human sessions.
 pub const IDENTITY_SESSION_REFRESH_V20: &str =
     include_str!("../migrations/0020_identity_session_refresh.sql");
+/// Explicit session lineages for targeted refresh-reuse and logout revocation.
+pub const IDENTITY_SESSION_LINEAGE_V21: &str =
+    include_str!("../migrations/0021_identity_session_lineage.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -489,6 +492,7 @@ impl Store {
         apply_migration(&mut tx, 18, ATTEMPT_READINESS_V18).await?;
         apply_migration(&mut tx, 19, IDENTITY_LIFECYCLE_V19).await?;
         apply_migration(&mut tx, 20, IDENTITY_SESSION_REFRESH_V20).await?;
+        apply_migration(&mut tx, 21, IDENTITY_SESSION_LINEAGE_V21).await?;
         tx.commit().await?;
         Ok(())
     }
