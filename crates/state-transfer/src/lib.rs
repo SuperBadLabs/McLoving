@@ -1065,6 +1065,7 @@ fn validate_job(
     }
     validate_object_list(&job.retained_workspaces, records, "retained workspaces")?;
     let mut previous_dependency: Option<&str> = None;
+    let mut dependency_keys = BTreeSet::new();
     for dependency in &job.persistent_dependencies {
         if previous_dependency.is_some_and(|previous| previous >= dependency.record.id.as_str()) {
             return Err(TransferError::InvalidField(
@@ -1074,6 +1075,11 @@ fn validate_job(
         previous_dependency = Some(&dependency.record.id);
         insert_record(records, &dependency.record)?;
         validate_text(&dependency.key, 512, "persistent dependency key")?;
+        if !dependency_keys.insert(dependency.key.as_str()) {
+            return Err(TransferError::InvalidField(
+                "persistent dependency keys must be unique within a job".to_owned(),
+            ));
+        }
         validate_digest(dependency.value_digest, "persistent dependency digest")?;
         validate_data_binding(&dependency.data_binding)?;
         validate_protection(&dependency.protection)?;
@@ -1487,6 +1493,14 @@ fn validate_filesystem_entries(object: &ObjectState) -> Result<(), TransferError
             ));
         }
         validate_data_binding(&entry.data_binding)?;
+        if classification_rank(entry.data_binding.classification)
+            < classification_rank(object.data_binding.classification)
+        {
+            return Err(TransferError::InvalidField(
+                "filesystem entry classification must be at least as restrictive as its object"
+                    .to_owned(),
+            ));
+        }
         match entry.kind {
             FilesystemEntryKind::Directory => {
                 if entry.content_digest.is_some() || entry.bytes != 0 {
@@ -1515,6 +1529,15 @@ fn validate_filesystem_entries(object: &ObjectState) -> Result<(), TransferError
         ));
     }
     Ok(())
+}
+
+fn classification_rank(classification: DataClassification) -> u8 {
+    match classification {
+        DataClassification::Public => 0,
+        DataClassification::Internal => 1,
+        DataClassification::Confidential => 2,
+        DataClassification::SecretMaterial => 3,
+    }
 }
 
 fn has_regular_file_ancestor(path: &str, regular_files: &BTreeSet<&str>) -> bool {

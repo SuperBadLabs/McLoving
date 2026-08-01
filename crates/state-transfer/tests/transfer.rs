@@ -492,6 +492,45 @@ fn secret_material_requires_an_explicit_non_literal_disposition() {
 }
 
 #[test]
+fn filesystem_entries_cannot_weaken_their_object_classification() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    let workspace = &mut bundle.jobs[0].retained_workspaces[0];
+    workspace.data_binding = DataBinding {
+        classification: DataClassification::SecretMaterial,
+        secret_disposition: Some(SecretDisposition::Reference(SecretReference {
+            provider: "vault".to_owned(),
+            reference: "kv/ci/workspace".to_owned(),
+            version: "11".to_owned(),
+            keyed_digest: digest(92),
+        })),
+    };
+    assert_eq!(
+        workspace.filesystem_entries[0].data_binding.classification,
+        DataClassification::Internal
+    );
+
+    assert!(matches!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(field)) if field.contains("at least as restrictive")
+    ));
+}
+
+#[test]
+fn persistent_dependency_keys_are_unique_within_a_job() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    let mut duplicate = bundle.jobs[0].persistent_dependencies[0].clone();
+    duplicate.record = record("state:stateful:duplicate", 93);
+    duplicate.value_digest = digest(94);
+    bundle.jobs[0].persistent_dependencies.push(duplicate);
+
+    assert!(matches!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(field))
+            if field.contains("persistent dependency keys must be unique")
+    ));
+}
+
+#[test]
 fn hostile_or_ambiguous_filesystem_manifests_fail_closed() {
     let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
 

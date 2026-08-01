@@ -34,6 +34,11 @@ substitution, gaps, duplicate records, noncontiguous attempts or logs, stale SCM
 baselines, unclassified state, retention shortening, hold omission, divergent
 hold identity, and unauthorized hold release fail closed.
 
+Nested state cannot weaken its container's trust boundary: every filesystem
+entry is at least as restrictive as the object that contains it. Persistent
+dependency keys are unique within a job, so replay and reconciliation never
+silently collapse two distinct dependencies onto one identity.
+
 ## Persistence and reconciliation
 
 Migration `0017_state_transfer.sql` adds immutable receipt, record-provenance,
@@ -87,12 +92,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `098f8fc36d079f7bbcb4ffcf8fc3d938a8b3f3c879987e2b1b30eaa1d06c0c16`;
-- source-evidence manifest SHA-256 `032e9ff221365501c0588e39877d54af0d2d90ac47f40290522c98d96494c0c8`;
-- forward bundle SHA-256 `a140148aeb3bba94b09fe28240122410330ea7c9a45a2576390e0e5224624b96`;
-- reverse bundle SHA-256 `f9f59b142943abc4589bb4d9dc47232acb5b5ce204505a442f2b1bf46a0a9219`;
-- reverse-evidence manifest SHA-256 `103ceb4d5936573f4c832512f4ad4d0c63f32318233cd2ea00479f27924f90ef`;
-- sealed transform-evidence manifest SHA-256 `ced62b7a554357722b2408a4cb32242964cf657c54a30c860b83c6a416a4c260`.
+- transform binary SHA-256 `c337a9c22d7350b349ce118cef48fea3681cbca417cb7719c5e8678d535342ba`;
+- source-evidence manifest SHA-256 `2dfc8a6b47cc39e4e2efc5e786f0bad2916b809b8ef2b92e8d3a98ad394dcf68`;
+- forward bundle SHA-256 `d7a365115c8ca8bfd4e17a674fc1d0ad748b7611c3126c59a625f0f45fe2fa0f`;
+- reverse bundle SHA-256 `f5e05f57113d914e8f45e0fcd59a655ea6896dbc3d0ab9823ebb2f98bcc94abe`;
+- reverse-evidence manifest SHA-256 `5d7463c40d9a5332443740598ce37db7210da40168d681bf5d05f2feaf1d706b`;
+- sealed transform-evidence manifest SHA-256 `49049ccb3fa6edd1cf3ac2d140050a145cfeb41d2e69c2faf5ee5b822d7bcab7`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 112 record-provenance rows, eight effective
