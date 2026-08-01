@@ -1495,7 +1495,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Reads committed log chunks in deterministic sequence order.
+    /// Reads current-fence committed log chunks in global commit order.
     pub async fn build_logs(
         &self,
         organization_id: Uuid,
@@ -1517,7 +1517,7 @@ impl Store {
                AND b.project_id = $2
                AND b.id = $3
                AND l.fence = a.fence
-             ORDER BY a.ordinal, l.sequence, l.stream, l.attempt_id",
+             ORDER BY l.cursor_id",
         )
         .bind(organization_id)
         .bind(project_id)

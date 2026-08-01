@@ -931,6 +931,8 @@ sealed native workflow API rather than fabricated stage names or build-wide
 timestamps. McLoving build 3 is a five-node PostgreSQL DAG whose graph,
 per-attempt timestamps and terminal outcomes, committed logs, available-artifact
 inventory, and fenced checkout are reread from controller truth before export.
+Attempt starts come from durable `attempt.running` events rather than admission
+timestamps, and logs are exported in the global controller commit-cursor order.
 The reverse bridge verifies the full canonical build record byte-for-byte and
 independently checks Jenkins-native build fields, workflow-stage semantics,
 SCM changelog, log payloads, artifacts, and a dedicated persisted
@@ -940,14 +942,14 @@ materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its exact transform binary SHA-256 is
-`ecd10e10e2cb69a3d65206a860ac1770aed8bcfaf27d4fdf296014cea3c7f07f`.
+`9cd974b41a24f0179aaf44e35a685c2be8e46204ded70528b6e382e801cc966b`.
 Its source, transform, and reverse manifest SHA-256 values are
-`9cfc4202c523a0572f2c4e4a5626c7b6494f451108f6881d35f8f9903e25a8bb`,
-`60305390aecf725b01d7d7c088009640f832a3e0f29a3fe01314954eefb561ce`,
-and `ed7d8f0b734de35209c980b24df9e254ee6da756efa23c79838715767b783e8e`;
+`a25705d644a07abbe4086ec3bff4654f29406b7dab4907f78a3cfd0ed53850c8`,
+`d5a179611342370198bddbfda077db8c98248651e3290ee8b79659bb3ae43927`,
+and `595dab7b7d047e71338be7ad904cf83a2557793dd301c9754898bcc0745fe187`;
 the forward and reverse bundle SHA-256 values are
-`82092815818d3c9e7120f5d9bebeafecd40bc4b4919b245752bd6161c1824f06`
-and `b967ed672d3c68ed8dc42f95028f7acdce4d242d408216861a0b58eca7688f87`.
+`980377915a4014001d8fe99f13cd82e7a376c376b5b4bb12f289441247bdb718`
+and `ac53c41f2d2d037c4823edbfe88a5bfc79ae872666f54c253f01a7af925a48b2`.
 An injected post-install failure restored repository, build, permalink, and
 next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed

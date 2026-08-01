@@ -1411,6 +1411,7 @@ async fn run_effect_free_build(
         node_ids.insert(node.node_id, format!("{index:02}-{stage}"));
     }
     let mut graph_nodes = Vec::new();
+    let mut previous_stage_end = None;
     for (index, stage) in STAGES.iter().enumerate() {
         let node = graph
             .nodes
@@ -1425,6 +1426,15 @@ async fn run_effect_free_build(
         let ended = attempt.completed_at_unix_ms.ok_or_else(|| {
             StoreError::InvalidStateTransfer(format!("stage {stage} has no terminal time"))
         })?;
+        let started = attempt.started_at_unix_ms.ok_or_else(|| {
+            StoreError::InvalidStateTransfer(format!("stage {stage} has no running time"))
+        })?;
+        if previous_stage_end.is_some_and(|ended| started < ended) {
+            return Err(StoreError::InvalidStateTransfer(format!(
+                "stage {stage} started before its dependency completed"
+            )));
+        }
+        previous_stage_end = Some(ended);
         let parents = graph
             .dependencies
             .iter()
@@ -1456,7 +1466,7 @@ async fn run_effect_free_build(
                 ),
                 ordinal: attempt.ordinal as u32,
                 result: build_result(&attempt.status)?,
-                started_at_unix_ms: attempt.created_at_unix_ms,
+                started_at_unix_ms: started,
                 ended_at_unix_ms: ended,
                 audit_digest: sha256(&attempt_bytes),
             }],
@@ -1465,6 +1475,16 @@ async fn run_effect_free_build(
     let logs = store
         .build_logs(organization_id, project_id, admission.build_id)
         .await?;
+    if logs.len() != STAGES.len()
+        || logs
+            .iter()
+            .zip(STAGES)
+            .any(|(log, stage)| log.content != format!("{stage} completed\n").as_bytes())
+    {
+        return Err(StoreError::InvalidStateTransfer(
+            "durable logs are not in global controller commit order".to_owned(),
+        ));
+    }
     let mut exported_logs = Vec::new();
     for (sequence, log) in logs.iter().enumerate() {
         let path = format!("mcloving-log-{sequence}.txt");

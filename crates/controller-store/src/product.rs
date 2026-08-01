@@ -144,6 +144,7 @@ pub struct AttemptView {
     pub lease_owner: Option<String>,
     pub terminal_summary: Option<Value>,
     pub created_at_unix_ms: i64,
+    pub started_at_unix_ms: Option<i64>,
     pub completed_at_unix_ms: Option<i64>,
 }
 
@@ -783,6 +784,19 @@ impl Store {
             "SELECT a.id, a.node_id, a.ordinal, a.status, a.fence,
                     a.lease_owner, a.terminal_summary,
                     (EXTRACT(EPOCH FROM a.created_at) * 1000)::bigint AS created_ms,
+                    (
+                        SELECT (EXTRACT(EPOCH FROM e.created_at) * 1000)::bigint
+                        FROM build_events AS e
+                        WHERE e.organization_id = a.organization_id
+                          AND e.build_id = n.build_id
+                          AND e.kind = 'attempt.running'
+                          AND e.payload @> jsonb_build_object(
+                              'attempt_id', a.id,
+                              'fence', a.fence
+                          )
+                        ORDER BY e.id
+                        LIMIT 1
+                    ) AS started_ms,
                     CASE WHEN a.completed_at IS NULL THEN NULL
                          ELSE (EXTRACT(EPOCH FROM a.completed_at) * 1000)::bigint
                     END AS completed_ms
@@ -839,6 +853,7 @@ impl Store {
                         lease_owner: row.try_get("lease_owner")?,
                         terminal_summary: row.try_get("terminal_summary")?,
                         created_at_unix_ms: row.try_get("created_ms")?,
+                        started_at_unix_ms: row.try_get("started_ms")?,
                         completed_at_unix_ms: row.try_get("completed_ms")?,
                     })
                 })
