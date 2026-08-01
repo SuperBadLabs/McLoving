@@ -763,9 +763,12 @@ AFTER INSERT ON state_transfer_receipts
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_receipt_complete();
 
-GRANT SELECT, INSERT ON state_transfer_receipts, state_transfer_records
-TO mcloving_tenant;
-GRANT SELECT, INSERT, UPDATE ON state_transfer_protections
+-- Runtime controller sessions may consume committed transfer truth, but they
+-- cannot construct it with direct SQL. Imports use the separately privileged
+-- migration connection only after the Rust validator has accepted the complete
+-- canonical schema and semantic invariants.
+GRANT SELECT ON state_transfer_receipts, state_transfer_records,
+    state_transfer_protections
 TO mcloving_tenant;
 GRANT EXECUTE ON FUNCTION mcloving_state_transfer_holds_valid(jsonb)
 TO mcloving_tenant;

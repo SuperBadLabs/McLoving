@@ -55,8 +55,8 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         .expect("create state-transfer tenant");
 
     let (bundle, expected) = transfer_bundle(20);
-    let tenant_store = unprivileged_store(&store).await;
-    let first = tenant_store
+    let migration_store = store.clone();
+    let first = migration_store
         .import_state_transfer(
             organization_id,
             project_id,
@@ -70,7 +70,46 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
     assert_eq!(first.record_count, 5);
     assert_eq!(first.protection_count, 2);
 
-    let mut sealed_append = tenant_store
+    let runtime_store = unprivileged_store(&store).await;
+    for (table, privilege) in [
+        ("state_transfer_receipts", "INSERT"),
+        ("state_transfer_records", "INSERT"),
+        ("state_transfer_protections", "INSERT"),
+        ("state_transfer_protections", "UPDATE"),
+    ] {
+        let granted: bool =
+            sqlx::query_scalar("SELECT has_table_privilege('mcloving_tenant', $1, $2)")
+                .bind(table)
+                .bind(privilege)
+                .fetch_one(store.pool())
+                .await
+                .expect("inspect runtime state-transfer write privilege");
+        assert!(!granted, "runtime unexpectedly has {privilege} on {table}");
+    }
+    let (runtime_bundle, runtime_expected) = transfer_bundle(29);
+    let runtime_insert_error = runtime_store
+        .import_state_transfer(
+            organization_id,
+            project_id,
+            &runtime_bundle,
+            &runtime_expected,
+            "runtime-counterfeit@example.test",
+        )
+        .await
+        .expect_err("runtime tenant cannot directly insert transfer truth");
+    assert_eq!(
+        match runtime_insert_error {
+            StoreError::Database(error) => error
+                .as_database_error()
+                .and_then(|database| database.code())
+                .map(|code| code.into_owned()),
+            _ => None,
+        }
+        .as_deref(),
+        Some("42501")
+    );
+
+    let mut sealed_append = migration_store
         .pool()
         .begin()
         .await
@@ -126,7 +165,7 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         .await
         .expect("create counterfeit-receipt test project");
     let counterfeit_receipt_id = Uuid::new_v4();
-    let mut counterfeit = tenant_store
+    let mut counterfeit = migration_store
         .pool()
         .begin()
         .await
@@ -262,7 +301,7 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
         .execute(store.pool())
         .await
         .expect("create empty counterfeit-receipt test project");
-    let mut empty_counterfeit = tenant_store
+    let mut empty_counterfeit = migration_store
         .pool()
         .begin()
         .await

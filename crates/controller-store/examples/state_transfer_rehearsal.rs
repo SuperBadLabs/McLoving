@@ -4,7 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mcloving_controller_store::{
-    ClaimRequest, NewBuild, NewLogChunk, StateTransferReceipt, Store, StoreError, TerminalOutcome,
+    ClaimRequest, EffectClass, EffectStatus, NewBuild, NewLogChunk, ScmCheckoutEvidenceRef,
+    StateTransferReceipt, Store, StoreError, TerminalOutcome,
 };
 use mcloving_state_transfer::{
     AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy,
@@ -861,15 +862,7 @@ async fn run_effect_free_build(
     next_checkout: &ScmState,
     predicate: &ChangePredicate,
 ) -> Result<mcloving_state_transfer::PredicateDecision, StoreError> {
-    let decision = store
-        .state_transfer_change_decision(
-            organization_id,
-            receipt.id,
-            source_job_id,
-            next_checkout,
-            predicate,
-        )
-        .await?;
+    const CHECKOUT_EFFECT_KEY: &str = "scm.checkout/stateful";
     let admission = store
         .admit_build(&NewBuild {
             organization_id,
@@ -884,10 +877,7 @@ async fn run_effect_free_build(
                 "external_effect_authority": false,
                 "state_transfer_receipt_id": receipt.id,
                 "source_job_id": source_job_id,
-                "previous_revision": next_checkout.previous_revision,
-                "revision": next_checkout.revision,
-                "predicate_selected": decision.selected,
-                "predicate_matches": decision.matched_change_record_ids,
+                "scm_checkout_effect_key": CHECKOUT_EFFECT_KEY,
             }),
         })
         .await?;
@@ -928,6 +918,78 @@ async fn run_effect_free_build(
             "effect-free build could not enter running state".to_owned(),
         ));
     }
+    let checkout_evidence = json!({
+        "schema": "mcloving.scm-checkout-evidence/v1",
+        "checkout": next_checkout,
+    });
+    if !store
+        .checkpoint_effect(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            "mig005a-agent",
+            CHECKOUT_EFFECT_KEY,
+            EffectClass::Idempotent,
+            EffectStatus::Prepared,
+            &checkout_evidence,
+        )
+        .await?
+        || !store
+            .checkpoint_effect(
+                organization_id,
+                claim.attempt_id,
+                claim.fence,
+                claim.restore_epoch,
+                "mig005a-agent",
+                CHECKOUT_EFFECT_KEY,
+                EffectClass::Idempotent,
+                EffectStatus::Applied,
+                &checkout_evidence,
+            )
+            .await?
+    {
+        return Err(StoreError::InvalidStateTransfer(
+            "SCM checkout evidence could not be durably authenticated".to_owned(),
+        ));
+    }
+    let mut substituted = next_checkout.clone();
+    substituted.changes[0].paths = vec!["src/counterfeit.target".to_owned()];
+    let substituted_evidence = json!({
+        "schema": "mcloving.scm-checkout-evidence/v1",
+        "checkout": substituted,
+    });
+    if store
+        .checkpoint_effect(
+            organization_id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            "mig005a-agent",
+            CHECKOUT_EFFECT_KEY,
+            EffectClass::Idempotent,
+            EffectStatus::Applied,
+            &substituted_evidence,
+        )
+        .await?
+    {
+        return Err(StoreError::InvalidStateTransfer(
+            "conflicting SCM checkout evidence was accepted".to_owned(),
+        ));
+    }
+    let decision = store
+        .state_transfer_change_decision(
+            organization_id,
+            receipt.id,
+            source_job_id,
+            ScmCheckoutEvidenceRef {
+                attempt_id: claim.attempt_id,
+                fence: claim.fence,
+                effect_key: CHECKOUT_EFFECT_KEY,
+            },
+            predicate,
+        )
+        .await?;
     let log = NewLogChunk {
         organization_id,
         attempt_id: claim.attempt_id,

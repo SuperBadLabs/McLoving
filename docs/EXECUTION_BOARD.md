@@ -920,13 +920,16 @@ and reverse state-transfer receipts, monotonic PostgreSQL protection truth,
 bounded no-follow filesystem materialization, and the disposable exact-profile
 Jenkins -> McLoving -> Jenkins rehearsal are documented in
 `docs/architecture/STATE_TRANSFER_V1.md`. The accepted successor rehearsal
+also removes direct runtime receipt/record/protection writes, derives change
+predicates only from an applied SCM checkpoint on a live fenced attempt, and
+quota-bounds canonical serialization before cloning or secondary processing. It
 materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its source, transform, and reverse manifest SHA-256 values are
-`26176f86b6c5fadd935b26df9bb3db4aff57f3ba60122510042a0e1880baa83c`,
-`f5c92cbe53316e960faa67ad35502d1ebda1f227b238f8e50432ff9a603dc964`,
-and `d04806bb0e7a41ce1c8c0a893c2a6764b010065000a4b1ec17941c68fa651c17`.
+`07b0640ebb47092803448de3f09a5bed7f2cf8de2003bce5626fa0593479a290`,
+`ea4972b69ada868d74764a1f66f16cd1e4c14441207dbe4adc721caced27a7d6`,
+and `6b4d8a4445d40c28250ea70d5e992b9c387cb228606a826e352b882ad92abcaf`.
 The source runtime is retained by default for the dependent phases and removed
 only by an explicit cleanup flag. `MIG-005` is next on its own branch
 and no longer waits for unrelated state-transfer work; both join only through

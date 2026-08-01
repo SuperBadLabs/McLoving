@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use mcloving_state_transfer::{
     ChangePredicate, Digest, ExpectedBinding, LegalHold, PredicateDecision, Protection, ScmState,
     StateBundle, TransferBinding, TransferDirection, canonical_binding_bytes, canonical_bytes,
-    evaluate_change_predicate, record_provenance, sha256, transform,
+    evaluate_change_predicate, record_provenance, sha256, transform, validate_scm_checkout,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
 use uuid::Uuid;
@@ -12,6 +13,14 @@ use uuid::Uuid;
 use super::{Store, StoreError, audit, validate_audit_actor};
 
 const STATE_TRANSFER_RECORD_INSERT_BATCH: usize = 512;
+const SCM_CHECKOUT_EVIDENCE_SCHEMA_V1: &str = "mcloving.scm-checkout-evidence/v1";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScmCheckoutEvidence {
+    schema: String,
+    checkout: ScmState,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StateTransferReceipt {
@@ -22,6 +31,13 @@ pub struct StateTransferReceipt {
     pub bundle_digest: Digest,
     pub record_count: usize,
     pub protection_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScmCheckoutEvidenceRef<'a> {
+    pub attempt_id: Uuid,
+    pub fence: i64,
+    pub effect_key: &'a str,
 }
 
 impl Store {
@@ -345,17 +361,83 @@ impl Store {
         Ok(bundle)
     }
 
-    /// Evaluates a new checkout against the exact SCM baseline in one committed
-    /// transfer receipt. The returned decision is therefore derived from
-    /// destination truth, not caller-supplied copies of prior history.
+    /// Evaluates a fenced agent's durable SCM checkout evidence against the
+    /// exact baseline in one committed transfer receipt.
+    ///
+    /// Raw caller-supplied change records are never execution authority. The
+    /// checkout must be the immutable payload of an `applied`, idempotent effect
+    /// on a currently leased attempt in the active restore epoch.
     pub async fn state_transfer_change_decision(
         &self,
         organization_id: Uuid,
         receipt_id: Uuid,
         source_job_id: &str,
-        next_checkout: &ScmState,
+        checkout_evidence: ScmCheckoutEvidenceRef<'_>,
         predicate: &ChangePredicate,
     ) -> Result<PredicateDecision, StoreError> {
+        if checkout_evidence.fence < 0
+            || checkout_evidence.effect_key.is_empty()
+            || checkout_evidence.effect_key.len() > 256
+        {
+            return Err(StoreError::InvalidStateTransfer(
+                "SCM checkout evidence binding is invalid".to_owned(),
+            ));
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let evidence_row = sqlx::query_as::<_, (Value, Vec<u8>)>(
+            "SELECT e.payload, e.payload_digest
+             FROM attempt_effects AS e
+             JOIN attempts AS a
+               ON a.organization_id = e.organization_id
+              AND a.id = e.attempt_id
+             CROSS JOIN controller_metadata AS m
+             WHERE e.organization_id = $1
+               AND e.attempt_id = $2
+               AND e.fence = $3
+               AND e.effect_key = $4
+               AND e.effect_class = 'idempotent'
+               AND e.status = 'applied'
+               AND a.fence = e.fence
+               AND a.restore_epoch = m.restore_epoch
+               AND a.status IN ('running', 'finalizing')
+               AND a.lease_expires_at > clock_timestamp()",
+        )
+        .bind(organization_id)
+        .bind(checkout_evidence.attempt_id)
+        .bind(checkout_evidence.fence)
+        .bind(checkout_evidence.effect_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        let (evidence_value, stored_evidence_digest) = evidence_row.ok_or_else(|| {
+            StoreError::InvalidStateTransfer(
+                "SCM checkout evidence is not an active fenced agent result".to_owned(),
+            )
+        })?;
+        let evidence_bytes = serde_json::to_vec(&evidence_value).map_err(|error| {
+            StoreError::InvalidStateTransfer(format!(
+                "SCM checkout evidence cannot be canonicalized: {error}"
+            ))
+        })?;
+        if sha256(&evidence_bytes).as_slice() != stored_evidence_digest.as_slice() {
+            return Err(StoreError::InvalidStateTransfer(
+                "SCM checkout evidence digest is invalid".to_owned(),
+            ));
+        }
+        let evidence: ScmCheckoutEvidence =
+            serde_json::from_value(evidence_value).map_err(|error| {
+                StoreError::InvalidStateTransfer(format!(
+                    "SCM checkout evidence payload is invalid: {error}"
+                ))
+            })?;
+        if evidence.schema != SCM_CHECKOUT_EVIDENCE_SCHEMA_V1 {
+            return Err(StoreError::InvalidStateTransfer(
+                "SCM checkout evidence schema is unsupported".to_owned(),
+            ));
+        }
+        let next_checkout = &evidence.checkout;
+        validate_scm_checkout(next_checkout)
+            .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?;
         let canonical = self
             .state_transfer_bundle(organization_id, receipt_id)
             .await?

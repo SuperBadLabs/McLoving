@@ -7,11 +7,12 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::{self, Write},
     path::Path,
 };
 
 #[cfg(target_os = "linux")]
-use std::{fs::File, io::Write};
+use std::fs::File;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -20,6 +21,7 @@ pub const STATE_TRANSFER_SCHEMA_V1: &str = "mcloving.state-transfer/v1";
 pub const MAX_TRANSFER_JOBS: usize = 10_000;
 pub const MAX_TRANSFER_RECORDS: usize = 1_000_000;
 pub const MAX_CANONICAL_BUNDLE_BYTES: usize = 64 * 1024 * 1024;
+pub const MAX_CANONICAL_BINDING_BYTES: usize = 1024 * 1024;
 pub const MAX_FILESYSTEM_ENTRIES_PER_OBJECT: usize = 1_000_000;
 pub const MAX_FILESYSTEM_PATH_BYTES: usize = 4_096;
 pub type Digest = [u8; 32];
@@ -487,7 +489,7 @@ pub fn transform(
         ));
     }
     let bundle_digest = sha256(&canonical_bytes);
-    let binding_digest = sha256(&canonical_bytes_of(&transformed.binding)?);
+    let binding_digest = sha256(&canonical_binding_bytes(&transformed.binding)?);
     Ok(TransferPlan {
         bundle: transformed,
         binding_digest,
@@ -523,11 +525,19 @@ fn protected_subjects(bundle: &StateBundle) -> BTreeSet<Digest> {
 }
 
 pub fn canonical_bytes(bundle: &StateBundle) -> Result<Vec<u8>, TransferError> {
-    canonical_bytes_of(bundle)
+    canonical_bytes_of(
+        bundle,
+        MAX_CANONICAL_BUNDLE_BYTES,
+        "canonical bundle exceeds byte limit",
+    )
 }
 
 pub fn canonical_binding_bytes(binding: &TransferBinding) -> Result<Vec<u8>, TransferError> {
-    canonical_bytes_of(binding)
+    canonical_bytes_of(
+        binding,
+        MAX_CANONICAL_BINDING_BYTES,
+        "canonical binding exceeds byte limit",
+    )
 }
 
 /// Evaluates the transferred canonical change entries used by Jenkins
@@ -574,6 +584,12 @@ pub fn evaluate_change_predicate(
         selected: !matched.is_empty(),
         matched_change_record_ids: matched,
     })
+}
+
+/// Validates one independently authenticated checkout payload before any of
+/// its change records are allowed to influence predicate execution.
+pub fn validate_scm_checkout(checkout: &ScmState) -> Result<(), TransferError> {
+    validate_scm(checkout, &mut BTreeMap::new())
 }
 
 /// Returns all record-level provenance in canonical record-ID order.
@@ -890,8 +906,49 @@ fn materialization_std_io(label: &str, error: std::io::Error) -> TransferError {
     TransferError::Materialization(format!("{label}: {error}"))
 }
 
-fn canonical_bytes_of<T: Serialize>(value: &T) -> Result<Vec<u8>, TransferError> {
-    serde_json::to_vec(value).map_err(|error| TransferError::Serialization(error.to_string()))
+struct LimitedCanonicalWriter {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    exceeded: bool,
+}
+
+impl Write for LimitedCanonicalWriter {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(input.len())
+            .ok_or_else(|| io::Error::other("canonical byte count overflow"))?;
+        if next > self.max_bytes {
+            self.exceeded = true;
+            return Err(io::Error::other("canonical byte limit exceeded"));
+        }
+        self.bytes.extend_from_slice(input);
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn canonical_bytes_of<T: Serialize>(
+    value: &T,
+    max_bytes: usize,
+    limit_message: &'static str,
+) -> Result<Vec<u8>, TransferError> {
+    let mut writer = LimitedCanonicalWriter {
+        bytes: Vec::new(),
+        max_bytes,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if writer.exceeded {
+            return Err(TransferError::InvalidField(limit_message.to_owned()));
+        }
+        return Err(TransferError::Serialization(error.to_string()));
+    }
+    Ok(writer.bytes)
 }
 
 fn validate_bundle(bundle: &StateBundle, expected: &ExpectedBinding) -> Result<(), TransferError> {
@@ -1844,4 +1901,20 @@ fn validate_digest(digest: Digest, field: &str) -> Result<(), TransferError> {
         return Err(TransferError::InvalidField(field.to_owned()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod canonical_writer_tests {
+    use super::{TransferError, canonical_bytes_of};
+
+    #[test]
+    fn canonical_writer_fails_at_the_bound_without_materializing_the_tail() {
+        let value = vec!["0123456789"; 64];
+        assert_eq!(
+            canonical_bytes_of(&value, 32, "bounded canonical payload"),
+            Err(TransferError::InvalidField(
+                "bounded canonical payload".to_owned()
+            ))
+        );
+    }
 }

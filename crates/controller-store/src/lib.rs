@@ -32,7 +32,7 @@ pub use product::{
 };
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
 pub use security::{CredentialDelivery, NewCredentialGrant, NewEnvironmentApproval};
-pub use state_transfer::StateTransferReceipt;
+pub use state_transfer::{ScmCheckoutEvidenceRef, StateTransferReceipt};
 pub use test_results::{
     DEFAULT_MAX_JUNIT_BYTES, DEFAULT_MAX_JUNIT_CASES, DEFAULT_MAX_JUNIT_SUITES, JunitLimits,
     NormalizedTestCase, NormalizedTestReport, NormalizedTestSuite,

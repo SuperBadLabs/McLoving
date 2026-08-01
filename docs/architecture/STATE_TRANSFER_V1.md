@@ -59,12 +59,15 @@ that input and every binding match, monotonically merges destination
 retention and active holds before publishing the receipt, appends audit truth,
 and writes the transactional outbox. Database triggers deny receipt/record
 mutation, protection deletion, deadline shortening, hold omission, and hold
-substitution even if an internal caller bypasses the Rust API. Receipt insertion
-also binds the raw canonical bundle and binding hashes to every indexed binding
-column; a deferred constraint requires the exact record-provenance set and
-the exact effective-protection set plus matching immutable audit proof before
-commit, so a direct runtime insert cannot publish partial or counterfeit
-committed truth. Provenance is inserted in bounded 512-row batches; once the
+substitution even if a privileged migration caller bypasses the Rust API. The
+runtime tenant has read-only access to transfer receipts, records, and
+protections; it has no direct insert/update authority. The separately
+privileged import path first applies the complete Rust schema and semantic
+validator. Receipt insertion then binds the raw canonical bundle and binding
+hashes to every indexed binding column, and a deferred constraint requires the
+exact record-provenance set and exact effective-protection set plus matching
+immutable audit proof before commit. Provenance is inserted in bounded 512-row
+batches; once the
 matching immutable audit proof seals a receipt, a separate trigger rejects every
 later provenance append. The constraint flattens each canonical record and
 protection set once before set comparison; receipt validation is linear rather
@@ -79,9 +82,12 @@ declared runtime root to the supplied Jenkins home, re-hashes the complete live
 build/workspace trees and job configuration, and only then deterministically
 constructs the canonical input bundle. A post-export live-configuration
 substitution is rejected before bundle construction. The rehearsal then reloads
-and independently revalidates the committed receipt, resolves the exact prior SCM
-checkout, checks that the delivered revision continues it, and derives the
-change predicate decision from those committed records. It then executes the
+and independently revalidates the committed receipt and resolves the exact prior
+SCM checkout. New change records are accepted only from an immutable `applied`,
+idempotent effect checkpoint on a live fenced attempt in the current restore
+epoch; conflicting payload replay is denied. The controller checks that this
+authenticated checkout continues the transferred revision and derives the
+change predicate decision from the durable evidence. It then executes the
 first McLoving build through the real controller state machine with
 external-effect authority explicitly false and exports the resulting history
 through the same versioned reverse transform.
@@ -116,12 +122,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `f867f9d7230a89781dd1a6322f249020630d5e7f4e3ad1bf9dc2624bc08c07b2`;
-- source-evidence manifest SHA-256 `26176f86b6c5fadd935b26df9bb3db4aff57f3ba60122510042a0e1880baa83c`;
-- forward bundle SHA-256 `8755955c075b9a17b2fb93f74ca8e22b71df657f8d702611189f4578cc371994`;
-- reverse bundle SHA-256 `addc0e38649de868d70e7eaf03a7f736e9327347680d1e70249e405a6d42b40a`;
-- reverse-evidence manifest SHA-256 `d04806bb0e7a41ce1c8c0a893c2a6764b010065000a4b1ec17941c68fa651c17`;
-- sealed transform-evidence manifest SHA-256 `f5c92cbe53316e960faa67ad35502d1ebda1f227b238f8e50432ff9a603dc964`.
+- transform binary SHA-256 `ccb7876e841e8449e88fad5d2ebd485b68ddcf9ed2c2d43330c4ad37a781cc68`;
+- source-evidence manifest SHA-256 `07b0640ebb47092803448de3f09a5bed7f2cf8de2003bce5626fa0593479a290`;
+- forward bundle SHA-256 `a133a2c23ea1368a74f2f762d72665f1ce665e0246cde1323ecad1f0e35169e3`;
+- reverse bundle SHA-256 `eb73b5ae55a62b6005539c1ac0769cc65b63844f31e61df0fa9300fbdc77f0a6`;
+- reverse-evidence manifest SHA-256 `6b4d8a4445d40c28250ea70d5e992b9c387cb228606a826e352b882ad92abcaf`;
+- sealed transform-evidence manifest SHA-256 `ea4972b69ada868d74764a1f66f16cd1e4c14441207dbe4adc721caced27a7d6`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 116 record-provenance rows, nine effective
