@@ -5,18 +5,18 @@ use std::path::{Path, PathBuf};
 
 use mcloving_controller_store::{
     ClaimRequest, DagDependency, DagNodeKind, DependencyCondition, NewDagBuild, NewDagNode,
-    NewLogChunk, ObjectStatus, ScmCheckoutEvidenceRef, StateTransferReceipt, Store, StoreError,
-    TerminalOutcome,
+    NewLogChunk, ObjectStatus, RetryDecision, ScmCheckoutEvidenceRef, StateTransferReceipt, Store,
+    StoreError, TerminalOutcome,
 };
 use mcloving_state_transfer::{
-    AttemptRetryReason, AttemptRetryState, AttemptState, BuildResult, BuildState, ChangeEntry,
-    ChangePredicate, ConflictPolicy, DataBinding, DataClassification, Digest, ExpectedBinding,
-    FilesystemEntry, FilesystemEntryKind, GraphDependencyCondition, GraphDependencyState,
-    GraphNodeState, JobState, LegalHold, LogState, MaterializationLimits, ObjectKind, ObjectState,
-    PersistentDependency, Protection, RecordProvenance, RetentionPolicy, RetrievalMetadata,
-    STATE_TRANSFER_SCHEMA_V1, ScmState, StateBundle, SystemIdentity, TransferBinding,
-    TransferDirection, canonical_bytes, materialize_filesystem_entries, record_provenance, sha256,
-    transform,
+    AttemptRetryReason, AttemptRetryState, AttemptState, AttemptTerminalReason, BuildResult,
+    BuildState, ChangeEntry, ChangePredicate, ConflictPolicy, DataBinding, DataClassification,
+    Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind, GraphDependencyCondition,
+    GraphDependencyState, GraphNodeState, JobState, LegalHold, LogState, MaterializationLimits,
+    ObjectKind, ObjectState, PersistentDependency, Protection, RecordProvenance, RetentionPolicy,
+    RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState, StateBundle, SystemIdentity,
+    TransferBinding, TransferDirection, canonical_bytes, materialize_filesystem_entries,
+    record_provenance, sha256, transform,
 };
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
@@ -917,7 +917,8 @@ fn parse_jenkins_workflow(workflow: &Value, number: u64) -> Result<Vec<GraphNode
                 ordinal: 1,
                 retry: None,
                 result,
-                started_at_unix_ms: start,
+                terminal_reason: None,
+                started_at_unix_ms: Some(start),
                 ended_at_unix_ms: start
                     .checked_add(duration)
                     .ok_or("Jenkins workflow stage time overflow")?,
@@ -1175,7 +1176,7 @@ async fn run_effect_free_build(
             required_capabilities: vec!["linux".to_owned()],
             required_platform: "linux".to_owned(),
             required_trust_pool: "isolated-rehearsal".to_owned(),
-            priority: 0,
+            priority: if index == STAGES.len() - 1 { 0 } else { 10 },
             execution_spec: json!({
                 "external_effect_authority": false,
                 "stage_path": node_key,
@@ -1200,6 +1201,76 @@ async fn run_effect_free_build(
     let checkout = inputs.checkouts.first().ok_or_else(|| {
         StoreError::InvalidStateTransfer("build three has no checkout input".to_owned())
     })?;
+    let failed_checkout = store
+        .claim_next(&ClaimRequest {
+            organization_id,
+            scheduler_id: "mig005a-scheduler".to_owned(),
+            agent_id: "mig005a-agent".to_owned(),
+            capabilities: vec!["linux".to_owned(), "platform:linux".to_owned()],
+            trust_pool: "isolated-rehearsal".to_owned(),
+            lease_seconds: 30,
+            fairness_seed: 0,
+        })
+        .await?
+        .ok_or_else(|| StoreError::InvalidStateTransfer("checkout was not claimable".to_owned()))?;
+    let checkout_node = admission
+        .nodes
+        .get("checkout")
+        .ok_or_else(|| StoreError::InvalidStateTransfer("checkout was not admitted".to_owned()))?;
+    if failed_checkout.node_id != checkout_node.node_id
+        || !store
+            .accept_offer(
+                organization_id,
+                failed_checkout.attempt_id,
+                failed_checkout.fence,
+                failed_checkout.restore_epoch,
+                "mig005a-agent",
+            )
+            .await?
+        || !store
+            .mark_attempt_running(
+                organization_id,
+                failed_checkout.attempt_id,
+                failed_checkout.fence,
+                failed_checkout.restore_epoch,
+                "mig005a-agent",
+            )
+            .await?
+        || !store
+            .finalize_attempt(
+                organization_id,
+                failed_checkout.attempt_id,
+                failed_checkout.fence,
+                failed_checkout.restore_epoch,
+                "mig005a-agent",
+                TerminalOutcome::Failed,
+                json!({"reason": "migration_retry_probe"}),
+            )
+            .await?
+    {
+        return Err(StoreError::InvalidStateTransfer(
+            "checkout retry probe could not reach a durable failure".to_owned(),
+        ));
+    }
+    if !matches!(
+        store
+            .schedule_retry(
+                organization_id,
+                failed_checkout.attempt_id,
+                2,
+                "migration retry-history rehearsal",
+            )
+            .await?,
+        RetryDecision::Scheduled {
+            ordinal: 2,
+            created: true,
+            ..
+        }
+    ) {
+        return Err(StoreError::InvalidStateTransfer(
+            "checkout retry probe did not schedule a new generation".to_owned(),
+        ));
+    }
     let mut decision = None;
     let mut checkout_attempt = None;
     for stage in STAGES {
@@ -1472,12 +1543,6 @@ async fn run_effect_free_build(
                     "stage {stage} attempt ordinal is not positive"
                 ))
             })?;
-            let attempt_started = attempt.started_at_unix_ms.ok_or_else(|| {
-                StoreError::InvalidStateTransfer(format!(
-                    "stage {stage} attempt {} has no running time",
-                    attempt.ordinal
-                ))
-            })?;
             let attempt_ended = attempt.completed_at_unix_ms.ok_or_else(|| {
                 StoreError::InvalidStateTransfer(format!(
                     "stage {stage} attempt {} has no terminal time",
@@ -1530,6 +1595,15 @@ async fn run_effect_free_build(
             let attempt_bytes = serde_json::to_vec(attempt).map_err(|error| {
                 StoreError::InvalidStateTransfer(format!("attempt serialization failed: {error}"))
             })?;
+            let terminal_reason = match attempt
+                .terminal_summary
+                .as_ref()
+                .and_then(|summary| summary.get("reason"))
+                .and_then(Value::as_str)
+            {
+                Some("fail_fast_skipped") => Some(AttemptTerminalReason::FailFastSkipped),
+                _ => None,
+            };
             exported_attempts.push(AttemptState {
                 record: record(
                     &format!("attempt:stateful:3:{stage}:{}", attempt.ordinal),
@@ -1538,7 +1612,8 @@ async fn run_effect_free_build(
                 ordinal,
                 retry,
                 result: build_result(&attempt.status)?,
-                started_at_unix_ms: attempt_started,
+                terminal_reason,
+                started_at_unix_ms: attempt.started_at_unix_ms,
                 ended_at_unix_ms: attempt_ended,
                 audit_digest: sha256(&attempt_bytes),
             });
@@ -1657,7 +1732,7 @@ async fn run_effect_free_build(
         started_at_unix_ms: graph_nodes
             .iter()
             .flat_map(|node| node.attempts.iter())
-            .map(|attempt| attempt.started_at_unix_ms)
+            .filter_map(|attempt| attempt.started_at_unix_ms)
             .min()
             .ok_or_else(|| StoreError::InvalidStateTransfer("build has no attempt".to_owned()))?,
         ended_at_unix_ms,
@@ -1871,7 +1946,7 @@ mod tests {
             }]
         );
         assert_eq!(graph[1].result, BuildResult::NotBuilt);
-        assert_eq!(graph[0].attempts[0].started_at_unix_ms, 1000);
+        assert_eq!(graph[0].attempts[0].started_at_unix_ms, Some(1000));
         assert_eq!(graph[0].attempts[0].ended_at_unix_ms, 1025);
     }
 

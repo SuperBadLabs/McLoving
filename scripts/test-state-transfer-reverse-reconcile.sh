@@ -260,11 +260,12 @@ jq -r '
   .jobs[] | select(.source_job_id == "stateful")
   | .builds[] | select(.number == 3)
   | .graph_nodes[]
-  | select(.attempts | length == 1)
+  | (.attempts | map(select(.started_at_unix_ms != null)) | last) as $executing
+  | select($executing != null)
   | [
       .stage_path,
-      .attempts[0].started_at_unix_ms,
-      .attempts[0].ended_at_unix_ms
+      $executing.started_at_unix_ms,
+      $executing.ended_at_unix_ms
     ]
   | @tsv
 ' "$reverse_bundle" > "$evidence/canonical-workflow-timing.tsv"
@@ -394,11 +395,13 @@ jq --sort-keys '
     end;
   [
     .graph_nodes[]
+    | (.attempts | map(select(.started_at_unix_ms != null)) | last) as $executing
+    | select($executing != null)
     | {
         name: .stage_path,
         status: (.result | jenkins_status),
-        startTimeMillis: .attempts[0].started_at_unix_ms,
-        durationMillis: (.attempts[0].ended_at_unix_ms - .attempts[0].started_at_unix_ms)
+        startTimeMillis: $executing.started_at_unix_ms,
+        durationMillis: ($executing.ended_at_unix_ms - $executing.started_at_unix_ms)
       }
   ] | sort_by(.name)
 ' "$evidence/expected-build-3.json" > "$evidence/expected-build-3-workflow.json"
@@ -411,6 +414,15 @@ cmp "$evidence/expected-build-3-workflow.json" \
 podman unshare cp "$job_home/builds/3/mcloving-state-transfer-build.json" \
   "$evidence/observed-build-3.json"
 cmp "$evidence/expected-build-3.json" "$evidence/observed-build-3.json"
+jq --sort-keys '
+  [.graph_nodes[] | select(.attempts | length > 1) | {stage_path, attempts}]
+' "$evidence/expected-build-3.json" > "$evidence/expected-build-3-retry-history.json"
+jq --sort-keys '
+  [.graph_nodes[] | select(.attempts | length > 1) | {stage_path, attempts}]
+' "$evidence/observed-build-3.json" > "$evidence/observed-build-3-retry-history.json"
+test "$(jq 'length' "$evidence/expected-build-3-retry-history.json")" = 4
+cmp "$evidence/expected-build-3-retry-history.json" \
+  "$evidence/observed-build-3-retry-history.json"
 jq --sort-keys '.protection' "$evidence/expected-build-3.json" \
   > "$evidence/expected-build-3-protection.json"
 podman unshare cp "$job_home/builds/3/mcloving-state-transfer-protection.json" \

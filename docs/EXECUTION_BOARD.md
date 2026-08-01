@@ -931,13 +931,17 @@ sealed native workflow API rather than fabricated stage names or build-wide
 timestamps. McLoving build 3 is a five-node PostgreSQL DAG whose graph,
 per-attempt timestamps and terminal outcomes, committed logs, available-artifact
 inventory, and fenced checkout are reread from controller truth before export.
-Attempt starts come from durable `attempt.running` events rather than admission
-timestamps, and logs are exported in the global controller commit-cursor order.
+Executing-attempt starts come from durable `attempt.running` events rather than
+admission timestamps. Fail-fast-skipped descendants are terminal-only attempts
+with no fabricated start time, and logs are exported in the global controller
+commit-cursor order.
 Graph dependencies retain their exact `succeeded` or `completed` condition,
 and imported Jenkins successors after observed non-successful stages use
 `completed` rather than fabricated `succeeded` edges. Child attempts cannot
 predate the first parent attempt that satisfies their exact condition;
-`succeeded` edges require the final parent attempt to be successful. Every retry
+`succeeded` edges require the final parent attempt to be successful, and child
+chronology uses the first actually executing attempt rather than an earlier
+terminal-only skipped placeholder. Every retry
 names its immediately preceding attempt and reason: `failed` for failed
 predecessors and `fail_fast_skipped` for fail-fast-aborted predecessors.
 Missing, reordered, mismatched, and post-success lineage fails closed. Later
@@ -946,21 +950,22 @@ descendants.
 The reverse bridge verifies the full canonical build record byte-for-byte and
 independently checks Jenkins-native build fields, workflow-stage semantics,
 exact per-stage start times and durations, SCM changelog, log payloads,
-artifacts, and a dedicated persisted
+artifacts, the complete canonical retry sidecar, four exact multi-attempt
+histories, and a dedicated persisted
 retention/legal-hold boundary. Actual record collection also fails before
 cloning any record beyond the one-million-record bound. It
 materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its exact transform binary SHA-256 is
-`347b07fee50e3ea485551af367ba5a9884cbc16e56bd694bca2782022280e4ab`.
+`3a6025f4726dc361f0be7221fa25d435b76801456eefbaec4e542dbdc52c81a8`.
 Its source, transform, and reverse manifest SHA-256 values are
-`6ea4167dbc1eeb616208d103c975803e4c7b56513894c2df57c22a60b7c8a553`,
-`1ace759d9549dcb4af46b2b5b811a598767c69e6a6995b042d2ab6099f05a5d8`,
-and `960eeacef48c7be63eaa7556db457ce1ba3443b29abcfaaeab938d9cd6981f12`;
+`a2b9db3b55c7d9bc1bf44482612cbb220921f06f2a8aef20664987f135a8186f`,
+`9998de7a455acd3a774bf595c6275ea0771afcd4f6cdd7f475e3c54341424749`,
+and `058ab1164d8d3c2396a0af49cae93ab98e80566bb585d6e788874654a605e30f`;
 the forward and reverse bundle SHA-256 values are
-`93e15df99d037fdf8aabee274fcf7bcb5efe8665c05be87e0caca43540ca78f9`
-and `60a2119091b8d140dd46a8c8ff1a962ffea2d8598a9bf5e954bfa70c085823ba`.
+`7101505b25759c5bb12e08718014fb96dd062d3f594dd48fad7b1dfd25549878`
+and `fc9e3774ecf2ff3461f5460768422a9cb7c83f9185cff21c183e5e7f9af6bcde`.
 An injected post-install failure restored repository, build, permalink, and
 next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed

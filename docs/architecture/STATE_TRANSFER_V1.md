@@ -46,8 +46,11 @@ substituted semantic content. Artifact and retained-workspace logical names are
 unique within their destination lists, and each object kind must match its
 containing list. Every artifact's producer build number must also match the
 build that contains it; retained-workspace provenance remains job-scoped.
-Graph-node attempts are contiguous, ordered, non-overlapping,
-and bounded by their owning build's start and end timestamps.
+Graph-node attempts are contiguous and bounded by their owning build. Executing
+attempts carry durable running timestamps and are ordered and non-overlapping.
+A fail-fast-skipped descendant instead carries an explicit terminal-only
+`fail_fast_skipped` reason and no fabricated start time; it may be reopened only
+by a retry that names that exact skipped attempt.
 
 ## Persistence and reconciliation
 
@@ -124,18 +127,18 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `347b07fee50e3ea485551af367ba5a9884cbc16e56bd694bca2782022280e4ab`;
-- source-evidence manifest SHA-256 `6ea4167dbc1eeb616208d103c975803e4c7b56513894c2df57c22a60b7c8a553`;
-- forward bundle SHA-256 `93e15df99d037fdf8aabee274fcf7bcb5efe8665c05be87e0caca43540ca78f9`;
-- reverse bundle SHA-256 `60a2119091b8d140dd46a8c8ff1a962ffea2d8598a9bf5e954bfa70c085823ba`;
-- reverse-evidence manifest SHA-256 `960eeacef48c7be63eaa7556db457ce1ba3443b29abcfaaeab938d9cd6981f12`;
-- sealed transform-evidence manifest SHA-256 `1ace759d9549dcb4af46b2b5b811a598767c69e6a6995b042d2ab6099f05a5d8`;
-- full imported-build verification receipt SHA-256 `9203e08bfa48952b47d17dacb465890859fc225aa15403196ee0e33c6ff519e6`;
+- transform binary SHA-256 `3a6025f4726dc361f0be7221fa25d435b76801456eefbaec4e542dbdc52c81a8`;
+- source-evidence manifest SHA-256 `a2b9db3b55c7d9bc1bf44482612cbb220921f06f2a8aef20664987f135a8186f`;
+- forward bundle SHA-256 `7101505b25759c5bb12e08718014fb96dd062d3f594dd48fad7b1dfd25549878`;
+- reverse bundle SHA-256 `fc9e3774ecf2ff3461f5460768422a9cb7c83f9185cff21c183e5e7f9af6bcde`;
+- reverse-evidence manifest SHA-256 `058ab1164d8d3c2396a0af49cae93ab98e80566bb585d6e788874654a605e30f`;
+- sealed transform-evidence manifest SHA-256 `9998de7a455acd3a774bf595c6275ea0771afcd4f6cdd7f475e3c54341424749`;
+- full imported-build verification receipt SHA-256 `4af88a3211b3011f9ef1d32d2cb33394278ae6d3deb7e330154e2733ef168d1d`;
 - imported protection-record SHA-256 `ae301c2fe1fa002fcc1d9b583ccd9a56f8c6a50f59911545356b5affcd0b285e`.
 
 The exact database contained three receipts (destination protection seed,
-forward import, reverse import), 143 record-provenance rows, nine effective
-protection rows, three fenced SCM-evidence rows, and 37 outbox rows. Exact
+forward import, reverse import), 147 record-provenance rows, nine effective
+protection rows, three fenced SCM-evidence rows, and 43 outbox rows. Exact
 replay reused the forward receipt. Jenkins workflow stages came from sealed
 native workflow responses. McLoving build 3 was exported only after rereading
 its durable five-node graph, actual `attempt.running` event times, globally
@@ -148,12 +151,18 @@ parent attempt and a `succeeded` edge to the final successful parent attempt;
 it rejects a child that starts before that event or has no successful parent
 attempt. Every retry explicitly names its immediately preceding attempt and its
 reason. A failed predecessor requires `failed`; an aborted predecessor is
-eligible only as `fail_fast_skipped`; missing, reordered, mismatched, and
-post-success lineage fails closed. Later failed parent retries on `completed`
-edges therefore do not invalidate already-admitted descendants. The reverse
-Jenkins import matched the full canonical record and independently verified
-native build/workflow/log/artifact/SCM semantics; all five native workflow
-stage start times and durations matched the canonical attempt intervals exactly.
+eligible only as terminal-only `fail_fast_skipped`; missing, reordered,
+mismatched, fabricated-running, and post-success lineage fails closed. The
+rehearsal exhausts checkout once, then operator-retries it: checkout records
+`failed -> succeeded`, and three descendants each record terminal-only
+`fail_fast_skipped -> succeeded`. Dependency chronology ignores the skipped
+placeholder and binds to the child's first executing retry. Later failed parent
+retries on `completed` edges therefore do not invalidate already-admitted
+descendants. The reverse Jenkins import matched the full canonical record and
+independently verified native build/workflow/log/artifact/SCM semantics; the
+native workflow uses each stage's final executing attempt interval while an
+exact sidecar and dedicated receipt preserve and compare all four retry
+histories byte-for-byte.
 The imported shorter/expired source protections were strengthened to deadline
 `2000000000000`; three overlapping active holds survived; a direct SQL hold
 release was denied.

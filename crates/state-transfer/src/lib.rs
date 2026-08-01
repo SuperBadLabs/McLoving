@@ -254,7 +254,8 @@ pub struct AttemptState {
     pub ordinal: u32,
     pub retry: Option<AttemptRetryState>,
     pub result: BuildResult,
-    pub started_at_unix_ms: i64,
+    pub terminal_reason: Option<AttemptTerminalReason>,
+    pub started_at_unix_ms: Option<i64>,
     pub ended_at_unix_ms: i64,
     pub audit_digest: Digest,
 }
@@ -269,6 +270,12 @@ pub struct AttemptRetryState {
 #[serde(rename_all = "snake_case")]
 pub enum AttemptRetryReason {
     Failed,
+    FailFastSkipped,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptTerminalReason {
     FailFastSkipped,
 }
 
@@ -1421,19 +1428,36 @@ fn validate_graph_nodes(
                     ));
                 }
             }
-            validate_time_range(
-                build_started_at_unix_ms,
-                attempt.started_at_unix_ms,
-                attempt.ended_at_unix_ms,
-                "attempt timing",
-            )?;
+            match (attempt.started_at_unix_ms, attempt.terminal_reason) {
+                (Some(started_at_unix_ms), None) => validate_time_range(
+                    build_started_at_unix_ms,
+                    started_at_unix_ms,
+                    attempt.ended_at_unix_ms,
+                    "attempt timing",
+                )?,
+                (None, Some(AttemptTerminalReason::FailFastSkipped))
+                    if attempt.result == BuildResult::Aborted =>
+                {
+                    if attempt.ended_at_unix_ms < build_started_at_unix_ms {
+                        return Err(TransferError::InvalidField(
+                            "terminal-only attempt must end inside its build window".to_owned(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(TransferError::InvalidField(
+                        "attempt execution timing and terminal reason are inconsistent".to_owned(),
+                    ));
+                }
+            }
             if attempt.ended_at_unix_ms > build_ended_at_unix_ms {
                 return Err(TransferError::InvalidField(
                     "attempt timing must remain within its build window".to_owned(),
                 ));
             }
-            if previous_attempt_end
-                .is_some_and(|ended_at_unix_ms| attempt.started_at_unix_ms < ended_at_unix_ms)
+            if let Some(started_at_unix_ms) = attempt.started_at_unix_ms
+                && previous_attempt_end
+                    .is_some_and(|ended_at_unix_ms| started_at_unix_ms < ended_at_unix_ms)
             {
                 return Err(TransferError::InvalidField(
                     "attempt timing must be ordered and non-overlapping".to_owned(),
@@ -1443,8 +1467,15 @@ fn validate_graph_nodes(
             validate_digest(attempt.audit_digest, "attempt audit digest")?;
             if let Some(next_attempt) = node.attempts.get(attempt_index + 1) {
                 let expected_reason = match attempt.result {
-                    BuildResult::Failed => AttemptRetryReason::Failed,
-                    BuildResult::Aborted => AttemptRetryReason::FailFastSkipped,
+                    BuildResult::Failed if attempt.terminal_reason.is_none() => {
+                        AttemptRetryReason::Failed
+                    }
+                    BuildResult::Aborted
+                        if attempt.terminal_reason
+                            == Some(AttemptTerminalReason::FailFastSkipped) =>
+                    {
+                        AttemptRetryReason::FailFastSkipped
+                    }
                     _ => {
                         return Err(TransferError::InvalidField(
                             "non-final graph attempt result is not retry-eligible".to_owned(),
@@ -1458,11 +1489,12 @@ fn validate_graph_nodes(
                 }
             }
         }
-        if node
-            .attempts
-            .last()
-            .is_some_and(|attempt| attempt.result != node.result)
-        {
+        if node.attempts.last().is_some_and(|attempt| {
+            attempt.result != node.result
+                && !(attempt.result == BuildResult::Aborted
+                    && attempt.terminal_reason == Some(AttemptTerminalReason::FailFastSkipped)
+                    && node.result == BuildResult::NotBuilt)
+        }) {
             return Err(TransferError::InvalidField(
                 "graph node result must match its final attempt result".to_owned(),
             ));
@@ -1489,7 +1521,11 @@ fn validate_graph_nodes(
                     "graph node parent must name another node in the same build".to_owned(),
                 ));
             };
-            if let Some(child_attempt) = node.attempts.first() {
+            if let Some(child_attempt) = node
+                .attempts
+                .iter()
+                .find(|attempt| attempt.started_at_unix_ms.is_some())
+            {
                 let satisfying_parent_attempt = match dependency.condition {
                     GraphDependencyCondition::Completed => parent.attempts.first(),
                     GraphDependencyCondition::Succeeded => parent
@@ -1506,7 +1542,9 @@ fn validate_graph_nodes(
                     ));
                 }
                 if satisfying_parent_attempt.is_some_and(|parent_attempt| {
-                    child_attempt.started_at_unix_ms < parent_attempt.ended_at_unix_ms
+                    child_attempt
+                        .started_at_unix_ms
+                        .is_some_and(|started_at| started_at < parent_attempt.ended_at_unix_ms)
                 }) {
                     return Err(TransferError::InvalidField(
                         "graph child attempt cannot start before its dependency is satisfied"
