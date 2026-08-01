@@ -1012,11 +1012,15 @@ SHA-256 values are
 `fb6ff37c33aba6288e9632e5d0993adf634d840c5fe21f6345dea5350f28e35b`
 and
 `f925714595d48efcf29ea9c64696a99cd361b6a4a9b847c2d96b807a63add309`.
+Both digests are compiled into the verifier and independently reject a joint
+ledger/lock/source substitution.
 The authoritative review-repaired external evidence is
-`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T111705Z-v6`; its
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T112304Z-v7`; its
 self-excluding manifest SHA-256 is
-`50bc61768682e225c6536d04db9dc940cf65a9ef164f956e336ca4f624448a5e`
-and covers 522 files. The non-recursive README predecessor
+`81ce26bd0335851b2e7deb7f292caa0a8cf725681afb947f5555a526c36cc44e`
+and covers 522 files. The complete-coverage predecessor
+`50bc61768682e225c6536d04db9dc940cf65a9ef164f956e336ca4f624448a5e`,
+non-recursive README predecessor
 `80032ba8401f0aa8b5ef974b043f5bb4172b887a5078842ee26bb982048a6f24`,
 review-repair predecessor
 `5387322af011b50fcb3d4200833d7a02b79a287518de4b55e62a412c33892517`,

@@ -17,6 +17,8 @@ The immutable prefetched source tree originated at
 `/sn8100/runs/mcloving/mig005-shared-libraries-20260801T103457Z/sources`.
 The authoritative verification receipt and its immutable predecessor ledger
 are recorded in `docs/architecture/JENKINS_SHARED_LIBRARY_ADMISSION_V1.md`.
+The verifier embeds the owner-reviewed raw and semantic ledger digests; changing
+the ledger and its adjacent lock together is rejected.
 
 Verification:
 

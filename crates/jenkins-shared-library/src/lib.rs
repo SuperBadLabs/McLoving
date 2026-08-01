@@ -17,6 +17,9 @@ use sha2::{Digest, Sha256};
 pub const SCHEMA: &str = "mcloving.jenkins.shared-library-ledger/v1";
 pub const LOCK_SCHEMA: &str = "mcloving.jenkins.shared-library-lock/v1";
 pub const LEDGER_ID: &str = "mario-jenkins-oracle-228-shared-libraries-v1";
+pub const LEDGER_SHA256: &str = "fb6ff37c33aba6288e9632e5d0993adf634d840c5fe21f6345dea5350f28e35b";
+pub const LEDGER_SEMANTIC_SHA256: &str =
+    "f925714595d48efcf29ea9c64696a99cd361b6a4a9b847c2d96b807a63add309";
 pub const INVENTORY_MANIFEST_SHA256: &str =
     "8cf682d06522b050c97c504c1a516f33463bd906e4ee10c3d6a1c38c03c6ec07";
 pub const JOB_GRAPH_SHA256: &str =
@@ -291,6 +294,12 @@ fn load_bundle(root: &Path) -> Result<(Ledger, LedgerReceipt), LibraryError> {
     let ledger = parse_and_validate(&ledger_bytes)?;
     let ledger_sha256 = sha256_hex(&ledger_bytes);
     let semantic_sha256 = semantic_digest(&ledger)?;
+    exact("ledger.sha256", &ledger_sha256, LEDGER_SHA256)?;
+    exact(
+        "ledger.semantic_sha256",
+        &semantic_sha256,
+        LEDGER_SEMANTIC_SHA256,
+    )?;
     let lock: LedgerLock = parse_yaml(&lock_bytes, "E_LOCK_SCHEMA")?;
     validate_lock(
         &lock,
@@ -1351,24 +1360,15 @@ mod tests {
         }
     }
 
-    fn write_bundle(root: &Path, ledger: &Ledger) {
-        let yaml = serde_saphyr::to_string(ledger).expect("serialize ledger");
-        fs::write(root.join("README.md"), "# Test ledger\n").expect("write readme");
-        fs::write(root.join("ledger.yaml"), &yaml).expect("write ledger");
-        let lock = format!(
-            "schema: {LOCK_SCHEMA}\nledger_id: {LEDGER_ID}\nledger_version: 1\nledger_sha256: {}\nsemantic_sha256: {}\nreadme_sha256: {}\ninventory_manifest_sha256: {INVENTORY_MANIFEST_SHA256}\ncorpus_manifest_sha256: {CORPUS_MANIFEST_SHA256}\nsource_manifest_sha256: {SOURCE_MANIFEST_SHA256}\n",
-            sha256_hex(yaml.as_bytes()),
-            semantic_digest(ledger).expect("semantic digest"),
-            sha256_hex(b"# Test ledger\n")
-        );
-        fs::write(root.join("ledger.lock.yaml"), lock).expect("write lock");
-    }
-
     #[test]
-    fn exact_bundle_is_accepted_and_extra_entry_is_rejected() {
+    fn exact_bundle_is_accepted_and_substitution_is_rejected() {
         let temp = TempDir::new().expect("tempdir");
-        let digests = vec![sha256_hex(b"fixture"); 25];
-        write_bundle(temp.path(), &ledger(&digests));
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let bundle =
+            workspace.join("migration/mario-jenkins-oracle-228/corpus-v1/shared-libraries-v1");
+        for name in BUNDLE_FILES {
+            fs::copy(bundle.join(name), temp.path().join(name)).expect("copy exact bundle");
+        }
         let receipt = verify_bundle(temp.path()).expect("valid bundle");
         assert_eq!(
             (
@@ -1383,6 +1383,31 @@ mod tests {
         assert_eq!(
             verify_bundle(temp.path()).expect_err("extra entry").code,
             "E_BUNDLE_ENTRY"
+        );
+        fs::remove_file(temp.path().join("unexpected")).expect("remove extra entry");
+
+        let ledger_path = temp.path().join("ledger.yaml");
+        let original = fs::read_to_string(&ledger_path).expect("read ledger");
+        let mutated = original.replacen(
+            "runtime-computed parameter revision",
+            "runtime-computed substituted revision",
+            1,
+        );
+        let candidate = parse_and_validate(mutated.as_bytes()).expect("valid substituted ledger");
+        let mutated_raw = sha256_hex(mutated.as_bytes());
+        let mutated_semantic = semantic_digest(&candidate).expect("semantic digest");
+        fs::write(&ledger_path, mutated).expect("write substituted ledger");
+        let lock_path = temp.path().join("ledger.lock.yaml");
+        let lock = fs::read_to_string(&lock_path)
+            .expect("read lock")
+            .replace(LEDGER_SHA256, &mutated_raw)
+            .replace(LEDGER_SEMANTIC_SHA256, &mutated_semantic);
+        fs::write(lock_path, lock).expect("write matching substituted lock");
+        assert_eq!(
+            verify_bundle(temp.path())
+                .expect_err("joint ledger and lock substitution")
+                .code,
+            "E_BINDING"
         );
     }
 
