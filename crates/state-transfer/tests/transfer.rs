@@ -471,6 +471,54 @@ fn graph_dependency_condition_is_canonical_and_round_trips() {
 }
 
 #[test]
+fn graph_child_attempt_cannot_predate_parent_completion() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![
+        GraphNodeState {
+            record: record("node:stateful:7:a", 70),
+            node_id: "a".to_owned(),
+            stage_path: "a".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: Vec::new(),
+            result: BuildResult::Succeeded,
+            attempts: vec![AttemptState {
+                record: record("attempt:stateful:7:a:1", 71),
+                ordinal: 1,
+                result: BuildResult::Succeeded,
+                started_at_unix_ms: 1_100,
+                ended_at_unix_ms: 1_160,
+                audit_digest: digest(72),
+            }],
+        },
+        GraphNodeState {
+            record: record("node:stateful:7:b", 73),
+            node_id: "b".to_owned(),
+            stage_path: "b".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: vec![GraphDependencyState {
+                parent_node_id: "a".to_owned(),
+                condition: GraphDependencyCondition::Succeeded,
+            }],
+            result: BuildResult::Succeeded,
+            attempts: vec![AttemptState {
+                record: record("attempt:stateful:7:b:1", 74),
+                ordinal: 1,
+                result: BuildResult::Succeeded,
+                started_at_unix_ms: 1_159,
+                ended_at_unix_ms: 1_200,
+                audit_digest: digest(75),
+            }],
+        },
+    ];
+    assert_eq!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "graph child attempt cannot start before parent completion".to_owned()
+        ))
+    );
+}
+
+#[test]
 fn graph_node_result_must_match_its_final_attempt() {
     let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
     bundle.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {

@@ -1436,6 +1436,22 @@ fn validate_graph_nodes(
                     "graph node cannot depend on itself".to_owned(),
                 ));
             }
+            let Some(parent) = nodes
+                .iter()
+                .find(|candidate| candidate.node_id == dependency.parent_node_id)
+            else {
+                return Err(TransferError::InvalidField(
+                    "graph node parent must name another node in the same build".to_owned(),
+                ));
+            };
+            if let (Some(child_attempt), Some(parent_attempt)) =
+                (node.attempts.first(), parent.attempts.last())
+                && child_attempt.started_at_unix_ms < parent_attempt.ended_at_unix_ms
+            {
+                return Err(TransferError::InvalidField(
+                    "graph child attempt cannot start before parent completion".to_owned(),
+                ));
+            }
         }
     }
     let mut remaining_parents = nodes
