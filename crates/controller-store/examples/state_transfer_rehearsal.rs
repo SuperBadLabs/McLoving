@@ -9,9 +9,9 @@ use mcloving_controller_store::{
 use mcloving_state_transfer::{
     AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy,
     DataBinding, DataClassification, Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind,
-    GraphNodeState, JobState, LegalHold, LogState, ObjectKind, ObjectState, Protection,
-    RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState,
-    StateBundle, SystemIdentity, TransferBinding, TransferDirection, canonical_bytes,
+    GraphNodeState, JobState, LegalHold, LogState, ObjectKind, ObjectState, PersistentDependency,
+    Protection, RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1,
+    ScmState, StateBundle, SystemIdentity, TransferBinding, TransferDirection, canonical_bytes,
     record_provenance, sha256, transform,
 };
 use serde_json::{Value, json};
@@ -132,8 +132,15 @@ async fn main() -> Result<(), AnyError> {
 
     let revision_3 = read_trimmed(&evidence.join("revision-3.txt"))?;
     let revision_2 = read_trimmed(&evidence.join("revision-2.txt"))?;
+    let restored_state = restore_persistent_dependency(&stored_forward, jenkins_home, output)?;
     let build_2_end = stored_forward.jobs[0].builds[1].ended_at_unix_ms;
-    let build_3 = mcloving_build_three(output, &revision_2, &revision_3, build_2_end)?;
+    let build_3 = mcloving_build_three(
+        output,
+        &revision_2,
+        &revision_3,
+        build_2_end,
+        &restored_state,
+    )?;
     let predicate = ChangePredicate {
         path_suffixes: vec![".target".to_owned()],
         message_digests: vec![sha256(b"MIG005A-MATCH second predicate revision")],
@@ -154,6 +161,11 @@ async fn main() -> Result<(), AnyError> {
     stored_forward.jobs[0].builds.push(build_3);
     stored_forward.jobs[0].next_build_number = 4;
     stored_forward.jobs[0].previous_result = Some(BuildResult::Succeeded);
+    let updated_state = fs::read(output.join("mcloving-persistent.state"))?;
+    stored_forward.jobs[0].persistent_dependencies = vec![persistent_dependency(
+        &updated_state,
+        "McLoving build three state",
+    )];
 
     let mcloving_export = canonical_bytes(&stored_forward)?;
     let mcloving_export_digest = sha256(&mcloving_export);
@@ -234,6 +246,10 @@ async fn main() -> Result<(), AnyError> {
             "destination_active_hold_count": destination_active_hold_count,
             "predicate_selected": decision.selected,
             "predicate_matches": decision.matched_change_record_ids,
+            "persistent_dependency_key": "persistent.state",
+            "persistent_dependency_source_digest": hex::encode(sha256(&restored_state)),
+            "persistent_dependency_output_digest": hex::encode(sha256(&updated_state)),
+            "persistent_dependency_consumed": true,
             "external_effects": 0,
             "unauthorized_hold_release": "denied",
             "forward_retrieval_verified": true,
@@ -295,6 +311,8 @@ fn jenkins_bundle(
         conflict_policy: ConflictPolicy::RejectDivergence,
         provenance: "pinned Jenkins 2.568.1 exact-profile source export".to_owned(),
     };
+    let persistent_state =
+        fs::read(jenkins_home.join("jobs/stateful/builds/2/archive/persistent.state"))?;
     Ok(StateBundle {
         binding,
         expected_record_ids: Vec::new(),
@@ -306,9 +324,84 @@ fn jenkins_bundle(
             previous_result: Some(BuildResult::Succeeded),
             builds: vec![build_1, build_2],
             retained_workspaces: vec![workspace_object(jenkins_home)?],
-            persistent_dependencies: Vec::new(),
+            persistent_dependencies: vec![persistent_dependency(
+                &persistent_state,
+                "Jenkins build two archived state",
+            )],
         }],
     })
+}
+
+fn persistent_dependency(bytes: &[u8], provenance: &str) -> PersistentDependency {
+    PersistentDependency {
+        record: RecordProvenance {
+            id: "dependency:stateful:persistent.state".to_owned(),
+            source_digest: sha256(bytes),
+            provenance: provenance.to_owned(),
+        },
+        key: "persistent.state".to_owned(),
+        value_digest: sha256(bytes),
+        data_binding: internal_data(),
+        protection: Protection {
+            // The dependency aliases the exact archived artifact payload, so
+            // its digest-keyed protection must be identical as well.
+            retention: retention("artifact-retention", 2_000_000_000_000),
+            active_holds: Vec::new(),
+        },
+    }
+}
+
+fn restore_persistent_dependency(
+    bundle: &StateBundle,
+    jenkins_home: &Path,
+    output: &Path,
+) -> Result<Vec<u8>, AnyError> {
+    let job = bundle
+        .jobs
+        .iter()
+        .find(|job| job.source_job_id == "stateful")
+        .ok_or("stored transfer is missing the stateful job")?;
+    if job.persistent_dependencies.len() != 1 {
+        return Err("stored transfer must contain exactly one persistent dependency".into());
+    }
+    let dependency = &job.persistent_dependencies[0];
+    if dependency.key != "persistent.state" {
+        return Err("stored transfer has an unexpected persistent dependency key".into());
+    }
+    let source_build = job
+        .builds
+        .iter()
+        .find(|build| build.number == 2)
+        .ok_or("stored transfer is missing Jenkins build two")?;
+    let source_artifact = source_build
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.logical_name == dependency.key)
+        .ok_or("stored transfer dependency has no matching source artifact")?;
+    if source_artifact.content_digest != dependency.value_digest {
+        return Err("stored dependency digest differs from its source artifact".into());
+    }
+    let bytes = fs::read(jenkins_home.join("jobs/stateful/builds/2/archive/persistent.state"))?;
+    if sha256(&bytes) != dependency.value_digest {
+        return Err("restored dependency payload does not match the imported digest".into());
+    }
+    if parse_persistent_build_number(&bytes)? != 2 {
+        return Err("restored dependency does not contain Jenkins build two state".into());
+    }
+    fs::write(output.join("restored-persistent.state"), &bytes)?;
+    Ok(bytes)
+}
+
+fn parse_persistent_build_number(bytes: &[u8]) -> Result<u64, AnyError> {
+    let value = std::str::from_utf8(bytes)?;
+    let number = value
+        .strip_prefix("build=")
+        .and_then(|value| value.strip_suffix('\n'))
+        .ok_or("persistent dependency is not canonical build state")?;
+    if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("persistent dependency build number is invalid".into());
+    }
+    Ok(number.parse()?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -548,12 +641,20 @@ fn mcloving_build_three(
     previous_revision: &str,
     revision: &str,
     prior_end: i64,
+    restored_state: &[u8],
 ) -> Result<BuildState, AnyError> {
     let intent = b"selected\n";
-    let state = b"build=3\n";
+    let restored_build = parse_persistent_build_number(restored_state)?;
+    let next_build = restored_build
+        .checked_add(1)
+        .ok_or("persistent dependency build number overflow")?;
+    if next_build != 3 {
+        return Err("restored persistent dependency did not advance to build three".into());
+    }
+    let state = format!("build={next_build}\n").into_bytes();
     fs::write(output.join("mcloving-changeset.intent"), intent)?;
     fs::write(output.join("mcloving-changelog.intent"), intent)?;
-    fs::write(output.join("mcloving-persistent.state"), state)?;
+    fs::write(output.join("mcloving-persistent.state"), &state)?;
     let mut artifacts: Vec<_> = [
         ("changeset.intent", intent.as_slice()),
         ("changelog.intent", intent.as_slice()),

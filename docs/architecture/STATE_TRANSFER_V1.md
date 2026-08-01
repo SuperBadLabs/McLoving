@@ -101,15 +101,15 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `9a5f6e533612ae3d735d0ef7374c23aeadad6c05847512fb39151b1d7e1a5bcd`;
-- source-evidence manifest SHA-256 `77ea1789ea45c4cd344936d0fb6e4b647f81bcb9ea912f24f1637f65663eb6c1`;
-- forward bundle SHA-256 `f95d52e83f873f0308280919a1b83416a50834d8e11877be0f0142448987ba46`;
-- reverse bundle SHA-256 `cf491186c1dabacef6e646ae359314f8b19cc0a132066cf327a5dc72fbd0d06e`;
-- reverse-evidence manifest SHA-256 `475043635d417501bf379aee52c4714afcac84ede7237b1a93c886916979d319`;
-- sealed transform-evidence manifest SHA-256 `f67d8f5a52247f242b7fb96e4bf4c857302f5e4b43d35e3902b13abbeac2fd13`.
+- transform binary SHA-256 `594d66e9277189a68ea868f9c6be6125eb96cee8b51e0a0e9fee5c0bd4a57cb7`;
+- source-evidence manifest SHA-256 `7966976db037e1363290f04740427e44c0cba2dd3b3b7d25a21450c9587d1bc6`;
+- forward bundle SHA-256 `f000a8325e5fbb74bec9fac40910f70b3c19525163cf7e14867b31ecbf0547f6`;
+- reverse bundle SHA-256 `a1031e308ffd725d11986b27db8bd8e1a4f8597e168d931e731e35d33d8664c6`;
+- reverse-evidence manifest SHA-256 `a038d0379fb0e12d7e341cb5e01c28dc93f1e9dd976896c2fc3dce2275d2648d`;
+- sealed transform-evidence manifest SHA-256 `4ae32d4c30b4ab9b13034d9abe1361d1fbe1667c11348429a4aba08b42016cea`.
 
 The exact database contained three receipts (destination protection seed,
-forward import, reverse import), 112 record-provenance rows, eight effective
+forward import, reverse import), 115 record-provenance rows, eight effective
 protection rows, and eight outbox rows. Exact replay reused the forward receipt.
 The imported shorter/expired source protections were strengthened to deadline
 `2000000000000`; three overlapping active holds survived; a direct SQL hold
@@ -121,7 +121,14 @@ predicates in McLoving, produced one externally effect-free authoritative build
 3, and advanced history to build 4. The reverse rehearsal verified the canonical
 bundle digest, derived build/result/SCM/predicate state from that bundle, and
 accepted artifact sidecars only after their lengths and SHA-256 digests matched
-the bundle's retrieval records. Jenkins then loaded reverse-imported build 3,
+the bundle's retrieval records. The forward receipt also bound Jenkins build 2's
+`persistent.state` as a first-class persistent dependency. McLoving restored
+and authenticated its `build=2` payload at SHA-256
+`d24c1088dcdfb2bb102abcb0d5fe3c7b71768ce10fb56efc97874d997a59c7d3`,
+consumed that value to produce `build=3`, and reverse-exported both the updated
+dependency and artifact at SHA-256
+`929f7d96cf9c8afd8517b80afadeb4a7f01f95107f4e83fc1cfb7c5ccb58e61b`.
+Jenkins then loaded reverse-imported build 3,
 retrieved its exact artifact, used its revision as the next changelog
 baseline, and ran build 4 on a nonmatching revision. Both predicate stages were
 skipped, only `persistent.state` was archived, builds 1–4 were unique, and
