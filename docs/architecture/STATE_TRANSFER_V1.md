@@ -124,13 +124,13 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `2232d8fb9b015295cc776cbbc7f98cddcf3c07197ee27c89c7cd7136e9249e1e`;
-- source-evidence manifest SHA-256 `5afc29e4d517cee59003baf067de4929727cf25aae1f84e4347a85fc330c12d2`;
-- forward bundle SHA-256 `ee25af1f7612897e1ea3bd11073ea09b10ab6527dc75ba1b06195f36c666e2af`;
-- reverse bundle SHA-256 `a6e52614df757b39f409e06a2af505aa4c8e63537eae4b1d7c230d1dbf128380`;
-- reverse-evidence manifest SHA-256 `21a58947c397ad3fcd19f1aa34a3640f0c0755f6037a612008edbfae2b5fc5c7`;
-- sealed transform-evidence manifest SHA-256 `253af73a03100b8ebdf823394baeac7556a0611d82434fe6d842330cddf5762c`;
-- full imported-build verification receipt SHA-256 `833327d6a394e68468b968ba26bf46eccad5d24b9053c266505e80d07b3d255b`;
+- transform binary SHA-256 `ebb39134a999de67d7a87ecf2413281553a44bb67e92360c6ad2c74e68a2d742`;
+- source-evidence manifest SHA-256 `1e02f30cae448b770999a943b81275c678cfcbd54a75db41f95cb222eae2aa72`;
+- forward bundle SHA-256 `5fbdb1d027b4960ca4cc40737d744a26a761a9090b657fcd24f295905b84d090`;
+- reverse bundle SHA-256 `5e018865d02a2c3a95063c52313119ec0a1179879a8469fba9ae77e45f0b8802`;
+- reverse-evidence manifest SHA-256 `c462ffe03b3ac0171fd0a398d0126798ba8c3730be95896106edfe8a9a7e933b`;
+- sealed transform-evidence manifest SHA-256 `19a05c1b215571305d7be4db1bb018ed83e2bd83680a9dc549af773beda2615c`;
+- full imported-build verification receipt SHA-256 `45ab1e55aeb2aeb35db39c18ffd5d733282974889f23b17513464f68b7926c3f`;
 - imported protection-record SHA-256 `ae301c2fe1fa002fcc1d9b583ccd9a56f8c6a50f59911545356b5affcd0b285e`.
 
 The exact database contained three receipts (destination protection seed,
@@ -140,8 +140,14 @@ replay reused the forward receipt. Jenkins workflow stages came from sealed
 native workflow responses. McLoving build 3 was exported only after rereading
 its durable five-node graph, actual `attempt.running` event times, globally
 cursor-ordered committed logs, artifacts, and checkout. Graph edges preserve
-their exact `succeeded` or `completed` dependency condition, and validation
-rejects a child attempt that starts before its parent's final attempt ends. The reverse
+their exact `succeeded` or `completed` dependency condition. A Jenkins stage
+that follows an observed non-successful predecessor, including a `when`-skipped
+`NOT_EXECUTED` stage, receives a `completed` edge rather than a fabricated
+`succeeded` edge. Validation binds a `completed` edge to the first completed
+parent attempt and a `succeeded` edge to the first successful parent attempt;
+it rejects a child that starts before that event or has no successful parent
+attempt. Later parent retries therefore do not invalidate already-admitted
+descendants. The reverse
 Jenkins import matched the full canonical record and independently verified
 native build/workflow/log/artifact/SCM semantics; all five native workflow
 stage start times and durations matched the canonical attempt intervals exactly.

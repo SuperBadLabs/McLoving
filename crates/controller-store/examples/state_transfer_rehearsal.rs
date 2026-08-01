@@ -863,7 +863,7 @@ fn parse_jenkins_workflow(workflow: &Value, number: u64) -> Result<Vec<GraphNode
         return Err("sealed Jenkins workflow stage count is outside the bound".into());
     }
     let mut nodes = Vec::with_capacity(stages.len());
-    let mut prior: Option<String> = None;
+    let mut prior: Option<(String, BuildResult)> = None;
     let mut seen = BTreeSet::new();
     for (index, stage) in stages.iter().enumerate() {
         let id = stage
@@ -899,9 +899,11 @@ fn parse_jenkins_workflow(workflow: &Value, number: u64) -> Result<Vec<GraphNode
             node_kind: "stage".to_owned(),
             dependencies: prior
                 .iter()
-                .map(|parent| GraphDependencyState {
+                .map(|(parent, parent_result)| GraphDependencyState {
                     parent_node_id: parent.clone(),
-                    condition: if name == "Declarative: Post Actions" {
+                    condition: if name == "Declarative: Post Actions"
+                        || *parent_result != BuildResult::Succeeded
+                    {
                         GraphDependencyCondition::Completed
                     } else {
                         GraphDependencyCondition::Succeeded
@@ -920,7 +922,7 @@ fn parse_jenkins_workflow(workflow: &Value, number: u64) -> Result<Vec<GraphNode
                 audit_digest: sha256(&stage_bytes),
             }],
         });
-        prior = Some(exported_id);
+        prior = Some((exported_id, result));
         if index + 1 != nodes.len() {
             return Err("Jenkins workflow stage ordering failed".into());
         }
@@ -1782,17 +1784,31 @@ mod tests {
                     "status": "NOT_EXECUTED",
                     "startTimeMillis": 1025,
                     "durationMillis": 5
+                },
+                {
+                    "id": "18",
+                    "name": "after-predicate",
+                    "status": "SUCCESS",
+                    "startTimeMillis": 1030,
+                    "durationMillis": 10
                 }
             ]
         });
         let graph = parse_jenkins_workflow(&workflow, 2).expect("parse sealed workflow");
-        assert_eq!(graph.len(), 2);
+        assert_eq!(graph.len(), 3);
         assert_eq!(graph[0].node_id, "00-6");
         assert_eq!(
             graph[1].dependencies,
             [GraphDependencyState {
                 parent_node_id: "00-6".to_owned(),
                 condition: GraphDependencyCondition::Succeeded,
+            }]
+        );
+        assert_eq!(
+            graph[2].dependencies,
+            [GraphDependencyState {
+                parent_node_id: "01-12".to_owned(),
+                condition: GraphDependencyCondition::Completed,
             }]
         );
         assert_eq!(graph[1].result, BuildResult::NotBuilt);

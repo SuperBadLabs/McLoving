@@ -1444,13 +1444,30 @@ fn validate_graph_nodes(
                     "graph node parent must name another node in the same build".to_owned(),
                 ));
             };
-            if let (Some(child_attempt), Some(parent_attempt)) =
-                (node.attempts.first(), parent.attempts.last())
-                && child_attempt.started_at_unix_ms < parent_attempt.ended_at_unix_ms
-            {
-                return Err(TransferError::InvalidField(
-                    "graph child attempt cannot start before parent completion".to_owned(),
-                ));
+            if let Some(child_attempt) = node.attempts.first() {
+                let satisfying_parent_attempt = match dependency.condition {
+                    GraphDependencyCondition::Completed => parent.attempts.first(),
+                    GraphDependencyCondition::Succeeded => parent
+                        .attempts
+                        .iter()
+                        .find(|attempt| attempt.result == BuildResult::Succeeded),
+                };
+                if dependency.condition == GraphDependencyCondition::Succeeded
+                    && satisfying_parent_attempt.is_none()
+                {
+                    return Err(TransferError::InvalidField(
+                        "graph succeeded dependency requires a successful parent attempt"
+                            .to_owned(),
+                    ));
+                }
+                if satisfying_parent_attempt.is_some_and(|parent_attempt| {
+                    child_attempt.started_at_unix_ms < parent_attempt.ended_at_unix_ms
+                }) {
+                    return Err(TransferError::InvalidField(
+                        "graph child attempt cannot start before its dependency is satisfied"
+                            .to_owned(),
+                    ));
+                }
             }
         }
     }

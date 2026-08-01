@@ -513,9 +513,186 @@ fn graph_child_attempt_cannot_predate_parent_completion() {
     assert_eq!(
         transform(&bundle, &expected, &BTreeMap::new()),
         Err(TransferError::InvalidField(
-            "graph child attempt cannot start before parent completion".to_owned()
+            "graph child attempt cannot start before its dependency is satisfied".to_owned()
         ))
     );
+}
+
+#[test]
+fn completed_edge_child_can_precede_a_later_parent_retry() {
+    let (mut bundle, mut expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![
+        GraphNodeState {
+            record: record("node:stateful:7:a", 70),
+            node_id: "a".to_owned(),
+            stage_path: "a".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: Vec::new(),
+            result: BuildResult::Succeeded,
+            attempts: vec![
+                AttemptState {
+                    record: record("attempt:stateful:7:a:1", 71),
+                    ordinal: 1,
+                    result: BuildResult::Failed,
+                    started_at_unix_ms: 1_100,
+                    ended_at_unix_ms: 1_140,
+                    audit_digest: digest(72),
+                },
+                AttemptState {
+                    record: record("attempt:stateful:7:a:2", 73),
+                    ordinal: 2,
+                    result: BuildResult::Succeeded,
+                    started_at_unix_ms: 1_180,
+                    ended_at_unix_ms: 1_200,
+                    audit_digest: digest(74),
+                },
+            ],
+        },
+        GraphNodeState {
+            record: record("node:stateful:7:b", 75),
+            node_id: "b".to_owned(),
+            stage_path: "b".to_owned(),
+            node_kind: "post".to_owned(),
+            dependencies: vec![GraphDependencyState {
+                parent_node_id: "a".to_owned(),
+                condition: GraphDependencyCondition::Completed,
+            }],
+            result: BuildResult::Succeeded,
+            attempts: vec![AttemptState {
+                record: record("attempt:stateful:7:b:1", 76),
+                ordinal: 1,
+                result: BuildResult::Succeeded,
+                started_at_unix_ms: 1_150,
+                ended_at_unix_ms: 1_170,
+                audit_digest: digest(77),
+            }],
+        },
+    ];
+    bundle.expected_record_ids.extend([
+        "attempt:stateful:7:a:1".to_owned(),
+        "attempt:stateful:7:a:2".to_owned(),
+        "attempt:stateful:7:b:1".to_owned(),
+        "node:stateful:7:a".to_owned(),
+        "node:stateful:7:b".to_owned(),
+    ]);
+    bundle.expected_record_ids.sort();
+    expected.input_bundle_digest = sha256(&canonical_bytes(&bundle).unwrap());
+
+    transform(&bundle, &expected, &BTreeMap::new())
+        .expect("completed edge binds to the first completed parent attempt");
+}
+
+#[test]
+fn succeeded_edge_requires_a_successful_parent_attempt() {
+    let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![
+        GraphNodeState {
+            record: record("node:stateful:7:a", 70),
+            node_id: "a".to_owned(),
+            stage_path: "a".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: Vec::new(),
+            result: BuildResult::Failed,
+            attempts: vec![AttemptState {
+                record: record("attempt:stateful:7:a:1", 71),
+                ordinal: 1,
+                result: BuildResult::Failed,
+                started_at_unix_ms: 1_100,
+                ended_at_unix_ms: 1_140,
+                audit_digest: digest(72),
+            }],
+        },
+        GraphNodeState {
+            record: record("node:stateful:7:b", 73),
+            node_id: "b".to_owned(),
+            stage_path: "b".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: vec![GraphDependencyState {
+                parent_node_id: "a".to_owned(),
+                condition: GraphDependencyCondition::Succeeded,
+            }],
+            result: BuildResult::Succeeded,
+            attempts: vec![AttemptState {
+                record: record("attempt:stateful:7:b:1", 74),
+                ordinal: 1,
+                result: BuildResult::Succeeded,
+                started_at_unix_ms: 1_150,
+                ended_at_unix_ms: 1_200,
+                audit_digest: digest(75),
+            }],
+        },
+    ];
+
+    assert_eq!(
+        transform(&bundle, &expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "graph succeeded dependency requires a successful parent attempt".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn succeeded_edge_binds_to_the_first_successful_parent_attempt() {
+    let (mut bundle, mut expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![
+        GraphNodeState {
+            record: record("node:stateful:7:a", 70),
+            node_id: "a".to_owned(),
+            stage_path: "a".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: Vec::new(),
+            result: BuildResult::Failed,
+            attempts: vec![
+                AttemptState {
+                    record: record("attempt:stateful:7:a:1", 71),
+                    ordinal: 1,
+                    result: BuildResult::Succeeded,
+                    started_at_unix_ms: 1_100,
+                    ended_at_unix_ms: 1_140,
+                    audit_digest: digest(72),
+                },
+                AttemptState {
+                    record: record("attempt:stateful:7:a:2", 73),
+                    ordinal: 2,
+                    result: BuildResult::Failed,
+                    started_at_unix_ms: 1_180,
+                    ended_at_unix_ms: 1_200,
+                    audit_digest: digest(74),
+                },
+            ],
+        },
+        GraphNodeState {
+            record: record("node:stateful:7:b", 75),
+            node_id: "b".to_owned(),
+            stage_path: "b".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: vec![GraphDependencyState {
+                parent_node_id: "a".to_owned(),
+                condition: GraphDependencyCondition::Succeeded,
+            }],
+            result: BuildResult::Succeeded,
+            attempts: vec![AttemptState {
+                record: record("attempt:stateful:7:b:1", 76),
+                ordinal: 1,
+                result: BuildResult::Succeeded,
+                started_at_unix_ms: 1_150,
+                ended_at_unix_ms: 1_170,
+                audit_digest: digest(77),
+            }],
+        },
+    ];
+    bundle.expected_record_ids.extend([
+        "attempt:stateful:7:a:1".to_owned(),
+        "attempt:stateful:7:a:2".to_owned(),
+        "attempt:stateful:7:b:1".to_owned(),
+        "node:stateful:7:a".to_owned(),
+        "node:stateful:7:b".to_owned(),
+    ]);
+    bundle.expected_record_ids.sort();
+    expected.input_bundle_digest = sha256(&canonical_bytes(&bundle).unwrap());
+
+    transform(&bundle, &expected, &BTreeMap::new())
+        .expect("succeeded edge binds to the first successful parent attempt");
 }
 
 #[test]
