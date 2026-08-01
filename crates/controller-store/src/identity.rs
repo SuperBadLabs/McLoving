@@ -1392,18 +1392,81 @@ impl Store {
         reason: &str,
         actor_subject: &str,
     ) -> Result<bool, StoreError> {
-        revoke_credential_record(
-            self,
-            organization_id,
-            "identity_sessions",
-            "session_id",
-            session_id,
-            now_unix_ms,
-            reason,
-            actor_subject,
-            "oidc_session_revoked",
+        validate_canonical(reason, "revocation reason", 256)?;
+        validate_canonical(actor_subject, "actor subject", 512)?;
+        if now_unix_ms < 0 {
+            return invalid("revocation timestamp is invalid");
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let session = sqlx::query_as::<_, (Uuid, Option<String>)>(
+            "SELECT identity_id, revocation_reason
+             FROM identity_sessions
+             WHERE organization_id = $1 AND session_id = $2
+             FOR UPDATE",
         )
-        .await
+        .bind(organization_id)
+        .bind(session_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((identity_id, revocation_reason)) = session else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+        let changed = match revocation_reason.as_deref() {
+            None => sqlx::query(
+                "UPDATE identity_sessions
+                     SET revoked_at_unix_ms = $3, revocation_reason = $4
+                     WHERE organization_id = $1 AND session_id = $2
+                       AND revoked_at_unix_ms IS NULL",
+            )
+            .bind(organization_id)
+            .bind(session_id)
+            .bind(now_unix_ms)
+            .bind(reason)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected(),
+            Some("refresh_rotation") => {
+                // A refresh may commit after API authentication but before
+                // logout reaches this row lock. In that ordering the access
+                // token identifies the rotated predecessor, so revoke the
+                // active identity-wide session family just as refresh-reuse
+                // detection does. The shared predecessor row lock serializes
+                // this update against rotation of that same generation.
+                sqlx::query(
+                    "UPDATE identity_sessions
+                     SET revoked_at_unix_ms = $3, revocation_reason = $4
+                     WHERE organization_id = $1 AND identity_id = $2
+                       AND revoked_at_unix_ms IS NULL",
+                )
+                .bind(organization_id)
+                .bind(identity_id)
+                .bind(now_unix_ms)
+                .bind(reason)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+            }
+            Some(_) => 0,
+        };
+        if changed > 0 {
+            append_audit_record(
+                &mut tx,
+                organization_id,
+                "authentication",
+                actor_subject,
+                "oidc_session_revoked",
+                &format!("credential:{session_id}"),
+                json!({
+                    "reason": reason,
+                    "revoked_at_unix_ms": now_unix_ms,
+                    "revoked_sessions": changed,
+                }),
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(changed > 0)
     }
 
     pub async fn revoke_service_credential(

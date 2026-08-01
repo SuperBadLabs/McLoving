@@ -428,6 +428,60 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         "refresh-token reuse revokes the active session family"
     );
 
+    let logout_predecessor = runtime
+        .issue_human_session(
+            &OidcIdentityClaims {
+                id_token_digest: digest("id-token-logout-race"),
+                ..changed_groups.clone()
+            },
+            &SessionIssue {
+                session_id: Uuid::new_v4(),
+                token_digest: digest("logout-race-access-before-refresh"),
+                refresh_token_digest: Some(digest("logout-race-refresh-before-refresh")),
+                issued_at_unix_ms: 13_000,
+                expires_at_unix_ms: 33_000,
+                refresh_expires_at_unix_ms: Some(63_000),
+            },
+        )
+        .await
+        .expect("issue session for logout-versus-refresh race");
+    let logout_successor_token = digest("logout-race-access-after-refresh");
+    runtime
+        .rotate_human_session(
+            organization_id,
+            digest("logout-race-refresh-before-refresh"),
+            &SessionIssue {
+                session_id: Uuid::new_v4(),
+                token_digest: logout_successor_token,
+                refresh_token_digest: Some(digest("logout-race-refresh-after-refresh")),
+                issued_at_unix_ms: 13_100,
+                expires_at_unix_ms: 33_100,
+                refresh_expires_at_unix_ms: Some(63_100),
+            },
+        )
+        .await
+        .expect("commit refresh before delayed logout reaches the predecessor lock");
+    assert!(
+        runtime
+            .revoke_session(
+                organization_id,
+                logout_predecessor.session_id,
+                13_101,
+                "logout",
+                &human_identity.subject,
+            )
+            .await
+            .expect("logout through the rotated predecessor"),
+        "logout must revoke the successor when refresh wins the race"
+    );
+    assert!(
+        runtime
+            .authenticate_api_token(organization_id, logout_successor_token, 13_102)
+            .await
+            .is_err(),
+        "a refresh successor must not survive a racing logout"
+    );
+
     let service_id = Uuid::new_v4();
     let service_identity = NewServiceIdentity {
         organization_id,
