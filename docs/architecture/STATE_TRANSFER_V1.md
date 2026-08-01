@@ -47,8 +47,11 @@ unique within their destination lists, and each object kind must match its
 containing list. Every artifact's producer build number must also match the
 build that contains it; retained-workspace provenance remains job-scoped.
 Graph-node attempts are contiguous and bounded by their owning build. Executing
-attempts carry durable queue/creation and running timestamps and are ordered
-and non-overlapping; a retry cannot be queued before its predecessor terminates.
+attempts carry distinct durable creation, dependency-readiness, and running
+timestamps and are ordered and non-overlapping; an attempt can be created while
+blocked, but cannot run before its recorded readiness, and a retry cannot be
+queued before its predecessor terminates. Dependency generation selection uses
+the child's readiness rather than its earlier creation timestamp.
 A queued attempt terminalized without execution instead carries an explicit
 terminal-only reason and no fabricated start time. The accepted reasons are
 `fail_fast_skipped`, `dependency_not_succeeded`,
@@ -61,8 +64,9 @@ accepted as evidence.
 
 ## Persistence and reconciliation
 
-Migration `0017_state_transfer.sql` adds immutable receipt, record-provenance,
-and effective-protection truth to PostgreSQL. Import runs in one transaction,
+Migrations `0017_state_transfer.sql` and `0018_attempt_readiness.sql` add
+immutable receipt, record-provenance, effective-protection, and per-attempt
+dependency-readiness truth to PostgreSQL. Import runs in one transaction,
 locks the destination project's transfer history, fingerprints canonical input
 before destination protections are merged, admits an exact replay only when
 that input and every binding match, monotonically merges destination
@@ -134,15 +138,15 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `6b291920b3de1ddc227170878bf1f6fe55e3323994a8ad017a15006e8821f909`;
-- source-evidence manifest SHA-256 `a6d3fb553121d9b38fc2790db1272074228f1e0e5df98a352b0b5af56d4a7392`;
-- forward bundle SHA-256 `605e87a96ee291b7ff269467c1db0a5b096b3e88b4598b27c781f902a82c5bd0`;
-- reverse bundle SHA-256 `065be4e468d9a8b09177dc21271e0a7f313ee81f2b184296ba70032354fc9891`;
-- reverse-evidence manifest SHA-256 `1d9a7666ada0ace06ea3a052216825c7135b0c36feed9ed25220f00249083d5b`;
-- sealed transform-evidence manifest SHA-256 `3aecff616991375d0d4514fa2a7028fe196621c3db4b732732ec3a177fbd3a90`;
-- full imported-build verification receipt SHA-256 `9f60559a2e6312529197c15bca056be7a182060891bb593361c7c557e0f15fce`;
-- imported protection-record SHA-256 `ae301c2fe1fa002fcc1d9b583ccd9a56f8c6a50f59911545356b5affcd0b285e`.
-- imported retry-history receipt SHA-256 `46e0c3c1a9adb1c35fff65b3bc9316db5e232afa24fa5e54fece34758b7a1b8c`.
+- transform binary SHA-256 `d6bef40c7bc5cb0809c5afd992bf8aa1e0b407f128073c14cf14c6f397ac5ca6`;
+- source-evidence manifest SHA-256 `a5117eaf0b5e6f9adfaa02e0a2e7299f654888063baf8e52da632f6484c1932a`;
+- forward bundle SHA-256 `af55724f12d3bb608ee7bd6f47f0e9d7ce5c4d8f1473be124cb0b5fe23aaf1bc`;
+- reverse bundle SHA-256 `a456495fd852a3a9c33ef08e9c947d437a92900e4fa54785a38c02328e2e5da5`;
+- reverse-evidence manifest SHA-256 `1dae46fa73c9c72992dac313c4650e967164634a3c2a6057c2ff12e96f55d070`;
+- sealed transform-evidence manifest SHA-256 `42ec8b8a482223e88a2fe98632cc60dc628314ea399bff8054966681432ad06f`;
+- full imported-build verification receipt SHA-256 `402ca8a862d6886d08421f416d8fe7d6974785cb051cebb24f50f2772b669b9b`;
+- imported protection-record SHA-256 `ae301c2fe1fa002fcc1d9b583ccd9a56f8c6a50f59911545356b5affcd0b285e`;
+- imported retry-history receipt SHA-256 `17cf65b5e1bd72f82929f10e56a01ce1911cf11bcb293c4472da209abbcea8ee`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 147 record-provenance rows, nine effective
@@ -154,7 +158,7 @@ cursor-ordered committed logs, artifacts, and checkout. Graph edges preserve
 their exact `succeeded` or `completed` dependency condition. A Jenkins stage
 that follows an observed non-successful predecessor, including a `when`-skipped
 `NOT_EXECUTED` stage, receives a `completed` edge rather than a fabricated
-`succeeded` edge. Validation uses each child attempt's durable queue time to
+`succeeded` edge. Validation uses each child attempt's durable readiness time to
 select the latest parent generation already admitted for either dependency
 condition. It then requires that exact generation to be terminal for
 `completed`, successful for `succeeded`, and ended before the child starts.

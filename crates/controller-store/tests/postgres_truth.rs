@@ -6940,6 +6940,31 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
             .expect("terminalize Linux retry")
     );
 
+    let graph_after_retry = store
+        .build_graph(organization_id, project_id, admission.build_id)
+        .await
+        .expect("read graph after automatic retry")
+        .expect("retried graph exists");
+    let join_attempt = graph_after_retry
+        .attempts
+        .iter()
+        .find(|attempt| attempt.node_id == admission.nodes["join"].node_id)
+        .expect("join attempt exists before it runs");
+    let retry_attempt = graph_after_retry
+        .attempts
+        .iter()
+        .find(|attempt| attempt.attempt_id == retry.attempt_id)
+        .expect("automatic parent retry is exported");
+    assert!(join_attempt.created_at_unix_ms <= retry_attempt.created_at_unix_ms);
+    assert!(
+        join_attempt
+            .ready_at_unix_ms
+            .expect("blocked join gains durable readiness")
+            >= retry_attempt
+                .completed_at_unix_ms
+                .expect("parent retry completed before join became ready")
+    );
+
     let restarted = Store::new(store.pool().clone());
     let join_claim = restarted
         .claim_next(&dag_claim(organization_id, "agent-join", "linux", "join"))

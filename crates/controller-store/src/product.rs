@@ -145,6 +145,7 @@ pub struct AttemptView {
     pub lease_owner: Option<String>,
     pub terminal_summary: Option<Value>,
     pub created_at_unix_ms: i64,
+    pub ready_at_unix_ms: Option<i64>,
     pub started_at_unix_ms: Option<i64>,
     pub completed_at_unix_ms: Option<i64>,
 }
@@ -785,6 +786,9 @@ impl Store {
             "SELECT a.id, a.node_id, a.ordinal, a.retry_of, a.status, a.fence,
                     a.lease_owner, a.terminal_summary,
                     (EXTRACT(EPOCH FROM a.created_at) * 1000)::bigint AS created_ms,
+                    CASE WHEN a.ready_at IS NULL THEN NULL
+                         ELSE (EXTRACT(EPOCH FROM a.ready_at) * 1000)::bigint
+                    END AS ready_ms,
                     (
                         SELECT (EXTRACT(EPOCH FROM e.created_at) * 1000)::bigint
                         FROM build_events AS e
@@ -855,6 +859,7 @@ impl Store {
                         lease_owner: row.try_get("lease_owner")?,
                         terminal_summary: row.try_get("terminal_summary")?,
                         created_at_unix_ms: row.try_get("created_ms")?,
+                        ready_at_unix_ms: row.try_get("ready_ms")?,
                         started_at_unix_ms: row.try_get("started_ms")?,
                         completed_at_unix_ms: row.try_get("completed_ms")?,
                     })

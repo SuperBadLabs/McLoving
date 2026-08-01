@@ -931,8 +931,11 @@ sealed native workflow API rather than fabricated stage names or build-wide
 timestamps. McLoving build 3 is a five-node PostgreSQL DAG whose graph,
 per-attempt timestamps and terminal outcomes, committed logs, available-artifact
 inventory, and fenced checkout are reread from controller truth before export.
-Attempt queue times come from durable attempt creation and executing-attempt
-starts come from durable `attempt.running` events. Fail-fast skips,
+Attempt creation and dependency-readiness are distinct durable PostgreSQL
+fields, while executing-attempt starts come from durable `attempt.running`
+events. Automatic and operator retry paths atomically establish each new
+generation's readiness; initially blocked attempts remain unready until their
+dependencies are satisfied. Fail-fast skips,
 unsatisfied-dependency skips, and queued
 pre-execution cancellations are typed terminal-only attempts with no fabricated
 start time; terminal timestamps remain monotonic, and logs are exported in the
@@ -944,7 +947,7 @@ predate the first parent attempt that satisfies their exact condition;
 `succeeded` edges require the final parent attempt to be successful, and child
 chronology uses the first actually executing attempt rather than an earlier
 terminal-only skipped placeholder. `completed` and `succeeded` edges bind to
-the latest parent generation admitted at the child attempt's queue time,
+the latest parent generation admitted at the child attempt's readiness time,
 preserving both reopened-parent waits
 and children completed before a later retry. Every retry
 names its immediately preceding attempt and reason: `failed` for failed
@@ -965,14 +968,14 @@ materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its exact transform binary SHA-256 is
-`6b291920b3de1ddc227170878bf1f6fe55e3323994a8ad017a15006e8821f909`.
+`d6bef40c7bc5cb0809c5afd992bf8aa1e0b407f128073c14cf14c6f397ac5ca6`.
 Its source, transform, and reverse manifest SHA-256 values are
-`a6d3fb553121d9b38fc2790db1272074228f1e0e5df98a352b0b5af56d4a7392`,
-`3aecff616991375d0d4514fa2a7028fe196621c3db4b732732ec3a177fbd3a90`,
-and `1d9a7666ada0ace06ea3a052216825c7135b0c36feed9ed25220f00249083d5b`;
+`a5117eaf0b5e6f9adfaa02e0a2e7299f654888063baf8e52da632f6484c1932a`,
+`42ec8b8a482223e88a2fe98632cc60dc628314ea399bff8054966681432ad06f`,
+and `1dae46fa73c9c72992dac313c4650e967164634a3c2a6057c2ff12e96f55d070`;
 the forward and reverse bundle SHA-256 values are
-`605e87a96ee291b7ff269467c1db0a5b096b3e88b4598b27c781f902a82c5bd0`
-and `065be4e468d9a8b09177dc21271e0a7f313ee81f2b184296ba70032354fc9891`.
+`af55724f12d3bb608ee7bd6f47f0e9d7ce5c4d8f1473be124cb0b5fe23aaf1bc`
+and `a456495fd852a3a9c33ef08e9c947d437a92900e4fa54785a38c02328e2e5da5`.
 An injected post-install failure restored repository, build, permalink, and
 next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed

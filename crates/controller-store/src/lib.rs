@@ -85,6 +85,8 @@ pub const PRODUCT_SURFACE_V15: &str = include_str!("../migrations/0015_product_s
 pub const GLOBAL_LOG_ORDER_V16: &str = include_str!("../migrations/0016_global_log_order.sql");
 /// Immutable, replay-safe Jenkins/McLoving persistent-state transfer records.
 pub const STATE_TRANSFER_V17: &str = include_str!("../migrations/0017_state_transfer.sql");
+/// Durable per-attempt dependency-generation readiness.
+pub const ATTEMPT_READINESS_V18: &str = include_str!("../migrations/0018_attempt_readiness.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -469,6 +471,7 @@ impl Store {
         apply_migration(&mut tx, 15, PRODUCT_SURFACE_V15).await?;
         apply_migration(&mut tx, 16, GLOBAL_LOG_ORDER_V16).await?;
         apply_migration(&mut tx, 17, STATE_TRANSFER_V17).await?;
+        apply_migration(&mut tx, 18, ATTEMPT_READINESS_V18).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1224,10 +1227,13 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "INSERT INTO attempts (
-                 id, organization_id, node_id, ordinal, status
+            "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+             INSERT INTO attempts (
+                 id, organization_id, node_id, ordinal, status,
+                 created_at, ready_at
              )
-             VALUES ($1, $2, $3, 1, 'queued')",
+             SELECT $1, $2, $3, 1, 'queued', admitted_at, admitted_at
+             FROM timing",
         )
         .bind(attempt_id)
         .bind(input.organization_id)
@@ -2721,12 +2727,14 @@ impl Store {
         let child_id = Uuid::new_v4();
         let child_ordinal = ordinal + 1;
         sqlx::query(
-            "INSERT INTO attempts (
+            "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+             INSERT INTO attempts (
                  id, organization_id, node_id, ordinal, status, retry_of,
-                 restore_epoch
+                 restore_epoch, created_at, ready_at
              )
-             SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch
-             FROM controller_metadata
+             SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch,
+                    admitted_at, admitted_at
+             FROM controller_metadata, timing
              WHERE singleton",
         )
         .bind(child_id)
@@ -2785,12 +2793,20 @@ impl Store {
             .await?;
             for (skipped_node_id, previous_attempt_id, previous_ordinal) in &skipped_nodes {
                 sqlx::query(
-                    "INSERT INTO attempts (
+                    "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+                     INSERT INTO attempts (
                          id, organization_id, node_id, ordinal, status, retry_of,
-                         restore_epoch
+                         restore_epoch, created_at, ready_at
                      )
-                     SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch
-                     FROM controller_metadata
+                     SELECT $1, $2, $3, $4, 'queued', $5, restore_epoch,
+                            admitted_at,
+                            CASE WHEN EXISTS (
+                                SELECT 1
+                                FROM node_dependencies AS dependency
+                                WHERE dependency.organization_id = $2
+                                  AND dependency.child_node_id = $3
+                            ) THEN NULL ELSE admitted_at END
+                     FROM controller_metadata, timing
                      WHERE singleton",
                 )
                 .bind(Uuid::new_v4())

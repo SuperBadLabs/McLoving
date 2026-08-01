@@ -489,6 +489,7 @@ fn graph_child_attempt_cannot_predate_parent_completion() {
                 result: BuildResult::Succeeded,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_100,
+                ready_at_unix_ms: Some(1_100),
                 started_at_unix_ms: Some(1_100),
                 ended_at_unix_ms: 1_160,
                 audit_digest: digest(72),
@@ -511,6 +512,7 @@ fn graph_child_attempt_cannot_predate_parent_completion() {
                 result: BuildResult::Succeeded,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_159,
+                ready_at_unix_ms: Some(1_159),
                 started_at_unix_ms: Some(1_159),
                 ended_at_unix_ms: 1_200,
                 audit_digest: digest(75),
@@ -544,6 +546,7 @@ fn completed_edge_child_can_precede_a_later_parent_retry() {
                     result: BuildResult::Failed,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_100,
+                    ready_at_unix_ms: Some(1_100),
                     started_at_unix_ms: Some(1_100),
                     ended_at_unix_ms: 1_140,
                     audit_digest: digest(72),
@@ -558,6 +561,7 @@ fn completed_edge_child_can_precede_a_later_parent_retry() {
                     result: BuildResult::Succeeded,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_180,
+                    ready_at_unix_ms: Some(1_180),
                     started_at_unix_ms: Some(1_180),
                     ended_at_unix_ms: 1_200,
                     audit_digest: digest(74),
@@ -581,6 +585,7 @@ fn completed_edge_child_can_precede_a_later_parent_retry() {
                 result: BuildResult::Succeeded,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_150,
+                ready_at_unix_ms: Some(1_150),
                 started_at_unix_ms: Some(1_150),
                 ended_at_unix_ms: 1_170,
                 audit_digest: digest(77),
@@ -620,6 +625,7 @@ fn completed_edge_reopened_child_waits_for_the_active_parent_retry() {
                     result: BuildResult::Aborted,
                     terminal_reason: Some(AttemptTerminalReason::FailFastSkipped),
                     queued_at_unix_ms: 1_100,
+                    ready_at_unix_ms: Some(1_100),
                     started_at_unix_ms: None,
                     ended_at_unix_ms: 1_140,
                     audit_digest: digest(72),
@@ -634,6 +640,7 @@ fn completed_edge_reopened_child_waits_for_the_active_parent_retry() {
                     result: BuildResult::Succeeded,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_150,
+                    ready_at_unix_ms: Some(1_150),
                     started_at_unix_ms: Some(1_150),
                     ended_at_unix_ms: 1_190,
                     audit_digest: digest(74),
@@ -658,6 +665,7 @@ fn completed_edge_reopened_child_waits_for_the_active_parent_retry() {
                     result: BuildResult::Aborted,
                     terminal_reason: Some(AttemptTerminalReason::FailFastSkipped),
                     queued_at_unix_ms: 1_100,
+                    ready_at_unix_ms: Some(1_100),
                     started_at_unix_ms: None,
                     ended_at_unix_ms: 1_145,
                     audit_digest: digest(77),
@@ -672,6 +680,7 @@ fn completed_edge_reopened_child_waits_for_the_active_parent_retry() {
                     result: BuildResult::Succeeded,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_170,
+                    ready_at_unix_ms: Some(1_170),
                     started_at_unix_ms: Some(1_170),
                     ended_at_unix_ms: 1_200,
                     audit_digest: digest(79),
@@ -686,6 +695,85 @@ fn completed_edge_reopened_child_waits_for_the_active_parent_retry() {
             "graph child attempt cannot start before its dependency is satisfied".to_owned()
         ))
     );
+}
+
+#[test]
+fn child_created_while_blocked_binds_to_parent_generation_at_readiness() {
+    let (mut bundle, mut expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![
+        GraphNodeState {
+            record: record("node:stateful:7:a", 70),
+            node_id: "a".to_owned(),
+            stage_path: "a".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: Vec::new(),
+            result: BuildResult::Succeeded,
+            attempts: vec![
+                AttemptState {
+                    record: record("attempt:stateful:7:a:1", 71),
+                    ordinal: 1,
+                    retry: None,
+                    result: BuildResult::Failed,
+                    terminal_reason: None,
+                    queued_at_unix_ms: 1_100,
+                    ready_at_unix_ms: Some(1_100),
+                    started_at_unix_ms: Some(1_100),
+                    ended_at_unix_ms: 1_140,
+                    audit_digest: digest(72),
+                },
+                AttemptState {
+                    record: record("attempt:stateful:7:a:2", 73),
+                    ordinal: 2,
+                    retry: Some(AttemptRetryState {
+                        previous_ordinal: 1,
+                        reason: AttemptRetryReason::Failed,
+                    }),
+                    result: BuildResult::Succeeded,
+                    terminal_reason: None,
+                    queued_at_unix_ms: 1_150,
+                    ready_at_unix_ms: Some(1_150),
+                    started_at_unix_ms: Some(1_150),
+                    ended_at_unix_ms: 1_190,
+                    audit_digest: digest(74),
+                },
+            ],
+        },
+        GraphNodeState {
+            record: record("node:stateful:7:b", 75),
+            node_id: "b".to_owned(),
+            stage_path: "b".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: vec![GraphDependencyState {
+                parent_node_id: "a".to_owned(),
+                condition: GraphDependencyCondition::Succeeded,
+            }],
+            result: BuildResult::Succeeded,
+            attempts: vec![AttemptState {
+                record: record("attempt:stateful:7:b:1", 76),
+                ordinal: 1,
+                retry: None,
+                result: BuildResult::Succeeded,
+                terminal_reason: None,
+                queued_at_unix_ms: 1_100,
+                ready_at_unix_ms: Some(1_190),
+                started_at_unix_ms: Some(1_195),
+                ended_at_unix_ms: 1_200,
+                audit_digest: digest(77),
+            }],
+        },
+    ];
+    bundle.expected_record_ids.extend([
+        "attempt:stateful:7:a:1".to_owned(),
+        "attempt:stateful:7:a:2".to_owned(),
+        "attempt:stateful:7:b:1".to_owned(),
+        "node:stateful:7:a".to_owned(),
+        "node:stateful:7:b".to_owned(),
+    ]);
+    bundle.expected_record_ids.sort();
+    expected.input_bundle_digest = sha256(&canonical_bytes(&bundle).unwrap());
+
+    transform(&bundle, &expected, &BTreeMap::new())
+        .expect("blocked child binds to the successful retry active at readiness");
 }
 
 #[test]
@@ -707,6 +795,7 @@ fn completed_edge_rejects_a_child_admitted_during_a_terminal_only_parent_retry()
                     result: BuildResult::Failed,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_100,
+                    ready_at_unix_ms: Some(1_100),
                     started_at_unix_ms: Some(1_100),
                     ended_at_unix_ms: 1_140,
                     audit_digest: digest(72),
@@ -721,6 +810,7 @@ fn completed_edge_rejects_a_child_admitted_during_a_terminal_only_parent_retry()
                     result: BuildResult::Aborted,
                     terminal_reason: Some(AttemptTerminalReason::FailFastSkipped),
                     queued_at_unix_ms: 1_150,
+                    ready_at_unix_ms: Some(1_150),
                     started_at_unix_ms: None,
                     ended_at_unix_ms: 1_190,
                     audit_digest: digest(74),
@@ -744,6 +834,7 @@ fn completed_edge_rejects_a_child_admitted_during_a_terminal_only_parent_retry()
                 result: BuildResult::Succeeded,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_160,
+                ready_at_unix_ms: Some(1_160),
                 started_at_unix_ms: Some(1_170),
                 ended_at_unix_ms: 1_200,
                 audit_digest: digest(77),
@@ -777,6 +868,7 @@ fn succeeded_edge_requires_a_successful_parent_attempt() {
                 result: BuildResult::Failed,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_100,
+                ready_at_unix_ms: Some(1_100),
                 started_at_unix_ms: Some(1_100),
                 ended_at_unix_ms: 1_140,
                 audit_digest: digest(72),
@@ -799,6 +891,7 @@ fn succeeded_edge_requires_a_successful_parent_attempt() {
                 result: BuildResult::Succeeded,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_150,
+                ready_at_unix_ms: Some(1_150),
                 started_at_unix_ms: Some(1_150),
                 ended_at_unix_ms: 1_200,
                 audit_digest: digest(75),
@@ -833,6 +926,7 @@ fn succeeded_edge_binds_to_the_final_successful_parent_attempt() {
                     result: BuildResult::Failed,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_100,
+                    ready_at_unix_ms: Some(1_100),
                     started_at_unix_ms: Some(1_100),
                     ended_at_unix_ms: 1_140,
                     audit_digest: digest(72),
@@ -847,6 +941,7 @@ fn succeeded_edge_binds_to_the_final_successful_parent_attempt() {
                     result: BuildResult::Succeeded,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_160,
+                    ready_at_unix_ms: Some(1_160),
                     started_at_unix_ms: Some(1_160),
                     ended_at_unix_ms: 1_180,
                     audit_digest: digest(74),
@@ -870,6 +965,7 @@ fn succeeded_edge_binds_to_the_final_successful_parent_attempt() {
                 result: BuildResult::Succeeded,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_180,
+                ready_at_unix_ms: Some(1_180),
                 started_at_unix_ms: Some(1_180),
                 ended_at_unix_ms: 1_200,
                 audit_digest: digest(77),
@@ -908,6 +1004,7 @@ fn successful_graph_attempt_cannot_be_retried() {
                 result: BuildResult::Succeeded,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_100,
+                ready_at_unix_ms: Some(1_100),
                 started_at_unix_ms: Some(1_100),
                 ended_at_unix_ms: 1_140,
                 audit_digest: digest(72),
@@ -922,6 +1019,7 @@ fn successful_graph_attempt_cannot_be_retried() {
                 result: BuildResult::Failed,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_160,
+                ready_at_unix_ms: Some(1_160),
                 started_at_unix_ms: Some(1_160),
                 ended_at_unix_ms: 1_200,
                 audit_digest: digest(74),
@@ -956,6 +1054,7 @@ fn fail_fast_skipped_graph_attempt_can_be_reopened() {
                     result: BuildResult::Failed,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_100,
+                    ready_at_unix_ms: Some(1_100),
                     started_at_unix_ms: Some(1_100),
                     ended_at_unix_ms: 1_140,
                     audit_digest: digest(72),
@@ -970,6 +1069,7 @@ fn fail_fast_skipped_graph_attempt_can_be_reopened() {
                     result: BuildResult::Succeeded,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_150,
+                    ready_at_unix_ms: Some(1_150),
                     started_at_unix_ms: Some(1_150),
                     ended_at_unix_ms: 1_170,
                     audit_digest: digest(74),
@@ -994,6 +1094,7 @@ fn fail_fast_skipped_graph_attempt_can_be_reopened() {
                     result: BuildResult::Aborted,
                     terminal_reason: Some(AttemptTerminalReason::FailFastSkipped),
                     queued_at_unix_ms: 1_100,
+                    ready_at_unix_ms: Some(1_100),
                     started_at_unix_ms: None,
                     ended_at_unix_ms: 1_145,
                     audit_digest: digest(77),
@@ -1008,6 +1109,7 @@ fn fail_fast_skipped_graph_attempt_can_be_reopened() {
                     result: BuildResult::Succeeded,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_180,
+                    ready_at_unix_ms: Some(1_180),
                     started_at_unix_ms: Some(1_180),
                     ended_at_unix_ms: 1_200,
                     audit_digest: digest(79),
@@ -1074,6 +1176,7 @@ fn non_dependency_terminal_only_attempt_reasons_have_exact_final_node_semantics(
                 result: BuildResult::Aborted,
                 terminal_reason: Some(terminal_reason),
                 queued_at_unix_ms: 1_100,
+                ready_at_unix_ms: Some(1_100),
                 started_at_unix_ms: None,
                 ended_at_unix_ms: 1_140,
                 audit_digest: digest(82),
@@ -1110,6 +1213,7 @@ fn dependency_skipped_graph_attempt_requires_a_failed_parent_and_exact_retry_lin
                     result: BuildResult::Failed,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_100,
+                    ready_at_unix_ms: Some(1_100),
                     started_at_unix_ms: Some(1_100),
                     ended_at_unix_ms: 1_130,
                     audit_digest: digest(82),
@@ -1124,6 +1228,7 @@ fn dependency_skipped_graph_attempt_requires_a_failed_parent_and_exact_retry_lin
                     result: BuildResult::Succeeded,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_145,
+                    ready_at_unix_ms: Some(1_145),
                     started_at_unix_ms: Some(1_145),
                     ended_at_unix_ms: 1_170,
                     audit_digest: digest(84),
@@ -1148,6 +1253,7 @@ fn dependency_skipped_graph_attempt_requires_a_failed_parent_and_exact_retry_lin
                     result: BuildResult::Aborted,
                     terminal_reason: Some(AttemptTerminalReason::DependencyNotSucceeded),
                     queued_at_unix_ms: 1_135,
+                    ready_at_unix_ms: Some(1_135),
                     started_at_unix_ms: None,
                     ended_at_unix_ms: 1_140,
                     audit_digest: digest(87),
@@ -1162,6 +1268,7 @@ fn dependency_skipped_graph_attempt_requires_a_failed_parent_and_exact_retry_lin
                     result: BuildResult::Succeeded,
                     terminal_reason: None,
                     queued_at_unix_ms: 1_175,
+                    ready_at_unix_ms: Some(1_175),
                     started_at_unix_ms: Some(1_175),
                     ended_at_unix_ms: 1_190,
                     audit_digest: digest(89),
@@ -1226,6 +1333,7 @@ fn terminal_only_attempt_cannot_end_before_its_predecessor() {
                 result: BuildResult::Failed,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_100,
+                ready_at_unix_ms: Some(1_100),
                 started_at_unix_ms: Some(1_100),
                 ended_at_unix_ms: 1_160,
                 audit_digest: digest(82),
@@ -1240,6 +1348,7 @@ fn terminal_only_attempt_cannot_end_before_its_predecessor() {
                 result: BuildResult::Aborted,
                 terminal_reason: Some(AttemptTerminalReason::FailFastSkipped),
                 queued_at_unix_ms: 1_150,
+                ready_at_unix_ms: Some(1_150),
                 started_at_unix_ms: None,
                 ended_at_unix_ms: 1_150,
                 audit_digest: digest(84),
@@ -1272,6 +1381,7 @@ fn graph_node_result_must_match_its_final_attempt() {
             result: BuildResult::Failed,
             terminal_reason: None,
             queued_at_unix_ms: 1_100,
+            ready_at_unix_ms: Some(1_100),
             started_at_unix_ms: Some(1_100),
             ended_at_unix_ms: 1_200,
             audit_digest: digest(72),
@@ -1289,7 +1399,9 @@ fn graph_node_result_must_match_its_final_attempt() {
 #[test]
 fn graph_node_attempts_must_stay_inside_the_build_window() {
     let (bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
-    for (started_at_unix_ms, ended_at_unix_ms) in [(1_099, 1_150), (1_150, 1_201)] {
+    for (queued_at_unix_ms, started_at_unix_ms, ended_at_unix_ms) in
+        [(999, 1_099, 1_150), (1_150, 1_150, 1_201)]
+    {
         let mut candidate = bundle.clone();
         candidate.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
             record: record("node:stateful:7:build", 70),
@@ -1304,7 +1416,8 @@ fn graph_node_attempts_must_stay_inside_the_build_window() {
                 retry: None,
                 result: BuildResult::Succeeded,
                 terminal_reason: None,
-                queued_at_unix_ms: started_at_unix_ms,
+                queued_at_unix_ms,
+                ready_at_unix_ms: Some(started_at_unix_ms),
                 started_at_unix_ms: Some(started_at_unix_ms),
                 ended_at_unix_ms,
                 audit_digest: digest(72),
@@ -1316,6 +1429,40 @@ fn graph_node_attempts_must_stay_inside_the_build_window() {
             Err(TransferError::InvalidField(field)) if field.contains("attempt timing")
         ));
     }
+}
+
+#[test]
+fn graph_attempt_can_queue_after_build_queue_before_build_start() {
+    let (mut bundle, mut expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    bundle.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
+        record: record("node:stateful:7:build", 70),
+        node_id: "build".to_owned(),
+        stage_path: "build".to_owned(),
+        node_kind: "stage".to_owned(),
+        dependencies: Vec::new(),
+        result: BuildResult::Succeeded,
+        attempts: vec![AttemptState {
+            record: record("attempt:stateful:7:build:1", 71),
+            ordinal: 1,
+            retry: None,
+            result: BuildResult::Succeeded,
+            terminal_reason: None,
+            queued_at_unix_ms: 1_050,
+            ready_at_unix_ms: Some(1_060),
+            started_at_unix_ms: Some(1_099),
+            ended_at_unix_ms: 1_150,
+            audit_digest: digest(72),
+        }],
+    }];
+    bundle.expected_record_ids.extend([
+        "attempt:stateful:7:build:1".to_owned(),
+        "node:stateful:7:build".to_owned(),
+    ]);
+    bundle.expected_record_ids.sort();
+    expected.input_bundle_digest = sha256(&canonical_bytes(&bundle).unwrap());
+
+    transform(&bundle, &expected, &BTreeMap::new())
+        .expect("attempt queueing is bounded by build queue, not build start");
 }
 
 #[test]
@@ -1359,6 +1506,7 @@ fn graph_node_attempts_must_be_ordered_and_non_overlapping() {
                 result: BuildResult::Failed,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_100,
+                ready_at_unix_ms: Some(1_100),
                 started_at_unix_ms: Some(1_100),
                 ended_at_unix_ms: 1_160,
                 audit_digest: digest(72),
@@ -1373,6 +1521,7 @@ fn graph_node_attempts_must_be_ordered_and_non_overlapping() {
                 result: BuildResult::Succeeded,
                 terminal_reason: None,
                 queued_at_unix_ms: 1_150,
+                ready_at_unix_ms: Some(1_150),
                 started_at_unix_ms: Some(1_150),
                 ended_at_unix_ms: 1_200,
                 audit_digest: digest(74),

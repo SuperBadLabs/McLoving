@@ -256,6 +256,9 @@ pub struct AttemptState {
     pub result: BuildResult,
     pub terminal_reason: Option<AttemptTerminalReason>,
     pub queued_at_unix_ms: i64,
+    /// When this attempt's dependency generation became eligible to run.
+    /// Blocked or skipped attempts can remain unready.
+    pub ready_at_unix_ms: Option<i64>,
     pub started_at_unix_ms: Option<i64>,
     pub ended_at_unix_ms: i64,
     pub audit_digest: Digest,
@@ -1243,6 +1246,7 @@ fn validate_build(
     validate_graph_nodes(
         &build.graph_nodes,
         records,
+        build.queued_at_unix_ms,
         build.started_at_unix_ms,
         build.ended_at_unix_ms,
     )?;
@@ -1374,6 +1378,7 @@ fn validate_invocation_parameters(
 fn validate_graph_nodes(
     nodes: &[GraphNodeState],
     records: &mut BTreeMap<String, Digest>,
+    build_queued_at_unix_ms: i64,
     build_started_at_unix_ms: i64,
     build_ended_at_unix_ms: i64,
 ) -> Result<(), TransferError> {
@@ -1433,14 +1438,20 @@ fn validate_graph_nodes(
                     ));
                 }
             }
-            match (attempt.started_at_unix_ms, attempt.terminal_reason) {
-                (Some(started_at_unix_ms), None) => validate_time_range(
-                    build_started_at_unix_ms,
-                    started_at_unix_ms,
-                    attempt.ended_at_unix_ms,
-                    "attempt timing",
-                )?,
-                (None, Some(_)) if attempt.result == BuildResult::Aborted => {
+            match (
+                attempt.ready_at_unix_ms,
+                attempt.started_at_unix_ms,
+                attempt.terminal_reason,
+            ) {
+                (Some(ready_at_unix_ms), Some(started_at_unix_ms), None) => {
+                    validate_time_range(
+                        ready_at_unix_ms,
+                        started_at_unix_ms,
+                        attempt.ended_at_unix_ms,
+                        "attempt timing",
+                    )?;
+                }
+                (_, None, Some(_)) if attempt.result == BuildResult::Aborted => {
                     if attempt.ended_at_unix_ms < build_started_at_unix_ms {
                         return Err(TransferError::InvalidField(
                             "terminal-only attempt must end inside its build window".to_owned(),
@@ -1453,15 +1464,22 @@ fn validate_graph_nodes(
                     ));
                 }
             }
-            if attempt.queued_at_unix_ms > attempt.ended_at_unix_ms
+            if attempt.queued_at_unix_ms < build_queued_at_unix_ms
+                || attempt.queued_at_unix_ms > attempt.ended_at_unix_ms
+                || attempt.ready_at_unix_ms.is_some_and(|ready_at_unix_ms| {
+                    ready_at_unix_ms < attempt.queued_at_unix_ms
+                        || ready_at_unix_ms > attempt.ended_at_unix_ms
+                })
                 || attempt
                     .started_at_unix_ms
                     .is_some_and(|started_at_unix_ms| {
-                        attempt.queued_at_unix_ms > started_at_unix_ms
+                        attempt
+                            .ready_at_unix_ms
+                            .is_none_or(|ready_at_unix_ms| ready_at_unix_ms > started_at_unix_ms)
                     })
             {
                 return Err(TransferError::InvalidField(
-                    "attempt queue time must precede execution and terminal time".to_owned(),
+                    "attempt timing must keep queue/readiness inside the build and before execution and terminal time".to_owned(),
                 ));
             }
             if attempt.ended_at_unix_ms > build_ended_at_unix_ms {
@@ -1564,13 +1582,17 @@ fn validate_graph_nodes(
                 .iter()
                 .filter(|attempt| attempt.started_at_unix_ms.is_some())
             {
+                let child_ready_at_unix_ms = child_attempt
+                    .ready_at_unix_ms
+                    .expect("executing child attempt has a readiness time");
                 let child_started_at_unix_ms = child_attempt
                     .started_at_unix_ms
                     .expect("executing child attempt has a start time");
-                let active_parent_attempt =
-                    parent.attempts.iter().rev().find(|attempt| {
-                        attempt.queued_at_unix_ms <= child_attempt.queued_at_unix_ms
-                    });
+                let active_parent_attempt = parent
+                    .attempts
+                    .iter()
+                    .rev()
+                    .find(|attempt| attempt.queued_at_unix_ms <= child_ready_at_unix_ms);
                 let satisfying_parent_attempt = match dependency.condition {
                     GraphDependencyCondition::Completed => active_parent_attempt,
                     GraphDependencyCondition::Succeeded => active_parent_attempt
@@ -1609,7 +1631,7 @@ fn validate_graph_nodes(
                     .find(|candidate| candidate.node_id == dependency.parent_node_id)
                     .and_then(|parent| {
                         parent.attempts.iter().rev().find(|parent_attempt| {
-                            parent_attempt.queued_at_unix_ms <= attempt.queued_at_unix_ms
+                            parent_attempt.queued_at_unix_ms <= attempt.ended_at_unix_ms
                         })
                     })
                     .is_some_and(|parent_attempt| {

@@ -255,14 +255,19 @@ impl Store {
             .execute(&mut *tx)
             .await?;
             sqlx::query(
-                "INSERT INTO attempts (
-                     id, organization_id, node_id, ordinal, status
+                "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+                 INSERT INTO attempts (
+                     id, organization_id, node_id, ordinal, status,
+                     created_at, ready_at
                  )
-                 VALUES ($1, $2, $3, 1, 'queued')",
+                 SELECT $1, $2, $3, 1, 'queued', admitted_at,
+                        CASE WHEN $4 THEN admitted_at ELSE NULL END
+                 FROM timing",
             )
             .bind(attempt_id)
             .bind(input.organization_id)
             .bind(node_id)
+            .bind(node.dependencies.is_empty())
             .execute(&mut *tx)
             .await?;
             nodes.insert(
@@ -373,10 +378,13 @@ pub(crate) async fn advance_dag_after_attempt(
         if !has_non_idempotent_effect {
             let retry_id = Uuid::new_v4();
             sqlx::query(
-                "INSERT INTO attempts (
-                     id, organization_id, node_id, ordinal, status, retry_of
+                "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+                 INSERT INTO attempts (
+                     id, organization_id, node_id, ordinal, status, retry_of,
+                     created_at, ready_at
                  )
-                 VALUES ($1, $2, $3, $4, 'queued', $5)",
+                 SELECT $1, $2, $3, $4, 'queued', $5, admitted_at, admitted_at
+                 FROM timing",
             )
             .bind(retry_id)
             .bind(organization_id)
@@ -388,7 +396,8 @@ pub(crate) async fn advance_dag_after_attempt(
             sqlx::query(
                 "UPDATE nodes
                  SET status = 'queued',
-                     cancellation_requested_at = NULL
+                     cancellation_requested_at = NULL,
+                     queued_at = clock_timestamp()
                  WHERE organization_id = $1
                    AND id = $2
                    AND logical_outcome IS NULL",
@@ -701,6 +710,24 @@ async fn advance_blocked_nodes(
         .execute(&mut **tx)
         .await?
         .rows_affected();
+        if readied > 0 {
+            sqlx::query(
+                "UPDATE attempts AS attempt
+                 SET ready_at = node.queued_at
+                 FROM nodes AS node
+                 WHERE attempt.organization_id = $1
+                   AND node.organization_id = attempt.organization_id
+                   AND node.build_id = $2
+                   AND node.id = attempt.node_id
+                   AND node.status = 'queued'
+                   AND attempt.status = 'queued'
+                   AND attempt.ready_at IS NULL",
+            )
+            .bind(organization_id)
+            .bind(build_id)
+            .execute(&mut **tx)
+            .await?;
+        }
         if skipped == 0 && readied == 0 {
             break;
         }
