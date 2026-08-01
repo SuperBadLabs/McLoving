@@ -167,7 +167,7 @@ LANGUAGE plpgsql
 SET search_path = public, pg_temp
 AS $$
 BEGIN
-    IF NEW.id IS DISTINCT FROM OLD.id
+    IF (NEW.id IS DISTINCT FROM OLD.id
        OR NEW.organization_id IS DISTINCT FROM OLD.organization_id
        OR NEW.kind IS DISTINCT FROM OLD.kind
        OR NEW.subject IS DISTINCT FROM OLD.subject
@@ -178,7 +178,31 @@ BEGIN
        OR NEW.source_membership_generation IS DISTINCT FROM OLD.source_membership_generation
        OR NEW.alias_history IS DISTINCT FROM OLD.alias_history
        OR NEW.provenance_digest IS DISTINCT FROM OLD.provenance_digest
-    THEN
+       ) AND NOT (
+           OLD.kind = 'human'
+           AND OLD.provider_id IS NULL
+           AND OLD.external_subject IS NULL
+           AND OLD.source_realm_digest IS NULL
+           AND OLD.source_identity_id IS NULL
+           AND OLD.source_membership_generation IS NULL
+           AND OLD.provenance_digest IS NULL
+           AND OLD.lifecycle_state = 'disabled'
+           AND OLD.lifecycle_generation = 2
+           AND NEW.id = OLD.id
+           AND NEW.organization_id = OLD.organization_id
+           AND NEW.kind = OLD.kind
+           AND NEW.subject = OLD.subject
+           AND NEW.provider_id IS NOT NULL
+           AND NEW.external_subject IS NOT NULL
+           AND NEW.source_realm_digest IS NOT NULL
+           AND NEW.source_identity_id IS NOT NULL
+           AND NEW.source_membership_generation IS NOT NULL
+           AND NEW.provenance_digest IS NOT NULL
+           AND NEW.lifecycle_state = OLD.lifecycle_state
+           AND NEW.lifecycle_generation = OLD.lifecycle_generation
+           AND NEW.group_generation = OLD.group_generation
+           AND NEW.group_digest = OLD.group_digest
+       ) THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'mcloving identity binding is immutable';
     END IF;
     IF NEW.lifecycle_generation < OLD.lifecycle_generation
@@ -200,9 +224,10 @@ GRANT SELECT ON identity_providers, identities, project_memberships,
     service_scopes TO mcloving_tenant;
 GRANT UPDATE (group_generation, group_digest, updated_at)
     ON identities TO mcloving_tenant;
-GRANT SELECT, INSERT ON identity_group_snapshots, oidc_token_replays TO mcloving_tenant;
-GRANT SELECT, INSERT, UPDATE ON oidc_login_attempts, identity_sessions,
-    service_credentials TO mcloving_tenant;
+GRANT SELECT, INSERT, DELETE ON identity_group_snapshots, oidc_token_replays TO mcloving_tenant;
+GRANT SELECT, INSERT, UPDATE, DELETE ON identity_sessions TO mcloving_tenant;
+GRANT SELECT, INSERT, UPDATE ON service_credentials TO mcloving_tenant;
+GRANT SELECT, INSERT, UPDATE, DELETE ON oidc_login_attempts TO mcloving_tenant;
 
 ALTER TABLE identity_providers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE identity_providers FORCE ROW LEVEL SECURITY;

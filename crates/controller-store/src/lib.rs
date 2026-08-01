@@ -95,6 +95,9 @@ pub const STATE_TRANSFER_V17: &str = include_str!("../migrations/0017_state_tran
 pub const ATTEMPT_READINESS_V18: &str = include_str!("../migrations/0018_attempt_readiness.sql");
 /// Durable OIDC, principal-lifecycle, session, and service-credential truth.
 pub const IDENTITY_LIFECYCLE_V19: &str = include_str!("../migrations/0019_identity_lifecycle.sql");
+/// One-time rotating refresh credentials for durable human sessions.
+pub const IDENTITY_SESSION_REFRESH_V20: &str =
+    include_str!("../migrations/0020_identity_session_refresh.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -485,6 +488,7 @@ impl Store {
         apply_migration(&mut tx, 17, STATE_TRANSFER_V17).await?;
         apply_migration(&mut tx, 18, ATTEMPT_READINESS_V18).await?;
         apply_migration(&mut tx, 19, IDENTITY_LIFECYCLE_V19).await?;
+        apply_migration(&mut tx, 20, IDENTITY_SESSION_REFRESH_V20).await?;
         tx.commit().await?;
         Ok(())
     }

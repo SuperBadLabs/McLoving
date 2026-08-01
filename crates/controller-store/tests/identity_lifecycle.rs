@@ -70,6 +70,8 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     };
     let organization_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
+    let second_organization_id = Uuid::new_v4();
+    let second_project_id = Uuid::new_v4();
     admin
         .create_project(
             organization_id,
@@ -79,6 +81,15 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         )
         .await
         .expect("create identity test tenant");
+    admin
+        .create_project(
+            second_organization_id,
+            &format!("org-{second_organization_id}"),
+            second_project_id,
+            "identity-lifecycle-second-tenant",
+        )
+        .await
+        .expect("create a real second tenant for isolation checks");
 
     let quarantined_legacy_human_id = Uuid::new_v4();
     sqlx::query(
@@ -127,6 +138,35 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         })
         .await
         .expect("provision exact provider");
+    admin
+        .provision_human_identity(&NewHumanIdentity {
+            organization_id,
+            identity_id: quarantined_legacy_human_id,
+            subject: format!("legacy:{quarantined_legacy_human_id}"),
+            provider_id,
+            external_subject: "reviewed-legacy-person".to_owned(),
+            source_realm_digest: digest("legacy-jenkins-realm"),
+            source_identity_id: "legacy-jenkins-user".to_owned(),
+            source_membership_generation: 4,
+            alias_history: vec!["legacy-login".to_owned()],
+            provenance_digest: digest("legacy-reviewed-provenance"),
+            actor_subject: "operator:identity".to_owned(),
+        })
+        .await
+        .expect("bind the quarantined legacy human through the reviewed mapping path");
+    assert_eq!(
+        admin
+            .transition_identity_lifecycle(
+                organization_id,
+                quarantined_legacy_human_id,
+                2,
+                IdentityLifecycle::Active,
+                "operator:identity",
+            )
+            .await
+            .expect("activate the legacy human only after immutable binding"),
+        3
+    );
 
     let human_id = Uuid::new_v4();
     admin
@@ -204,8 +244,10 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             &SessionIssue {
                 session_id: Uuid::new_v4(),
                 token_digest: session_token,
+                refresh_token_digest: Some(digest("human-refresh-1")),
                 issued_at_unix_ms: 10_000,
                 expires_at_unix_ms: 30_000,
+                refresh_expires_at_unix_ms: Some(60_000),
             },
         )
         .await
@@ -227,8 +269,10 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
                 &SessionIssue {
                     session_id: Uuid::new_v4(),
                     token_digest: digest("replayed-session"),
+                    refresh_token_digest: Some(digest("replayed-refresh")),
                     issued_at_unix_ms: 10_200,
                     expires_at_unix_ms: 30_000,
+                    refresh_expires_at_unix_ms: Some(60_000),
                 },
             )
             .await
@@ -248,8 +292,10 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             &SessionIssue {
                 session_id: Uuid::new_v4(),
                 token_digest: second_token,
+                refresh_token_digest: Some(digest("human-refresh-2")),
                 issued_at_unix_ms: 11_000,
                 expires_at_unix_ms: 31_000,
+                refresh_expires_at_unix_ms: Some(61_000),
             },
         )
         .await
@@ -264,10 +310,68 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     );
     assert!(
         runtime
-            .authenticate_api_token(Uuid::new_v4(), second_token, 11_100)
+            .authenticate_api_token(second_organization_id, second_token, 11_100)
             .await
             .is_err(),
         "credential must not cross tenant boundaries"
+    );
+
+    let refreshed_token = digest("human-session-3");
+    let refreshed_session = runtime
+        .rotate_human_session(
+            organization_id,
+            digest("human-refresh-2"),
+            &SessionIssue {
+                session_id: Uuid::new_v4(),
+                token_digest: refreshed_token,
+                refresh_token_digest: Some(digest("human-refresh-3")),
+                issued_at_unix_ms: 12_000,
+                expires_at_unix_ms: 32_000,
+                refresh_expires_at_unix_ms: Some(62_000),
+            },
+        )
+        .await
+        .expect("rotate a live refresh credential exactly once");
+    assert_eq!(
+        refreshed_session.refresh_expires_at_unix_ms,
+        Some(61_000),
+        "refresh rotation preserves the original absolute refresh deadline"
+    );
+    assert!(
+        runtime
+            .authenticate_api_token(organization_id, second_token, 12_001)
+            .await
+            .is_err(),
+        "refresh rotation must immediately revoke the replaced access token"
+    );
+    runtime
+        .authenticate_api_token(organization_id, refreshed_token, 12_001)
+        .await
+        .expect("new access token authenticates after refresh rotation");
+    assert!(
+        runtime
+            .rotate_human_session(
+                organization_id,
+                digest("human-refresh-2"),
+                &SessionIssue {
+                    session_id: Uuid::new_v4(),
+                    token_digest: digest("refresh-replay-access"),
+                    refresh_token_digest: Some(digest("refresh-replay-next")),
+                    issued_at_unix_ms: 12_002,
+                    expires_at_unix_ms: 32_002,
+                    refresh_expires_at_unix_ms: Some(62_002),
+                },
+            )
+            .await
+            .is_err(),
+        "a refresh credential must be one-time"
+    );
+    assert!(
+        runtime
+            .authenticate_api_token(organization_id, refreshed_token, 12_003)
+            .await
+            .is_err(),
+        "refresh-token reuse revokes the active session family"
     );
 
     let service_id = Uuid::new_v4();
@@ -311,6 +415,17 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
             .expect("exact service credential provisioning is restart-idempotent"),
         credential
     );
+    assert!(
+        admin
+            .provision_service_credential(&NewServiceCredential {
+                credential_id: Uuid::new_v4(),
+                token_digest: digest("same-generation-different-token"),
+                ..service_credential.clone()
+            })
+            .await
+            .is_err(),
+        "a generation cannot silently accept a different token digest"
+    );
     let service = runtime
         .authenticate_api_token(organization_id, service_token, 12_000)
         .await
@@ -320,11 +435,33 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         service.principal.service_scopes,
         BTreeSet::from([ServiceScope::ProjectRead, ServiceScope::BuildSubmit])
     );
+    let rotated_service_token = digest("service-token-2");
+    let rotated_credential = admin
+        .provision_service_credential(&NewServiceCredential {
+            credential_id: Uuid::new_v4(),
+            generation: 2,
+            token_digest: rotated_service_token,
+            issued_at_unix_ms: 12_050,
+            ..service_credential.clone()
+        })
+        .await
+        .expect("rotate to the next service credential generation");
+    assert!(
+        runtime
+            .authenticate_api_token(organization_id, service_token, 12_051)
+            .await
+            .is_err(),
+        "a new credential generation immediately revokes the old generation"
+    );
+    runtime
+        .authenticate_api_token(organization_id, rotated_service_token, 12_051)
+        .await
+        .expect("the new service credential generation authenticates");
     assert!(
         runtime
             .revoke_service_credential(
                 organization_id,
-                credential.credential_id,
+                rotated_credential.credential_id,
                 12_100,
                 "rotation",
                 "operator:identity",
@@ -334,7 +471,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     );
     assert!(
         runtime
-            .authenticate_api_token(organization_id, service_token, 12_101)
+            .authenticate_api_token(organization_id, rotated_service_token, 12_101)
             .await
             .is_err()
     );
@@ -352,7 +489,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     assert_eq!(lifecycle_generation, 2);
     assert!(
         runtime
-            .authenticate_api_token(organization_id, second_token, 12_200)
+            .authenticate_api_token(organization_id, refreshed_token, 12_200)
             .await
             .is_err(),
         "identity disable must immediately fence every session"
@@ -365,6 +502,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         "identity_provider_provisioned",
         "human_identity_provisioned",
         "oidc_session_issued",
+        "oidc_session_refreshed",
         "service_identity_provisioned",
         "service_credential_provisioned",
         "service_credential_revoked",

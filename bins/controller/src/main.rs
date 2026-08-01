@@ -20,12 +20,12 @@ use mcloving_agent_protocol::{
     ATTEMPT_CREDENTIALS_FEATURE, ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS,
     WORK_DELIVERY_FEATURE, negotiate,
 };
-use mcloving_controller_api::{ApiState, router};
+use mcloving_controller_api::{ApiState, OidcClientConfig, router};
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, NewLogChunk, NewServiceCredential,
-    NewServiceIdentity, ReconciliationTrustPoolAuthorization, Store, StoreError, TerminalOutcome,
-    authz::ServiceScope,
+    AgentReconciliationDisposition, ClaimRequest, IdentityProviderWrite, NewLogChunk,
+    NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization, Store,
+    StoreError, TerminalOutcome, authz::ServiceScope,
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
@@ -60,8 +60,12 @@ async fn main() -> Result<()> {
     }
     let artifact_agent_token = std::env::var("MCLOVING_ARTIFACT_AGENT_TOKEN")
         .context("MCLOVING_ARTIFACT_AGENT_TOKEN is required")?;
+    if bearer_token == artifact_agent_token {
+        bail!("MCLOVING_API_TOKEN and MCLOVING_ARTIFACT_AGENT_TOKEN must be distinct");
+    }
     let listen = std::env::var("MCLOVING_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let worker = EmbeddedWorker::from_environment()?;
+    let oidc = oidc_environment(worker.organization_id)?;
     let migration_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&migration_database_url)
@@ -112,6 +116,12 @@ async fn main() -> Result<()> {
         })
         .await
         .context("provision durable public API service credential")?;
+    if let Some(oidc) = &oidc {
+        migration_store
+            .provision_identity_provider(&oidc.provider)
+            .await
+            .context("provision exact OIDC provider generation")?;
+    }
     migration_pool.close().await;
 
     let runtime_pool = PgPoolOptions::new()
@@ -143,13 +153,18 @@ async fn main() -> Result<()> {
         },
     )
     .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
-    let state = ApiState::new_durable(store.clone())
+    let mut state = ApiState::new_durable(store.clone())
         .with_artifact_agent_token(&artifact_agent_token, &worker.config.agent_id)
         .context("configure artifact-agent authentication")?;
     if std::env::var_os("MCLOVING_API_PRINCIPALS_PATH").is_some() {
         bail!(
             "MCLOVING_API_PRINCIPALS_PATH is retired; provision immutable OIDC identities instead"
         );
+    }
+    if let Some(oidc) = oidc {
+        state = state
+            .with_oidc_client(oidc.client)
+            .context("configure OIDC authorization-code client")?;
     }
     let state = state
         .with_object_store(object_store)
@@ -166,9 +181,12 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("bind controller to {listen}"))?;
     let server = async {
-        axum::serve(listener, router(state))
-            .await
-            .context("serve public API")
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .context("serve public API")
     };
     let agent_server = run_agent_control_server(store.clone());
     tokio::pin!(server);
@@ -196,6 +214,167 @@ fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(error).with_context(|| format!("read {name}")),
     }
+}
+
+struct OidcEnvironment {
+    provider: IdentityProviderWrite,
+    client: OidcClientConfig,
+}
+
+fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
+    let provider_id = match std::env::var("MCLOVING_OIDC_PROVIDER_ID") {
+        Ok(value) => value
+            .parse::<Uuid>()
+            .context("MCLOVING_OIDC_PROVIDER_ID must be a UUID")?,
+        Err(std::env::VarError::NotPresent) => {
+            const OIDC_ENVIRONMENT: &[&str] = &[
+                "MCLOVING_OIDC_ISSUER",
+                "MCLOVING_OIDC_AUDIENCE",
+                "MCLOVING_OIDC_AUTHORIZATION_ENDPOINT",
+                "MCLOVING_OIDC_TOKEN_ENDPOINT",
+                "MCLOVING_OIDC_JWKS_URI",
+                "MCLOVING_OIDC_CLIENT_ID",
+                "MCLOVING_OIDC_CLIENT_SECRET",
+                "MCLOVING_OIDC_GROUP_CLAIM",
+                "MCLOVING_OIDC_CONFIGURATION_GENERATION",
+                "MCLOVING_OIDC_JWKS_GENERATION",
+                "MCLOVING_OIDC_JWKS_SHA256",
+                "MCLOVING_OIDC_ALLOWED_REDIRECT_URIS",
+                "MCLOVING_OIDC_SESSION_TTL_SECONDS",
+                "MCLOVING_OIDC_REFRESH_TTL_SECONDS",
+                "MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS",
+                "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
+                "MCLOVING_OIDC_MAX_JWKS_BYTES",
+            ];
+            if let Some(name) = OIDC_ENVIRONMENT
+                .iter()
+                .find(|name| std::env::var_os(name).is_some())
+            {
+                bail!("{name} requires MCLOVING_OIDC_PROVIDER_ID");
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("read MCLOVING_OIDC_PROVIDER_ID"),
+    };
+    let issuer = required("MCLOVING_OIDC_ISSUER")?;
+    let audience = required("MCLOVING_OIDC_AUDIENCE")?;
+    let authorization_endpoint = required("MCLOVING_OIDC_AUTHORIZATION_ENDPOINT")?;
+    let token_endpoint = required("MCLOVING_OIDC_TOKEN_ENDPOINT")?;
+    let jwks_uri = required("MCLOVING_OIDC_JWKS_URI")?;
+    let client_id = required("MCLOVING_OIDC_CLIENT_ID")?;
+    let client_secret = match std::env::var("MCLOVING_OIDC_CLIENT_SECRET") {
+        Ok(secret) => Some(secret),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(error).context("read MCLOVING_OIDC_CLIENT_SECRET"),
+    };
+    let group_claim = required("MCLOVING_OIDC_GROUP_CLAIM")?;
+    let configuration_generation =
+        bounded_u64_environment("MCLOVING_OIDC_CONFIGURATION_GENERATION", 1)?;
+    let jwks_generation = bounded_u64_environment("MCLOVING_OIDC_JWKS_GENERATION", 1)?;
+    let jwks_digest = parse_sha256_environment("MCLOVING_OIDC_JWKS_SHA256")?;
+    let allowed_redirect_uris = required("MCLOVING_OIDC_ALLOWED_REDIRECT_URIS")?
+        .split(',')
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if allowed_redirect_uris.iter().any(|uri| uri.trim() != uri) {
+        bail!("MCLOVING_OIDC_ALLOWED_REDIRECT_URIS entries must be canonical");
+    }
+    let configuration_digest = oidc_configuration_digest(
+        &[
+            &issuer,
+            &audience,
+            &authorization_endpoint,
+            &token_endpoint,
+            &jwks_uri,
+            &client_id,
+            &group_claim,
+        ],
+        client_secret.as_deref(),
+    );
+    let configuration_generation = i64::try_from(configuration_generation)
+        .context("MCLOVING_OIDC_CONFIGURATION_GENERATION is too large")?;
+    let jwks_generation =
+        i64::try_from(jwks_generation).context("MCLOVING_OIDC_JWKS_GENERATION is too large")?;
+    Ok(Some(OidcEnvironment {
+        provider: IdentityProviderWrite {
+            organization_id,
+            provider_id,
+            issuer,
+            audience,
+            authorization_endpoint,
+            token_endpoint,
+            jwks_uri,
+            client_id,
+            group_claim,
+            configuration_generation,
+            configuration_digest,
+            jwks_generation,
+            jwks_digest,
+            enabled: true,
+            actor_subject: "bootstrap:controller".to_owned(),
+        },
+        client: OidcClientConfig {
+            organization_id,
+            provider_id,
+            client_secret,
+            allowed_redirect_uris,
+            session_ttl: Duration::from_secs(bounded_u64_environment(
+                "MCLOVING_OIDC_SESSION_TTL_SECONDS",
+                15 * 60,
+            )?),
+            refresh_ttl: Duration::from_secs(bounded_u64_environment(
+                "MCLOVING_OIDC_REFRESH_TTL_SECONDS",
+                8 * 60 * 60,
+            )?),
+            request_timeout: Duration::from_secs(bounded_u64_environment(
+                "MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS",
+                10,
+            )?),
+            clock_skew: Duration::from_secs(bounded_u64_environment(
+                "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
+                60,
+            )?),
+            max_jwks_bytes: usize::try_from(bounded_u64_environment(
+                "MCLOVING_OIDC_MAX_JWKS_BYTES",
+                256 * 1024,
+            )?)
+            .context("MCLOVING_OIDC_MAX_JWKS_BYTES is too large")?,
+            allow_insecure_loopback_for_tests: false,
+        },
+    }))
+}
+
+fn oidc_configuration_digest(fields: &[&str], client_secret: Option<&str>) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"mcloving.oidc.configuration.v1\0");
+    for field in fields {
+        hash.update(field.len().to_be_bytes());
+        hash.update(field.as_bytes());
+    }
+    match client_secret {
+        Some(secret) => hash.update(Sha256::digest(secret.as_bytes())),
+        None => hash.update([0_u8; 32]),
+    }
+    hash.finalize().into()
+}
+
+fn parse_sha256_environment(name: &str) -> Result<[u8; 32]> {
+    let value = required(name)?;
+    if value.len() != 64 {
+        bail!("{name} must contain exactly 64 lowercase hexadecimal characters");
+    }
+    let mut digest = [0_u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        let pair = &value[index * 2..index * 2 + 2];
+        if !pair
+            .bytes()
+            .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+        {
+            bail!("{name} must contain exactly 64 lowercase hexadecimal characters");
+        }
+        *byte = u8::from_str_radix(pair, 16).context("parse OIDC JWKS SHA-256")?;
+    }
+    Ok(digest)
 }
 
 fn deterministic_uuid(label: &str) -> Uuid {

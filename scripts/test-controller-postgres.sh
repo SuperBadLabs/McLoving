@@ -52,6 +52,7 @@ podman run --rm \
   bash -c \
   'cargo test --locked -p mcloving-controller-store --test postgres_truth &&
    cargo test --locked -p mcloving-controller-store --test identity_lifecycle &&
+   cargo test --locked -p mcloving-controller-api --test oidc_flow &&
    cargo test --locked -p mcloving-execution-spine --test real_spine &&
    cargo test --locked -p mcloving-controller --test deployable_runtime &&
    cargo test --locked -p mcloving-controller --test diff_001 &&

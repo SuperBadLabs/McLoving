@@ -10,6 +10,9 @@ use super::authz::{Principal, PrincipalKind, ProjectRole, ServiceScope};
 use super::{Store, StoreError};
 
 const MAX_GROUPS: usize = 4096;
+const MAX_ACTIVE_LOGIN_ATTEMPTS_PER_PROVIDER: i64 = 1024;
+const IDENTITY_HISTORY_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+const RETAINED_GROUP_GENERATIONS: i64 = 128;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -151,8 +154,10 @@ pub struct OidcIdentityClaims {
 pub struct SessionIssue {
     pub session_id: Uuid,
     pub token_digest: [u8; 32],
+    pub refresh_token_digest: Option<[u8; 32]>,
     pub issued_at_unix_ms: i64,
     pub expires_at_unix_ms: i64,
+    pub refresh_expires_at_unix_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -163,6 +168,7 @@ pub struct SessionView {
     pub group_generation: i64,
     pub issued_at_unix_ms: i64,
     pub expires_at_unix_ms: i64,
+    pub refresh_expires_at_unix_ms: Option<i64>,
     pub revoked_at_unix_ms: Option<i64>,
 }
 
@@ -178,6 +184,29 @@ pub struct AuthenticatedIdentity {
 }
 
 impl Store {
+    pub async fn identity_provider_config(
+        &self,
+        organization_id: Uuid,
+        provider_id: Uuid,
+    ) -> Result<IdentityProviderConfig, StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row = sqlx::query_as::<_, ProviderRow>(
+            "SELECT provider_id, issuer, audience, authorization_endpoint,
+                    token_endpoint, jwks_uri, client_id, group_claim,
+                    configuration_generation, configuration_digest,
+                    jwks_generation, jwks_digest, enabled
+             FROM identity_providers
+             WHERE organization_id = $1 AND provider_id = $2",
+        )
+        .bind(organization_id)
+        .bind(provider_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::IdentityConflict("OIDC provider is unknown".to_owned()))?;
+        tx.commit().await?;
+        provider_from_row(row)
+    }
+
     pub async fn provision_identity_provider(
         &self,
         input: &IdentityProviderWrite,
@@ -303,6 +332,68 @@ impl Store {
         }
         let aliases = canonical_strings(&input.alias_history, "alias")?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        let legacy = sqlx::query_as::<_, (Uuid, String, String, String, i64, Option<Uuid>)>(
+            "SELECT id, subject, kind, lifecycle_state, lifecycle_generation, provider_id
+             FROM identities
+             WHERE organization_id = $1 AND (id = $2 OR subject = $3)
+             FOR UPDATE",
+        )
+        .bind(input.organization_id)
+        .bind(input.identity_id)
+        .bind(&input.subject)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(legacy) = legacy {
+            if legacy.0 == input.identity_id
+                && legacy.1 == input.subject
+                && legacy.2 == "human"
+                && legacy.3 == "disabled"
+                && legacy.4 == 2
+                && legacy.5.is_none()
+            {
+                sqlx::query(
+                    "UPDATE identities
+                     SET provider_id = $4, external_subject = $5,
+                         source_realm_digest = $6, source_identity_id = $7,
+                         source_membership_generation = $8, alias_history = $9,
+                         provenance_digest = $10, updated_at = clock_timestamp()
+                     WHERE organization_id = $1 AND id = $2 AND subject = $3",
+                )
+                .bind(input.organization_id)
+                .bind(input.identity_id)
+                .bind(&input.subject)
+                .bind(input.provider_id)
+                .bind(&input.external_subject)
+                .bind(input.source_realm_digest.as_slice())
+                .bind(&input.source_identity_id)
+                .bind(input.source_membership_generation)
+                .bind(json!(aliases))
+                .bind(input.provenance_digest.as_slice())
+                .execute(&mut *tx)
+                .await?;
+                append_audit_record(
+                    &mut tx,
+                    input.organization_id,
+                    "identity",
+                    &input.actor_subject,
+                    "legacy_human_identity_bound",
+                    &format!("identity:{}", input.identity_id),
+                    json!({
+                        "provider_id": input.provider_id,
+                        "source_realm_digest": hex::encode(input.source_realm_digest),
+                        "source_identity_id": input.source_identity_id,
+                        "source_membership_generation": input.source_membership_generation,
+                        "provenance_digest": hex::encode(input.provenance_digest),
+                    }),
+                )
+                .await?;
+                tx.commit().await?;
+                return Ok(());
+            }
+            return Err(StoreError::IdentityConflict(
+                "human identity collides with an immutable existing binding".to_owned(),
+            ));
+        }
         let collision = sqlx::query_scalar::<_, i64>(
             "SELECT count(*) FROM identities
              WHERE organization_id = $1
@@ -456,32 +547,34 @@ impl Store {
             return invalid("service credential expiry must follow issuance");
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
-        let existing = sqlx::query_as::<_, (Uuid, Uuid, i64, i64, Option<i64>, Option<i64>)>(
-            "SELECT credential_id, identity_id, generation, issued_at_unix_ms,
+        let existing =
+            sqlx::query_as::<_, (Uuid, Uuid, i64, Vec<u8>, i64, Option<i64>, Option<i64>)>(
+                "SELECT credential_id, identity_id, generation, token_digest, issued_at_unix_ms,
                     expires_at_unix_ms, revoked_at_unix_ms
              FROM service_credentials
              WHERE organization_id = $1 AND (credential_id = $2 OR token_digest = $3)",
-        )
-        .bind(input.organization_id)
-        .bind(input.credential_id)
-        .bind(input.token_digest.as_slice())
-        .fetch_optional(&mut *tx)
-        .await?;
+            )
+            .bind(input.organization_id)
+            .bind(input.credential_id)
+            .bind(input.token_digest.as_slice())
+            .fetch_optional(&mut *tx)
+            .await?;
         if let Some(existing) = existing {
             if existing.0 == input.credential_id
                 && existing.1 == input.identity_id
                 && existing.2 == input.generation
-                && existing.4 == input.expires_at_unix_ms
-                && existing.5.is_none()
+                && existing.3.as_slice() == input.token_digest
+                && existing.5 == input.expires_at_unix_ms
+                && existing.6.is_none()
             {
                 tx.commit().await?;
                 return Ok(ServiceCredential {
                     credential_id: existing.0,
                     identity_id: existing.1,
                     generation: existing.2,
-                    issued_at_unix_ms: existing.3,
-                    expires_at_unix_ms: existing.4,
-                    revoked_at_unix_ms: existing.5,
+                    issued_at_unix_ms: existing.4,
+                    expires_at_unix_ms: existing.5,
+                    revoked_at_unix_ms: existing.6,
                 });
             }
             return Err(StoreError::IdentityConflict(
@@ -532,6 +625,20 @@ impl Store {
         .bind(input.expires_at_unix_ms)
         .execute(&mut *tx)
         .await?;
+        let superseded = sqlx::query(
+            "UPDATE service_credentials
+             SET revoked_at_unix_ms = $4,
+                 revocation_reason = 'superseded_generation'
+             WHERE organization_id = $1 AND identity_id = $2
+               AND credential_id <> $3 AND revoked_at_unix_ms IS NULL",
+        )
+        .bind(input.organization_id)
+        .bind(input.identity_id)
+        .bind(input.credential_id)
+        .bind(input.issued_at_unix_ms)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
         append_audit_record(
             &mut tx,
             input.organization_id,
@@ -539,7 +646,11 @@ impl Store {
             &input.actor_subject,
             "service_credential_provisioned",
             &format!("service-credential:{}", input.credential_id),
-            json!({"identity_id": input.identity_id, "generation": input.generation}),
+            json!({
+                "identity_id": input.identity_id,
+                "generation": input.generation,
+                "superseded_credentials": superseded,
+            }),
         )
         .await?;
         tx.commit().await?;
@@ -563,6 +674,41 @@ impl Store {
             return invalid("OIDC login attempt bounds are invalid");
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        sqlx::query(
+            "DELETE FROM oidc_login_attempts
+             WHERE organization_id = $1
+               AND (expires_at_unix_ms < (extract(epoch FROM clock_timestamp()) * 1000)::bigint
+                    OR consumed_at_unix_ms < (extract(epoch FROM clock_timestamp()) * 1000)::bigint - 600000)",
+        )
+        .bind(input.organization_id)
+        .execute(&mut *tx)
+        .await?;
+        let active_attempts = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM oidc_login_attempts
+             WHERE organization_id = $1 AND provider_id = $2
+               AND consumed_at_unix_ms IS NULL
+               AND expires_at_unix_ms >= (extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+        )
+        .bind(input.organization_id)
+        .bind(input.provider_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if active_attempts >= MAX_ACTIVE_LOGIN_ATTEMPTS_PER_PROVIDER {
+            sqlx::query(
+                "DELETE FROM oidc_login_attempts
+                 WHERE organization_id = $1 AND attempt_id = (
+                     SELECT attempt_id FROM oidc_login_attempts
+                     WHERE organization_id = $1 AND provider_id = $2
+                       AND consumed_at_unix_ms IS NULL
+                     ORDER BY created_at, attempt_id
+                     FOR UPDATE SKIP LOCKED LIMIT 1
+                 )",
+            )
+            .bind(input.organization_id)
+            .bind(input.provider_id)
+            .execute(&mut *tx)
+            .await?;
+        }
         let provider_generation = sqlx::query_scalar::<_, i64>(
             "SELECT configuration_generation FROM identity_providers
              WHERE organization_id = $1 AND provider_id = $2 AND enabled",
@@ -673,11 +819,19 @@ impl Store {
         validate_canonical(&claims.issuer, "OIDC issuer", 2048)?;
         validate_canonical(&claims.external_subject, "OIDC subject", 512)?;
         let groups = canonical_strings(&claims.groups, "OIDC group")?;
-        if issue.issued_at_unix_ms < 0 || issue.expires_at_unix_ms <= issue.issued_at_unix_ms {
+        if issue.issued_at_unix_ms < 0
+            || issue.expires_at_unix_ms <= issue.issued_at_unix_ms
+            || issue.refresh_token_digest.is_some() != issue.refresh_expires_at_unix_ms.is_some()
+            || issue
+                .refresh_expires_at_unix_ms
+                .is_some_and(|expires| expires <= issue.expires_at_unix_ms)
+        {
             return invalid("session lifetime is invalid");
         }
         let group_digest = digest_strings(&groups);
         let mut tx = self.tenant_transaction(claims.organization_id).await?;
+        prune_identity_security_history(&mut tx, claims.organization_id, issue.issued_at_unix_ms)
+            .await?;
         let provider = sqlx::query_as::<_, (String, i64, i64, bool)>(
             "SELECT issuer, configuration_generation, jwks_generation, enabled
              FROM identity_providers
@@ -769,6 +923,10 @@ impl Store {
         }
         reject_credential_digest_collision(&mut tx, claims.organization_id, &issue.token_digest)
             .await?;
+        if let Some(refresh_digest) = &issue.refresh_token_digest {
+            reject_credential_digest_collision(&mut tx, claims.organization_id, refresh_digest)
+                .await?;
+        }
         sqlx::query(
             "INSERT INTO oidc_token_replays(
                  organization_id, id_token_digest, identity_id, expires_at_unix_ms
@@ -785,8 +943,9 @@ impl Store {
                  organization_id, session_id, identity_id, token_digest,
                  provider_configuration_generation, provider_jwks_generation,
                  identity_lifecycle_generation, group_generation,
-                 issued_at_unix_ms, expires_at_unix_ms, last_seen_at_unix_ms
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9)",
+                 issued_at_unix_ms, expires_at_unix_ms, last_seen_at_unix_ms,
+                 refresh_token_digest, refresh_expires_at_unix_ms
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9,$11,$12)",
         )
         .bind(claims.organization_id)
         .bind(issue.session_id)
@@ -798,6 +957,13 @@ impl Store {
         .bind(group_generation)
         .bind(issue.issued_at_unix_ms)
         .bind(issue.expires_at_unix_ms)
+        .bind(
+            issue
+                .refresh_token_digest
+                .as_ref()
+                .map(|digest| digest.as_slice()),
+        )
+        .bind(issue.refresh_expires_at_unix_ms)
         .execute(&mut *tx)
         .await?;
         append_audit_record(
@@ -826,6 +992,7 @@ impl Store {
             group_generation,
             issued_at_unix_ms: issue.issued_at_unix_ms,
             expires_at_unix_ms: issue.expires_at_unix_ms,
+            refresh_expires_at_unix_ms: issue.refresh_expires_at_unix_ms,
             revoked_at_unix_ms: None,
         })
     }
@@ -907,7 +1074,8 @@ impl Store {
         if let Some(id) = session_id {
             sqlx::query(
                 "UPDATE identity_sessions SET last_seen_at_unix_ms = GREATEST(last_seen_at_unix_ms, $3)
-                 WHERE organization_id = $1 AND session_id = $2",
+                 WHERE organization_id = $1 AND session_id = $2
+                   AND last_seen_at_unix_ms <= $3 - 60000",
             )
             .bind(organization_id)
             .bind(id)
@@ -925,6 +1093,187 @@ impl Store {
             session_id,
             service_credential_id: credential_id,
         })
+    }
+
+    pub async fn rotate_human_session(
+        &self,
+        organization_id: Uuid,
+        current_refresh_token_digest: [u8; 32],
+        issue: &SessionIssue,
+    ) -> Result<SessionView, StoreError> {
+        let Some(next_refresh_digest) = issue.refresh_token_digest else {
+            return invalid("a refreshed session requires a rotating refresh credential");
+        };
+        let Some(_requested_refresh_expiry) = issue.refresh_expires_at_unix_ms else {
+            return invalid("a refreshed session requires a refresh expiry");
+        };
+        if issue.issued_at_unix_ms < 0 || issue.expires_at_unix_ms <= issue.issued_at_unix_ms {
+            return invalid("refreshed session lifetime is invalid");
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let current = sqlx::query_as::<_, SessionRefreshRow>(
+            "SELECT s.session_id, s.identity_id, i.subject,
+                    s.provider_configuration_generation,
+                    s.provider_jwks_generation,
+                    s.identity_lifecycle_generation, s.group_generation,
+                    s.refresh_expires_at_unix_ms
+             FROM identity_sessions s
+             JOIN identities i ON i.organization_id = s.organization_id
+                              AND i.id = s.identity_id
+             JOIN identity_providers p ON p.organization_id = i.organization_id
+                                      AND p.provider_id = i.provider_id
+             WHERE s.organization_id = $1 AND s.refresh_token_digest = $2
+               AND s.revoked_at_unix_ms IS NULL
+               AND s.refresh_expires_at_unix_ms > $3
+               AND i.kind = 'human' AND i.lifecycle_state = 'active'
+               AND s.identity_lifecycle_generation = i.lifecycle_generation
+               AND s.group_generation = i.group_generation
+               AND p.enabled
+               AND s.provider_configuration_generation = p.configuration_generation
+               AND s.provider_jwks_generation = p.jwks_generation
+             FOR UPDATE OF s",
+        )
+        .bind(organization_id)
+        .bind(current_refresh_token_digest.as_slice())
+        .bind(issue.issued_at_unix_ms)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(current) = current else {
+            revoke_session_family_on_refresh_reuse(
+                &mut tx,
+                organization_id,
+                &current_refresh_token_digest,
+                issue.issued_at_unix_ms,
+            )
+            .await?;
+            tx.commit().await?;
+            return Err(StoreError::IdentityConflict(
+                "refresh credential is unknown, stale, expired, or revoked".to_owned(),
+            ));
+        };
+        let absolute_refresh_expiry = current.7.ok_or_else(|| {
+            StoreError::IdentityConflict("refresh credential has no absolute expiry".to_owned())
+        })?;
+        if issue.expires_at_unix_ms >= absolute_refresh_expiry {
+            return Err(StoreError::IdentityConflict(
+                "refresh credential is too close to its absolute expiry; reauthentication is required"
+                    .to_owned(),
+            ));
+        }
+        reject_credential_digest_collision(&mut tx, organization_id, &issue.token_digest).await?;
+        reject_credential_digest_collision(&mut tx, organization_id, &next_refresh_digest).await?;
+        sqlx::query(
+            "UPDATE identity_sessions
+             SET revoked_at_unix_ms = $3, revocation_reason = 'refresh_rotation'
+             WHERE organization_id = $1 AND session_id = $2",
+        )
+        .bind(organization_id)
+        .bind(current.0)
+        .bind(issue.issued_at_unix_ms)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO identity_sessions(
+                 organization_id, session_id, identity_id, token_digest,
+                 provider_configuration_generation, provider_jwks_generation,
+                 identity_lifecycle_generation, group_generation,
+                 issued_at_unix_ms, expires_at_unix_ms, last_seen_at_unix_ms,
+                 refresh_token_digest, refresh_expires_at_unix_ms
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$9,$11,$12)",
+        )
+        .bind(organization_id)
+        .bind(issue.session_id)
+        .bind(current.1)
+        .bind(issue.token_digest.as_slice())
+        .bind(current.3)
+        .bind(current.4)
+        .bind(current.5)
+        .bind(current.6)
+        .bind(issue.issued_at_unix_ms)
+        .bind(issue.expires_at_unix_ms)
+        .bind(next_refresh_digest.as_slice())
+        .bind(absolute_refresh_expiry)
+        .execute(&mut *tx)
+        .await?;
+        append_audit_record(
+            &mut tx,
+            organization_id,
+            "authentication",
+            &current.2,
+            "oidc_session_refreshed",
+            &format!("identity-session:{}", issue.session_id),
+            json!({
+                "identity_id": current.1,
+                "replaced_session_id": current.0,
+                "configuration_generation": current.3,
+                "jwks_generation": current.4,
+                "lifecycle_generation": current.5,
+                "group_generation": current.6,
+                "expires_at_unix_ms": issue.expires_at_unix_ms,
+                "refresh_expires_at_unix_ms": absolute_refresh_expiry,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(SessionView {
+            session_id: issue.session_id,
+            identity_id: current.1,
+            identity_lifecycle_generation: current.5,
+            group_generation: current.6,
+            issued_at_unix_ms: issue.issued_at_unix_ms,
+            expires_at_unix_ms: issue.expires_at_unix_ms,
+            refresh_expires_at_unix_ms: Some(absolute_refresh_expiry),
+            revoked_at_unix_ms: None,
+        })
+    }
+
+    pub async fn refresh_session_provider(
+        &self,
+        organization_id: Uuid,
+        refresh_token_digest: [u8; 32],
+        now_unix_ms: i64,
+    ) -> Result<Uuid, StoreError> {
+        if now_unix_ms < 0 {
+            return invalid("refresh lookup timestamp is invalid");
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let provider_id = sqlx::query_scalar::<_, Uuid>(
+            "SELECT i.provider_id
+             FROM identity_sessions s
+             JOIN identities i ON i.organization_id = s.organization_id
+                              AND i.id = s.identity_id
+             JOIN identity_providers p ON p.organization_id = i.organization_id
+                                      AND p.provider_id = i.provider_id
+             WHERE s.organization_id = $1 AND s.refresh_token_digest = $2
+               AND s.revoked_at_unix_ms IS NULL
+               AND s.refresh_expires_at_unix_ms > $3
+               AND i.kind = 'human' AND i.lifecycle_state = 'active'
+               AND s.identity_lifecycle_generation = i.lifecycle_generation
+               AND s.group_generation = i.group_generation
+               AND p.enabled
+               AND s.provider_configuration_generation = p.configuration_generation
+               AND s.provider_jwks_generation = p.jwks_generation",
+        )
+        .bind(organization_id)
+        .bind(refresh_token_digest.as_slice())
+        .bind(now_unix_ms)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(provider_id) = provider_id else {
+            revoke_session_family_on_refresh_reuse(
+                &mut tx,
+                organization_id,
+                &refresh_token_digest,
+                now_unix_ms,
+            )
+            .await?;
+            tx.commit().await?;
+            return Err(StoreError::IdentityConflict(
+                "refresh credential is unknown, stale, expired, or revoked".to_owned(),
+            ));
+        };
+        tx.commit().await?;
+        Ok(provider_id)
     }
 
     pub async fn revoke_session(
@@ -1066,6 +1415,7 @@ type LoginRow = (
 type IdentityRow = (Uuid, String, String, String, i64, i64, Vec<u8>);
 type SessionAuthRow = (Uuid, Uuid, String, String, String, i64, i64);
 type ServiceAuthRow = (Uuid, Uuid, String, String, String, i64, i64);
+type SessionRefreshRow = (Uuid, Uuid, String, i64, i64, i64, i64, Option<i64>);
 
 fn provider_from_write(input: &IdentityProviderWrite) -> IdentityProviderConfig {
     IdentityProviderConfig {
@@ -1171,6 +1521,91 @@ async fn load_principal(
     })
 }
 
+async fn prune_identity_security_history(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    now_unix_ms: i64,
+) -> Result<(), StoreError> {
+    let cutoff = now_unix_ms.saturating_sub(IDENTITY_HISTORY_RETENTION_MS);
+    sqlx::query(
+        "DELETE FROM oidc_token_replays
+         WHERE organization_id = $1 AND expires_at_unix_ms < $2",
+    )
+    .bind(organization_id)
+    .bind(cutoff)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM identity_sessions
+         WHERE organization_id = $1
+           AND COALESCE(revoked_at_unix_ms, expires_at_unix_ms) < $2
+           AND COALESCE(refresh_expires_at_unix_ms, expires_at_unix_ms) < $2",
+    )
+    .bind(organization_id)
+    .bind(cutoff)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM identity_group_snapshots snapshots
+         USING identities identity
+         WHERE snapshots.organization_id = $1
+           AND identity.organization_id = snapshots.organization_id
+           AND identity.id = snapshots.identity_id
+           AND snapshots.generation <= identity.group_generation - $2",
+    )
+    .bind(organization_id)
+    .bind(RETAINED_GROUP_GENERATIONS)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn revoke_session_family_on_refresh_reuse(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    organization_id: Uuid,
+    refresh_token_digest: &[u8; 32],
+    now_unix_ms: i64,
+) -> Result<(), StoreError> {
+    let stale = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT s.identity_id, i.subject
+         FROM identity_sessions s
+         JOIN identities i ON i.organization_id = s.organization_id
+                          AND i.id = s.identity_id
+         WHERE s.organization_id = $1 AND s.refresh_token_digest = $2
+         FOR UPDATE OF s",
+    )
+    .bind(organization_id)
+    .bind(refresh_token_digest.as_slice())
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((identity_id, subject)) = stale else {
+        return Ok(());
+    };
+    let revoked = sqlx::query(
+        "UPDATE identity_sessions
+         SET revoked_at_unix_ms = $3, revocation_reason = 'refresh_reuse_detected'
+         WHERE organization_id = $1 AND identity_id = $2
+           AND revoked_at_unix_ms IS NULL",
+    )
+    .bind(organization_id)
+    .bind(identity_id)
+    .bind(now_unix_ms)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    append_audit_record(
+        tx,
+        organization_id,
+        "authentication",
+        &subject,
+        "oidc_refresh_reuse_detected",
+        &format!("identity:{identity_id}"),
+        json!({"revoked_sessions": revoked, "detected_at_unix_ms": now_unix_ms}),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn reject_credential_digest_collision(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
@@ -1178,6 +1613,7 @@ async fn reject_credential_digest_collision(
 ) -> Result<(), StoreError> {
     let collision = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM identity_sessions WHERE organization_id = $1 AND token_digest = $2)
+             OR EXISTS(SELECT 1 FROM identity_sessions WHERE organization_id = $1 AND refresh_token_digest = $2)
              OR EXISTS(SELECT 1 FROM service_credentials WHERE organization_id = $1 AND token_digest = $2)",
     )
     .bind(organization_id)

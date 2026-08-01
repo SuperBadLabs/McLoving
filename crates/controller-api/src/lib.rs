@@ -1,5 +1,9 @@
 //! Versioned public HTTP API and its Rust client.
 
+mod oidc;
+
+pub use oidc::OidcClientConfig;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -49,6 +53,7 @@ pub struct ApiState {
     artifact_body_limit: usize,
     staged_upload_ttl: Duration,
     publication_claim_cursor: Arc<Mutex<Option<String>>>,
+    oidc_clients: BTreeMap<(Uuid, Uuid), oidc::OidcClient>,
 }
 
 #[derive(Clone)]
@@ -89,6 +94,7 @@ impl ApiState {
             artifact_body_limit: 2 * 1024 * 1024,
             staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
             publication_claim_cursor: Arc::new(Mutex::new(None)),
+            oidc_clients: BTreeMap::new(),
         })
     }
 
@@ -106,6 +112,7 @@ impl ApiState {
             artifact_body_limit: 2 * 1024 * 1024,
             staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
             publication_claim_cursor: Arc::new(Mutex::new(None)),
+            oidc_clients: BTreeMap::new(),
         }
     }
 
@@ -199,6 +206,23 @@ impl ApiState {
         self.staged_upload_ttl = staged_upload_ttl;
         self
     }
+
+    pub fn with_oidc_client(mut self, config: OidcClientConfig) -> Result<Self, ApiError> {
+        if !matches!(self.authentication, Authentication::Durable) {
+            return Err(ApiError::configuration(
+                "OIDC requires durable database-backed authentication",
+            ));
+        }
+        let key = (config.organization_id, config.provider_id);
+        if self.oidc_clients.contains_key(&key) {
+            return Err(ApiError::configuration(
+                "OIDC provider is configured more than once",
+            ));
+        }
+        self.oidc_clients
+            .insert(key, oidc::OidcClient::new(config)?);
+        Ok(self)
+    }
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -210,6 +234,22 @@ pub fn router(state: ApiState) -> Router {
         .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
     static_ui_router()
         .route("/openapi.json", get(openapi))
+        .route(
+            "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start",
+            get(oidc::start),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/callback",
+            get(oidc::callback),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/auth/session/refresh",
+            post(oidc::refresh),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/auth/session/logout",
+            post(oidc::logout),
+        )
         .route(
             "/api/v1/organizations/{organization_id}/audit",
             get(list_audit),
@@ -451,6 +491,7 @@ async fn openapi() -> Json<Value> {
 
 fn openapi_document() -> Value {
     let organization = path_parameter("organization_id", "uuid");
+    let provider = path_parameter("provider_id", "uuid");
     let project = path_parameter("project_id", "uuid");
     let pipeline = path_parameter("pipeline_id", "uuid");
     let digest = path_parameter("digest", "sha256");
@@ -481,6 +522,7 @@ fn openapi_document() -> Value {
         },
         "servers": [{"url": "/"}],
         "tags": [
+            {"name": "authentication"},
             {"name": "pipelines"},
             {"name": "components"},
             {"name": "builds"},
@@ -491,6 +533,37 @@ fn openapi_document() -> Value {
         ],
         "security": [{"bearer": []}],
         "paths": {
+            "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start": {
+                "parameters": [organization.clone(), provider.clone()],
+                "get": unauthenticated_api_operation(
+                    "startOidcLogin", "authentication", "Start OIDC authorization code with PKCE", "200",
+                    vec![required_query_parameter("redirect_uri", "string")], None
+                )
+            },
+            "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/callback": {
+                "parameters": [organization.clone(), provider],
+                "get": unauthenticated_api_operation(
+                    "completeOidcLogin", "authentication", "Complete one-time OIDC callback", "200",
+                    vec![
+                        required_query_parameter("code", "string"),
+                        required_query_parameter("state", "string")
+                    ], None
+                )
+            },
+            "/api/v1/organizations/{organization_id}/auth/session/refresh": {
+                "parameters": [organization.clone()],
+                "post": unauthenticated_api_operation(
+                    "refreshOidcSession", "authentication", "Rotate an OIDC refresh credential", "200",
+                    Vec::new(), Some("RefreshRequest")
+                )
+            },
+            "/api/v1/organizations/{organization_id}/auth/session/logout": {
+                "parameters": [organization.clone()],
+                "post": api_operation(
+                    "logoutOidcSession", "authentication", "Revoke the current OIDC session", "200",
+                    Vec::new(), None
+                )
+            },
             "/api/v1/organizations/{organization_id}/audit": {
                 "parameters": [organization.clone()],
                 "get": api_operation(
@@ -708,6 +781,14 @@ fn openapi_document() -> Value {
                     },
                     "additionalProperties": false
                 },
+                "RefreshRequest": {
+                    "type": "object",
+                    "required": ["refresh_token"],
+                    "properties": {
+                        "refresh_token": {"type": "string", "minLength": 1, "maxLength": 4096}
+                    },
+                    "additionalProperties": false
+                },
                 "PipelineUpsertRequest": {
                     "type": "object",
                     "required": ["slug", "source"],
@@ -804,6 +885,26 @@ fn api_operation(
             }
         });
     }
+    operation
+}
+
+fn unauthenticated_api_operation(
+    operation_id: &str,
+    tag: &str,
+    summary: &str,
+    success_status: &str,
+    parameters: Vec<Value>,
+    request_schema: Option<&str>,
+) -> Value {
+    let mut operation = api_operation(
+        operation_id,
+        tag,
+        summary,
+        success_status,
+        parameters,
+        request_schema,
+    );
+    operation["security"] = json!([]);
     operation
 }
 
@@ -3826,6 +3927,22 @@ mod tests {
         let document = openapi_document();
         let paths = document["paths"].as_object().expect("paths object");
         let expected = [
+            (
+                "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/callback",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/auth/session/refresh",
+                "post",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/auth/session/logout",
+                "post",
+            ),
             ("/api/v1/organizations/{organization_id}/audit", "get"),
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/validate",
