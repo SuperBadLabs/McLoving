@@ -118,6 +118,7 @@ else
 fi
 
 podman stop --time 30 "$container" >/dev/null
+cp "$home/jobs/stateful/config.xml" "$evidence/jenkins-job-config.xml"
 cp "$home/jobs/stateful/nextBuildNumber" "$evidence/jenkins-next-build-number.txt"
 cp "$home/jobs/stateful/builds/1/build.xml" "$evidence/jenkins-build-1.xml"
 cp "$home/jobs/stateful/builds/2/build.xml" "$evidence/jenkins-build-2.xml"

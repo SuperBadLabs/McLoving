@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,8 +49,8 @@ async fn main() -> Result<(), AnyError> {
         .await?;
 
     let implementation_digest = digest_file(&env::current_exe()?)?;
-    let source_export_digest = digest_file(&evidence.join("SHA256SUMS"))?;
-    let configuration_digest = digest_file(&jenkins_home.join("jobs/stateful/config.xml"))?;
+    let source_export_digest = verify_source_export(evidence, jenkins_home)?;
+    let configuration_digest = digest_file(&evidence.join("jenkins-job-config.xml"))?;
     let mut forward = jenkins_bundle(
         evidence,
         jenkins_home,
@@ -305,9 +305,7 @@ fn jenkins_bundle(
         },
         source_export_digest,
         transform_implementation_digest: implementation_digest,
-        transform_configuration_digest: digest_file(
-            &jenkins_home.join("jobs/stateful/config.xml"),
-        )?,
+        transform_configuration_digest: configuration_digest,
         conflict_policy: ConflictPolicy::RejectDivergence,
         provenance: "pinned Jenkins 2.568.1 exact-profile source export".to_owned(),
     };
@@ -980,6 +978,139 @@ fn read_trimmed(path: &Path) -> Result<String, AnyError> {
 
 fn digest_file(path: &Path) -> Result<Digest, AnyError> {
     Ok(sha256(&fs::read(path)?))
+}
+
+fn verify_source_export(evidence: &Path, jenkins_home: &Path) -> Result<Digest, AnyError> {
+    verify_flat_manifest(evidence)?;
+
+    let runtime_root = fs::canonicalize(read_trimmed(&evidence.join("runtime-root.txt"))?)?;
+    let expected_home = fs::canonicalize(runtime_root.join("jenkins-home"))?;
+    let actual_home = fs::canonicalize(jenkins_home)?;
+    if actual_home != expected_home {
+        return Err("Jenkins home does not match the sealed runtime root".into());
+    }
+
+    verify_tree_manifest(
+        &evidence.join("jenkins-build-tree.sha256"),
+        &actual_home.join("jobs/stateful/builds"),
+    )?;
+    verify_tree_manifest(
+        &evidence.join("jenkins-workspace-tree.sha256"),
+        &actual_home.join("workspace/stateful"),
+    )?;
+
+    let sealed_config = digest_file(&evidence.join("jenkins-job-config.xml"))?;
+    let live_config = digest_file(&actual_home.join("jobs/stateful/config.xml"))?;
+    if sealed_config != live_config {
+        return Err("live Jenkins job configuration differs from the sealed export".into());
+    }
+
+    digest_file(&evidence.join("SHA256SUMS"))
+}
+
+fn verify_flat_manifest(root: &Path) -> Result<(), AnyError> {
+    let manifest_path = root.join("SHA256SUMS");
+    let entries = parse_manifest(&manifest_path, |recorded| {
+        let path = Path::new(recorded);
+        if path.parent().and_then(Path::file_name) != Some("evidence".as_ref()) {
+            return Err("source manifest entry is outside the evidence directory".into());
+        }
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+            .ok_or_else(|| "source manifest entry has no UTF-8 file name".into())
+    })?;
+    let expected = regular_files(root)?
+        .into_iter()
+        .filter(|path| path != &manifest_path)
+        .map(|path| {
+            path.strip_prefix(root)?
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "source evidence file name is not UTF-8".into())
+        })
+        .collect::<Result<BTreeSet<_>, AnyError>>()?;
+    if entries.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        return Err("source evidence manifest does not cover the exact file set".into());
+    }
+    for (relative, expected_digest) in entries {
+        if digest_file(&root.join(relative))? != expected_digest {
+            return Err("source evidence manifest digest mismatch".into());
+        }
+    }
+    Ok(())
+}
+
+fn verify_tree_manifest(manifest_path: &Path, root: &Path) -> Result<(), AnyError> {
+    let canonical_root = fs::canonicalize(root)?;
+    let entries = parse_manifest(manifest_path, |recorded| {
+        let relative = Path::new(recorded)
+            .strip_prefix(&canonical_root)
+            .map_err(|_| "tree manifest entry has the wrong source root")?
+            .to_str()
+            .ok_or("tree manifest entry is not UTF-8")?
+            .replace('\\', "/");
+        validate_relative_path(&relative)?;
+        Ok(relative)
+    })?;
+    let mut actual = BTreeMap::new();
+    for path in regular_files(&canonical_root)? {
+        let relative = path
+            .strip_prefix(&canonical_root)?
+            .to_str()
+            .ok_or("live Jenkins path is not UTF-8")?
+            .replace('\\', "/");
+        actual.insert(relative, digest_file(&path)?);
+    }
+    if entries != actual {
+        return Err("live Jenkins tree differs from the sealed export manifest".into());
+    }
+    Ok(())
+}
+
+fn parse_manifest<F>(path: &Path, mut key: F) -> Result<BTreeMap<String, Digest>, AnyError>
+where
+    F: FnMut(&str) -> Result<String, AnyError>,
+{
+    let content = fs::read_to_string(path)?;
+    if content.is_empty() || !content.ends_with('\n') {
+        return Err("SHA-256 manifest is empty or noncanonical".into());
+    }
+    let mut entries = BTreeMap::new();
+    for line in content.lines() {
+        let (digest, recorded) = line
+            .split_once("  ")
+            .ok_or("SHA-256 manifest line is malformed")?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || recorded.is_empty()
+        {
+            return Err("SHA-256 manifest line is noncanonical".into());
+        }
+        let decoded = hex::decode(digest)?;
+        let parsed: Digest = decoded
+            .try_into()
+            .map_err(|_| "SHA-256 manifest digest has the wrong length")?;
+        if entries.insert(key(recorded)?, parsed).is_some() {
+            return Err("SHA-256 manifest contains a duplicate path".into());
+        }
+    }
+    Ok(entries)
+}
+
+fn validate_relative_path(path: &str) -> Result<(), AnyError> {
+    let candidate = Path::new(path);
+    if path.is_empty()
+        || candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("tree manifest contains an unsafe relative path".into());
+    }
+    Ok(())
 }
 
 fn regular_files(root: &Path) -> Result<Vec<PathBuf>, AnyError> {

@@ -74,7 +74,12 @@ denominator, an empty or structurally malformed job set, and therefore cannot
 publish a vacuously complete counterfeit receipt.
 
 Reader and execution authority consume only a committed receipt. The rehearsal
-reloads and independently revalidates that receipt, resolves the exact prior SCM
+first verifies the sealed source-evidence file set and every digest, binds the
+declared runtime root to the supplied Jenkins home, re-hashes the complete live
+build/workspace trees and job configuration, and only then deterministically
+constructs the canonical input bundle. A post-export live-configuration
+substitution is rejected before bundle construction. The rehearsal then reloads
+and independently revalidates the committed receipt, resolves the exact prior SCM
 checkout, checks that the delivered revision continues it, and derives the
 change predicate decision from those committed records. It then executes the
 first McLoving build through the real controller state machine with
@@ -107,12 +112,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `e01b224845a29100e731c3c09eb8a6b3e6abd1333d79ce71af23a2411aab8f38`;
-- source-evidence manifest SHA-256 `166abab097290a8251bbec8d6de3574b5ebf9910dce8f81db318c39d9a35ebf0`;
-- forward bundle SHA-256 `c71beca20862965c9e9ff3825717fc18e561a1230fe07ec30c7a0c36e52ec8db`;
-- reverse bundle SHA-256 `b9ef89bc03ab9fb6ddd4ce6b0e445c86d25e2edf193ccc841a83ad44960940f5`;
-- reverse-evidence manifest SHA-256 `c1c0105431fd34e0e61c05b898079bc040be72817327a71812b9ac26702e196a`;
-- sealed transform-evidence manifest SHA-256 `ac9f83b7d2d774b439cc6edd5c31e19e6e989e8928598d47ab126e3631151251`.
+- transform binary SHA-256 `5baa52ddf8ef1ed9a23a660c232e63488b182d284992c70bb3065eecd07c613e`;
+- source-evidence manifest SHA-256 `0f8374a152bbb9d49d18605e120371b8b43238e7ecc30989e64597ea3c0dd773`;
+- forward bundle SHA-256 `a719a763c8c58406addd3e9da25ffc3041cf7f9ff21e759efb35be95220275bd`;
+- reverse bundle SHA-256 `ef237e01c2123bac35c330f6ca4ba01654c3e0e420d9b1682f2e97b4abf38259`;
+- reverse-evidence manifest SHA-256 `f3b3e67d7b01daa5ed18bec01f67b8926b3cdd056e68c311fffa6c7fdc2817c6`;
+- sealed transform-evidence manifest SHA-256 `abe0fd06530d5a11506f613a125618fbb24b0a3daf44ba50d0963d136de5e802`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 115 record-provenance rows, eight effective
