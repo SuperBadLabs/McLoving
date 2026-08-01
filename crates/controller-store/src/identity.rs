@@ -370,18 +370,41 @@ impl Store {
             return invalid("service identity must have at least one explicit scope");
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
-        let collision = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM identities
-             WHERE organization_id = $1 AND (id = $2 OR subject = $3)",
+        let existing = sqlx::query_as::<_, (Uuid, String, String, String)>(
+            "SELECT id, subject, kind, lifecycle_state FROM identities
+             WHERE organization_id = $1 AND (id = $2 OR subject = $3)
+             FOR UPDATE",
         )
         .bind(input.organization_id)
         .bind(input.identity_id)
         .bind(&input.subject)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
-        if collision != 0 {
+        if let Some(existing) = existing {
+            let scopes = sqlx::query_scalar::<_, String>(
+                "SELECT scope FROM service_scopes
+                 WHERE organization_id = $1 AND identity_id = $2
+                 ORDER BY scope",
+            )
+            .bind(input.organization_id)
+            .bind(existing.0)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .map(|scope| parse_scope(&scope))
+            .collect::<Result<BTreeSet<_>, _>>()?;
+            if existing.0 == input.identity_id
+                && existing.1 == input.subject
+                && existing.2 == "service"
+                && existing.3 == "active"
+                && scopes == input.scopes
+            {
+                tx.commit().await?;
+                return Ok(());
+            }
             return Err(StoreError::IdentityConflict(
-                "service identity collides with an immutable existing binding".to_owned(),
+                "service identity collides with an immutable existing binding or scope set"
+                    .to_owned(),
             ));
         }
         sqlx::query(
@@ -433,6 +456,38 @@ impl Store {
             return invalid("service credential expiry must follow issuance");
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        let existing = sqlx::query_as::<_, (Uuid, Uuid, i64, i64, Option<i64>, Option<i64>)>(
+            "SELECT credential_id, identity_id, generation, issued_at_unix_ms,
+                    expires_at_unix_ms, revoked_at_unix_ms
+             FROM service_credentials
+             WHERE organization_id = $1 AND (credential_id = $2 OR token_digest = $3)",
+        )
+        .bind(input.organization_id)
+        .bind(input.credential_id)
+        .bind(input.token_digest.as_slice())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = existing {
+            if existing.0 == input.credential_id
+                && existing.1 == input.identity_id
+                && existing.2 == input.generation
+                && existing.4 == input.expires_at_unix_ms
+                && existing.5.is_none()
+            {
+                tx.commit().await?;
+                return Ok(ServiceCredential {
+                    credential_id: existing.0,
+                    identity_id: existing.1,
+                    generation: existing.2,
+                    issued_at_unix_ms: existing.3,
+                    expires_at_unix_ms: existing.4,
+                    revoked_at_unix_ms: existing.5,
+                });
+            }
+            return Err(StoreError::IdentityConflict(
+                "service credential collides with an existing binding".to_owned(),
+            ));
+        }
         let identity = sqlx::query_as::<_, (String, String)>(
             "SELECT kind, lifecycle_state FROM identities
              WHERE organization_id = $1 AND id = $2 FOR UPDATE",

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
@@ -23,9 +23,9 @@ use mcloving_agent_protocol::{
 use mcloving_controller_api::{ApiState, router};
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, NewLogChunk,
-    ReconciliationTrustPoolAuthorization, Store, StoreError, TerminalOutcome,
-    authz::{Principal, PrincipalKind, ProjectRole, ServiceScope},
+    AgentReconciliationDisposition, ClaimRequest, NewLogChunk, NewServiceCredential,
+    NewServiceIdentity, ReconciliationTrustPoolAuthorization, Store, StoreError, TerminalOutcome,
+    authz::ServiceScope,
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
@@ -48,18 +48,70 @@ async fn main() -> Result<()> {
     }
     let bearer_token =
         std::env::var("MCLOVING_API_TOKEN").context("MCLOVING_API_TOKEN is required")?;
+    if bearer_token.len() < 32 {
+        bail!("MCLOVING_API_TOKEN must contain at least 32 bytes");
+    }
+    let bearer_generation = std::env::var("MCLOVING_API_TOKEN_GENERATION")
+        .unwrap_or_else(|_| "1".to_owned())
+        .parse::<i64>()
+        .context("MCLOVING_API_TOKEN_GENERATION must be a positive integer")?;
+    if bearer_generation <= 0 {
+        bail!("MCLOVING_API_TOKEN_GENERATION must be positive");
+    }
     let artifact_agent_token = std::env::var("MCLOVING_ARTIFACT_AGENT_TOKEN")
         .context("MCLOVING_ARTIFACT_AGENT_TOKEN is required")?;
     let listen = std::env::var("MCLOVING_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
+    let worker = EmbeddedWorker::from_environment()?;
     let migration_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&migration_database_url)
         .await
         .context("connect to PostgreSQL migration role")?;
-    Store::new(migration_pool.clone())
+    let migration_store = Store::new(migration_pool.clone());
+    migration_store
         .migrate()
         .await
         .context("migrate controller store")?;
+    let api_identity_id = deterministic_uuid(&format!(
+        "mcloving:service:public-api:{}",
+        worker.organization_id
+    ));
+    let api_subject = format!("service:public-api:{api_identity_id}");
+    migration_store
+        .provision_service_identity(&NewServiceIdentity {
+            organization_id: worker.organization_id,
+            identity_id: api_identity_id,
+            subject: api_subject,
+            scopes: [
+                ServiceScope::ProjectRead,
+                ServiceScope::BuildSubmit,
+                ServiceScope::BuildCancel,
+                ServiceScope::SecretUse,
+                ServiceScope::ProjectAdmin,
+                ServiceScope::AuditRead,
+                ServiceScope::SchedulerControl,
+            ]
+            .into(),
+            actor_subject: "bootstrap:controller".to_owned(),
+        })
+        .await
+        .context("provision durable public API service identity")?;
+    let credential_id = deterministic_uuid(&format!(
+        "mcloving:service-credential:{api_identity_id}:{bearer_generation}"
+    ));
+    migration_store
+        .provision_service_credential(&NewServiceCredential {
+            organization_id: worker.organization_id,
+            credential_id,
+            identity_id: api_identity_id,
+            generation: bearer_generation,
+            token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
+            issued_at_unix_ms: unix_time_ms(),
+            expires_at_unix_ms: None,
+            actor_subject: "bootstrap:controller".to_owned(),
+        })
+        .await
+        .context("provision durable public API service credential")?;
     migration_pool.close().await;
 
     let runtime_pool = PgPoolOptions::new()
@@ -91,38 +143,13 @@ async fn main() -> Result<()> {
         },
     )
     .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
-    let worker = EmbeddedWorker::from_environment()?;
-    let mut state = ApiState::new(
-        store.clone(),
-        &bearer_token,
-        Principal {
-            subject: "service:public-api".to_owned(),
-            kind: PrincipalKind::Service,
-            organization_id: worker.organization_id,
-            project_roles: BTreeMap::new(),
-            service_scopes: [
-                ServiceScope::ProjectRead,
-                ServiceScope::BuildSubmit,
-                ServiceScope::BuildCancel,
-                ServiceScope::SecretUse,
-                ServiceScope::ProjectAdmin,
-                ServiceScope::AuditRead,
-                ServiceScope::SchedulerControl,
-            ]
-            .into(),
-        },
-    )
-    .context("configure public API")?
-    .with_artifact_agent_token(&artifact_agent_token, &worker.config.agent_id)
-    .context("configure artifact-agent authentication")?;
-    if let Ok(path) = std::env::var("MCLOVING_API_PRINCIPALS_PATH") {
-        let bindings = std::fs::read_to_string(&path)
-            .with_context(|| format!("read API principal bindings from {path}"))?;
-        for (token, principal) in parse_human_api_principals(&bindings, worker.organization_id)? {
-            state = state
-                .with_bearer_principal(&token, principal)
-                .context("configure human API principal")?;
-        }
+    let state = ApiState::new_durable(store.clone())
+        .with_artifact_agent_token(&artifact_agent_token, &worker.config.agent_id)
+        .context("configure artifact-agent authentication")?;
+    if std::env::var_os("MCLOVING_API_PRINCIPALS_PATH").is_some() {
+        bail!(
+            "MCLOVING_API_PRINCIPALS_PATH is retired; provision immutable OIDC identities instead"
+        );
     }
     let state = state
         .with_object_store(object_store)
@@ -155,75 +182,6 @@ async fn main() -> Result<()> {
     }
 }
 
-fn parse_human_api_principals(
-    value: &str,
-    organization_id: Uuid,
-) -> Result<Vec<(String, Principal)>> {
-    let mut subject_tokens = BTreeMap::new();
-    let mut bindings = BTreeMap::<String, Principal>::new();
-    for (index, line) in value.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 4 {
-            bail!(
-                "API principal binding line {} must be token<TAB>subject<TAB>project UUID<TAB>role",
-                index + 1
-            );
-        }
-        let token = fields[0];
-        let subject = fields[1];
-        if token.len() < 32
-            || token.trim() != token
-            || subject.is_empty()
-            || subject.trim() != subject
-        {
-            bail!(
-                "API principal binding line {} has a non-canonical token or subject",
-                index + 1
-            );
-        }
-        let project_id = fields[2]
-            .parse::<Uuid>()
-            .with_context(|| format!("parse project UUID on API principal line {}", index + 1))?;
-        let role = match fields[3] {
-            "viewer" => ProjectRole::Viewer,
-            "developer" => ProjectRole::Developer,
-            "admin" => ProjectRole::Admin,
-            "owner" => ProjectRole::Owner,
-            _ => bail!(
-                "API principal binding line {} has an unsupported role",
-                index + 1
-            ),
-        };
-        if let Some(bound_token) = subject_tokens.get(subject) {
-            if bound_token != token {
-                bail!("API principal subject {subject} is bound to multiple credentials");
-            }
-        } else {
-            subject_tokens.insert(subject.to_owned(), token.to_owned());
-        }
-        let principal = bindings
-            .entry(token.to_owned())
-            .or_insert_with(|| Principal {
-                subject: subject.to_owned(),
-                kind: PrincipalKind::Human,
-                organization_id,
-                project_roles: BTreeMap::new(),
-                service_scopes: BTreeSet::new(),
-            });
-        if principal.subject != subject {
-            bail!("API credential is bound to multiple subjects");
-        }
-        if principal.project_roles.insert(project_id, role).is_some() {
-            bail!("API principal subject {subject} repeats project {project_id}");
-        }
-    }
-    Ok(bindings.into_iter().collect())
-}
-
 fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
     match std::env::var(name) {
         Ok(value) => {
@@ -238,6 +196,23 @@ fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(error).with_context(|| format!("read {name}")),
     }
+}
+
+fn deterministic_uuid(label: &str) -> Uuid {
+    let digest = Sha256::digest(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn unix_time_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 #[derive(Clone)]
@@ -1232,43 +1207,6 @@ mod tests {
     fn composite_authority_token_preserves_restore_epoch_and_fence() {
         let token = (u64::from(17_u32) << 32) | u64::from(23_u32);
         assert_eq!(decode_authority_token(token), (17, 23));
-    }
-
-    #[test]
-    fn human_api_principal_file_binds_distinct_subject_and_project_role() {
-        let organization_id = Uuid::new_v4();
-        let project_id = Uuid::new_v4();
-        let second_project_id = Uuid::new_v4();
-        let bindings = parse_human_api_principals(
-            &format!(
-                "human-approval-token-that-is-32-bytes\talice@example.test\t{project_id}\tadmin\nhuman-approval-token-that-is-32-bytes\talice@example.test\t{second_project_id}\tviewer\n"
-            ),
-            organization_id,
-        )
-        .expect("parse human principal");
-        assert_eq!(bindings.len(), 1);
-        let (token, principal) = &bindings[0];
-        assert_eq!(token, "human-approval-token-that-is-32-bytes");
-        assert_eq!(principal.subject, "alice@example.test");
-        assert_eq!(principal.kind, PrincipalKind::Human);
-        assert_eq!(
-            principal.project_roles.get(&project_id),
-            Some(&ProjectRole::Admin)
-        );
-        assert_eq!(
-            principal.project_roles.get(&second_project_id),
-            Some(&ProjectRole::Viewer)
-        );
-        assert!(
-            parse_human_api_principals(
-                &format!(
-                    "first-human-approval-token-32-bytes\talice\t{project_id}\tadmin\nsecond-human-approval-token-32-bytes\talice\t{project_id}\towner\n"
-                ),
-                organization_id,
-            )
-            .is_err(),
-            "one subject must not be bound to multiple credentials"
-        );
     }
 
     #[test]

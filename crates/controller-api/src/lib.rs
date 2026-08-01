@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
@@ -43,7 +43,7 @@ const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
 #[derive(Clone)]
 pub struct ApiState {
     store: Store,
-    credentials: Vec<ApiCredential>,
+    authentication: Authentication,
     artifact_agents: Vec<ArtifactAgentCredential>,
     object_store: Option<FilesystemObjectStore>,
     artifact_body_limit: usize,
@@ -55,6 +55,14 @@ pub struct ApiState {
 struct ApiCredential {
     token_digest: [u8; 32],
     principal: Principal,
+}
+
+#[derive(Clone)]
+enum Authentication {
+    /// Test and compatibility construction only. The shipped controller uses
+    /// the durable identity/session tables instead.
+    Static(Vec<ApiCredential>),
+    Durable,
 }
 
 #[derive(Clone)]
@@ -72,16 +80,33 @@ impl ApiState {
         }
         Ok(Self {
             store,
-            credentials: vec![ApiCredential {
+            authentication: Authentication::Static(vec![ApiCredential {
                 token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
                 principal,
-            }],
+            }]),
             artifact_agents: Vec::new(),
             object_store: None,
             artifact_body_limit: 2 * 1024 * 1024,
             staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
             publication_claim_cursor: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Constructs the production API authentication path.
+    ///
+    /// Human sessions and service credentials are resolved from PostgreSQL on
+    /// every request, so revocation and lifecycle-generation fences apply
+    /// across every active controller without process-local token state.
+    pub fn new_durable(store: Store) -> Self {
+        Self {
+            store,
+            authentication: Authentication::Durable,
+            artifact_agents: Vec::new(),
+            object_store: None,
+            artifact_body_limit: 2 * 1024 * 1024,
+            staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
+            publication_claim_cursor: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Adds another independently authenticated API principal.
@@ -96,8 +121,12 @@ impl ApiState {
     ) -> Result<Self, ApiError> {
         validate_bearer_secret(bearer_token)?;
         let token_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
-        if self
-            .credentials
+        let Authentication::Static(credentials) = &mut self.authentication else {
+            return Err(ApiError::configuration(
+                "process-local bearer principals are forbidden in durable authentication mode",
+            ));
+        };
+        if credentials
             .iter()
             .any(|credential| constant_time_eq(&credential.token_digest, &token_digest))
             || self
@@ -109,7 +138,7 @@ impl ApiState {
                 "API and artifact-agent bearer tokens must be globally unique",
             ));
         }
-        self.credentials.push(ApiCredential {
+        credentials.push(ApiCredential {
             token_digest,
             principal,
         });
@@ -132,10 +161,13 @@ impl ApiState {
             ));
         }
         let token_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
-        if self
-            .credentials
-            .iter()
-            .any(|credential| constant_time_eq(&credential.token_digest, &token_digest))
+        let collides_with_api = match &self.authentication {
+            Authentication::Static(credentials) => credentials
+                .iter()
+                .any(|credential| constant_time_eq(&credential.token_digest, &token_digest)),
+            Authentication::Durable => false,
+        };
+        if collides_with_api
             || self.artifact_agents.iter().any(|credential| {
                 credential.agent_id == agent_id
                     || constant_time_eq(&credential.token_digest, &token_digest)
@@ -947,7 +979,7 @@ async fn list_audit(
     Query(query): Query<AuditQuery>,
     headers: HeaderMap,
 ) -> Result<Json<AuditPage>, ApiError> {
-    authorize(&state, &headers, organization_id, None, Action::AuditRead)?;
+    authorize(&state, &headers, organization_id, None, Action::AuditRead).await?;
     let after_sequence = query.after_sequence.unwrap_or(0);
     let limit = query.limit.unwrap_or(100);
     if after_sequence < 0 || limit == 0 || limit > mcloving_controller_store::MAX_AUDIT_PAGE {
@@ -980,7 +1012,8 @@ async fn validate_pipeline(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
     let digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
@@ -1002,7 +1035,8 @@ async fn plan_pipeline(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
     Ok(Json(pipeline_plan(&pipeline)?))
@@ -1020,7 +1054,8 @@ async fn put_pipeline(
         organization_id,
         Some(project_id),
         Action::ProjectAdmin,
-    )?;
+    )
+    .await?;
     let expected_revision = expected_revision(&headers)?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
@@ -1080,7 +1115,8 @@ async fn get_pipeline(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let record = state
         .store
         .pipeline(organization_id, project_id, pipeline_id)
@@ -1107,7 +1143,8 @@ async fn list_pipelines(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     state
         .store
         .pipelines(
@@ -1133,7 +1170,8 @@ async fn put_component(
         organization_id,
         Some(project_id),
         Action::ProjectAdmin,
-    )?;
+    )
+    .await?;
     let digest = parse_hex_digest_named(&digest_hex, "component")?;
     let canonical_bytes = parse_hex_bytes(&request.canonical_hex, "component canonical bytes")?;
     if Sha256::digest(&canonical_bytes).as_slice() != digest {
@@ -1189,7 +1227,8 @@ async fn get_component(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let digest = parse_hex_digest_named(&digest_hex, "component")?;
     state
         .store
@@ -1212,7 +1251,8 @@ async fn list_components(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let after = match (&query.after, &query.after_digest) {
         (None, None) => None,
         (Some(name), Some(digest)) => Some(ComponentCursor {
@@ -1252,7 +1292,8 @@ async fn list_builds(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let after = match (query.after_created_micros, query.after_id) {
         (None, None) => None,
         (Some(created_at_unix_micros), Some(build_id)) => Some(BuildCursor {
@@ -1292,7 +1333,8 @@ async fn build_graph(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     state
         .store
         .build_graph(organization_id, project_id, build_id)
@@ -1313,7 +1355,8 @@ async fn list_approvals(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     state
         .store
         .approvals(organization_id, project_id, build_id)
@@ -1334,7 +1377,8 @@ async fn create_approval(
         organization_id,
         Some(project_id),
         Action::ProjectAdmin,
-    )?;
+    )
+    .await?;
     let graph = state
         .store
         .build_graph(organization_id, project_id, build_id)
@@ -1380,7 +1424,8 @@ async fn list_credential_grants(
         organization_id,
         Some(project_id),
         Action::SecretUse,
-    )?;
+    )
+    .await?;
     state
         .store
         .credential_grants(organization_id, project_id, build_id)
@@ -1400,7 +1445,8 @@ async fn list_test_reports(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     state
         .store
         .test_reports(organization_id, project_id, build_id)
@@ -1574,7 +1620,8 @@ async fn submit(
         organization_id,
         Some(project_id),
         Action::BuildSubmit,
-    )?;
+    )
+    .await?;
     let required_trust_pool = submission_trust_pool(&headers)?;
     let required_platform = submission_platform(&headers)?;
     let idempotency_key = headers
@@ -1980,7 +2027,8 @@ async fn status(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let snapshot = state
         .store
         .build_snapshot(organization_id, project_id, build_id)
@@ -2012,7 +2060,8 @@ async fn stage_artifact(
         organization_id,
         Some(project_id),
         Action::BuildSubmit,
-    )?;
+    )
+    .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
     let name = bounded_header(
         &headers,
@@ -2128,7 +2177,8 @@ async fn commit_artifact(
         organization_id,
         Some(project_id),
         Action::BuildSubmit,
-    )?;
+    )
+    .await?;
     authorize_artifact_agent(&state, &headers, &request.agent_id)?;
     require_build(&state, organization_id, project_id, build_id).await?;
     if !upload_token.starts_with(&format!("{organization_id}-")) {
@@ -2245,7 +2295,8 @@ async fn list_artifacts(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
     let artifacts = state
         .store
@@ -2270,7 +2321,8 @@ async fn artifact_metadata(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
     let artifact = find_artifact(
         &state,
@@ -2296,7 +2348,8 @@ async fn download_artifact(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
     let artifact = find_artifact(
         &state,
@@ -2403,7 +2456,8 @@ async fn logs(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     if state
         .store
         .build_snapshot(organization_id, project_id, build_id)
@@ -2476,7 +2530,8 @@ async fn cancel(
         organization_id,
         Some(project_id),
         Action::BuildCancel,
-    )?;
+    )
+    .await?;
     let accepted = state
         .store
         .request_cancellation_as(organization_id, project_id, build_id, &principal.subject)
@@ -2497,7 +2552,8 @@ async fn retry_attempt(
         organization_id,
         Some(project_id),
         Action::BuildSubmit,
-    )?;
+    )
+    .await?;
     let graph = state
         .store
         .build_graph(organization_id, project_id, build_id)
@@ -2562,7 +2618,8 @@ async fn explain(
         organization_id,
         None,
         Action::SchedulerControl,
-    )?;
+    )
+    .await?;
     let response = match state
         .store
         .explain_wait(
@@ -2755,32 +2812,40 @@ fn object_store_error(error: ObjectStoreError) -> ApiError {
     }
 }
 
-fn authorize<'a>(
-    state: &'a ApiState,
+async fn authorize(
+    state: &ApiState,
     headers: &HeaderMap,
     organization_id: Uuid,
     project_id: Option<Uuid>,
     action: Action,
-) -> Result<&'a Principal, ApiError> {
-    let principal = authenticate_principal(state, headers)?;
-    authorize_principal(principal, organization_id, project_id, action)
+) -> Result<Principal, ApiError> {
+    let principal = authenticate_principal(state, headers, organization_id).await?;
+    authorize_principal(&principal, organization_id, project_id, action)
         .map_err(|error| ApiError::new(StatusCode::FORBIDDEN, "forbidden", error.to_string()))?;
     Ok(principal)
 }
 
-fn authenticate_principal<'a>(
-    state: &'a ApiState,
+async fn authenticate_principal(
+    state: &ApiState,
     headers: &HeaderMap,
-) -> Result<&'a Principal, ApiError> {
-    let supplied = bearer_token(headers)
-        .map(|token| Sha256::digest(token.as_bytes()))
+    organization_id: Uuid,
+) -> Result<Principal, ApiError> {
+    let supplied: [u8; 32] = bearer_token(headers)
+        .map(|token| Sha256::digest(token.as_bytes()).into())
         .ok_or_else(unauthorized)?;
-    state
-        .credentials
-        .iter()
-        .find(|credential| constant_time_eq(supplied.as_slice(), &credential.token_digest))
-        .map(|credential| &credential.principal)
-        .ok_or_else(unauthorized)
+    match &state.authentication {
+        Authentication::Static(credentials) => credentials
+            .iter()
+            .find(|credential| constant_time_eq(&supplied, &credential.token_digest))
+            .map(|credential| credential.principal.clone())
+            .ok_or_else(unauthorized),
+        Authentication::Durable => state
+            .store
+            .authenticate_api_token(organization_id, supplied, unix_time_ms())
+            .await
+            .map(|authenticated| authenticated.principal)
+            .map_err(|_| unauthorized()),
+    }
 }
 
 fn authorize_artifact_agent(
@@ -2808,6 +2873,14 @@ fn authorize_artifact_agent(
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     header_bearer_token(headers, "authorization")
+}
+
+fn unix_time_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 fn header_bearer_token<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -3583,6 +3656,7 @@ mod tests {
             Some(project_id),
             Action::ProjectAdmin,
         )
+        .await
         .expect("human principal is independently authenticated");
         assert_eq!(resolved.subject, "oidc:alice");
     }

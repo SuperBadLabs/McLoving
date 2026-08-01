@@ -271,30 +271,46 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     );
 
     let service_id = Uuid::new_v4();
+    let service_identity = NewServiceIdentity {
+        organization_id,
+        identity_id: service_id,
+        subject: format!("service:{service_id}"),
+        scopes: BTreeSet::from([ServiceScope::ProjectRead, ServiceScope::BuildSubmit]),
+        actor_subject: "operator:identity".to_owned(),
+    };
     admin
-        .provision_service_identity(&NewServiceIdentity {
-            organization_id,
-            identity_id: service_id,
-            subject: format!("service:{service_id}"),
-            scopes: BTreeSet::from([ServiceScope::ProjectRead, ServiceScope::BuildSubmit]),
-            actor_subject: "operator:identity".to_owned(),
-        })
+        .provision_service_identity(&service_identity)
         .await
         .expect("provision scoped service identity");
+    admin
+        .provision_service_identity(&service_identity)
+        .await
+        .expect("exact service identity provisioning is restart-idempotent");
     let service_token = digest("service-token-1");
+    let service_credential = NewServiceCredential {
+        organization_id,
+        credential_id: Uuid::new_v4(),
+        identity_id: service_id,
+        generation: 1,
+        token_digest: service_token,
+        issued_at_unix_ms: 10_000,
+        expires_at_unix_ms: Some(40_000),
+        actor_subject: "operator:identity".to_owned(),
+    };
     let credential = admin
-        .provision_service_credential(&NewServiceCredential {
-            organization_id,
-            credential_id: Uuid::new_v4(),
-            identity_id: service_id,
-            generation: 1,
-            token_digest: service_token,
-            issued_at_unix_ms: 10_000,
-            expires_at_unix_ms: Some(40_000),
-            actor_subject: "operator:identity".to_owned(),
-        })
+        .provision_service_credential(&service_credential)
         .await
         .expect("provision independent service credential");
+    assert_eq!(
+        admin
+            .provision_service_credential(&NewServiceCredential {
+                issued_at_unix_ms: 10_500,
+                ..service_credential.clone()
+            })
+            .await
+            .expect("exact service credential provisioning is restart-idempotent"),
+        credential
+    );
     let service = runtime
         .authenticate_api_token(organization_id, service_token, 12_000)
         .await
