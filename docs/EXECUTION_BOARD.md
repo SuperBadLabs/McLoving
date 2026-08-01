@@ -1055,7 +1055,7 @@ tmpfs, dropped-capability, memory/swap, and ulimit policy, plus two-sided
 containment, database integrity, coverage, raw observations, and trace
 equality. The raw McLoving admission/build digest, graph/build/node/attempt
 identity, fence, graph/status/attempt terminal-result agreement, and ordered log
-identity are cross-bound; the embedded worker enforces a 1,048,576-byte aggregate
+identity are cross-bound; the embedded worker enforces a 67,108,864-byte aggregate
 stdout/stderr ceiling; resealed semantic,
 identity, and authority mutations fail closed.
 The exact Jenkins initializer digest/body, source path, controller chronology,
@@ -1071,9 +1071,9 @@ cases and 1/228 corpus cases. The remaining 227 cases and every unimplemented
 family remain non-admitted with zero authority. The exact contract is
 `docs/architecture/JENKINS_NATIVE_DIFFERENTIAL_V1.md`; expanding compiler
 admission requires a new differential version. The sealed external evidence
-is `/sn8100/runs/mcloving/diff001-native-20260801T160000Z-v30`, with a
-self-excluding 34-file manifest SHA-256 of
-`52079f5f248bf47c3f5c7753edfeca4bcf7db51485186300113845365768bb61`.
+is `/sn8100/runs/mcloving/diff001-native-20260801T162027Z-v34`, with a
+self-excluding 35-file manifest SHA-256 of
+`9f5f28dd10f0b07bb56918a9ee74306d35e7a312566ff1a85ed6924329783cd1`.
 Immutable v5 is a superseded no-McLoving-containment predecessor; immutable
 v10-v14 are rejected/superseded envelope iterations, v15 failed before
 execution, v17 is the review-superseded predecessor to v18, and v18 is the
@@ -1081,8 +1081,10 @@ chronology-wording predecessor to v19, v19 is the identity-binding predecessor
 to v20, v20 is the runner/source/mount-binding predecessor to v21, and v21 is
 the Jenkins invocation/runtime-binding predecessor to v22. V22 is superseded
 because its worker output was unbounded; v23-v25 failed before execution, v26
-and v28 are exact-contract predecessors, and the successful bounded v29 capture
-is incorporated into v30; all predecessors
+and v28 are exact-contract predecessors, v29/v30 are superseded 1 MiB-quota
+evidence, v31 failed on evidence-mount permissions, v32 failed on a host-built
+glibc mismatch, and the successful shared-64-MiB v33 capture is incorporated
+into v34; all predecessors
 contribute no authority.
 `DIFF-002` remains dependency-blocked; the next unblocked parity-substrate
 slice is selected after the DIFF-001 review/merge gate.

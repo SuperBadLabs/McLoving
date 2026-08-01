@@ -54,7 +54,7 @@ embedded Linux worker against fresh PostgreSQL. Controller and database shared
 only an internal Podman network and published no ports. The non-root runner had
 a read-only root filesystem, no effective or bounding capabilities, no-new-
 privileges, a read-only source mount, and explicit CPU, memory, PID, time, and
-output bounds. The embedded worker enforces an exact 1,048,576-byte aggregate
+output bounds. The embedded worker enforces an exact 67,108,864-byte aggregate
 stdout/stderr ceiling. PostgreSQL had a read-only root filesystem and only the five
 startup capabilities required by its image entrypoint. The build used
 synthetic API identities, no production credential, and no external-effect
@@ -130,9 +130,9 @@ implication.
 The repository receipt is
 `migration/mario-jenkins-oracle-228/corpus-v1/differential-v1`. The sealed
 external evidence is
-`/sn8100/runs/mcloving/diff001-native-20260801T160000Z-v30`; its
-self-excluding 34-file manifest SHA-256 is
-`52079f5f248bf47c3f5c7753edfeca4bcf7db51485186300113845365768bb61`.
+`/sn8100/runs/mcloving/diff001-native-20260801T162027Z-v34`; its
+self-excluding 35-file manifest SHA-256 is
+`9f5f28dd10f0b07bb56918a9ee74306d35e7a312566ff1a85ed6924329783cd1`.
 The immutable v5 envelope is superseded because it lacked McLoving containment
 receipts. The immutable v10 envelope is rejected because its outer manifest
 omitted the nested repository `SHA256SUMS`; v11 predates the final repository
@@ -150,5 +150,9 @@ failed before execution on evidence-directory permissions, host ABI mismatch,
 and a login-shell PATH reset respectively. V26 was superseded because its
 reconstructed command omitted explicit memory/swap equality; v28 was
 superseded because an extra database network alias broadened the exact topology.
-V29 is the successful bounded capture incorporated byte-for-byte into v30.
+V29 is the successful 1 MiB-bounded capture incorporated into v30, which was
+then superseded because that ceiling contradicted the shared 64 MiB execution
+contract. V31 failed before execution on evidence-mount permissions and v32
+failed before execution on a host-built glibc mismatch. V33 is the successful
+shared-64-MiB capture incorporated byte-for-byte into v34.
 None of the predecessors contributes authority.
