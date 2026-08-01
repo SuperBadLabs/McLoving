@@ -1074,16 +1074,17 @@ impl Store {
         }
         reject_credential_digest_collision(&mut tx, organization_id, &issue.token_digest).await?;
         reject_credential_digest_collision(&mut tx, organization_id, &next_refresh_digest).await?;
-        sqlx::query(
+        let effective_replaced_at_unix_ms = sqlx::query_scalar::<_, i64>(
             "UPDATE identity_sessions
              SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $3),
                  revocation_reason = 'refresh_rotation'
-             WHERE organization_id = $1 AND session_id = $2",
+             WHERE organization_id = $1 AND session_id = $2
+             RETURNING revoked_at_unix_ms",
         )
         .bind(organization_id)
         .bind(current.0)
         .bind(issue.issued_at_unix_ms)
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
         sqlx::query(
             "INSERT INTO identity_sessions(
@@ -1123,6 +1124,8 @@ impl Store {
                 "jwks_generation": current.4,
                 "lifecycle_generation": current.5,
                 "group_generation": current.6,
+                "requested_replaced_at_unix_ms": issue.issued_at_unix_ms,
+                "effective_replaced_at_unix_ms": effective_replaced_at_unix_ms,
                 "expires_at_unix_ms": issue.expires_at_unix_ms,
                 "refresh_expires_at_unix_ms": absolute_refresh_expiry,
             }),
@@ -1271,16 +1274,7 @@ impl Store {
             Some(_) => Vec::new(),
         };
         if !effective_revocations.is_empty() {
-            let effective_min = effective_revocations
-                .iter()
-                .min()
-                .copied()
-                .expect("non-empty revocation timestamps have a minimum");
-            let effective_max = effective_revocations
-                .iter()
-                .max()
-                .copied()
-                .expect("non-empty revocation timestamps have a maximum");
+            let (effective_min, effective_max) = timestamp_bounds(&effective_revocations);
             append_audit_record(
                 &mut tx,
                 organization_id,
@@ -1379,24 +1373,35 @@ impl Store {
         .await?;
         let revoked_service_credentials =
             if current_state == IdentityLifecycle::Active && next != IdentityLifecycle::Active {
-                sqlx::query(
-                    "UPDATE service_credentials
-                 SET revoked_at_unix_ms = GREATEST(
-                         issued_at_unix_ms,
-                         (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
-                     ),
-                     revocation_reason = 'identity_lifecycle_transition'
-                 WHERE organization_id = $1 AND identity_id = $2
-                   AND revoked_at_unix_ms IS NULL",
+                sqlx::query_as::<_, (i64, i64)>(
+                    "WITH revocation_clock AS (
+                         SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS unix_ms
+                     )
+                     UPDATE service_credentials
+                     SET revoked_at_unix_ms = GREATEST(
+                             issued_at_unix_ms,
+                             revocation_clock.unix_ms
+                         ),
+                         revocation_reason = 'identity_lifecycle_transition'
+                     FROM revocation_clock
+                     WHERE organization_id = $1 AND identity_id = $2
+                       AND revoked_at_unix_ms IS NULL
+                     RETURNING service_credentials.revoked_at_unix_ms, revocation_clock.unix_ms",
                 )
                 .bind(organization_id)
                 .bind(identity_id)
-                .execute(&mut *tx)
+                .fetch_all(&mut *tx)
                 .await?
-                .rows_affected()
             } else {
-                0
+                Vec::new()
             };
+        let revocation_clock_unix_ms = revoked_service_credentials.first().map(|row| row.1);
+        let effective_revocation_timestamps = revoked_service_credentials
+            .iter()
+            .map(|row| row.0)
+            .collect::<Vec<_>>();
+        let (effective_revoked_at_unix_ms_min, effective_revoked_at_unix_ms_max) =
+            timestamp_bounds(&effective_revocation_timestamps);
         append_audit_record(
             &mut tx,
             organization_id,
@@ -1409,7 +1414,10 @@ impl Store {
                 "to": next,
                 "generation": generation,
                 "reason": reason,
-                "revoked_service_credentials": revoked_service_credentials,
+                "revoked_service_credentials": revoked_service_credentials.len(),
+                "revocation_clock_unix_ms": revocation_clock_unix_ms,
+                "effective_revoked_at_unix_ms_min": effective_revoked_at_unix_ms_min,
+                "effective_revoked_at_unix_ms_max": effective_revoked_at_unix_ms_max,
             }),
         )
         .await?;
@@ -1721,20 +1729,22 @@ async fn provision_service_credential_in_transaction(
     .bind(input.expires_at_unix_ms)
     .execute(&mut **tx)
     .await?;
-    let superseded = sqlx::query(
+    let effective_superseded_at_unix_ms = sqlx::query_scalar::<_, i64>(
         "UPDATE service_credentials
          SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $4),
              revocation_reason = 'superseded_generation'
          WHERE organization_id = $1 AND identity_id = $2
-           AND credential_id <> $3 AND revoked_at_unix_ms IS NULL",
+           AND credential_id <> $3 AND revoked_at_unix_ms IS NULL
+         RETURNING revoked_at_unix_ms",
     )
     .bind(input.organization_id)
     .bind(input.identity_id)
     .bind(input.credential_id)
     .bind(input.issued_at_unix_ms)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected();
+    .fetch_all(&mut **tx)
+    .await?;
+    let (effective_superseded_at_unix_ms_min, effective_superseded_at_unix_ms_max) =
+        timestamp_bounds(&effective_superseded_at_unix_ms);
     append_audit_record(
         tx,
         input.organization_id,
@@ -1745,7 +1755,10 @@ async fn provision_service_credential_in_transaction(
         json!({
             "identity_id": input.identity_id,
             "generation": input.generation,
-            "superseded_credentials": superseded,
+            "superseded_credentials": effective_superseded_at_unix_ms.len(),
+            "requested_superseded_at_unix_ms": input.issued_at_unix_ms,
+            "effective_superseded_at_unix_ms_min": effective_superseded_at_unix_ms_min,
+            "effective_superseded_at_unix_ms_max": effective_superseded_at_unix_ms_max,
         }),
     )
     .await?;
@@ -1914,16 +1927,7 @@ async fn revoke_session_family_on_refresh_reuse(
     if effective_revocations.is_empty() {
         return Ok(());
     }
-    let effective_min = effective_revocations
-        .iter()
-        .min()
-        .copied()
-        .expect("non-empty revocation timestamps have a minimum");
-    let effective_max = effective_revocations
-        .iter()
-        .max()
-        .copied()
-        .expect("non-empty revocation timestamps have a maximum");
+    let (effective_min, effective_max) = timestamp_bounds(&effective_revocations);
     append_audit_record(
         tx,
         organization_id,
@@ -2076,6 +2080,10 @@ fn digest_array(value: &[u8]) -> Result<[u8; 32], StoreError> {
     value.try_into().map_err(|_| {
         StoreError::InvalidIdentityOperation("identity digest has an invalid length".to_owned())
     })
+}
+
+fn timestamp_bounds(values: &[i64]) -> (Option<i64>, Option<i64>) {
+    (values.iter().min().copied(), values.iter().max().copied())
 }
 
 fn validate_canonical(value: &str, label: &str, max: usize) -> Result<(), StoreError> {

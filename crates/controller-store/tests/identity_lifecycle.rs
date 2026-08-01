@@ -716,7 +716,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         .await
         .expect("commit refresh before delayed logout reaches the predecessor lock");
     let logout_final_token = digest("logout-race-access-after-second-refresh");
-    runtime
+    let logout_final = runtime
         .rotate_human_session(
             organization_id,
             digest("logout-race-refresh-after-refresh"),
@@ -1170,6 +1170,46 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         i64::MAX - 10,
         "audit must record the effective durable revocation timestamp"
     );
+    let skewed_service_rotation = audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "service_credential_provisioned"
+                && event.subject
+                    == format!(
+                        "service-credential:{}",
+                        future_second_credential.credential_id
+                    )
+        })
+        .expect("clock-skewed service rotation audit event");
+    assert_eq!(
+        skewed_service_rotation.payload["requested_superseded_at_unix_ms"],
+        i64::MAX - 10
+    );
+    assert_eq!(
+        skewed_service_rotation.payload["effective_superseded_at_unix_ms_min"],
+        i64::MAX - 3
+    );
+    assert_eq!(
+        skewed_service_rotation.payload["effective_superseded_at_unix_ms_max"],
+        i64::MAX - 3
+    );
+    let skewed_refresh_rotation = audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "oidc_session_refreshed"
+                && event.subject == format!("identity-session:{}", logout_final.session_id)
+        })
+        .expect("clock-skewed refresh rotation audit event");
+    assert_eq!(
+        skewed_refresh_rotation.payload["requested_replaced_at_unix_ms"],
+        13_050
+    );
+    assert_eq!(
+        skewed_refresh_rotation.payload["effective_replaced_at_unix_ms"],
+        13_100
+    );
     let logout = audit
         .events
         .iter()
@@ -1202,6 +1242,28 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     assert_eq!(
         human_disable.payload["reason"], "suspected-account-compromise",
         "lifecycle audit must preserve the canonical operational reason"
+    );
+    let future_lifecycle_disable = audit
+        .events
+        .iter()
+        .find(|event| {
+            event.action == "identity_lifecycle_transitioned"
+                && event.subject == format!("identity:{future_service_id}")
+        })
+        .expect("future-issued service lifecycle audit event");
+    assert_eq!(
+        future_lifecycle_disable.payload["effective_revoked_at_unix_ms_min"],
+        i64::MAX - 1
+    );
+    assert_eq!(
+        future_lifecycle_disable.payload["effective_revoked_at_unix_ms_max"],
+        i64::MAX - 1
+    );
+    assert!(
+        future_lifecycle_disable.payload["revocation_clock_unix_ms"]
+            .as_i64()
+            .is_some_and(|clock| clock < i64::MAX - 1),
+        "lifecycle audit must distinguish its database clock from the effective future timestamp"
     );
     for action in [
         "identity_provider_provisioned",
