@@ -216,6 +216,18 @@ fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
     }
 }
 
+fn bounded_u64_environment_at_most(name: &str, default: u64, maximum: u64) -> Result<u64> {
+    let value = bounded_u64_environment(name, default)?;
+    bounded_u64_at_most(name, value, maximum)
+}
+
+fn bounded_u64_at_most(name: &str, value: u64, maximum: u64) -> Result<u64> {
+    if value > maximum {
+        bail!("{name} must be at most {maximum}");
+    }
+    Ok(value)
+}
+
 struct OidcEnvironment {
     provider: IdentityProviderWrite,
     client: OidcClientConfig,
@@ -330,9 +342,10 @@ fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
                 "MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS",
                 10,
             )?),
-            clock_skew: Duration::from_secs(bounded_u64_environment(
+            clock_skew: Duration::from_secs(bounded_u64_environment_at_most(
                 "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
                 60,
+                5 * 60,
             )?),
             max_jwks_bytes: usize::try_from(bounded_u64_environment(
                 "MCLOVING_OIDC_MAX_JWKS_BYTES",
@@ -1475,6 +1488,20 @@ mod tests {
                 .unwrap_err()
                 .code(),
             tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn oidc_clock_skew_has_a_security_ceiling() {
+        assert_eq!(
+            bounded_u64_at_most("MCLOVING_OIDC_CLOCK_SKEW_SECONDS", 300, 300).unwrap(),
+            300
+        );
+        assert!(
+            bounded_u64_at_most("MCLOVING_OIDC_CLOCK_SKEW_SECONDS", 301, 300)
+                .unwrap_err()
+                .to_string()
+                .contains("must be at most 300")
         );
     }
 }

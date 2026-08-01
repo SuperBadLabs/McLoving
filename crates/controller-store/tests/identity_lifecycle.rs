@@ -186,22 +186,37 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     );
 
     let human_id = Uuid::new_v4();
+    let human_identity = NewHumanIdentity {
+        organization_id,
+        identity_id: human_id,
+        subject: format!("principal:{human_id}"),
+        provider_id,
+        external_subject: "immutable-person-42".to_owned(),
+        source_realm_digest: digest("jenkins-realm"),
+        source_identity_id: "jenkins-user-42".to_owned(),
+        source_membership_generation: 7,
+        alias_history: vec!["old-login".to_owned()],
+        provenance_digest: digest("mig-000-provenance"),
+        actor_subject: "operator:identity".to_owned(),
+    };
     admin
-        .provision_human_identity(&NewHumanIdentity {
-            organization_id,
-            identity_id: human_id,
-            subject: format!("principal:{human_id}"),
-            provider_id,
-            external_subject: "immutable-person-42".to_owned(),
-            source_realm_digest: digest("jenkins-realm"),
-            source_identity_id: "jenkins-user-42".to_owned(),
-            source_membership_generation: 7,
-            alias_history: vec!["old-login".to_owned()],
-            provenance_digest: digest("mig-000-provenance"),
-            actor_subject: "operator:identity".to_owned(),
-        })
+        .provision_human_identity(&human_identity)
         .await
         .expect("provision reviewed immutable human mapping");
+    admin
+        .provision_human_identity(&human_identity)
+        .await
+        .expect("an exact human-provisioning retry is idempotent");
+    assert!(
+        admin
+            .provision_human_identity(&NewHumanIdentity {
+                external_subject: "substituted-person-42".to_owned(),
+                ..human_identity.clone()
+            })
+            .await
+            .is_err(),
+        "an idempotent retry must not permit an immutable binding substitution"
+    );
     sqlx::query(
         "INSERT INTO project_memberships(identity_id, organization_id, project_id, role)
          VALUES ($1,$2,$3,'developer')",
@@ -548,7 +563,7 @@ async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
         .await
         .expect("fresh post-reactivation credential authenticates");
     assert!(
-        runtime
+        admin
             .revoke_service_credential(
                 organization_id,
                 final_credential.credential_id,

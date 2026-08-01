@@ -226,7 +226,7 @@ GRANT UPDATE (group_generation, group_digest, updated_at)
     ON identities TO mcloving_tenant;
 GRANT SELECT, INSERT, DELETE ON identity_group_snapshots, oidc_token_replays TO mcloving_tenant;
 GRANT SELECT, INSERT, UPDATE, DELETE ON identity_sessions TO mcloving_tenant;
-GRANT SELECT, INSERT, UPDATE ON service_credentials TO mcloving_tenant;
+GRANT SELECT ON service_credentials TO mcloving_tenant;
 GRANT SELECT, INSERT, UPDATE, DELETE ON oidc_login_attempts TO mcloving_tenant;
 
 ALTER TABLE identity_providers ENABLE ROW LEVEL SECURITY;

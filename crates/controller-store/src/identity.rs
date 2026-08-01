@@ -469,6 +469,33 @@ impl Store {
                 tx.commit().await?;
                 return Ok(());
             }
+            let exact_mapping = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(
+                     SELECT 1 FROM identities
+                     WHERE organization_id = $1 AND id = $2 AND subject = $3
+                       AND kind = 'human' AND provider_id = $4
+                       AND external_subject = $5 AND source_realm_digest = $6
+                       AND source_identity_id = $7
+                       AND source_membership_generation = $8
+                       AND alias_history = $9 AND provenance_digest = $10
+                 )",
+            )
+            .bind(input.organization_id)
+            .bind(input.identity_id)
+            .bind(&input.subject)
+            .bind(input.provider_id)
+            .bind(&input.external_subject)
+            .bind(input.source_realm_digest.as_slice())
+            .bind(&input.source_identity_id)
+            .bind(input.source_membership_generation)
+            .bind(json!(aliases))
+            .bind(input.provenance_digest.as_slice())
+            .fetch_one(&mut *tx)
+            .await?;
+            if exact_mapping {
+                tx.commit().await?;
+                return Ok(());
+            }
             return Err(StoreError::IdentityConflict(
                 "human identity collides with an immutable existing binding".to_owned(),
             ));
