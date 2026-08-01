@@ -188,6 +188,11 @@ jq --sort-keys '
   .jobs[] | select(.source_job_id == "stateful")
   | .builds[] | select(.number == 3)
 ' "$reverse_bundle" > "$staging/mcloving-state-transfer-build.json"
+jq --sort-keys '
+  .jobs[] | select(.source_job_id == "stateful")
+  | .builds[] | select(.number == 3)
+  | .protection
+' "$reverse_bundle" > "$staging/mcloving-state-transfer-protection.json"
 old_persistent_md5=$(md5sum "$staging/archive/persistent.state" | awk '{print $1}')
 materialize_artifact changeset.intent
 materialize_artifact changelog.intent
@@ -341,6 +346,18 @@ jq --sort-keys '
 podman unshare cp "$job_home/builds/3/mcloving-state-transfer-build.json" \
   "$evidence/observed-build-3.json"
 cmp "$evidence/expected-build-3.json" "$evidence/observed-build-3.json"
+jq --sort-keys '.protection' "$evidence/expected-build-3.json" \
+  > "$evidence/expected-build-3-protection.json"
+podman unshare cp "$job_home/builds/3/mcloving-state-transfer-protection.json" \
+  "$evidence/observed-build-3-protection.json"
+cmp "$evidence/expected-build-3-protection.json" \
+  "$evidence/observed-build-3-protection.json"
+jq --exit-status '
+  .retention.retain_until_unix_ms == 2000000000000
+  and ([.active_holds[].hold_id] | sort)
+      == ["destination-case", "source-case-a", "source-case-b"]
+  and ([.active_holds[] | select(.release_authority == "custodian:mig005a")] | length) == 3
+' "$evidence/observed-build-3-protection.json" >/dev/null
 cat "$transform_root"/mcloving-log-*.txt > "$evidence/expected-build-3.log"
 podman unshare cp "$job_home/builds/3/log" "$evidence/observed-build-3.log"
 cmp "$evidence/expected-build-3.log" "$evidence/observed-build-3.log"
@@ -351,6 +368,7 @@ jq -n --sort-keys \
   {
     schema: "mcloving.jenkins-import-verification/v1",
     canonical_record_equal: true,
+    protection_record_equal: true,
     native_build: {
       number: $api[0].number,
       queue_id: $api[0].queueId,

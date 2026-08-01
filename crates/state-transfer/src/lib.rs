@@ -1734,15 +1734,26 @@ fn insert_record(
     records: &mut BTreeMap<String, Digest>,
     record: &RecordProvenance,
 ) -> Result<(), TransferError> {
+    insert_record_with_limit(records, record, MAX_TRANSFER_RECORDS)
+}
+
+fn insert_record_with_limit(
+    records: &mut BTreeMap<String, Digest>,
+    record: &RecordProvenance,
+    limit: usize,
+) -> Result<(), TransferError> {
     validate_text(&record.id, 1024, "record ID")?;
     validate_digest(record.source_digest, "record source digest")?;
     validate_text(&record.provenance, 4096, "record provenance")?;
-    if records
-        .insert(record.id.clone(), record.source_digest)
-        .is_some()
-    {
+    if records.contains_key(&record.id) {
         return Err(TransferError::DuplicateRecord(record.id.clone()));
     }
+    if records.len() >= limit {
+        return Err(TransferError::InvalidField(
+            "bundle exceeds record limit".to_owned(),
+        ));
+    }
+    records.insert(record.id.clone(), record.source_digest);
     Ok(())
 }
 
@@ -1914,7 +1925,11 @@ fn validate_digest(digest: Digest, field: &str) -> Result<(), TransferError> {
 
 #[cfg(test)]
 mod canonical_writer_tests {
-    use super::{TransferError, canonical_bytes_of};
+    use std::collections::BTreeMap;
+
+    use super::{
+        RecordProvenance, TransferError, canonical_bytes_of, insert_record_with_limit, sha256,
+    };
 
     #[test]
     fn canonical_writer_fails_at_the_bound_without_materializing_the_tail() {
@@ -1925,5 +1940,29 @@ mod canonical_writer_tests {
                 "bounded canonical payload".to_owned()
             ))
         );
+    }
+
+    #[test]
+    fn record_limit_is_enforced_before_cloning_the_overflow_record() {
+        let first = RecordProvenance {
+            id: "first".to_owned(),
+            source_digest: sha256(b"first"),
+            provenance: "first record".to_owned(),
+        };
+        let overflow = RecordProvenance {
+            id: "overflow".to_owned(),
+            source_digest: sha256(b"overflow"),
+            provenance: "overflow record".to_owned(),
+        };
+        let mut records = BTreeMap::new();
+        insert_record_with_limit(&mut records, &first, 1).expect("first record fits");
+        assert_eq!(
+            insert_record_with_limit(&mut records, &overflow, 1),
+            Err(TransferError::InvalidField(
+                "bundle exceeds record limit".to_owned()
+            ))
+        );
+        assert_eq!(records.len(), 1);
+        assert!(!records.contains_key("overflow"));
     }
 }

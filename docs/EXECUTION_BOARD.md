@@ -933,19 +933,21 @@ per-attempt timestamps and terminal outcomes, committed logs, available-artifact
 inventory, and fenced checkout are reread from controller truth before export.
 The reverse bridge verifies the full canonical build record byte-for-byte and
 independently checks Jenkins-native build fields, workflow-stage semantics,
-SCM changelog, log payloads, and artifacts. It
+SCM changelog, log payloads, artifacts, and a dedicated persisted
+retention/legal-hold boundary. Actual record collection also fails before
+cloning any record beyond the one-million-record bound. It
 materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its exact transform binary SHA-256 is
-`9b30a5218012ec46cf29ac9f2758e19ca2ad7123e87fec453e320ba28f66ab56`.
+`ecd10e10e2cb69a3d65206a860ac1770aed8bcfaf27d4fdf296014cea3c7f07f`.
 Its source, transform, and reverse manifest SHA-256 values are
-`66bc739f25079abc455bb28072fcc7b747aac20594d1acd91d2879f9d307582b`,
-`d1159befcc9e9a17ccb10b8250c228ac810d3b1e0db1753a40955c5432eb7c30`,
-and `06eaed0f12272feaf2ae7998910140deae5449feeffb61feaeb98a16da758b68`;
+`9cfc4202c523a0572f2c4e4a5626c7b6494f451108f6881d35f8f9903e25a8bb`,
+`60305390aecf725b01d7d7c088009640f832a3e0f29a3fe01314954eefb561ce`,
+and `ed7d8f0b734de35209c980b24df9e254ee6da756efa23c79838715767b783e8e`;
 the forward and reverse bundle SHA-256 values are
-`a4b1179a6f3671f56d5f1fb5549e54b3904567c1012eaac1008c8a47ebbc74f4`
-and `ec4dd8f75ef567a7f2cc35ca915e1f8d359c095dc74ffcdab004f3c6b18a147a`.
+`82092815818d3c9e7120f5d9bebeafecd40bc4b4919b245752bd6161c1824f06`
+and `b967ed672d3c68ed8dc42f95028f7acdce4d242d408216861a0b58eca7688f87`.
 An injected post-install failure restored repository, build, permalink, and
 next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed
