@@ -9,6 +9,7 @@ use uuid::Uuid;
 mod audit;
 pub mod authz;
 mod dag;
+mod identity;
 mod product;
 mod scheduler;
 mod security;
@@ -23,6 +24,11 @@ pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
     DagNodeKind, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode, compile_matrix,
     validate_dag_contract,
+};
+pub use identity::{
+    AuthenticatedIdentity, IdentityLifecycle, IdentityProviderConfig, IdentityProviderWrite,
+    LoginAttempt, NewHumanIdentity, NewServiceCredential, NewServiceIdentity, OidcIdentityClaims,
+    ServiceCredential, SessionIssue, SessionView,
 };
 pub use product::{
     ApprovalView, AttemptView, BuildCursor, BuildGraph, BuildListItem, BuildPage, ComponentCursor,
@@ -87,6 +93,8 @@ pub const GLOBAL_LOG_ORDER_V16: &str = include_str!("../migrations/0016_global_l
 pub const STATE_TRANSFER_V17: &str = include_str!("../migrations/0017_state_transfer.sql");
 /// Durable per-attempt dependency-generation readiness.
 pub const ATTEMPT_READINESS_V18: &str = include_str!("../migrations/0018_attempt_readiness.sql");
+/// Durable OIDC, principal-lifecycle, session, and service-credential truth.
+pub const IDENTITY_LIFECYCLE_V19: &str = include_str!("../migrations/0019_identity_lifecycle.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -417,6 +425,10 @@ pub enum StoreError {
     InvalidStateTransfer(String),
     #[error("state-transfer conflict: {0}")]
     StateTransferConflict(String),
+    #[error("invalid identity operation: {0}")]
+    InvalidIdentityOperation(String),
+    #[error("identity operation conflict: {0}")]
+    IdentityConflict(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -472,6 +484,7 @@ impl Store {
         apply_migration(&mut tx, 16, GLOBAL_LOG_ORDER_V16).await?;
         apply_migration(&mut tx, 17, STATE_TRANSFER_V17).await?;
         apply_migration(&mut tx, 18, ATTEMPT_READINESS_V18).await?;
+        apply_migration(&mut tx, 19, IDENTITY_LIFECYCLE_V19).await?;
         tx.commit().await?;
         Ok(())
     }
