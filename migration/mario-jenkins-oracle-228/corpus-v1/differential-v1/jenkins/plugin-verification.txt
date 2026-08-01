@@ -1,0 +1,9 @@
+schema=mcloving.jenkins.plugin-verification/v1
+host=mario
+plugin_root=/home/srikanth/jenkins-oracle-228/plugins
+plugin_manifest_sha256=e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0
+plugin_count=90
+latest_plugin_mtime=2026-07-26T05:55:08.950484000Z
+jenkins_execution_started_at=2026-08-01T12:15:43.236541506Z
+verified_at=2026-08-01T13:28:36Z
+verification=sha256sum-strict-all-ok

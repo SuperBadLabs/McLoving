@@ -1049,20 +1049,23 @@ shipped McLoving controller/embedded Linux worker against fresh PostgreSQL on
 an internal-only Podman network. Both derive the same canonical one-stage,
 one-process, success trace with exact semantic stdout and zero user workspace,
 artifact, test, approval, credential-grant, or external-effect output. An
-independent bounded verifier checks the exact 28-file repository tree,
-two-sided containment, database integrity, coverage, raw observations, and
-trace equality; resealed semantic and authority mutations fail closed.
+independent bounded verifier checks the exact 30-file repository tree,
+including the verified 90-plugin profile, exact Jenkins console, mount sources,
+tmpfs, dropped-capability, memory/swap, and ulimit policy, plus two-sided
+containment, database integrity, coverage, raw observations, and trace
+equality; resealed semantic and authority mutations fail closed.
 Certified equivalence is 1/1 admitted
 cases and 1/228 corpus cases. The remaining 227 cases and every unimplemented
 family remain non-admitted with zero authority. The exact contract is
 `docs/architecture/JENKINS_NATIVE_DIFFERENTIAL_V1.md`; expanding compiler
 admission requires a new differential version. The sealed external evidence
-is `/sn8100/runs/mcloving/diff001-native-20260801T131600Z-v17`, with a
-self-excluding 32-file manifest SHA-256 of
-`7c4d05df6d5902b3d769a86b298edc9613297ca573d5f657dae11c41dc5760f7`.
+is `/sn8100/runs/mcloving/diff001-native-20260801T134200Z-v19`, with a
+self-excluding 34-file manifest SHA-256 of
+`7322f454d4ffad02f61b46c4e1112ac54764ccde43b9b2d0cb3fc9bbe5569bd4`.
 Immutable v5 is a superseded no-McLoving-containment predecessor; immutable
-v10-v14 are rejected/superseded envelope iterations, and v15 failed before
-execution; they contribute no authority.
+v10-v14 are rejected/superseded envelope iterations, v15 failed before
+execution, v17 is the review-superseded predecessor to v18, and v18 is the
+chronology-wording predecessor to v19; they contribute no authority.
 `DIFF-002` remains dependency-blocked; the next unblocked parity-substrate
 slice is selected after the DIFF-001 review/merge gate.
 

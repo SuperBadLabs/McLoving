@@ -32,11 +32,15 @@ alternate-agent selection remain non-admitted.
 Jenkins ran on Mario in a new disposable home using Jenkins 2.568.1 and exact
 image digest
 `f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`.
-The pinned 90-plugin oracle directory, source, and initialization fixture were
-read-only mounts. The container had no network, a read-only root filesystem,
-dropped capabilities, no privilege escalation, and explicit CPU, memory, PID,
-file-descriptor, time, and output bounds. A negative external-network probe
-failed. The live Mario oracle remained healthy and unchanged after teardown.
+The exact 90-plugin SHA-256 manifest and plugin files predated execution and
+were later independently reverified against the pinned oracle directory
+without mismatch; that directory, source, and initialization fixture were
+mounted read-only from their exact captured source paths. The container
+had no network, a read-only root filesystem, the exact dropped-capability and
+2 GiB no-exec tmpfs policies, no privilege escalation, and explicit CPU,
+memory/swap, PID, file-descriptor, time, and output bounds. A negative
+external-network probe failed. The live Mario oracle remained healthy and
+unchanged after teardown.
 
 McLoving ran the exact compiled bytes through the shipped controller and
 embedded Linux worker against fresh PostgreSQL. Controller and database shared
@@ -61,14 +65,15 @@ capture and final evidence envelope are immutable.
 
 ## Fail-closed verifier
 
-`mcloving-jenkins-differential` accepts only the exact 28-file self-excluding
+`mcloving-jenkins-differential` accepts only the exact 30-file self-excluding
 manifest and exact filesystem tree. It rejects traversal, symlinks, special or
 oversized files, unmanifested/missing/additional entries, and digest
 substitution. It independently checks:
 
-- source, compiled-pipeline, Jenkins image, runtime, locale, and containment;
-- Jenkins build, stage, literal shell step, console, workspace, and artifact
-  observations;
+- source, compiled-pipeline, Jenkins image, exact 90-plugin manifest and
+  verification receipt, runtime, locale, and containment;
+- Jenkins build, stage, literal shell step, exact console transcript,
+  workspace, and artifact observations;
 - McLoving image/runtime identities, internal network, runner/database
   containment, database integrity, graph, platform, trust pool, attempt,
   result, stdout/stderr, workspace, artifact, test, approval, and grant
@@ -76,9 +81,11 @@ substitution. It independently checks:
 - the strict-YAML coverage and zero-authority contract; and
 - equality of the independently derived canonical traces.
 
-Mutation tests alter and reseal the Jenkins result, Jenkins network mode,
-McLoving output, McLoving read-only root filesystem, and admission denominator;
-unsafe paths, extra files, and symlinked evidence are also rejected.
+Mutation tests alter and reseal the Jenkins result, network mode, memory/swap,
+ulimits, tmpfs, dropped capabilities, plugin mount source, plugin manifest,
+console output, McLoving output, McLoving read-only root filesystem, and
+admission denominator; unsafe paths, extra files, and symlinked evidence are
+also rejected.
 
 ## Coverage truth
 
@@ -98,12 +105,15 @@ implication.
 The repository receipt is
 `migration/mario-jenkins-oracle-228/corpus-v1/differential-v1`. The sealed
 external evidence is
-`/sn8100/runs/mcloving/diff001-native-20260801T131600Z-v17`; its
-self-excluding 32-file manifest SHA-256 is
-`7c4d05df6d5902b3d769a86b298edc9613297ca573d5f657dae11c41dc5760f7`.
+`/sn8100/runs/mcloving/diff001-native-20260801T134200Z-v19`; its
+self-excluding 34-file manifest SHA-256 is
+`7322f454d4ffad02f61b46c4e1112ac54764ccde43b9b2d0cb3fc9bbe5569bd4`.
 The immutable v5 envelope is superseded because it lacked McLoving containment
 receipts. The immutable v10 envelope is rejected because its outer manifest
 omitted the nested repository `SHA256SUMS`; v11 predates the final repository
 README lock; v12 used temporary receipt filenames; and v13 had an incomplete
-predecessor ledger. V14 was superseded by exact directory accounting, and v15
-failed before execution on a glibc mismatch. None contributes authority.
+predecessor ledger. V14 was superseded by exact directory accounting, v15
+failed before execution on a glibc mismatch, and v17 was superseded by the
+review-driven exact plugin, console, and containment binding in v18; v18 was
+then superseded by v19's chronology-accurate plugin-verification wording. None
+contributes authority.

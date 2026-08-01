@@ -5,8 +5,11 @@ surface: one exact declarative pipeline from the immutable 228-file Mario
 corpus. It does not claim broad Jenkins compatibility.
 
 The source was run in a fresh, disposable Jenkins 2.568.1 controller from the
-exact pinned image, with the pinned oracle plugin directory mounted read-only,
-no network, a read-only root filesystem, dropped capabilities, synthetic local
+exact pinned image, with the exact 90-plugin SHA-256 manifest and plugin files
+predating execution, later independently reverified without mismatch, and the
+oracle directory mounted from the pinned source path read-only. The container
+had no network, a read-only root filesystem, the exact
+dropped-capability set, synthetic local
 initialization, and bounded CPU, memory, PIDs, file descriptors, and time. The
 live Mario oracle was not mutated. The compiled strict-YAML pipeline was run
 through the shipped McLoving controller and embedded Linux worker against a
@@ -18,7 +21,9 @@ published no ports and retained only its five required startup capabilities.
 Both disposable stacks were torn down after collection.
 
 The independent `mcloving-jenkins-differential` verifier checks the manifest,
-source and pipeline identities, the two raw receipts, Jenkins containment,
+source, pipeline, image, and plugin-profile identities, the two raw receipts,
+the exact Jenkins console transcript and containment (including mount sources,
+tmpfs policy, dropped capabilities, memory/swap, and ulimits),
 McLoving runner/database/network containment and integrity,
 coverage/authority declarations, and the canonical trace. It compares stage
 order, literal process arguments, terminal outcome, attempt ordinal, semantic

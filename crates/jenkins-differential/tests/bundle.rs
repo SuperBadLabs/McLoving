@@ -14,7 +14,7 @@ fn exact_two_sided_receipt_is_certified() {
     let receipt = verify_bundle(&fixture()).expect("verify exact differential bundle");
     assert_eq!(receipt.schema, SCHEMA);
     assert_eq!(receipt.case, CASE);
-    assert_eq!(receipt.files, 28);
+    assert_eq!(receipt.files, 30);
     assert_eq!(receipt.admitted_cases, 1);
     assert_eq!(receipt.certified_cases, 1);
     assert_eq!(receipt.non_admitted_cases, 227);
@@ -46,6 +46,36 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "\"Soft\": 1024",
             "\"Soft\": 2048",
             "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
+            "\"/tmp\": \"rw,noexec,nosuid,nodev,size=2g,rprivate,tmpcopyup\"",
+            "\"/tmp\": \"rw,noexec,nosuid,nodev,size=1g,rprivate,tmpcopyup\"",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
+            "\"CAP_SYS_CHROOT\"",
+            "\"CAP_SYS_ADMIN\"",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/container-inspect.json",
+            "\"Source\": \"/home/srikanth/jenkins-oracle-228/plugins\"",
+            "\"Source\": \"/tmp/unsealed-plugins\"",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/console.txt",
+            "Hello World\n[Pipeline] }",
+            "Hello World\nunexpected output\n[Pipeline] }",
+            "E_JENKINS_LOG",
+        ),
+        (
+            "jenkins/PLUGIN_SHA256SUMS",
+            "695c029c078e91dd423a4f0b98bd4e24a60469826088e7855ad022fc1a134e92",
+            "795c029c078e91dd423a4f0b98bd4e24a60469826088e7855ad022fc1a134e92",
+            "E_JENKINS_PLUGINS",
         ),
         (
             "mcloving/mcloving-raw.json",

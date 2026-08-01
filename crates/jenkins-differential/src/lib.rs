@@ -18,6 +18,8 @@ pub const PIPELINE_SHA256: &str =
     "551d489ca13bf5d130bdc5c10ce35e5d3d988bdaa1c5488dd9bc79b30674acdc";
 pub const JENKINS_IMAGE_SHA256: &str =
     "f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02";
+pub const JENKINS_PLUGIN_MANIFEST_SHA256: &str =
+    "e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0";
 pub const MCLOVING_RUNNER_IMAGE_SHA256: &str =
     "77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa";
 pub const MCLOVING_DATABASE_IMAGE_SHA256: &str =
@@ -32,7 +34,7 @@ const MCLOVING_CONTROLLER_BINARY_SHA256: &str =
 const MAX_FILES: usize = 32;
 const MAX_FILE_BYTES: u64 = 262_144;
 const MAX_BUNDLE_BYTES: u64 = 1_048_576;
-const BUNDLE_FILES: [&str; 28] = [
+const BUNDLE_FILES: [&str; 30] = [
     "README.md",
     "coverage.yaml",
     "pipeline.yaml",
@@ -45,6 +47,8 @@ const BUNDLE_FILES: [&str; 28] = [
     "jenkins/file-sha256.txt",
     "jenkins/image-inspect.json",
     "jenkins/init.groovy",
+    "jenkins/PLUGIN_SHA256SUMS",
+    "jenkins/plugin-verification.txt",
     "jenkins/queue.json",
     "jenkins/runtime.txt",
     "jenkins/stage-build.json",
@@ -162,6 +166,7 @@ struct CoverageAuthority {
 pub fn verify_bundle(root: &Path) -> Result<VerificationReceipt, VerificationError> {
     verify_manifest(root)?;
     verify_source_and_pipeline(root)?;
+    verify_jenkins_plugin_profile(root)?;
     let coverage = verify_coverage(root)?;
     let jenkins = derive_jenkins_trace(root)?;
     let mcloving = derive_mcloving_trace(root)?;
@@ -413,13 +418,26 @@ fn derive_jenkins_trace(root: &Path) -> Result<CanonicalTrace, VerificationError
         "E_JENKINS_STAGE",
     )?;
 
-    let console = text(root, "jenkins/console.txt")?;
-    if !console.contains("+ echo Hello World\nHello World\n")
-        || !console.contains("Finished: SUCCESS")
-    {
+    const EXPECTED_CONSOLE: &str = "Started by user unknown or anonymous\n\
+[Pipeline] Start of Pipeline\n\
+[Pipeline] node\n\
+Running on Jenkins in /var/jenkins_home/workspace/diff-001-admitted\n\
+[Pipeline] {\n\
+[Pipeline] stage\n\
+[Pipeline] { (Build)\n\
+[Pipeline] sh\n\
++ echo Hello World\n\
+Hello World\n\
+[Pipeline] }\n\
+[Pipeline] // stage\n\
+[Pipeline] }\n\
+[Pipeline] // node\n\
+[Pipeline] End of Pipeline\n\
+Finished: SUCCESS\n";
+    if text(root, "jenkins/console.txt")? != EXPECTED_CONSOLE {
         return Err(VerificationError::new(
             "E_JENKINS_LOG",
-            "semantic output or terminal outcome is missing",
+            "Jenkins console transcript is not exact",
         ));
     }
     if !read(root, "jenkins/workspace.tsv")?.is_empty()
@@ -473,6 +491,30 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         container,
         &["HostConfig", "SecurityOpt"],
         &["no-new-privileges"],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string_array(
+        container,
+        &["HostConfig", "CapDrop"],
+        &[
+            "CAP_CHOWN",
+            "CAP_DAC_OVERRIDE",
+            "CAP_FOWNER",
+            "CAP_FSETID",
+            "CAP_KILL",
+            "CAP_NET_BIND_SERVICE",
+            "CAP_SETFCAP",
+            "CAP_SETGID",
+            "CAP_SETPCAP",
+            "CAP_SETUID",
+            "CAP_SYS_CHROOT",
+        ],
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(
+        container,
+        &["HostConfig", "Tmpfs", "/tmp"],
+        "rw,noexec,nosuid,nodev,size=2g,rprivate,tmpcopyup",
         "E_JENKINS_CONTAINMENT",
     )?;
     exact_empty_object(
@@ -537,10 +579,19 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         exact_u64(limit, &["Hard"], bound, "E_JENKINS_CONTAINMENT")?;
     }
     let mounts = array(container, &["Mounts"], "E_JENKINS_CONTAINMENT")?;
-    for destination in [
-        "/usr/share/jenkins/ref/plugins",
-        "/fixture/Jenkinsfile",
-        "/usr/share/jenkins/ref/init.groovy.d/99-diff001.groovy",
+    for (source, destination) in [
+        (
+            "/home/srikanth/jenkins-oracle-228/plugins",
+            "/usr/share/jenkins/ref/plugins",
+        ),
+        (
+            "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/fixture/Jenkinsfile",
+            "/fixture/Jenkinsfile",
+        ),
+        (
+            "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/fixture/99-diff001.groovy",
+            "/usr/share/jenkins/ref/init.groovy.d/99-diff001.groovy",
+        ),
     ] {
         let mount = mounts
             .iter()
@@ -554,6 +605,7 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
                 )
             })?;
         exact_bool(mount, &["RW"], false, "E_JENKINS_CONTAINMENT")?;
+        exact_string(mount, &["Source"], source, "E_JENKINS_CONTAINMENT")?;
     }
     let external = text(root, "jenkins/external-network.txt")?;
     let runtime = text(root, "jenkins/runtime.txt")?;
@@ -565,6 +617,63 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         return Err(VerificationError::new(
             "E_JENKINS_CONTAINMENT",
             "runtime or negative-network receipt differs",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_jenkins_plugin_profile(root: &Path) -> Result<(), VerificationError> {
+    let manifest = read(root, "jenkins/PLUGIN_SHA256SUMS")?;
+    if sha256(&manifest) != JENKINS_PLUGIN_MANIFEST_SHA256 {
+        return Err(VerificationError::new(
+            "E_JENKINS_PLUGINS",
+            "Jenkins plugin manifest digest differs",
+        ));
+    }
+    let manifest_text = std::str::from_utf8(&manifest)
+        .map_err(|error| VerificationError::new("E_JENKINS_PLUGINS", error.to_string()))?;
+    let mut plugins = BTreeSet::new();
+    for line in manifest_text.lines() {
+        let (digest, path) = line.split_once("  ").ok_or_else(|| {
+            VerificationError::new("E_JENKINS_PLUGINS", "invalid plugin manifest line")
+        })?;
+        let valid_digest = digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase());
+        let valid_path = path.strip_prefix("plugins/").is_some_and(|leaf| {
+            !leaf.is_empty()
+                && leaf.ends_with(".jpi")
+                && !leaf.contains('/')
+                && !leaf.contains('\\')
+                && leaf != ".jpi"
+        });
+        if !valid_digest || !valid_path || !plugins.insert(path) {
+            return Err(VerificationError::new(
+                "E_JENKINS_PLUGINS",
+                "plugin manifest entry is not canonical and unique",
+            ));
+        }
+    }
+    if plugins.len() != 90 {
+        return Err(VerificationError::new(
+            "E_JENKINS_PLUGINS",
+            "Jenkins plugin manifest does not contain exactly 90 plugins",
+        ));
+    }
+    const EXPECTED_RECEIPT: &str = "schema=mcloving.jenkins.plugin-verification/v1\n\
+host=mario\n\
+plugin_root=/home/srikanth/jenkins-oracle-228/plugins\n\
+plugin_manifest_sha256=e33fa87646e6e360e7614373cc0057ba2e92ff18b9a9ea9419dea796dcb950b0\n\
+plugin_count=90\n\
+latest_plugin_mtime=2026-07-26T05:55:08.950484000Z\n\
+jenkins_execution_started_at=2026-08-01T12:15:43.236541506Z\n\
+verified_at=2026-08-01T13:28:36Z\n\
+verification=sha256sum-strict-all-ok\n";
+    if text(root, "jenkins/plugin-verification.txt")? != EXPECTED_RECEIPT {
+        return Err(VerificationError::new(
+            "E_JENKINS_PLUGINS",
+            "Jenkins plugin verification receipt differs",
         ));
     }
     Ok(())
