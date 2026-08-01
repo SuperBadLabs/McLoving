@@ -11,11 +11,11 @@ use mcloving_controller_store::{
 use mcloving_state_transfer::{
     AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy,
     DataBinding, DataClassification, Digest, ExpectedBinding, FilesystemEntry, FilesystemEntryKind,
-    GraphNodeState, JobState, LegalHold, LogState, MaterializationLimits, ObjectKind, ObjectState,
-    PersistentDependency, Protection, RecordProvenance, RetentionPolicy, RetrievalMetadata,
-    STATE_TRANSFER_SCHEMA_V1, ScmState, StateBundle, SystemIdentity, TransferBinding,
-    TransferDirection, canonical_bytes, materialize_filesystem_entries, record_provenance, sha256,
-    transform,
+    GraphDependencyCondition, GraphDependencyState, GraphNodeState, JobState, LegalHold, LogState,
+    MaterializationLimits, ObjectKind, ObjectState, PersistentDependency, Protection,
+    RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState,
+    StateBundle, SystemIdentity, TransferBinding, TransferDirection, canonical_bytes,
+    materialize_filesystem_entries, record_provenance, sha256, transform,
 };
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
@@ -863,7 +863,7 @@ fn parse_jenkins_workflow(workflow: &Value, number: u64) -> Result<Vec<GraphNode
         return Err("sealed Jenkins workflow stage count is outside the bound".into());
     }
     let mut nodes = Vec::with_capacity(stages.len());
-    let mut prior = None;
+    let mut prior: Option<String> = None;
     let mut seen = BTreeSet::new();
     for (index, stage) in stages.iter().enumerate() {
         let id = stage
@@ -897,7 +897,17 @@ fn parse_jenkins_workflow(workflow: &Value, number: u64) -> Result<Vec<GraphNode
             node_id: exported_id.clone(),
             stage_path: name.to_owned(),
             node_kind: "stage".to_owned(),
-            parent_node_ids: prior.iter().cloned().collect(),
+            dependencies: prior
+                .iter()
+                .map(|parent| GraphDependencyState {
+                    parent_node_id: parent.clone(),
+                    condition: if name == "Declarative: Post Actions" {
+                        GraphDependencyCondition::Completed
+                    } else {
+                        GraphDependencyCondition::Succeeded
+                    },
+                })
+                .collect(),
             result,
             attempts: vec![AttemptState {
                 record: record(&format!("attempt:stateful:{number}:{id}:1"), &stage_bytes),
@@ -1435,13 +1445,27 @@ async fn run_effect_free_build(
             )));
         }
         previous_stage_end = Some(ended);
-        let parents = graph
+        let dependencies = graph
             .dependencies
             .iter()
             .filter(|edge| edge.child_node_id == node.node_id)
             .map(|edge| {
-                node_ids.get(&edge.parent_node_id).cloned().ok_or_else(|| {
-                    StoreError::InvalidStateTransfer("graph parent is unknown".to_owned())
+                let parent_node_id =
+                    node_ids.get(&edge.parent_node_id).cloned().ok_or_else(|| {
+                        StoreError::InvalidStateTransfer("graph parent is unknown".to_owned())
+                    })?;
+                let condition = match edge.condition.as_str() {
+                    "succeeded" => GraphDependencyCondition::Succeeded,
+                    "completed" => GraphDependencyCondition::Completed,
+                    other => {
+                        return Err(StoreError::InvalidStateTransfer(format!(
+                            "graph dependency condition {other} is unsupported"
+                        )));
+                    }
+                };
+                Ok(GraphDependencyState {
+                    parent_node_id,
+                    condition,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1457,7 +1481,7 @@ async fn run_effect_free_build(
                 (*stage).to_owned()
             },
             node_kind: node.kind.clone(),
-            parent_node_ids: parents,
+            dependencies,
             result: build_result(&node.status)?,
             attempts: vec![AttemptState {
                 record: record(
@@ -1669,7 +1693,10 @@ fn hold(id: &str, placed_at_unix_ms: i64) -> LegalHold {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildResult, parse_jenkins_git_changelog, parse_jenkins_workflow, sha256};
+    use super::{
+        BuildResult, GraphDependencyCondition, GraphDependencyState, parse_jenkins_git_changelog,
+        parse_jenkins_workflow, sha256,
+    };
     use serde_json::json;
 
     const CHANGELOG: &str = concat!(
@@ -1761,7 +1788,13 @@ mod tests {
         let graph = parse_jenkins_workflow(&workflow, 2).expect("parse sealed workflow");
         assert_eq!(graph.len(), 2);
         assert_eq!(graph[0].node_id, "00-6");
-        assert_eq!(graph[1].parent_node_ids, ["00-6"]);
+        assert_eq!(
+            graph[1].dependencies,
+            [GraphDependencyState {
+                parent_node_id: "00-6".to_owned(),
+                condition: GraphDependencyCondition::Succeeded,
+            }]
+        );
         assert_eq!(graph[1].result, BuildResult::NotBuilt);
         assert_eq!(graph[0].attempts[0].started_at_unix_ms, 1000);
         assert_eq!(graph[0].attempts[0].ended_at_unix_ms, 1025);

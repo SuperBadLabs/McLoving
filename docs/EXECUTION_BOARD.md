@@ -933,23 +933,25 @@ per-attempt timestamps and terminal outcomes, committed logs, available-artifact
 inventory, and fenced checkout are reread from controller truth before export.
 Attempt starts come from durable `attempt.running` events rather than admission
 timestamps, and logs are exported in the global controller commit-cursor order.
+Graph dependencies retain their exact `succeeded` or `completed` condition.
 The reverse bridge verifies the full canonical build record byte-for-byte and
 independently checks Jenkins-native build fields, workflow-stage semantics,
-SCM changelog, log payloads, artifacts, and a dedicated persisted
+exact per-stage start times and durations, SCM changelog, log payloads,
+artifacts, and a dedicated persisted
 retention/legal-hold boundary. Actual record collection also fails before
 cloning any record beyond the one-million-record bound. It
 materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its exact transform binary SHA-256 is
-`9cd974b41a24f0179aaf44e35a685c2be8e46204ded70528b6e382e801cc966b`.
+`e81c99987b04d8b10623cc727ef15bafb978233f05555bb2fc4f0ec635726438`.
 Its source, transform, and reverse manifest SHA-256 values are
-`a25705d644a07abbe4086ec3bff4654f29406b7dab4907f78a3cfd0ed53850c8`,
-`d5a179611342370198bddbfda077db8c98248651e3290ee8b79659bb3ae43927`,
-and `595dab7b7d047e71338be7ad904cf83a2557793dd301c9754898bcc0745fe187`;
+`53c6e95426d536450ca6b7a985535c7be037416cfb478f1b639cd2080df09f79`,
+`2f3c95f8210cd97963862ea29c7bd17be0f77e2553c2c2bca9be3d6d9da9a6e1`,
+and `3060624f1bdfd943e707d86b2f9bc4f2e0390f2a42692d665469b001133788df`;
 the forward and reverse bundle SHA-256 values are
-`980377915a4014001d8fe99f13cd82e7a376c376b5b4bb12f289441247bdb718`
-and `ac53c41f2d2d037c4823edbfe88a5bfc79ae872666f54c253f01a7af925a48b2`.
+`d77f3da7b4446d62e52e8bdf4bbb33523243f224425276c4894d36b04dc44f16`
+and `dc55f30c7843c79eeb8127b48ef93aac6dade37c95379eaec1b535941145a7e5`.
 An injected post-install failure restored repository, build, permalink, and
 next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed

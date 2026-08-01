@@ -10,12 +10,12 @@ use std::{
 use mcloving_state_transfer::{
     ApprovalState, AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate,
     ConflictPolicy, DataBinding, DataClassification, Digest, ExpectedBinding, FilesystemEntry,
-    FilesystemEntryKind, GraphNodeState, JobState, LegalHold, MaterializationLimits, ObjectKind,
-    ObjectState, PersistentDependency, Protection, RecordProvenance, RetentionPolicy,
-    RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState, SecretDisposition, SecretReference,
-    StateBundle, SystemIdentity, TransferBinding, TransferDirection, TransferError, TriggerCause,
-    canonical_bytes, evaluate_change_predicate, materialize_filesystem_entries, protections,
-    sha256, transform,
+    FilesystemEntryKind, GraphDependencyCondition, GraphDependencyState, GraphNodeState, JobState,
+    LegalHold, MaterializationLimits, ObjectKind, ObjectState, PersistentDependency, Protection,
+    RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState,
+    SecretDisposition, SecretReference, StateBundle, SystemIdentity, TransferBinding,
+    TransferDirection, TransferError, TriggerCause, canonical_bytes, evaluate_change_predicate,
+    materialize_filesystem_entries, protections, sha256, transform,
 };
 
 fn digest(byte: u8) -> Digest {
@@ -389,7 +389,10 @@ fn cyclic_graph_history_fails_closed() {
             node_id: "a".to_owned(),
             stage_path: "a".to_owned(),
             node_kind: "stage".to_owned(),
-            parent_node_ids: vec!["b".to_owned()],
+            dependencies: vec![GraphDependencyState {
+                parent_node_id: "b".to_owned(),
+                condition: GraphDependencyCondition::Completed,
+            }],
             result: BuildResult::Succeeded,
             attempts: Vec::new(),
         },
@@ -398,7 +401,10 @@ fn cyclic_graph_history_fails_closed() {
             node_id: "b".to_owned(),
             stage_path: "b".to_owned(),
             node_kind: "stage".to_owned(),
-            parent_node_ids: vec!["a".to_owned()],
+            dependencies: vec![GraphDependencyState {
+                parent_node_id: "a".to_owned(),
+                condition: GraphDependencyCondition::Completed,
+            }],
             result: BuildResult::Succeeded,
             attempts: Vec::new(),
         },
@@ -412,6 +418,59 @@ fn cyclic_graph_history_fails_closed() {
 }
 
 #[test]
+fn graph_dependency_condition_is_canonical_and_round_trips() {
+    let (mut completed, mut completed_expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    completed.jobs[0].builds[0].graph_nodes = vec![
+        GraphNodeState {
+            record: record("node:stateful:7:a", 70),
+            node_id: "a".to_owned(),
+            stage_path: "a".to_owned(),
+            node_kind: "stage".to_owned(),
+            dependencies: Vec::new(),
+            result: BuildResult::Failed,
+            attempts: Vec::new(),
+        },
+        GraphNodeState {
+            record: record("node:stateful:7:b", 71),
+            node_id: "b".to_owned(),
+            stage_path: "b".to_owned(),
+            node_kind: "post".to_owned(),
+            dependencies: vec![GraphDependencyState {
+                parent_node_id: "a".to_owned(),
+                condition: GraphDependencyCondition::Completed,
+            }],
+            result: BuildResult::Succeeded,
+            attempts: Vec::new(),
+        },
+    ];
+    completed.expected_record_ids.extend([
+        "node:stateful:7:a".to_owned(),
+        "node:stateful:7:b".to_owned(),
+    ]);
+    completed.expected_record_ids.sort();
+    completed_expected.input_bundle_digest = sha256(&canonical_bytes(&completed).unwrap());
+    transform(&completed, &completed_expected, &BTreeMap::new())
+        .expect("completed dependency accepts a terminal failed parent");
+
+    let mut succeeded = completed.clone();
+    succeeded.jobs[0].builds[0].graph_nodes[1].dependencies[0].condition =
+        GraphDependencyCondition::Succeeded;
+    assert_ne!(
+        canonical_bytes(&completed).unwrap(),
+        canonical_bytes(&succeeded).unwrap(),
+        "dependency condition must be bound into canonical state"
+    );
+    let mut succeeded_expected = completed_expected;
+    succeeded_expected.input_bundle_digest = sha256(&canonical_bytes(&succeeded).unwrap());
+    let succeeded_plan = transform(&succeeded, &succeeded_expected, &BTreeMap::new())
+        .expect("succeeded dependency remains valid canonical history");
+    assert_eq!(
+        succeeded_plan.bundle.jobs[0].builds[0].graph_nodes[1].dependencies[0].condition,
+        GraphDependencyCondition::Succeeded
+    );
+}
+
+#[test]
 fn graph_node_result_must_match_its_final_attempt() {
     let (mut bundle, expected) = fixture(TransferDirection::JenkinsToMcLoving);
     bundle.jobs[0].builds[0].graph_nodes = vec![GraphNodeState {
@@ -419,7 +478,7 @@ fn graph_node_result_must_match_its_final_attempt() {
         node_id: "build".to_owned(),
         stage_path: "build".to_owned(),
         node_kind: "stage".to_owned(),
-        parent_node_ids: Vec::new(),
+        dependencies: Vec::new(),
         result: BuildResult::Succeeded,
         attempts: vec![AttemptState {
             record: record("attempt:stateful:7:build:1", 71),
@@ -449,7 +508,7 @@ fn graph_node_attempts_must_stay_inside_the_build_window() {
             node_id: "build".to_owned(),
             stage_path: "build".to_owned(),
             node_kind: "stage".to_owned(),
-            parent_node_ids: Vec::new(),
+            dependencies: Vec::new(),
             result: BuildResult::Succeeded,
             attempts: vec![AttemptState {
                 record: record("attempt:stateful:7:build:1", 71),
@@ -499,7 +558,7 @@ fn graph_node_attempts_must_be_ordered_and_non_overlapping() {
         node_id: "build".to_owned(),
         stage_path: "build".to_owned(),
         node_kind: "stage".to_owned(),
-        parent_node_ids: Vec::new(),
+        dependencies: Vec::new(),
         result: BuildResult::Succeeded,
         attempts: vec![
             AttemptState {

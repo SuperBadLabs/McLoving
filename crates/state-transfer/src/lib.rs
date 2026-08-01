@@ -259,12 +259,25 @@ pub struct AttemptState {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GraphDependencyState {
+    pub parent_node_id: String,
+    pub condition: GraphDependencyCondition,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphDependencyCondition {
+    Succeeded,
+    Completed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GraphNodeState {
     pub record: RecordProvenance,
     pub node_id: String,
     pub stage_path: String,
     pub node_kind: String,
-    pub parent_node_ids: Vec<String>,
+    pub dependencies: Vec<GraphDependencyState>,
     pub result: BuildResult,
     pub attempts: Vec<AttemptState>,
 }
@@ -1351,7 +1364,22 @@ fn validate_graph_nodes(
         validate_text(&node.node_id, 512, "graph node ID")?;
         validate_text(&node.stage_path, 1024, "graph node stage path")?;
         validate_text(&node.node_kind, 128, "graph node kind")?;
-        validate_sorted_unique_strings(&node.parent_node_ids, "parent node IDs")?;
+        let mut previous_parent: Option<&str> = None;
+        for dependency in &node.dependencies {
+            validate_text(
+                &dependency.parent_node_id,
+                512,
+                "graph dependency parent node ID",
+            )?;
+            if previous_parent
+                .is_some_and(|parent: &str| parent >= dependency.parent_node_id.as_str())
+            {
+                return Err(TransferError::InvalidField(
+                    "graph dependencies must be strictly sorted by parent node ID".to_owned(),
+                ));
+            }
+            previous_parent = Some(dependency.parent_node_id.as_str());
+        }
         let mut expected_ordinal = 1_u32;
         let mut previous_attempt_end = None;
         for attempt in &node.attempts {
@@ -1397,25 +1425,28 @@ fn validate_graph_nodes(
         known_ids.insert(node.node_id.as_str());
     }
     for node in nodes {
-        if node
-            .parent_node_ids
-            .iter()
-            .any(|parent| !known_ids.contains(parent.as_str()) || parent == &node.node_id)
-        {
-            return Err(TransferError::InvalidField(
-                "graph node parent must name another node in the same build".to_owned(),
-            ));
+        for dependency in &node.dependencies {
+            if !known_ids.contains(dependency.parent_node_id.as_str()) {
+                return Err(TransferError::InvalidField(
+                    "graph node parent must name another node in the same build".to_owned(),
+                ));
+            }
+            if dependency.parent_node_id == node.node_id {
+                return Err(TransferError::InvalidField(
+                    "graph node cannot depend on itself".to_owned(),
+                ));
+            }
         }
     }
     let mut remaining_parents = nodes
         .iter()
-        .map(|node| (node.node_id.as_str(), node.parent_node_ids.len()))
+        .map(|node| (node.node_id.as_str(), node.dependencies.len()))
         .collect::<BTreeMap<_, _>>();
     let mut children = BTreeMap::<&str, Vec<&str>>::new();
     for node in nodes {
-        for parent in &node.parent_node_ids {
+        for dependency in &node.dependencies {
             children
-                .entry(parent.as_str())
+                .entry(dependency.parent_node_id.as_str())
                 .or_default()
                 .push(node.node_id.as_str());
         }

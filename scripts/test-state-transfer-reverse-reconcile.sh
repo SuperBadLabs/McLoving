@@ -243,16 +243,62 @@ for sequence in $(seq 0 $((log_count - 1))); do
   cat "$payload" >> "$staging/log"
 done
 
-old_workflow_start=$(jq -r '.timestamp' "$transform_root/../source/evidence/jenkins-build-2.json" 2>/dev/null || true)
-if [[ -z "$old_workflow_start" || "$old_workflow_start" == null ]]; then
-  old_workflow_start=$(sed -n 's#.*<timestamp>\([0-9][0-9]*\)</timestamp>.*#\1#p' "$job_home/builds/2/build.xml" | head -n 1)
-fi
-test -n "$old_workflow_start"
-workflow_delta=$((build_started - old_workflow_start))
-WORKFLOW_DELTA=$workflow_delta perl -0pi -e '
-  my $delta = $ENV{WORKFLOW_DELTA};
-  s{<startTime>([0-9]+)</startTime>}{"<startTime>" . ($1 + $delta) . "</startTime>"}ge;
-' "$staging/workflow-completed/flowNodeStore.xml"
+perl -0ne '
+  while (m{<entry>(.*?)</entry>}sg) {
+    my $entry = $1;
+    next unless $entry =~ m{<node class="cps\.n\.StepStartNode"};
+    my ($id) = $entry =~ m{<id>([0-9]+)</id>};
+    my ($name) = $entry =~ m{<displayName>([^<]+)</displayName>};
+    print "$name\t$id\n" if defined $id && defined $name;
+  }
+' "$staging/workflow-completed/flowNodeStore.xml" \
+  > "$evidence/native-workflow-stage-map.tsv"
+test "$(wc -l < "$evidence/native-workflow-stage-map.tsv" | tr -d ' ')" = 5
+test "$(cut -f1 "$evidence/native-workflow-stage-map.tsv" | sort -u | wc -l | tr -d ' ')" = 5
+test "$(cut -f2 "$evidence/native-workflow-stage-map.tsv" | sort -u | wc -l | tr -d ' ')" = 5
+jq -r '
+  .jobs[] | select(.source_job_id == "stateful")
+  | .builds[] | select(.number == 3)
+  | .graph_nodes[]
+  | select(.attempts | length == 1)
+  | [
+      .stage_path,
+      .attempts[0].started_at_unix_ms,
+      .attempts[0].ended_at_unix_ms
+    ]
+  | @tsv
+' "$reverse_bundle" > "$evidence/canonical-workflow-timing.tsv"
+test "$(wc -l < "$evidence/canonical-workflow-timing.tsv" | tr -d ' ')" = 5
+: > "$evidence/workflow-timing-map.tsv"
+while IFS=$'\t' read -r stage_name stage_started stage_ended; do
+  stage_id=$(awk -F '\t' -v name="$stage_name" '$1 == name {print $2}' \
+    "$evidence/native-workflow-stage-map.tsv")
+  test "$(printf '%s\n' "$stage_id" | wc -l | tr -d ' ')" = 1
+  test -n "$stage_id"
+  printf '%s\t%s\t%s\t%s\n' \
+    "$stage_name" "$stage_id" "$stage_started" "$stage_ended" \
+    >> "$evidence/workflow-timing-map.tsv"
+done < "$evidence/canonical-workflow-timing.tsv"
+test "$(wc -l < "$evidence/workflow-timing-map.tsv" | tr -d ' ')" = 5
+test "$(cut -f1 "$evidence/workflow-timing-map.tsv" | sort -u | wc -l | tr -d ' ')" = 5
+test "$(cut -f2 "$evidence/workflow-timing-map.tsv" | sort -u | wc -l | tr -d ' ')" = 5
+while IFS=$'\t' read -r stage_name stage_id stage_started stage_ended; do
+  test -n "$stage_name"
+  test -n "$stage_id"
+  test "$stage_started" -le "$stage_ended"
+  stage_parent_id=$((stage_id - 1))
+  STAGE_ID=$stage_id STAGE_PARENT_ID=$stage_parent_id \
+    STAGE_STARTED=$stage_started STAGE_ENDED=$stage_ended perl -0pi -e '
+      my $id = $ENV{STAGE_ID};
+      my $parent = $ENV{STAGE_PARENT_ID};
+      my $started = $ENV{STAGE_STARTED};
+      my $ended = $ENV{STAGE_ENDED};
+      my $starts = s{(<entry>(?:(?!</entry>).)*?<node class="cps\.n\.StepStartNode"(?:(?!</entry>).)*?<id>\Q$id\E</id>(?:(?!</entry>).)*?<startTime>)[0-9]+(</startTime>(?:(?!</entry>).)*?</entry>)}{$1 . $started . $2}se;
+      my $ends = s{(<entry>(?:(?!</entry>).)*?<node class="cps\.n\.StepEndNode"(?:(?!</entry>).)*?<startId>\Q$parent\E</startId>(?:(?!</entry>).)*?<startTime>)[0-9]+(</startTime>(?:(?!</entry>).)*?</entry>)}{$1 . $ended . $2}se;
+      die "canonical workflow timing target mismatch for stage $id\n"
+        unless $starts == 1 && $ends == 1;
+    ' "$staging/workflow-completed/flowNodeStore.xml"
+done < "$evidence/workflow-timing-map.tsv"
 
 rg --quiet "<sha1>$revision_3</sha1>" "$staging/build.xml"
 rg --quiet "<hudsonBuildNumber>${build_number}</hudsonBuildNumber>" "$staging/build.xml"
@@ -333,16 +379,35 @@ jq --exit-status --argjson number "$build_number" --arg result "$jenkins_result"
 curl --fail --silent --show-error \
   "http://127.0.0.1:${port}/job/stateful/3/wfapi/describe" \
   -o "$evidence/jenkins-imported-build-3-workflow.json"
-jq --exit-status '
-  .status == "SUCCESS"
-  and ([.stages[].name] | sort)
-      == ["Declarative: Post Actions", "changelog-predicate", "changeset-predicate", "checkout", "effect-free-state"]
-  and ([.stages[] | select(.status == "SUCCESS")] | length) == 5
-' "$evidence/jenkins-imported-build-3-workflow.json" >/dev/null
 jq --sort-keys '
   .jobs[] | select(.source_job_id == "stateful")
   | .builds[] | select(.number == 3)
 ' "$reverse_bundle" > "$evidence/expected-build-3.json"
+jq --sort-keys '
+  def jenkins_status:
+    if . == "succeeded" then "SUCCESS"
+    elif . == "failed" then "FAILED"
+    elif . == "aborted" then "ABORTED"
+    elif . == "unstable" then "UNSTABLE"
+    elif . == "not_built" then "NOT_EXECUTED"
+    else error("unsupported canonical stage result")
+    end;
+  [
+    .graph_nodes[]
+    | {
+        name: .stage_path,
+        status: (.result | jenkins_status),
+        startTimeMillis: .attempts[0].started_at_unix_ms,
+        durationMillis: (.attempts[0].ended_at_unix_ms - .attempts[0].started_at_unix_ms)
+      }
+  ] | sort_by(.name)
+' "$evidence/expected-build-3.json" > "$evidence/expected-build-3-workflow.json"
+jq --sort-keys '
+  [.stages[] | {name, status, startTimeMillis, durationMillis}] | sort_by(.name)
+' "$evidence/jenkins-imported-build-3-workflow.json" \
+  > "$evidence/observed-build-3-workflow.json"
+cmp "$evidence/expected-build-3-workflow.json" \
+  "$evidence/observed-build-3-workflow.json"
 podman unshare cp "$job_home/builds/3/mcloving-state-transfer-build.json" \
   "$evidence/observed-build-3.json"
 cmp "$evidence/expected-build-3.json" "$evidence/observed-build-3.json"
