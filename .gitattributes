@@ -2,3 +2,4 @@ migration/mario-jenkins-oracle-228/corpus-v1/sources/** -text -whitespace
 migration/mario-jenkins-oracle-228/corpus-v1/oracle/** -text -whitespace
 migration/mario-jenkins-oracle-228/corpus-v1/SOURCE_METHOD_ORIGINAL.md -text -whitespace
 migration/mario-jenkins-oracle-228/corpus-v1/source-hits.tsv -text -whitespace
+migration/mario-jenkins-oracle-228/corpus-v1/differential-v1/** -text -whitespace

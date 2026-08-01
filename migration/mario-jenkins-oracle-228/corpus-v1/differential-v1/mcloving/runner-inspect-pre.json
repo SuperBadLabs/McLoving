@@ -1,0 +1,327 @@
+[
+     {
+          "Id": "6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614",
+          "Created": "2026-08-01T08:11:05.433588704-05:00",
+          "Path": "bash",
+          "Args": [
+               "-c",
+               "set -euo pipefail; { id; uname -a; locale; sha256sum 'target/debug/deps/diff_001-3b7075192798a581' target/debug/mcloving-controller; } > /evidence/runtime.txt; exec 'target/debug/deps/diff_001-3b7075192798a581' --nocapture"
+          ],
+          "State": {
+               "OciVersion": "1.1.0",
+               "Status": "created",
+               "Running": false,
+               "Paused": false,
+               "Restarting": false,
+               "OOMKilled": false,
+               "Dead": false,
+               "Pid": 0,
+               "ExitCode": 0,
+               "Error": "",
+               "StartedAt": "0001-01-01T00:00:00Z",
+               "FinishedAt": "0001-01-01T00:00:00Z",
+               "Health": {
+                    "Status": "",
+                    "FailingStreak": 0,
+                    "Log": null
+               },
+               "CheckpointedAt": "0001-01-01T00:00:00Z",
+               "RestoredAt": "0001-01-01T00:00:00Z"
+          },
+          "Image": "a0635962c16d5f26400703edd4317175cf9531f3285d632613f9da227f9c71d1",
+          "ImageDigest": "sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+          "ImageName": "docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+          "Rootfs": "",
+          "Pod": "",
+          "ResolvConfPath": "",
+          "HostnamePath": "",
+          "HostsPath": "",
+          "StaticDir": "/home/srikanth/.local/share/containers/storage/overlay-containers/6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614/userdata",
+          "OCIRuntime": "runc",
+          "ConmonPidFile": "/run/user/1000/containers/overlay-containers/6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614/userdata/conmon.pid",
+          "PidFile": "/run/user/1000/containers/overlay-containers/6c58b760d4f6030af9115d37f3d0137cc9ced22bfc9ebfefe3d68c0b91a66614/userdata/pidfile",
+          "Name": "mcloving-diff001-runner-v16",
+          "RestartCount": 0,
+          "Driver": "overlay",
+          "MountLabel": "",
+          "ProcessLabel": "",
+          "AppArmorProfile": "",
+          "EffectiveCaps": null,
+          "BoundingCaps": null,
+          "ExecIDs": [],
+          "GraphDriver": {
+               "Name": "overlay",
+               "Data": {
+                    "LowerDir": "/home/srikanth/.local/share/containers/storage/overlay/84cd569541471571d474373047cd629a18474651cbae84a15336ab48e9c1249a/diff:/home/srikanth/.local/share/containers/storage/overlay/6ed4daeb42f2357dc0b89953b899bda75557667fc332df7059b33fe652fd90be/diff:/home/srikanth/.local/share/containers/storage/overlay/a953769aed258014040812d20647d4d6081e3d363c090447570f659515d04183/diff:/home/srikanth/.local/share/containers/storage/overlay/1ca80c2bf88c3fca04d5b1f7ca345a9d6610997edfb4a3f2f0b642560209732e/diff:/home/srikanth/.local/share/containers/storage/overlay/b1a465965094b9af7fff87ee250ecbd82f7b5095ea2dfcc5c695a1b096f068b6/diff:/home/srikanth/.local/share/containers/storage/overlay/f2c42f900cb3b12d5456f76b4fa6454a52df3981323d3a1b1a17fe4c4955ab4a/diff",
+                    "UpperDir": "/home/srikanth/.local/share/containers/storage/overlay/c1417f3237fbc4b5edfb597f305a26c6ddc0b7a447181ae0eaa52dd7c5745cba/diff",
+                    "WorkDir": "/home/srikanth/.local/share/containers/storage/overlay/c1417f3237fbc4b5edfb597f305a26c6ddc0b7a447181ae0eaa52dd7c5745cba/work"
+               }
+          },
+          "Mounts": [
+               {
+                    "Type": "bind",
+                    "Source": "/sn8100/work/forge/McLoving-diff001",
+                    "Destination": "/work",
+                    "Driver": "",
+                    "Mode": "Z",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/sn8100/runs/mcloving/diff001-native-20260801T131300Z-v16/capture/mcloving",
+                    "Destination": "/evidence",
+                    "Driver": "",
+                    "Mode": "Z",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": true,
+                    "Propagation": "rprivate"
+               }
+          ],
+          "Dependencies": [],
+          "NetworkSettings": {
+               "EndpointID": "",
+               "Gateway": "",
+               "IPAddress": "",
+               "IPPrefixLen": 0,
+               "IPv6Gateway": "",
+               "GlobalIPv6Address": "",
+               "GlobalIPv6PrefixLen": 0,
+               "MacAddress": "",
+               "Bridge": "",
+               "SandboxID": "",
+               "HairpinMode": false,
+               "LinkLocalIPv6Address": "",
+               "LinkLocalIPv6PrefixLen": 0,
+               "Ports": {},
+               "SandboxKey": "",
+               "Networks": {
+                    "mcloving-diff001-net-v16": {
+                         "EndpointID": "",
+                         "Gateway": "",
+                         "IPAddress": "",
+                         "IPPrefixLen": 0,
+                         "IPv6Gateway": "",
+                         "GlobalIPv6Address": "",
+                         "GlobalIPv6PrefixLen": 0,
+                         "MacAddress": "",
+                         "NetworkID": "mcloving-diff001-net-v16",
+                         "DriverOpts": null,
+                         "IPAMConfig": null,
+                         "Links": null,
+                         "Aliases": [
+                              "6c58b760d4f6"
+                         ]
+                    }
+               }
+          },
+          "Namespace": "",
+          "IsInfra": false,
+          "IsService": false,
+          "KubeExitCodePropagation": "invalid",
+          "lockNumber": 306,
+          "Config": {
+               "Hostname": "6c58b760d4f6",
+               "Domainname": "",
+               "User": "1000:1000",
+               "AttachStdin": false,
+               "AttachStdout": false,
+               "AttachStderr": false,
+               "Tty": false,
+               "OpenStdin": false,
+               "StdinOnce": false,
+               "Env": [
+                    "LANG=C.UTF-8",
+                    "PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "CARGO_HOME=/usr/local/cargo",
+                    "RUST_VERSION=1.97.1",
+                    "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v16:5432/mcloving",
+                    "container=podman",
+                    "RUSTUP_HOME=/usr/local/rustup",
+                    "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
+                    "LC_ALL=C.UTF-8"
+               ],
+               "Cmd": [
+                    "bash",
+                    "-c",
+                    "set -euo pipefail; { id; uname -a; locale; sha256sum 'target/debug/deps/diff_001-3b7075192798a581' target/debug/mcloving-controller; } > /evidence/runtime.txt; exec 'target/debug/deps/diff_001-3b7075192798a581' --nocapture"
+               ],
+               "Image": "docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+               "Volumes": null,
+               "WorkingDir": "/work",
+               "Entrypoint": "",
+               "OnBuild": null,
+               "Labels": {
+                    "org.opencontainers.image.source": "https://github.com/rust-lang/docker-rust"
+               },
+               "Annotations": null,
+               "StopSignal": 15,
+               "HealthcheckOnFailureAction": "none",
+               "CreateCommand": [
+                    "podman",
+                    "create",
+                    "--name",
+                    "mcloving-diff001-runner-v16",
+                    "--network",
+                    "mcloving-diff001-net-v16",
+                    "--read-only",
+                    "--userns",
+                    "keep-id",
+                    "--user",
+                    "1000:1000",
+                    "--memory",
+                    "4g",
+                    "--memory-swap",
+                    "4g",
+                    "--cpus",
+                    "4",
+                    "--pids-limit",
+                    "512",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--cap-drop",
+                    "all",
+                    "--tmpfs",
+                    "/tmp:rw,noexec,nosuid,nodev,size=1g",
+                    "--env",
+                    "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v16:5432/mcloving",
+                    "--env",
+                    "MCLOVING_DIFF001_EVIDENCE_DIR=/evidence",
+                    "--env",
+                    "LANG=C.UTF-8",
+                    "--env",
+                    "LC_ALL=C.UTF-8",
+                    "--volume",
+                    "/sn8100/work/forge/McLoving-diff001:/work:ro,Z",
+                    "--volume",
+                    "/sn8100/runs/mcloving/diff001-native-20260801T131300Z-v16/capture/mcloving:/evidence:rw,Z",
+                    "--workdir",
+                    "/work",
+                    "docker.io/library/rust@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa",
+                    "bash",
+                    "-c",
+                    "set -euo pipefail; { id; uname -a; locale; sha256sum 'target/debug/deps/diff_001-3b7075192798a581' target/debug/mcloving-controller; } > /evidence/runtime.txt; exec 'target/debug/deps/diff_001-3b7075192798a581' --nocapture"
+               ],
+               "Umask": "0022",
+               "Timeout": 0,
+               "StopTimeout": 10,
+               "Passwd": true,
+               "sdNotifyMode": "container"
+          },
+          "HostConfig": {
+               "Binds": [
+                    "/sn8100/work/forge/McLoving-diff001:/work:ro,Z,rprivate,rbind",
+                    "/sn8100/runs/mcloving/diff001-native-20260801T131300Z-v16/capture/mcloving:/evidence:rw,Z,rprivate,rbind"
+               ],
+               "CgroupManager": "systemd",
+               "CgroupMode": "private",
+               "ContainerIDFile": "",
+               "LogConfig": {
+                    "Type": "journald",
+                    "Config": null,
+                    "Path": "",
+                    "Tag": "",
+                    "Size": "0B"
+               },
+               "NetworkMode": "bridge",
+               "PortBindings": {},
+               "RestartPolicy": {
+                    "Name": "",
+                    "MaximumRetryCount": 0
+               },
+               "AutoRemove": false,
+               "VolumeDriver": "",
+               "VolumesFrom": null,
+               "CapAdd": [],
+               "CapDrop": [
+                    "CAP_CHOWN",
+                    "CAP_DAC_OVERRIDE",
+                    "CAP_FOWNER",
+                    "CAP_FSETID",
+                    "CAP_KILL",
+                    "CAP_NET_BIND_SERVICE",
+                    "CAP_SETFCAP",
+                    "CAP_SETGID",
+                    "CAP_SETPCAP",
+                    "CAP_SETUID",
+                    "CAP_SYS_CHROOT"
+               ],
+               "Dns": [],
+               "DnsOptions": [],
+               "DnsSearch": [],
+               "ExtraHosts": [],
+               "GroupAdd": [],
+               "IpcMode": "shareable",
+               "Cgroup": "",
+               "Cgroups": "default",
+               "Links": null,
+               "OomScoreAdj": 0,
+               "PidMode": "private",
+               "Privileged": false,
+               "PublishAllPorts": false,
+               "ReadonlyRootfs": true,
+               "SecurityOpt": [
+                    "no-new-privileges"
+               ],
+               "Tmpfs": {
+                    "/tmp": "rw,noexec,nosuid,nodev,size=1g,rprivate,tmpcopyup"
+               },
+               "UTSMode": "private",
+               "UsernsMode": "private",
+               "IDMappings": {
+                    "UidMap": [
+                         "0:1:1000",
+                         "1000:0:1",
+                         "1001:1001:64536"
+                    ],
+                    "GidMap": [
+                         "0:1:1000",
+                         "1000:0:1",
+                         "1001:1001:64536"
+                    ]
+               },
+               "ShmSize": 65536000,
+               "Runtime": "oci",
+               "ConsoleSize": [
+                    0,
+                    0
+               ],
+               "Isolation": "",
+               "CpuShares": 0,
+               "Memory": 4294967296,
+               "NanoCpus": 4000000000,
+               "CgroupParent": "user.slice",
+               "BlkioWeight": 0,
+               "BlkioWeightDevice": null,
+               "BlkioDeviceReadBps": null,
+               "BlkioDeviceWriteBps": null,
+               "BlkioDeviceReadIOps": null,
+               "BlkioDeviceWriteIOps": null,
+               "CpuPeriod": 100000,
+               "CpuQuota": 400000,
+               "CpuRealtimePeriod": 0,
+               "CpuRealtimeRuntime": 0,
+               "CpusetCpus": "",
+               "CpusetMems": "",
+               "Devices": [],
+               "DiskQuota": 0,
+               "KernelMemory": 0,
+               "MemoryReservation": 0,
+               "MemorySwap": 4294967296,
+               "MemorySwappiness": -1,
+               "OomKillDisable": false,
+               "PidsLimit": 512,
+               "Ulimits": [],
+               "CpuCount": 0,
+               "CpuPercent": 0,
+               "IOMaximumIOps": 0,
+               "IOMaximumBandwidth": 0,
+               "CgroupConf": null
+          }
+     }
+]

@@ -1,0 +1,21 @@
+[
+     {
+          "name": "mcloving-diff001-net-v16",
+          "id": "419ef843a49f10654293345dca7fde15e1363c5faf2a67f0d9a5d620fa28b3a5",
+          "driver": "bridge",
+          "network_interface": "podman1",
+          "created": "2026-08-01T08:11:04.170254308-05:00",
+          "subnets": [
+               {
+                    "subnet": "10.89.0.0/24",
+                    "gateway": "10.89.0.1"
+               }
+          ],
+          "ipv6_enabled": false,
+          "internal": true,
+          "dns_enabled": true,
+          "ipam_options": {
+               "driver": "host-local"
+          }
+     }
+]

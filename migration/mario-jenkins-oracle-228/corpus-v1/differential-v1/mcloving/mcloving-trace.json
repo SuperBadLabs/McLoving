@@ -1,0 +1,28 @@
+{
+  "approvals": 0,
+  "artifacts": 0,
+  "attempt_ordinals": [
+    1
+  ],
+  "case": "corpus-052-cinqict_jenkinsdev",
+  "credential_grants": 0,
+  "external_effects": 0,
+  "pipeline_sha256": "551d489ca13bf5d130bdc5c10ce35e5d3d988bdaa1c5488dd9bc79b30674acdc",
+  "process": {
+    "args": [
+      "-xe",
+      "-c",
+      "echo \"Hello World\""
+    ],
+    "program": "/bin/sh"
+  },
+  "schema": "mcloving.jenkins.differential-trace/v1",
+  "semantic_stdout_hex": "48656c6c6f20576f726c640a",
+  "source_sha256": "666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100",
+  "stage_order": [
+    "Build"
+  ],
+  "terminal_outcome": "success",
+  "tests": 0,
+  "workspace_entries": 0
+}

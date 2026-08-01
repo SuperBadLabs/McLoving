@@ -1,0 +1,44 @@
+version: 1
+schema: mcloving.jenkins.native-differential/v1
+corpus_cases: 228
+admitted_cases: 1
+certified_cases: 1
+non_admitted_cases: 227
+jenkins_executions: 1
+mcloving_executions: 1
+admitted_case:
+  id: corpus-052-cinqict_jenkinsdev
+  source_sha256: 666ac2275ea75730e27cf7b565d757691b094c508355adc0199d745278a23100
+  pipeline_sha256: 551d489ca13bf5d130bdc5c10ce35e5d3d988bdaa1c5488dd9bc79b30674acdc
+  platform: linux
+  trust_pool: migration-deny-authority
+non_admitted_families:
+  - parameters
+  - conditions
+  - matrix
+  - timeouts
+  - retries
+  - caught-errors
+  - unstable-results
+  - cancellation
+  - post
+  - parallel
+  - join
+  - fail-fast
+  - multi-build
+  - shared-resources
+  - alternate-agent-selection
+  - approvals
+  - dependencies
+  - caches
+  - artifacts
+  - tests
+  - failure-outcomes
+  - scripted-pipeline
+  - shared-library-runtime
+  - external-effects
+authority:
+  jenkins_network: none
+  mcloving_network: internal-postgresql-only
+  production_effects: false
+  credentials: false

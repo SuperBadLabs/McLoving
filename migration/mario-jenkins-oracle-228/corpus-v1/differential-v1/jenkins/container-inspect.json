@@ -1,0 +1,362 @@
+[
+     {
+          "Id": "b64bb5ef3f6ec2e148d61d9593f5d1ab0a407fd632b5f51c36b559e4e85ab9a3",
+          "Created": "2026-08-01T12:15:43.236541506Z",
+          "Path": "/usr/bin/tini",
+          "Args": [
+               "--",
+               "/usr/local/bin/jenkins.sh"
+          ],
+          "State": {
+               "OciVersion": "1.1.0",
+               "Status": "running",
+               "Running": true,
+               "Paused": false,
+               "Restarting": false,
+               "OOMKilled": false,
+               "Dead": false,
+               "Pid": 2449919,
+               "ConmonPid": 2449917,
+               "ExitCode": 0,
+               "Error": "",
+               "StartedAt": "2026-08-01T12:15:43.401795528Z",
+               "FinishedAt": "0001-01-01T00:00:00Z",
+               "Health": {
+                    "Status": "",
+                    "FailingStreak": 0,
+                    "Log": null
+               },
+               "CgroupPath": "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-b64bb5ef3f6ec2e148d61d9593f5d1ab0a407fd632b5f51c36b559e4e85ab9a3.scope",
+               "CheckpointedAt": "0001-01-01T00:00:00Z",
+               "RestoredAt": "0001-01-01T00:00:00Z"
+          },
+          "Image": "3b072c3e47bfa9a97dc733fc414da2005c99180f111ac0842327bd963509a1c1",
+          "ImageDigest": "sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02",
+          "ImageName": "docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02",
+          "Rootfs": "",
+          "Pod": "",
+          "ResolvConfPath": "",
+          "HostnamePath": "/run/user/1000/containers/overlay-containers/b64bb5ef3f6ec2e148d61d9593f5d1ab0a407fd632b5f51c36b559e4e85ab9a3/userdata/hostname",
+          "HostsPath": "/run/user/1000/containers/overlay-containers/b64bb5ef3f6ec2e148d61d9593f5d1ab0a407fd632b5f51c36b559e4e85ab9a3/userdata/hosts",
+          "StaticDir": "/home/srikanth/.local/share/containers/storage/overlay-containers/b64bb5ef3f6ec2e148d61d9593f5d1ab0a407fd632b5f51c36b559e4e85ab9a3/userdata",
+          "OCIConfigPath": "/home/srikanth/.local/share/containers/storage/overlay-containers/b64bb5ef3f6ec2e148d61d9593f5d1ab0a407fd632b5f51c36b559e4e85ab9a3/userdata/config.json",
+          "OCIRuntime": "crun",
+          "ConmonPidFile": "/run/user/1000/containers/overlay-containers/b64bb5ef3f6ec2e148d61d9593f5d1ab0a407fd632b5f51c36b559e4e85ab9a3/userdata/conmon.pid",
+          "PidFile": "/run/user/1000/containers/overlay-containers/b64bb5ef3f6ec2e148d61d9593f5d1ab0a407fd632b5f51c36b559e4e85ab9a3/userdata/pidfile",
+          "Name": "mcloving-diff001-jenkins",
+          "RestartCount": 0,
+          "Driver": "overlay",
+          "MountLabel": "",
+          "ProcessLabel": "",
+          "AppArmorProfile": "",
+          "EffectiveCaps": null,
+          "BoundingCaps": null,
+          "ExecIDs": [],
+          "GraphDriver": {
+               "Name": "overlay",
+               "Data": {
+                    "LowerDir": "/home/srikanth/.local/share/containers/storage/overlay/87c12dc7424e9205839dfb87ea3c283939bebbcabbc8351992085fdfc6894cc9/diff:/home/srikanth/.local/share/containers/storage/overlay/3ad2772d796104e615b98714fd3e582de60bf3ccd5f827b3e5f694abf2e83013/diff:/home/srikanth/.local/share/containers/storage/overlay/51202bc291f76dfd2f508ba408bb1cd5a9ef21fbf2459b5b09bf2350a16b38d4/diff:/home/srikanth/.local/share/containers/storage/overlay/045373659f6a4d4702490bee296a19d58e4cd029a11c4e466bbf624b5ff3cd73/diff:/home/srikanth/.local/share/containers/storage/overlay/16b832a191a560580b7e70299fec1aa12f39907468ad2be18dd6637eb1f931eb/diff:/home/srikanth/.local/share/containers/storage/overlay/112a249acd476dcadcaaa72b48055df8628b150353cd65b2b5b809c6870e93ad/diff:/home/srikanth/.local/share/containers/storage/overlay/d560fefdcc052c874fc2249d4a087fcbb3417a11a3a8f679247944f1e229e59f/diff:/home/srikanth/.local/share/containers/storage/overlay/5ac27957c8d0e5b87ea80fa75f4c135e66c1717619a29de8b5f133fe251e013c/diff:/home/srikanth/.local/share/containers/storage/overlay/49f2b422e96a09d4fbf1371e74bbc6fe806d46d0f082d82384293707e8a96e0f/diff:/home/srikanth/.local/share/containers/storage/overlay/d8b7e33f21b684bf4410d3c156d9d8b1420fb2e4f90c561b892ac5868f53fab9/diff:/home/srikanth/.local/share/containers/storage/overlay/c341432a52d7c55ecf8dd0619c4bb98fa1de1a891ec684b57b8cca188d625453/diff:/home/srikanth/.local/share/containers/storage/overlay/8007431a6be6089f64b17854599eb05ecee65ddd1bf3609dc8248e835570bb65/diff",
+                    "MergedDir": "/home/srikanth/.local/share/containers/storage/overlay/cbb3b64d15f7cd16d8bee2f7dc3bb80e3dd668673b8d8834c22e55bd5ef21a85/merged",
+                    "UpperDir": "/home/srikanth/.local/share/containers/storage/overlay/cbb3b64d15f7cd16d8bee2f7dc3bb80e3dd668673b8d8834c22e55bd5ef21a85/diff",
+                    "WorkDir": "/home/srikanth/.local/share/containers/storage/overlay/cbb3b64d15f7cd16d8bee2f7dc3bb80e3dd668673b8d8834c22e55bd5ef21a85/work"
+               }
+          },
+          "Mounts": [
+               {
+                    "Type": "bind",
+                    "Source": "/home/srikanth/jenkins-oracle-228/plugins",
+                    "Destination": "/usr/share/jenkins/ref/plugins",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/home",
+                    "Destination": "/var/jenkins_home",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": true,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/fixture/Jenkinsfile",
+                    "Destination": "/fixture/Jenkinsfile",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               },
+               {
+                    "Type": "bind",
+                    "Source": "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/fixture/99-diff001.groovy",
+                    "Destination": "/usr/share/jenkins/ref/init.groovy.d/99-diff001.groovy",
+                    "Driver": "",
+                    "Mode": "",
+                    "Options": [
+                         "rbind"
+                    ],
+                    "RW": false,
+                    "Propagation": "rprivate"
+               }
+          ],
+          "Dependencies": [],
+          "NetworkSettings": {
+               "EndpointID": "",
+               "Gateway": "",
+               "IPAddress": "",
+               "IPPrefixLen": 0,
+               "IPv6Gateway": "",
+               "GlobalIPv6Address": "",
+               "GlobalIPv6PrefixLen": 0,
+               "MacAddress": "",
+               "Bridge": "",
+               "SandboxID": "",
+               "HairpinMode": false,
+               "LinkLocalIPv6Address": "",
+               "LinkLocalIPv6PrefixLen": 0,
+               "Ports": {},
+               "SandboxKey": "/proc/2449919/ns/net",
+               "Networks": {
+                    "none": {
+                         "EndpointID": "",
+                         "Gateway": "",
+                         "IPAddress": "",
+                         "IPPrefixLen": 0,
+                         "IPv6Gateway": "",
+                         "GlobalIPv6Address": "",
+                         "GlobalIPv6PrefixLen": 0,
+                         "MacAddress": "",
+                         "NetworkID": "none",
+                         "DriverOpts": null,
+                         "IPAMConfig": null,
+                         "Links": null
+                    }
+               }
+          },
+          "Namespace": "",
+          "IsInfra": false,
+          "IsService": false,
+          "KubeExitCodePropagation": "invalid",
+          "lockNumber": 23,
+          "Config": {
+               "Hostname": "b64bb5ef3f6e",
+               "Domainname": "",
+               "User": "jenkins",
+               "AttachStdin": false,
+               "AttachStdout": false,
+               "AttachStderr": false,
+               "Tty": false,
+               "OpenStdin": false,
+               "StdinOnce": false,
+               "Env": [
+                    "container=podman",
+                    "COPY_REFERENCE_FILE_LOG=/var/jenkins_home/copy_reference_file.log",
+                    "JAVA_HOME=/opt/java/openjdk",
+                    "JENKINS_SLAVE_AGENT_PORT=50000",
+                    "PATH=/opt/java/openjdk/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    "JENKINS_UC=https://updates.jenkins.io",
+                    "JENKINS_HOME=/var/jenkins_home",
+                    "JENKINS_UC_EXPERIMENTAL=https://updates.jenkins.io/experimental",
+                    "JENKINS_VERSION=2.568.1",
+                    "LANG=C.UTF-8",
+                    "REF=/usr/share/jenkins/ref",
+                    "JENKINS_INCREMENTALS_REPO_MIRROR=https://repo.jenkins-ci.org/incrementals",
+                    "JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Djava.awt.headless=true -Xms512m -Xmx2g",
+                    "TZ=UTC",
+                    "HOME=/var/jenkins_home",
+                    "HOSTNAME=b64bb5ef3f6e"
+               ],
+               "Cmd": null,
+               "Image": "docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02",
+               "Volumes": null,
+               "WorkingDir": "/",
+               "Entrypoint": "/usr/bin/tini -- /usr/local/bin/jenkins.sh",
+               "OnBuild": null,
+               "Labels": {
+                    "org.opencontainers.image.description": "The Jenkins Continuous Integration and Delivery server",
+                    "org.opencontainers.image.licenses": "MIT",
+                    "org.opencontainers.image.revision": "7ce7e3cd5eb2aa98c3990ab5c4270cb579e40a51",
+                    "org.opencontainers.image.source": "https://github.com/jenkinsci/docker",
+                    "org.opencontainers.image.title": "Official Jenkins Docker image",
+                    "org.opencontainers.image.url": "https://www.jenkins.io/",
+                    "org.opencontainers.image.vendor": "Jenkins project",
+                    "org.opencontainers.image.version": "2.568.1"
+               },
+               "Annotations": {
+                    "io.container.manager": "libpod",
+                    "org.opencontainers.image.stopSignal": "15"
+               },
+               "StopSignal": 15,
+               "HealthcheckOnFailureAction": "none",
+               "CreateCommand": [
+                    "podman",
+                    "run",
+                    "--detach",
+                    "--name",
+                    "mcloving-diff001-jenkins",
+                    "--network",
+                    "none",
+                    "--read-only",
+                    "--cap-drop",
+                    "all",
+                    "--security-opt",
+                    "no-new-privileges",
+                    "--memory",
+                    "4g",
+                    "--memory-swap",
+                    "4g",
+                    "--cpus",
+                    "2",
+                    "--pids-limit",
+                    "512",
+                    "--ulimit",
+                    "nofile=1024:1024",
+                    "--tmpfs",
+                    "/tmp:rw,noexec,nosuid,nodev,size=2g",
+                    "--env",
+                    "JAVA_OPTS=-Djenkins.install.runSetupWizard=false -Djava.awt.headless=true -Xms512m -Xmx2g",
+                    "--env",
+                    "LANG=C.UTF-8",
+                    "--env",
+                    "TZ=UTC",
+                    "--volume",
+                    "/home/srikanth/jenkins-oracle-228/plugins:/usr/share/jenkins/ref/plugins:ro",
+                    "--volume",
+                    "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/home:/var/jenkins_home:Z",
+                    "--volume",
+                    "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/fixture/Jenkinsfile:/fixture/Jenkinsfile:ro",
+                    "--volume",
+                    "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/fixture/99-diff001.groovy:/usr/share/jenkins/ref/init.groovy.d/99-diff001.groovy:ro",
+                    "docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02"
+               ],
+               "Umask": "0022",
+               "Timeout": 0,
+               "StopTimeout": 10,
+               "Passwd": true,
+               "sdNotifyMode": "container"
+          },
+          "HostConfig": {
+               "Binds": [
+                    "/home/srikanth/jenkins-oracle-228/plugins:/usr/share/jenkins/ref/plugins:ro,rprivate,rbind",
+                    "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/home:/var/jenkins_home:rw,rprivate,rbind",
+                    "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/fixture/Jenkinsfile:/fixture/Jenkinsfile:ro,rprivate,rbind",
+                    "/home/srikanth/mcloving-diff001-20260801T121500Z-v2/jenkins/fixture/99-diff001.groovy:/usr/share/jenkins/ref/init.groovy.d/99-diff001.groovy:ro,rprivate,rbind"
+               ],
+               "CgroupManager": "systemd",
+               "CgroupMode": "private",
+               "ContainerIDFile": "",
+               "LogConfig": {
+                    "Type": "journald",
+                    "Config": null,
+                    "Path": "",
+                    "Tag": "",
+                    "Size": "0B"
+               },
+               "NetworkMode": "none",
+               "PortBindings": {},
+               "RestartPolicy": {
+                    "Name": "",
+                    "MaximumRetryCount": 0
+               },
+               "AutoRemove": false,
+               "VolumeDriver": "",
+               "VolumesFrom": null,
+               "CapAdd": [],
+               "CapDrop": [
+                    "CAP_CHOWN",
+                    "CAP_DAC_OVERRIDE",
+                    "CAP_FOWNER",
+                    "CAP_FSETID",
+                    "CAP_KILL",
+                    "CAP_NET_BIND_SERVICE",
+                    "CAP_SETFCAP",
+                    "CAP_SETGID",
+                    "CAP_SETPCAP",
+                    "CAP_SETUID",
+                    "CAP_SYS_CHROOT"
+               ],
+               "Dns": [],
+               "DnsOptions": [],
+               "DnsSearch": [],
+               "ExtraHosts": [],
+               "GroupAdd": [],
+               "IpcMode": "shareable",
+               "Cgroup": "",
+               "Cgroups": "default",
+               "Links": null,
+               "OomScoreAdj": 0,
+               "PidMode": "private",
+               "Privileged": false,
+               "PublishAllPorts": false,
+               "ReadonlyRootfs": true,
+               "SecurityOpt": [
+                    "no-new-privileges"
+               ],
+               "Tmpfs": {
+                    "/tmp": "rw,noexec,nosuid,nodev,size=2g,rprivate,tmpcopyup"
+               },
+               "UTSMode": "private",
+               "UsernsMode": "",
+               "ShmSize": 65536000,
+               "Runtime": "oci",
+               "ConsoleSize": [
+                    0,
+                    0
+               ],
+               "Isolation": "",
+               "CpuShares": 0,
+               "Memory": 4294967296,
+               "NanoCpus": 2000000000,
+               "CgroupParent": "user.slice",
+               "BlkioWeight": 0,
+               "BlkioWeightDevice": null,
+               "BlkioDeviceReadBps": null,
+               "BlkioDeviceWriteBps": null,
+               "BlkioDeviceReadIOps": null,
+               "BlkioDeviceWriteIOps": null,
+               "CpuPeriod": 100000,
+               "CpuQuota": 200000,
+               "CpuRealtimePeriod": 0,
+               "CpuRealtimeRuntime": 0,
+               "CpusetCpus": "",
+               "CpusetMems": "",
+               "Devices": [],
+               "DiskQuota": 0,
+               "KernelMemory": 0,
+               "MemoryReservation": 0,
+               "MemorySwap": 4294967296,
+               "MemorySwappiness": -1,
+               "OomKillDisable": false,
+               "PidsLimit": 512,
+               "Ulimits": [
+                    {
+                         "Name": "RLIMIT_NOFILE",
+                         "Soft": 1024,
+                         "Hard": 1024
+                    },
+                    {
+                         "Name": "RLIMIT_NPROC",
+                         "Soft": 127781,
+                         "Hard": 127781
+                    }
+               ],
+               "CpuCount": 0,
+               "CpuPercent": 0,
+               "IOMaximumIOps": 0,
+               "IOMaximumBandwidth": 0,
+               "CgroupConf": null
+          }
+     }
+]

@@ -1,0 +1,59 @@
+Running from: /usr/share/jenkins/jenkins.war
+webroot: /var/jenkins_home/war
+2026-08-01 12:15:45.181+0000 [id=1]	INFO	winstone.Logger#logInternal: Beginning extraction from war file
+2026-08-01 12:15:45.616+0000 [id=1]	WARNING	o.e.j.ee9.nested.ContextHandler#setContextPath: Empty contextPath
+2026-08-01 12:15:45.650+0000 [id=1]	INFO	org.eclipse.jetty.server.Server#doStart: jetty-12.1.8; built: 2026-04-01T01:09:18.991Z; git: c9cdc9aaa434a3665b8a53b4d1cc3684992da649; jvm 21.0.11+10-LTS
+2026-08-01 12:15:45.969+0000 [id=1]	INFO	o.e.j.e.w.StandardDescriptorProcessor#visitServlet: NO JSP Support for /, did not find org.eclipse.jetty.ee9.jsp.JettyJspServlet
+2026-08-01 12:15:45.996+0000 [id=1]	INFO	o.e.j.s.DefaultSessionIdManager#doStart: Session workerName=node0
+2026-08-01 12:15:46.280+0000 [id=1]	INFO	hudson.WebAppMain#contextInitialized: Jenkins home directory: /var/jenkins_home found at: EnvVars.masterEnvVars.get("JENKINS_HOME")
+2026-08-01 12:15:46.360+0000 [id=1]	INFO	o.e.j.s.handler.ContextHandler#doStart: Started oeje9n.ContextHandler$CoreContextHandler@39c385d6{Jenkins v2.568.1,/,b=file:///var/jenkins_home/war/,a=AVAILABLE,h=oeje9n.ContextHandler$CoreContextHandler$CoreToNestedHandler@1cec219f{STARTED}}
+2026-08-01 12:15:46.365+0000 [id=1]	INFO	o.e.j.server.AbstractConnector#doStart: Started oejs.ServerConnector@859ea42{HTTP/1.1, (http/1.1)}{0.0.0.0:8080}
+2026-08-01 12:15:46.366+0000 [id=1]	INFO	org.eclipse.jetty.server.Server#doStart: Started oejs.Server@2af46afd{STARTING}[12.1.8,sto=0] @717ms
+2026-08-01 12:15:46.366+0000 [id=31]	INFO	winstone.Logger#logInternal: Winstone Servlet Engine running: controlPort=disabled
+2026-08-01 12:15:46.460+0000 [id=30]	INFO	jenkins.model.Jenkins#<init>: Starting version 2.568.1
+2026-08-01 12:15:46.513+0000 [id=39]	INFO	jenkins.InitReactorRunner$1#onAttained: Started initialization
+2026-08-01 12:15:48.106+0000 [id=39]	INFO	jenkins.InitReactorRunner$1#onAttained: Listed all plugins
+2026-08-01 12:15:50.367+0000 [id=40]	INFO	jenkins.InitReactorRunner$1#onAttained: Prepared all plugins
+2026-08-01 12:15:50.376+0000 [id=38]	INFO	jenkins.InitReactorRunner$1#onAttained: Started all plugins
+2026-08-01 12:15:50.377+0000 [id=38]	INFO	jenkins.InitReactorRunner$1#onAttained: Augmented all extensions
+2026-08-01 12:15:51.165+0000 [id=37]	INFO	h.p.b.g.GlobalTimeOutConfiguration#load: global timeout not set
+2026-08-01 12:15:51.548+0000 [id=39]	INFO	jenkins.InitReactorRunner$1#onAttained: System config loaded
+2026-08-01 12:15:51.548+0000 [id=39]	INFO	jenkins.InitReactorRunner$1#onAttained: System config adapted
+2026-08-01 12:15:51.568+0000 [id=38]	INFO	jenkins.InitReactorRunner$1#onAttained: Loaded all jobs
+2026-08-01 12:15:51.569+0000 [id=39]	INFO	o.j.p.l.nodes.NodesMirror#createNodeResources: lockable-resources-plugin: configure node resources
+2026-08-01 12:15:51.574+0000 [id=40]	INFO	jenkins.InitReactorRunner$1#onAttained: Configuration for all jobs updated
+2026-08-01 12:15:51.577+0000 [id=40]	INFO	j.util.groovy.GroovyHookScript#execute: Executing /var/jenkins_home/init.groovy.d/99-diff001.groovy
+2026-08-01 12:15:51.579+0000 [id=54]	INFO	hudson.util.Retrier#start: Attempt #1 to do the action check updates server
+2026-08-01 12:15:51.687+0000 [id=54]	INFO	hudson.util.Retrier#start: The attempt #1 to do the action check updates server failed with an allowed exception:
+java.net.UnknownHostException: updates.jenkins.io
+	at java.base/sun.nio.ch.NioSocketImpl.connect(Unknown Source)
+	at java.base/java.net.SocksSocketImpl.connect(Unknown Source)
+	at java.base/java.net.Socket.connect(Unknown Source)
+	at java.base/sun.security.ssl.SSLSocketImpl.connect(Unknown Source)
+	at java.base/sun.net.NetworkClient.doConnect(Unknown Source)
+	at java.base/sun.net.www.http.HttpClient.openServer(Unknown Source)
+	at java.base/sun.net.www.http.HttpClient.openServer(Unknown Source)
+	at java.base/sun.net.www.protocol.https.HttpsClient.<init>(Unknown Source)
+	at java.base/sun.net.www.protocol.https.HttpsClient.New(Unknown Source)
+	at java.base/sun.net.www.protocol.https.AbstractDelegateHttpsURLConnection.getNewHttpClient(Unknown Source)
+	at java.base/sun.net.www.protocol.http.HttpURLConnection.plainConnect0(Unknown Source)
+	at java.base/sun.net.www.protocol.http.HttpURLConnection.plainConnect(Unknown Source)
+	at java.base/sun.net.www.protocol.https.AbstractDelegateHttpsURLConnection.connect(Unknown Source)
+	at java.base/sun.net.www.protocol.http.HttpURLConnection.getInputStream0(Unknown Source)
+	at java.base/sun.net.www.protocol.http.HttpURLConnection.getInputStream(Unknown Source)
+	at java.base/sun.net.www.protocol.https.HttpsURLConnectionImpl.getInputStream(Unknown Source)
+	at hudson.model.DownloadService.loadJSON(DownloadService.java:122)
+	at hudson.model.UpdateSite.updateDirectlyNow(UpdateSite.java:235)
+	at hudson.model.UpdateSite.updateDirectlyNow(UpdateSite.java:230)
+	at hudson.PluginManager.checkUpdatesServer(PluginManager.java:2152)
+	at hudson.util.Retrier.start(Retrier.java:62)
+	at hudson.PluginManager.doCheckUpdatesServer(PluginManager.java:2123)
+	at jenkins.DailyCheck.execute(DailyCheck.java:93)
+	at hudson.model.AsyncPeriodicWork.lambda$doRun$0(AsyncPeriodicWork.java:110)
+	at java.base/java.lang.Thread.run(Unknown Source)
+2026-08-01 12:15:51.687+0000 [id=54]	INFO	hudson.util.Retrier#start: Calling the listener of the allowed exception 'updates.jenkins.io' at the attempt #1 to do the action check updates server
+2026-08-01 12:15:51.688+0000 [id=54]	INFO	hudson.util.Retrier#start: Attempted the action check updates server for 1 time(s) with no success
+2026-08-01 12:15:51.689+0000 [id=54]	SEVERE	hudson.PluginManager#doCheckUpdatesServer: Error checking update sites for 1 attempt(s). Last exception was: UnknownHostException: updates.jenkins.io
+2026-08-01 12:15:51.882+0000 [id=40]	INFO	jenkins.InitReactorRunner$1#onAttained: Completed initialization
+2026-08-01 12:15:51.913+0000 [id=30]	INFO	hudson.lifecycle.Lifecycle#onReady: Jenkins is fully up and running
+2026-08-01 12:16:03.050+0000 [id=82]	INFO	o.j.p.l.queue.LockRunListener#onCompleted: diff-001-admitted #1
