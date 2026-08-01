@@ -270,6 +270,7 @@ pub(crate) async fn callback(
         ));
     }
     let client = runtime_client(&state, organization_id, provider_id)?;
+    let provider = current_provider(&state, organization_id, provider_id, client).await?;
     let now = unix_time_ms();
     let login = state
         .store
@@ -282,7 +283,6 @@ pub(crate) async fn callback(
             "OIDC state is bound to another provider",
         ));
     }
-    let provider = current_provider(&state, organization_id, provider_id, client).await?;
     validate_provider_urls(&provider, client.config.allow_insecure_loopback_for_tests)?;
     let mut token_request = client.http.post(&provider.token_endpoint).form(&[
         ("grant_type", "authorization_code"),

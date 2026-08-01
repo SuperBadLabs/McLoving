@@ -141,6 +141,34 @@ async fn runtime_store(admin: &Store) -> Store {
     )
 }
 
+async fn oidc_app(
+    admin: &Store,
+    organization_id: Uuid,
+    provider_id: Uuid,
+    configuration_generation: i64,
+    configuration_digest: [u8; 32],
+    redirect_uri: &str,
+) -> Router {
+    router(
+        ApiState::new_durable(runtime_store(admin).await)
+            .with_oidc_client(OidcClientConfig {
+                organization_id,
+                provider_id,
+                configuration_generation,
+                configuration_digest,
+                client_secret: Some("contained-client-secret".to_owned()),
+                allowed_redirect_uris: BTreeSet::from([redirect_uri.to_owned()]),
+                session_ttl: Duration::from_secs(300),
+                refresh_ttl: Duration::from_secs(900),
+                request_timeout: Duration::from_secs(2),
+                clock_skew: Duration::from_secs(5),
+                max_jwks_bytes: 64 * 1024,
+                allow_insecure_loopback_for_tests: true,
+            })
+            .expect("configure contained OIDC client"),
+    )
+}
+
 #[tokio::test]
 async fn oidc_pkce_refresh_group_fencing_and_logout_are_end_to_end() {
     let Some(admin) = test_store().await else {
@@ -246,24 +274,15 @@ async fn oidc_pkce_refresh_group_fencing_and_logout_are_end_to_end() {
     .expect("provision reviewed project role");
 
     let redirect_uri = "http://127.0.0.1/callback";
-    let app = router(
-        ApiState::new_durable(runtime_store(&admin).await)
-            .with_oidc_client(OidcClientConfig {
-                organization_id,
-                provider_id,
-                configuration_generation: 1,
-                configuration_digest,
-                client_secret: Some("contained-client-secret".to_owned()),
-                allowed_redirect_uris: BTreeSet::from([redirect_uri.to_owned()]),
-                session_ttl: Duration::from_secs(300),
-                refresh_ttl: Duration::from_secs(900),
-                request_timeout: Duration::from_secs(2),
-                clock_skew: Duration::from_secs(5),
-                max_jwks_bytes: 64 * 1024,
-                allow_insecure_loopback_for_tests: true,
-            })
-            .expect("configure contained OIDC client"),
-    );
+    let app = oidc_app(
+        &admin,
+        organization_id,
+        provider_id,
+        1,
+        configuration_digest,
+        redirect_uri,
+    )
+    .await;
 
     let first = login(
         app.clone(),
@@ -353,18 +372,47 @@ async fn oidc_pkce_refresh_group_fencing_and_logout_are_end_to_end() {
         StatusCode::UNAUTHORIZED,
         "logout revokes the durable session across controllers"
     );
+    let next_configuration_digest = Sha256::digest(b"test-provider-v2").into();
     admin
         .provision_identity_provider(&IdentityProviderWrite {
             configuration_generation: 2,
-            configuration_digest: Sha256::digest(b"test-provider-v2").into(),
-            ..provider
+            configuration_digest: next_configuration_digest,
+            ..provider.clone()
         })
         .await
         .expect("advance the durable provider configuration");
     assert_eq!(
-        start_status(app, organization_id, provider_id, redirect_uri).await,
+        start_status(app.clone(), organization_id, provider_id, redirect_uri).await,
         StatusCode::SERVICE_UNAVAILABLE,
         "a replica with stale local OIDC configuration must fail closed"
+    );
+    let fresh_app = oidc_app(
+        &admin,
+        organization_id,
+        provider_id,
+        2,
+        next_configuration_digest,
+        redirect_uri,
+    )
+    .await;
+    let callback_state = begin_login(
+        fresh_app.clone(),
+        organization_id,
+        provider_id,
+        redirect_uri,
+        &expected,
+        vec!["operators".to_owned()],
+    )
+    .await;
+    assert_eq!(
+        callback_status(app, organization_id, provider_id, &callback_state).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a stale replica must reject before consuming fresh callback state"
+    );
+    assert_eq!(
+        callback_status(fresh_app, organization_id, provider_id, &callback_state).await,
+        StatusCode::OK,
+        "the fresh replica must be able to retry the unconsumed callback"
     );
     idp_server.abort();
 }
@@ -405,6 +453,34 @@ async fn login(
     expected: &Arc<Mutex<Option<ExpectedExchange>>>,
     groups: Vec<String>,
 ) -> Value {
+    let state = begin_login(
+        app.clone(),
+        organization_id,
+        provider_id,
+        redirect_uri,
+        expected,
+        groups,
+    )
+    .await;
+    let callback = callback_response(app, organization_id, provider_id, &state).await;
+    assert_eq!(callback.status(), StatusCode::OK);
+    assert_no_store(&callback);
+    serde_json::from_slice(
+        &to_bytes(callback.into_body(), 64 * 1024)
+            .await
+            .expect("callback body"),
+    )
+    .expect("parse callback response")
+}
+
+async fn begin_login(
+    app: Router,
+    organization_id: Uuid,
+    provider_id: Uuid,
+    redirect_uri: &str,
+    expected: &Arc<Mutex<Option<ExpectedExchange>>>,
+    groups: Vec<String>,
+) -> String {
     let mut start_url = reqwest::Url::parse("http://mcloving.invalid").expect("base URL");
     start_url.set_path(&format!(
         "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start"
@@ -450,25 +526,37 @@ async fn login(
         redirect_uri: redirect_uri.to_owned(),
         groups,
     });
-    let callback = app
+    query["state"].clone()
+}
+
+async fn callback_response(
+    app: Router,
+    organization_id: Uuid,
+    provider_id: Uuid,
+    state: &str,
+) -> axum::response::Response {
+    app
         .oneshot(
             Request::get(format!(
                 "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/callback?code=valid-code&state={}",
-                query["state"]
+                state
             ))
             .body(Body::empty())
             .expect("callback request"),
         )
         .await
-        .expect("callback response");
-    assert_eq!(callback.status(), StatusCode::OK);
-    assert_no_store(&callback);
-    serde_json::from_slice(
-        &to_bytes(callback.into_body(), 64 * 1024)
-            .await
-            .expect("callback body"),
-    )
-    .expect("parse callback response")
+        .expect("callback response")
+}
+
+async fn callback_status(
+    app: Router,
+    organization_id: Uuid,
+    provider_id: Uuid,
+    state: &str,
+) -> StatusCode {
+    callback_response(app, organization_id, provider_id, state)
+        .await
+        .status()
 }
 
 async fn project_read(
