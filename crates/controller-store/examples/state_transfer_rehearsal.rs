@@ -1003,6 +1003,44 @@ async fn run_effect_free_build(
             "effect-free build could not publish terminal state".to_owned(),
         ));
     }
+    if !store
+        .record_state_transfer_scm_checkout_evidence(
+            organization_id,
+            project_id,
+            receipt.id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            "mig005a-agent",
+            CHECKOUT_EVIDENCE_KEY,
+            next_checkout,
+            "migration:rehearsal",
+        )
+        .await?
+    {
+        return Err(StoreError::InvalidStateTransfer(
+            "exact SCM evidence replay failed after attempt completion".to_owned(),
+        ));
+    }
+    if store
+        .record_state_transfer_scm_checkout_evidence(
+            organization_id,
+            project_id,
+            receipt.id,
+            claim.attempt_id,
+            claim.fence,
+            claim.restore_epoch,
+            "mig005a-agent",
+            CHECKOUT_EVIDENCE_KEY,
+            &substituted,
+            "migration:rehearsal",
+        )
+        .await?
+    {
+        return Err(StoreError::InvalidStateTransfer(
+            "conflicting SCM evidence replay was accepted after attempt completion".to_owned(),
+        ));
+    }
     let snapshot = store
         .build_snapshot(organization_id, project_id, admission.build_id)
         .await?

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 
 use mcloving_state_transfer::{
     ChangePredicate, Digest, ExpectedBinding, LegalHold, PredicateDecision, Protection, ScmState,
@@ -21,6 +22,59 @@ const MAX_SCM_CHECKOUT_EVIDENCE_BYTES: usize = 1_048_576;
 struct ScmCheckoutEvidence {
     schema: String,
     checkout: ScmState,
+}
+
+#[derive(Serialize)]
+struct ScmCheckoutEvidenceView<'a> {
+    schema: &'static str,
+    checkout: &'a ScmState,
+}
+
+struct LimitedCanonicalWriter {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    exceeded: bool,
+}
+
+impl Write for LimitedCanonicalWriter {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(input.len())
+            .ok_or_else(|| io::Error::other("canonical byte count overflow"))?;
+        if next > self.max_bytes {
+            self.exceeded = true;
+            return Err(io::Error::other("canonical byte limit exceeded"));
+        }
+        self.bytes.extend_from_slice(input);
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bounded_canonical_json<T: Serialize>(
+    value: &T,
+    max_bytes: usize,
+    limit_message: &'static str,
+) -> Result<Vec<u8>, StoreError> {
+    let mut writer = LimitedCanonicalWriter {
+        bytes: Vec::new(),
+        max_bytes,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if writer.exceeded {
+            return Err(StoreError::InvalidStateTransfer(limit_message.to_owned()));
+        }
+        return Err(StoreError::InvalidStateTransfer(format!(
+            "canonical JSON serialization failed: {error}"
+        )));
+    }
+    Ok(writer.bytes)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -397,22 +451,43 @@ impl Store {
         }
         validate_scm_checkout(checkout)
             .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?;
-        let evidence = ScmCheckoutEvidence {
-            schema: SCM_CHECKOUT_EVIDENCE_SCHEMA_V1.to_owned(),
-            checkout: checkout.clone(),
+        let evidence = ScmCheckoutEvidenceView {
+            schema: SCM_CHECKOUT_EVIDENCE_SCHEMA_V1,
+            checkout,
         };
-        let canonical_evidence = serde_json::to_vec(&evidence).map_err(|error| {
-            StoreError::InvalidStateTransfer(format!(
-                "SCM checkout evidence cannot be canonicalized: {error}"
-            ))
-        })?;
-        if canonical_evidence.len() > MAX_SCM_CHECKOUT_EVIDENCE_BYTES {
-            return Err(StoreError::InvalidStateTransfer(
-                "SCM checkout evidence exceeds the canonical byte limit".to_owned(),
-            ));
-        }
+        let canonical_evidence = bounded_canonical_json(
+            &evidence,
+            MAX_SCM_CHECKOUT_EVIDENCE_BYTES,
+            "SCM checkout evidence exceeds the canonical byte limit",
+        )?;
         let evidence_digest = sha256(&canonical_evidence);
         let mut tx = self.tenant_transaction(organization_id).await?;
+        let existing = sqlx::query_as::<_, (Uuid, Uuid, i64, String, Vec<u8>, Vec<u8>, String)>(
+            "SELECT project_id, receipt_id, restore_epoch, agent_id,
+                    canonical_evidence, evidence_digest, actor_subject
+             FROM state_transfer_scm_evidence
+             WHERE organization_id = $1
+               AND attempt_id = $2
+               AND fence = $3
+               AND evidence_key = $4",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(evidence_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = existing {
+            let exact_replay = existing.0 == project_id
+                && existing.1 == receipt_id
+                && existing.2 == restore_epoch
+                && existing.3 == agent_id
+                && existing.4 == canonical_evidence
+                && existing.5 == evidence_digest
+                && existing.6 == actor_subject;
+            tx.commit().await?;
+            return Ok(exact_replay);
+        }
         let inserted = sqlx::query_scalar::<_, bool>(
             "INSERT INTO state_transfer_scm_evidence (
                  organization_id, project_id, receipt_id, attempt_id,
@@ -438,23 +513,29 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
         if inserted.is_none() {
-            let existing = sqlx::query_as::<_, (Uuid, Vec<u8>, Vec<u8>)>(
-                "SELECT receipt_id, canonical_evidence, evidence_digest
+            let existing =
+                sqlx::query_as::<_, (Uuid, Uuid, i64, String, Vec<u8>, Vec<u8>, String)>(
+                    "SELECT project_id, receipt_id, restore_epoch, agent_id,
+                        canonical_evidence, evidence_digest, actor_subject
                  FROM state_transfer_scm_evidence
                  WHERE organization_id = $1
                    AND attempt_id = $2
                    AND fence = $3
                    AND evidence_key = $4",
-            )
-            .bind(organization_id)
-            .bind(attempt_id)
-            .bind(fence)
-            .bind(evidence_key)
-            .fetch_one(&mut *tx)
-            .await?;
-            let exact_replay = existing.0 == receipt_id
-                && existing.1 == canonical_evidence
-                && existing.2 == evidence_digest;
+                )
+                .bind(organization_id)
+                .bind(attempt_id)
+                .bind(fence)
+                .bind(evidence_key)
+                .fetch_one(&mut *tx)
+                .await?;
+            let exact_replay = existing.0 == project_id
+                && existing.1 == receipt_id
+                && existing.2 == restore_epoch
+                && existing.3 == agent_id
+                && existing.4 == canonical_evidence
+                && existing.5 == evidence_digest
+                && existing.6 == actor_subject;
             if !exact_replay {
                 tx.rollback().await?;
                 return Ok(false);
@@ -707,4 +788,20 @@ fn digest_array(bytes: Vec<u8>) -> Result<Digest, StoreError> {
             "stored state-transfer digest is not exactly 32 bytes".to_owned(),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StoreError, bounded_canonical_json};
+
+    #[test]
+    fn bounded_canonical_json_rejects_at_the_limit() {
+        let oversized = vec!["0123456789"; 64];
+        let error = bounded_canonical_json(&oversized, 32, "bounded evidence")
+            .expect_err("oversized evidence must fail while streaming");
+        assert!(matches!(
+            error,
+            StoreError::InvalidStateTransfer(message) if message == "bounded evidence"
+        ));
+    }
 }
