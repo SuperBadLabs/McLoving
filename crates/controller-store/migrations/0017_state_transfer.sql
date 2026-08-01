@@ -36,13 +36,25 @@ CREATE TABLE state_transfer_receipts (
     transform_configuration_digest bytea NOT NULL CHECK (
         octet_length(transform_configuration_digest) = 32
     ),
-    binding_digest bytea NOT NULL CHECK (octet_length(binding_digest) = 32),
+    binding_digest bytea NOT NULL CHECK (
+        octet_length(binding_digest) = 32
+        AND binding_digest <> decode(repeat('00', 32), 'hex')
+    ),
+    canonical_binding bytea NOT NULL CHECK (
+        octet_length(canonical_binding) BETWEEN 1 AND 1048576
+        AND binding_digest = sha256(canonical_binding)
+    ),
     input_bundle_digest bytea NOT NULL CHECK (
         octet_length(input_bundle_digest) = 32
+        AND input_bundle_digest <> decode(repeat('00', 32), 'hex')
     ),
-    bundle_digest bytea NOT NULL CHECK (octet_length(bundle_digest) = 32),
+    bundle_digest bytea NOT NULL CHECK (
+        octet_length(bundle_digest) = 32
+        AND bundle_digest <> decode(repeat('00', 32), 'hex')
+    ),
     canonical_bundle bytea NOT NULL CHECK (
         octet_length(canonical_bundle) BETWEEN 1 AND 67108864
+        AND bundle_digest = sha256(canonical_bundle)
     ),
     actor_subject text NOT NULL CHECK (length(actor_subject) BETWEEN 1 AND 512),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -159,6 +171,80 @@ AS $$
 $$;
 
 REVOKE ALL ON FUNCTION mcloving_state_transfer_digest_json(bytea) FROM PUBLIC;
+
+CREATE FUNCTION mcloving_validate_state_transfer_receipt()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    bundle_value jsonb;
+    binding_value jsonb;
+    expected_direction text;
+BEGIN
+    BEGIN
+        bundle_value := convert_from(NEW.canonical_bundle, 'UTF8')::jsonb;
+        binding_value := convert_from(NEW.canonical_binding, 'UTF8')::jsonb;
+    EXCEPTION WHEN others THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer receipt contains invalid canonical JSON';
+    END;
+    expected_direction := CASE NEW.direction
+        WHEN 'jenkins_to_mcloving' THEN 'jenkins_to_mc_loving'
+        WHEN 'mcloving_to_jenkins' THEN 'mc_loving_to_jenkins'
+        ELSE NULL
+    END;
+    IF jsonb_typeof(bundle_value) IS DISTINCT FROM 'object'
+       OR jsonb_typeof(binding_value) IS DISTINCT FROM 'object'
+       OR bundle_value -> 'binding' IS DISTINCT FROM binding_value
+       OR binding_value ->> 'schema' IS DISTINCT FROM 'mcloving.state-transfer/v1'
+       OR binding_value ->> 'direction' IS DISTINCT FROM expected_direction
+       OR binding_value -> 'source' ->> 'kind' IS DISTINCT FROM NEW.source_kind
+       OR binding_value -> 'source' ->> 'instance_id'
+            IS DISTINCT FROM NEW.source_instance_id
+       OR binding_value -> 'source' ->> 'generation'
+            IS DISTINCT FROM NEW.source_generation
+       OR binding_value -> 'source' -> 'configuration_digest'
+            IS DISTINCT FROM mcloving_state_transfer_digest_json(
+                NEW.source_configuration_digest
+            )
+       OR binding_value -> 'destination' ->> 'kind'
+            IS DISTINCT FROM NEW.destination_kind
+       OR binding_value -> 'destination' ->> 'instance_id'
+            IS DISTINCT FROM NEW.destination_instance_id
+       OR binding_value -> 'destination' ->> 'generation'
+            IS DISTINCT FROM NEW.destination_generation
+       OR binding_value -> 'destination' -> 'configuration_digest'
+            IS DISTINCT FROM mcloving_state_transfer_digest_json(
+                NEW.destination_configuration_digest
+            )
+       OR binding_value -> 'source_export_digest'
+            IS DISTINCT FROM mcloving_state_transfer_digest_json(
+                NEW.source_export_digest
+            )
+       OR binding_value -> 'transform_implementation_digest'
+            IS DISTINCT FROM mcloving_state_transfer_digest_json(
+                NEW.transform_implementation_digest
+            )
+       OR binding_value -> 'transform_configuration_digest'
+            IS DISTINCT FROM mcloving_state_transfer_digest_json(
+                NEW.transform_configuration_digest
+            )
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer receipt binding is invalid';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_validate_state_transfer_receipt() FROM PUBLIC;
+
+CREATE TRIGGER state_transfer_receipts_validate
+BEFORE INSERT ON state_transfer_receipts
+FOR EACH ROW EXECUTE FUNCTION mcloving_validate_state_transfer_receipt();
 
 CREATE FUNCTION mcloving_state_transfer_normalize_holds(holds jsonb)
 RETURNS jsonb
@@ -405,6 +491,150 @@ REVOKE ALL ON FUNCTION mcloving_state_transfer_protection_monotonic() FROM PUBLI
 CREATE TRIGGER state_transfer_protections_monotonic
 BEFORE INSERT OR UPDATE OR DELETE ON state_transfer_protections
 FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_protection_monotonic();
+
+CREATE FUNCTION mcloving_state_transfer_receipt_complete()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    bundle_value jsonb;
+    expected_record_count bigint;
+    actual_record_count bigint;
+    actual_protection_count bigint;
+    expected_payload jsonb;
+BEGIN
+    bundle_value := convert_from(NEW.canonical_bundle, 'UTF8')::jsonb;
+    IF jsonb_typeof(bundle_value -> 'expected_record_ids') IS DISTINCT FROM 'array'
+       OR EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(bundle_value -> 'expected_record_ids') AS item(value)
+           WHERE jsonb_typeof(value) IS DISTINCT FROM 'string'
+              OR length(value #>> '{}') NOT BETWEEN 1 AND 1024
+       )
+       OR EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements_text(
+               bundle_value -> 'expected_record_ids'
+           ) AS item(record_id)
+           GROUP BY record_id
+           HAVING count(*) <> 1
+       )
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer expected record set is invalid';
+    END IF;
+    expected_record_count := jsonb_array_length(
+        bundle_value -> 'expected_record_ids'
+    );
+    IF (
+           SELECT count(*)
+           FROM jsonb_path_query(
+               bundle_value,
+               'strict $.**.record'
+           ) AS item(record_value)
+       ) <> expected_record_count
+       OR EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements_text(
+               bundle_value -> 'expected_record_ids'
+           ) AS expected(record_id)
+           WHERE (
+               SELECT count(*)
+               FROM jsonb_path_query(
+                   bundle_value,
+                   'strict $.**.record'
+               ) AS item(record_value)
+               WHERE record_value ->> 'id' = expected.record_id
+           ) <> 1
+       )
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer canonical record set is invalid';
+    END IF;
+    SELECT count(*)
+    INTO actual_record_count
+    FROM state_transfer_records
+    WHERE organization_id = NEW.organization_id
+      AND receipt_id = NEW.id;
+    IF actual_record_count <> expected_record_count
+       OR EXISTS (
+           SELECT 1
+           FROM state_transfer_records AS stored
+           WHERE stored.organization_id = NEW.organization_id
+             AND stored.receipt_id = NEW.id
+             AND NOT EXISTS (
+                 SELECT 1
+                 FROM jsonb_path_query(
+                     bundle_value,
+                     'strict $.**.record'
+                 ) AS item(record_value)
+                 WHERE record_value ->> 'id' = stored.record_id
+                   AND record_value ->> 'provenance' = stored.provenance
+                   AND record_value -> 'source_digest' =
+                       mcloving_state_transfer_digest_json(stored.source_digest)
+             )
+       )
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer provenance rows are incomplete';
+    END IF;
+    SELECT count(*)
+    INTO actual_protection_count
+    FROM state_transfer_protections
+    WHERE organization_id = NEW.organization_id
+      AND project_id = NEW.project_id
+      AND receipt_id = NEW.id;
+    expected_payload := jsonb_build_object(
+        'receipt_id', NEW.id,
+        'project_id', NEW.project_id,
+        'direction', NEW.direction,
+        'binding_digest', encode(NEW.binding_digest, 'hex'),
+        'bundle_digest', encode(NEW.bundle_digest, 'hex'),
+        'source_export_digest', encode(NEW.source_export_digest, 'hex'),
+        'record_count', actual_record_count,
+        'protection_count', actual_protection_count
+    );
+    IF (
+           SELECT count(*)
+           FROM outbox
+           WHERE organization_id = NEW.organization_id
+             AND topic = 'state_transfer.imported'
+             AND aggregate_id = NEW.id
+             AND payload = expected_payload
+       ) <> 1
+       OR (
+           SELECT count(*)
+           FROM audit_events
+           WHERE organization_id = NEW.organization_id
+             AND category = 'migration'
+             AND actor_subject = NEW.actor_subject
+             AND action = 'state_transfer.imported'
+             AND subject = format(
+                 'project:%s:state-transfer:%s',
+                 NEW.project_id,
+                 NEW.id
+             )
+             AND payload = expected_payload
+       ) <> 1
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'mcloving state-transfer receipt lacks its exact audit/outbox proof';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_state_transfer_receipt_complete() FROM PUBLIC;
+
+CREATE CONSTRAINT TRIGGER state_transfer_receipts_complete
+AFTER INSERT ON state_transfer_receipts
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION mcloving_state_transfer_receipt_complete();
 
 GRANT SELECT, INSERT ON state_transfer_receipts, state_transfer_records
 TO mcloving_tenant;

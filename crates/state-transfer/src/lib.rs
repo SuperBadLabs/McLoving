@@ -519,6 +519,10 @@ pub fn canonical_bytes(bundle: &StateBundle) -> Result<Vec<u8>, TransferError> {
     canonical_bytes_of(bundle)
 }
 
+pub fn canonical_binding_bytes(binding: &TransferBinding) -> Result<Vec<u8>, TransferError> {
+    canonical_bytes_of(binding)
+}
+
 /// Evaluates the transferred canonical change entries used by Jenkins
 /// `changeset`/`changelog` conditions. Mapping code resolves Jenkins patterns
 /// and regexes into these exact suffix/message-digest predicates before this
@@ -1094,6 +1098,7 @@ fn validate_build(
     validate_protection(&build.protection)?;
     insert_hold_records(records, &build.protection)?;
     let mut prior_checkout: Option<&str> = None;
+    let mut checkout_identities = BTreeSet::new();
     for scm in &build.checkouts {
         if prior_checkout.is_some_and(|value| value >= scm.record.id.as_str()) {
             return Err(TransferError::InvalidField(
@@ -1101,6 +1106,15 @@ fn validate_build(
             ));
         }
         prior_checkout = Some(&scm.record.id);
+        if !checkout_identities.insert((
+            scm.provider.as_str(),
+            scm.repository.as_str(),
+            scm.reference.as_str(),
+        )) {
+            return Err(TransferError::InvalidField(
+                "SCM checkout identities must be unique within a build".to_owned(),
+            ));
+        }
         validate_scm(scm, records)?;
     }
     validate_graph_nodes(&build.graph_nodes, records)?;

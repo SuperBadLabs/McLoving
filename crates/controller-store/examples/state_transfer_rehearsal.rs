@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mcloving_controller_store::{
-    ClaimRequest, NewBuild, NewLogChunk, Store, StoreError, TerminalOutcome,
+    ClaimRequest, NewBuild, NewLogChunk, StateTransferReceipt, Store, StoreError, TerminalOutcome,
 };
 use mcloving_state_transfer::{
     AttemptState, BuildResult, BuildState, ChangeEntry, ChangePredicate, ConflictPolicy,
@@ -12,7 +12,7 @@ use mcloving_state_transfer::{
     GraphNodeState, JobState, LegalHold, LogState, ObjectKind, ObjectState, Protection,
     RecordProvenance, RetentionPolicy, RetrievalMetadata, STATE_TRANSFER_SCHEMA_V1, ScmState,
     StateBundle, SystemIdentity, TransferBinding, TransferDirection, canonical_bytes,
-    evaluate_change_predicate, record_provenance, sha256, transform,
+    record_provenance, sha256, transform,
 };
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
@@ -138,18 +138,19 @@ async fn main() -> Result<(), AnyError> {
         path_suffixes: vec![".target".to_owned()],
         message_digests: vec![sha256(b"MIG005A-MATCH second predicate revision")],
     };
-    let decision = evaluate_change_predicate(&build_3.checkouts[0], &predicate)?;
-    if !decision.selected {
-        return Err("transferred SCM baseline did not select the McLoving predicate".into());
-    }
-    run_effect_free_build(
+    let decision = run_effect_free_build(
         &store,
         organization_id,
         project_id,
-        forward_receipt.bundle_digest,
-        &decision.matched_change_record_ids,
+        &forward_receipt,
+        "stateful",
+        &build_3.checkouts[0],
+        &predicate,
     )
     .await?;
+    if !decision.selected {
+        return Err("transferred SCM baseline did not select the McLoving predicate".into());
+    }
     stored_forward.jobs[0].builds.push(build_3);
     stored_forward.jobs[0].next_build_number = 4;
     stored_forward.jobs[0].previous_result = Some(BuildResult::Succeeded);
@@ -647,22 +648,38 @@ async fn run_effect_free_build(
     store: &Store,
     organization_id: Uuid,
     project_id: Uuid,
-    pipeline_digest: Digest,
-    matches: &[String],
-) -> Result<(), StoreError> {
+    receipt: &StateTransferReceipt,
+    source_job_id: &str,
+    next_checkout: &ScmState,
+    predicate: &ChangePredicate,
+) -> Result<mcloving_state_transfer::PredicateDecision, StoreError> {
+    let decision = store
+        .state_transfer_change_decision(
+            organization_id,
+            receipt.id,
+            source_job_id,
+            next_checkout,
+            predicate,
+        )
+        .await?;
     let admission = store
         .admit_build(&NewBuild {
             organization_id,
             project_id,
             idempotency_key: "mig005a-effect-free-build-3".to_owned(),
-            pipeline_digest,
+            pipeline_digest: receipt.bundle_digest,
             node_key: "predicate-intents".to_owned(),
             required_capabilities: vec!["linux".to_owned()],
             required_trust_pool: "isolated-rehearsal".to_owned(),
             priority: 0,
             execution_spec: json!({
                 "external_effect_authority": false,
-                "predicate_matches": matches,
+                "state_transfer_receipt_id": receipt.id,
+                "source_job_id": source_job_id,
+                "previous_revision": next_checkout.previous_revision,
+                "revision": next_checkout.revision,
+                "predicate_selected": decision.selected,
+                "predicate_matches": decision.matched_change_record_ids,
             }),
         })
         .await?;
@@ -722,7 +739,12 @@ async fn run_effect_free_build(
                 claim.restore_epoch,
                 "mig005a-agent",
                 TerminalOutcome::Succeeded,
-                json!({"external_effects": 0, "predicate_matches": matches}),
+                json!({
+                    "external_effects": 0,
+                    "state_transfer_receipt_id": receipt.id,
+                    "predicate_selected": decision.selected,
+                    "predicate_matches": decision.matched_change_record_ids,
+                }),
             )
             .await?
     {
@@ -741,7 +763,7 @@ async fn run_effect_free_build(
             "effect-free build did not finish successfully".to_owned(),
         ));
     }
-    Ok(())
+    Ok(decision)
 }
 
 async fn prove_unauthorized_hold_release_denied(

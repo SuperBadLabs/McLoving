@@ -69,6 +69,66 @@ async fn state_transfer_is_idempotent_monotonic_and_audited() {
     assert!(first.created);
     assert_eq!(first.record_count, 5);
     assert_eq!(first.protection_count, 2);
+
+    let counterfeit_project_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO projects (id, organization_id, slug) VALUES ($1, $2, $3)")
+        .bind(counterfeit_project_id)
+        .bind(organization_id)
+        .bind("state-transfer-counterfeit")
+        .execute(store.pool())
+        .await
+        .expect("create counterfeit-receipt test project");
+    let counterfeit_receipt_id = Uuid::new_v4();
+    let mut counterfeit = tenant_store
+        .pool()
+        .begin()
+        .await
+        .expect("begin direct runtime receipt insert");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *counterfeit)
+        .await
+        .expect("bind direct runtime insert tenant");
+    sqlx::query(
+        "INSERT INTO state_transfer_receipts (
+             id, organization_id, project_id, direction,
+             source_kind, source_instance_id, source_generation,
+             source_configuration_digest,
+             destination_kind, destination_instance_id,
+             destination_generation, destination_configuration_digest,
+             source_export_digest, transform_implementation_digest,
+             transform_configuration_digest, binding_digest, canonical_binding,
+             input_bundle_digest, bundle_digest, canonical_bundle, actor_subject
+         )
+         SELECT $1, organization_id, $2, direction,
+                source_kind, source_instance_id, source_generation,
+                source_configuration_digest,
+                destination_kind, destination_instance_id,
+                destination_generation, destination_configuration_digest,
+                source_export_digest, transform_implementation_digest,
+                transform_configuration_digest, binding_digest, canonical_binding,
+                input_bundle_digest, bundle_digest, canonical_bundle, actor_subject
+         FROM state_transfer_receipts
+         WHERE organization_id = $3 AND id = $4",
+    )
+    .bind(counterfeit_receipt_id)
+    .bind(counterfeit_project_id)
+    .bind(organization_id)
+    .bind(first.id)
+    .execute(&mut *counterfeit)
+    .await
+    .expect("direct runtime insert reaches the deferred completeness fence");
+    let counterfeit_error = counterfeit
+        .commit()
+        .await
+        .expect_err("runtime role cannot commit a receipt without provenance/audit/outbox proof");
+    assert_eq!(
+        counterfeit_error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
     assert!(
         sqlx::query_scalar::<_, bool>(
             "SELECT has_function_privilege(

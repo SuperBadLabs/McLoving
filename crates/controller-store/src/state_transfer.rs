@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use mcloving_state_transfer::{
-    Digest, ExpectedBinding, LegalHold, Protection, StateBundle, TransferBinding,
-    TransferDirection, canonical_bytes, record_provenance, sha256, transform,
+    ChangePredicate, Digest, ExpectedBinding, LegalHold, PredicateDecision, Protection, ScmState,
+    StateBundle, TransferBinding, TransferDirection, canonical_binding_bytes, canonical_bytes,
+    evaluate_change_predicate, record_provenance, sha256, transform,
 };
 use serde_json::{Value, json};
 use sqlx::{Row, postgres::PgRow};
@@ -123,6 +124,8 @@ impl Store {
         let plan = transform(bundle, expected, &existing)
             .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?;
         let binding = &plan.bundle.binding;
+        let canonical_binding = canonical_binding_bytes(binding)
+            .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?;
         let receipt_id = Uuid::new_v4();
         let inserted = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO state_transfer_receipts (
@@ -132,15 +135,15 @@ impl Store {
                  destination_kind, destination_instance_id,
                  destination_generation, destination_configuration_digest,
                  source_export_digest, transform_implementation_digest,
-                 transform_configuration_digest, binding_digest,
+                 transform_configuration_digest, binding_digest, canonical_binding,
                  input_bundle_digest, bundle_digest, canonical_bundle, actor_subject
              )
              VALUES (
                  $1, $2, $3, $4,
                  $5, $6, $7, $8,
                  $9, $10, $11, $12,
-                 $13, $14, $15, $16,
-                 $17, $18, $19, $20
+                 $13, $14, $15, $16, $17,
+                 $18, $19, $20, $21
              )
              ON CONFLICT (
                  organization_id, project_id, direction,
@@ -168,6 +171,7 @@ impl Store {
         .bind(binding.transform_implementation_digest.as_slice())
         .bind(binding.transform_configuration_digest.as_slice())
         .bind(plan.binding_digest.as_slice())
+        .bind(&canonical_binding)
         .bind(input_plan.bundle_digest.as_slice())
         .bind(plan.bundle_digest.as_slice())
         .bind(&plan.canonical_bytes)
@@ -337,6 +341,85 @@ impl Store {
         .await?;
         tx.commit().await?;
         Ok(bundle)
+    }
+
+    /// Evaluates a new checkout against the exact SCM baseline in one committed
+    /// transfer receipt. The returned decision is therefore derived from
+    /// destination truth, not caller-supplied copies of prior history.
+    pub async fn state_transfer_change_decision(
+        &self,
+        organization_id: Uuid,
+        receipt_id: Uuid,
+        source_job_id: &str,
+        next_checkout: &ScmState,
+        predicate: &ChangePredicate,
+    ) -> Result<PredicateDecision, StoreError> {
+        let canonical = self
+            .state_transfer_bundle(organization_id, receipt_id)
+            .await?
+            .ok_or_else(|| {
+                StoreError::InvalidStateTransfer(
+                    "state-transfer receipt does not exist in the tenant".to_owned(),
+                )
+            })?;
+        let bundle: StateBundle = serde_json::from_slice(&canonical).map_err(|error| {
+            StoreError::InvalidStateTransfer(format!(
+                "stored state-transfer bundle is invalid: {error}"
+            ))
+        })?;
+        let verified = transform(
+            &bundle,
+            &ExpectedBinding {
+                direction: bundle.binding.direction,
+                source: bundle.binding.source.clone(),
+                destination: bundle.binding.destination.clone(),
+                source_export_digest: bundle.binding.source_export_digest,
+                transform_implementation_digest: bundle.binding.transform_implementation_digest,
+                transform_configuration_digest: bundle.binding.transform_configuration_digest,
+                conflict_policy: bundle.binding.conflict_policy,
+            },
+            &BTreeMap::new(),
+        )
+        .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))?;
+        if verified.canonical_bytes != canonical {
+            return Err(StoreError::InvalidStateTransfer(
+                "stored state-transfer bundle is not canonical".to_owned(),
+            ));
+        }
+        let job = bundle
+            .jobs
+            .iter()
+            .find(|job| job.source_job_id == source_job_id)
+            .ok_or_else(|| {
+                StoreError::InvalidStateTransfer(
+                    "state-transfer job is absent from the committed receipt".to_owned(),
+                )
+            })?;
+        let previous_build = job.builds.last().ok_or_else(|| {
+            StoreError::InvalidStateTransfer(
+                "state-transfer job has no committed build baseline".to_owned(),
+            )
+        })?;
+        let previous_checkout = previous_build
+            .checkouts
+            .iter()
+            .find(|checkout| {
+                checkout.provider == next_checkout.provider
+                    && checkout.repository == next_checkout.repository
+                    && checkout.reference == next_checkout.reference
+            })
+            .ok_or_else(|| {
+                StoreError::InvalidStateTransfer(
+                    "new checkout has no identity-matched transferred baseline".to_owned(),
+                )
+            })?;
+        if next_checkout.previous_revision.as_deref() != Some(previous_checkout.revision.as_str()) {
+            return Err(StoreError::InvalidStateTransfer(
+                "new checkout does not continue the transferred SCM baseline".to_owned(),
+            ));
+        }
+        evaluate_change_predicate(next_checkout, predicate)
+            .map_err(|error| StoreError::InvalidStateTransfer(error.to_string()))
     }
 }
 

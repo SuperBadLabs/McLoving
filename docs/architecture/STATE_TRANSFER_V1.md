@@ -44,11 +44,18 @@ that input and every binding match, monotonically merges destination
 retention and active holds before publishing the receipt, appends audit truth,
 and writes the transactional outbox. Database triggers deny receipt/record
 mutation, protection deletion, deadline shortening, hold omission, and hold
-substitution even if an internal caller bypasses the Rust API.
+substitution even if an internal caller bypasses the Rust API. Receipt insertion
+also binds the raw canonical bundle and binding hashes to every indexed binding
+column; a deferred constraint requires the exact record-provenance set and
+matching audit/outbox proof before commit, so a direct runtime insert cannot
+publish partial or counterfeit committed truth.
 
 Reader and execution authority consume only a committed receipt. The rehearsal
-executes the first McLoving build through the real controller state machine with
-external-effect authority explicitly false, then exports the resulting history
+reloads and independently revalidates that receipt, resolves the exact prior SCM
+checkout, checks that the delivered revision continues it, and derives the
+change predicate decision from those committed records. It then executes the
+first McLoving build through the real controller state machine with
+external-effect authority explicitly false and exports the resulting history
 through the same versioned reverse transform.
 
 ## Filesystem and secret boundary
@@ -75,12 +82,12 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `d7e00947f72bbb9c7953f7d0c1e524f9561958e8dc7b3a5bef32f1f9cbc66606`;
-- source-evidence manifest SHA-256 `d9c369546daa948d86b31017a22da4cbf08bc5180c7b32a1b10fce6a3bdcfc80`;
-- forward bundle SHA-256 `ece806022af5c52432cc0ec8d89cdd11db0b656ebba1ab9a4da61f234fe0e8fd`;
-- reverse bundle SHA-256 `039a030b2a9c76f49d31930bec901095fefacd2ec37ee361159816e509330eec`;
-- reverse-evidence manifest SHA-256 `c6c833ca70ab5a99f5338623b9ddd8d1aae170e44e85304f36b139fbd614f3b4`;
-- sealed transform-evidence manifest SHA-256 `84780d5299a1ba16c53dd87613841eee53990f35c702f744e00e3dae70697634`.
+- transform binary SHA-256 `705c8a818e29815e694b8a44028def807806282a25678e53208035782d3018ff`;
+- source-evidence manifest SHA-256 `80e7f934e3231fe9c84123c7eface6a6353fa328b53807e61b3cc10404ef9ac9`;
+- forward bundle SHA-256 `df3bee2fc43be49a50a728bc7bcd55a4852c632f02784a3cf8166747ee3367b5`;
+- reverse bundle SHA-256 `04aec0a8053198f73c893e07fcff22c1f896a83cd07686e578e2dc31f89b4e48`;
+- reverse-evidence manifest SHA-256 `e0de7ae1f72ba619e198c5abfdc0a0ef6fab19b920f5346371d05a5d9268f554`;
+- sealed transform-evidence manifest SHA-256 `3d73d399db19729a8e55e66ef7b735988ecb0cfaa39a9d86cd3949ff906db185`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 112 record-provenance rows, eight effective

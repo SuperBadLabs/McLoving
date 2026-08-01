@@ -403,6 +403,21 @@ fn provenance_and_scm_substitution_fail_closed() {
         transform(&unmatched_scm, &expected, &BTreeMap::new()),
         Err(TransferError::ScmBaselineMismatch { .. })
     ));
+
+    let (mut duplicate_scm, duplicate_expected) = fixture(TransferDirection::JenkinsToMcLoving);
+    let mut duplicate_checkout = duplicate_scm.jobs[0].builds[1].checkouts[0].clone();
+    duplicate_checkout.record.id.push_str(":duplicate");
+    duplicate_checkout.record.source_digest = digest(98);
+    duplicate_checkout.revision = "duplicate-revision".to_owned();
+    duplicate_scm.jobs[0].builds[1]
+        .checkouts
+        .push(duplicate_checkout);
+    assert_eq!(
+        transform(&duplicate_scm, &duplicate_expected, &BTreeMap::new()),
+        Err(TransferError::InvalidField(
+            "SCM checkout identities must be unique within a build".to_owned()
+        ))
+    );
 }
 
 #[test]
