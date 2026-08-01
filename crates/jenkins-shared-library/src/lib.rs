@@ -1017,8 +1017,18 @@ fn collect_files(
             .strip_prefix(root)
             .map_err(|_| LibraryError::new("E_SOURCE_ENTRY", "source path escaped namespace"))?
             .to_str()
-            .ok_or_else(|| LibraryError::new("E_SOURCE_ENTRY", "source path is not UTF-8"))?
-            .replace('\\', "/");
+            .ok_or_else(|| LibraryError::new("E_SOURCE_ENTRY", "source path is not UTF-8"))?;
+        if std::path::MAIN_SEPARATOR != '\\' && relative.contains('\\') {
+            return Err(LibraryError::new(
+                "E_SOURCE_ENTRY",
+                "source path contains a non-separator backslash",
+            ));
+        }
+        let relative = if std::path::MAIN_SEPARATOR == '\\' {
+            relative.replace('\\', "/")
+        } else {
+            relative.to_owned()
+        };
         validate_relative(&relative)?;
         let metadata = entry
             .metadata()
@@ -1629,5 +1639,23 @@ mod tests {
             fs::set_permissions(directory, fs::Permissions::from_mode(0o755))
                 .expect("unseal nested directory");
         }
+
+        let backslash_fixture = TempDir::new().expect("backslash fixture");
+        let vars = backslash_fixture.path().join("vars");
+        fs::create_dir(&vars).expect("vars directory");
+        let ambiguous = vars.join("com\\Example.groovy");
+        fs::write(&ambiguous, b"def call() { true }\n").expect("ambiguous source file");
+        fs::set_permissions(&ambiguous, fs::Permissions::from_mode(0o444))
+            .expect("seal ambiguous source");
+        fs::set_permissions(&vars, fs::Permissions::from_mode(0o555)).expect("seal vars");
+        assert_eq!(
+            digest_namespace(backslash_fixture.path(), Namespace::Vars, true)
+                .expect_err("Unix backslash path")
+                .code,
+            "E_SOURCE_ENTRY"
+        );
+        fs::set_permissions(&vars, fs::Permissions::from_mode(0o755)).expect("unseal vars");
+        fs::set_permissions(&ambiguous, fs::Permissions::from_mode(0o644))
+            .expect("unseal ambiguous source");
     }
 }

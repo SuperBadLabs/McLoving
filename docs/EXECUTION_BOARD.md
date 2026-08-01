@@ -1014,11 +1014,13 @@ and
 `f925714595d48efcf29ea9c64696a99cd361b6a4a9b847c2d96b807a63add309`.
 Both digests are compiled into the verifier and independently reject a joint
 ledger/lock/source substitution.
-The authoritative bounded-traversal external evidence is
-`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T113730Z-v8`; its
+The authoritative path-collision-repaired external evidence is
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T114712Z-v9`; its
 self-excluding manifest SHA-256 is
-`0f41561942d065d178a86aec82a8bd2db522ee66ac4e591ee531316de913f7e5`
-and covers 522 files. The trust-root predecessor
+`971f0d6dc07c04257f54bb9757e1d26e557d62239282caa1b1bb11a5d0dc128f`
+and covers 522 files. The bounded-traversal predecessor
+`0f41561942d065d178a86aec82a8bd2db522ee66ac4e591ee531316de913f7e5`,
+trust-root predecessor
 `81ce26bd0335851b2e7deb7f292caa0a8cf725681afb947f5555a526c36cc44e`,
 complete-coverage predecessor
 `50bc61768682e225c6536d04db9dc940cf65a9ef164f956e336ca4f624448a5e`,
