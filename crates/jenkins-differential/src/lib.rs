@@ -33,6 +33,8 @@ pub const MCLOVING_DATABASE_IMAGE_SHA256: &str =
     "ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94";
 
 const MCLOVING_NETWORK: &str = "mcloving-diff001-net-v16";
+const MCLOVING_NETWORK_ID: &str =
+    "419ef843a49f10654293345dca7fde15e1363c5faf2a67f0d9a5d620fa28b3a5";
 const MCLOVING_PIPELINE_DIGEST: &str =
     "2a9b8b7bcd076950c67de874bd1e2b693af511ad55a7de3495d5c0b4210349d3";
 const MCLOVING_PIPELINE_DIGEST_BYTES: [u64; 32] = [
@@ -516,6 +518,17 @@ Finished: SUCCESS\n";
 }
 
 fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
+    let image_inspect = json(root, "jenkins/image-inspect.json")?;
+    let image = first_object(&image_inspect, "E_JENKINS_CONTAINMENT")?;
+    exact_string(
+        image,
+        &["Digest"],
+        &format!("sha256:{JENKINS_IMAGE_SHA256}"),
+        "E_JENKINS_CONTAINMENT",
+    )?;
+    exact_string(image, &["Architecture"], "amd64", "E_JENKINS_CONTAINMENT")?;
+    exact_string(image, &["Os"], "linux", "E_JENKINS_CONTAINMENT")?;
+
     let inspect = json(root, "jenkins/container-inspect.json")?;
     let container = inspect
         .as_array()
@@ -786,7 +799,7 @@ fn verify_jenkins_containment(root: &Path) -> Result<(), VerificationError> {
         exact_bool(mount, &["RW"], writable, "E_JENKINS_CONTAINMENT")?;
         exact_string(mount, &["Source"], source, "E_JENKINS_CONTAINMENT")?;
     }
-    let external = text(root, "jenkins/external-network.txt")?;
+    const EXPECTED_EXTERNAL_NETWORK: &str = "curl: (7) Failed to connect to 192.0.2.1 port 80 after 0 ms: Could not connect to server\nexit_code=7\n";
     const EXPECTED_RUNTIME: &str = "uid=1000(jenkins) gid=1000(jenkins) groups=1000(jenkins)\n\
 Linux b64bb5ef3f6e 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 GNU/Linux\n\
 LANG=C.UTF-8\n\
@@ -808,7 +821,7 @@ openjdk version \"21.0.11\" 2026-04-21 LTS\n\
 OpenJDK Runtime Environment Temurin-21.0.11+10 (build 21.0.11+10-LTS)\n\
 OpenJDK 64-Bit Server VM Temurin-21.0.11+10 (build 21.0.11+10-LTS, mixed mode)\n\
 2.568.1\n";
-    if !external.ends_with("exit_code=7\n")
+    if text(root, "jenkins/external-network.txt")? != EXPECTED_EXTERNAL_NETWORK
         || text(root, "jenkins/runtime.txt")? != EXPECTED_RUNTIME
     {
         return Err(VerificationError::new(
@@ -1010,11 +1023,57 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         "E_MCLOVING_CONTAINMENT",
     )?;
     exact_string(network, &["driver"], "bridge", "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        network,
+        &["id"],
+        MCLOVING_NETWORK_ID,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        network,
+        &["network_interface"],
+        "podman1",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        network,
+        &["created"],
+        "2026-08-01T08:11:04.170254308-05:00",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
     exact_bool(network, &["internal"], true, "E_MCLOVING_CONTAINMENT")?;
+    exact_bool(network, &["ipv6_enabled"], false, "E_MCLOVING_CONTAINMENT")?;
+    exact_bool(network, &["dns_enabled"], true, "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        network,
+        &["ipam_options", "driver"],
+        "host-local",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    let subnets = array(network, &["subnets"], "E_MCLOVING_CONTAINMENT")?;
+    if subnets.len() != 1 {
+        return Err(VerificationError::new(
+            "E_MCLOVING_CONTAINMENT",
+            "network subnet set is not exact",
+        ));
+    }
+    exact_string(
+        &subnets[0],
+        &["subnet"],
+        "10.89.0.0/24",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        &subnets[0],
+        &["gateway"],
+        "10.89.0.1",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
 
     let pre = json(root, "mcloving/runner-inspect-pre.json")?;
     let pre = first_object(&pre, "E_MCLOVING_CONTAINMENT")?;
     verify_runner_contract(pre, false)?;
+    verify_network_attachment(pre, "", "", 0, "", "6c58b760d4f6")?;
     exact_string(
         pre,
         &["State", "Status"],
@@ -1025,6 +1084,7 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
     let post = json(root, "mcloving/runner-inspect-post.json")?;
     let post = first_object(&post, "E_MCLOVING_CONTAINMENT")?;
     verify_runner_contract(post, true)?;
+    verify_network_attachment(post, "", "", 0, "", "6c58b760d4f6")?;
     exact_string(
         post,
         &["State", "Status"],
@@ -1047,6 +1107,14 @@ fn verify_mcloving_containment(root: &Path) -> Result<(), VerificationError> {
         2_147_483_648,
         2_000_000_000,
         256,
+    )?;
+    verify_network_attachment(
+        database,
+        "10.89.0.1",
+        "10.89.0.2",
+        24,
+        "62:4e:4f:34:09:2c",
+        "80e472c55998",
     )?;
     exact_string(
         database,
@@ -1421,6 +1489,67 @@ fn verify_common_container(
         &[MCLOVING_NETWORK],
         "E_MCLOVING_CONTAINMENT",
     )?;
+    Ok(())
+}
+
+fn verify_network_attachment(
+    container: &Value,
+    gateway: &str,
+    address: &str,
+    prefix: u64,
+    mac_address: &str,
+    alias: &str,
+) -> Result<(), VerificationError> {
+    let attachment = value(
+        container,
+        &["NetworkSettings", "Networks", MCLOVING_NETWORK],
+    )
+    .ok_or_else(|| {
+        VerificationError::new("E_MCLOVING_CONTAINMENT", "missing network attachment")
+    })?;
+    exact_string(
+        attachment,
+        &["NetworkID"],
+        MCLOVING_NETWORK,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(attachment, &["EndpointID"], "", "E_MCLOVING_CONTAINMENT")?;
+    exact_string(attachment, &["Gateway"], gateway, "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        attachment,
+        &["IPAddress"],
+        address,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_u64(
+        attachment,
+        &["IPPrefixLen"],
+        prefix,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(attachment, &["IPv6Gateway"], "", "E_MCLOVING_CONTAINMENT")?;
+    exact_string(
+        attachment,
+        &["GlobalIPv6Address"],
+        "",
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_u64(
+        attachment,
+        &["GlobalIPv6PrefixLen"],
+        0,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_string(
+        attachment,
+        &["MacAddress"],
+        mac_address,
+        "E_MCLOVING_CONTAINMENT",
+    )?;
+    exact_null(attachment, &["DriverOpts"], "E_MCLOVING_CONTAINMENT")?;
+    exact_null(attachment, &["IPAMConfig"], "E_MCLOVING_CONTAINMENT")?;
+    exact_null(attachment, &["Links"], "E_MCLOVING_CONTAINMENT")?;
+    exact_string_array(attachment, &["Aliases"], &[alias], "E_MCLOVING_CONTAINMENT")?;
     Ok(())
 }
 

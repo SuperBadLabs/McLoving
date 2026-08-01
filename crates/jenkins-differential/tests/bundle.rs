@@ -84,6 +84,24 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "E_JENKINS_CONTAINMENT",
         ),
         (
+            "jenkins/image-inspect.json",
+            "\"Architecture\": \"amd64\"",
+            "\"Architecture\": \"arm64\"",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/image-inspect.json",
+            "sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02",
+            "sha256:a4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
+            "jenkins/external-network.txt",
+            "curl: (7)",
+            "HTTP/1.1 200 OK\ncurl: (7)",
+            "E_JENKINS_CONTAINMENT",
+        ),
+        (
             "jenkins/console.txt",
             "Hello World\n[Pipeline] }",
             "Hello World\nunexpected output\n[Pipeline] }",
@@ -157,6 +175,12 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
         ),
         (
             "mcloving/runner-inspect-pre.json",
+            "\"NetworkID\": \"mcloving-diff001-net-v16\"",
+            "\"NetworkID\": \"external-bridge\"",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/runner-inspect-pre.json",
             "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@mcloving-diff001-db-v16:5432/mcloving",
             "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@substituted-db:5432/mcloving",
             "E_MCLOVING_CONTAINMENT",
@@ -201,6 +225,18 @@ fn self_consistent_semantic_and_containment_mutations_fail_closed() {
             "mcloving/postgres-inspect.json",
             "\"NetworkMode\": \"bridge\"",
             "\"NetworkMode\": \"host\"",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/postgres-inspect.json",
+            "\"NetworkID\": \"mcloving-diff001-net-v16\"",
+            "\"NetworkID\": \"external-bridge\"",
+            "E_MCLOVING_CONTAINMENT",
+        ),
+        (
+            "mcloving/network-inspect.json",
+            "\"internal\": true",
+            "\"internal\": false",
             "E_MCLOVING_CONTAINMENT",
         ),
         (
