@@ -255,6 +255,7 @@ pub struct AttemptState {
     pub retry: Option<AttemptRetryState>,
     pub result: BuildResult,
     pub terminal_reason: Option<AttemptTerminalReason>,
+    pub queued_at_unix_ms: i64,
     pub started_at_unix_ms: Option<i64>,
     pub ended_at_unix_ms: i64,
     pub audit_digest: Digest,
@@ -1452,6 +1453,17 @@ fn validate_graph_nodes(
                     ));
                 }
             }
+            if attempt.queued_at_unix_ms > attempt.ended_at_unix_ms
+                || attempt
+                    .started_at_unix_ms
+                    .is_some_and(|started_at_unix_ms| {
+                        attempt.queued_at_unix_ms > started_at_unix_ms
+                    })
+            {
+                return Err(TransferError::InvalidField(
+                    "attempt queue time must precede execution and terminal time".to_owned(),
+                ));
+            }
             if attempt.ended_at_unix_ms > build_ended_at_unix_ms {
                 return Err(TransferError::InvalidField(
                     "attempt timing must remain within its build window".to_owned(),
@@ -1465,6 +1477,14 @@ fn validate_graph_nodes(
             {
                 return Err(TransferError::InvalidField(
                     "attempt timing must be ordered and non-overlapping".to_owned(),
+                ));
+            }
+            if attempt_index > 0
+                && previous_attempt_end
+                    .is_some_and(|ended_at_unix_ms| attempt.queued_at_unix_ms < ended_at_unix_ms)
+            {
+                return Err(TransferError::InvalidField(
+                    "graph retry cannot be queued before its predecessor ends".to_owned(),
                 ));
             }
             previous_attempt_end = Some(attempt.ended_at_unix_ms);
@@ -1539,26 +1559,21 @@ fn validate_graph_nodes(
                     "graph node parent must name another node in the same build".to_owned(),
                 ));
             };
-            if let Some(child_attempt) = node
+            for child_attempt in node
                 .attempts
                 .iter()
-                .find(|attempt| attempt.started_at_unix_ms.is_some())
+                .filter(|attempt| attempt.started_at_unix_ms.is_some())
             {
                 let child_started_at_unix_ms = child_attempt
                     .started_at_unix_ms
                     .expect("executing child attempt has a start time");
+                let active_parent_attempt =
+                    parent.attempts.iter().rev().find(|attempt| {
+                        attempt.queued_at_unix_ms <= child_attempt.queued_at_unix_ms
+                    });
                 let satisfying_parent_attempt = match dependency.condition {
-                    GraphDependencyCondition::Completed => {
-                        parent.attempts.iter().rev().find(|attempt| {
-                            attempt.started_at_unix_ms.map_or(
-                                attempt.ended_at_unix_ms <= child_started_at_unix_ms,
-                                |started_at_unix_ms| started_at_unix_ms <= child_started_at_unix_ms,
-                            )
-                        })
-                    }
-                    GraphDependencyCondition::Succeeded => parent
-                        .attempts
-                        .last()
+                    GraphDependencyCondition::Completed => active_parent_attempt,
+                    GraphDependencyCondition::Succeeded => active_parent_attempt
                         .filter(|attempt| attempt.result == BuildResult::Succeeded),
                 };
                 if satisfying_parent_attempt.is_none() {
@@ -1580,6 +1595,33 @@ fn validate_graph_nodes(
                             .to_owned(),
                     ));
                 }
+            }
+        }
+        for attempt in node.attempts.iter().filter(|attempt| {
+            attempt.terminal_reason == Some(AttemptTerminalReason::DependencyNotSucceeded)
+        }) {
+            let has_failed_dependency = node.dependencies.iter().any(|dependency| {
+                if dependency.condition != GraphDependencyCondition::Succeeded {
+                    return false;
+                }
+                nodes
+                    .iter()
+                    .find(|candidate| candidate.node_id == dependency.parent_node_id)
+                    .and_then(|parent| {
+                        parent.attempts.iter().rev().find(|parent_attempt| {
+                            parent_attempt.queued_at_unix_ms <= attempt.queued_at_unix_ms
+                        })
+                    })
+                    .is_some_and(|parent_attempt| {
+                        parent_attempt.result != BuildResult::Succeeded
+                            && parent_attempt.ended_at_unix_ms <= attempt.ended_at_unix_ms
+                    })
+            });
+            if !has_failed_dependency {
+                return Err(TransferError::InvalidField(
+                    "dependency-skipped attempt requires an unsatisfied succeeded dependency"
+                        .to_owned(),
+                ));
             }
         }
     }

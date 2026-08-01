@@ -47,13 +47,17 @@ unique within their destination lists, and each object kind must match its
 containing list. Every artifact's producer build number must also match the
 build that contains it; retained-workspace provenance remains job-scoped.
 Graph-node attempts are contiguous and bounded by their owning build. Executing
-attempts carry durable running timestamps and are ordered and non-overlapping.
+attempts carry durable queue/creation and running timestamps and are ordered
+and non-overlapping; a retry cannot be queued before its predecessor terminates.
 A queued attempt terminalized without execution instead carries an explicit
 terminal-only reason and no fabricated start time. The accepted reasons are
 `fail_fast_skipped`, `dependency_not_succeeded`,
 `dag_cancelled_before_execution`, and `cancelled_before_execution`; each has an
 exact skipped or aborted node outcome, and only the controller-reopenable skip
-reasons may precede a retry that names that exact terminal-only attempt.
+reasons may precede a retry that names that exact terminal-only attempt. An
+unsatisfied-dependency skip must also bind an actual `succeeded` edge to the
+active non-successful parent generation; the terminal reason alone is not
+accepted as evidence.
 
 ## Persistence and reconciliation
 
@@ -130,14 +134,15 @@ The accepted disposable rehearsal used:
 
 - Jenkins image `docker.io/jenkins/jenkins@sha256:f4f65e6cd1405cd889b7f5ac33f9d5cdc2a099de6b87fe8a3933b9c5d53d1d02`;
 - PostgreSQL image `docker.io/library/postgres@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94`;
-- transform binary SHA-256 `44472c6f40e6989650336132d67bad8ee7bbef2cae0fa0a4581e2f91d8259cc9`;
-- source-evidence manifest SHA-256 `0ad53688225747414f06341672ed2ce773c91aea1a908af3fd50f1fe708c71c3`;
-- forward bundle SHA-256 `a606f6ebc0735bcf92c28052c1dd1a73d3f3b0e0713b0676dddb66a82c69054a`;
-- reverse bundle SHA-256 `233cd2cdbf4401184fa2bcbd84560a268c62ef8d8b02058aa8d465340e7fa7d3`;
-- reverse-evidence manifest SHA-256 `7b4c4822c30a2753c8f23c7d04f5eca7685e1c21f71ea8efbff546d1db626121`;
-- sealed transform-evidence manifest SHA-256 `c129e28a4ca7ccc264d44b30294341f4aa13a817ebee252afc1687711026db08`;
-- full imported-build verification receipt SHA-256 `22385a7f3c350dc2993c868d5f49be01ceefa904d839c22f9912c6828dd0e12e`;
+- transform binary SHA-256 `6b291920b3de1ddc227170878bf1f6fe55e3323994a8ad017a15006e8821f909`;
+- source-evidence manifest SHA-256 `a6d3fb553121d9b38fc2790db1272074228f1e0e5df98a352b0b5af56d4a7392`;
+- forward bundle SHA-256 `605e87a96ee291b7ff269467c1db0a5b096b3e88b4598b27c781f902a82c5bd0`;
+- reverse bundle SHA-256 `065be4e468d9a8b09177dc21271e0a7f313ee81f2b184296ba70032354fc9891`;
+- reverse-evidence manifest SHA-256 `1d9a7666ada0ace06ea3a052216825c7135b0c36feed9ed25220f00249083d5b`;
+- sealed transform-evidence manifest SHA-256 `3aecff616991375d0d4514fa2a7028fe196621c3db4b732732ec3a177fbd3a90`;
+- full imported-build verification receipt SHA-256 `9f60559a2e6312529197c15bca056be7a182060891bb593361c7c557e0f15fce`;
 - imported protection-record SHA-256 `ae301c2fe1fa002fcc1d9b583ccd9a56f8c6a50f59911545356b5affcd0b285e`.
+- imported retry-history receipt SHA-256 `46e0c3c1a9adb1c35fff65b3bc9316db5e232afa24fa5e54fece34758b7a1b8c`.
 
 The exact database contained three receipts (destination protection seed,
 forward import, reverse import), 147 record-provenance rows, nine effective
@@ -149,10 +154,13 @@ cursor-ordered committed logs, artifacts, and checkout. Graph edges preserve
 their exact `succeeded` or `completed` dependency condition. A Jenkins stage
 that follows an observed non-successful predecessor, including a `when`-skipped
 `NOT_EXECUTED` stage, receives a `completed` edge rather than a fabricated
-`succeeded` edge. Validation binds a `completed` edge to the first completed
-parent attempt and a `succeeded` edge to the final successful parent attempt;
-it rejects a child that starts before that event or has no successful parent
-attempt. Every retry explicitly names its immediately preceding attempt and its
+`succeeded` edge. Validation uses each child attempt's durable queue time to
+select the latest parent generation already admitted for either dependency
+condition. It then requires that exact generation to be terminal for
+`completed`, successful for `succeeded`, and ended before the child starts.
+This preserves children admitted before a later parent retry while rejecting
+children started during executing or terminal-only active retries. Every retry
+explicitly names its immediately preceding attempt and its
 reason. A failed predecessor requires `failed`; an aborted predecessor is
 eligible only with its exact reopenable terminal-only reason; dependency skips
 use `dependency_not_succeeded`, while pre-execution cancellations remain final.

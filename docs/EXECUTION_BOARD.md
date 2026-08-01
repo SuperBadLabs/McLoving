@@ -931,8 +931,9 @@ sealed native workflow API rather than fabricated stage names or build-wide
 timestamps. McLoving build 3 is a five-node PostgreSQL DAG whose graph,
 per-attempt timestamps and terminal outcomes, committed logs, available-artifact
 inventory, and fenced checkout are reread from controller truth before export.
-Executing-attempt starts come from durable `attempt.running` events rather than
-admission timestamps. Fail-fast skips, unsatisfied-dependency skips, and queued
+Attempt queue times come from durable attempt creation and executing-attempt
+starts come from durable `attempt.running` events. Fail-fast skips,
+unsatisfied-dependency skips, and queued
 pre-execution cancellations are typed terminal-only attempts with no fabricated
 start time; terminal timestamps remain monotonic, and logs are exported in the
 global controller commit-cursor order.
@@ -942,11 +943,14 @@ and imported Jenkins successors after observed non-successful stages use
 predate the first parent attempt that satisfies their exact condition;
 `succeeded` edges require the final parent attempt to be successful, and child
 chronology uses the first actually executing attempt rather than an earlier
-terminal-only skipped placeholder. `completed` edges bind to the latest parent
-generation already begun at child start, preserving both reopened-parent waits
+terminal-only skipped placeholder. `completed` and `succeeded` edges bind to
+the latest parent generation admitted at the child attempt's queue time,
+preserving both reopened-parent waits
 and children completed before a later retry. Every retry
 names its immediately preceding attempt and reason: `failed` for failed
-predecessors and `fail_fast_skipped` for fail-fast-aborted predecessors.
+predecessors, `fail_fast_skipped` for fail-fast-aborted predecessors, and
+`dependency_not_succeeded` only when an actual active non-successful parent
+generation supports the skip.
 Missing, reordered, mismatched, and post-success lineage fails closed. Later
 failed parent retries on `completed` edges do not invalidate already-admitted
 descendants.
@@ -961,14 +965,14 @@ materializes the sealed retained-workspace inventory, makes its exact
 `src/first.target` bytes a build-3 input, reverse-exports those bytes as a
 build-owned artifact, and independently retrieves and compares that artifact
 from Jenkins. Its exact transform binary SHA-256 is
-`44472c6f40e6989650336132d67bad8ee7bbef2cae0fa0a4581e2f91d8259cc9`.
+`6b291920b3de1ddc227170878bf1f6fe55e3323994a8ad017a15006e8821f909`.
 Its source, transform, and reverse manifest SHA-256 values are
-`0ad53688225747414f06341672ed2ce773c91aea1a908af3fd50f1fe708c71c3`,
-`c129e28a4ca7ccc264d44b30294341f4aa13a817ebee252afc1687711026db08`,
-and `7b4c4822c30a2753c8f23c7d04f5eca7685e1c21f71ea8efbff546d1db626121`;
+`a6d3fb553121d9b38fc2790db1272074228f1e0e5df98a352b0b5af56d4a7392`,
+`3aecff616991375d0d4514fa2a7028fe196621c3db4b732732ec3a177fbd3a90`,
+and `1d9a7666ada0ace06ea3a052216825c7135b0c36feed9ed25220f00249083d5b`;
 the forward and reverse bundle SHA-256 values are
-`a606f6ebc0735bcf92c28052c1dd1a73d3f3b0e0713b0676dddb66a82c69054a`
-and `233cd2cdbf4401184fa2bcbd84560a268c62ef8d8b02058aa8d465340e7fa7d3`.
+`605e87a96ee291b7ff269467c1db0a5b096b3e88b4598b27c781f902a82c5bd0`
+and `065be4e468d9a8b09177dc21271e0a7f313ee81f2b184296ba70032354fc9891`.
 An injected post-install failure restored repository, build, permalink, and
 next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed

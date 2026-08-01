@@ -918,6 +918,7 @@ fn parse_jenkins_workflow(workflow: &Value, number: u64) -> Result<Vec<GraphNode
                 retry: None,
                 result,
                 terminal_reason: None,
+                queued_at_unix_ms: start,
                 started_at_unix_ms: Some(start),
                 ended_at_unix_ms: start
                     .checked_add(duration)
@@ -1632,6 +1633,7 @@ async fn run_effect_free_build(
                 retry,
                 result: build_result(&attempt.status)?,
                 terminal_reason,
+                queued_at_unix_ms: attempt.created_at_unix_ms,
                 started_at_unix_ms: attempt.started_at_unix_ms,
                 ended_at_unix_ms: attempt_ended,
                 audit_digest: sha256(&attempt_bytes),
