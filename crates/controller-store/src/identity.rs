@@ -214,116 +214,31 @@ impl Store {
         validate_provider(input)?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         lock_identity_provisioning(&mut tx, input.organization_id).await?;
-        let current = sqlx::query_as::<_, ProviderRow>(
-            "SELECT provider_id, issuer, audience, authorization_endpoint,
-                    token_endpoint, jwks_uri, client_id, group_claim,
-                    configuration_generation, configuration_digest,
-                    jwks_generation, jwks_digest, enabled
-             FROM identity_providers
-             WHERE organization_id = $1 AND provider_id = $2
-             FOR UPDATE",
-        )
-        .bind(input.organization_id)
-        .bind(input.provider_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        if let Some(current) = current {
-            let current = provider_from_row(current)?;
-            if current == provider_from_write(input) {
-                tx.commit().await?;
-                return Ok(current);
-            }
-            if input.issuer != current.issuer {
-                return Err(StoreError::IdentityConflict(
-                    "an identity-provider issuer is immutable; replacement requires a new provider and reviewed identity mappings"
-                        .to_owned(),
-                ));
-            }
-            if input.configuration_generation != current.configuration_generation + 1
-                || input.jwks_generation < current.jwks_generation
-            {
-                return Err(StoreError::IdentityConflict(
-                    "identity-provider generations must advance exactly and never regress"
-                        .to_owned(),
-                ));
-            }
-            sqlx::query(
-                "UPDATE identity_providers
-                 SET issuer = $3, audience = $4, authorization_endpoint = $5,
-                     token_endpoint = $6, jwks_uri = $7, client_id = $8,
-                     group_claim = $9, configuration_generation = $10,
-                     configuration_digest = $11, jwks_generation = $12,
-                     jwks_digest = $13, enabled = $14,
-                     updated_at = clock_timestamp()
-                 WHERE organization_id = $1 AND provider_id = $2",
-            )
-            .bind(input.organization_id)
-            .bind(input.provider_id)
-            .bind(&input.issuer)
-            .bind(&input.audience)
-            .bind(&input.authorization_endpoint)
-            .bind(&input.token_endpoint)
-            .bind(&input.jwks_uri)
-            .bind(&input.client_id)
-            .bind(&input.group_claim)
-            .bind(input.configuration_generation)
-            .bind(input.configuration_digest.as_slice())
-            .bind(input.jwks_generation)
-            .bind(input.jwks_digest.as_slice())
-            .bind(input.enabled)
-            .execute(&mut *tx)
-            .await?;
-        } else {
-            if input.configuration_generation != 1 || input.jwks_generation != 1 {
-                return Err(StoreError::IdentityConflict(
-                    "a new identity provider must begin at generation one".to_owned(),
-                ));
-            }
-            sqlx::query(
-                "INSERT INTO identity_providers(
-                     organization_id, provider_id, issuer, audience,
-                     authorization_endpoint, token_endpoint, jwks_uri, client_id,
-                     group_claim, configuration_generation, configuration_digest,
-                     jwks_generation, jwks_digest, enabled
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
-            )
-            .bind(input.organization_id)
-            .bind(input.provider_id)
-            .bind(&input.issuer)
-            .bind(&input.audience)
-            .bind(&input.authorization_endpoint)
-            .bind(&input.token_endpoint)
-            .bind(&input.jwks_uri)
-            .bind(&input.client_id)
-            .bind(&input.group_claim)
-            .bind(input.configuration_generation)
-            .bind(input.configuration_digest.as_slice())
-            .bind(input.jwks_generation)
-            .bind(input.jwks_digest.as_slice())
-            .bind(input.enabled)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        append_audit_record(
-            &mut tx,
-            input.organization_id,
-            "identity",
-            &input.actor_subject,
-            "identity_provider_provisioned",
-            &format!("identity-provider:{}", input.provider_id),
-            json!({
-                "configuration_generation": input.configuration_generation,
-                "configuration_digest": hex::encode(input.configuration_digest),
-                "jwks_generation": input.jwks_generation,
-                "jwks_digest": hex::encode(input.jwks_digest),
-                "enabled": input.enabled,
-            }),
-        )
-        .await?;
+        let provider = provision_identity_provider_in_transaction(&mut tx, input).await?;
         tx.commit().await?;
-        Ok(provider_from_write(input))
+        Ok(provider)
+    }
+
+    /// Atomically rolls out the public API credential and its OIDC provider configuration.
+    ///
+    /// A rejected half of the rollout rolls back the other half, preserving the previously
+    /// deployable controller configuration and API credential.
+    pub async fn provision_controller_authentication(
+        &self,
+        credential: &NewServiceCredential,
+        provider: &IdentityProviderWrite,
+    ) -> Result<(ServiceCredential, IdentityProviderConfig), StoreError> {
+        if credential.organization_id != provider.organization_id {
+            return invalid("service credential and identity provider must share an organization");
+        }
+        validate_service_credential(credential)?;
+        validate_provider(provider)?;
+        let mut tx = self.tenant_transaction(credential.organization_id).await?;
+        lock_identity_provisioning(&mut tx, credential.organization_id).await?;
+        let provider = provision_identity_provider_in_transaction(&mut tx, provider).await?;
+        let credential = provision_service_credential_in_transaction(&mut tx, credential).await?;
+        tx.commit().await?;
+        Ok((credential, provider))
     }
 
     pub async fn transition_identity_provider_enabled(
@@ -643,133 +558,12 @@ impl Store {
         &self,
         input: &NewServiceCredential,
     ) -> Result<ServiceCredential, StoreError> {
-        validate_canonical(&input.actor_subject, "actor subject", 512)?;
-        if input.generation <= 0 || input.issued_at_unix_ms < 0 {
-            return invalid("service credential generation or timestamp is invalid");
-        }
-        if input
-            .expires_at_unix_ms
-            .is_some_and(|value| value <= input.issued_at_unix_ms)
-        {
-            return invalid("service credential expiry must follow issuance");
-        }
+        validate_service_credential(input)?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         lock_identity_provisioning(&mut tx, input.organization_id).await?;
-        let existing =
-            sqlx::query_as::<_, (Uuid, Uuid, i64, Vec<u8>, i64, Option<i64>, Option<i64>)>(
-                "SELECT credential_id, identity_id, generation, token_digest, issued_at_unix_ms,
-                    expires_at_unix_ms, revoked_at_unix_ms
-             FROM service_credentials
-             WHERE organization_id = $1 AND (credential_id = $2 OR token_digest = $3)",
-            )
-            .bind(input.organization_id)
-            .bind(input.credential_id)
-            .bind(input.token_digest.as_slice())
-            .fetch_optional(&mut *tx)
-            .await?;
-        if let Some(existing) = existing {
-            if existing.0 == input.credential_id
-                && existing.1 == input.identity_id
-                && existing.2 == input.generation
-                && existing.3.as_slice() == input.token_digest
-                && existing.5 == input.expires_at_unix_ms
-                && existing.6.is_none()
-            {
-                tx.commit().await?;
-                return Ok(ServiceCredential {
-                    credential_id: existing.0,
-                    identity_id: existing.1,
-                    generation: existing.2,
-                    issued_at_unix_ms: existing.4,
-                    expires_at_unix_ms: existing.5,
-                    revoked_at_unix_ms: existing.6,
-                });
-            }
-            return Err(StoreError::IdentityConflict(
-                "service credential collides with an existing binding".to_owned(),
-            ));
-        }
-        let identity = sqlx::query_as::<_, (String, String)>(
-            "SELECT kind, lifecycle_state FROM identities
-             WHERE organization_id = $1 AND id = $2 FOR UPDATE",
-        )
-        .bind(input.organization_id)
-        .bind(input.identity_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or_else(|| StoreError::IdentityConflict("service identity is unknown".to_owned()))?;
-        if identity.0 != "service" || identity.1 != "active" {
-            return Err(StoreError::IdentityConflict(
-                "service credential requires an active service identity".to_owned(),
-            ));
-        }
-        let next_generation = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(max(generation), 0) + 1 FROM service_credentials
-             WHERE organization_id = $1 AND identity_id = $2",
-        )
-        .bind(input.organization_id)
-        .bind(input.identity_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if input.generation != next_generation {
-            return Err(StoreError::IdentityConflict(
-                "service credential generation must advance exactly".to_owned(),
-            ));
-        }
-        reject_credential_digest_collision(&mut tx, input.organization_id, &input.token_digest)
-            .await?;
-        sqlx::query(
-            "INSERT INTO service_credentials(
-                 organization_id, credential_id, identity_id, generation,
-                 token_digest, issued_at_unix_ms, expires_at_unix_ms
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-        )
-        .bind(input.organization_id)
-        .bind(input.credential_id)
-        .bind(input.identity_id)
-        .bind(input.generation)
-        .bind(input.token_digest.as_slice())
-        .bind(input.issued_at_unix_ms)
-        .bind(input.expires_at_unix_ms)
-        .execute(&mut *tx)
-        .await?;
-        let superseded = sqlx::query(
-            "UPDATE service_credentials
-             SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $4),
-                 revocation_reason = 'superseded_generation'
-             WHERE organization_id = $1 AND identity_id = $2
-               AND credential_id <> $3 AND revoked_at_unix_ms IS NULL",
-        )
-        .bind(input.organization_id)
-        .bind(input.identity_id)
-        .bind(input.credential_id)
-        .bind(input.issued_at_unix_ms)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        append_audit_record(
-            &mut tx,
-            input.organization_id,
-            "identity",
-            &input.actor_subject,
-            "service_credential_provisioned",
-            &format!("service-credential:{}", input.credential_id),
-            json!({
-                "identity_id": input.identity_id,
-                "generation": input.generation,
-                "superseded_credentials": superseded,
-            }),
-        )
-        .await?;
+        let credential = provision_service_credential_in_transaction(&mut tx, input).await?;
         tx.commit().await?;
-        Ok(ServiceCredential {
-            credential_id: input.credential_id,
-            identity_id: input.identity_id,
-            generation: input.generation,
-            issued_at_unix_ms: input.issued_at_unix_ms,
-            expires_at_unix_ms: input.expires_at_unix_ms,
-            revoked_at_unix_ms: None,
-        })
+        Ok(credential)
     }
 
     pub async fn record_oidc_login_attempt(&self, input: &LoginAttempt) -> Result<(), StoreError> {
@@ -1694,6 +1488,250 @@ fn validate_provider(input: &IdentityProviderWrite) -> Result<(), StoreError> {
         return invalid("identity provider generations must be positive");
     }
     Ok(())
+}
+
+fn validate_service_credential(input: &NewServiceCredential) -> Result<(), StoreError> {
+    validate_canonical(&input.actor_subject, "actor subject", 512)?;
+    if input.generation <= 0 || input.issued_at_unix_ms < 0 {
+        return invalid("service credential generation or timestamp is invalid");
+    }
+    if input
+        .expires_at_unix_ms
+        .is_some_and(|value| value <= input.issued_at_unix_ms)
+    {
+        return invalid("service credential expiry must follow issuance");
+    }
+    Ok(())
+}
+
+async fn provision_identity_provider_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: &IdentityProviderWrite,
+) -> Result<IdentityProviderConfig, StoreError> {
+    let current = sqlx::query_as::<_, ProviderRow>(
+        "SELECT provider_id, issuer, audience, authorization_endpoint,
+                token_endpoint, jwks_uri, client_id, group_claim,
+                configuration_generation, configuration_digest,
+                jwks_generation, jwks_digest, enabled
+         FROM identity_providers
+         WHERE organization_id = $1 AND provider_id = $2
+         FOR UPDATE",
+    )
+    .bind(input.organization_id)
+    .bind(input.provider_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some(current) = current {
+        let current = provider_from_row(current)?;
+        if current == provider_from_write(input) {
+            return Ok(current);
+        }
+        if input.issuer != current.issuer {
+            return Err(StoreError::IdentityConflict(
+                "an identity-provider issuer is immutable; replacement requires a new provider and reviewed identity mappings"
+                    .to_owned(),
+            ));
+        }
+        if input.configuration_generation != current.configuration_generation + 1
+            || input.jwks_generation < current.jwks_generation
+        {
+            return Err(StoreError::IdentityConflict(
+                "identity-provider generations must advance exactly and never regress".to_owned(),
+            ));
+        }
+        sqlx::query(
+            "UPDATE identity_providers
+             SET issuer = $3, audience = $4, authorization_endpoint = $5,
+                 token_endpoint = $6, jwks_uri = $7, client_id = $8,
+                 group_claim = $9, configuration_generation = $10,
+                 configuration_digest = $11, jwks_generation = $12,
+                 jwks_digest = $13, enabled = $14,
+                 updated_at = clock_timestamp()
+             WHERE organization_id = $1 AND provider_id = $2",
+        )
+        .bind(input.organization_id)
+        .bind(input.provider_id)
+        .bind(&input.issuer)
+        .bind(&input.audience)
+        .bind(&input.authorization_endpoint)
+        .bind(&input.token_endpoint)
+        .bind(&input.jwks_uri)
+        .bind(&input.client_id)
+        .bind(&input.group_claim)
+        .bind(input.configuration_generation)
+        .bind(input.configuration_digest.as_slice())
+        .bind(input.jwks_generation)
+        .bind(input.jwks_digest.as_slice())
+        .bind(input.enabled)
+        .execute(&mut **tx)
+        .await?;
+    } else {
+        if input.configuration_generation != 1 || input.jwks_generation != 1 {
+            return Err(StoreError::IdentityConflict(
+                "a new identity provider must begin at generation one".to_owned(),
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO identity_providers(
+                 organization_id, provider_id, issuer, audience,
+                 authorization_endpoint, token_endpoint, jwks_uri, client_id,
+                 group_claim, configuration_generation, configuration_digest,
+                 jwks_generation, jwks_digest, enabled
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
+        )
+        .bind(input.organization_id)
+        .bind(input.provider_id)
+        .bind(&input.issuer)
+        .bind(&input.audience)
+        .bind(&input.authorization_endpoint)
+        .bind(&input.token_endpoint)
+        .bind(&input.jwks_uri)
+        .bind(&input.client_id)
+        .bind(&input.group_claim)
+        .bind(input.configuration_generation)
+        .bind(input.configuration_digest.as_slice())
+        .bind(input.jwks_generation)
+        .bind(input.jwks_digest.as_slice())
+        .bind(input.enabled)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    append_audit_record(
+        tx,
+        input.organization_id,
+        "identity",
+        &input.actor_subject,
+        "identity_provider_provisioned",
+        &format!("identity-provider:{}", input.provider_id),
+        json!({
+            "configuration_generation": input.configuration_generation,
+            "configuration_digest": hex::encode(input.configuration_digest),
+            "jwks_generation": input.jwks_generation,
+            "jwks_digest": hex::encode(input.jwks_digest),
+            "enabled": input.enabled,
+        }),
+    )
+    .await?;
+    Ok(provider_from_write(input))
+}
+
+async fn provision_service_credential_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: &NewServiceCredential,
+) -> Result<ServiceCredential, StoreError> {
+    let existing = sqlx::query_as::<_, (Uuid, Uuid, i64, Vec<u8>, i64, Option<i64>, Option<i64>)>(
+        "SELECT credential_id, identity_id, generation, token_digest, issued_at_unix_ms,
+                    expires_at_unix_ms, revoked_at_unix_ms
+             FROM service_credentials
+             WHERE organization_id = $1 AND (credential_id = $2 OR token_digest = $3)",
+    )
+    .bind(input.organization_id)
+    .bind(input.credential_id)
+    .bind(input.token_digest.as_slice())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(existing) = existing {
+        if existing.0 == input.credential_id
+            && existing.1 == input.identity_id
+            && existing.2 == input.generation
+            && existing.3.as_slice() == input.token_digest
+            && existing.5 == input.expires_at_unix_ms
+            && existing.6.is_none()
+        {
+            return Ok(ServiceCredential {
+                credential_id: existing.0,
+                identity_id: existing.1,
+                generation: existing.2,
+                issued_at_unix_ms: existing.4,
+                expires_at_unix_ms: existing.5,
+                revoked_at_unix_ms: existing.6,
+            });
+        }
+        return Err(StoreError::IdentityConflict(
+            "service credential collides with an existing binding".to_owned(),
+        ));
+    }
+    let identity = sqlx::query_as::<_, (String, String)>(
+        "SELECT kind, lifecycle_state FROM identities
+         WHERE organization_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(input.organization_id)
+    .bind(input.identity_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| StoreError::IdentityConflict("service identity is unknown".to_owned()))?;
+    if identity.0 != "service" || identity.1 != "active" {
+        return Err(StoreError::IdentityConflict(
+            "service credential requires an active service identity".to_owned(),
+        ));
+    }
+    let next_generation = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(max(generation), 0) + 1 FROM service_credentials
+         WHERE organization_id = $1 AND identity_id = $2",
+    )
+    .bind(input.organization_id)
+    .bind(input.identity_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if input.generation != next_generation {
+        return Err(StoreError::IdentityConflict(
+            "service credential generation must advance exactly".to_owned(),
+        ));
+    }
+    reject_credential_digest_collision(tx, input.organization_id, &input.token_digest).await?;
+    sqlx::query(
+        "INSERT INTO service_credentials(
+             organization_id, credential_id, identity_id, generation,
+             token_digest, issued_at_unix_ms, expires_at_unix_ms
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+    )
+    .bind(input.organization_id)
+    .bind(input.credential_id)
+    .bind(input.identity_id)
+    .bind(input.generation)
+    .bind(input.token_digest.as_slice())
+    .bind(input.issued_at_unix_ms)
+    .bind(input.expires_at_unix_ms)
+    .execute(&mut **tx)
+    .await?;
+    let superseded = sqlx::query(
+        "UPDATE service_credentials
+         SET revoked_at_unix_ms = GREATEST(issued_at_unix_ms, $4),
+             revocation_reason = 'superseded_generation'
+         WHERE organization_id = $1 AND identity_id = $2
+           AND credential_id <> $3 AND revoked_at_unix_ms IS NULL",
+    )
+    .bind(input.organization_id)
+    .bind(input.identity_id)
+    .bind(input.credential_id)
+    .bind(input.issued_at_unix_ms)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    append_audit_record(
+        tx,
+        input.organization_id,
+        "identity",
+        &input.actor_subject,
+        "service_credential_provisioned",
+        &format!("service-credential:{}", input.credential_id),
+        json!({
+            "identity_id": input.identity_id,
+            "generation": input.generation,
+            "superseded_credentials": superseded,
+        }),
+    )
+    .await?;
+    Ok(ServiceCredential {
+        credential_id: input.credential_id,
+        identity_id: input.identity_id,
+        generation: input.generation,
+        issued_at_unix_ms: input.issued_at_unix_ms,
+        expires_at_unix_ms: input.expires_at_unix_ms,
+        revoked_at_unix_ms: None,
+    })
 }
 
 async fn load_principal(

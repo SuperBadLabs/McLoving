@@ -63,6 +63,116 @@ fn digest(label: &str) -> [u8; 32] {
 }
 
 #[tokio::test]
+async fn controller_authentication_rollout_is_atomic() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    admin
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            Uuid::new_v4(),
+            "controller-authentication-atomicity",
+        )
+        .await
+        .expect("create controller authentication test tenant");
+    let provider = IdentityProviderWrite {
+        organization_id,
+        provider_id: Uuid::new_v4(),
+        issuer: "https://id.example.test".to_owned(),
+        audience: "mcloving".to_owned(),
+        authorization_endpoint: "https://id.example.test/authorize".to_owned(),
+        token_endpoint: "https://id.example.test/token".to_owned(),
+        jwks_uri: "https://id.example.test/jwks".to_owned(),
+        client_id: "mcloving".to_owned(),
+        group_claim: "groups".to_owned(),
+        configuration_generation: 1,
+        configuration_digest: digest("atomic-provider-v1"),
+        jwks_generation: 1,
+        jwks_digest: digest("atomic-jwks-v1"),
+        enabled: true,
+        actor_subject: "bootstrap:controller".to_owned(),
+    };
+    admin
+        .provision_identity_provider(&provider)
+        .await
+        .expect("provision initial provider");
+    let identity_id = Uuid::new_v4();
+    admin
+        .provision_service_identity(&NewServiceIdentity {
+            organization_id,
+            identity_id,
+            subject: format!("service:public-api:{identity_id}"),
+            scopes: BTreeSet::from([ServiceScope::ProjectRead]),
+            actor_subject: "bootstrap:controller".to_owned(),
+        })
+        .await
+        .expect("provision public API identity");
+    let original_token = digest("atomic-api-token-v1");
+    admin
+        .provision_service_credential(&NewServiceCredential {
+            organization_id,
+            credential_id: Uuid::new_v4(),
+            identity_id,
+            generation: 1,
+            token_digest: original_token,
+            issued_at_unix_ms: 10_000,
+            expires_at_unix_ms: None,
+            actor_subject: "bootstrap:controller".to_owned(),
+        })
+        .await
+        .expect("provision original public API credential");
+
+    let rejected_token = digest("atomic-api-token-v2-rejected");
+    assert!(
+        admin
+            .provision_controller_authentication(
+                &NewServiceCredential {
+                    organization_id,
+                    credential_id: Uuid::new_v4(),
+                    identity_id,
+                    generation: 2,
+                    token_digest: rejected_token,
+                    issued_at_unix_ms: 10_100,
+                    expires_at_unix_ms: None,
+                    actor_subject: "bootstrap:controller".to_owned(),
+                },
+                &IdentityProviderWrite {
+                    issuer: "https://replacement-id.example.test".to_owned(),
+                    configuration_generation: 2,
+                    configuration_digest: digest("atomic-provider-v2-rejected"),
+                    ..provider.clone()
+                },
+            )
+            .await
+            .is_err(),
+        "an invalid provider rollout must reject the whole controller authentication bundle"
+    );
+    admin
+        .authenticate_api_token(organization_id, original_token, 10_101)
+        .await
+        .expect("the original API credential survives a rejected provider rollout");
+    assert!(
+        admin
+            .authenticate_api_token(organization_id, rejected_token, 10_101)
+            .await
+            .is_err(),
+        "the rejected API credential must not be persisted"
+    );
+    assert_eq!(
+        admin
+            .identity_provider_config(organization_id, provider.provider_id)
+            .await
+            .expect("load provider after rejected rollout")
+            .configuration_generation,
+        1,
+        "the provider generation must also remain unchanged"
+    );
+}
+
+#[tokio::test]
 async fn identity_sessions_and_service_credentials_are_fenced_and_audited() {
     let Some(admin) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");

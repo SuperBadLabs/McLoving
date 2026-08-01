@@ -106,24 +106,26 @@ async fn main() -> Result<()> {
     let credential_id = deterministic_uuid(&format!(
         "mcloving:service-credential:{api_identity_id}:{bearer_generation}"
     ));
-    migration_store
-        .provision_service_credential(&NewServiceCredential {
-            organization_id: worker.organization_id,
-            credential_id,
-            identity_id: api_identity_id,
-            generation: bearer_generation,
-            token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
-            issued_at_unix_ms: unix_time_ms(),
-            expires_at_unix_ms: None,
-            actor_subject: "bootstrap:controller".to_owned(),
-        })
-        .await
-        .context("provision durable public API service credential")?;
+    let api_credential = NewServiceCredential {
+        organization_id: worker.organization_id,
+        credential_id,
+        identity_id: api_identity_id,
+        generation: bearer_generation,
+        token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
+        issued_at_unix_ms: unix_time_ms(),
+        expires_at_unix_ms: None,
+        actor_subject: "bootstrap:controller".to_owned(),
+    };
     if let Some(oidc) = &oidc {
         migration_store
-            .provision_identity_provider(&oidc.provider)
+            .provision_controller_authentication(&api_credential, &oidc.provider)
             .await
-            .context("provision exact OIDC provider generation")?;
+            .context("atomically provision public API credential and OIDC provider generation")?;
+    } else {
+        migration_store
+            .provision_service_credential(&api_credential)
+            .await
+            .context("provision durable public API service credential")?;
     }
     migration_pool.close().await;
 
