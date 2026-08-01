@@ -595,10 +595,10 @@ fn parse_yaml<T: for<'de> Deserialize<'de>>(
     bytes: &[u8],
     code: &'static str,
 ) -> Result<T, LibraryError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| LibraryError::new("E_UTF8", "input is not UTF-8"))?;
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| LibraryError::new(code, "input is not UTF-8"))?;
     parse_strict(text, ParseLimits::default())
-        .map_err(|error| LibraryError::new("E_YAML", error.to_string()))?;
+        .map_err(|error| LibraryError::new(code, error.to_string()))?;
     serde_saphyr::from_str(text).map_err(|error| LibraryError::new(code, error.to_string()))
 }
 
@@ -660,6 +660,7 @@ fn validate_ledger(ledger: &Ledger) -> Result<(), LibraryError> {
         }
         validate_visible(&resolution.reference, "resolution reference", 512)?;
         validate_visible(&resolution.requested_ref, "requested ref", 256)?;
+        validate_visible(&resolution.repository, "resolved repository", 512)?;
         validate_hex(&resolution.commit_sha1, 40, "commit SHA-1")?;
         validate_hex(&resolution.tree_sha256, 64, "tree SHA-256")?;
         if !resolution.repository.starts_with("https://github.com/")
@@ -1363,6 +1364,23 @@ mod tests {
                 .code,
             "E_POLICY"
         );
+
+        let mut candidate = ledger(&digests);
+        candidate.resolutions[0].repository = "https://github.com/example/library\n.git".to_owned();
+        assert_eq!(
+            validate_ledger(&candidate)
+                .expect_err("control character in repository")
+                .code,
+            "E_TOKEN"
+        );
+    }
+
+    #[test]
+    fn strict_yaml_errors_are_attributed_to_the_input_schema() {
+        let error =
+            parse_yaml::<LedgerLock>(b"schema: first\nschema: duplicate\n", "E_LOCK_SCHEMA")
+                .expect_err("duplicate YAML key");
+        assert_eq!(error.code, "E_LOCK_SCHEMA");
     }
 
     #[test]

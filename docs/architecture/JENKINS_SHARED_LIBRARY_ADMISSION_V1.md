@@ -67,11 +67,15 @@ It contains 518 files / 1,400,368 bytes. The ledger raw SHA-256 is
 `c38a4c7374bf5bd205bbd2c63d2c6092362d28ae05055583f1ca38e1c0a3e169`;
 its canonical semantic SHA-256 is
 `56be6a979931fa703ef815ffc5a7299235d6840e6e4d46471877d0fdc08d772a`.
-The authoritative full-corpus-locked external evidence is
-`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T110035Z-v3`. Its
+The authoritative review-repaired external evidence is
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T110935Z-v5`. Its
 self-excluding manifest covers 522 files and has SHA-256
-`f290fe2090dba32b2af907b8f55e60035fb14a14ce499a21d8560bce93a2daf7`.
-The README-lock predecessor remains immutable at manifest
+`80032ba8401f0aa8b5ef974b043f5bb4172b887a5078842ee26bb982048a6f24`.
+The review-repair predecessor remains immutable at manifest
+`5387322af011b50fcb3d4200833d7a02b79a287518de4b55e62a412c33892517`;
+the full-corpus-lock predecessor remains immutable at manifest
+`f290fe2090dba32b2af907b8f55e60035fb14a14ce499a21d8560bce93a2daf7`;
+the README-lock predecessor remains immutable at manifest
 `ec598cbc26a39d8f2d69ebd3d8298f89dc5728dd5b91c5f8ea7215b4fd57b9cf`;
 the pre-README-lock predecessor remains immutable at manifest
 `a6671f966e3738e25135b33fc397b5fb21666ac60edb931b49e3b35672f5123b`.

@@ -13,10 +13,10 @@ controller execution.
 Source verification is not execution certification. All 20 live observations
 remain explicitly unsupported and `executable_cases` is exactly zero.
 
-The immutable external source/evidence root is
-`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T103457Z`; its
-self-excluding 522-file manifest SHA-256 is
-`a6671f966e3738e25135b33fc397b5fb21666ac60edb931b49e3b35672f5123b`.
+The immutable prefetched source tree originated at
+`/sn8100/runs/mcloving/mig005-shared-libraries-20260801T103457Z/sources`.
+The authoritative verification receipt and its immutable predecessor ledger
+are recorded in `docs/architecture/JENKINS_SHARED_LIBRARY_ADMISSION_V1.md`.
 
 Verification:
 
