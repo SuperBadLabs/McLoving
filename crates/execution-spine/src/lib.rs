@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use mcloving_agent_runtime::executor::{
-    ExecutionError, ExecutionMode, ExecutionRequest, Termination, execute_with_spawn_hook,
+    ExecutionError, ExecutionMode, ExecutionRequest, Termination, WorkspaceRootGuard,
+    execute_with_spawn_hook,
 };
 use mcloving_agent_runtime::{
     Acceptance, AttemptPhase, Journal, JournalError, MAX_ATTEMPT_OUTPUT_BYTES, SpoolEntry,
@@ -38,6 +39,30 @@ pub struct RunReceipt {
     pub exit_code: Option<i32>,
     pub stdout_sha256: [u8; 32],
     pub stderr_sha256: [u8; 32],
+}
+
+/// Proves that the embedded worker can use its durable local resources before
+/// the controller rotates any externally visible credentials.
+pub async fn preflight_worker(config: &WorkerConfig) -> Result<(), SpineError> {
+    fs::create_dir_all(&config.workspace_root).await?;
+    let workspace_guard = WorkspaceRootGuard::open(&config.workspace_root)?;
+    workspace_guard.ensure_original(&config.workspace_root)?;
+
+    let probe = config
+        .workspace_root
+        .join(format!(".mcloving-preflight-{}", Uuid::new_v4()));
+    fs::create_dir(&probe).await?;
+    if let Err(error) = workspace_guard.ensure_original(&config.workspace_root) {
+        let _ = fs::remove_dir(&probe).await;
+        return Err(error.into());
+    }
+    fs::remove_dir(&probe).await?;
+
+    if let Some(parent) = config.journal_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    Journal::open(&config.journal_path)?;
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]

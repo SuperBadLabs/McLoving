@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use mcloving_agent_protocol::wire::agent_control_server::{AgentControl, AgentControlServer};
@@ -20,22 +20,36 @@ use mcloving_agent_protocol::{
     ATTEMPT_CREDENTIALS_FEATURE, ProtocolRange, RECOVERED_FINALIZATION_LEASE_SECONDS,
     WORK_DELIVERY_FEATURE, negotiate,
 };
-use mcloving_controller_api::{ApiState, router};
+use mcloving_controller_api::{
+    ApiState, MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
+    MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig, router,
+};
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, NewLogChunk,
-    ReconciliationTrustPoolAuthorization, Store, StoreError, TerminalOutcome,
-    authz::{Principal, PrincipalKind, ProjectRole, ServiceScope},
+    AgentReconciliationDisposition, ClaimRequest, IdentityProviderWrite, NewLogChunk,
+    NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization, Store,
+    StoreError, TerminalOutcome, authz::ServiceScope,
 };
-use mcloving_execution_spine::{WorkerConfig, run_claim};
+use mcloving_execution_spine::{WorkerConfig, preflight_worker, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
+
+fn validate_artifact_agent_token(api_token: &str, artifact_agent_token: &str) -> Result<()> {
+    if artifact_agent_token.len() < 32 {
+        bail!("MCLOVING_ARTIFACT_AGENT_TOKEN must contain at least 32 bytes");
+    }
+    if api_token == artifact_agent_token {
+        bail!("MCLOVING_API_TOKEN and MCLOVING_ARTIFACT_AGENT_TOKEN must be distinct");
+    }
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,28 +60,30 @@ async fn main() -> Result<()> {
     if migration_database_url == runtime_database_url {
         bail!("migration and runtime database credentials must be distinct");
     }
+    if std::env::var_os("MCLOVING_API_PRINCIPALS_PATH").is_some() {
+        bail!(
+            "MCLOVING_API_PRINCIPALS_PATH is retired; provision immutable OIDC identities instead"
+        );
+    }
     let bearer_token =
         std::env::var("MCLOVING_API_TOKEN").context("MCLOVING_API_TOKEN is required")?;
+    if bearer_token.len() < 32 {
+        bail!("MCLOVING_API_TOKEN must contain at least 32 bytes");
+    }
+    let bearer_generation = std::env::var("MCLOVING_API_TOKEN_GENERATION")
+        .unwrap_or_else(|_| "1".to_owned())
+        .parse::<i64>()
+        .context("MCLOVING_API_TOKEN_GENERATION must be a positive integer")?;
+    if bearer_generation <= 0 {
+        bail!("MCLOVING_API_TOKEN_GENERATION must be positive");
+    }
     let artifact_agent_token = std::env::var("MCLOVING_ARTIFACT_AGENT_TOKEN")
         .context("MCLOVING_ARTIFACT_AGENT_TOKEN is required")?;
+    validate_artifact_agent_token(&bearer_token, &artifact_agent_token)?;
+    let artifact_agent_digest: [u8; 32] = Sha256::digest(artifact_agent_token.as_bytes()).into();
     let listen = std::env::var("MCLOVING_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
-    let migration_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&migration_database_url)
-        .await
-        .context("connect to PostgreSQL migration role")?;
-    Store::new(migration_pool.clone())
-        .migrate()
-        .await
-        .context("migrate controller store")?;
-    migration_pool.close().await;
-
-    let runtime_pool = PgPoolOptions::new()
-        .max_connections(16)
-        .connect(&runtime_database_url)
-        .await
-        .context("connect to PostgreSQL runtime role")?;
-    let store = Store::new(runtime_pool);
+    let worker = EmbeddedWorker::from_environment()?;
+    let oidc = oidc_environment(worker.organization_id)?;
     let object_root = PathBuf::from(
         std::env::var("MCLOVING_OBJECT_ROOT").unwrap_or_else(|_| "./data/objects".to_owned()),
     );
@@ -91,16 +107,50 @@ async fn main() -> Result<()> {
         },
     )
     .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
-    let worker = EmbeddedWorker::from_environment()?;
-    let mut state = ApiState::new(
-        store.clone(),
-        &bearer_token,
-        Principal {
-            subject: "service:public-api".to_owned(),
-            kind: PrincipalKind::Service,
+    preflight_worker(&worker.config)
+        .await
+        .context("preflight embedded worker runtime")?;
+    let listener = TcpListener::bind(&listen)
+        .await
+        .with_context(|| format!("bind controller to {listen}"))?;
+    let agent_control = agent_control_environment().await?;
+    let migration_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&migration_database_url)
+        .await
+        .context("connect to PostgreSQL migration role")?;
+    let migration_store = Store::new(migration_pool.clone());
+    migration_store
+        .migrate()
+        .await
+        .context("migrate controller store")?;
+    let runtime_pool = PgPoolOptions::new()
+        .max_connections(16)
+        .connect(&runtime_database_url)
+        .await
+        .context("connect to PostgreSQL runtime role")?;
+    let store = Store::new(runtime_pool);
+    store
+        .preflight_tenant_runtime(&migration_store, worker.organization_id)
+        .await
+        .context("preflight PostgreSQL runtime tenant access")?;
+    let mut state = ApiState::new_durable(store.clone());
+    if let Some(oidc) = &oidc {
+        state = state
+            .with_oidc_client(oidc.client.clone())
+            .context("configure OIDC authorization-code client")?;
+    }
+    let api_identity_id = deterministic_uuid(&format!(
+        "mcloving:service:public-api:{}",
+        worker.organization_id
+    ));
+    let api_subject = format!("service:public-api:{api_identity_id}");
+    migration_store
+        .provision_service_identity(&NewServiceIdentity {
             organization_id: worker.organization_id,
-            project_roles: BTreeMap::new(),
-            service_scopes: [
+            identity_id: api_identity_id,
+            subject: api_subject,
+            scopes: [
                 ServiceScope::ProjectRead,
                 ServiceScope::BuildSubmit,
                 ServiceScope::BuildCancel,
@@ -110,40 +160,65 @@ async fn main() -> Result<()> {
                 ServiceScope::SchedulerControl,
             ]
             .into(),
-        },
-    )
-    .context("configure public API")?
-    .with_artifact_agent_token(&artifact_agent_token, &worker.config.agent_id)
-    .context("configure artifact-agent authentication")?;
-    if let Ok(path) = std::env::var("MCLOVING_API_PRINCIPALS_PATH") {
-        let bindings = std::fs::read_to_string(&path)
-            .with_context(|| format!("read API principal bindings from {path}"))?;
-        for (token, principal) in parse_human_api_principals(&bindings, worker.organization_id)? {
-            state = state
-                .with_bearer_principal(&token, principal)
-                .context("configure human API principal")?;
-        }
+            actor_subject: "bootstrap:controller".to_owned(),
+        })
+        .await
+        .context("provision durable public API service identity")?;
+    let credential_id = deterministic_uuid(&format!(
+        "mcloving:service-credential:{api_identity_id}:{bearer_generation}"
+    ));
+    let api_credential = NewServiceCredential {
+        organization_id: worker.organization_id,
+        credential_id,
+        identity_id: api_identity_id,
+        generation: bearer_generation,
+        token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
+        issued_at_unix_ms: unix_time_ms(),
+        expires_at_unix_ms: None,
+        actor_subject: "bootstrap:controller".to_owned(),
+    };
+    if let Some(oidc) = &oidc {
+        migration_store
+            .provision_controller_authentication(
+                &api_credential,
+                &oidc.provider,
+                &worker.config.agent_id,
+                artifact_agent_digest,
+            )
+            .await
+            .context(
+                "atomically provision public API credential, OIDC provider, and artifact-agent reservation",
+            )?;
+    } else {
+        migration_store
+            .provision_controller_credential(
+                &api_credential,
+                &worker.config.agent_id,
+                artifact_agent_digest,
+            )
+            .await
+            .context("atomically provision public API credential and artifact-agent reservation")?;
     }
+    migration_pool.close().await;
     let state = state
+        .with_durable_artifact_agent_token(
+            &artifact_agent_token,
+            &worker.config.agent_id,
+            worker.organization_id,
+        )
+        .await
+        .context("configure artifact-agent authentication")?
         .with_object_store(object_store)
         .with_staged_upload_ttl(staged_upload_ttl);
-    tokio::fs::create_dir_all(&worker.config.workspace_root)
-        .await
-        .context("create embedded worker workspace root")?;
-    if let Some(parent) = worker.config.journal_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .context("create embedded worker journal directory")?;
-    }
-    let listener = TcpListener::bind(&listen)
-        .await
-        .with_context(|| format!("bind controller to {listen}"))?;
     let server = async {
-        axum::serve(listener, router(state))
-            .await
-            .context("serve public API")
+        axum::serve(
+            listener,
+            router(state).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .context("serve public API")
     };
-    let agent_server = run_agent_control_server(store.clone());
+    let agent_server = run_agent_control_server(store.clone(), agent_control);
     tokio::pin!(server);
     tokio::pin!(agent_server);
     let worker_loop = run_embedded_worker(store, worker);
@@ -153,75 +228,6 @@ async fn main() -> Result<()> {
         result = &mut agent_server => result,
         result = &mut worker_loop => result,
     }
-}
-
-fn parse_human_api_principals(
-    value: &str,
-    organization_id: Uuid,
-) -> Result<Vec<(String, Principal)>> {
-    let mut subject_tokens = BTreeMap::new();
-    let mut bindings = BTreeMap::<String, Principal>::new();
-    for (index, line) in value.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let fields = line.split('\t').collect::<Vec<_>>();
-        if fields.len() != 4 {
-            bail!(
-                "API principal binding line {} must be token<TAB>subject<TAB>project UUID<TAB>role",
-                index + 1
-            );
-        }
-        let token = fields[0];
-        let subject = fields[1];
-        if token.len() < 32
-            || token.trim() != token
-            || subject.is_empty()
-            || subject.trim() != subject
-        {
-            bail!(
-                "API principal binding line {} has a non-canonical token or subject",
-                index + 1
-            );
-        }
-        let project_id = fields[2]
-            .parse::<Uuid>()
-            .with_context(|| format!("parse project UUID on API principal line {}", index + 1))?;
-        let role = match fields[3] {
-            "viewer" => ProjectRole::Viewer,
-            "developer" => ProjectRole::Developer,
-            "admin" => ProjectRole::Admin,
-            "owner" => ProjectRole::Owner,
-            _ => bail!(
-                "API principal binding line {} has an unsupported role",
-                index + 1
-            ),
-        };
-        if let Some(bound_token) = subject_tokens.get(subject) {
-            if bound_token != token {
-                bail!("API principal subject {subject} is bound to multiple credentials");
-            }
-        } else {
-            subject_tokens.insert(subject.to_owned(), token.to_owned());
-        }
-        let principal = bindings
-            .entry(token.to_owned())
-            .or_insert_with(|| Principal {
-                subject: subject.to_owned(),
-                kind: PrincipalKind::Human,
-                organization_id,
-                project_roles: BTreeMap::new(),
-                service_scopes: BTreeSet::new(),
-            });
-        if principal.subject != subject {
-            bail!("API credential is bound to multiple subjects");
-        }
-        if principal.project_roles.insert(project_id, role).is_some() {
-            bail!("API principal subject {subject} repeats project {project_id}");
-        }
-    }
-    Ok(bindings.into_iter().collect())
 }
 
 fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
@@ -238,6 +244,245 @@ fn bounded_u64_environment(name: &str, default: u64) -> Result<u64> {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(error).with_context(|| format!("read {name}")),
     }
+}
+
+fn bounded_u64_environment_at_most(name: &str, default: u64, maximum: u64) -> Result<u64> {
+    let value = bounded_u64_environment(name, default)?;
+    bounded_u64_at_most(name, value, maximum)
+}
+
+fn bounded_u64_at_most(name: &str, value: u64, maximum: u64) -> Result<u64> {
+    if value > maximum {
+        bail!("{name} must be at most {maximum}");
+    }
+    Ok(value)
+}
+
+struct OidcEnvironment {
+    provider: IdentityProviderWrite,
+    client: OidcClientConfig,
+}
+
+fn oidc_environment(organization_id: Uuid) -> Result<Option<OidcEnvironment>> {
+    let provider_id = match std::env::var("MCLOVING_OIDC_PROVIDER_ID") {
+        Ok(value) => value
+            .parse::<Uuid>()
+            .context("MCLOVING_OIDC_PROVIDER_ID must be a UUID")?,
+        Err(std::env::VarError::NotPresent) => {
+            const OIDC_ENVIRONMENT: &[&str] = &[
+                "MCLOVING_OIDC_ISSUER",
+                "MCLOVING_OIDC_AUDIENCE",
+                "MCLOVING_OIDC_AUTHORIZATION_ENDPOINT",
+                "MCLOVING_OIDC_TOKEN_ENDPOINT",
+                "MCLOVING_OIDC_JWKS_URI",
+                "MCLOVING_OIDC_CLIENT_ID",
+                "MCLOVING_OIDC_CLIENT_SECRET",
+                "MCLOVING_OIDC_GROUP_CLAIM",
+                "MCLOVING_OIDC_CONFIGURATION_GENERATION",
+                "MCLOVING_OIDC_JWKS_GENERATION",
+                "MCLOVING_OIDC_JWKS_SHA256",
+                "MCLOVING_OIDC_ALLOWED_REDIRECT_URIS",
+                "MCLOVING_OIDC_SESSION_TTL_SECONDS",
+                "MCLOVING_OIDC_REFRESH_TTL_SECONDS",
+                "MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS",
+                "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
+                "MCLOVING_OIDC_MAX_JWKS_BYTES",
+            ];
+            if let Some(name) = OIDC_ENVIRONMENT
+                .iter()
+                .find(|name| std::env::var_os(name).is_some())
+            {
+                bail!("{name} requires MCLOVING_OIDC_PROVIDER_ID");
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error).context("read MCLOVING_OIDC_PROVIDER_ID"),
+    };
+    let issuer = required("MCLOVING_OIDC_ISSUER")?;
+    let audience = required("MCLOVING_OIDC_AUDIENCE")?;
+    let authorization_endpoint = required("MCLOVING_OIDC_AUTHORIZATION_ENDPOINT")?;
+    let token_endpoint = required("MCLOVING_OIDC_TOKEN_ENDPOINT")?;
+    let jwks_uri = required("MCLOVING_OIDC_JWKS_URI")?;
+    let client_id = required("MCLOVING_OIDC_CLIENT_ID")?;
+    let client_secret = match std::env::var("MCLOVING_OIDC_CLIENT_SECRET") {
+        Ok(secret) => Some(secret),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(error).context("read MCLOVING_OIDC_CLIENT_SECRET"),
+    };
+    let group_claim = required("MCLOVING_OIDC_GROUP_CLAIM")?;
+    let configuration_generation =
+        bounded_u64_environment("MCLOVING_OIDC_CONFIGURATION_GENERATION", 1)?;
+    let jwks_generation = bounded_u64_environment("MCLOVING_OIDC_JWKS_GENERATION", 1)?;
+    let jwks_digest = parse_sha256_environment("MCLOVING_OIDC_JWKS_SHA256")?;
+    let allowed_redirect_uris = required("MCLOVING_OIDC_ALLOWED_REDIRECT_URIS")?
+        .split(',')
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if allowed_redirect_uris.iter().any(|uri| uri.trim() != uri) {
+        bail!("MCLOVING_OIDC_ALLOWED_REDIRECT_URIS entries must be canonical");
+    }
+    let session_ttl_seconds = bounded_u64_environment_at_most(
+        "MCLOVING_OIDC_SESSION_TTL_SECONDS",
+        15 * 60,
+        MAX_OIDC_SESSION_TTL_SECONDS,
+    )?;
+    let refresh_ttl_seconds = bounded_u64_environment_at_most(
+        "MCLOVING_OIDC_REFRESH_TTL_SECONDS",
+        8 * 60 * 60,
+        MAX_OIDC_REFRESH_TTL_SECONDS,
+    )?;
+    let request_timeout_seconds = bounded_u64_environment_at_most(
+        "MCLOVING_OIDC_REQUEST_TIMEOUT_SECONDS",
+        10,
+        MAX_OIDC_REQUEST_TIMEOUT_SECONDS,
+    )?;
+    let clock_skew_seconds = bounded_u64_environment_at_most(
+        "MCLOVING_OIDC_CLOCK_SKEW_SECONDS",
+        60,
+        MAX_OIDC_CLOCK_SKEW_SECONDS,
+    )?;
+    let max_jwks_bytes = usize::try_from(bounded_u64_environment_at_most(
+        "MCLOVING_OIDC_MAX_JWKS_BYTES",
+        256 * 1024,
+        MAX_OIDC_JWKS_BYTES as u64,
+    )?)
+    .context("MCLOVING_OIDC_MAX_JWKS_BYTES is too large")?;
+    let configuration_digest = oidc_configuration_digest(
+        &[
+            &issuer,
+            &audience,
+            &authorization_endpoint,
+            &token_endpoint,
+            &jwks_uri,
+            &client_id,
+            &group_claim,
+        ],
+        client_secret.as_deref(),
+        &allowed_redirect_uris,
+        session_ttl_seconds,
+        refresh_ttl_seconds,
+        request_timeout_seconds,
+        clock_skew_seconds,
+        max_jwks_bytes,
+        false,
+    );
+    let configuration_generation = i64::try_from(configuration_generation)
+        .context("MCLOVING_OIDC_CONFIGURATION_GENERATION is too large")?;
+    let jwks_generation =
+        i64::try_from(jwks_generation).context("MCLOVING_OIDC_JWKS_GENERATION is too large")?;
+    let provider = IdentityProviderWrite {
+        organization_id,
+        provider_id,
+        issuer,
+        audience,
+        authorization_endpoint,
+        token_endpoint,
+        jwks_uri,
+        client_id,
+        group_claim,
+        configuration_generation,
+        configuration_digest,
+        jwks_generation,
+        jwks_digest,
+        enabled: true,
+        actor_subject: "bootstrap:controller".to_owned(),
+    };
+    let client = OidcClientConfig {
+        organization_id,
+        provider_id,
+        configuration_generation,
+        configuration_digest,
+        client_secret,
+        allowed_redirect_uris,
+        session_ttl: Duration::from_secs(session_ttl_seconds),
+        refresh_ttl: Duration::from_secs(refresh_ttl_seconds),
+        request_timeout: Duration::from_secs(request_timeout_seconds),
+        clock_skew: Duration::from_secs(clock_skew_seconds),
+        max_jwks_bytes,
+        allow_insecure_loopback_for_tests: false,
+    };
+    client
+        .validate_with_provider(&provider)
+        .context("validate complete OIDC runtime client before persistence")?;
+    Ok(Some(OidcEnvironment { provider, client }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn oidc_configuration_digest(
+    fields: &[&str],
+    client_secret: Option<&str>,
+    allowed_redirect_uris: &BTreeSet<String>,
+    session_ttl_seconds: u64,
+    refresh_ttl_seconds: u64,
+    request_timeout_seconds: u64,
+    clock_skew_seconds: u64,
+    max_jwks_bytes: usize,
+    allow_insecure_loopback_for_tests: bool,
+) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"mcloving.oidc.configuration.v2\0");
+    for field in fields {
+        hash_oidc_configuration_field(&mut hash, field.as_bytes());
+    }
+    match client_secret {
+        Some(secret) => {
+            hash.update([1]);
+            hash.update(Sha256::digest(secret.as_bytes()));
+        }
+        None => hash.update([0]),
+    }
+    hash.update((allowed_redirect_uris.len() as u64).to_be_bytes());
+    for redirect_uri in allowed_redirect_uris {
+        hash_oidc_configuration_field(&mut hash, redirect_uri.as_bytes());
+    }
+    hash.update(session_ttl_seconds.to_be_bytes());
+    hash.update(refresh_ttl_seconds.to_be_bytes());
+    hash.update(request_timeout_seconds.to_be_bytes());
+    hash.update(clock_skew_seconds.to_be_bytes());
+    hash.update((max_jwks_bytes as u64).to_be_bytes());
+    hash.update([u8::from(allow_insecure_loopback_for_tests)]);
+    hash.finalize().into()
+}
+
+fn hash_oidc_configuration_field(hash: &mut Sha256, value: &[u8]) {
+    hash.update((value.len() as u64).to_be_bytes());
+    hash.update(value);
+}
+
+fn parse_sha256_environment(name: &str) -> Result<[u8; 32]> {
+    let value = required(name)?;
+    if value.len() != 64 {
+        bail!("{name} must contain exactly 64 lowercase hexadecimal characters");
+    }
+    let mut digest = [0_u8; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        let pair = &value[index * 2..index * 2 + 2];
+        if !pair
+            .bytes()
+            .all(|value| value.is_ascii_digit() || (b'a'..=b'f').contains(&value))
+        {
+            bail!("{name} must contain exactly 64 lowercase hexadecimal characters");
+        }
+        *byte = u8::from_str_radix(pair, 16).context("parse OIDC JWKS SHA-256")?;
+    }
+    Ok(digest)
+}
+
+fn deterministic_uuid(label: &str) -> Uuid {
+    let digest = Sha256::digest(label.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+fn unix_time_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 #[derive(Clone)]
@@ -950,40 +1195,87 @@ fn credential_store_error(error: StoreError) -> Status {
     }
 }
 
-async fn run_agent_control_server(store: Store) -> Result<()> {
-    let Some(listen) = std::env::var("MCLOVING_AGENT_LISTEN").ok() else {
+struct AgentControlEnvironment {
+    address: SocketAddr,
+    listener: TcpListener,
+    certificate: Vec<u8>,
+    private_key: Vec<u8>,
+    client_ca: Vec<u8>,
+    identities: AgentIdentityBindings,
+    #[cfg(debug_assertions)]
+    drop_start_response_once: bool,
+}
+
+impl AgentControlEnvironment {
+    fn tls_config(&self) -> ServerTlsConfig {
+        ServerTlsConfig::new()
+            .identity(Identity::from_pem(
+                self.certificate.clone(),
+                self.private_key.clone(),
+            ))
+            .client_ca_root(Certificate::from_pem(self.client_ca.clone()))
+    }
+}
+
+async fn agent_control_environment() -> Result<Option<AgentControlEnvironment>> {
+    let listen = match std::env::var("MCLOVING_AGENT_LISTEN") {
+        Ok(listen) => listen,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(error).context("read MCLOVING_AGENT_LISTEN"),
+    };
+    let address = listen
+        .parse()
+        .with_context(|| format!("MCLOVING_AGENT_LISTEN is invalid: {listen}"))?;
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("bind agent control to {address}"))?;
+    let environment = AgentControlEnvironment {
+        address,
+        listener,
+        certificate: std::fs::read(required("MCLOVING_AGENT_SERVER_CERT_PATH")?)
+            .context("read agent-control server certificate")?,
+        private_key: std::fs::read(required("MCLOVING_AGENT_SERVER_KEY_PATH")?)
+            .context("read agent-control server private key")?,
+        client_ca: std::fs::read(required("MCLOVING_AGENT_CLIENT_CA_PATH")?)
+            .context("read agent-control client CA")?,
+        identities: AgentIdentityBindings::read(PathBuf::from(required(
+            "MCLOVING_AGENT_IDENTITY_BINDINGS_PATH",
+        )?))
+        .context("read agent certificate identity bindings")?,
+        #[cfg(debug_assertions)]
+        drop_start_response_once: std::env::var_os("MCLOVING_TEST_DROP_START_RESPONSE_ONCE")
+            .is_some(),
+    };
+    Server::builder()
+        .tls_config(environment.tls_config())
+        .context("configure agent-control mTLS")?;
+    Ok(Some(environment))
+}
+
+async fn run_agent_control_server(
+    store: Store,
+    environment: Option<AgentControlEnvironment>,
+) -> Result<()> {
+    let Some(environment) = environment else {
         std::future::pending::<()>().await;
         unreachable!("pending agent server future returned")
     };
-    let address: SocketAddr = listen
-        .parse()
-        .with_context(|| format!("MCLOVING_AGENT_LISTEN is invalid: {listen}"))?;
-    let certificate = std::fs::read(required("MCLOVING_AGENT_SERVER_CERT_PATH")?)
-        .context("read agent-control server certificate")?;
-    let private_key = std::fs::read(required("MCLOVING_AGENT_SERVER_KEY_PATH")?)
-        .context("read agent-control server private key")?;
-    let client_ca = std::fs::read(required("MCLOVING_AGENT_CLIENT_CA_PATH")?)
-        .context("read agent-control client CA")?;
-    let identities = AgentIdentityBindings::read(PathBuf::from(required(
-        "MCLOVING_AGENT_IDENTITY_BINDINGS_PATH",
-    )?))
-    .context("read agent certificate identity bindings")?;
-    let tls = ServerTlsConfig::new()
-        .identity(Identity::from_pem(certificate, private_key))
-        .client_ca_root(Certificate::from_pem(client_ca));
+    let address = environment.address;
+    let tls = environment.tls_config();
+    let listener = environment.listener;
+    #[cfg(debug_assertions)]
+    let drop_start_response_once = environment.drop_start_response_once;
     let service = ControllerAgentService {
         store,
-        identities: Arc::new(identities),
+        identities: Arc::new(environment.identities),
         #[cfg(debug_assertions)]
-        drop_start_response_once: Arc::new(AtomicBool::new(
-            std::env::var_os("MCLOVING_TEST_DROP_START_RESPONSE_ONCE").is_some(),
-        )),
+        drop_start_response_once: Arc::new(AtomicBool::new(drop_start_response_once)),
     };
     Server::builder()
         .tls_config(tls)
         .context("configure agent-control mTLS")?
         .add_service(AgentControlServer::new(service))
-        .serve(address)
+        .serve_with_incoming(TcpListenerStream::new(listener))
         .await
         .with_context(|| format!("serve agent control on {address}"))
 }
@@ -1229,46 +1521,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn composite_authority_token_preserves_restore_epoch_and_fence() {
-        let token = (u64::from(17_u32) << 32) | u64::from(23_u32);
-        assert_eq!(decode_authority_token(token), (17, 23));
+    fn artifact_agent_token_is_validated_before_bootstrap() {
+        let api_token = "a".repeat(32);
+        let short_artifact_token = "b".repeat(31);
+        assert_eq!(
+            validate_artifact_agent_token(&api_token, &short_artifact_token)
+                .unwrap_err()
+                .to_string(),
+            "MCLOVING_ARTIFACT_AGENT_TOKEN must contain at least 32 bytes"
+        );
+        assert!(validate_artifact_agent_token(&api_token, &api_token).is_err());
+        assert!(validate_artifact_agent_token(&api_token, &"b".repeat(32)).is_ok());
     }
 
     #[test]
-    fn human_api_principal_file_binds_distinct_subject_and_project_role() {
-        let organization_id = Uuid::new_v4();
-        let project_id = Uuid::new_v4();
-        let second_project_id = Uuid::new_v4();
-        let bindings = parse_human_api_principals(
-            &format!(
-                "human-approval-token-that-is-32-bytes\talice@example.test\t{project_id}\tadmin\nhuman-approval-token-that-is-32-bytes\talice@example.test\t{second_project_id}\tviewer\n"
-            ),
-            organization_id,
-        )
-        .expect("parse human principal");
-        assert_eq!(bindings.len(), 1);
-        let (token, principal) = &bindings[0];
-        assert_eq!(token, "human-approval-token-that-is-32-bytes");
-        assert_eq!(principal.subject, "alice@example.test");
-        assert_eq!(principal.kind, PrincipalKind::Human);
-        assert_eq!(
-            principal.project_roles.get(&project_id),
-            Some(&ProjectRole::Admin)
-        );
-        assert_eq!(
-            principal.project_roles.get(&second_project_id),
-            Some(&ProjectRole::Viewer)
-        );
-        assert!(
-            parse_human_api_principals(
-                &format!(
-                    "first-human-approval-token-32-bytes\talice\t{project_id}\tadmin\nsecond-human-approval-token-32-bytes\talice\t{project_id}\towner\n"
-                ),
-                organization_id,
-            )
-            .is_err(),
-            "one subject must not be bound to multiple credentials"
-        );
+    fn composite_authority_token_preserves_restore_epoch_and_fence() {
+        let token = (u64::from(17_u32) << 32) | u64::from(23_u32);
+        assert_eq!(decode_authority_token(token), (17, 23));
     }
 
     #[test]
@@ -1358,6 +1627,74 @@ mod tests {
                 .unwrap_err()
                 .code(),
             tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn oidc_clock_skew_has_a_security_ceiling() {
+        assert_eq!(
+            bounded_u64_at_most("MCLOVING_OIDC_CLOCK_SKEW_SECONDS", 300, 300).unwrap(),
+            300
+        );
+        assert!(
+            bounded_u64_at_most("MCLOVING_OIDC_CLOCK_SKEW_SECONDS", 301, 300)
+                .unwrap_err()
+                .to_string()
+                .contains("must be at most 300")
+        );
+    }
+
+    #[test]
+    fn oidc_configuration_digest_binds_local_security_controls() {
+        let first_redirects = BTreeSet::from(["https://app.example.test/callback".to_owned()]);
+        let second_redirects = BTreeSet::from(["https://new.example.test/callback".to_owned()]);
+        let fields = [
+            "https://id.example.test",
+            "audience",
+            "https://id.example.test/authorize",
+            "https://id.example.test/token",
+            "https://id.example.test/jwks",
+            "client",
+            "groups",
+        ];
+        let baseline = oidc_configuration_digest(
+            &fields,
+            Some("secret"),
+            &first_redirects,
+            900,
+            28_800,
+            10,
+            60,
+            256 * 1024,
+            false,
+        );
+        assert_ne!(
+            baseline,
+            oidc_configuration_digest(
+                &fields,
+                Some("secret"),
+                &second_redirects,
+                900,
+                28_800,
+                10,
+                60,
+                256 * 1024,
+                false,
+            )
+        );
+        assert_ne!(
+            baseline,
+            oidc_configuration_digest(
+                &fields,
+                Some("secret"),
+                &first_redirects,
+                901,
+                28_800,
+                10,
+                60,
+                256 * 1024,
+                false,
+            )
         );
     }
 }

@@ -2367,6 +2367,26 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
     .await
     .expect("inspect authorization-table privileges");
     assert!(!can_mutate_grants);
+    let can_read_service_credentials = sqlx::query_scalar::<_, bool>(
+        "SELECT has_table_privilege('mcloving_tenant', 'service_credentials', 'SELECT')",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("inspect runtime service-credential read privilege");
+    assert!(can_read_service_credentials);
+    let can_mutate_service_credentials = sqlx::query_scalar::<_, bool>(
+        "SELECT
+           has_table_privilege('mcloving_tenant', 'service_credentials', 'INSERT')
+           OR has_table_privilege('mcloving_tenant', 'service_credentials', 'UPDATE')
+           OR has_table_privilege('mcloving_tenant', 'service_credentials', 'DELETE')",
+    )
+    .fetch_one(store.pool())
+    .await
+    .expect("inspect runtime service-credential mutation privileges");
+    assert!(
+        !can_mutate_service_credentials,
+        "runtime role must not mint, restore, or delete service credentials"
+    );
     let can_observe_global_deletion_state = sqlx::query_scalar::<_, bool>(
         "SELECT
            has_table_privilege(

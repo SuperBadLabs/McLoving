@@ -9,6 +9,7 @@ use uuid::Uuid;
 mod audit;
 pub mod authz;
 mod dag;
+mod identity;
 mod product;
 mod scheduler;
 mod security;
@@ -23,6 +24,11 @@ pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
     DagNodeKind, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode, compile_matrix,
     validate_dag_contract,
+};
+pub use identity::{
+    AuthenticatedIdentity, IdentityLifecycle, IdentityProviderConfig, IdentityProviderWrite,
+    LoginAttempt, NewHumanIdentity, NewServiceCredential, NewServiceIdentity, OidcIdentityClaims,
+    ServiceCredential, SessionIssue, SessionView,
 };
 pub use product::{
     ApprovalView, AttemptView, BuildCursor, BuildGraph, BuildListItem, BuildPage, ComponentCursor,
@@ -87,6 +93,20 @@ pub const GLOBAL_LOG_ORDER_V16: &str = include_str!("../migrations/0016_global_l
 pub const STATE_TRANSFER_V17: &str = include_str!("../migrations/0017_state_transfer.sql");
 /// Durable per-attempt dependency-generation readiness.
 pub const ATTEMPT_READINESS_V18: &str = include_str!("../migrations/0018_attempt_readiness.sql");
+/// Durable OIDC, principal-lifecycle, session, and service-credential truth.
+pub const IDENTITY_LIFECYCLE_V19: &str = include_str!("../migrations/0019_identity_lifecycle.sql");
+/// One-time rotating refresh credentials for durable human sessions.
+pub const IDENTITY_SESSION_REFRESH_V20: &str =
+    include_str!("../migrations/0020_identity_session_refresh.sql");
+/// Explicit session lineages for targeted refresh-reuse and logout revocation.
+pub const IDENTITY_SESSION_LINEAGE_V21: &str =
+    include_str!("../migrations/0021_identity_session_lineage.sql");
+/// Durable reservation of non-API secrets in the global credential namespace.
+pub const CREDENTIAL_NAMESPACE_V22: &str =
+    include_str!("../migrations/0022_credential_namespace.sql");
+/// Fail-closed PostgreSQL function execution boundary for runtime sessions.
+pub const RUNTIME_FUNCTION_BOUNDARY_V23: &str =
+    include_str!("../migrations/0023_runtime_function_boundary.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -417,6 +437,12 @@ pub enum StoreError {
     InvalidStateTransfer(String),
     #[error("state-transfer conflict: {0}")]
     StateTransferConflict(String),
+    #[error("invalid identity operation: {0}")]
+    InvalidIdentityOperation(String),
+    #[error("invalid runtime database configuration: {0}")]
+    InvalidRuntimeConfiguration(String),
+    #[error("identity operation conflict: {0}")]
+    IdentityConflict(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -437,6 +463,579 @@ impl Store {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Proves that migration and runtime pools target the same live database,
+    /// then verifies the exact RLS-constrained runtime role and its required
+    /// privilege envelope before bootstrap rotates credentials.
+    pub async fn preflight_tenant_runtime(
+        &self,
+        migration_store: &Self,
+        organization_id: Uuid,
+    ) -> Result<(), StoreError> {
+        let lock_key = {
+            let mut bytes = [0_u8; 8];
+            bytes.copy_from_slice(&Uuid::new_v4().as_bytes()[..8]);
+            i64::from_be_bytes(bytes)
+        };
+        let mut migration_tx = migration_store.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *migration_tx)
+            .await?;
+        let migration_database = sqlx::query_as::<_, (String, i64)>(
+            "SELECT current_database(), oid::bigint
+               FROM pg_database
+              WHERE datname = current_database()",
+        )
+        .fetch_one(&mut *migration_tx)
+        .await?;
+
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let runtime_claimed_lock =
+            sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .fetch_one(&mut *tx)
+                .await?;
+        if runtime_claimed_lock {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "migration and runtime pools do not share one live PostgreSQL cluster".to_owned(),
+            ));
+        }
+        let runtime_database = sqlx::query_as::<_, (String, i64)>(
+            "SELECT current_database(), oid::bigint
+               FROM pg_database
+              WHERE datname = current_database()",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if runtime_database != migration_database {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "migration and runtime pools do not target the same PostgreSQL database".to_owned(),
+            ));
+        }
+
+        let constrained_runtime_role = sqlx::query_scalar::<_, bool>(
+            "SELECT session_user = current_user
+                    AND rolname = 'mcloving_tenant'
+                    AND rolcanlogin
+                    AND NOT rolsuper
+                    AND NOT rolbypassrls
+                    AND NOT rolcreaterole
+                    AND NOT rolcreatedb
+                    AND NOT rolreplication
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM pg_auth_members
+                         WHERE member = pg_roles.oid
+                    )
+               FROM pg_roles
+              WHERE rolname = session_user",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !constrained_runtime_role {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "runtime login must be the constrained mcloving_tenant role".to_owned(),
+            ));
+        }
+
+        let required_privileges = sqlx::query_scalar::<_, bool>(
+            "WITH expected_schema(privilege, is_grantable) AS (
+                 VALUES ('USAGE', false)
+             ),
+             expected_tables(table_name, privilege) AS (
+                 VALUES
+                   ('organizations', 'SELECT'),
+                   ('projects', 'SELECT'),
+                   ('identities', 'SELECT'),
+                   ('project_memberships', 'SELECT'),
+                   ('service_scopes', 'SELECT'),
+                   ('builds', 'SELECT'), ('builds', 'INSERT'),
+                   ('builds', 'UPDATE'), ('builds', 'DELETE'),
+                   ('nodes', 'SELECT'), ('nodes', 'INSERT'),
+                   ('nodes', 'UPDATE'), ('nodes', 'DELETE'),
+                   ('attempts', 'SELECT'), ('attempts', 'INSERT'),
+                   ('attempts', 'UPDATE'), ('attempts', 'DELETE'),
+                   ('build_events', 'SELECT'), ('build_events', 'INSERT'),
+                   ('build_events', 'UPDATE'), ('build_events', 'DELETE'),
+                   ('outbox', 'SELECT'), ('outbox', 'INSERT'),
+                   ('outbox', 'UPDATE'), ('outbox', 'DELETE'),
+                   ('attempt_log_chunks', 'SELECT'), ('attempt_log_chunks', 'INSERT'),
+                   ('attempt_log_chunks', 'UPDATE'), ('attempt_log_chunks', 'DELETE'),
+                   ('attempt_effects', 'SELECT'), ('attempt_effects', 'INSERT'),
+                   ('attempt_effects', 'UPDATE'),
+                   ('dead_letters', 'SELECT'), ('dead_letters', 'INSERT'),
+                   ('attempt_objects', 'SELECT'), ('attempt_objects', 'INSERT'),
+                   ('attempt_objects', 'UPDATE'),
+                   ('controller_metadata', 'SELECT'),
+                   ('object_retention', 'SELECT'), ('object_retention', 'INSERT'),
+                   ('object_retention', 'UPDATE'),
+                   ('legal_holds', 'SELECT'), ('legal_holds', 'INSERT'),
+                   ('legal_holds', 'UPDATE'),
+                   ('agent_sessions', 'SELECT'), ('agent_sessions', 'INSERT'),
+                   ('agent_sessions', 'UPDATE'),
+                   ('node_dependencies', 'SELECT'), ('node_dependencies', 'INSERT'),
+                   ('node_dependencies', 'UPDATE'), ('node_dependencies', 'DELETE'),
+                   ('protected_environments', 'SELECT'),
+                   ('protected_environments', 'INSERT'),
+                   ('protected_environments', 'UPDATE'),
+                   ('environment_approvals', 'SELECT'),
+                   ('environment_approvals', 'INSERT'),
+                   ('environment_approvals', 'UPDATE'),
+                   ('credential_grants', 'SELECT'), ('credential_grants', 'INSERT'),
+                   ('credential_grants', 'UPDATE'),
+                   ('audit_events', 'SELECT'), ('audit_events', 'INSERT'),
+                   ('audit_chain_heads', 'SELECT'), ('audit_chain_heads', 'INSERT'),
+                   ('audit_chain_heads', 'UPDATE'),
+                   ('audit_retention_policies', 'SELECT'),
+                   ('audit_retention_policies', 'INSERT'),
+                   ('audit_retention_policies', 'UPDATE'),
+                   ('normalized_test_reports', 'SELECT'),
+                   ('normalized_test_reports', 'INSERT'),
+                   ('normalized_test_suites', 'SELECT'),
+                   ('normalized_test_suites', 'INSERT'),
+                   ('normalized_test_cases', 'SELECT'),
+                   ('normalized_test_cases', 'INSERT'),
+                   ('pipeline_definitions', 'SELECT'),
+                   ('pipeline_definitions', 'INSERT'),
+                   ('pipeline_definitions', 'UPDATE'),
+                   ('pipeline_revisions', 'SELECT'), ('pipeline_revisions', 'INSERT'),
+                   ('component_packages', 'SELECT'), ('component_packages', 'INSERT'),
+                   ('state_transfer_receipts', 'SELECT'),
+                   ('state_transfer_records', 'SELECT'),
+                   ('state_transfer_protections', 'SELECT'),
+                   ('state_transfer_scm_evidence', 'SELECT'),
+                   ('identity_providers', 'SELECT'),
+                   ('identity_group_snapshots', 'SELECT'),
+                   ('identity_group_snapshots', 'INSERT'),
+                   ('identity_group_snapshots', 'DELETE'),
+                   ('oidc_token_replays', 'SELECT'), ('oidc_token_replays', 'INSERT'),
+                   ('oidc_token_replays', 'DELETE'),
+                   ('identity_sessions', 'SELECT'), ('identity_sessions', 'INSERT'),
+                   ('identity_sessions', 'UPDATE'), ('identity_sessions', 'DELETE'),
+                   ('service_credentials', 'SELECT'),
+                   ('oidc_login_attempts', 'SELECT'), ('oidc_login_attempts', 'INSERT'),
+                   ('oidc_login_attempts', 'UPDATE'), ('oidc_login_attempts', 'DELETE'),
+                   ('credential_namespace_reservations', 'SELECT'),
+                   ('credential_namespace_reservations', 'INSERT')
+             ),
+             expected_columns(table_name, column_name, privilege, is_grantable) AS (
+                 VALUES
+                   ('identities', 'group_generation', 'UPDATE', false),
+                   ('identities', 'group_digest', 'UPDATE', false),
+                   ('identities', 'updated_at', 'UPDATE', false)
+             ),
+             expected_functions(function_oid, privilege, is_grantable) AS (
+                 VALUES
+                   ('public.mcloving_owned_object_publication_allowed(uuid,uuid,bigint,text,text,bytea)'::regprocedure, 'EXECUTE', false),
+                   ('public.mcloving_state_transfer_holds_valid(jsonb)'::regprocedure, 'EXECUTE', false),
+                   ('public.mcloving_state_transfer_digest_json(bytea)'::regprocedure, 'EXECUTE', false),
+                   ('public.mcloving_state_transfer_normalize_holds(jsonb)'::regprocedure, 'EXECUTE', false),
+                   ('public.mcloving_state_transfer_protection_digest(text,text,bytea,bigint,jsonb)'::regprocedure, 'EXECUTE', false),
+                   ('public.mcloving_state_transfer_receipt_has_protection(uuid,uuid,uuid,bytea,text,text,bytea,bigint,jsonb)'::regprocedure, 'EXECUTE', false)
+             ),
+             actual_schema(privilege, is_grantable) AS (
+                 SELECT acl.privilege_type, acl.is_grantable
+                   FROM pg_namespace AS namespace
+                  CROSS JOIN LATERAL aclexplode(
+                      array_append(
+                          COALESCE(namespace.nspacl, '{}'::aclitem[]),
+                          makeaclitem(
+                              namespace.nspowner,
+                              namespace.nspowner,
+                              'USAGE',
+                              false
+                          )
+                      )
+                  ) AS acl
+                   JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+                  WHERE namespace.nspname = 'public'
+                    AND grantee.rolname = current_user
+             ),
+             public_schema_privileges AS (
+                 SELECT acl.privilege_type
+                   FROM pg_namespace AS namespace
+                  CROSS JOIN LATERAL aclexplode(
+                      array_append(
+                          COALESCE(namespace.nspacl, '{}'::aclitem[]),
+                          makeaclitem(
+                              namespace.nspowner,
+                              namespace.nspowner,
+                              'USAGE',
+                              false
+                          )
+                      )
+                  ) AS acl
+                  WHERE namespace.nspname = 'public'
+                    AND acl.grantee = 0
+             ),
+             unexpected_named_schema_privileges AS (
+                 SELECT acl.privilege_type
+                   FROM pg_namespace AS namespace
+                  CROSS JOIN LATERAL aclexplode(
+                      array_append(
+                          COALESCE(namespace.nspacl, '{}'::aclitem[]),
+                          makeaclitem(
+                              namespace.nspowner,
+                              namespace.nspowner,
+                              'USAGE',
+                              false
+                          )
+                      )
+                  ) AS acl
+                   JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+                  WHERE namespace.nspname = 'public'
+                    AND acl.grantee <> namespace.nspowner
+                    AND NOT (
+                        grantee.rolname = current_user
+                        AND acl.privilege_type = 'USAGE'
+                        AND NOT acl.is_grantable
+                    )
+             ),
+             actual_tables(table_name, privilege) AS (
+                 SELECT table_name, privilege_type
+                   FROM information_schema.table_privileges
+                  WHERE table_schema = 'public'
+                    AND grantee = current_user
+             ),
+             actual_columns(table_name, column_name, privilege, is_grantable) AS (
+                 SELECT column_name.table_name,
+                        column_name.column_name,
+                        column_name.privilege_type,
+                        column_name.is_grantable = 'YES'
+                   FROM information_schema.column_privileges AS column_name
+                  WHERE column_name.table_schema = 'public'
+                    AND column_name.grantee = current_user
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM expected_tables AS table_grant
+                         WHERE table_grant.table_name = column_name.table_name
+                           AND table_grant.privilege = column_name.privilege_type
+                    )
+             ),
+             expected_sequences(sequence_oid, privilege, is_grantable) AS (
+                 SELECT sequence.oid, grant_name.privilege, false
+                   FROM pg_class AS sequence
+                   JOIN pg_namespace AS namespace
+                     ON namespace.oid = sequence.relnamespace
+                  CROSS JOIN (VALUES ('USAGE'), ('SELECT')) AS grant_name(privilege)
+                  WHERE namespace.nspname = 'public'
+                    AND sequence.relkind = 'S'
+             ),
+             actual_sequences(sequence_oid, privilege, is_grantable) AS (
+                 SELECT sequence.oid, acl.privilege_type, acl.is_grantable
+                   FROM pg_class AS sequence
+                   JOIN pg_namespace AS namespace
+                     ON namespace.oid = sequence.relnamespace
+                  CROSS JOIN LATERAL aclexplode(
+                      array_append(
+                          COALESCE(sequence.relacl, '{}'::aclitem[]),
+                          makeaclitem(
+                              sequence.relowner,
+                              sequence.relowner,
+                              'SELECT',
+                              false
+                          )
+                      )
+                  ) AS acl
+                   JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+                  WHERE namespace.nspname = 'public'
+                    AND sequence.relkind = 'S'
+                    AND grantee.rolname = current_user
+             ),
+             actual_functions(function_oid, privilege, is_grantable) AS (
+                 SELECT function.oid, acl.privilege_type, acl.is_grantable
+                   FROM pg_proc AS function
+                  JOIN pg_namespace AS namespace
+                     ON namespace.oid = function.pronamespace
+                  CROSS JOIN LATERAL aclexplode(
+                      array_append(
+                          COALESCE(
+                              function.proacl,
+                              acldefault('f', function.proowner)
+                          ),
+                          makeaclitem(
+                              function.proowner,
+                              function.proowner,
+                              'EXECUTE',
+                              false
+                          )
+                      )
+                  ) AS acl
+                   JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+                  WHERE namespace.nspname = 'public'
+                    AND grantee.rolname = current_user
+             ),
+             public_function_execution AS (
+                 SELECT function.oid
+                   FROM pg_proc AS function
+                  JOIN pg_namespace AS namespace
+                     ON namespace.oid = function.pronamespace
+                  CROSS JOIN LATERAL aclexplode(
+                      array_append(
+                          COALESCE(
+                              function.proacl,
+                              acldefault('f', function.proowner)
+                          ),
+                          makeaclitem(
+                              function.proowner,
+                              function.proowner,
+                              'EXECUTE',
+                              false
+                          )
+                      )
+                  ) AS acl
+                  WHERE namespace.nspname = 'public'
+                    AND acl.grantee = 0
+                    AND acl.privilege_type = 'EXECUTE'
+             ),
+             runtime_owned_functions AS (
+                 SELECT function.oid
+                   FROM pg_proc AS function
+                   JOIN pg_namespace AS namespace
+                     ON namespace.oid = function.pronamespace
+                   JOIN pg_roles AS owner ON owner.oid = function.proowner
+                  WHERE namespace.nspname = 'public'
+                    AND owner.rolname = session_user
+             )
+             SELECT has_schema_privilege(current_user, 'public', 'USAGE')
+                    AND NOT has_schema_privilege(current_user, 'public', 'CREATE')
+                    AND NOT EXISTS (
+                        (SELECT * FROM expected_schema
+                         EXCEPT
+                         SELECT * FROM actual_schema)
+                        UNION ALL
+                        (SELECT * FROM actual_schema
+                         EXCEPT
+                         SELECT * FROM expected_schema)
+                    )
+                    AND NOT EXISTS (SELECT 1 FROM public_schema_privileges)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM unexpected_named_schema_privileges
+                    )
+                    AND NOT EXISTS (
+                        (SELECT * FROM expected_tables
+                         EXCEPT
+                         SELECT * FROM actual_tables)
+                        UNION ALL
+                        (SELECT * FROM actual_tables
+                         EXCEPT
+                         SELECT * FROM expected_tables)
+                    )
+                    AND NOT EXISTS (
+                        (SELECT * FROM expected_columns
+                         EXCEPT
+                         SELECT * FROM actual_columns)
+                        UNION ALL
+                        (SELECT * FROM actual_columns
+                         EXCEPT
+                         SELECT * FROM expected_columns)
+                    )
+                    AND NOT EXISTS (
+                        (SELECT * FROM expected_functions
+                         EXCEPT
+                         SELECT * FROM actual_functions)
+                        UNION ALL
+                        (SELECT * FROM actual_functions
+                         EXCEPT
+                         SELECT * FROM expected_functions)
+                    )
+                    AND NOT EXISTS (
+                        (SELECT * FROM expected_sequences
+                         EXCEPT
+                         SELECT * FROM actual_sequences)
+                        UNION ALL
+                        (SELECT * FROM actual_sequences
+                         EXCEPT
+                         SELECT * FROM expected_sequences)
+                    )
+                    AND NOT EXISTS (SELECT 1 FROM public_function_execution)
+                    AND NOT EXISTS (SELECT 1 FROM runtime_owned_functions)
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM information_schema.table_privileges
+                         WHERE table_schema = 'public'
+                           AND grantee IN ('PUBLIC', current_user)
+                           AND is_grantable = 'YES'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM information_schema.column_privileges
+                         WHERE table_schema = 'public'
+                           AND grantee = 'PUBLIC'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM pg_class AS object
+                         JOIN pg_namespace AS namespace
+                            ON namespace.oid = object.relnamespace
+                         CROSS JOIN LATERAL aclexplode(
+                             array_append(
+                                 COALESCE(object.relacl, '{}'::aclitem[]),
+                                 makeaclitem(
+                                     object.relowner,
+                                     object.relowner,
+                                     'SELECT',
+                                     false
+                                 )
+                             )
+                         ) AS acl
+                         WHERE namespace.nspname = 'public'
+                           AND object.relkind IN ('r', 'p', 'v', 'm', 'S')
+                           AND acl.grantee = 0
+                    )",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !required_privileges {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "runtime role does not match the required least-privilege grant matrix".to_owned(),
+            ));
+        }
+
+        let forced_rls = sqlx::query_scalar::<_, bool>(
+            "WITH expected(table_name) AS (
+                 VALUES
+                   ('organizations'), ('projects'), ('identities'),
+                   ('project_memberships'), ('service_scopes'), ('builds'),
+                   ('nodes'), ('attempts'), ('build_events'), ('outbox'),
+                   ('pipeline_definitions'), ('pipeline_revisions'),
+                   ('component_packages'), ('attempt_log_chunks'),
+                   ('attempt_effects'), ('dead_letters'), ('attempt_objects'),
+                   ('state_transfer_receipts'), ('state_transfer_records'),
+                   ('state_transfer_scm_evidence'), ('state_transfer_protections'),
+                   ('object_retention'), ('legal_holds'), ('node_dependencies'),
+                   ('identity_providers'), ('identity_group_snapshots'),
+                   ('oidc_login_attempts'), ('identity_sessions'),
+                   ('oidc_token_replays'), ('service_credentials'),
+                   ('protected_environments'), ('environment_approvals'),
+                   ('credential_grants'), ('credential_namespace_reservations'),
+                   ('audit_events'), ('audit_chain_heads'),
+                   ('audit_retention_policies'), ('normalized_test_reports'),
+                   ('normalized_test_suites'), ('normalized_test_cases')
+             ),
+             relations AS (
+                 SELECT expected.table_name, class.oid, class.relowner,
+                        class.relrowsecurity, class.relforcerowsecurity,
+                        CASE
+                            WHEN expected.table_name = 'organizations' THEN 'id'
+                            ELSE 'organization_id'
+                        END AS tenant_column
+                   FROM expected
+                   LEFT JOIN pg_class AS class
+                     ON class.oid = format('public.%I', expected.table_name)::regclass
+             ),
+             policies AS (
+                 SELECT relation.table_name, relation.tenant_column,
+                        policy.polname, policy.polcmd, policy.polpermissive,
+                        policy.polroles,
+                        pg_get_expr(policy.polqual, policy.polrelid) AS using_expression,
+                        pg_get_expr(policy.polwithcheck, policy.polrelid) AS check_expression
+                   FROM relations AS relation
+                   JOIN pg_policy AS policy ON policy.polrelid = relation.oid
+             )
+             SELECT COUNT(*) = 40
+                    AND BOOL_AND(
+                        relrowsecurity
+                        AND relforcerowsecurity
+                        AND relowner <> (
+                            SELECT oid FROM pg_roles WHERE rolname = session_user
+                        )
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM relations AS relation
+                          LEFT JOIN policies AS policy
+                            ON policy.table_name = relation.table_name
+                         WHERE policy.polname IS NULL
+                            OR policy.polname <> format(
+                                '%s_tenant_policy', relation.table_name
+                            )
+                            OR policy.polcmd <> '*'
+                            OR NOT policy.polpermissive
+                            OR policy.polroles <> ARRAY[0]::oid[]
+                            OR policy.using_expression <> format(
+                                '(%I = (NULLIF(current_setting(''mcloving.organization_id''::text, true), ''''::text))::uuid)',
+                                relation.tenant_column
+                            )
+                            OR policy.check_expression <> format(
+                                '(%I = (NULLIF(current_setting(''mcloving.organization_id''::text, true), ''''::text))::uuid)',
+                                relation.tenant_column
+                            )
+                    )
+                    AND (SELECT COUNT(*) FROM policies) = 40
+               FROM relations",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !forced_rls {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "required tenant tables must enforce row-level security".to_owned(),
+            ));
+        }
+
+        let (organization_visible, _, _, _) = sqlx::query_as::<_, (bool, i64, i64, i64)>(
+            "SELECT
+                 EXISTS (
+                     SELECT 1
+                     FROM organizations
+                     WHERE id = $1
+                 ),
+                 (SELECT COUNT(*) FROM projects WHERE organization_id = $1),
+                 (SELECT COUNT(*) FROM service_credentials WHERE organization_id = $1),
+                 (SELECT COUNT(*)
+                    FROM credential_namespace_reservations
+                   WHERE organization_id = $1)",
+        )
+        .bind(organization_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !organization_visible {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(format!(
+                "organization {organization_id} is not visible to the runtime role"
+            )));
+        }
+        let mut other_organization_id = Uuid::new_v4();
+        while other_organization_id == organization_id {
+            other_organization_id = Uuid::new_v4();
+        }
+        sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+            .bind(other_organization_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        let cross_tenant_visible = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM organizations WHERE id = $1
+             ) OR EXISTS (
+                 SELECT 1 FROM projects WHERE organization_id = $1
+             )",
+        )
+        .bind(organization_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if cross_tenant_visible {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "tenant row-level-security policies permit cross-tenant visibility".to_owned(),
+            ));
+        }
+        tx.rollback().await?;
+        migration_tx.rollback().await?;
+        Ok(())
     }
 
     /// Installs the version-one controller schema.
@@ -472,6 +1071,11 @@ impl Store {
         apply_migration(&mut tx, 16, GLOBAL_LOG_ORDER_V16).await?;
         apply_migration(&mut tx, 17, STATE_TRANSFER_V17).await?;
         apply_migration(&mut tx, 18, ATTEMPT_READINESS_V18).await?;
+        apply_migration(&mut tx, 19, IDENTITY_LIFECYCLE_V19).await?;
+        apply_migration(&mut tx, 20, IDENTITY_SESSION_REFRESH_V20).await?;
+        apply_migration(&mut tx, 21, IDENTITY_SESSION_LINEAGE_V21).await?;
+        apply_migration(&mut tx, 22, CREDENTIAL_NAMESPACE_V22).await?;
+        apply_migration(&mut tx, 23, RUNTIME_FUNCTION_BOUNDARY_V23).await?;
         tx.commit().await?;
         Ok(())
     }

@@ -1,8 +1,15 @@
 //! Versioned public HTTP API and its Rust client.
 
+mod oidc;
+
+pub use oidc::{
+    MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
+    MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig,
+};
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
@@ -43,18 +50,27 @@ const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
 #[derive(Clone)]
 pub struct ApiState {
     store: Store,
-    credentials: Vec<ApiCredential>,
+    authentication: Authentication,
     artifact_agents: Vec<ArtifactAgentCredential>,
     object_store: Option<FilesystemObjectStore>,
     artifact_body_limit: usize,
     staged_upload_ttl: Duration,
     publication_claim_cursor: Arc<Mutex<Option<String>>>,
+    oidc_clients: BTreeMap<(Uuid, Uuid), oidc::OidcClient>,
 }
 
 #[derive(Clone)]
 struct ApiCredential {
     token_digest: [u8; 32],
     principal: Principal,
+}
+
+#[derive(Clone)]
+enum Authentication {
+    /// Test and compatibility construction only. The shipped controller uses
+    /// the durable identity/session tables instead.
+    Static(Vec<ApiCredential>),
+    Durable,
 }
 
 #[derive(Clone)]
@@ -72,16 +88,35 @@ impl ApiState {
         }
         Ok(Self {
             store,
-            credentials: vec![ApiCredential {
+            authentication: Authentication::Static(vec![ApiCredential {
                 token_digest: Sha256::digest(bearer_token.as_bytes()).into(),
                 principal,
-            }],
+            }]),
             artifact_agents: Vec::new(),
             object_store: None,
             artifact_body_limit: 2 * 1024 * 1024,
             staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
             publication_claim_cursor: Arc::new(Mutex::new(None)),
+            oidc_clients: BTreeMap::new(),
         })
+    }
+
+    /// Constructs the production API authentication path.
+    ///
+    /// Human sessions and service credentials are resolved from PostgreSQL on
+    /// every request, so revocation and lifecycle-generation fences apply
+    /// across every active controller without process-local token state.
+    pub fn new_durable(store: Store) -> Self {
+        Self {
+            store,
+            authentication: Authentication::Durable,
+            artifact_agents: Vec::new(),
+            object_store: None,
+            artifact_body_limit: 2 * 1024 * 1024,
+            staged_upload_ttl: Duration::from_secs(24 * 60 * 60),
+            publication_claim_cursor: Arc::new(Mutex::new(None)),
+            oidc_clients: BTreeMap::new(),
+        }
     }
 
     /// Adds another independently authenticated API principal.
@@ -96,8 +131,12 @@ impl ApiState {
     ) -> Result<Self, ApiError> {
         validate_bearer_secret(bearer_token)?;
         let token_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
-        if self
-            .credentials
+        let Authentication::Static(credentials) = &mut self.authentication else {
+            return Err(ApiError::configuration(
+                "process-local bearer principals are forbidden in durable authentication mode",
+            ));
+        };
+        if credentials
             .iter()
             .any(|credential| constant_time_eq(&credential.token_digest, &token_digest))
             || self
@@ -109,7 +148,7 @@ impl ApiState {
                 "API and artifact-agent bearer tokens must be globally unique",
             ));
         }
-        self.credentials.push(ApiCredential {
+        credentials.push(ApiCredential {
             token_digest,
             principal,
         });
@@ -132,8 +171,12 @@ impl ApiState {
             ));
         }
         let token_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
-        if self
-            .credentials
+        let Authentication::Static(credentials) = &self.authentication else {
+            return Err(ApiError::configuration(
+                "durable authentication requires a database-backed artifact-agent token check",
+            ));
+        };
+        if credentials
             .iter()
             .any(|credential| constant_time_eq(&credential.token_digest, &token_digest))
             || self.artifact_agents.iter().any(|credential| {
@@ -145,6 +188,49 @@ impl ApiState {
                 "artifact agent IDs must be unique and bearer tokens must be globally unique",
             ));
         }
+        self.artifact_agents.push(ArtifactAgentCredential {
+            token_digest,
+            agent_id: agent_id.to_owned(),
+        });
+        Ok(self)
+    }
+
+    /// Binds an artifact-publishing agent after atomically reserving its bearer
+    /// digest outside every durable API credential namespace for this tenant.
+    pub async fn with_durable_artifact_agent_token(
+        mut self,
+        bearer_token: &str,
+        agent_id: &str,
+        organization_id: Uuid,
+    ) -> Result<Self, ApiError> {
+        validate_bearer_secret(bearer_token)?;
+        if agent_id.trim().is_empty() || agent_id.trim() != agent_id {
+            return Err(ApiError::configuration(
+                "artifact agent ID must be non-empty and canonical",
+            ));
+        }
+        if !matches!(self.authentication, Authentication::Durable) {
+            return Err(ApiError::configuration(
+                "database-backed artifact-agent token checks require durable authentication",
+            ));
+        }
+        let token_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
+        if self.artifact_agents.iter().any(|credential| {
+            credential.agent_id == agent_id
+                || constant_time_eq(&credential.token_digest, &token_digest)
+        }) {
+            return Err(ApiError::configuration(
+                "artifact agent IDs must be unique and bearer tokens must be globally unique",
+            ));
+        }
+        self.store
+            .reserve_artifact_agent_credential(organization_id, agent_id, token_digest)
+            .await
+            .map_err(|error| {
+                ApiError::configuration(format!(
+                    "reserve artifact-agent bearer in the durable credential namespace: {error}"
+                ))
+            })?;
         self.artifact_agents.push(ArtifactAgentCredential {
             token_digest,
             agent_id: agent_id.to_owned(),
@@ -167,6 +253,23 @@ impl ApiState {
         self.staged_upload_ttl = staged_upload_ttl;
         self
     }
+
+    pub fn with_oidc_client(mut self, config: OidcClientConfig) -> Result<Self, ApiError> {
+        if !matches!(self.authentication, Authentication::Durable) {
+            return Err(ApiError::configuration(
+                "OIDC requires durable database-backed authentication",
+            ));
+        }
+        let key = (config.organization_id, config.provider_id);
+        if self.oidc_clients.contains_key(&key) {
+            return Err(ApiError::configuration(
+                "OIDC provider is configured more than once",
+            ));
+        }
+        self.oidc_clients
+            .insert(key, oidc::OidcClient::new(config)?);
+        Ok(self)
+    }
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -178,6 +281,22 @@ pub fn router(state: ApiState) -> Router {
         .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
     static_ui_router()
         .route("/openapi.json", get(openapi))
+        .route(
+            "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start",
+            get(oidc::start),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/callback",
+            get(oidc::callback),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/auth/session/refresh",
+            post(oidc::refresh),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/auth/session/logout",
+            post(oidc::logout),
+        )
         .route(
             "/api/v1/organizations/{organization_id}/audit",
             get(list_audit),
@@ -419,6 +538,7 @@ async fn openapi() -> Json<Value> {
 
 fn openapi_document() -> Value {
     let organization = path_parameter("organization_id", "uuid");
+    let provider = path_parameter("provider_id", "uuid");
     let project = path_parameter("project_id", "uuid");
     let pipeline = path_parameter("pipeline_id", "uuid");
     let digest = path_parameter("digest", "sha256");
@@ -449,6 +569,7 @@ fn openapi_document() -> Value {
         },
         "servers": [{"url": "/"}],
         "tags": [
+            {"name": "authentication"},
             {"name": "pipelines"},
             {"name": "components"},
             {"name": "builds"},
@@ -459,6 +580,37 @@ fn openapi_document() -> Value {
         ],
         "security": [{"bearer": []}],
         "paths": {
+            "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start": {
+                "parameters": [organization.clone(), provider.clone()],
+                "get": unauthenticated_api_operation(
+                    "startOidcLogin", "authentication", "Start OIDC authorization code with PKCE", "200",
+                    vec![required_query_parameter("redirect_uri", "string")], None
+                )
+            },
+            "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/callback": {
+                "parameters": [organization.clone(), provider],
+                "get": unauthenticated_api_operation(
+                    "completeOidcLogin", "authentication", "Complete one-time OIDC callback", "200",
+                    vec![
+                        required_query_parameter("code", "string"),
+                        required_query_parameter("state", "string")
+                    ], None
+                )
+            },
+            "/api/v1/organizations/{organization_id}/auth/session/refresh": {
+                "parameters": [organization.clone()],
+                "post": unauthenticated_api_operation(
+                    "refreshOidcSession", "authentication", "Rotate an OIDC refresh credential", "200",
+                    Vec::new(), Some("RefreshRequest")
+                )
+            },
+            "/api/v1/organizations/{organization_id}/auth/session/logout": {
+                "parameters": [organization.clone()],
+                "post": api_operation(
+                    "logoutOidcSession", "authentication", "Revoke the current OIDC session", "200",
+                    Vec::new(), None
+                )
+            },
             "/api/v1/organizations/{organization_id}/audit": {
                 "parameters": [organization.clone()],
                 "get": api_operation(
@@ -676,6 +828,14 @@ fn openapi_document() -> Value {
                     },
                     "additionalProperties": false
                 },
+                "RefreshRequest": {
+                    "type": "object",
+                    "required": ["refresh_token"],
+                    "properties": {
+                        "refresh_token": {"type": "string", "minLength": 32, "maxLength": 512}
+                    },
+                    "additionalProperties": false
+                },
                 "PipelineUpsertRequest": {
                     "type": "object",
                     "required": ["slug", "source"],
@@ -772,6 +932,26 @@ fn api_operation(
             }
         });
     }
+    operation
+}
+
+fn unauthenticated_api_operation(
+    operation_id: &str,
+    tag: &str,
+    summary: &str,
+    success_status: &str,
+    parameters: Vec<Value>,
+    request_schema: Option<&str>,
+) -> Value {
+    let mut operation = api_operation(
+        operation_id,
+        tag,
+        summary,
+        success_status,
+        parameters,
+        request_schema,
+    );
+    operation["security"] = json!([]);
     operation
 }
 
@@ -947,7 +1127,7 @@ async fn list_audit(
     Query(query): Query<AuditQuery>,
     headers: HeaderMap,
 ) -> Result<Json<AuditPage>, ApiError> {
-    authorize(&state, &headers, organization_id, None, Action::AuditRead)?;
+    authorize(&state, &headers, organization_id, None, Action::AuditRead).await?;
     let after_sequence = query.after_sequence.unwrap_or(0);
     let limit = query.limit.unwrap_or(100);
     if after_sequence < 0 || limit == 0 || limit > mcloving_controller_store::MAX_AUDIT_PAGE {
@@ -980,7 +1160,8 @@ async fn validate_pipeline(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
     let digest = pipeline.semantic_digest().map_err(pipeline_rejected)?;
@@ -1002,7 +1183,8 @@ async fn plan_pipeline(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
     Ok(Json(pipeline_plan(&pipeline)?))
@@ -1020,7 +1202,8 @@ async fn put_pipeline(
         organization_id,
         Some(project_id),
         Action::ProjectAdmin,
-    )?;
+    )
+    .await?;
     let expected_revision = expected_revision(&headers)?;
     let pipeline =
         compile_source_with_parameters(&request.source, parameter_values(request.parameters)?)?;
@@ -1080,7 +1263,8 @@ async fn get_pipeline(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let record = state
         .store
         .pipeline(organization_id, project_id, pipeline_id)
@@ -1107,7 +1291,8 @@ async fn list_pipelines(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     state
         .store
         .pipelines(
@@ -1133,7 +1318,8 @@ async fn put_component(
         organization_id,
         Some(project_id),
         Action::ProjectAdmin,
-    )?;
+    )
+    .await?;
     let digest = parse_hex_digest_named(&digest_hex, "component")?;
     let canonical_bytes = parse_hex_bytes(&request.canonical_hex, "component canonical bytes")?;
     if Sha256::digest(&canonical_bytes).as_slice() != digest {
@@ -1189,7 +1375,8 @@ async fn get_component(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let digest = parse_hex_digest_named(&digest_hex, "component")?;
     state
         .store
@@ -1212,7 +1399,8 @@ async fn list_components(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let after = match (&query.after, &query.after_digest) {
         (None, None) => None,
         (Some(name), Some(digest)) => Some(ComponentCursor {
@@ -1252,7 +1440,8 @@ async fn list_builds(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let after = match (query.after_created_micros, query.after_id) {
         (None, None) => None,
         (Some(created_at_unix_micros), Some(build_id)) => Some(BuildCursor {
@@ -1292,7 +1481,8 @@ async fn build_graph(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     state
         .store
         .build_graph(organization_id, project_id, build_id)
@@ -1313,7 +1503,8 @@ async fn list_approvals(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     state
         .store
         .approvals(organization_id, project_id, build_id)
@@ -1334,7 +1525,8 @@ async fn create_approval(
         organization_id,
         Some(project_id),
         Action::ProjectAdmin,
-    )?;
+    )
+    .await?;
     let graph = state
         .store
         .build_graph(organization_id, project_id, build_id)
@@ -1380,7 +1572,8 @@ async fn list_credential_grants(
         organization_id,
         Some(project_id),
         Action::SecretUse,
-    )?;
+    )
+    .await?;
     state
         .store
         .credential_grants(organization_id, project_id, build_id)
@@ -1400,7 +1593,8 @@ async fn list_test_reports(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     state
         .store
         .test_reports(organization_id, project_id, build_id)
@@ -1574,7 +1768,8 @@ async fn submit(
         organization_id,
         Some(project_id),
         Action::BuildSubmit,
-    )?;
+    )
+    .await?;
     let required_trust_pool = submission_trust_pool(&headers)?;
     let required_platform = submission_platform(&headers)?;
     let idempotency_key = headers
@@ -1980,7 +2175,8 @@ async fn status(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     let snapshot = state
         .store
         .build_snapshot(organization_id, project_id, build_id)
@@ -2012,7 +2208,8 @@ async fn stage_artifact(
         organization_id,
         Some(project_id),
         Action::BuildSubmit,
-    )?;
+    )
+    .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
     let name = bounded_header(
         &headers,
@@ -2128,7 +2325,8 @@ async fn commit_artifact(
         organization_id,
         Some(project_id),
         Action::BuildSubmit,
-    )?;
+    )
+    .await?;
     authorize_artifact_agent(&state, &headers, &request.agent_id)?;
     require_build(&state, organization_id, project_id, build_id).await?;
     if !upload_token.starts_with(&format!("{organization_id}-")) {
@@ -2245,7 +2443,8 @@ async fn list_artifacts(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
     let artifacts = state
         .store
@@ -2270,7 +2469,8 @@ async fn artifact_metadata(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
     let artifact = find_artifact(
         &state,
@@ -2296,7 +2496,8 @@ async fn download_artifact(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
     let artifact = find_artifact(
         &state,
@@ -2403,7 +2604,8 @@ async fn logs(
         organization_id,
         Some(project_id),
         Action::ProjectRead,
-    )?;
+    )
+    .await?;
     if state
         .store
         .build_snapshot(organization_id, project_id, build_id)
@@ -2476,7 +2678,8 @@ async fn cancel(
         organization_id,
         Some(project_id),
         Action::BuildCancel,
-    )?;
+    )
+    .await?;
     let accepted = state
         .store
         .request_cancellation_as(organization_id, project_id, build_id, &principal.subject)
@@ -2497,7 +2700,8 @@ async fn retry_attempt(
         organization_id,
         Some(project_id),
         Action::BuildSubmit,
-    )?;
+    )
+    .await?;
     let graph = state
         .store
         .build_graph(organization_id, project_id, build_id)
@@ -2562,7 +2766,8 @@ async fn explain(
         organization_id,
         None,
         Action::SchedulerControl,
-    )?;
+    )
+    .await?;
     let response = match state
         .store
         .explain_wait(
@@ -2755,32 +2960,40 @@ fn object_store_error(error: ObjectStoreError) -> ApiError {
     }
 }
 
-fn authorize<'a>(
-    state: &'a ApiState,
+async fn authorize(
+    state: &ApiState,
     headers: &HeaderMap,
     organization_id: Uuid,
     project_id: Option<Uuid>,
     action: Action,
-) -> Result<&'a Principal, ApiError> {
-    let principal = authenticate_principal(state, headers)?;
-    authorize_principal(principal, organization_id, project_id, action)
+) -> Result<Principal, ApiError> {
+    let principal = authenticate_principal(state, headers, organization_id).await?;
+    authorize_principal(&principal, organization_id, project_id, action)
         .map_err(|error| ApiError::new(StatusCode::FORBIDDEN, "forbidden", error.to_string()))?;
     Ok(principal)
 }
 
-fn authenticate_principal<'a>(
-    state: &'a ApiState,
+async fn authenticate_principal(
+    state: &ApiState,
     headers: &HeaderMap,
-) -> Result<&'a Principal, ApiError> {
-    let supplied = bearer_token(headers)
-        .map(|token| Sha256::digest(token.as_bytes()))
+    organization_id: Uuid,
+) -> Result<Principal, ApiError> {
+    let supplied: [u8; 32] = bearer_token(headers)
+        .map(|token| Sha256::digest(token.as_bytes()).into())
         .ok_or_else(unauthorized)?;
-    state
-        .credentials
-        .iter()
-        .find(|credential| constant_time_eq(supplied.as_slice(), &credential.token_digest))
-        .map(|credential| &credential.principal)
-        .ok_or_else(unauthorized)
+    match &state.authentication {
+        Authentication::Static(credentials) => credentials
+            .iter()
+            .find(|credential| constant_time_eq(&supplied, &credential.token_digest))
+            .map(|credential| credential.principal.clone())
+            .ok_or_else(unauthorized),
+        Authentication::Durable => state
+            .store
+            .authenticate_api_token(organization_id, supplied, unix_time_ms())
+            .await
+            .map(|authenticated| authenticated.principal)
+            .map_err(|_| unauthorized()),
+    }
 }
 
 fn authorize_artifact_agent(
@@ -2808,6 +3021,14 @@ fn authorize_artifact_agent(
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     header_bearer_token(headers, "authorization")
+}
+
+fn unix_time_ms() -> i64 {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).unwrap_or(i64::MAX)
 }
 
 fn header_bearer_token<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -3583,6 +3804,7 @@ mod tests {
             Some(project_id),
             Action::ProjectAdmin,
         )
+        .await
         .expect("human principal is independently authenticated");
         assert_eq!(resolved.subject, "oidc:alice");
     }
@@ -3666,6 +3888,16 @@ mod tests {
                 .with_bearer_principal(shared, principal)
                 .is_err(),
             "an artifact-agent bearer cannot also authenticate an API principal"
+        );
+
+        let durable_pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("construct lazy pool");
+        assert!(
+            ApiState::new_durable(Store::new(durable_pool))
+                .with_artifact_agent_token(shared, "agent-1")
+                .is_err(),
+            "durable mode must fail closed unless the database namespace is checked"
         );
     }
 
@@ -3752,6 +3984,22 @@ mod tests {
         let document = openapi_document();
         let paths = document["paths"].as_object().expect("paths object");
         let expected = [
+            (
+                "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/callback",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/auth/session/refresh",
+                "post",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/auth/session/logout",
+                "post",
+            ),
             ("/api/v1/organizations/{organization_id}/audit", "get"),
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/validate",
