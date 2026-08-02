@@ -609,6 +609,35 @@ async fn failed_runtime_preflight_does_not_rotate_the_active_api_credential() {
     .await
     .expect("restore identity-column grant");
 
+    sqlx::query("DROP ROLE IF EXISTS mcloving_preflight_intruder")
+        .execute(&pool)
+        .await
+        .expect("remove stale preflight intruder role");
+    sqlx::query("CREATE ROLE mcloving_preflight_intruder NOLOGIN")
+        .execute(&pool)
+        .await
+        .expect("create preflight intruder role");
+    sqlx::query("GRANT CREATE ON SCHEMA public TO mcloving_preflight_intruder")
+        .execute(&pool)
+        .await
+        .expect("widen schema grant to a named third party");
+    assert_runtime_preflight_rejected(
+        &migration_url,
+        &runtime_url,
+        organization_id,
+        root.path(),
+        "a third-party schema CREATE grant must fail preflight",
+    )
+    .await;
+    sqlx::query("REVOKE ALL ON SCHEMA public FROM mcloving_preflight_intruder")
+        .execute(&pool)
+        .await
+        .expect("restore schema grant envelope");
+    sqlx::query("DROP ROLE mcloving_preflight_intruder")
+        .execute(&pool)
+        .await
+        .expect("remove preflight intruder role");
+
     let runtime_base = runtime_url
         .rsplit_once('/')
         .map(|(base, _)| base)

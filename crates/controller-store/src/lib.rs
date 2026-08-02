@@ -676,6 +676,29 @@ impl Store {
                   WHERE namespace.nspname = 'public'
                     AND acl.grantee = 0
              ),
+             unexpected_named_schema_privileges AS (
+                 SELECT acl.privilege_type
+                   FROM pg_namespace AS namespace
+                  CROSS JOIN LATERAL aclexplode(
+                      array_append(
+                          COALESCE(namespace.nspacl, '{}'::aclitem[]),
+                          makeaclitem(
+                              namespace.nspowner,
+                              namespace.nspowner,
+                              'USAGE',
+                              false
+                          )
+                      )
+                  ) AS acl
+                   JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+                  WHERE namespace.nspname = 'public'
+                    AND acl.grantee <> namespace.nspowner
+                    AND NOT (
+                        grantee.rolname = current_user
+                        AND acl.privilege_type = 'USAGE'
+                        AND NOT acl.is_grantable
+                    )
+             ),
              actual_tables(table_name, privilege) AS (
                  SELECT table_name, privilege_type
                    FROM information_schema.table_privileges
@@ -794,6 +817,9 @@ impl Store {
                          SELECT * FROM expected_schema)
                     )
                     AND NOT EXISTS (SELECT 1 FROM public_schema_privileges)
+                    AND NOT EXISTS (
+                        SELECT 1 FROM unexpected_named_schema_privileges
+                    )
                     AND NOT EXISTS (
                         (SELECT * FROM expected_tables
                          EXCEPT
