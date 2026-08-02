@@ -30,7 +30,7 @@ use mcloving_controller_store::{
     NewServiceCredential, NewServiceIdentity, ReconciliationTrustPoolAuthorization, Store,
     StoreError, TerminalOutcome, authz::ServiceScope,
 };
-use mcloving_execution_spine::{WorkerConfig, run_claim};
+use mcloving_execution_spine::{WorkerConfig, preflight_worker, run_claim};
 use mcloving_object_store::{FilesystemObjectStore, Quota};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -107,14 +107,9 @@ async fn main() -> Result<()> {
         },
     )
     .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
-    tokio::fs::create_dir_all(&worker.config.workspace_root)
+    preflight_worker(&worker.config)
         .await
-        .context("create embedded worker workspace root")?;
-    if let Some(parent) = worker.config.journal_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .context("create embedded worker journal directory")?;
-    }
+        .context("preflight embedded worker runtime")?;
     let listener = TcpListener::bind(&listen)
         .await
         .with_context(|| format!("bind controller to {listen}"))?;
@@ -135,6 +130,10 @@ async fn main() -> Result<()> {
         .await
         .context("connect to PostgreSQL runtime role")?;
     let store = Store::new(runtime_pool);
+    store
+        .preflight_tenant_runtime(worker.organization_id)
+        .await
+        .context("preflight PostgreSQL runtime tenant access")?;
     let mut state = ApiState::new_durable(store.clone());
     if let Some(oidc) = &oidc {
         state = state

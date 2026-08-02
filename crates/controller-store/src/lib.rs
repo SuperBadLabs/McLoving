@@ -436,6 +436,8 @@ pub enum StoreError {
     StateTransferConflict(String),
     #[error("invalid identity operation: {0}")]
     InvalidIdentityOperation(String),
+    #[error("invalid runtime database configuration: {0}")]
+    InvalidRuntimeConfiguration(String),
     #[error("identity operation conflict: {0}")]
     IdentityConflict(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
@@ -458,6 +460,36 @@ impl Store {
 
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Proves that the runtime role can enter the configured tenant boundary
+    /// and read the migrated schema before bootstrap rotates credentials.
+    pub async fn preflight_tenant_runtime(&self, organization_id: Uuid) -> Result<(), StoreError> {
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let (organization_visible, _, _, _) = sqlx::query_as::<_, (bool, i64, i64, i64)>(
+            "SELECT
+                 EXISTS (
+                     SELECT 1
+                     FROM organizations
+                     WHERE id = $1
+                 ),
+                 (SELECT COUNT(*) FROM projects WHERE organization_id = $1),
+                 (SELECT COUNT(*) FROM service_credentials WHERE organization_id = $1),
+                 (SELECT COUNT(*)
+                    FROM credential_namespace_reservations
+                   WHERE organization_id = $1)",
+        )
+        .bind(organization_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !organization_visible {
+            tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(format!(
+                "organization {organization_id} is not visible to the runtime role"
+            )));
+        }
+        tx.rollback().await?;
+        Ok(())
     }
 
     /// Installs the version-one controller schema.

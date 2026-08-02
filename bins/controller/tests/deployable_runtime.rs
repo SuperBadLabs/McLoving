@@ -467,6 +467,75 @@ async fn failed_runtime_preflight_does_not_rotate_the_active_api_credential() {
         "invalid runtime database configuration must fail preflight"
     );
 
+    let runtime_base = runtime_url
+        .rsplit_once('/')
+        .map(|(base, _)| base)
+        .expect("runtime URL contains a database path");
+    let valid_wrong_database = format!("{runtime_base}/postgres");
+    let wrong_database = preflight_controller_command(
+        &migration_url,
+        &valid_wrong_database,
+        "preflight-api-token-generation-two",
+        2,
+        organization_id,
+        "127.0.0.1:0",
+        root.path(),
+    )
+    .output()
+    .await
+    .expect("run wrong-database controller");
+    assert!(
+        !wrong_database.status.success(),
+        "a connectable runtime database without the tenant schema must fail preflight"
+    );
+
+    let invalid_journal = preflight_controller_command(
+        &migration_url,
+        &runtime_url,
+        "preflight-api-token-generation-two",
+        2,
+        organization_id,
+        "127.0.0.1:0",
+        root.path(),
+    )
+    .env(
+        "MCLOVING_AGENT_JOURNAL",
+        root.path().join("preflight-workspace"),
+    )
+    .output()
+    .await
+    .expect("run invalid-journal controller");
+    assert!(
+        !invalid_journal.status.success(),
+        "a journal path that cannot be opened as SQLite must fail preflight"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let workspace_link = root.path().join("preflight-workspace-link");
+        symlink(root.path().join("preflight-workspace"), &workspace_link)
+            .expect("create workspace symlink");
+        let invalid_workspace = preflight_controller_command(
+            &migration_url,
+            &runtime_url,
+            "preflight-api-token-generation-two",
+            2,
+            organization_id,
+            "127.0.0.1:0",
+            root.path(),
+        )
+        .env("MCLOVING_WORKSPACE_ROOT", &workspace_link)
+        .output()
+        .await
+        .expect("run invalid-workspace controller");
+        assert!(
+            !invalid_workspace.status.success(),
+            "a symlinked workspace root must fail the execution guard during preflight"
+        );
+    }
+
     let credentials = sqlx::query_as::<_, (i64, Option<i64>)>(
         "SELECT generation, revoked_at_unix_ms
          FROM service_credentials
