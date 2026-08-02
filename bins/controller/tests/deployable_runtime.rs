@@ -8,6 +8,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 const TOKEN: &str = "mcloving-controller-binary-test-token";
+static DEPLOYABLE_RUNTIME_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const PIPELINE: &str = r#"
 version: 1
 name: deployed-controller
@@ -23,6 +24,7 @@ stages:
 
 #[tokio::test]
 async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
+    let _test_guard = DEPLOYABLE_RUNTIME_TEST_LOCK.lock().await;
     let Ok(migration_url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -380,6 +382,7 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
 
 #[tokio::test]
 async fn failed_runtime_preflight_does_not_rotate_the_active_api_credential() {
+    let _test_guard = DEPLOYABLE_RUNTIME_TEST_LOCK.lock().await;
     let Ok(migration_url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
@@ -511,6 +514,101 @@ async fn failed_runtime_preflight_does_not_rotate_the_active_api_credential() {
         "a privileged login that assumes mcloving_tenant must fail preflight"
     );
 
+    sqlx::query(
+        "ALTER POLICY identity_sessions_tenant_policy ON identity_sessions
+         USING (
+             true OR current_setting('mcloving.organization_id', true) IS NOT NULL
+         )
+         WITH CHECK (
+             organization_id =
+             NULLIF(current_setting('mcloving.organization_id', true), '')::uuid
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("weaken tenant policy");
+    assert_runtime_preflight_rejected(
+        &migration_url,
+        &runtime_url,
+        organization_id,
+        root.path(),
+        "a semantically weakened tenant policy must fail preflight",
+    )
+    .await;
+    sqlx::query(
+        "ALTER POLICY identity_sessions_tenant_policy ON identity_sessions
+         USING (
+             organization_id =
+             NULLIF(current_setting('mcloving.organization_id', true), '')::uuid
+         )
+         WITH CHECK (
+             organization_id =
+             NULLIF(current_setting('mcloving.organization_id', true), '')::uuid
+         )",
+    )
+    .execute(&pool)
+    .await
+    .expect("restore tenant policy");
+
+    let restore_function_owner = sqlx::query_scalar::<_, String>(
+        "SELECT format(
+             'ALTER FUNCTION public.mcloving_state_transfer_holds_valid(jsonb) OWNER TO %I',
+             current_user
+         )",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("render function owner restoration");
+    sqlx::query(
+        "ALTER FUNCTION public.mcloving_state_transfer_holds_valid(jsonb)
+         OWNER TO mcloving_tenant",
+    )
+    .execute(&pool)
+    .await
+    .expect("transfer function to runtime role");
+    assert_runtime_preflight_rejected(
+        &migration_url,
+        &runtime_url,
+        organization_id,
+        root.path(),
+        "runtime ownership of an allowlisted function must fail preflight",
+    )
+    .await;
+    sqlx::query(&restore_function_owner)
+        .execute(&pool)
+        .await
+        .expect("restore function owner");
+    sqlx::query(
+        "GRANT EXECUTE ON FUNCTION public.mcloving_state_transfer_holds_valid(jsonb)
+         TO mcloving_tenant",
+    )
+    .execute(&pool)
+    .await
+    .expect("restore runtime function grant");
+
+    sqlx::query(
+        "GRANT UPDATE (group_generation) ON identities
+         TO mcloving_tenant WITH GRANT OPTION",
+    )
+    .execute(&pool)
+    .await
+    .expect("widen identity-column grant");
+    assert_runtime_preflight_rejected(
+        &migration_url,
+        &runtime_url,
+        organization_id,
+        root.path(),
+        "a column grant option must fail preflight",
+    )
+    .await;
+    sqlx::query(
+        "REVOKE GRANT OPTION FOR UPDATE (group_generation) ON identities
+         FROM mcloving_tenant",
+    )
+    .execute(&pool)
+    .await
+    .expect("restore identity-column grant");
+
     let runtime_base = runtime_url
         .rsplit_once('/')
         .map(|(base, _)| base)
@@ -631,6 +729,28 @@ fn preflight_controller_command(
         .env("MCLOVING_OBJECT_ROOT", root.join("preflight-objects"))
         .kill_on_drop(true);
     command
+}
+
+async fn assert_runtime_preflight_rejected(
+    migration_url: &str,
+    runtime_url: &str,
+    organization_id: Uuid,
+    root: &std::path::Path,
+    expectation: &str,
+) {
+    let output = preflight_controller_command(
+        migration_url,
+        runtime_url,
+        "preflight-api-token-generation-two",
+        2,
+        organization_id,
+        "127.0.0.1:0",
+        root,
+    )
+    .output()
+    .await
+    .expect("run rejected runtime preflight");
+    assert!(!output.status.success(), "{expectation}");
 }
 
 async fn enable_test_runtime_login(pool: &sqlx::PgPool) {

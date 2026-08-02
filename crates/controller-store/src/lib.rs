@@ -772,6 +772,15 @@ impl Store {
                   WHERE namespace.nspname = 'public'
                     AND acl.grantee = 0
                     AND acl.privilege_type = 'EXECUTE'
+             ),
+             runtime_owned_functions AS (
+                 SELECT function.oid
+                   FROM pg_proc AS function
+                   JOIN pg_namespace AS namespace
+                     ON namespace.oid = function.pronamespace
+                   JOIN pg_roles AS owner ON owner.oid = function.proowner
+                  WHERE namespace.nspname = 'public'
+                    AND owner.rolname = session_user
              )
              SELECT has_schema_privilege(current_user, 'public', 'USAGE')
                     AND NOT has_schema_privilege(current_user, 'public', 'CREATE')
@@ -822,6 +831,7 @@ impl Store {
                          SELECT * FROM expected_sequences)
                     )
                     AND NOT EXISTS (SELECT 1 FROM public_function_execution)
+                    AND NOT EXISTS (SELECT 1 FROM runtime_owned_functions)
                     AND NOT EXISTS (
                         SELECT 1
                           FROM information_schema.table_privileges
@@ -889,13 +899,19 @@ impl Store {
              ),
              relations AS (
                  SELECT expected.table_name, class.oid, class.relowner,
-                        class.relrowsecurity, class.relforcerowsecurity
+                        class.relrowsecurity, class.relforcerowsecurity,
+                        CASE
+                            WHEN expected.table_name = 'organizations' THEN 'id'
+                            ELSE 'organization_id'
+                        END AS tenant_column
                    FROM expected
                    LEFT JOIN pg_class AS class
                      ON class.oid = format('public.%I', expected.table_name)::regclass
              ),
              policies AS (
-                 SELECT relation.table_name, policy.polcmd,
+                 SELECT relation.table_name, relation.tenant_column,
+                        policy.polname, policy.polcmd, policy.polpermissive,
+                        policy.polroles,
                         pg_get_expr(policy.polqual, policy.polrelid) AS using_expression,
                         pg_get_expr(policy.polwithcheck, policy.polrelid) AS check_expression
                    FROM relations AS relation
@@ -912,30 +928,25 @@ impl Store {
                     AND NOT EXISTS (
                         SELECT 1
                           FROM relations AS relation
-                         WHERE NOT EXISTS (
-                             SELECT 1
-                               FROM policies AS policy
-                              WHERE policy.table_name = relation.table_name
-                         )
+                          LEFT JOIN policies AS policy
+                            ON policy.table_name = relation.table_name
+                         WHERE policy.polname IS NULL
+                            OR policy.polname <> format(
+                                '%s_tenant_policy', relation.table_name
+                            )
+                            OR policy.polcmd <> '*'
+                            OR NOT policy.polpermissive
+                            OR policy.polroles <> ARRAY[0]::oid[]
+                            OR policy.using_expression <> format(
+                                '(%I = (NULLIF(current_setting(''mcloving.organization_id''::text, true), ''''::text))::uuid)',
+                                relation.tenant_column
+                            )
+                            OR policy.check_expression <> format(
+                                '(%I = (NULLIF(current_setting(''mcloving.organization_id''::text, true), ''''::text))::uuid)',
+                                relation.tenant_column
+                            )
                     )
-                    AND NOT EXISTS (
-                        SELECT 1
-                          FROM policies
-                         WHERE (
-                             polcmd IN ('*', 'r', 'w', 'd')
-                             AND (
-                                 using_expression IS NULL
-                                 OR using_expression NOT LIKE '%mcloving.organization_id%'
-                             )
-                         )
-                         OR (
-                             polcmd IN ('*', 'a', 'w')
-                             AND (
-                                 check_expression IS NULL
-                                 OR check_expression NOT LIKE '%mcloving.organization_id%'
-                             )
-                         )
-                    )
+                    AND (SELECT COUNT(*) FROM policies) = 40
                FROM relations",
         )
         .fetch_one(&mut *tx)
