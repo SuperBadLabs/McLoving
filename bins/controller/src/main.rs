@@ -59,6 +59,11 @@ async fn main() -> Result<()> {
     if migration_database_url == runtime_database_url {
         bail!("migration and runtime database credentials must be distinct");
     }
+    if std::env::var_os("MCLOVING_API_PRINCIPALS_PATH").is_some() {
+        bail!(
+            "MCLOVING_API_PRINCIPALS_PATH is retired; provision immutable OIDC identities instead"
+        );
+    }
     let bearer_token =
         std::env::var("MCLOVING_API_TOKEN").context("MCLOVING_API_TOKEN is required")?;
     if bearer_token.len() < 32 {
@@ -186,11 +191,6 @@ async fn main() -> Result<()> {
         )
         .await
         .context("configure artifact-agent authentication")?;
-    if std::env::var_os("MCLOVING_API_PRINCIPALS_PATH").is_some() {
-        bail!(
-            "MCLOVING_API_PRINCIPALS_PATH is retired; provision immutable OIDC identities instead"
-        );
-    }
     if let Some(oidc) = oidc {
         state = state
             .with_oidc_client(oidc.client)
