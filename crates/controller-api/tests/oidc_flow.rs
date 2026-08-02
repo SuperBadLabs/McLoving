@@ -38,13 +38,17 @@ struct ExpectedExchange {
     challenge: String,
     redirect_uri: String,
     groups: Vec<String>,
+    audience: Value,
+    authorized_party: Option<String>,
 }
 
 #[derive(Serialize)]
 struct TestClaims {
     iss: String,
     sub: String,
-    aud: String,
+    aud: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    azp: Option<String>,
     exp: u64,
     iat: u64,
     nonce: String,
@@ -82,7 +86,8 @@ async fn token(
         &TestClaims {
             iss: state.issuer,
             sub: "immutable-source-user-42".to_owned(),
-            aud: "mcloving-test".to_owned(),
+            aud: expected.audience,
+            azp: expected.authorized_party,
             exp: now + 300,
             iat: now,
             nonce: expected.nonce,
@@ -312,7 +317,7 @@ async fn oidc_pkce_refresh_group_fencing_and_logout_are_end_to_end() {
         organization_id,
         provider_id,
         issuer: base.clone(),
-        audience: "mcloving-test".to_owned(),
+        audience: "mcloving-api".to_owned(),
         authorization_endpoint: format!("{base}/authorize"),
         token_endpoint: format!("{base}/token"),
         jwks_uri: format!("{base}/jwks"),
@@ -367,6 +372,29 @@ async fn oidc_pkce_refresh_group_fencing_and_logout_are_end_to_end() {
         redirect_uri,
     )
     .await;
+
+    let resource_only_state = begin_login_with_token_binding(
+        app.clone(),
+        organization_id,
+        provider_id,
+        redirect_uri,
+        &expected,
+        vec!["developers".to_owned()],
+        json!("mcloving-api"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        callback_status(
+            app.clone(),
+            organization_id,
+            provider_id,
+            &resource_only_state,
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+        "a signed resource-only ID token must not authenticate this client",
+    );
 
     let first = login(
         app.clone(),
@@ -565,6 +593,30 @@ async fn begin_login(
     expected: &Arc<Mutex<Option<ExpectedExchange>>>,
     groups: Vec<String>,
 ) -> String {
+    begin_login_with_token_binding(
+        app,
+        organization_id,
+        provider_id,
+        redirect_uri,
+        expected,
+        groups,
+        json!(["mcloving-api", "mcloving-test"]),
+        Some("mcloving-test".to_owned()),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn begin_login_with_token_binding(
+    app: Router,
+    organization_id: Uuid,
+    provider_id: Uuid,
+    redirect_uri: &str,
+    expected: &Arc<Mutex<Option<ExpectedExchange>>>,
+    groups: Vec<String>,
+    audience: Value,
+    authorized_party: Option<String>,
+) -> String {
     let mut start_url = reqwest::Url::parse("http://mcloving.invalid").expect("base URL");
     start_url.set_path(&format!(
         "/api/v1/organizations/{organization_id}/auth/oidc/{provider_id}/start"
@@ -609,6 +661,8 @@ async fn begin_login(
         challenge: query["code_challenge"].clone(),
         redirect_uri: redirect_uri.to_owned(),
         groups,
+        audience,
+        authorized_party,
     });
     query["state"].clone()
 }
