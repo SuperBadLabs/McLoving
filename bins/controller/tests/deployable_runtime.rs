@@ -489,6 +489,28 @@ async fn failed_runtime_preflight_does_not_rotate_the_active_api_credential() {
         "an overprivileged runtime login must fail preflight"
     );
 
+    let assumed_runtime_url = if migration_url.contains('?') {
+        format!("{migration_url}&options=-c%20role%3Dmcloving_tenant")
+    } else {
+        format!("{migration_url}?options=-c%20role%3Dmcloving_tenant")
+    };
+    let assumed_runtime = preflight_controller_command(
+        &migration_url,
+        &assumed_runtime_url,
+        "preflight-api-token-generation-two",
+        2,
+        organization_id,
+        "127.0.0.1:0",
+        root.path(),
+    )
+    .output()
+    .await
+    .expect("run assumed-role controller");
+    assert!(
+        !assumed_runtime.status.success(),
+        "a privileged login that assumes mcloving_tenant must fail preflight"
+    );
+
     let runtime_base = runtime_url
         .rsplit_once('/')
         .map(|(base, _)| base)
