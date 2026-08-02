@@ -40,6 +40,16 @@ use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+fn validate_artifact_agent_token(api_token: &str, artifact_agent_token: &str) -> Result<()> {
+    if artifact_agent_token.len() < 32 {
+        bail!("MCLOVING_ARTIFACT_AGENT_TOKEN must contain at least 32 bytes");
+    }
+    if api_token == artifact_agent_token {
+        bail!("MCLOVING_API_TOKEN and MCLOVING_ARTIFACT_AGENT_TOKEN must be distinct");
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let migration_database_url = std::env::var("MCLOVING_MIGRATION_DATABASE_URL")
@@ -63,9 +73,7 @@ async fn main() -> Result<()> {
     }
     let artifact_agent_token = std::env::var("MCLOVING_ARTIFACT_AGENT_TOKEN")
         .context("MCLOVING_ARTIFACT_AGENT_TOKEN is required")?;
-    if bearer_token == artifact_agent_token {
-        bail!("MCLOVING_API_TOKEN and MCLOVING_ARTIFACT_AGENT_TOKEN must be distinct");
-    }
+    validate_artifact_agent_token(&bearer_token, &artifact_agent_token)?;
     let artifact_agent_digest: [u8; 32] = Sha256::digest(artifact_agent_token.as_bytes()).into();
     let listen = std::env::var("MCLOVING_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let worker = EmbeddedWorker::from_environment()?;
@@ -1464,6 +1472,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_agent_token_is_validated_before_bootstrap() {
+        let api_token = "a".repeat(32);
+        let short_artifact_token = "b".repeat(31);
+        assert_eq!(
+            validate_artifact_agent_token(&api_token, &short_artifact_token)
+                .unwrap_err()
+                .to_string(),
+            "MCLOVING_ARTIFACT_AGENT_TOKEN must contain at least 32 bytes"
+        );
+        assert!(validate_artifact_agent_token(&api_token, &api_token).is_err());
+        assert!(validate_artifact_agent_token(&api_token, &"b".repeat(32)).is_ok());
+    }
 
     #[test]
     fn composite_authority_token_preserves_restore_epoch_and_fence() {
