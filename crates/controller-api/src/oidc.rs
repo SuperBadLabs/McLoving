@@ -687,21 +687,24 @@ fn authorized_party_matches(
     authorized_party: Option<&str>,
     client_id: &str,
 ) -> bool {
-    let audience_count = match audience {
-        Value::String(value) if !value.is_empty() => 1,
+    let audience_values = match audience {
+        Value::String(value) if !value.is_empty() => vec![value.as_str()],
         Value::Array(values)
             if !values.is_empty()
                 && values
                     .iter()
                     .all(|value| value.as_str().is_some_and(|value| !value.is_empty())) =>
         {
-            values.len()
+            values.iter().filter_map(Value::as_str).collect::<Vec<_>>()
         }
         _ => return false,
     };
+    if !audience_values.contains(&client_id) {
+        return false;
+    }
     match authorized_party {
         Some(value) => value == client_id,
-        None => audience_count == 1,
+        None => audience_values.len() == 1,
     }
 }
 
@@ -880,6 +883,14 @@ mod tests {
         assert!(authorized_party_matches(&one, None, "mcloving"));
         assert!(authorized_party_matches(&one, Some("mcloving"), "mcloving"));
         assert!(!authorized_party_matches(&one, Some("other"), "mcloving"));
+
+        let resource_only = serde_json::json!("mcloving-api");
+        assert!(!authorized_party_matches(&resource_only, None, "mcloving"));
+        assert!(!authorized_party_matches(
+            &resource_only,
+            Some("mcloving"),
+            "mcloving"
+        ));
 
         let many = serde_json::json!(["mcloving", "other"]);
         assert!(!authorized_party_matches(&many, None, "mcloving"));
