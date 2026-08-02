@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
         .context("connect to PostgreSQL runtime role")?;
     let store = Store::new(runtime_pool);
     store
-        .preflight_tenant_runtime(worker.organization_id)
+        .preflight_tenant_runtime(&migration_store, worker.organization_id)
         .await
         .context("preflight PostgreSQL runtime tenant access")?;
     let mut state = ApiState::new_durable(store.clone());

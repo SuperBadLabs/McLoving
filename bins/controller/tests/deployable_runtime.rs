@@ -467,6 +467,28 @@ async fn failed_runtime_preflight_does_not_rotate_the_active_api_credential() {
         "invalid runtime database configuration must fail preflight"
     );
 
+    let privileged_runtime_url = if migration_url.contains('?') {
+        format!("{migration_url}&application_name=privileged-runtime-preflight")
+    } else {
+        format!("{migration_url}?application_name=privileged-runtime-preflight")
+    };
+    let privileged_runtime = preflight_controller_command(
+        &migration_url,
+        &privileged_runtime_url,
+        "preflight-api-token-generation-two",
+        2,
+        organization_id,
+        "127.0.0.1:0",
+        root.path(),
+    )
+    .output()
+    .await
+    .expect("run privileged-runtime controller");
+    assert!(
+        !privileged_runtime.status.success(),
+        "an overprivileged runtime login must fail preflight"
+    );
+
     let runtime_base = runtime_url
         .rsplit_once('/')
         .map(|(base, _)| base)

@@ -462,10 +462,282 @@ impl Store {
         &self.pool
     }
 
-    /// Proves that the runtime role can enter the configured tenant boundary
-    /// and read the migrated schema before bootstrap rotates credentials.
-    pub async fn preflight_tenant_runtime(&self, organization_id: Uuid) -> Result<(), StoreError> {
+    /// Proves that migration and runtime pools target the same live database,
+    /// then verifies the exact RLS-constrained runtime role and its required
+    /// privilege envelope before bootstrap rotates credentials.
+    pub async fn preflight_tenant_runtime(
+        &self,
+        migration_store: &Self,
+        organization_id: Uuid,
+    ) -> Result<(), StoreError> {
+        let lock_key = {
+            let mut bytes = [0_u8; 8];
+            bytes.copy_from_slice(&Uuid::new_v4().as_bytes()[..8]);
+            i64::from_be_bytes(bytes)
+        };
+        let mut migration_tx = migration_store.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *migration_tx)
+            .await?;
+        let migration_database = sqlx::query_as::<_, (String, i64)>(
+            "SELECT current_database(), oid::bigint
+               FROM pg_database
+              WHERE datname = current_database()",
+        )
+        .fetch_one(&mut *migration_tx)
+        .await?;
+
         let mut tx = self.tenant_transaction(organization_id).await?;
+        let runtime_claimed_lock =
+            sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .fetch_one(&mut *tx)
+                .await?;
+        if runtime_claimed_lock {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "migration and runtime pools do not share one live PostgreSQL cluster".to_owned(),
+            ));
+        }
+        let runtime_database = sqlx::query_as::<_, (String, i64)>(
+            "SELECT current_database(), oid::bigint
+               FROM pg_database
+              WHERE datname = current_database()",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if runtime_database != migration_database {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "migration and runtime pools do not target the same PostgreSQL database".to_owned(),
+            ));
+        }
+
+        let constrained_runtime_role = sqlx::query_scalar::<_, bool>(
+            "SELECT rolname = 'mcloving_tenant'
+                    AND NOT rolsuper
+                    AND NOT rolbypassrls
+                    AND NOT rolcreaterole
+                    AND NOT rolcreatedb
+                    AND NOT rolreplication
+               FROM pg_roles
+              WHERE rolname = current_user",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !constrained_runtime_role {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "runtime login must be the constrained mcloving_tenant role".to_owned(),
+            ));
+        }
+
+        let required_privileges = sqlx::query_scalar::<_, bool>(
+            "WITH required(table_name, privilege) AS (
+                 VALUES
+                   ('organizations', 'SELECT'),
+                   ('projects', 'SELECT'),
+                   ('identities', 'SELECT'),
+                   ('project_memberships', 'SELECT'),
+                   ('service_scopes', 'SELECT'),
+                   ('builds', 'SELECT'), ('builds', 'INSERT'),
+                   ('builds', 'UPDATE'), ('builds', 'DELETE'),
+                   ('nodes', 'SELECT'), ('nodes', 'INSERT'),
+                   ('nodes', 'UPDATE'), ('nodes', 'DELETE'),
+                   ('attempts', 'SELECT'), ('attempts', 'INSERT'),
+                   ('attempts', 'UPDATE'), ('attempts', 'DELETE'),
+                   ('build_events', 'SELECT'), ('build_events', 'INSERT'),
+                   ('build_events', 'UPDATE'), ('build_events', 'DELETE'),
+                   ('outbox', 'SELECT'), ('outbox', 'INSERT'),
+                   ('outbox', 'UPDATE'), ('outbox', 'DELETE'),
+                   ('attempt_log_chunks', 'SELECT'), ('attempt_log_chunks', 'INSERT'),
+                   ('attempt_log_chunks', 'UPDATE'), ('attempt_log_chunks', 'DELETE'),
+                   ('attempt_effects', 'SELECT'), ('attempt_effects', 'INSERT'),
+                   ('attempt_effects', 'UPDATE'),
+                   ('dead_letters', 'SELECT'), ('dead_letters', 'INSERT'),
+                   ('attempt_objects', 'SELECT'), ('attempt_objects', 'INSERT'),
+                   ('attempt_objects', 'UPDATE'),
+                   ('controller_metadata', 'SELECT'),
+                   ('object_retention', 'SELECT'), ('object_retention', 'INSERT'),
+                   ('object_retention', 'UPDATE'),
+                   ('legal_holds', 'SELECT'), ('legal_holds', 'INSERT'),
+                   ('legal_holds', 'UPDATE'),
+                   ('agent_sessions', 'SELECT'), ('agent_sessions', 'INSERT'),
+                   ('agent_sessions', 'UPDATE'),
+                   ('node_dependencies', 'SELECT'), ('node_dependencies', 'INSERT'),
+                   ('node_dependencies', 'UPDATE'), ('node_dependencies', 'DELETE'),
+                   ('protected_environments', 'SELECT'),
+                   ('protected_environments', 'INSERT'),
+                   ('protected_environments', 'UPDATE'),
+                   ('environment_approvals', 'SELECT'),
+                   ('environment_approvals', 'INSERT'),
+                   ('environment_approvals', 'UPDATE'),
+                   ('credential_grants', 'SELECT'), ('credential_grants', 'INSERT'),
+                   ('credential_grants', 'UPDATE'),
+                   ('audit_events', 'SELECT'), ('audit_events', 'INSERT'),
+                   ('audit_chain_heads', 'SELECT'), ('audit_chain_heads', 'INSERT'),
+                   ('audit_chain_heads', 'UPDATE'),
+                   ('audit_retention_policies', 'SELECT'),
+                   ('audit_retention_policies', 'INSERT'),
+                   ('audit_retention_policies', 'UPDATE'),
+                   ('normalized_test_reports', 'SELECT'),
+                   ('normalized_test_reports', 'INSERT'),
+                   ('normalized_test_suites', 'SELECT'),
+                   ('normalized_test_suites', 'INSERT'),
+                   ('normalized_test_cases', 'SELECT'),
+                   ('normalized_test_cases', 'INSERT'),
+                   ('pipeline_definitions', 'SELECT'),
+                   ('pipeline_definitions', 'INSERT'),
+                   ('pipeline_definitions', 'UPDATE'),
+                   ('pipeline_revisions', 'SELECT'), ('pipeline_revisions', 'INSERT'),
+                   ('component_packages', 'SELECT'), ('component_packages', 'INSERT'),
+                   ('state_transfer_receipts', 'SELECT'),
+                   ('state_transfer_records', 'SELECT'),
+                   ('state_transfer_protections', 'SELECT'),
+                   ('state_transfer_scm_evidence', 'SELECT'),
+                   ('identity_providers', 'SELECT'),
+                   ('identity_group_snapshots', 'SELECT'),
+                   ('identity_group_snapshots', 'INSERT'),
+                   ('identity_group_snapshots', 'DELETE'),
+                   ('oidc_token_replays', 'SELECT'), ('oidc_token_replays', 'INSERT'),
+                   ('oidc_token_replays', 'DELETE'),
+                   ('identity_sessions', 'SELECT'), ('identity_sessions', 'INSERT'),
+                   ('identity_sessions', 'UPDATE'), ('identity_sessions', 'DELETE'),
+                   ('service_credentials', 'SELECT'),
+                   ('oidc_login_attempts', 'SELECT'), ('oidc_login_attempts', 'INSERT'),
+                   ('oidc_login_attempts', 'UPDATE'), ('oidc_login_attempts', 'DELETE'),
+                   ('credential_namespace_reservations', 'SELECT'),
+                   ('credential_namespace_reservations', 'INSERT')
+             )
+             SELECT has_schema_privilege(current_user, 'public', 'USAGE')
+                    AND BOOL_AND(has_table_privilege(
+                        current_user,
+                        format('public.%I', table_name),
+                        privilege
+                    ))
+                    AND has_column_privilege(
+                        current_user,
+                        'public.identities',
+                        'group_generation',
+                        'UPDATE'
+                    )
+                    AND has_column_privilege(
+                        current_user,
+                        'public.identities',
+                        'group_digest',
+                        'UPDATE'
+                    )
+                    AND has_column_privilege(
+                        current_user,
+                        'public.identities',
+                        'updated_at',
+                        'UPDATE'
+                    )
+                    AND has_function_privilege(
+                        current_user,
+                        'public.mcloving_owned_object_publication_allowed(uuid,uuid,bigint,text,text,bytea)',
+                        'EXECUTE'
+                    )
+                    AND has_function_privilege(
+                        current_user,
+                        'public.mcloving_state_transfer_holds_valid(jsonb)',
+                        'EXECUTE'
+                    )
+                    AND has_function_privilege(
+                        current_user,
+                        'public.mcloving_state_transfer_digest_json(bytea)',
+                        'EXECUTE'
+                    )
+                    AND has_function_privilege(
+                        current_user,
+                        'public.mcloving_state_transfer_normalize_holds(jsonb)',
+                        'EXECUTE'
+                    )
+                    AND has_function_privilege(
+                        current_user,
+                        'public.mcloving_state_transfer_protection_digest(text,text,bytea,bigint,jsonb)',
+                        'EXECUTE'
+                    )
+                    AND has_function_privilege(
+                        current_user,
+                        'public.mcloving_state_transfer_receipt_has_protection(uuid,uuid,uuid,bytea,text,text,bytea,bigint,jsonb)',
+                        'EXECUTE'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM pg_class AS sequence
+                          JOIN pg_namespace AS namespace
+                            ON namespace.oid = sequence.relnamespace
+                         WHERE namespace.nspname = 'public'
+                           AND sequence.relkind = 'S'
+                           AND NOT (
+                               has_sequence_privilege(
+                                   current_user,
+                                   sequence.oid,
+                                   'USAGE'
+                               )
+                               AND has_sequence_privilege(
+                                   current_user,
+                                   sequence.oid,
+                                   'SELECT'
+                               )
+                           )
+                    )
+                    AND NOT has_table_privilege(
+                        current_user,
+                        'public.organizations',
+                        'INSERT'
+                    )
+                    AND NOT has_table_privilege(
+                        current_user,
+                        'public.projects',
+                        'INSERT'
+                    )
+                    AND NOT has_table_privilege(
+                        current_user,
+                        'public.service_credentials',
+                        'INSERT'
+                    )
+               FROM required",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !required_privileges {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "runtime role does not match the required least-privilege grant matrix".to_owned(),
+            ));
+        }
+
+        let forced_rls = sqlx::query_scalar::<_, bool>(
+            "SELECT COUNT(*) = 7
+                    AND BOOL_AND(relrowsecurity AND relforcerowsecurity)
+               FROM pg_class
+              WHERE oid = ANY(ARRAY[
+                  'public.organizations'::regclass,
+                  'public.projects'::regclass,
+                  'public.builds'::regclass,
+                  'public.nodes'::regclass,
+                  'public.attempts'::regclass,
+                  'public.service_credentials'::regclass,
+                  'public.credential_namespace_reservations'::regclass
+              ])",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if !forced_rls {
+            tx.rollback().await?;
+            migration_tx.rollback().await?;
+            return Err(StoreError::InvalidRuntimeConfiguration(
+                "required tenant tables must enforce row-level security".to_owned(),
+            ));
+        }
+
         let (organization_visible, _, _, _) = sqlx::query_as::<_, (bool, i64, i64, i64)>(
             "SELECT
                  EXISTS (
@@ -484,11 +756,13 @@ impl Store {
         .await?;
         if !organization_visible {
             tx.rollback().await?;
+            migration_tx.rollback().await?;
             return Err(StoreError::InvalidRuntimeConfiguration(format!(
                 "organization {organization_id} is not visible to the runtime role"
             )));
         }
         tx.rollback().await?;
+        migration_tx.rollback().await?;
         Ok(())
     }
 
