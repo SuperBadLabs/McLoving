@@ -4,6 +4,10 @@
 -- only through a trigger or the separately privileged migration connection.
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
 
+-- Runtime access to the application schema is explicit as well. PostgreSQL's
+-- default PUBLIC schema access must not silently widen the tenant envelope.
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+
 -- Keep future migrations fail-closed as they add functions. A new callable
 -- runtime function must carry an explicit, reviewable mcloving_tenant grant.
 ALTER DEFAULT PRIVILEGES IN SCHEMA public

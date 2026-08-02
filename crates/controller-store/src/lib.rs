@@ -522,6 +522,7 @@ impl Store {
         let constrained_runtime_role = sqlx::query_scalar::<_, bool>(
             "SELECT session_user = current_user
                     AND rolname = 'mcloving_tenant'
+                    AND rolcanlogin
                     AND NOT rolsuper
                     AND NOT rolbypassrls
                     AND NOT rolcreaterole
@@ -546,7 +547,10 @@ impl Store {
         }
 
         let required_privileges = sqlx::query_scalar::<_, bool>(
-            "WITH expected_tables(table_name, privilege) AS (
+            "WITH expected_schema(privilege, is_grantable) AS (
+                 VALUES ('USAGE', false)
+             ),
+             expected_tables(table_name, privilege) AS (
                  VALUES
                    ('organizations', 'SELECT'),
                    ('projects', 'SELECT'),
@@ -622,11 +626,11 @@ impl Store {
                    ('credential_namespace_reservations', 'SELECT'),
                    ('credential_namespace_reservations', 'INSERT')
              ),
-             expected_columns(table_name, column_name, privilege) AS (
+             expected_columns(table_name, column_name, privilege, is_grantable) AS (
                  VALUES
-                   ('identities', 'group_generation', 'UPDATE'),
-                   ('identities', 'group_digest', 'UPDATE'),
-                   ('identities', 'updated_at', 'UPDATE')
+                   ('identities', 'group_generation', 'UPDATE', false),
+                   ('identities', 'group_digest', 'UPDATE', false),
+                   ('identities', 'updated_at', 'UPDATE', false)
              ),
              expected_functions(function_oid, privilege, is_grantable) AS (
                  VALUES
@@ -637,16 +641,52 @@ impl Store {
                    ('public.mcloving_state_transfer_protection_digest(text,text,bytea,bigint,jsonb)'::regprocedure, 'EXECUTE', false),
                    ('public.mcloving_state_transfer_receipt_has_protection(uuid,uuid,uuid,bytea,text,text,bytea,bigint,jsonb)'::regprocedure, 'EXECUTE', false)
              ),
+             actual_schema(privilege, is_grantable) AS (
+                 SELECT acl.privilege_type, acl.is_grantable
+                   FROM pg_namespace AS namespace
+                  CROSS JOIN LATERAL aclexplode(
+                      array_append(
+                          COALESCE(namespace.nspacl, '{}'::aclitem[]),
+                          makeaclitem(
+                              namespace.nspowner,
+                              namespace.nspowner,
+                              'USAGE',
+                              false
+                          )
+                      )
+                  ) AS acl
+                   JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+                  WHERE namespace.nspname = 'public'
+                    AND grantee.rolname = current_user
+             ),
+             public_schema_privileges AS (
+                 SELECT acl.privilege_type
+                   FROM pg_namespace AS namespace
+                  CROSS JOIN LATERAL aclexplode(
+                      array_append(
+                          COALESCE(namespace.nspacl, '{}'::aclitem[]),
+                          makeaclitem(
+                              namespace.nspowner,
+                              namespace.nspowner,
+                              'USAGE',
+                              false
+                          )
+                      )
+                  ) AS acl
+                  WHERE namespace.nspname = 'public'
+                    AND acl.grantee = 0
+             ),
              actual_tables(table_name, privilege) AS (
                  SELECT table_name, privilege_type
                    FROM information_schema.table_privileges
                   WHERE table_schema = 'public'
                     AND grantee = current_user
              ),
-             actual_columns(table_name, column_name, privilege) AS (
+             actual_columns(table_name, column_name, privilege, is_grantable) AS (
                  SELECT column_name.table_name,
                         column_name.column_name,
-                        column_name.privilege_type
+                        column_name.privilege_type,
+                        column_name.is_grantable = 'YES'
                    FROM information_schema.column_privileges AS column_name
                   WHERE column_name.table_schema = 'public'
                     AND column_name.grantee = current_user
@@ -656,6 +696,36 @@ impl Store {
                          WHERE table_grant.table_name = column_name.table_name
                            AND table_grant.privilege = column_name.privilege_type
                     )
+             ),
+             expected_sequences(sequence_oid, privilege, is_grantable) AS (
+                 SELECT sequence.oid, grant_name.privilege, false
+                   FROM pg_class AS sequence
+                   JOIN pg_namespace AS namespace
+                     ON namespace.oid = sequence.relnamespace
+                  CROSS JOIN (VALUES ('USAGE'), ('SELECT')) AS grant_name(privilege)
+                  WHERE namespace.nspname = 'public'
+                    AND sequence.relkind = 'S'
+             ),
+             actual_sequences(sequence_oid, privilege, is_grantable) AS (
+                 SELECT sequence.oid, acl.privilege_type, acl.is_grantable
+                   FROM pg_class AS sequence
+                   JOIN pg_namespace AS namespace
+                     ON namespace.oid = sequence.relnamespace
+                  CROSS JOIN LATERAL aclexplode(
+                      array_append(
+                          COALESCE(sequence.relacl, '{}'::aclitem[]),
+                          makeaclitem(
+                              sequence.relowner,
+                              sequence.relowner,
+                              'SELECT',
+                              false
+                          )
+                      )
+                  ) AS acl
+                   JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+                  WHERE namespace.nspname = 'public'
+                    AND sequence.relkind = 'S'
+                    AND grantee.rolname = current_user
              ),
              actual_functions(function_oid, privilege, is_grantable) AS (
                  SELECT function.oid, acl.privilege_type, acl.is_grantable
@@ -706,6 +776,16 @@ impl Store {
              SELECT has_schema_privilege(current_user, 'public', 'USAGE')
                     AND NOT has_schema_privilege(current_user, 'public', 'CREATE')
                     AND NOT EXISTS (
+                        (SELECT * FROM expected_schema
+                         EXCEPT
+                         SELECT * FROM actual_schema)
+                        UNION ALL
+                        (SELECT * FROM actual_schema
+                         EXCEPT
+                         SELECT * FROM expected_schema)
+                    )
+                    AND NOT EXISTS (SELECT 1 FROM public_schema_privileges)
+                    AND NOT EXISTS (
                         (SELECT * FROM expected_tables
                          EXCEPT
                          SELECT * FROM actual_tables)
@@ -732,6 +812,15 @@ impl Store {
                          EXCEPT
                          SELECT * FROM expected_functions)
                     )
+                    AND NOT EXISTS (
+                        (SELECT * FROM expected_sequences
+                         EXCEPT
+                         SELECT * FROM actual_sequences)
+                        UNION ALL
+                        (SELECT * FROM actual_sequences
+                         EXCEPT
+                         SELECT * FROM expected_sequences)
+                    )
                     AND NOT EXISTS (SELECT 1 FROM public_function_execution)
                     AND NOT EXISTS (
                         SELECT 1
@@ -742,28 +831,9 @@ impl Store {
                     )
                     AND NOT EXISTS (
                         SELECT 1
-                          FROM pg_class AS sequence
-                          JOIN pg_namespace AS namespace
-                            ON namespace.oid = sequence.relnamespace
-                         WHERE namespace.nspname = 'public'
-                           AND sequence.relkind = 'S'
-                           AND NOT (
-                               has_sequence_privilege(
-                                   current_user,
-                                   sequence.oid,
-                                   'USAGE'
-                               )
-                               AND has_sequence_privilege(
-                                   current_user,
-                                   sequence.oid,
-                                   'SELECT'
-                               )
-                               AND NOT has_sequence_privilege(
-                                   current_user,
-                                   sequence.oid,
-                                   'UPDATE'
-                               )
-                           )
+                          FROM information_schema.column_privileges
+                         WHERE table_schema = 'public'
+                           AND grantee = 'PUBLIC'
                     )
                     AND NOT EXISTS (
                         SELECT 1
