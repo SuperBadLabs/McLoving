@@ -35,6 +35,7 @@ use mcloving_object_store::{FilesystemObjectStore, Quota};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
+use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status};
@@ -83,6 +84,41 @@ async fn main() -> Result<()> {
     let listen = std::env::var("MCLOVING_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let worker = EmbeddedWorker::from_environment()?;
     let oidc = oidc_environment(worker.organization_id)?;
+    let object_root = PathBuf::from(
+        std::env::var("MCLOVING_OBJECT_ROOT").unwrap_or_else(|_| "./data/objects".to_owned()),
+    );
+    let max_object_bytes = bounded_u64_environment("MCLOVING_MAX_OBJECT_BYTES", 64 * 1024 * 1024)?;
+    let max_total_bytes =
+        bounded_u64_environment("MCLOVING_MAX_TOTAL_OBJECT_BYTES", 10 * 1024 * 1024 * 1024)?;
+    let max_staged_objects = bounded_u64_environment("MCLOVING_MAX_STAGED_OBJECTS", 4_096)?;
+    let staged_upload_ttl = Duration::from_secs(bounded_u64_environment(
+        "MCLOVING_STAGED_UPLOAD_TTL_SECONDS",
+        24 * 60 * 60,
+    )?);
+    if max_total_bytes < max_object_bytes {
+        bail!("MCLOVING_MAX_TOTAL_OBJECT_BYTES must be at least MCLOVING_MAX_OBJECT_BYTES");
+    }
+    let object_store = FilesystemObjectStore::open(
+        &object_root,
+        Quota {
+            max_object_bytes,
+            max_total_bytes,
+            max_staged_objects,
+        },
+    )
+    .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
+    tokio::fs::create_dir_all(&worker.config.workspace_root)
+        .await
+        .context("create embedded worker workspace root")?;
+    if let Some(parent) = worker.config.journal_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("create embedded worker journal directory")?;
+    }
+    let listener = TcpListener::bind(&listen)
+        .await
+        .with_context(|| format!("bind controller to {listen}"))?;
+    let agent_control = agent_control_environment().await?;
     let migration_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(&migration_database_url)
@@ -93,6 +129,18 @@ async fn main() -> Result<()> {
         .migrate()
         .await
         .context("migrate controller store")?;
+    let runtime_pool = PgPoolOptions::new()
+        .max_connections(16)
+        .connect(&runtime_database_url)
+        .await
+        .context("connect to PostgreSQL runtime role")?;
+    let store = Store::new(runtime_pool);
+    let mut state = ApiState::new_durable(store.clone());
+    if let Some(oidc) = &oidc {
+        state = state
+            .with_oidc_client(oidc.client.clone())
+            .context("configure OIDC authorization-code client")?;
+    }
     let api_identity_id = deterministic_uuid(&format!(
         "mcloving:service:public-api:{}",
         worker.organization_id
@@ -153,63 +201,16 @@ async fn main() -> Result<()> {
             .context("atomically provision public API credential and artifact-agent reservation")?;
     }
     migration_pool.close().await;
-
-    let runtime_pool = PgPoolOptions::new()
-        .max_connections(16)
-        .connect(&runtime_database_url)
-        .await
-        .context("connect to PostgreSQL runtime role")?;
-    let store = Store::new(runtime_pool);
-    let object_root = PathBuf::from(
-        std::env::var("MCLOVING_OBJECT_ROOT").unwrap_or_else(|_| "./data/objects".to_owned()),
-    );
-    let max_object_bytes = bounded_u64_environment("MCLOVING_MAX_OBJECT_BYTES", 64 * 1024 * 1024)?;
-    let max_total_bytes =
-        bounded_u64_environment("MCLOVING_MAX_TOTAL_OBJECT_BYTES", 10 * 1024 * 1024 * 1024)?;
-    let max_staged_objects = bounded_u64_environment("MCLOVING_MAX_STAGED_OBJECTS", 4_096)?;
-    let staged_upload_ttl = Duration::from_secs(bounded_u64_environment(
-        "MCLOVING_STAGED_UPLOAD_TTL_SECONDS",
-        24 * 60 * 60,
-    )?);
-    if max_total_bytes < max_object_bytes {
-        bail!("MCLOVING_MAX_TOTAL_OBJECT_BYTES must be at least MCLOVING_MAX_OBJECT_BYTES");
-    }
-    let object_store = FilesystemObjectStore::open(
-        &object_root,
-        Quota {
-            max_object_bytes,
-            max_total_bytes,
-            max_staged_objects,
-        },
-    )
-    .with_context(|| format!("open artifact object store at {}", object_root.display()))?;
-    let mut state = ApiState::new_durable(store.clone())
+    let state = state
         .with_durable_artifact_agent_token(
             &artifact_agent_token,
             &worker.config.agent_id,
             worker.organization_id,
         )
         .await
-        .context("configure artifact-agent authentication")?;
-    if let Some(oidc) = oidc {
-        state = state
-            .with_oidc_client(oidc.client)
-            .context("configure OIDC authorization-code client")?;
-    }
-    let state = state
+        .context("configure artifact-agent authentication")?
         .with_object_store(object_store)
         .with_staged_upload_ttl(staged_upload_ttl);
-    tokio::fs::create_dir_all(&worker.config.workspace_root)
-        .await
-        .context("create embedded worker workspace root")?;
-    if let Some(parent) = worker.config.journal_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .context("create embedded worker journal directory")?;
-    }
-    let listener = TcpListener::bind(&listen)
-        .await
-        .with_context(|| format!("bind controller to {listen}"))?;
     let server = async {
         axum::serve(
             listener,
@@ -218,7 +219,7 @@ async fn main() -> Result<()> {
         .await
         .context("serve public API")
     };
-    let agent_server = run_agent_control_server(store.clone());
+    let agent_server = run_agent_control_server(store.clone(), agent_control);
     tokio::pin!(server);
     tokio::pin!(agent_server);
     let worker_loop = run_embedded_worker(store, worker);
@@ -1195,40 +1196,87 @@ fn credential_store_error(error: StoreError) -> Status {
     }
 }
 
-async fn run_agent_control_server(store: Store) -> Result<()> {
-    let Some(listen) = std::env::var("MCLOVING_AGENT_LISTEN").ok() else {
+struct AgentControlEnvironment {
+    address: SocketAddr,
+    listener: TcpListener,
+    certificate: Vec<u8>,
+    private_key: Vec<u8>,
+    client_ca: Vec<u8>,
+    identities: AgentIdentityBindings,
+    #[cfg(debug_assertions)]
+    drop_start_response_once: bool,
+}
+
+impl AgentControlEnvironment {
+    fn tls_config(&self) -> ServerTlsConfig {
+        ServerTlsConfig::new()
+            .identity(Identity::from_pem(
+                self.certificate.clone(),
+                self.private_key.clone(),
+            ))
+            .client_ca_root(Certificate::from_pem(self.client_ca.clone()))
+    }
+}
+
+async fn agent_control_environment() -> Result<Option<AgentControlEnvironment>> {
+    let listen = match std::env::var("MCLOVING_AGENT_LISTEN") {
+        Ok(listen) => listen,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(error).context("read MCLOVING_AGENT_LISTEN"),
+    };
+    let address = listen
+        .parse()
+        .with_context(|| format!("MCLOVING_AGENT_LISTEN is invalid: {listen}"))?;
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("bind agent control to {address}"))?;
+    let environment = AgentControlEnvironment {
+        address,
+        listener,
+        certificate: std::fs::read(required("MCLOVING_AGENT_SERVER_CERT_PATH")?)
+            .context("read agent-control server certificate")?,
+        private_key: std::fs::read(required("MCLOVING_AGENT_SERVER_KEY_PATH")?)
+            .context("read agent-control server private key")?,
+        client_ca: std::fs::read(required("MCLOVING_AGENT_CLIENT_CA_PATH")?)
+            .context("read agent-control client CA")?,
+        identities: AgentIdentityBindings::read(PathBuf::from(required(
+            "MCLOVING_AGENT_IDENTITY_BINDINGS_PATH",
+        )?))
+        .context("read agent certificate identity bindings")?,
+        #[cfg(debug_assertions)]
+        drop_start_response_once: std::env::var_os("MCLOVING_TEST_DROP_START_RESPONSE_ONCE")
+            .is_some(),
+    };
+    Server::builder()
+        .tls_config(environment.tls_config())
+        .context("configure agent-control mTLS")?;
+    Ok(Some(environment))
+}
+
+async fn run_agent_control_server(
+    store: Store,
+    environment: Option<AgentControlEnvironment>,
+) -> Result<()> {
+    let Some(environment) = environment else {
         std::future::pending::<()>().await;
         unreachable!("pending agent server future returned")
     };
-    let address: SocketAddr = listen
-        .parse()
-        .with_context(|| format!("MCLOVING_AGENT_LISTEN is invalid: {listen}"))?;
-    let certificate = std::fs::read(required("MCLOVING_AGENT_SERVER_CERT_PATH")?)
-        .context("read agent-control server certificate")?;
-    let private_key = std::fs::read(required("MCLOVING_AGENT_SERVER_KEY_PATH")?)
-        .context("read agent-control server private key")?;
-    let client_ca = std::fs::read(required("MCLOVING_AGENT_CLIENT_CA_PATH")?)
-        .context("read agent-control client CA")?;
-    let identities = AgentIdentityBindings::read(PathBuf::from(required(
-        "MCLOVING_AGENT_IDENTITY_BINDINGS_PATH",
-    )?))
-    .context("read agent certificate identity bindings")?;
-    let tls = ServerTlsConfig::new()
-        .identity(Identity::from_pem(certificate, private_key))
-        .client_ca_root(Certificate::from_pem(client_ca));
+    let address = environment.address;
+    let tls = environment.tls_config();
+    let listener = environment.listener;
+    #[cfg(debug_assertions)]
+    let drop_start_response_once = environment.drop_start_response_once;
     let service = ControllerAgentService {
         store,
-        identities: Arc::new(identities),
+        identities: Arc::new(environment.identities),
         #[cfg(debug_assertions)]
-        drop_start_response_once: Arc::new(AtomicBool::new(
-            std::env::var_os("MCLOVING_TEST_DROP_START_RESPONSE_ONCE").is_some(),
-        )),
+        drop_start_response_once: Arc::new(AtomicBool::new(drop_start_response_once)),
     };
     Server::builder()
         .tls_config(tls)
         .context("configure agent-control mTLS")?
         .add_service(AgentControlServer::new(service))
-        .serve(address)
+        .serve_with_incoming(TcpListenerStream::new(listener))
         .await
         .with_context(|| format!("serve agent control on {address}"))
 }
