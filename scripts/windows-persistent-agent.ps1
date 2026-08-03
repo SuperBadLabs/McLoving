@@ -175,10 +175,6 @@ $controllerCaPath = Join-Path $GateRoot "ca.pem"
 $agentCertificatePath = Join-Path $GateRoot "agent.pem"
 $agentPrivateKeyPath = Join-Path $GateRoot "agent-key.pem"
 
-$sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $BinarySource).Hash.ToLowerInvariant()
-if ($sourceHash -ne $ExpectedBinarySha256.ToLowerInvariant()) {
-    throw "package binary hash mismatch: $sourceHash"
-}
 $validationEnvironment = @{
     MCLOVING_AGENT_ID = $agentId
     MCLOVING_AGENT_TRUST_POOL = $trustPool
@@ -195,13 +191,42 @@ $validationEnvironment = @{
     MCLOVING_AGENT_RENEW_MILLISECONDS = "500"
     MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS = "250"
 }
+$inputStageRoot = Join-Path ([IO.Path]::GetTempPath()) `
+    ("mcloving-install-inputs-" + [Guid]::NewGuid().ToString("N"))
+$protectedBinarySource = Join-Path $inputStageRoot "mcloving-agent.exe"
+$protectedSignerCertificateSource = Join-Path $inputStageRoot "signer.cer"
 $temporaryTrustStores = @()
 $installFailure = $null
 $trustCleanupFailures = @()
+$inputCleanupFailures = @()
 try {
+    # BinarySource and SignerCertificateSource may be supplied from a location
+    # writable by a non-administrator.  Copy both into a fresh protected tree,
+    # then authenticate only those immutable copies before executing/importing.
+    # The directory is protected before any child is created, so copied files
+    # inherit the SYSTEM/Administrators-only boundary immediately.
+    New-Item -ItemType Directory -Path $inputStageRoot -ErrorAction Stop | Out-Null
+    Set-RestrictedTreeAcl $inputStageRoot
+    Copy-Item -LiteralPath $BinarySource -Destination $protectedBinarySource -ErrorAction Stop
     if ($SignerCertificateSource) {
-        $signerCertificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2($SignerCertificateSource)
-        if ($signerCertificate.Thumbprint -ne $ExpectedSignerThumbprint) {
+        Copy-Item -LiteralPath $SignerCertificateSource `
+            -Destination $protectedSignerCertificateSource -ErrorAction Stop
+    }
+    Set-RestrictedTreeAcl $inputStageRoot
+
+    $sourceHash = (Get-FileHash -Algorithm SHA256 `
+        -LiteralPath $protectedBinarySource).Hash.ToLowerInvariant()
+    if ($sourceHash -ne $ExpectedBinarySha256.ToLowerInvariant()) {
+        throw "package binary hash mismatch: $sourceHash"
+    }
+    if ($SignerCertificateSource) {
+        $signerCertificates = New-Object `
+            Security.Cryptography.X509Certificates.X509Certificate2Collection
+        $signerCertificates.Import($protectedSignerCertificateSource)
+        if ($signerCertificates.Count -ne 1) {
+            throw "signer certificate file must contain exactly one certificate"
+        }
+        if ($signerCertificates[0].Thumbprint -ne $ExpectedSignerThumbprint) {
             throw "signer certificate thumbprint mismatch"
         }
         foreach ($storeName in @("Root", "TrustedPublisher")) {
@@ -211,13 +236,17 @@ try {
                 # Record cleanup responsibility before import so even a partially
                 # successful provider operation is removed by the finally block.
                 $temporaryTrustStores += $storeName
-                Import-Certificate -FilePath $SignerCertificateSource `
-                    -CertStoreLocation "Cert:\LocalMachine\$storeName" | Out-Null
+                $importedCertificate = Import-Certificate `
+                    -FilePath $protectedSignerCertificateSource `
+                    -CertStoreLocation "Cert:\LocalMachine\$storeName"
+                if ($importedCertificate.Thumbprint -ne $ExpectedSignerThumbprint) {
+                    throw "imported signer certificate thumbprint mismatch in $storeName"
+                }
             }
         }
     }
 
-    $signature = Get-AuthenticodeSignature -LiteralPath $BinarySource
+    $signature = Get-AuthenticodeSignature -LiteralPath $protectedBinarySource
     if ($signature.Status -ne "Valid") {
         throw "package Authenticode status is $($signature.Status)"
     }
@@ -227,7 +256,7 @@ try {
     # Only the hash- and signer-pinned binary may parse the actual PEM files.
     # This proves that the client certificate and private key match before the
     # installer mutates ACLs, package contents, the registry, or SCM.
-    Invoke-AgentConfigValidation $BinarySource $validationEnvironment
+    Invoke-AgentConfigValidation $protectedBinarySource $validationEnvironment
 
     New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
     Set-RestrictedTreeAcl $PackageRoot
@@ -239,7 +268,7 @@ try {
 
     New-Item -ItemType Directory -Force -Path $scripts, $workspace | Out-Null
     Remove-Item -LiteralPath $stagedBinary, $backupBinary -Force -ErrorAction SilentlyContinue
-    Copy-Item -LiteralPath $BinarySource -Destination $stagedBinary -Force
+    Copy-Item -LiteralPath $protectedBinarySource -Destination $stagedBinary -Force
     $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedBinary).Hash.ToLowerInvariant()
     if ($installedHash -ne $ExpectedBinarySha256.ToLowerInvariant()) {
         throw "installed binary hash mismatch: $installedHash"
@@ -267,16 +296,33 @@ try {
             $trustCleanupFailures += "${storeName}: $($_.Exception.Message)"
         }
     }
+    try {
+        if (Test-Path -LiteralPath $inputStageRoot) {
+            Remove-Item -LiteralPath $inputStageRoot -Recurse -Force -ErrorAction Stop
+        }
+    } catch {
+        $inputCleanupFailures += $_.Exception.Message
+    }
 }
 if ($installFailure) {
     Remove-Item -LiteralPath $stagedBinary, $backupBinary -Force -ErrorAction SilentlyContinue
+    $cleanupFailures = @()
     if ($trustCleanupFailures.Count -ne 0) {
-        throw "installer failed: $($installFailure.Exception.Message); temporary trust cleanup failed: $($trustCleanupFailures -join '; ')"
+        $cleanupFailures += "temporary trust: $($trustCleanupFailures -join '; ')"
+    }
+    if ($inputCleanupFailures.Count -ne 0) {
+        $cleanupFailures += "protected inputs: $($inputCleanupFailures -join '; ')"
+    }
+    if ($cleanupFailures.Count -ne 0) {
+        throw "installer failed: $($installFailure.Exception.Message); cleanup failed: $($cleanupFailures -join '; ')"
     }
     throw $installFailure
 }
 if ($trustCleanupFailures.Count -ne 0) {
     throw "temporary trust cleanup failed: $($trustCleanupFailures -join '; ')"
+}
+if ($inputCleanupFailures.Count -ne 0) {
+    throw "protected input cleanup failed: $($inputCleanupFailures -join '; ')"
 }
 
 @'
@@ -402,9 +448,11 @@ try {
         New-ItemProperty -Path $serviceRegistryPath -Name DelayedAutostart `
             -PropertyType DWord -Value 0 -Force | Out-Null
     } else {
-        $newServiceCreated = $true
         New-Service -Name $ServiceName -BinaryPathName $serviceCommand -StartupType Automatic |
             Out-Null
+        # Rollback owns the service only after this invocation successfully
+        # created it.  A racing third-party registration must never be deleted.
+        $newServiceCreated = $true
     }
     $environment = @(
         "MCLOVING_AGENT_ID=$agentId",
