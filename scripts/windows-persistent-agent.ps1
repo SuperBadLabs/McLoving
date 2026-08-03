@@ -238,27 +238,71 @@ Write-Output "process-gone-$Name"
 '@ | Set-Content -Encoding utf8 (Join-Path $scripts "verify-recovery.ps1")
 
 $serviceCommand = '"{0}" service' -f $binary
-New-Service -Name $ServiceName -BinaryPathName $serviceCommand -StartupType Automatic | Out-Null
-$environment = @(
-    "MCLOVING_AGENT_ID=$($config.agent_id)",
-    "MCLOVING_AGENT_TRUST_POOL=$($config.trust_pool)",
-    "MCLOVING_AGENT_ORGANIZATION_ID=$($config.organization_id)",
-    "MCLOVING_CONTROLLER_URI=$($config.controller_uri)",
-    "MCLOVING_CONTROLLER_DNS_NAME=$($config.controller_dns_name)",
-    "MCLOVING_CONTROLLER_CA_PATH=$(Join-Path $GateRoot 'ca.pem')",
-    "MCLOVING_AGENT_CERTIFICATE_PATH=$(Join-Path $GateRoot 'agent.pem')",
-    "MCLOVING_AGENT_PRIVATE_KEY_PATH=$(Join-Path $GateRoot 'agent-key.pem')",
-    "MCLOVING_AGENT_JOURNAL_PATH=$journal",
-    "MCLOVING_AGENT_WORKSPACE_ROOT=$workspace",
-    "MCLOVING_AGENT_LEASE_SECONDS=5",
-    "MCLOVING_AGENT_POLL_MILLISECONDS=50",
-    "MCLOVING_AGENT_RENEW_MILLISECONDS=500",
-    "MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS=250"
-)
-New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" `
-    -Name Environment -PropertyType MultiString -Value $environment -Force | Out-Null
-Start-Service -Name $ServiceName
-$service = Get-Service -Name $ServiceName
-if ($service.Status -ne "Running") { throw "persistent agent service did not start" }
+$newServiceCreated = $false
+try {
+    New-Service -Name $ServiceName -BinaryPathName $serviceCommand -StartupType Automatic | Out-Null
+    $newServiceCreated = $true
+    $environment = @(
+        "MCLOVING_AGENT_ID=$($config.agent_id)",
+        "MCLOVING_AGENT_TRUST_POOL=$($config.trust_pool)",
+        "MCLOVING_AGENT_ORGANIZATION_ID=$($config.organization_id)",
+        "MCLOVING_CONTROLLER_URI=$($config.controller_uri)",
+        "MCLOVING_CONTROLLER_DNS_NAME=$($config.controller_dns_name)",
+        "MCLOVING_CONTROLLER_CA_PATH=$(Join-Path $GateRoot 'ca.pem')",
+        "MCLOVING_AGENT_CERTIFICATE_PATH=$(Join-Path $GateRoot 'agent.pem')",
+        "MCLOVING_AGENT_PRIVATE_KEY_PATH=$(Join-Path $GateRoot 'agent-key.pem')",
+        "MCLOVING_AGENT_JOURNAL_PATH=$journal",
+        "MCLOVING_AGENT_WORKSPACE_ROOT=$workspace",
+        "MCLOVING_AGENT_LEASE_SECONDS=5",
+        "MCLOVING_AGENT_POLL_MILLISECONDS=50",
+        "MCLOVING_AGENT_RENEW_MILLISECONDS=500",
+        "MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS=250"
+    )
+    New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" `
+        -Name Environment -PropertyType MultiString -Value $environment -Force | Out-Null
+    Start-Service -Name $ServiceName
+    $service = Get-Service -Name $ServiceName
+    if ($service.Status -ne "Running") { throw "persistent agent service did not start" }
+} catch {
+    $serviceInstallFailure = $_
+    $serviceRollbackFailures = @()
+    if ($newServiceCreated) {
+        try {
+            $rollbackService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($rollbackService -and
+                $rollbackService.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
+                Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+                $rollbackService.WaitForStatus(
+                    [ServiceProcess.ServiceControllerStatus]::Stopped,
+                    [TimeSpan]::FromSeconds(30)
+                )
+            }
+            if ($rollbackService) { $rollbackService.Dispose() }
+        } catch {
+            $serviceRollbackFailures += "stop: $($_.Exception.Message)"
+        }
+        try {
+            if (Get-CimInstance Win32_Service -Filter "Name='$ServiceName'") {
+                & sc.exe delete $ServiceName | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "service deletion failed: $LASTEXITCODE" }
+            }
+            $deleted = $false
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+                if (-not (Get-CimInstance Win32_Service -Filter "Name='$ServiceName'")) {
+                    $deleted = $true
+                    break
+                }
+                Start-Sleep -Milliseconds 500
+            }
+            if (-not $deleted) { throw "new service remained after rollback timeout" }
+        } catch {
+            $serviceRollbackFailures += "delete: $($_.Exception.Message)"
+        }
+    }
+    if ($serviceRollbackFailures.Count -ne 0) {
+        throw "service installation failed: $($serviceInstallFailure.Exception.Message); service rollback failed: $($serviceRollbackFailures -join '; ')"
+    }
+    throw $serviceInstallFailure
+}
 $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
 Write-Output "persistent-agent-started service=$ServiceName binary_sha256=$binaryHash"
