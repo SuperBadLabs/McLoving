@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use mcloving_agent::{AgentConfig, journal_health, probe_once, run_until_stopped};
+use mcloving_agent::{
+    AgentConfig, journal_health, journal_session_epoch, probe_once, run_until_stopped,
+};
 #[cfg(windows)]
 use mcloving_agent::{
     run_creation_boundary_service_smoke, run_execution_service_smoke, run_service_smoke,
@@ -44,7 +46,10 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         "journal-check" => {
             let path = required_path(&arguments, 1, "JOURNAL")?;
             let (mode, integrity, active) = journal_health(&path)?;
-            println!("journal_mode={mode} integrity={integrity} active_attempts={active}");
+            let session_epoch = journal_session_epoch(&path)?;
+            println!(
+                "journal_mode={mode} integrity={integrity} session_epoch={session_epoch} active_attempts={active}"
+            );
         }
         "service" => run_windows_service(ServiceMode::Production)?,
         "service-smoke" => {

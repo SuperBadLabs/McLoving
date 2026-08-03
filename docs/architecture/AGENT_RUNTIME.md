@@ -219,12 +219,14 @@ remain deployment hardening.
 
 ## Current external proof gap
 
-The hosted Windows CI campaign proves native compilation, service
-install/start/stop/uninstall, journal reopen, Job Object descendant cleanup,
-hard service-process termination, and no duplicate accepted execution after
-restart. A signed package on a persistent Windows host still must prove
-machine-reboot reconciliation, payload-directory survival, and cross-host
-controller/network interruption before full Windows parity is closed.
+The hosted Windows CI campaign and the persistent NucBoxG3 `WIN-001` closure
+prove native compilation, service install/start/stop/uninstall, monotonic
+session epochs across journal reopen, Job Object descendant cleanup, hard
+service-process termination, journal reconciliation, and no duplicate accepted
+execution after restart. A signed package on the persistent Windows host still
+must prove machine-reboot reconciliation, payload-directory survival, and
+cross-host controller/network interruption before full Windows parity is
+closed.
 
 The executor creates the workload suspended with atomic Job membership in the
 Win32 creation attribute list. Native forced-crash tests cover every

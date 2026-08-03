@@ -325,6 +325,19 @@ impl Journal {
         from_sql_integer(next)
     }
 
+    /// Returns the last durably reserved session epoch without advancing it.
+    ///
+    /// Persistent-host service gates use this read-only value to prove that
+    /// every SCM restart advances fenced authority across journal reopen.
+    pub fn last_session_epoch(&self) -> Result<u64, JournalError> {
+        let epoch: i64 = self.connection.query_row(
+            "SELECT last_session_epoch FROM agent_metadata WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        from_sql_integer(epoch)
+    }
+
     pub fn accept(&mut self, acceptance: &Acceptance) -> Result<AcceptanceAck, JournalError> {
         validate_relative_path(&acceptance.workspace)?;
         let fence_token = to_sql_integer(acceptance.fence_token)?;
@@ -1309,11 +1322,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("agent.db");
         let mut journal = Journal::open(&path).unwrap();
+        assert_eq!(journal.last_session_epoch().unwrap(), 0);
         assert_eq!(journal.reserve_session_epoch(0).unwrap(), 1);
         assert_eq!(journal.reserve_session_epoch(7).unwrap(), 7);
+        assert_eq!(journal.last_session_epoch().unwrap(), 7);
         drop(journal);
 
         let mut reopened = Journal::open(&path).unwrap();
+        assert_eq!(reopened.last_session_epoch().unwrap(), 7);
         assert_eq!(reopened.reserve_session_epoch(2).unwrap(), 8);
     }
 

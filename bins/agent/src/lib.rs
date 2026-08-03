@@ -1033,6 +1033,11 @@ pub fn journal_health(path: &Path) -> Result<(String, String, usize), AgentError
     ))
 }
 
+pub fn journal_session_epoch(path: &Path) -> Result<u64, AgentError> {
+    let journal = Journal::open(path)?;
+    Ok(journal.last_session_epoch()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

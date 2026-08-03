@@ -751,7 +751,7 @@ dependency-ready.
 | AGENT-005 | DONE | AGENT-004, OPS-001 | One immediate SQLite transaction persists the terminal phase plus complete log/result descriptors before upload; no-follow canonical result paths reject workload redirection; reconnect retains exact authority, verifies every spool digest/size, deterministically replays the original work or cancellation protocol, accepts only exact terminal replay without self-revoking renewal, and idempotently reclaims acknowledged local spools while preserving terminal history; forced response-loss and agent-crash gates converge to one terminal event |
 | AGENT-006 | DONE | AGENT-003 | SQLite journal v2 migrates legacy rows fail-closed and persists Linux boot ID plus `/proc` birth ticks; cancellation revalidates identity before TERM and KILL, never signals a recycled PGID, never treats a missing group leader as proof of an empty group, and returns distinct completed, already-exited, retire-stale, and reconciliation-required outcomes with idempotent controller truth |
 | WIN-004 | DONE | AGENT-003 | Win32 creates every workload suspended with atomic kill-on-close Job membership through `PROC_THREAD_ATTRIBUTE_JOB_LIST`, records durable process identity before resume, and uses a restricted inherited-handle list; native forced-crash gates at every creation boundary and after descendant spawn leave no escaped process |
-| WIN-001 | ACTIVE | AGENT-003, AGENT-004, AGENT-005 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove hosted Windows install/start/stop/uninstall, monotonic session epochs, process restart, and journal reconciliation |
+| WIN-001 | DONE | AGENT-003, AGENT-004, AGENT-005 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove hosted Windows install/start/stop/uninstall, monotonic session epochs, process restart, and journal reconciliation |
 | WIN-002 | ACTIVE | WIN-001, WIN-004 | Add explicit direct-process, `cmd.exe`, and PowerShell execution modes; isolate each attempt in a race-free Job Object and ACL-owned workspace; prove timeout/cancel/service-crash kills every descendant and preserves durable stdout/stderr/result evidence |
 | WIN-003 | ACTIVE | WIN-002, E2E-003 | Maintain one versioned Linux/Windows semantic-parity matrix and run destructive hosted-Windows proof; then close with a signed package on a persistent Windows host through controller/network interruption and machine reboot, requiring matching terminal outcomes, logs, artifacts, cancellation, stale-authority rejection, and zero escaped descendants |
 
@@ -1208,7 +1208,16 @@ live status, and the browser journey gate proves the full desktop flow,
 strict-YAML validation, audit/explainability views, clean console, and a
 390-pixel viewport without page overflow. W3-C and Wave 3 are closed.
 
-The still-active `WIN-001`, `WIN-002`, and `WIN-003` persistent-host closure is
-tracked independently and remains a release gate for Windows parity; it does
-not block platform-neutral Wave 3 implementation, and Wave 3 cannot mark those
-tickets done by implication.
+`WIN-001` is closed on NucBoxG3 with the exact modified source archive
+`6a182420c0274034d0ab7213f037b64a70d2e53974fedb292bbad0da05c2c9a9`
+and release binary
+`ee0f042e90215095d5873eec709d0560f3595174a9d3d7ef7e6a321f987c4446`.
+The native Windows 11 SCM gate proves install, two starts and stops, durable
+session epochs `1 -> 2`, WAL integrity, forced-crash reconciliation, complete
+Windows tests, deny-warnings clippy, uninstall, and LAN SSH reachability. The
+read-only 12-file evidence directory is
+`C:\McLoving-Windows-Work\evidence-win001-20260803`; its self-excluding
+manifest SHA-256 is
+`5975d499b76fade9d0a60654c247bd8fe1cad93188bbb60f169cf3aef48a0101`.
+`WIN-002` and `WIN-003` remain active release gates for Windows semantic and
+persistent-host parity; Wave 3 cannot mark those tickets done by implication.
