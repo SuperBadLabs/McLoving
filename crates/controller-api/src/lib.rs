@@ -1896,7 +1896,7 @@ fn execution_spec(steps: &[Step]) -> Value {
         .map(|step| match step {
             Step::Process(process) => json!({
                 "kind": "process",
-                "mode": process.mode.as_str(),
+                "mode": execution_mode_wire_name(process.mode),
                 "program": process.program,
                 "args": process.args,
                 "env": process.env,
@@ -1905,6 +1905,15 @@ fn execution_spec(steps: &[Step]) -> Value {
         })
         .collect::<Vec<_>>();
     json!({"version": 1, "steps": steps})
+}
+
+fn execution_mode_wire_name(mode: ProcessMode) -> &'static str {
+    match mode {
+        // Protocol 1.0 agents derived this spelling from the Rust variant name.
+        // Keep emitting it until a negotiated feature can version the wire value.
+        ProcessMode::PowerShell => "power_shell",
+        _ => mode.as_str(),
+    }
 }
 
 fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<(), ApiError> {
@@ -4371,7 +4380,7 @@ stages:
         )
         .expect("compile explicit Windows process mode");
         let spec = execution_spec(&pipeline.stages[0].steps);
-        assert_eq!(spec["steps"][0]["mode"], "powershell");
+        assert_eq!(spec["steps"][0]["mode"], "power_shell");
         assert_eq!(spec["steps"][0]["program"], "build.ps1");
     }
 

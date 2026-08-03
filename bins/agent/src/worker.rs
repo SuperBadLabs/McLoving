@@ -90,7 +90,7 @@ enum ProcessMode {
     #[default]
     Direct,
     WindowsCmd,
-    #[serde(rename = "powershell")]
+    #[serde(rename = "powershell", alias = "power_shell")]
     PowerShell,
 }
 
@@ -2453,8 +2453,17 @@ mod tests {
                 .mode,
             ProcessMode::PowerShell
         ));
-        let inferred = br#"{"version":1,"steps":[{"kind":"process","mode":"power_shell","program":"build.ps1"}]}"#;
-        assert!(validate_assignment(&config(), 1, assignment(inferred)).is_err());
+        let legacy_powershell = br#"{"version":1,"steps":[{"kind":"process","mode":"power_shell","program":"build.ps1"}]}"#;
+        assert!(matches!(
+            validate_assignment(&config(), 1, assignment(legacy_powershell))
+                .expect("accept the protocol v1.0 PowerShell spelling")
+                .process
+                .mode,
+            ProcessMode::PowerShell
+        ));
+        let unknown_mode =
+            br#"{"version":1,"steps":[{"kind":"process","mode":"shell","program":"build.ps1"}]}"#;
+        assert!(validate_assignment(&config(), 1, assignment(unknown_mode)).is_err());
     }
 
     #[test]

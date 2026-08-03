@@ -112,7 +112,7 @@ enum ProcessMode {
     #[default]
     Direct,
     WindowsCmd,
-    #[serde(rename = "powershell")]
+    #[serde(rename = "powershell", alias = "power_shell")]
     PowerShell,
 }
 
@@ -543,4 +543,38 @@ async fn write_result(
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn powershell_mode_accepts_current_and_protocol_v1_wire_spellings() {
+        for mode in ["powershell", "power_shell"] {
+            let spec: ExecutionSpec = serde_json::from_value(json!({
+                "version": 1,
+                "steps": [{
+                    "kind": "process",
+                    "mode": mode,
+                    "program": "build.ps1"
+                }]
+            }))
+            .expect("accept supported PowerShell wire spelling");
+            assert!(matches!(spec.steps[0].mode, ProcessMode::PowerShell));
+        }
+
+        assert!(
+            serde_json::from_value::<ExecutionSpec>(json!({
+                "version": 1,
+                "steps": [{
+                    "kind": "process",
+                    "mode": "shell",
+                    "program": "build.ps1"
+                }]
+            }))
+            .is_err(),
+            "unknown execution modes must remain fail-closed"
+        );
+    }
 }
