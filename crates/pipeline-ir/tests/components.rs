@@ -3,8 +3,8 @@ use std::str::FromStr;
 
 use mcloving_pipeline_ir::{
     CompilerIdentity, ComponentCatalog, ComponentDigest, ComponentErrorCode, ComponentInvocation,
-    ExpansionLimits, ParameterType, ParameterValue, ParseLimits, Provenance, VersionedComponent,
-    compile_strict_yaml, expand_component,
+    ExpansionLimits, IR_V1, IR_V1_2, ParameterType, ParameterValue, ParseLimits, ProcessMode,
+    Provenance, Step, VersionedComponent, compile_strict_yaml, expand_component,
 };
 
 const TEMPLATE_A: &str = r#"
@@ -37,6 +37,18 @@ stages:
       - process:
           args: [{expression: 'parameters.target + "-release"'}]
           program: echo
+"#;
+
+const WINDOWS_TEMPLATE: &str = r#"
+version: 1
+name: reusable-windows
+stages:
+  - id: build
+    name: Build
+    steps:
+      - process:
+          mode: powershell
+          program: build.ps1
 "#;
 
 fn provenance(marker: u8) -> Provenance {
@@ -87,6 +99,139 @@ fn component_identity_is_presentation_independent_and_excludes_provenance() {
         first.semantic_digest().unwrap(),
         second.semantic_digest().unwrap()
     );
+}
+
+#[test]
+fn expansion_preserves_v12_for_windows_execution_modes() {
+    let item = component(WINDOWS_TEMPLATE, 22);
+    assert_eq!(item.pipeline.schema, IR_V1_2);
+    let digest = item.semantic_digest().unwrap();
+    let mut catalog = ComponentCatalog::default();
+    catalog.insert_exact(digest, item).unwrap();
+
+    let expanded = expand_component(
+        ComponentInvocation {
+            digest,
+            inputs: BTreeMap::new(),
+        },
+        &catalog,
+        ExpansionLimits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(expanded.pipeline().schema, IR_V1_2);
+    let Step::Process(process) = &expanded.pipeline().stages[0].steps[0];
+    assert_eq!(process.mode, ProcessMode::PowerShell);
+}
+
+#[test]
+fn dependency_modes_promote_the_complete_expansion_to_v12() {
+    let windows_leaf = component(WINDOWS_TEMPLATE, 23);
+    let windows_leaf_digest = windows_leaf.semantic_digest().unwrap();
+    let intermediate_pipeline = compile_strict_yaml(
+        "fixture://direct-intermediate",
+        r#"
+version: 1
+name: direct-intermediate
+stages:
+  - id: intermediate
+    name: Intermediate
+    steps:
+      - process:
+          mode: direct
+          program: intermediate-tool
+"#,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    let intermediate = VersionedComponent::new(
+        "direct-intermediate",
+        intermediate_pipeline,
+        BTreeMap::new(),
+        vec![ComponentInvocation {
+            digest: windows_leaf_digest,
+            inputs: BTreeMap::new(),
+        }],
+        provenance(24),
+    )
+    .unwrap();
+    let intermediate_digest = intermediate.semantic_digest().unwrap();
+    let root_pipeline = compile_strict_yaml(
+        "fixture://direct-root",
+        r#"
+version: 1
+name: direct-root
+stages:
+  - id: root
+    name: Root
+    steps:
+      - process:
+          mode: direct
+          program: root-tool
+"#,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    let root = VersionedComponent::new(
+        "direct-root",
+        root_pipeline,
+        BTreeMap::new(),
+        vec![ComponentInvocation {
+            digest: intermediate_digest,
+            inputs: BTreeMap::new(),
+        }],
+        provenance(25),
+    )
+    .unwrap();
+    let root_digest = root.semantic_digest().unwrap();
+    let mut catalog = ComponentCatalog::default();
+    catalog
+        .insert_exact(windows_leaf_digest, windows_leaf)
+        .unwrap();
+    catalog
+        .insert_exact(intermediate_digest, intermediate)
+        .unwrap();
+    catalog.insert_exact(root_digest, root).unwrap();
+
+    let expanded = expand_component(
+        ComponentInvocation {
+            digest: root_digest,
+            inputs: BTreeMap::new(),
+        },
+        &catalog,
+        ExpansionLimits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(expanded.pipeline().schema, IR_V1_2);
+    assert!(expanded.pipeline().stages.iter().any(|stage| {
+        stage.steps.iter().any(|step| {
+            let Step::Process(process) = step;
+            process.mode == ProcessMode::PowerShell
+        })
+    }));
+}
+
+#[test]
+fn direct_only_expansion_remains_v1() {
+    let item = component(TEMPLATE_A, 26);
+    let digest = item.semantic_digest().unwrap();
+    let mut catalog = ComponentCatalog::default();
+    catalog.insert_exact(digest, item).unwrap();
+    let expanded = expand_component(
+        ComponentInvocation {
+            digest,
+            inputs: BTreeMap::from([(
+                "target".to_owned(),
+                ParameterValue::String("windows".to_owned()),
+            )]),
+        },
+        &catalog,
+        ExpansionLimits::default(),
+    )
+    .unwrap();
+
+    assert_eq!(expanded.pipeline().schema, IR_V1);
 }
 
 #[test]
