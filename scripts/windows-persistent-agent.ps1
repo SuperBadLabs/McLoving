@@ -48,16 +48,16 @@ function New-RestrictedAcl([bool]$IsDirectory) {
 
 function Set-RestrictedTreeAcl([string]$Root) {
     $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
-    if (-not $rootItem.PSIsContainer -or
-        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        throw "gate root must be an existing non-reparse directory"
+    if (-not $rootItem.PSIsContainer) {
+        throw "restricted root must be an existing directory: $Root"
     }
-    Set-Acl -LiteralPath $rootItem.FullName -AclObject (New-RestrictedAcl $true)
     $items = @(Get-ChildItem -LiteralPath $rootItem.FullName -Force -Recurse -ErrorAction Stop)
-    foreach ($item in $items) {
+    foreach ($item in @($rootItem) + $items) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            throw "gate tree contains a reparse point: $($item.FullName)"
+            throw "restricted tree contains a reparse point: $($item.FullName)"
         }
+    }
+    foreach ($item in @($rootItem) + $items) {
         Set-Acl -LiteralPath $item.FullName -AclObject (New-RestrictedAcl $item.PSIsContainer)
     }
     foreach ($item in @($rootItem) + $items) {
@@ -74,15 +74,30 @@ function Set-RestrictedTreeAcl([string]$Root) {
                 [Security.AccessControl.FileSystemRights]::FullControl
         })
         if (-not $applied.AreAccessRulesProtected -or $rules.Count -ne 2 -or $unexpected.Count -ne 0) {
-            throw "gate ACL replacement verification failed: $($item.FullName)"
+            throw "restricted ACL replacement verification failed: $($item.FullName)"
         }
     }
+}
+
+function Get-RequiredConfigString([object]$Config, [string]$Name) {
+    $property = $Config.PSObject.Properties[$Name]
+    if ($null -eq $property -or
+        $property.Value -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($property.Value)) {
+        throw "agent configuration property $Name must be a non-empty string"
+    }
+    return $property.Value
 }
 
 $binary = Join-Path $packageRoot "mcloving-agent.exe"
 $configPath = Join-Path $GateRoot "agent-config.json"
 $configSource = Get-Content -Raw -LiteralPath $configPath
 $config = $configSource | ConvertFrom-Json
+$agentId = Get-RequiredConfigString $config "agent_id"
+$trustPool = Get-RequiredConfigString $config "trust_pool"
+$organizationId = Get-RequiredConfigString $config "organization_id"
+$controllerUri = Get-RequiredConfigString $config "controller_uri"
+$controllerDnsName = Get-RequiredConfigString $config "controller_dns_name"
 $scripts = Join-Path $GateRoot "scripts"
 $journal = Join-Path $GateRoot "agent.db"
 $workspace = Join-Path $GateRoot "workspaces"
@@ -121,6 +136,8 @@ try {
         throw "package signer thumbprint mismatch"
     }
 
+    New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
+    Set-RestrictedTreeAcl $PackageRoot
     Set-RestrictedTreeAcl $GateRoot
     $restrictedConfigSource = Get-Content -Raw -LiteralPath $configPath
     if ($restrictedConfigSource -cne $configSource) {
@@ -149,7 +166,7 @@ try {
         }
         if (-not $deleted) { throw "prior service remained after deletion timeout" }
     }
-    New-Item -ItemType Directory -Force -Path $packageRoot, $scripts, $workspace | Out-Null
+    New-Item -ItemType Directory -Force -Path $scripts, $workspace | Out-Null
     Copy-Item -LiteralPath $BinarySource -Destination $binary -Force
     $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
     if ($installedHash -ne $ExpectedBinarySha256.ToLowerInvariant()) {
@@ -160,6 +177,7 @@ try {
         $installedSignature.SignerCertificate.Thumbprint -ne $ExpectedSignerThumbprint) {
         throw "installed binary Authenticode validation failed"
     }
+    Set-RestrictedTreeAcl $PackageRoot
 } catch {
     $installFailure = $_
 } finally {
@@ -251,11 +269,11 @@ try {
     New-Service -Name $ServiceName -BinaryPathName $serviceCommand -StartupType Automatic | Out-Null
     $newServiceCreated = $true
     $environment = @(
-        "MCLOVING_AGENT_ID=$($config.agent_id)",
-        "MCLOVING_AGENT_TRUST_POOL=$($config.trust_pool)",
-        "MCLOVING_AGENT_ORGANIZATION_ID=$($config.organization_id)",
-        "MCLOVING_CONTROLLER_URI=$($config.controller_uri)",
-        "MCLOVING_CONTROLLER_DNS_NAME=$($config.controller_dns_name)",
+        "MCLOVING_AGENT_ID=$agentId",
+        "MCLOVING_AGENT_TRUST_POOL=$trustPool",
+        "MCLOVING_AGENT_ORGANIZATION_ID=$organizationId",
+        "MCLOVING_CONTROLLER_URI=$controllerUri",
+        "MCLOVING_CONTROLLER_DNS_NAME=$controllerDnsName",
         "MCLOVING_CONTROLLER_CA_PATH=$(Join-Path $GateRoot 'ca.pem')",
         "MCLOVING_AGENT_CERTIFICATE_PATH=$(Join-Path $GateRoot 'agent.pem')",
         "MCLOVING_AGENT_PRIVATE_KEY_PATH=$(Join-Path $GateRoot 'agent-key.pem')",

@@ -28,6 +28,26 @@ function Assert-AuthenticodeValid([string]$Path, [string]$Thumbprint) {
     return $signature
 }
 
+function New-RestrictedDirectoryAcl {
+    $acl = [Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    $administrators = [Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
+    $acl.SetOwner($administrators)
+    foreach ($sidValue in @("S-1-5-18", "S-1-5-32-544")) {
+        $sid = [Security.Principal.SecurityIdentifier]::new($sidValue)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$acl.AddAccessRule($rule)
+    }
+    return $acl
+}
+
 if (Test-Path -LiteralPath $OutputRoot) {
     throw "refusing to overwrite existing package root: $OutputRoot"
 }
@@ -76,13 +96,22 @@ if ($dirtyPaths.Count -ne 0) {
 $outputParent = Split-Path -Parent $OutputRoot
 New-Item -ItemType Directory -Force -Path $outputParent | Out-Null
 New-Item -ItemType Directory -Path $OutputRoot | Out-Null
+Set-Acl -LiteralPath $OutputRoot -AclObject (New-RestrictedDirectoryAcl)
 $package = Join-Path $OutputRoot "package"
 New-Item -ItemType Directory -Path $package | Out-Null
+$snapshotArchive = Join-Path $OutputRoot "source-tree.tar"
+$snapshot = Join-Path $OutputRoot "source"
+& git -C $source archive --format=tar --output=$snapshotArchive $SourceTree
+if ($LASTEXITCODE -ne 0) { throw "immutable source export failed: $LASTEXITCODE" }
+New-Item -ItemType Directory -Path $snapshot | Out-Null
+& tar.exe -xf $snapshotArchive -C $snapshot
+if ($LASTEXITCODE -ne 0) { throw "immutable source extraction failed: $LASTEXITCODE" }
+Remove-Item -LiteralPath $snapshotArchive -Force
 $buildTarget = Join-Path $OutputRoot "cargo-target"
 $previousCargoTargetDir = $env:CARGO_TARGET_DIR
 $env:CARGO_TARGET_DIR = $buildTarget
 
-Push-Location $source
+Push-Location $snapshot
 try {
     $rustc = (& rustup run $Toolchain rustc -Vv) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw "pinned rustc query failed: $LASTEXITCODE" }
@@ -92,6 +121,8 @@ try {
     & rustup run $Toolchain cargo metadata --locked --format-version 1 |
         Set-Content -Encoding utf8 (Join-Path $package "cargo-metadata.json")
     if ($LASTEXITCODE -ne 0) { throw "locked dependency inventory failed: $LASTEXITCODE" }
+    Copy-Item -LiteralPath (Join-Path $snapshot "Cargo.lock") `
+        -Destination (Join-Path $package "Cargo.lock")
 } finally {
     Pop-Location
     if ($null -eq $previousCargoTargetDir) {
@@ -99,12 +130,17 @@ try {
     } else {
         $env:CARGO_TARGET_DIR = $previousCargoTargetDir
     }
+    if (Test-Path -LiteralPath $snapshotArchive) {
+        Remove-Item -LiteralPath $snapshotArchive -Force
+    }
+    if (Test-Path -LiteralPath $snapshot) {
+        Remove-Item -LiteralPath $snapshot -Recurse -Force
+    }
 }
 
 $builtBinary = Join-Path $buildTarget "x86_64-pc-windows-msvc\release\mcloving-agent.exe"
 $packagedBinary = Join-Path $package "mcloving-agent.exe"
 Copy-Item -LiteralPath $builtBinary -Destination $packagedBinary
-Copy-Item -LiteralPath (Join-Path $source "Cargo.lock") -Destination (Join-Path $package "Cargo.lock")
 Remove-Item -LiteralPath $buildTarget -Recurse -Force
 $unsignedBinarySha256 = Get-Sha256 $packagedBinary
 
@@ -151,10 +187,11 @@ try {
         production_release_provenance = $false
         source_commit = $SourceCommit
         source_tree = $SourceTree
+        source_snapshot = "git archive --format=tar <source_tree>"
         rust_toolchain = $Toolchain
         rustc = $rustc
         target = "x86_64-pc-windows-msvc"
-        build_command = "CARGO_TARGET_DIR=<package-root>/cargo-target rustup run $Toolchain cargo build --locked --release -p mcloving-agent --target x86_64-pc-windows-msvc"
+        build_command = "cd <immutable-source-snapshot>; CARGO_TARGET_DIR=<package-root>/cargo-target rustup run $Toolchain cargo build --locked --release -p mcloving-agent --target x86_64-pc-windows-msvc"
         unsigned_binary_sha256 = $unsignedBinarySha256
         signed_binary_sha256 = $signedBinarySha256
         signer_subject = $certificate.Subject
