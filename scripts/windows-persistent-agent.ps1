@@ -79,9 +79,10 @@ function Set-RestrictedTreeAcl([string]$Root) {
     }
 }
 
-Set-RestrictedTreeAcl $GateRoot
 $binary = Join-Path $packageRoot "mcloving-agent.exe"
-$config = Get-Content -Raw (Join-Path $GateRoot "agent-config.json") | ConvertFrom-Json
+$configPath = Join-Path $GateRoot "agent-config.json"
+$configSource = Get-Content -Raw -LiteralPath $configPath
+$config = $configSource | ConvertFrom-Json
 $scripts = Join-Path $GateRoot "scripts"
 $journal = Join-Path $GateRoot "agent.db"
 $workspace = Join-Path $GateRoot "workspaces"
@@ -118,6 +119,12 @@ try {
     }
     if ($signature.SignerCertificate.Thumbprint -ne $ExpectedSignerThumbprint) {
         throw "package signer thumbprint mismatch"
+    }
+
+    Set-RestrictedTreeAcl $GateRoot
+    $restrictedConfigSource = Get-Content -Raw -LiteralPath $configPath
+    if ($restrictedConfigSource -cne $configSource) {
+        throw "agent configuration changed while the gate ACL was being restricted"
     }
 
     $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -237,6 +244,7 @@ if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
 Write-Output "process-gone-$Name"
 '@ | Set-Content -Encoding utf8 (Join-Path $scripts "verify-recovery.ps1")
 
+Set-RestrictedTreeAcl $GateRoot
 $serviceCommand = '"{0}" service' -f $binary
 $newServiceCreated = $false
 try {
