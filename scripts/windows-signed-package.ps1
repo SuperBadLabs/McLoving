@@ -78,24 +78,34 @@ New-Item -ItemType Directory -Force -Path $outputParent | Out-Null
 New-Item -ItemType Directory -Path $OutputRoot | Out-Null
 $package = Join-Path $OutputRoot "package"
 New-Item -ItemType Directory -Path $package | Out-Null
+$buildTarget = Join-Path $OutputRoot "cargo-target"
+$previousCargoTargetDir = $env:CARGO_TARGET_DIR
+$env:CARGO_TARGET_DIR = $buildTarget
 
 Push-Location $source
 try {
     $rustc = (& rustup run $Toolchain rustc -Vv) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw "pinned rustc query failed: $LASTEXITCODE" }
-    & rustup run $Toolchain cargo build --locked --release -p mcloving-agent
+    & rustup run $Toolchain cargo build --locked --release -p mcloving-agent `
+        --target x86_64-pc-windows-msvc
     if ($LASTEXITCODE -ne 0) { throw "release agent build failed: $LASTEXITCODE" }
     & rustup run $Toolchain cargo metadata --locked --format-version 1 |
         Set-Content -Encoding utf8 (Join-Path $package "cargo-metadata.json")
     if ($LASTEXITCODE -ne 0) { throw "locked dependency inventory failed: $LASTEXITCODE" }
 } finally {
     Pop-Location
+    if ($null -eq $previousCargoTargetDir) {
+        Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+    } else {
+        $env:CARGO_TARGET_DIR = $previousCargoTargetDir
+    }
 }
 
-$builtBinary = Join-Path $source "target\release\mcloving-agent.exe"
+$builtBinary = Join-Path $buildTarget "x86_64-pc-windows-msvc\release\mcloving-agent.exe"
 $packagedBinary = Join-Path $package "mcloving-agent.exe"
 Copy-Item -LiteralPath $builtBinary -Destination $packagedBinary
 Copy-Item -LiteralPath (Join-Path $source "Cargo.lock") -Destination (Join-Path $package "Cargo.lock")
+Remove-Item -LiteralPath $buildTarget -Recurse -Force
 $unsignedBinarySha256 = Get-Sha256 $packagedBinary
 
 $subject = "CN=McLoving WIN-003 qualification $SourceCommit"
@@ -144,7 +154,7 @@ try {
         rust_toolchain = $Toolchain
         rustc = $rustc
         target = "x86_64-pc-windows-msvc"
-        build_command = "rustup run $Toolchain cargo build --locked --release -p mcloving-agent"
+        build_command = "CARGO_TARGET_DIR=<package-root>/cargo-target rustup run $Toolchain cargo build --locked --release -p mcloving-agent --target x86_64-pc-windows-msvc"
         unsigned_binary_sha256 = $unsignedBinarySha256
         signed_binary_sha256 = $signedBinarySha256
         signer_subject = $certificate.Subject

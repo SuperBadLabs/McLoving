@@ -16,6 +16,70 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw "persistent Windows agent installation requires an elevated administrator session"
 }
+
+function New-RestrictedAcl([bool]$IsDirectory) {
+    $acl = if ($IsDirectory) {
+        [Security.AccessControl.DirectorySecurity]::new()
+    } else {
+        [Security.AccessControl.FileSecurity]::new()
+    }
+    $acl.SetAccessRuleProtection($true, $false)
+    $administrators = [Security.Principal.SecurityIdentifier]::new("S-1-5-32-544")
+    $acl.SetOwner($administrators)
+    $inheritance = if ($IsDirectory) {
+        [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else {
+        [Security.AccessControl.InheritanceFlags]::None
+    }
+    foreach ($sidValue in @("S-1-5-18", "S-1-5-32-544")) {
+        $sid = [Security.Principal.SecurityIdentifier]::new($sidValue)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+        [void]$acl.AddAccessRule($rule)
+    }
+    return $acl
+}
+
+function Set-RestrictedTreeAcl([string]$Root) {
+    $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "gate root must be an existing non-reparse directory"
+    }
+    Set-Acl -LiteralPath $rootItem.FullName -AclObject (New-RestrictedAcl $true)
+    $items = @(Get-ChildItem -LiteralPath $rootItem.FullName -Force -Recurse -ErrorAction Stop)
+    foreach ($item in $items) {
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "gate tree contains a reparse point: $($item.FullName)"
+        }
+        Set-Acl -LiteralPath $item.FullName -AclObject (New-RestrictedAcl $item.PSIsContainer)
+    }
+    foreach ($item in @($rootItem) + $items) {
+        $applied = Get-Acl -LiteralPath $item.FullName -ErrorAction Stop
+        $rules = @($applied.GetAccessRules(
+            $true,
+            $false,
+            [Security.Principal.SecurityIdentifier]
+        ))
+        $unexpected = @($rules | Where-Object {
+            $_.IdentityReference.Value -notin @("S-1-5-18", "S-1-5-32-544") -or
+            $_.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne
+                [Security.AccessControl.FileSystemRights]::FullControl
+        })
+        if (-not $applied.AreAccessRulesProtected -or $rules.Count -ne 2 -or $unexpected.Count -ne 0) {
+            throw "gate ACL replacement verification failed: $($item.FullName)"
+        }
+    }
+}
+
+Set-RestrictedTreeAcl $GateRoot
 $binary = Join-Path $packageRoot "mcloving-agent.exe"
 $config = Get-Content -Raw (Join-Path $GateRoot "agent-config.json") | ConvertFrom-Json
 $scripts = Join-Path $GateRoot "scripts"
@@ -172,9 +236,6 @@ if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
 }
 Write-Output "process-gone-$Name"
 '@ | Set-Content -Encoding utf8 (Join-Path $scripts "verify-recovery.ps1")
-
-& icacls.exe $GateRoot /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "workspace ACL setup failed: $LASTEXITCODE" }
 
 $serviceCommand = '"{0}" service' -f $binary
 New-Service -Name $ServiceName -BinaryPathName $serviceCommand -StartupType Automatic | Out-Null
