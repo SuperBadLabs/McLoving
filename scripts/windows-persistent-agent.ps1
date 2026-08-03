@@ -157,6 +157,8 @@ function Install-StagedBinary(
     throw "staged binary could not be installed within 30 seconds: $($lastFailure.Exception.Message)"
 }
 
+$GateRoot = [IO.Path]::GetFullPath($GateRoot)
+$PackageRoot = [IO.Path]::GetFullPath($PackageRoot)
 $binary = Join-Path $packageRoot "mcloving-agent.exe"
 $stagedBinary = Join-Path $packageRoot "mcloving-agent.installing.exe"
 $backupBinary = Join-Path $packageRoot "mcloving-agent.rollback.exe"
@@ -171,19 +173,31 @@ $controllerDnsName = Get-RequiredConfigString $config "controller_dns_name"
 $scripts = Join-Path $GateRoot "scripts"
 $journal = Join-Path $GateRoot "agent.db"
 $workspace = Join-Path $GateRoot "workspaces"
-$controllerCaPath = Join-Path $GateRoot "ca.pem"
-$agentCertificatePath = Join-Path $GateRoot "agent.pem"
-$agentPrivateKeyPath = Join-Path $GateRoot "agent-key.pem"
+$controllerCaSource = Join-Path $GateRoot "ca.pem"
+$agentCertificateSource = Join-Path $GateRoot "agent.pem"
+$agentPrivateKeySource = Join-Path $GateRoot "agent-key.pem"
 
+$inputStageRoot = Join-Path ([IO.Path]::GetTempPath()) `
+    ("mcloving-install-inputs-" + [Guid]::NewGuid().ToString("N"))
+$protectedBinarySource = Join-Path $inputStageRoot "mcloving-agent.exe"
+$protectedSignerCertificateSource = Join-Path $inputStageRoot "signer.cer"
+$protectedControllerCaPath = Join-Path $inputStageRoot "ca.pem"
+$protectedAgentCertificatePath = Join-Path $inputStageRoot "agent.pem"
+$protectedAgentPrivateKeyPath = Join-Path $inputStageRoot "agent-key.pem"
+$identityGeneration = Join-Path $PackageRoot `
+    ("identity-" + [Guid]::NewGuid().ToString("N"))
+$controllerCaPath = Join-Path $identityGeneration "ca.pem"
+$agentCertificatePath = Join-Path $identityGeneration "agent.pem"
+$agentPrivateKeyPath = Join-Path $identityGeneration "agent-key.pem"
 $validationEnvironment = @{
     MCLOVING_AGENT_ID = $agentId
     MCLOVING_AGENT_TRUST_POOL = $trustPool
     MCLOVING_AGENT_ORGANIZATION_ID = $organizationId
     MCLOVING_CONTROLLER_URI = $controllerUri
     MCLOVING_CONTROLLER_DNS_NAME = $controllerDnsName
-    MCLOVING_CONTROLLER_CA_PATH = $controllerCaPath
-    MCLOVING_AGENT_CERTIFICATE_PATH = $agentCertificatePath
-    MCLOVING_AGENT_PRIVATE_KEY_PATH = $agentPrivateKeyPath
+    MCLOVING_CONTROLLER_CA_PATH = $protectedControllerCaPath
+    MCLOVING_AGENT_CERTIFICATE_PATH = $protectedAgentCertificatePath
+    MCLOVING_AGENT_PRIVATE_KEY_PATH = $protectedAgentPrivateKeyPath
     MCLOVING_AGENT_JOURNAL_PATH = $journal
     MCLOVING_AGENT_WORKSPACE_ROOT = $workspace
     MCLOVING_AGENT_LEASE_SECONDS = "5"
@@ -191,18 +205,15 @@ $validationEnvironment = @{
     MCLOVING_AGENT_RENEW_MILLISECONDS = "500"
     MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS = "250"
 }
-$inputStageRoot = Join-Path ([IO.Path]::GetTempPath()) `
-    ("mcloving-install-inputs-" + [Guid]::NewGuid().ToString("N"))
-$protectedBinarySource = Join-Path $inputStageRoot "mcloving-agent.exe"
-$protectedSignerCertificateSource = Join-Path $inputStageRoot "signer.cer"
 $temporaryTrustStores = @()
 $installFailure = $null
 $trustCleanupFailures = @()
 $inputCleanupFailures = @()
+$identityGenerationCreated = $false
 try {
-    # BinarySource and SignerCertificateSource may be supplied from a location
-    # writable by a non-administrator.  Copy both into a fresh protected tree,
-    # then authenticate only those immutable copies before executing/importing.
+    # Package and GateRoot inputs may be supplied from locations writable by a
+    # non-administrator.  Copy the binary, signer, and TLS identity into a fresh
+    # protected tree, then authenticate only those immutable copies.
     # The directory is protected before any child is created, so copied files
     # inherit the SYSTEM/Administrators-only boundary immediately.
     New-Item -ItemType Directory -Path $inputStageRoot -ErrorAction Stop | Out-Null
@@ -212,6 +223,12 @@ try {
         Copy-Item -LiteralPath $SignerCertificateSource `
             -Destination $protectedSignerCertificateSource -ErrorAction Stop
     }
+    Copy-Item -LiteralPath $controllerCaSource `
+        -Destination $protectedControllerCaPath -ErrorAction Stop
+    Copy-Item -LiteralPath $agentCertificateSource `
+        -Destination $protectedAgentCertificatePath -ErrorAction Stop
+    Copy-Item -LiteralPath $agentPrivateKeySource `
+        -Destination $protectedAgentPrivateKeyPath -ErrorAction Stop
     Set-RestrictedTreeAcl $inputStageRoot
 
     $sourceHash = (Get-FileHash -Algorithm SHA256 `
@@ -260,6 +277,34 @@ try {
 
     New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
     Set-RestrictedTreeAcl $PackageRoot
+    New-Item -ItemType Directory -Path $identityGeneration -ErrorAction Stop | Out-Null
+    $identityGenerationCreated = $true
+    $identityCopies = @(
+        [PSCustomObject]@{
+            Source = $protectedControllerCaPath
+            Destination = $controllerCaPath
+        },
+        [PSCustomObject]@{
+            Source = $protectedAgentCertificatePath
+            Destination = $agentCertificatePath
+        },
+        [PSCustomObject]@{
+            Source = $protectedAgentPrivateKeyPath
+            Destination = $agentPrivateKeyPath
+        }
+    )
+    foreach ($identityCopy in $identityCopies) {
+        Copy-Item -LiteralPath $identityCopy.Source `
+            -Destination $identityCopy.Destination -ErrorAction Stop
+        $sourceIdentityHash = (Get-FileHash -Algorithm SHA256 `
+            -LiteralPath $identityCopy.Source).Hash
+        $installedIdentityHash = (Get-FileHash -Algorithm SHA256 `
+            -LiteralPath $identityCopy.Destination).Hash
+        if ($installedIdentityHash -cne $sourceIdentityHash) {
+            throw "installed TLS identity copy hash mismatch: $($identityCopy.Destination)"
+        }
+    }
+    Set-RestrictedTreeAcl $PackageRoot
     Set-RestrictedTreeAcl $GateRoot
     $restrictedConfigSource = Get-Content -Raw -LiteralPath $configPath
     if ($restrictedConfigSource -cne $configSource) {
@@ -304,27 +349,53 @@ try {
         $inputCleanupFailures += $_.Exception.Message
     }
 }
-if ($installFailure) {
+if ($installFailure -or $trustCleanupFailures.Count -ne 0 -or
+    $inputCleanupFailures.Count -ne 0) {
     Remove-Item -LiteralPath $stagedBinary, $backupBinary -Force -ErrorAction SilentlyContinue
-    $cleanupFailures = @()
+    $primaryFailures = @()
+    if ($installFailure) {
+        $primaryFailures += $installFailure.Exception.Message
+    }
     if ($trustCleanupFailures.Count -ne 0) {
-        $cleanupFailures += "temporary trust: $($trustCleanupFailures -join '; ')"
+        $primaryFailures += "temporary trust cleanup: $($trustCleanupFailures -join '; ')"
     }
     if ($inputCleanupFailures.Count -ne 0) {
-        $cleanupFailures += "protected inputs: $($inputCleanupFailures -join '; ')"
+        $primaryFailures += "protected input cleanup: $($inputCleanupFailures -join '; ')"
+    }
+    $cleanupFailures = @()
+    if ($identityGenerationCreated) {
+        try {
+            Remove-Item -LiteralPath $identityGeneration -Recurse -Force -ErrorAction Stop
+            $identityGenerationCreated = $false
+        } catch {
+            $cleanupFailures += "installed identity: $($_.Exception.Message)"
+        }
     }
     if ($cleanupFailures.Count -ne 0) {
-        throw "installer failed: $($installFailure.Exception.Message); cleanup failed: $($cleanupFailures -join '; ')"
+        throw "installer failed: $($primaryFailures -join '; '); cleanup failed: $($cleanupFailures -join '; ')"
     }
-    throw $installFailure
-}
-if ($trustCleanupFailures.Count -ne 0) {
-    throw "temporary trust cleanup failed: $($trustCleanupFailures -join '; ')"
-}
-if ($inputCleanupFailures.Count -ne 0) {
-    throw "protected input cleanup failed: $($inputCleanupFailures -join '; ')"
+    throw "installer failed: $($primaryFailures -join '; ')"
 }
 
+$serviceCommand = '"{0}" service' -f $binary
+$serviceRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+$existingServiceConfig = $null
+$existingServiceWasRunning = $false
+$previousServicePath = $null
+$previousServiceStart = $null
+$previousDelayedAutoStartExists = $false
+$previousDelayedAutoStart = $null
+$previousEnvironmentExists = $false
+$previousEnvironment = $null
+$binaryExisted = $false
+$newServiceCreated = $false
+$registrationChanged = $false
+$binaryReplaced = $false
+$priorStateCaptured = $false
+$serviceMutationStarted = $false
+$delayedAutoStartWritten = $false
+$environmentWritten = $false
+try {
 @'
 @echo off
 echo cmd-%~1
@@ -382,16 +453,7 @@ Write-Output "process-gone-$Name"
 '@ | Set-Content -Encoding utf8 (Join-Path $scripts "verify-recovery.ps1")
 
 Set-RestrictedTreeAcl $GateRoot
-$serviceCommand = '"{0}" service' -f $binary
-$serviceRegistryPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
 $existingServiceConfig = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
-$existingServiceWasRunning = $false
-$previousServicePath = $null
-$previousServiceStart = $null
-$previousDelayedAutoStartExists = $false
-$previousDelayedAutoStart = $null
-$previousEnvironmentExists = $false
-$previousEnvironment = $null
 if ($existingServiceConfig) {
     $existingServiceWasRunning = $existingServiceConfig.State -eq "Running"
     $previousServicePath = $existingServiceConfig.PathName
@@ -410,15 +472,13 @@ if ($existingServiceConfig) {
         $previousEnvironmentExists = $true
         $previousEnvironment = @($previousEnvironmentProperty.Environment)
     }
+    $priorStateCaptured = $true
 }
 $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
-$newServiceCreated = $false
-$registrationChanged = $false
-$binaryReplaced = $false
-try {
     if ($existingServiceConfig) {
         $existingService = Get-Service -Name $ServiceName -ErrorAction Stop
         if ($existingService.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
+            $serviceMutationStarted = $true
             Stop-Service -Name $ServiceName -Force -ErrorAction Stop
             $existingService.WaitForStatus(
                 [ServiceProcess.ServiceControllerStatus]::Stopped,
@@ -427,6 +487,7 @@ try {
         }
         $existingService.Dispose()
     }
+    $serviceMutationStarted = $true
     if ($binaryExisted) {
         Copy-Item -LiteralPath $binary -Destination $backupBinary -Force
     }
@@ -445,6 +506,7 @@ try {
         if ($change.ReturnValue -ne 0) {
             throw "service reconfiguration failed: $($change.ReturnValue)"
         }
+        $delayedAutoStartWritten = $true
         New-ItemProperty -Path $serviceRegistryPath -Name DelayedAutostart `
             -PropertyType DWord -Value 0 -Force | Out-Null
     } else {
@@ -470,6 +532,7 @@ try {
         "MCLOVING_AGENT_RENEW_MILLISECONDS=500",
         "MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS=250"
     )
+    $environmentWritten = $true
     New-ItemProperty -Path $serviceRegistryPath `
         -Name Environment -PropertyType MultiString -Value $environment -Force | Out-Null
     Start-Service -Name $ServiceName
@@ -489,16 +552,18 @@ try {
     $serviceRollbackFailures = @()
     $binaryRestored = -not $binaryReplaced
     try {
-        $rollbackService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($rollbackService -and
-            $rollbackService.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
-            Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-            $rollbackService.WaitForStatus(
-                [ServiceProcess.ServiceControllerStatus]::Stopped,
-                [TimeSpan]::FromSeconds(30)
-            )
+        if ($serviceMutationStarted) {
+            $rollbackService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($rollbackService -and
+                $rollbackService.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
+                Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+                $rollbackService.WaitForStatus(
+                    [ServiceProcess.ServiceControllerStatus]::Stopped,
+                    [TimeSpan]::FromSeconds(30)
+                )
+            }
+            if ($rollbackService) { $rollbackService.Dispose() }
         }
-        if ($rollbackService) { $rollbackService.Dispose() }
     } catch {
         $serviceRollbackFailures += "stop: $($_.Exception.Message)"
     }
@@ -529,7 +594,7 @@ try {
             $serviceRollbackFailures += "binary: $($_.Exception.Message)"
         }
     }
-    if ($existingServiceConfig) {
+    if ($existingServiceConfig -and $priorStateCaptured) {
         try {
             if ($registrationChanged) {
                 $restore = Invoke-CimMethod -InputObject $existingServiceConfig -MethodName Change `
@@ -541,21 +606,25 @@ try {
                     throw "prior service reconfiguration failed: $($restore.ReturnValue)"
                 }
             }
-            if ($previousDelayedAutoStartExists) {
-                New-ItemProperty -Path $serviceRegistryPath -Name DelayedAutostart `
-                    -PropertyType DWord -Value $previousDelayedAutoStart -Force | Out-Null
-            } else {
-                Remove-ItemProperty -Path $serviceRegistryPath -Name DelayedAutostart `
-                    -ErrorAction SilentlyContinue
+            if ($delayedAutoStartWritten) {
+                if ($previousDelayedAutoStartExists) {
+                    New-ItemProperty -Path $serviceRegistryPath -Name DelayedAutostart `
+                        -PropertyType DWord -Value $previousDelayedAutoStart -Force | Out-Null
+                } else {
+                    Remove-ItemProperty -Path $serviceRegistryPath -Name DelayedAutostart `
+                        -ErrorAction SilentlyContinue
+                }
             }
-            if ($previousEnvironmentExists) {
-                New-ItemProperty -Path $serviceRegistryPath -Name Environment `
-                    -PropertyType MultiString -Value $previousEnvironment -Force | Out-Null
-            } else {
-                Remove-ItemProperty -Path $serviceRegistryPath -Name Environment `
-                    -ErrorAction SilentlyContinue
+            if ($environmentWritten) {
+                if ($previousEnvironmentExists) {
+                    New-ItemProperty -Path $serviceRegistryPath -Name Environment `
+                        -PropertyType MultiString -Value $previousEnvironment -Force | Out-Null
+                } else {
+                    Remove-ItemProperty -Path $serviceRegistryPath -Name Environment `
+                        -ErrorAction SilentlyContinue
+                }
             }
-            if ($existingServiceWasRunning) {
+            if ($existingServiceWasRunning -and $serviceMutationStarted) {
                 if (-not $binaryRestored) {
                     throw "prior running service cannot be restarted without its restored binary"
                 }
@@ -571,12 +640,47 @@ try {
             $serviceRollbackFailures += "restore: $($_.Exception.Message)"
         }
     }
-    Remove-Item -LiteralPath $stagedBinary, $backupBinary -Force -ErrorAction SilentlyContinue
+    if ($identityGenerationCreated) {
+        try {
+            Remove-Item -LiteralPath $identityGeneration -Recurse -Force -ErrorAction Stop
+            $identityGenerationCreated = $false
+        } catch {
+            $serviceRollbackFailures += "identity: $($_.Exception.Message)"
+        }
+    }
+    Remove-Item -LiteralPath $stagedBinary -Force -ErrorAction SilentlyContinue
+    $retainedBackup = $null
+    if ($binaryRestored) {
+        Remove-Item -LiteralPath $backupBinary -Force -ErrorAction SilentlyContinue
+    } elseif (Test-Path -LiteralPath $backupBinary -PathType Leaf) {
+        $retainedBackup = $backupBinary
+    }
     if ($serviceRollbackFailures.Count -ne 0) {
-        throw "service installation failed: $($serviceInstallFailure.Exception.Message); service rollback failed: $($serviceRollbackFailures -join '; ')"
+        $retainedBackupDiagnostic = if ($retainedBackup) {
+            "; prior binary retained at $retainedBackup"
+        } else { "" }
+        throw "service installation failed: $($serviceInstallFailure.Exception.Message); service rollback failed: $($serviceRollbackFailures -join '; ')$retainedBackupDiagnostic"
     }
     throw $serviceInstallFailure
 }
 Remove-Item -LiteralPath $stagedBinary, $backupBinary -Force -ErrorAction SilentlyContinue
+$identityCleanupFailures = @()
+$staleIdentityGenerations = @(Get-ChildItem -LiteralPath $PackageRoot -Directory `
+    -Filter "identity-*" -Force -ErrorAction Stop)
+foreach ($staleIdentityGeneration in $staleIdentityGenerations) {
+    if ($staleIdentityGeneration.Name -ieq (Split-Path -Leaf $identityGeneration)) { continue }
+    try {
+        if (($staleIdentityGeneration.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "refusing to remove reparse point"
+        }
+        Remove-Item -LiteralPath $staleIdentityGeneration.FullName `
+            -Recurse -Force -ErrorAction Stop
+    } catch {
+        $identityCleanupFailures += "$($staleIdentityGeneration.FullName): $($_.Exception.Message)"
+    }
+}
+if ($identityCleanupFailures.Count -ne 0) {
+    throw "persistent agent started but superseded identity cleanup failed: $($identityCleanupFailures -join '; ')"
+}
 $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
 Write-Output "persistent-agent-started service=$ServiceName binary_sha256=$binaryHash"
