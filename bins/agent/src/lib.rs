@@ -860,6 +860,13 @@ async fn outbound_config(config: &AgentConfig) -> Result<OutboundMtlsConfig, Age
     })
 }
 
+/// Validates every local production identity input without opening a network
+/// connection or creating journal/workspace state.
+pub async fn validate_outbound_configuration(config: &AgentConfig) -> Result<(), AgentError> {
+    outbound_config(config).await?.endpoint()?;
+    Ok(())
+}
+
 #[cfg(windows)]
 const fn platform_feature() -> &'static str {
     "windows-job-object-v1"

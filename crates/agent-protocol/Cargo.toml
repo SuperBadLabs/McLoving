@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 prost = "=0.14.4"
+rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std"] }
 sha2 = "=0.10.9"
 thiserror = "=2.0.17"
 tonic = { version = "=0.14.6", features = ["tls-ring", "transport"] }

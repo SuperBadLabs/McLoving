@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use mcloving_agent::{
     AgentConfig, journal_health, journal_session_epoch, probe_once, run_until_stopped,
+    validate_outbound_configuration,
 };
 #[cfg(windows)]
 use mcloving_agent::{
@@ -51,6 +52,11 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 "journal_mode={mode} integrity={integrity} session_epoch={session_epoch} active_attempts={active}"
             );
         }
+        "validate-config" => {
+            let config = AgentConfig::from_environment()?;
+            runtime()?.block_on(validate_outbound_configuration(&config))?;
+            println!("configuration-valid");
+        }
         "service" => run_windows_service(ServiceMode::Production)?,
         "service-smoke" => {
             run_windows_service(ServiceMode::Smoke(required_path(&arguments, 1, "JOURNAL")?))?;
@@ -87,7 +93,7 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: mcloving-agent [foreground|probe|journal-check PATH|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT MARKER_ROOT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
+                "usage: mcloving-agent [foreground|probe|journal-check PATH|validate-config|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT MARKER_ROOT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
                     .into(),
             );
         }

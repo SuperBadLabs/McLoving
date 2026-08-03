@@ -1279,6 +1279,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "rustls",
  "sha2",
  "thiserror",
  "tonic",

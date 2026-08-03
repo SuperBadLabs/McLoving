@@ -7,6 +7,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use rustls::{ClientConfig, RootCertStore};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
@@ -272,6 +274,14 @@ pub enum TransportError {
     EmptyControllerDnsName,
     #[error("TLS material must not be empty")]
     EmptyTlsMaterial,
+    #[error("controller CA PEM is invalid: {0}")]
+    InvalidControllerCa(String),
+    #[error("agent certificate PEM is invalid: {0}")]
+    InvalidAgentCertificate(String),
+    #[error("agent private key PEM is invalid: {0}")]
+    InvalidAgentPrivateKey(String),
+    #[error("agent certificate and private key are incompatible: {0}")]
+    InvalidClientIdentity(String),
     #[error("invalid controller endpoint: {0}")]
     InvalidEndpoint(#[from] tonic::transport::Error),
 }
@@ -294,6 +304,8 @@ impl OutboundMtlsConfig {
             return Err(TransportError::EmptyTlsMaterial);
         }
 
+        self.validate_tls_material()?;
+
         let tls = ClientTlsConfig::new()
             .domain_name(self.controller_dns_name.clone())
             .ca_certificate(Certificate::from_pem(self.controller_ca_pem.clone()))
@@ -303,6 +315,41 @@ impl OutboundMtlsConfig {
             ));
 
         Ok(Endpoint::from_shared(self.controller_uri.clone())?.tls_config(tls)?)
+    }
+
+    fn validate_tls_material(&self) -> Result<(), TransportError> {
+        let controller_cas = CertificateDer::pem_slice_iter(&self.controller_ca_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| TransportError::InvalidControllerCa(error.to_string()))?;
+        if controller_cas.is_empty() {
+            return Err(TransportError::InvalidControllerCa(
+                "no CERTIFICATE section was found".to_owned(),
+            ));
+        }
+        let mut roots = RootCertStore::empty();
+        let (accepted, rejected) = roots.add_parsable_certificates(controller_cas);
+        if accepted == 0 || rejected != 0 {
+            return Err(TransportError::InvalidControllerCa(format!(
+                "accepted {accepted} certificate(s) and rejected {rejected}"
+            )));
+        }
+
+        let certificates = CertificateDer::pem_slice_iter(&self.agent_certificate_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| TransportError::InvalidAgentCertificate(error.to_string()))?;
+        if certificates.is_empty() {
+            return Err(TransportError::InvalidAgentCertificate(
+                "no CERTIFICATE section was found".to_owned(),
+            ));
+        }
+        let private_key = PrivateKeyDer::from_pem_slice(&self.agent_private_key_pem)
+            .map_err(|error| TransportError::InvalidAgentPrivateKey(error.to_string()))?;
+
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(certificates, private_key)
+            .map_err(|error| TransportError::InvalidClientIdentity(error.to_string()))?;
+        Ok(())
     }
 }
 
@@ -467,6 +514,22 @@ mod tests {
         assert!(matches!(
             config.endpoint(),
             Err(TransportError::EmptyTlsMaterial)
+        ));
+    }
+
+    #[test]
+    fn outbound_transport_rejects_malformed_pem_before_connecting() {
+        let config = OutboundMtlsConfig {
+            controller_uri: "https://controller.internal:8443".to_owned(),
+            controller_dns_name: "controller.internal".to_owned(),
+            controller_ca_pem: b"not a PEM certificate".to_vec(),
+            agent_certificate_pem: b"not a PEM certificate".to_vec(),
+            agent_private_key_pem: b"not a PEM key".to_vec(),
+        };
+
+        assert!(matches!(
+            config.endpoint(),
+            Err(TransportError::InvalidControllerCa(_))
         ));
     }
 }
