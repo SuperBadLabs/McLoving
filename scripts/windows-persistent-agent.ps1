@@ -12,6 +12,10 @@ param(
     [string]$SignerCertificateSource = ""
 )
 $ErrorActionPreference = "Stop"
+if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "persistent Windows agent installation requires an elevated administrator session"
+}
 $binary = Join-Path $packageRoot "mcloving-agent.exe"
 $config = Get-Content -Raw (Join-Path $GateRoot "agent-config.json") | ConvertFrom-Json
 $scripts = Join-Path $GateRoot "scripts"
@@ -19,6 +23,8 @@ $journal = Join-Path $GateRoot "agent.db"
 $workspace = Join-Path $GateRoot "workspaces"
 
 $temporaryTrustStores = @()
+$installFailure = $null
+$trustCleanupFailures = @()
 try {
     if ($SignerCertificateSource) {
         $signerCertificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2($SignerCertificateSource)
@@ -73,7 +79,7 @@ try {
         if (-not $deleted) { throw "prior service remained after deletion timeout" }
     }
     New-Item -ItemType Directory -Force -Path $packageRoot, $scripts, $workspace | Out-Null
-    Copy-Item -Force $BinarySource $binary
+    Copy-Item -LiteralPath $BinarySource -Destination $binary -Force
     $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $binary).Hash.ToLowerInvariant()
     if ($installedHash -ne $ExpectedBinarySha256.ToLowerInvariant()) {
         throw "installed binary hash mismatch: $installedHash"
@@ -83,12 +89,32 @@ try {
         $installedSignature.SignerCertificate.Thumbprint -ne $ExpectedSignerThumbprint) {
         throw "installed binary Authenticode validation failed"
     }
+} catch {
+    $installFailure = $_
 } finally {
     foreach ($storeName in $temporaryTrustStores) {
-        Get-ChildItem "Cert:\LocalMachine\$storeName" |
-            Where-Object { $_.Thumbprint -eq $ExpectedSignerThumbprint } |
-            Remove-Item -Force
+        try {
+            Get-ChildItem "Cert:\LocalMachine\$storeName" -ErrorAction Stop |
+                Where-Object { $_.Thumbprint -eq $ExpectedSignerThumbprint } |
+                Remove-Item -Force -ErrorAction Stop
+            $residualTrust = Get-ChildItem "Cert:\LocalMachine\$storeName" -ErrorAction Stop |
+                Where-Object { $_.Thumbprint -eq $ExpectedSignerThumbprint }
+            if ($residualTrust) {
+                throw "temporary signer remains in $storeName after cleanup"
+            }
+        } catch {
+            $trustCleanupFailures += "${storeName}: $($_.Exception.Message)"
+        }
     }
+}
+if ($installFailure) {
+    if ($trustCleanupFailures.Count -ne 0) {
+        throw "installer failed: $($installFailure.Exception.Message); temporary trust cleanup failed: $($trustCleanupFailures -join '; ')"
+    }
+    throw $installFailure
+}
+if ($trustCleanupFailures.Count -ne 0) {
+    throw "temporary trust cleanup failed: $($trustCleanupFailures -join '; ')"
 }
 
 @'

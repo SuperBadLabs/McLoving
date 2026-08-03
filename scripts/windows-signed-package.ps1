@@ -108,6 +108,8 @@ $certificate = New-SelfSignedCertificate `
     -HashAlgorithm SHA256 `
     -KeyExportPolicy NonExportable `
     -NotAfter (Get-Date).AddDays(7)
+$packageFailure = $null
+$certificateCleanupFailures = @()
 try {
     $certificatePath = Join-Path $OutputRoot "win003-signer.cer"
     Export-Certificate -Cert $certificate -FilePath $certificatePath | Out-Null
@@ -193,11 +195,30 @@ try {
         result = "PASS"
     }
     $closure | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutputRoot "PACKAGE-CLOSURE.json")
+} catch {
+    $packageFailure = $_
 } finally {
-    Remove-Item -LiteralPath "Cert:\LocalMachine\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
-    foreach ($storeName in @("Root", "CA", "TrustedPublisher")) {
-        Get-ChildItem "Cert:\LocalMachine\$storeName" |
-            Where-Object { $_.Thumbprint -eq $certificate.Thumbprint } |
-            Remove-Item -Force
+    foreach ($storeName in @("My", "Root", "CA", "TrustedPublisher")) {
+        try {
+            Get-ChildItem "Cert:\LocalMachine\$storeName" -ErrorAction Stop |
+                Where-Object { $_.Thumbprint -eq $certificate.Thumbprint } |
+                Remove-Item -Force -ErrorAction Stop
+            $residualCertificate = Get-ChildItem "Cert:\LocalMachine\$storeName" -ErrorAction Stop |
+                Where-Object { $_.Thumbprint -eq $certificate.Thumbprint }
+            if ($residualCertificate) {
+                throw "qualification certificate remains in $storeName after cleanup"
+            }
+        } catch {
+            $certificateCleanupFailures += "${storeName}: $($_.Exception.Message)"
+        }
     }
+}
+if ($packageFailure) {
+    if ($certificateCleanupFailures.Count -ne 0) {
+        throw "package operation failed: $($packageFailure.Exception.Message); certificate cleanup failed: $($certificateCleanupFailures -join '; ')"
+    }
+    throw $packageFailure
+}
+if ($certificateCleanupFailures.Count -ne 0) {
+    throw "certificate cleanup failed: $($certificateCleanupFailures -join '; ')"
 }
