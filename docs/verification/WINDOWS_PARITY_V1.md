@@ -1,6 +1,6 @@
 # Linux/Windows execution parity matrix v1
 
-Status: WIN-001 and WIN-002 verified; WIN-003 persistent reboot gate active
+Status: WIN-001, WIN-002, and WIN-003 verified on persistent NucBoxG3
 
 This matrix is a release contract, not a portability claim inferred from
 cross-compilation. Every row needs exact-package evidence on both platforms.
@@ -39,10 +39,28 @@ follow-up job, an ACL root limited to `SYSTEM` and Administrators, journal
 integrity after stop, and clean service uninstall. These are execution and
 lifecycle boundaries, not a hostile-tenant sandbox.
 
-The persistent-host reboot row is intentionally separate. A hosted CI VM
-cannot supply honest across-reboot evidence. `WIN-003` remains open until an
-owner-authorized persistent Windows war host runs that row with the exact
-signed package. That row must also prove that accepted workspace and spool
-directory entries survive abrupt power loss: Win32 `FlushFileBuffers` requires
-a `GENERIC_WRITE` file handle and is not a least-privilege POSIX-style
-directory-fsync primitive.
+The persistent-host reboot row is intentionally separate because a hosted CI
+VM cannot supply honest across-reboot evidence. NucBoxG3 ran the exact signed
+qualification package over pinned LAN SSH. A physical reboot advanced the
+journal epoch `3 -> 8`, returned the automatic SCM service, rejected stale
+session authority, reported zero active attempts, and left no pre-reboot child.
+The accepted attempt finalized `failed` with exit code 1 during SCM shutdown,
+before the reboot removed connectivity, so it correctly had one offer and no
+lease-expiration retry. Controller loss is a different transition: it produced
+one lease expiration, a higher-fence second offer, eventual success, and no
+escaped first child. A new post-reboot build also succeeded.
+
+The evidence binds signed binary SHA-256
+`2eb8ad27d241249d73641d52f872e9ea62b67e8c7d23d5e8b911cf11485aeb37`.
+The signer was a short-lived self-signed qualification identity, not
+production `REL-001` provenance. NucBoxG3 manifest SHA-256 is
+`b650f953f84ac0ccea0f5288593e26a74882f830378686a9a3049c68d7c5e3ce`;
+the HeMan controller/database bundle manifest is
+`97173f15264c83359891904c7a3bf1763b46cfdcadf007e21027d90f0cd5776b`.
+Private test keys, service state, certificate trust, and the isolated database
+fixture were removed after sealing.
+
+The installer is fail-closed: digest and signer thumbprint are mandatory, a
+wrong-digest native probe leaves both service state and certificate stores
+unchanged, the copied binary is reverified, and temporary self-signed trust is
+removed before the SCM service starts. Production trust remains `REL-001` work.

@@ -628,7 +628,7 @@ Execution classes: `SERIAL`, `BATCH`, `PARALLEL`.
 | W1-B | AGENT-001, AGENT-002, AGENT-003 | DONE | Outbound mTLS contract, fenced sessions, durable journal, Linux process-tree containment |
 | W1-C | UX-001, E2E-001, E2E-002, E2E-003 | DONE | Truthful CLI-driven end-to-end spine and recovery |
 | W2-A | CTRL-003, OPS-001, OPS-002 | DONE | PR #7 merged recoverable execution, staged object truth, restore fencing, retention, and legal holds |
-| W2-B | WIN-001, WIN-002, WIN-003 | DONE | PR #8 merged the Windows service/runtime foundation and hosted destructive fixture; WIN-001 and WIN-002 are now closed on NucBoxG3, while WIN-003 remains active until signed-package interruption/reboot parity closes |
+| W2-B | WIN-001, WIN-002, WIN-003 | DONE | PR #8 merged the Windows service/runtime foundation and hosted destructive fixture; all three tickets are now closed on persistent NucBoxG3 with signed-package, controller-loss, cancellation, and physical-reboot evidence |
 | W2-C | AGENT-004, AGENT-005, AGENT-006, WIN-004 | DONE | PR #9 closes production remote work, atomic/replay-safe finalization, non-reusable Linux containment identity, and atomic Windows Job membership |
 | W3-A | IR-003, IR-004, CTRL-004 | DONE | Native pipeline semantics: typed parameters and bounded expressions, digest-pinned reusable components, deterministic matrix expansion, and durable parallel DAG execution |
 | W3-B | SEC-003, AUDIT-001, OPS-003, TEST-001 | DONE | Fenced grants and protected environments, tenant hash-chain audit, staged artifact product journeys, and immutable normalized test truth |
@@ -658,7 +658,7 @@ boundary is too large or authority-sensitive to share a pull request safely.
 
 | Lane | Ticket or ordered chain | Class | Start gate | Streamlined execution rule |
 |---|---|---|---|---|
-| Windows evidence | `WIN-001` -> `WIN-002` -> `WIN-003` | SERIAL | Active (`WIN-003`) | One persistent-Windows evidence generation at a time; the lane may run beside Linux/repository work |
+| Windows evidence | `WIN-001` -> `WIN-002` -> `WIN-003` | SERIAL | DONE | Persistent-host Windows evidence is sealed; reopen only for a versioned package or contract change |
 | Library compiler | `MIG-005` | DONE | `MIG-002`, `MIG-003` are done | Separate deny-authority worker/ledger PR; exact 228-file reconciliation and prefetched-source verification are complete |
 
 ### Parity substrate lanes
@@ -706,8 +706,7 @@ After `DIFF-001` closure, the current three implementation slots are:
 3. `JOBSTATE-001` — independent operational-state fence and prerequisite for
    `TRIG-001` plus the state/policy differential.
 
-The Windows persistent-host campaign continues independently as an isolated
-evidence lane. When a slot merges, select the earliest ready successor on the
+The Windows persistent-host campaign is closed. When a slot merges, select the earliest ready successor on the
 same critical path before opening a lower-value parallel ticket. Do not exceed
 three mutable implementation pull requests merely because more tickets are
 dependency-ready.
@@ -717,7 +716,7 @@ dependency-ready.
 | Ticket | Status | Depends on | Objective and acceptance |
 |---|---|---|---|
 | FOUND-001 | DONE | — | Private monorepo, ADRs 1–15, board, threat model skeleton, CI, clean protected merge |
-| CI-001 | DONE | FOUND-001 | Preserve every protected required check while cancelling superseded PR runs, restoring commit-pinned Rust caches keyed by the lockfile/toolchain, and tiering the full Windows native-service/crash-recovery war gate to Windows-agent-impacting PRs and every push to `main`; a tested Linux router must compare changed source paths, the complete production-and-test package closure, resolved dependency graph, and normalized workspace build policy so an unrelated workspace-member/lockfile addition skips Windows without hiding an agent dependency change; persistent-host `WIN-003` evidence remains a separate release gate |
+| CI-001 | DONE | FOUND-001 | Preserve every protected required check while cancelling superseded PR runs, restoring commit-pinned Rust caches keyed by the lockfile/toolchain, and tiering the full Windows native-service/crash-recovery war gate to Windows-agent-impacting PRs and every push to `main`; a tested Linux router must compare changed source paths, the complete production-and-test package closure, resolved dependency graph, and normalized workspace build policy so an unrelated workspace-member/lockfile addition skips Windows without hiding an agent dependency change; persistent-host `WIN-003` evidence was completed as a separate release gate |
 | ARCH-001 | DONE | FOUND-001 | Finite TLC model; lease type, stale publication rejection, fencing, terminal monotonicity, and completion stability checked in CI |
 | FOUND-002 | DONE | FOUND-001 | Digest-pinned Rust/gitleaks, checksummed tools, documented cache policy, one-command HeMan validation |
 | SEC-001 | DONE | FOUND-001 | Actors, assets, boundaries, assumptions, 24 owned threats, mitigations, residual risk, and verification map |
@@ -753,7 +752,7 @@ dependency-ready.
 | WIN-004 | DONE | AGENT-003 | Win32 creates every workload suspended with atomic kill-on-close Job membership through `PROC_THREAD_ATTRIBUTE_JOB_LIST`, records durable process identity before resume, and uses a restricted inherited-handle list; native forced-crash gates at every creation boundary and after descendant spawn leave no escaped process |
 | WIN-001 | DONE | AGENT-003, AGENT-004, AGENT-005 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove hosted Windows install/start/stop/uninstall, monotonic session epochs, process restart, and journal reconciliation |
 | WIN-002 | DONE | WIN-001, WIN-004 | Add explicit direct-process, `cmd.exe`, and PowerShell execution modes; isolate each attempt in a race-free Job Object and ACL-owned workspace; prove timeout/cancel/service-crash kills every descendant and preserves durable stdout/stderr/result evidence |
-| WIN-003 | ACTIVE | WIN-002, E2E-003 | Maintain one versioned Linux/Windows semantic-parity matrix and run destructive hosted-Windows proof; then close with a signed package on a persistent Windows host through controller/network interruption and machine reboot, requiring matching terminal outcomes, logs, artifacts, cancellation, stale-authority rejection, and zero escaped descendants |
+| WIN-003 | DONE | WIN-002, E2E-003 | Maintain one versioned Linux/Windows semantic-parity matrix and run destructive hosted-Windows proof; then close with a signed package on a persistent Windows host through controller/network interruption and machine reboot, requiring matching terminal outcomes, logs, artifacts, cancellation, stale-authority rejection, and zero escaped descendants |
 
 ## Wave 3 — Native product surface
 
@@ -990,8 +989,7 @@ The source runtime is retained by default for the dependent phases and removed
 only by an explicit cleanup flag. `MIG-005` is next on its own branch
 and no longer waits for unrelated state-transfer work; both join only through
 their required differential evidence. The serial persistent-Windows evidence
-lane has closed `WIN-001` and `WIN-002`; `WIN-003` remains and may run in
-parallel with repository implementation.
+lane has closed `WIN-001`, `WIN-002`, and `WIN-003`.
 
 `MIG-005` is complete. The strict-YAML
 `mario-jenkins-oracle-228-shared-libraries-v1` ledger binds the frozen
@@ -1110,11 +1108,10 @@ missing but descendants may remain. Windows process creation now assigns the
 kill-on-close Job atomically before any workload code can execute; native
 crash-boundary gates prove no escaped process.
 
-After `W2-C`, the Windows tickets still require the full controller-driven
-hosted campaign. `WIN-003` additionally requires a signed package on a
-persistent Windows host through controller/network interruption and machine
-reboot. Cross-compilation, a test-only service fixture, or hosted CI alone
-cannot waive either boundary.
+After `W2-C`, the Windows tickets still required the full controller-driven
+hosted campaign. `WIN-003` has now supplied the signed persistent-host package,
+controller-interruption, and physical-reboot proof; cross-compilation and the
+hosted test fixture were not used as substitutes.
 
 Wave 3 is complete in three dependency-ordered batches. `W3-A` and `W3-B`
 establish the native authoring, durable execution, security, audit, artifact,
@@ -1235,6 +1232,49 @@ gate also covered timeout and service-crash cleanup under Windows PowerShell
 `1f2282bfe22cf91bf9db96be3fb7fea6ef364bbff2e0e3ed0d8923ac63ad4cae`;
 HeMan's read-only controller/database evidence manifest is
 `272b018f5abbc62ed148d2b3e3e7d90cc8574347d8fd930c603128dbdf5e5460`.
-All one-day test private keys were destroyed after sealing. `WIN-003` remains
-the active release gate for signed-package interruption, reboot, artifact, and
-full semantic-parity proof; Wave 3 cannot mark it done by implication.
+All one-day test private keys were destroyed after sealing.
+
+`WIN-003` is closed on NucBoxG3 with the signed qualification package built
+natively from commit `1dd946f0d3c717dd5c3f312dacac7a68c927a7c3` and tree
+`82b93c8916925d7fb8abc415e5fd37efc3ee8b2d`. The source archive SHA-256 is
+`c134565a2a39febdc95b8668f69337bea64bd87a152f1bebd57a5098f27df1ac`;
+the signed binary is
+`2eb8ad27d241249d73641d52f872e9ea62b67e8c7d23d5e8b911cf11485aeb37`;
+and the package archive is
+`67356d0c2d0146ec582bdfdabc61578240ebbf1e5132ab03e417b20ed9ac7656`.
+The short-lived self-signed Authenticode identity is qualification evidence,
+not `REL-001` production provenance; its private key was non-exportable and
+deleted after signing, and its public trust anchors were removed after the
+gate.
+
+The outbound mTLS gate proved direct, `cmd.exe`, and PowerShell execution;
+durable stream digests; explicit cancellation with a separately verified dead
+descendant; and controller interruption with one lease expiration, two fenced
+offers, one logical success, and no escaped first child. A physical Windows
+reboot advanced the agent journal session epoch `3 -> 8`, returned the SCM
+service automatically, rejected a fresh-journal stale session, left zero
+active attempts, and killed the pre-reboot PID. Because SCM shutdown allowed
+the live agent to publish exit code 1 before power loss, that rebooted attempt
+has one `failed` terminal, zero lease expirations, and one offer; it was not
+silently retried. A separate post-reboot build succeeded. This exact terminal
+distinction is the current recovery contract, not a claim that machine reboot
+and controller loss have identical retry behavior.
+
+The NucBoxG3 read-only evidence manifest SHA-256 is
+`b650f953f84ac0ccea0f5288593e26a74882f830378686a9a3049c68d7c5e3ce`.
+HeMan's controller, PostgreSQL, LAN-host-key, and mirrored host evidence is
+sealed at `/sn8100/runs/mcloving/windows/win003-hardening-20260803`; its manifest
+SHA-256 is
+`97173f15264c83359891904c7a3bf1763b46cfdcadf007e21027d90f0cd5776b`.
+All temporary mTLS private keys, the Windows service, the qualification trust
+anchors, and the isolated PostgreSQL fixture were removed after independent
+manifest verification. W2-B and the persistent Windows evidence lane are
+closed; `REL-001` remains the separate production-signing dependency.
+
+The final installer contract requires both the exact binary digest and signer
+thumbprint. A native wrong-digest attempt failed before service mutation and
+removed its temporary qualification trust; the accepted install reverified
+the copied binary, removed temporary trust before service start, and left no
+machine-wide qualification certificate after success. Replacement of an
+existing service also requires a bounded observed stop and complete SCM
+deletion before any binary is copied.

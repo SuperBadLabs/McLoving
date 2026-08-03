@@ -152,6 +152,10 @@ async fn persistent_windows_agent_executes_every_explicit_mode() {
         .await
         .expect("submit cancellation tree");
     wait_running(&client, organization_id, project_id, cancellation.build_id).await;
+    // The controller publishes logs when the attempt finalizes, so give the
+    // Windows workload a bounded opportunity to spawn its descendant before
+    // cancellation instead of polling an API that cannot expose the PID yet.
+    tokio::time::sleep(Duration::from_secs(5)).await;
     client
         .cancel(organization_id, project_id, cancellation.build_id)
         .await
@@ -185,8 +189,28 @@ async fn persistent_windows_agent_executes_every_explicit_mode() {
         .expect("read no-escape logs");
     assert!(joined_logs(&verify_logs).contains("process-gone"));
 
+    let recovery = if std::env::var("MCLOVING_WINDOWS_RECOVERY_GATE").as_deref() == Ok("1") {
+        run_recovery_gate(
+            &client,
+            organization_id,
+            project_id,
+            &script_root,
+            &migration_url,
+            api_port,
+            &agent_listen,
+            &controller_binary,
+            &tls,
+            &root,
+            &pool,
+            &mut controller,
+        )
+        .await
+    } else {
+        serde_json::Value::Null
+    };
+
     let receipt = json!({
-        "schema": "mcloving-win-002-cross-host-v1",
+        "schema": if recovery.is_null() { "mcloving-win-002-cross-host-v1" } else { "mcloving-win-003-cross-host-v1" },
         "organization_id": organization_id,
         "project_id": project_id,
         "agent_id": AGENT_ID,
@@ -206,14 +230,187 @@ async fn persistent_windows_agent_executes_every_explicit_mode() {
             "cancelled_tree": digest_logs(&cancellation_logs),
             "no_escaped_descendant": digest_logs(&verify_logs),
         },
+        "persistent_recovery": recovery,
         "result": "PASS",
     });
+    let receipt_name = if recovery.is_null() {
+        "WIN-002-CROSS-HOST.json"
+    } else {
+        "WIN-003-CROSS-HOST.json"
+    };
     std::fs::write(
-        root.join("WIN-002-CROSS-HOST.json"),
+        root.join(receipt_name),
         serde_json::to_vec_pretty(&receipt).expect("serialize gate receipt"),
     )
     .expect("write gate receipt");
     stop(&mut controller).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_recovery_gate(
+    client: &Client,
+    organization_id: Uuid,
+    project_id: Uuid,
+    script_root: &str,
+    migration_url: &str,
+    api_port: u16,
+    agent_listen: &str,
+    controller_binary: &Path,
+    tls: &MtlsFiles,
+    root: &Path,
+    pool: &sqlx::PgPool,
+    controller: &mut Child,
+) -> serde_json::Value {
+    let recovery_path = format!(r"{script_root}\recovery.ps1");
+    let verify_path = format!(r"{script_root}\verify-recovery.ps1");
+
+    let interrupted = client
+        .submit_on_platform_in_pool(
+            organization_id,
+            project_id,
+            "win003-controller-interruption",
+            "windows",
+            TRUST_POOL,
+            pipeline("powershell", &recovery_path, &["controller"]),
+        )
+        .await
+        .expect("submit controller-interruption workload");
+    wait_running(client, organization_id, project_id, interrupted.build_id).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    stop(controller).await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    *controller = controller_command(
+        controller_binary,
+        migration_url,
+        organization_id,
+        api_port,
+        agent_listen,
+        tls,
+        root,
+    )
+    .spawn()
+    .expect("restart shipped controller after interruption");
+    wait_until_listening(client, organization_id).await;
+    let interrupted =
+        wait_terminal(client, organization_id, project_id, interrupted.build_id).await;
+    assert_eq!(interrupted.status, "succeeded");
+    let interrupted_logs = client
+        .logs(organization_id, project_id, interrupted.build_id)
+        .await
+        .expect("read controller-interruption logs");
+    assert!(joined_logs(&interrupted_logs).contains("retry-after-controller"));
+    let interrupted_expirations =
+        event_count(pool, interrupted.build_id, "attempt.lease_expired").await;
+    let interrupted_offers = event_count(pool, interrupted.build_id, "attempt.offered").await;
+    assert_eq!(interrupted_expirations, 1);
+    assert_eq!(interrupted_offers, 2);
+    let interrupted_cleanup = submit_and_wait(
+        client,
+        organization_id,
+        project_id,
+        "win003-controller-no-escape",
+        &pipeline("powershell", &verify_path, &["controller"]),
+    )
+    .await;
+
+    let rebooted = client
+        .submit_on_platform_in_pool(
+            organization_id,
+            project_id,
+            "win003-machine-reboot",
+            "windows",
+            TRUST_POOL,
+            pipeline("powershell", &recovery_path, &["reboot"]),
+        )
+        .await
+        .expect("submit machine-reboot workload");
+    wait_running(client, organization_id, project_id, rebooted.build_id).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    std::fs::write(
+        root.join("WIN003_REBOOT_REQUEST.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schema": "mcloving-win-003-reboot-request-v1",
+            "build_id": rebooted.build_id,
+        }))
+        .expect("serialize reboot request"),
+    )
+    .expect("publish machine-reboot request");
+    let reboot_completion = root.join("WIN003_REBOOT_COMPLETE.json");
+    wait_for_marker(&reboot_completion, Duration::from_secs(300)).await;
+    let host_receipt: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&reboot_completion).expect("read persistent-host reboot receipt"),
+    )
+    .expect("parse persistent-host reboot receipt");
+    assert_eq!(host_receipt["result"], "PASS");
+    assert_eq!(host_receipt["lan_ssh_reachable"], true);
+    assert_eq!(host_receipt["service_automatic_and_running"], true);
+    assert_eq!(host_receipt["stale_authority_rejected"], true);
+    assert!(
+        host_receipt["session_epoch_after"].as_u64().unwrap_or(0)
+            > host_receipt["session_epoch_before"]
+                .as_u64()
+                .unwrap_or(u64::MAX)
+    );
+
+    let rebooted = wait_terminal(client, organization_id, project_id, rebooted.build_id).await;
+    assert_eq!(rebooted.status, "failed");
+    let reboot_logs = client
+        .logs(organization_id, project_id, rebooted.build_id)
+        .await
+        .expect("read machine-reboot logs");
+    assert!(joined_logs(&reboot_logs).contains("first-child-reboot="));
+    let reboot_expirations = event_count(pool, rebooted.build_id, "attempt.lease_expired").await;
+    let reboot_offers = event_count(pool, rebooted.build_id, "attempt.offered").await;
+    assert_eq!(reboot_expirations, 0);
+    assert_eq!(reboot_offers, 1);
+    let reboot_cleanup = submit_and_wait(
+        client,
+        organization_id,
+        project_id,
+        "win003-reboot-no-escape",
+        &pipeline("powershell", &verify_path, &["reboot"]),
+    )
+    .await;
+    let post_reboot = submit_and_wait(
+        client,
+        organization_id,
+        project_id,
+        "win003-post-reboot",
+        &pipeline("direct", r"C:\Windows\System32\whoami.exe", &[]),
+    )
+    .await;
+
+    json!({
+        "schema": "mcloving-win-003-persistent-recovery-v1",
+        "controller_interruption": {
+            "build_id": interrupted.build_id,
+            "terminal": interrupted.status,
+            "log_sha256": digest_logs(&interrupted_logs),
+            "no_escape_build_id": interrupted_cleanup.build_id,
+            "lease_expirations": interrupted_expirations,
+            "offers": interrupted_offers,
+        },
+        "machine_reboot": {
+            "build_id": rebooted.build_id,
+            "terminal": rebooted.status,
+            "log_sha256": digest_logs(&reboot_logs),
+            "no_escape_build_id": reboot_cleanup.build_id,
+            "lease_expirations": reboot_expirations,
+            "offers": reboot_offers,
+            "host_receipt": host_receipt,
+        },
+        "post_reboot_build_id": post_reboot.build_id,
+        "result": "PASS",
+    })
+}
+
+async fn event_count(pool: &sqlx::PgPool, build_id: Uuid, kind: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM build_events WHERE build_id = $1 AND kind = $2")
+        .bind(build_id)
+        .bind(kind)
+        .fetch_one(pool)
+        .await
+        .expect("count recovery events")
 }
 
 fn pipeline(mode: &str, program: &str, arguments: &[&str]) -> String {

@@ -217,16 +217,19 @@ multi-tenant security boundaries. Untrusted multi-tenant workloads still
 require a VM or equivalent isolation; cgroup/resource quotas and Windows ACLs
 remain deployment hardening.
 
-## Current external proof gap
+## Persistent-host proof closure
 
-The hosted Windows CI campaign and the persistent NucBoxG3 `WIN-001` closure
-prove native compilation, service install/start/stop/uninstall, monotonic
-session epochs across journal reopen, Job Object descendant cleanup, hard
-service-process termination, journal reconciliation, and no duplicate accepted
-execution after restart. A signed package on the persistent Windows host still
-must prove machine-reboot reconciliation, payload-directory survival, and
-cross-host controller/network interruption before full Windows parity is
-closed.
+The hosted Windows CI campaign and persistent NucBoxG3 `WIN-001` through
+`WIN-003` closures prove native compilation, service lifecycle, monotonic
+session epochs, atomic Job Object containment, cancellation, hard
+service-process termination, journal reconciliation, stale-authority denial,
+controller-loss retry, and physical-machine reboot using an exact signed
+qualification package. Controller loss expires the old lease and permits only
+a higher-fence retry. During the observed machine reboot, SCM shutdown let the
+agent publish an ordinary failed terminal before connectivity disappeared, so
+the controller neither expired nor retried that already-terminal attempt. A
+separate post-reboot build proves restored service health. These outcomes are
+intentionally distinct and are bound in the versioned parity receipt.
 
 The executor creates the workload suspended with atomic Job membership in the
 Win32 creation attribute list. Native forced-crash tests cover every
@@ -244,5 +247,6 @@ post-controller-commit crash. On Linux, journal schema v2 binds the process
 group leader to the machine boot ID and `/proc` start ticks; restart
 reconciliation revalidates that non-reusable identity before both TERM and
 KILL. A missing leader is not proof that the process group is empty and remains
-reconciliation-required until containment is verified. Full Windows parity
-still depends on the hosted persistent-machine gates.
+reconciliation-required until containment is verified. Production release
+still depends on `REL-001` signing and the later versioned war campaign; those
+are provenance and release gates, not missing Windows runtime evidence.
