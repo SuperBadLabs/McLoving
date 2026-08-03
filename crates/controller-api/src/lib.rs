@@ -1895,6 +1895,7 @@ fn execution_spec(steps: &[Step]) -> Value {
         .map(|step| match step {
             Step::Process(process) => json!({
                 "kind": "process",
+                "mode": process.mode.as_str(),
                 "program": process.program,
                 "args": process.args,
                 "env": process.env,
@@ -4322,5 +4323,27 @@ mod tests {
         let error = submission_platform(&headers).expect_err("reject unsupported platform");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.code, "invalid_platform");
+    }
+
+    #[test]
+    fn execution_spec_preserves_explicit_process_mode() {
+        let pipeline = compile_source_with_parameters(
+            r#"
+version: 1
+name: windows-mode
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          mode: powershell
+          program: build.ps1
+"#,
+            BTreeMap::new(),
+        )
+        .expect("compile explicit Windows process mode");
+        let spec = execution_spec(&pipeline.stages[0].steps);
+        assert_eq!(spec["steps"][0]["mode"], "powershell");
+        assert_eq!(spec["steps"][0]["program"], "build.ps1");
     }
 }

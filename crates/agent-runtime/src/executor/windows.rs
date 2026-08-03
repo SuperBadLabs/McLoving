@@ -854,7 +854,9 @@ Wait-Process -Id $child.Id
         let cancellation_pid_path = pid_path.clone();
         let cancellation = tokio::spawn(async move {
             for _ in 0..2_500 {
-                if cancellation_pid_path.exists() {
+                if let Ok(contents) = fs::read_to_string(&cancellation_pid_path)
+                    && contents.trim().parse::<u32>().is_ok()
+                {
                     cancel.cancel();
                     return;
                 }

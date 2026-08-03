@@ -43,6 +43,7 @@ stages:
     name: Build
     steps:
       - process:
+          mode: direct
           program: cargo
           args: [test, --locked]
           env:
@@ -51,8 +52,9 @@ stages:
 ```
 
 Stages are sequential. Stage IDs are unique restricted identifiers. The only
-v1 step is a direct process with a program, optional string arguments, optional
-string environment mapping, and optional non-negative timeout.
+v1 step is a process with an explicit creation mode, a program, optional string
+arguments, optional string environment mapping, and optional non-negative
+timeout. The mode defaults to `direct` for v1.0/v1.1 compatibility.
 
 Unknown fields are errors at the pipeline, stage, step, and process levels.
 Adding semantics therefore requires a versioned contract change rather than
@@ -83,6 +85,20 @@ does not invoke the YAML parser or schema compiler.
 A reader accepts a produced IR when major versions match and the reader minor
 version is greater than or equal to the produced minor version. A major
 mismatch or newer producer minor version is rejected explicitly.
+
+## Pipeline IR v1.2 explicit process modes
+
+IR v1.2 adds exactly three process creation contracts: `direct`,
+`windows_cmd`, and `powershell`. A non-direct mode promotes the semantic IR to
+v1.2, and canonical bytes bind a closed mode opcode before the program. The
+independent validator rejects unknown opcodes. Controller lowering carries the
+mode into the agent execution specification without inspecting the program
+name, extension, arguments, or command text.
+
+`windows_cmd` and `powershell` are Windows-only. A non-Windows executor rejects
+them rather than attempting a compatibility fallback. Direct mode preserves
+the existing argv/no-shell behavior. This contract deliberately does not add a
+generic shell string or implicit interpreter selection.
 
 ## Pipeline IR v1.1 parameters and expressions
 

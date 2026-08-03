@@ -112,6 +112,7 @@ enum ProcessMode {
     #[default]
     Direct,
     WindowsCmd,
+    #[serde(rename = "powershell")]
     PowerShell,
 }
 

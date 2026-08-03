@@ -193,7 +193,7 @@ try {
   @'
 "unexpected-resume" | Set-Content -Encoding ascii ran.txt
 Start-Sleep -Seconds 300
-'@ | Set-Content -Encoding utf8NoBOM $boundaryScript
+'@ | Set-Content -Encoding utf8 $boundaryScript
 
   $boundaries = @(
     @{

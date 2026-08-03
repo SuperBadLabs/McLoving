@@ -90,6 +90,7 @@ enum ProcessMode {
     #[default]
     Direct,
     WindowsCmd,
+    #[serde(rename = "powershell")]
     PowerShell,
 }
 
@@ -2435,6 +2436,25 @@ mod tests {
             validate_assignment(&config(), 1, assignment(wrong_kind)),
             Err(AgentError::UnsupportedSpec)
         ));
+
+        let windows_cmd = br#"{"version":1,"steps":[{"kind":"process","mode":"windows_cmd","program":"build.cmd"}]}"#;
+        assert!(matches!(
+            validate_assignment(&config(), 1, assignment(windows_cmd))
+                .expect("accept explicit cmd mode")
+                .process
+                .mode,
+            ProcessMode::WindowsCmd
+        ));
+        let powershell = br#"{"version":1,"steps":[{"kind":"process","mode":"powershell","program":"build.ps1"}]}"#;
+        assert!(matches!(
+            validate_assignment(&config(), 1, assignment(powershell))
+                .expect("accept explicit PowerShell mode")
+                .process
+                .mode,
+            ProcessMode::PowerShell
+        ));
+        let inferred = br#"{"version":1,"steps":[{"kind":"process","mode":"power_shell","program":"build.ps1"}]}"#;
+        assert!(validate_assignment(&config(), 1, assignment(inferred)).is_err());
     }
 
     #[test]
