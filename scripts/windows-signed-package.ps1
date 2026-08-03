@@ -43,6 +43,36 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 $source = (Resolve-Path -LiteralPath $SourceRoot).Path
+$gitRoot = (& git -C $source rev-parse --show-toplevel) -join "`n"
+if ($LASTEXITCODE -ne 0) {
+    throw "source root is not a Git worktree: $source"
+}
+$gitRoot = (Resolve-Path -LiteralPath $gitRoot.Trim()).Path
+if (-not [string]::Equals($gitRoot, $source, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "source root must be the Git worktree root: expected $gitRoot, received $source"
+}
+$actualCommit = ((& git -C $source rev-parse --verify HEAD) -join "").Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0) {
+    throw "failed to resolve source commit"
+}
+$actualTree = ((& git -C $source rev-parse --verify 'HEAD^{tree}') -join "").Trim().ToLowerInvariant()
+if ($LASTEXITCODE -ne 0) {
+    throw "failed to resolve source tree"
+}
+if ($actualCommit -ne $SourceCommit) {
+    throw "source commit mismatch: expected $SourceCommit, actual $actualCommit"
+}
+if ($actualTree -ne $SourceTree) {
+    throw "source tree mismatch: expected $SourceTree, actual $actualTree"
+}
+$dirtyPaths = @(& git -C $source status --porcelain=v1 --untracked-files=all)
+if ($LASTEXITCODE -ne 0) {
+    throw "failed to inspect source worktree status"
+}
+if ($dirtyPaths.Count -ne 0) {
+    throw "source worktree must be clean before package qualification"
+}
+
 $outputParent = Split-Path -Parent $OutputRoot
 New-Item -ItemType Directory -Force -Path $outputParent | Out-Null
 New-Item -ItemType Directory -Path $OutputRoot | Out-Null

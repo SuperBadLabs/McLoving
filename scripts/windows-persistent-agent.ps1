@@ -18,16 +18,24 @@ $scripts = Join-Path $GateRoot "scripts"
 $journal = Join-Path $GateRoot "agent.db"
 $workspace = Join-Path $GateRoot "workspaces"
 
-$temporaryTrustInstalled = $false
+$temporaryTrustStores = @()
 try {
     if ($SignerCertificateSource) {
         $signerCertificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2($SignerCertificateSource)
         if ($signerCertificate.Thumbprint -ne $ExpectedSignerThumbprint) {
             throw "signer certificate thumbprint mismatch"
         }
-        Import-Certificate -FilePath $SignerCertificateSource -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
-        Import-Certificate -FilePath $SignerCertificateSource -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" | Out-Null
-        $temporaryTrustInstalled = $true
+        foreach ($storeName in @("Root", "TrustedPublisher")) {
+            $alreadyTrusted = Get-ChildItem "Cert:\LocalMachine\$storeName" |
+                Where-Object { $_.Thumbprint -eq $ExpectedSignerThumbprint }
+            if (-not $alreadyTrusted) {
+                # Record cleanup responsibility before import so even a partially
+                # successful provider operation is removed by the finally block.
+                $temporaryTrustStores += $storeName
+                Import-Certificate -FilePath $SignerCertificateSource `
+                    -CertStoreLocation "Cert:\LocalMachine\$storeName" | Out-Null
+            }
+        }
     }
 
     $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $BinarySource).Hash.ToLowerInvariant()
@@ -76,12 +84,10 @@ try {
         throw "installed binary Authenticode validation failed"
     }
 } finally {
-    if ($temporaryTrustInstalled) {
-        foreach ($storeName in @("Root", "CA", "TrustedPublisher")) {
-            Get-ChildItem "Cert:\LocalMachine\$storeName" |
-                Where-Object { $_.Thumbprint -eq $ExpectedSignerThumbprint } |
-                Remove-Item -Force
-        }
+    foreach ($storeName in $temporaryTrustStores) {
+        Get-ChildItem "Cert:\LocalMachine\$storeName" |
+            Where-Object { $_.Thumbprint -eq $ExpectedSignerThumbprint } |
+            Remove-Item -Force
     }
 }
 

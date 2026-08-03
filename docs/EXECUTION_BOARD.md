@@ -658,7 +658,6 @@ boundary is too large or authority-sensitive to share a pull request safely.
 
 | Lane | Ticket or ordered chain | Class | Start gate | Streamlined execution rule |
 |---|---|---|---|---|
-| Windows evidence | `WIN-001` -> `WIN-002` -> `WIN-003` | SERIAL | DONE | Persistent-host Windows evidence is sealed; reopen only for a versioned package or contract change |
 | Library compiler | `MIG-005` | DONE | `MIG-002`, `MIG-003` are done | Separate deny-authority worker/ledger PR; exact 228-file reconciliation and prefetched-source verification are complete |
 
 ### Parity substrate lanes
