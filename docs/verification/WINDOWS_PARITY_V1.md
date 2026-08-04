@@ -155,3 +155,33 @@ HeMan's immutable 41-file cross-host bundle is
 Cleanup removed the service, both install roots, gate private key, temporary
 signer trust, qualification database container, and all transient package and
 source paths while preserving the sealed evidence.
+
+## Exact-head authenticated startup closure
+
+Commit `11a0e18f860cc6ea39a623e601ad5ff1defb11ee`, tree
+`50ffb804978cd457eba92d3d702d7a1c70516fd7`, closes the remaining
+controller-trust seam. The production service writes a protected atomic
+session receipt only after the mTLS `OpenSession` RPC is accepted; installation
+requires its epoch to match the journal. A locally valid client-authentication
+certificate from an untrusted issuer therefore failed after controller contact
+and triggered complete service/package rollback.
+
+The complete final-package NucBoxG3 campaign passed all execution modes,
+cancellation/crash recovery, controller interruption, and physical reboot in
+126.32 seconds. Session authority advanced `3 -> 8`, stale authority was
+rejected, zero attempts remained active, and LAN SSH returned. The reboot gate
+was corrected after an honestly preserved false positive where Windows reused
+a numeric PID for `svchost.exe`; the final proof compares PID and process
+creation identity. Live replacement then preserved journal/workspace state,
+advanced epoch `55 -> 56`, and matched authenticated receipt epoch `56`.
+
+The signed binary SHA-256 is
+`68aa3779c1c31e91c917c546cc4d5ae643d7cabe59690ff2b03bc64be066e609`;
+the archive SHA-256 is
+`85ab3eb8117727a8f381b460f1545fdac62c88ac24c0f210fcf1be7bf08d0ba6`.
+The immutable NucBoxG3 28-file manifest is
+`750dd34beddfb95349e631e72f4dfdb203d32e91768a0fbd71b16cd8973fadd5`,
+and HeMan's immutable 21-file cross-host manifest is
+`0fe814ce842b6bdd978932f065eed5e8f591c60ad0075706f9ab303e49423e5b`.
+All transient services, containers, package/source copies, TLS private keys,
+and install roots were removed after sealing.

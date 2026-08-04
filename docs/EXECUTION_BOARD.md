@@ -1387,3 +1387,44 @@ path remains. A bounded read-only Claude plan-mode review consumed 15 turns and
 timed out at 180 seconds without a verdict or finding; it made no repository
 mutation. Review threads `PRRT_kwDOTmTe486WOZn1` and
 `PRRT_kwDOTmTe486WOZn4` are addressed by this exact evidence.
+
+The exact-head authenticated-startup closure supersedes the precursor
+attribution above. Commit `11a0e18f860cc6ea39a623e601ad5ff1defb11ee`,
+tree `50ffb804978cd457eba92d3d702d7a1c70516fd7`, publishes a protected
+write-once session receipt only after the controller accepts the mTLS
+`OpenSession` RPC. The installer requires that receipt to match the new
+journal epoch, so a locally valid `clientAuth` certificate issued by an
+untrusted CA cannot turn a pre-connect epoch reservation into install success.
+The native negative gate proved local validation succeeded, controller trust
+failed, no authenticated receipt appeared, and service/package rollback was
+complete.
+
+NucBoxG3 then ran the complete exact-package campaign in 126.32 seconds:
+every explicit Windows mode, cancellation and crash recovery, controller
+interruption, physical reboot, stale-authority rejection, and post-reboot LAN
+SSH all passed. Reboot advanced session epoch `3 -> 8` with zero active
+attempts. A first reboot observation honestly failed because Windows reused
+the numeric workload PID for `svchost.exe`; the preserved diagnosis at
+`/sn8100/runs/mcloving/windows/pr25-11a0e18-failed-pid-reuse` has manifest
+SHA-256
+`87d2fcdb0f1101335638a5200e58fcdddf38a0be33bd20720b5e589b65f398bf`.
+The corrected gate binds PID plus `Win32_Process` creation time, and the clean
+full rerun passed. Same-package live replacement preserved the predecessor
+journal and workspace marker, advanced epoch `55 -> 56`, retained active
+attempts `0 -> 0`, and matched authenticated receipt epoch `56`.
+
+The final bundle, archive, and signed binary SHA-256 values are respectively
+`bf8621cf639dde6183e0ee9f219cfaf6d67516049c24d30afc3c97e5b90f598a`,
+`85ab3eb8117727a8f381b460f1545fdac62c88ac24c0f210fcf1be7bf08d0ba6`,
+and `68aa3779c1c31e91c917c546cc4d5ae643d7cabe59690ff2b03bc64be066e609`.
+NucBoxG3's immutable 28-file manifest is
+`750dd34beddfb95349e631e72f4dfdb203d32e91768a0fbd71b16cd8973fadd5`;
+its nested package manifest is
+`da91469b403c9ea97f5ce9af75da0f47f872d4fdddd80d3d9fc08b6da95b2706`.
+HeMan's immutable 21-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-11a0e18-final`, manifest SHA-256
+`0fe814ce842b6bdd978932f065eed5e8f591c60ad0075706f9ab303e49423e5b`.
+Claude's bounded read-only exact-commit review returned `NO_FINDINGS` without
+mutation. Review threads `PRRT_kwDOTmTe486WPgc3` and
+`PRRT_kwDOTmTe486WPgc9` are closed by the implementation and final-package
+evidence. `WIN-003` therefore remains `DONE` on exact final-package proof.
