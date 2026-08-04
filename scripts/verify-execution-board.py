@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import re
-import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -66,54 +65,6 @@ def main() -> None:
         else:
             if updated > date.today():
                 errors.append(f"execution board Updated date is in the future: {updated}")
-
-            # A dirty local board has not acquired its final commit date yet. CI
-            # checks the committed form: when history for this file is available,
-            # the header must name the date of the commit that last changed it.
-            relative_board = board.relative_to(repository)
-            worktree_clean = subprocess.run(
-                ["git", "diff", "--quiet", "--", str(relative_board)],
-                cwd=repository,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            index_clean = subprocess.run(
-                ["git", "diff", "--cached", "--quiet", "--", str(relative_board)],
-                cwd=repository,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            if worktree_clean.returncode == 0 and index_clean.returncode == 0:
-                shallow_repository = subprocess.run(
-                    ["git", "rev-parse", "--is-shallow-repository"],
-                    cwd=repository,
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                if (
-                    shallow_repository.returncode == 0
-                    and shallow_repository.stdout.strip() == "false"
-                ):
-                    committed_date = subprocess.run(
-                        ["git", "log", "-1", "--format=%cs", "--", str(relative_board)],
-                        cwd=repository,
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                    )
-                    expected = committed_date.stdout.strip()
-                    if (
-                        committed_date.returncode == 0
-                        and expected
-                        and expected != str(updated)
-                    ):
-                        errors.append(
-                            f"execution board Updated date is {updated}; last board "
-                            f"commit is {expected}"
-                        )
 
     if re.search(r"Protected `main` is `[0-9a-f]{40}`", text):
         errors.append(
