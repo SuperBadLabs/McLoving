@@ -384,6 +384,12 @@ $PackageRoot = [IO.Path]::GetFullPath($PackageRoot)
 # ancestors before reading GateRoot inputs or creating PackageRoot children.
 Assert-NonReplaceableParentChain $GateRoot
 Assert-NonReplaceableParentChain $PackageRoot
+# A DACL replacement cannot revoke handles granted while an existing root was
+# writable. Never reuse that namespace: upgrades must supply a fresh
+# PackageRoot so its boundary is established atomically at creation.
+if (Test-Path -LiteralPath $PackageRoot) {
+    throw "package root already exists; use a fresh protected package root: $PackageRoot"
+}
 $binary = Join-Path $packageRoot "mcloving-agent.exe"
 $stagedBinary = Join-Path $packageRoot "mcloving-agent.installing.exe"
 $backupBinary = Join-Path $packageRoot "mcloving-agent.rollback.exe"
@@ -440,6 +446,7 @@ $temporaryTrustStores = @()
 $installFailure = $null
 $trustCleanupFailures = @()
 $inputCleanupFailures = @()
+$packageRootCreated = $false
 $identityGenerationCreated = $false
 try {
     # Package and GateRoot inputs may be supplied from locations writable by a
@@ -526,11 +533,8 @@ try {
     # installer mutates ACLs, package contents, the registry, or SCM.
     Invoke-AgentConfigValidation $protectedBinarySource $validationEnvironment
 
-    if (Test-Path -LiteralPath $PackageRoot) {
-        Set-RestrictedTreeAcl $PackageRoot
-    } else {
-        New-RestrictedDirectoryPathAtomic $PackageRoot
-    }
+    New-RestrictedDirectoryPathAtomic $PackageRoot
+    $packageRootCreated = $true
     Assert-NonReplaceableDirectoryChain $PackageRoot
     New-RestrictedDirectoryAtomic $identityGeneration
     $identityGenerationCreated = $true
@@ -626,6 +630,14 @@ if ($installFailure -or $trustCleanupFailures.Count -ne 0 -or
             $identityGenerationCreated = $false
         } catch {
             $cleanupFailures += "installed identity: $($_.Exception.Message)"
+        }
+    }
+    if ($packageRootCreated) {
+        try {
+            Remove-Item -LiteralPath $PackageRoot -Force -ErrorAction Stop
+            $packageRootCreated = $false
+        } catch {
+            $cleanupFailures += "new package root: $($_.Exception.Message)"
         }
     }
     if ($cleanupFailures.Count -ne 0) {
@@ -947,6 +959,14 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
         Remove-Item -LiteralPath $backupBinary -Force -ErrorAction SilentlyContinue
     } elseif (Test-Path -LiteralPath $backupBinary -PathType Leaf) {
         $retainedBackup = $backupBinary
+    }
+    if ($packageRootCreated -and $serviceRollbackFailures.Count -eq 0) {
+        try {
+            Remove-Item -LiteralPath $PackageRoot -Force -ErrorAction Stop
+            $packageRootCreated = $false
+        } catch {
+            $serviceRollbackFailures += "new package root: $($_.Exception.Message)"
+        }
     }
     if ($serviceRollbackFailures.Count -ne 0) {
         $retainedBackupDiagnostic = if ($retainedBackup) {
