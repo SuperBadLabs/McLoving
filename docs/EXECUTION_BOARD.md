@@ -1235,13 +1235,13 @@ All one-day test private keys were destroyed after sealing.
 
 `WIN-003` is closed on NucBoxG3 with the signed qualification package built
 natively from the final reviewed installer implementation at commit
-`9859c7a2755818352d4c05f8c32683a4c48162e2` and tree
-`32c418621b6ad4a99027d6177ad1c3e4690198f1`. The exact source bundle SHA-256
-is `72b06879decb1d1805d871f0170b4f90f2b2ef7009a7f69b1c2d18e56c36891a`;
+`a250c864baa4fe0ad13b22d905568164674182b6` and tree
+`ada4377b5fe30c2ee395a851537766b6fe313ccb`. The exact source bundle SHA-256
+is `c41491b83c20f788ad70360acac37ef9caa158597a912daeee3a889867778f6a`;
 the signed binary is
-`a04653791500577f44ea263b2ae61810ccf239c07592b0fbbce9f6037a2ffdd9`;
+`03ec3a0fa2c76985aac6ad4d361501d3e0e595f97eeeca1e0b9ceebe9c618ea4`;
 and the package archive is
-`6cc715f1ba7b50a2e7bbf16d7562aee751b387b8b67f54568b795bd9fa18ee43`.
+`728885bef6935c3a1405db85a91c73ec7465654632e2741b3524e97a036dc734`.
 The short-lived self-signed Authenticode identity is qualification evidence,
 not `REL-001` production provenance. The packager binds its exact CNG key
 `UniqueName`, requires exactly one `My`-store `-DeleteKey` removal, and emits
@@ -1263,23 +1263,26 @@ the live agent to publish exit code 1 before power loss, that rebooted attempt
 has one `failed` terminal, zero lease expirations, and one offer; it was not
 silently retried. A separate post-reboot build succeeded. This exact terminal
 distinction is the current recovery contract, not a claim that machine reboot
-and controller loss have identical retry behavior.
+and controller loss have identical retry behavior. The current reboot request
+UUID `60dd96bd-912f-4cc0-99c0-5500a04585cb` and build ID
+`76230dbc-3e8e-4404-ada6-2fe48e54c451` were echoed by the host completion and
+checked by the Rust gate, so a stale completion marker cannot satisfy the run.
 
-The final NucBoxG3 package/runtime successor has a read-only 22-file manifest
+The final NucBoxG3 package/runtime successor has a read-only 23-file manifest
 SHA-256 of
-`e4640675ba723cb0bc40e0e88733355f5b89f2cce6d3ed8509c5144fe5df59e3`.
+`e5f058248e3d861314bddb7527314df1ba793744952ca7c0259c6f4f09afaf60`.
 Its nested package manifest SHA-256 is
-`625a44f94351d29f84831a0dccc12fcab3f04f0dec7295a310cf33351f39f3ad`
+`ef4d056e82626cfe1d76660e33fc4aecb22b29a756770a8a4a0f81cb9b2335c8`
 and verifies directly because the seal includes the exact signed binary and
-cargo metadata. HeMan's 35-file outer evidence bundle is sealed at
-`/sn8100/runs/mcloving/windows/pr25-9859c7a-final`; its self-excluding manifest
+cargo metadata. HeMan's 38-file outer evidence bundle is sealed at
+`/sn8100/runs/mcloving/windows/pr25-a250c86-final`; its self-excluding manifest
 SHA-256 is
-`eaf38a3f7ea99355a7c31d72fcea98ab7df4d7090190ba2311a659c271aaff19`.
+`6e26f2e1dad9f3261c3641dca03c5e9f3d1d31c5704b287ec2bc699bd0735195`.
 It binds the exact source and package, native host and controller receipts,
-PostgreSQL dump and schema, the read-only verifier's exact-diff
-`VERIFIER_PASS`, the separately recorded bounded evidence-review timeout, and
-cleanup receipts. The earlier `pr25-cfd7aa2-final` bundle remains immutable
-predecessor evidence rather than the current reviewed closure. The Nuc seal
+PostgreSQL dump and schema, the read-only verifier's bounded timeout/no-verdict
+receipt, and cleanup receipts. The earlier `pr25-cfd7aa2-final` and
+`pr25-9859c7a-final` bundles remain immutable predecessor evidence rather than
+the current reviewed closure. The Nuc seal
 removed the Windows service, installed identity, qualification trust anchors,
 gate private key, and test-only recovery-probe shim; manifest-covered cleanup
 receipts record that state. HeMan's remaining mTLS private keys and isolated
@@ -1306,6 +1309,8 @@ declaring SCM startup healthy, the exact staged binary observes any existing
 journal read-only, then the installed service must produce schema v2 and a
 strictly higher session epoch while SCM remains running. A native corrupt-
 journal preflight failed closed with no service, installed binary, or temporary
-signer trust left behind. The installer rolls back the whole service
+signer trust left behind. Separate native probes placed `GateRoot` and
+`PackageRoot` below a public replaceable ancestor; both were rejected before
+service or package mutation. The installer rolls back the whole service
 transaction on every post-identity failure and prunes superseded generations
 only after the running service points to the retained identity.

@@ -51,23 +51,24 @@ one lease expiration, a higher-fence second offer, eventual success, and no
 escaped first child. A new post-reboot build also succeeded.
 
 The evidence binds final reviewed implementation commit
-`9859c7a2755818352d4c05f8c32683a4c48162e2`, tree
-`32c418621b6ad4a99027d6177ad1c3e4690198f1`, and signed binary SHA-256
-`a04653791500577f44ea263b2ae61810ccf239c07592b0fbbce9f6037a2ffdd9`.
+`a250c864baa4fe0ad13b22d905568164674182b6`, tree
+`ada4377b5fe30c2ee395a851537766b6fe313ccb`, and signed binary SHA-256
+`03ec3a0fa2c76985aac6ad4d361501d3e0e595f97eeeca1e0b9ceebe9c618ea4`.
 The signer was a short-lived self-signed qualification identity, not
 production `REL-001` provenance. Its exact CNG key identity is bound before
 cleanup, exactly one `My`-store private-key deletion is required, and PASS is
 withheld unless that bound key file is absent. The external exact-package
 qualification harness observed 13 CNG key files before and after with zero
-delta. NucBoxG3's complete 22-file manifest SHA-256 is
-`e4640675ba723cb0bc40e0e88733355f5b89f2cce6d3ed8509c5144fe5df59e3`;
+delta. NucBoxG3's complete 23-file manifest SHA-256 is
+`e5f058248e3d861314bddb7527314df1ba793744952ca7c0259c6f4f09afaf60`;
 the nested package manifest SHA-256 is
-`625a44f94351d29f84831a0dccc12fcab3f04f0dec7295a310cf33351f39f3ad`;
-and the 35-file HeMan outer evidence manifest is
-`eaf38a3f7ea99355a7c31d72fcea98ab7df4d7090190ba2311a659c271aaff19`.
+`ef4d056e82626cfe1d76660e33fc4aecb22b29a756770a8a4a0f81cb9b2335c8`;
+and the 38-file HeMan outer evidence manifest is
+`6e26f2e1dad9f3261c3641dca03c5e9f3d1d31c5704b287ec2bc699bd0735195`.
 The exact archive SHA-256 is
-`6cc715f1ba7b50a2e7bbf16d7562aee751b387b8b67f54568b795bd9fa18ee43`.
-The earlier `pr25-cfd7aa2-final` bundle remains immutable predecessor evidence.
+`728885bef6935c3a1405db85a91c73ec7465654632e2741b3524e97a036dc734`.
+The earlier `pr25-cfd7aa2-final` and `pr25-9859c7a-final` bundles remain
+immutable predecessor evidence.
 Three historical qualification keys were removed by exact CNG container name
 under a manifest-covered remediation receipt.
 The Nuc seal removed its private gate key, service state, installed identity,
@@ -89,6 +90,10 @@ captured before protected staging. The exact staged binary observes an existing
 journal read-only before mutation; after service start, schema v2 and a strictly
 higher session epoch must be observed while SCM remains running. A corrupt-
 journal native preflight proved rollback with no service, binary, or signer
-trust residue. The entire post-snapshot seam is transactional, and old
+trust residue. Native probes also proved that replaceable ancestors below both
+`GateRoot` and `PackageRoot` are rejected before service/package mutation. The
+physical reboot completion echoed the current request UUID and build ID, and
+the Rust gate removed any prior marker before publishing that request. The
+entire post-snapshot seam is transactional, and old
 generations are pruned only after successful binding. Production trust remains
 `REL-001` work.
