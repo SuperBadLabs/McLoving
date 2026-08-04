@@ -16,7 +16,7 @@ cross-compilation. Every row needs exact-package evidence on both platforms.
 | Service lifecycle | Deployment-specific | SCM install/start/stop/uninstall | Two clean starts with monotonic journal epoch |
 | Machine reboot | Persistent Linux war host | Persistent Windows war host | Journal reconciliation without duplicate execution |
 | Stale authority | Fence and restore epoch | Same durable protocol | Stale session/fence rejected |
-| Output/result | File and parent-directory fsync, then SHA-256 | File flush and SQLite FULL commit, then SHA-256; no inferred directory-fsync guarantee | Matching content digest now; directory-entry survival in persistent reboot gate |
+| Output/result | File and parent-directory fsync, then SHA-256 | File flush and SQLite FULL commit, then SHA-256; no inferred directory-fsync guarantee | Matching content digest now; graceful-reboot survival in the persistent gate; abrupt power-loss survival unproven |
 
 Strict YAML declares the process creation contract as `mode: direct`,
 `mode: windows_cmd`, or `mode: powershell`. The compiler emits Pipeline IR
@@ -52,6 +52,13 @@ offers, a `retry-after-reboot` log marker, and one terminal success. Controller
 loss is a different transition: it produced one lease expiration, a higher-
 fence second offer, eventual success, and no escaped first child. A new post-
 reboot build also succeeded.
+
+The reboot evidence is intentionally scoped to an orderly Windows restart.
+SCM shutdown let the agent flush and close its state before connectivity and
+power were removed, so this gate does not prove directory-entry durability
+under abrupt power loss. Windows lacks a least-privilege POSIX-style directory
+fsync equivalent; any future abrupt-power-loss claim requires a separate
+destructive gate and remains outside the verified `WIN-003` contract.
 
 The protected-runtime physical-campaign evidence binds predecessor commit
 `ee4fffac0b6bcc1b5e901bf2e6dfe3e485fd2e65`, tree

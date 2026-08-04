@@ -112,8 +112,9 @@ an atomic kill-on-close Job Object, cancellation and service crash leave no
 descendant, and the workspace root ACL grants only `SYSTEM` and Administrators.
 The accepted residual risk is unchanged: Job Objects and ACL ownership are not
 a hostile multi-tenant isolation boundary. The deployment owner must use a VM
-or equivalent boundary before admitting mutually untrusted Windows workloads;
-`WIN-003` still owns signed-package interruption and reboot evidence.
+or equivalent boundary before admitting mutually untrusted Windows workloads.
+`WIN-003` supplied the signed-package interruption and graceful-reboot evidence;
+abrupt-power-loss directory-entry durability remains unclaimed.
 
 ## Data-flow rules
 
