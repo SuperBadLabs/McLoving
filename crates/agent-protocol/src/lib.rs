@@ -7,9 +7,14 @@
 
 use std::collections::{BTreeSet, HashMap};
 
+use rustls::{
+    ClientConfig, RootCertStore,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+use x509_parser::parse_x509_certificate;
 
 /// Generated Protobuf and gRPC contract.
 pub mod wire {
@@ -272,6 +277,14 @@ pub enum TransportError {
     EmptyControllerDnsName,
     #[error("TLS material must not be empty")]
     EmptyTlsMaterial,
+    #[error("controller CA PEM is invalid: {0}")]
+    InvalidControllerCa(String),
+    #[error("agent certificate PEM is invalid: {0}")]
+    InvalidAgentCertificate(String),
+    #[error("agent private key PEM is invalid: {0}")]
+    InvalidAgentPrivateKey(String),
+    #[error("agent certificate and private key are incompatible: {0}")]
+    InvalidClientIdentity(String),
     #[error("invalid controller endpoint: {0}")]
     InvalidEndpoint(#[from] tonic::transport::Error),
 }
@@ -294,6 +307,8 @@ impl OutboundMtlsConfig {
             return Err(TransportError::EmptyTlsMaterial);
         }
 
+        self.validate_tls_material()?;
+
         let tls = ClientTlsConfig::new()
             .domain_name(self.controller_dns_name.clone())
             .ca_certificate(Certificate::from_pem(self.controller_ca_pem.clone()))
@@ -304,14 +319,129 @@ impl OutboundMtlsConfig {
 
         Ok(Endpoint::from_shared(self.controller_uri.clone())?.tls_config(tls)?)
     }
+
+    fn validate_tls_material(&self) -> Result<(), TransportError> {
+        let controller_cas = CertificateDer::pem_slice_iter(&self.controller_ca_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| TransportError::InvalidControllerCa(error.to_string()))?;
+        if controller_cas.is_empty() {
+            return Err(TransportError::InvalidControllerCa(
+                "no CERTIFICATE section was found".to_owned(),
+            ));
+        }
+        let mut roots = RootCertStore::empty();
+        let (accepted, rejected) = roots.add_parsable_certificates(controller_cas);
+        if accepted == 0 || rejected != 0 {
+            return Err(TransportError::InvalidControllerCa(format!(
+                "accepted {accepted} certificate(s) and rejected {rejected}"
+            )));
+        }
+
+        let certificates = CertificateDer::pem_slice_iter(&self.agent_certificate_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| TransportError::InvalidAgentCertificate(error.to_string()))?;
+        if certificates.is_empty() {
+            return Err(TransportError::InvalidAgentCertificate(
+                "no CERTIFICATE section was found".to_owned(),
+            ));
+        }
+        let private_key = PrivateKeyDer::from_pem_slice(&self.agent_private_key_pem)
+            .map_err(|error| TransportError::InvalidAgentPrivateKey(error.to_string()))?;
+
+        let leaf = certificates
+            .first()
+            .expect("the certificate chain was already proven non-empty");
+        let (_, parsed_leaf) = parse_x509_certificate(leaf.as_ref())
+            .map_err(|error| TransportError::InvalidAgentCertificate(error.to_string()))?;
+        if !parsed_leaf.validity().is_valid() {
+            return Err(TransportError::InvalidAgentCertificate(
+                "certificate is expired or not yet valid".to_owned(),
+            ));
+        }
+        if let Some(extended_key_usage) = parsed_leaf
+            .extended_key_usage()
+            .map_err(|error| TransportError::InvalidAgentCertificate(error.to_string()))?
+            && !extended_key_usage.value.any
+            && !extended_key_usage.value.client_auth
+        {
+            return Err(TransportError::InvalidAgentCertificate(
+                "certificate extended key usage does not permit TLS client authentication"
+                    .to_owned(),
+            ));
+        }
+        if let Some(key_usage) = parsed_leaf
+            .key_usage()
+            .map_err(|error| TransportError::InvalidAgentCertificate(error.to_string()))?
+            && !key_usage.value.digital_signature()
+        {
+            return Err(TransportError::InvalidAgentCertificate(
+                "certificate key usage does not permit digital signatures".to_owned(),
+            ));
+        }
+
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(certificates, private_key)
+            .map_err(|error| TransportError::InvalidClientIdentity(error.to_string()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
+        ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, date_time_ymd,
+    };
 
     fn features(values: &[&str]) -> BTreeSet<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn generated_mtls_config(agent_not_before: i32, agent_not_after: i32) -> OutboundMtlsConfig {
+        generated_mtls_config_with_usages(
+            agent_not_before,
+            agent_not_after,
+            vec![ExtendedKeyUsagePurpose::ClientAuth],
+            Vec::new(),
+        )
+    }
+
+    fn generated_mtls_config_with_usages(
+        agent_not_before: i32,
+        agent_not_after: i32,
+        extended_key_usages: Vec<ExtendedKeyUsagePurpose>,
+        key_usages: Vec<KeyUsagePurpose>,
+    ) -> OutboundMtlsConfig {
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.not_before = date_time_ymd(2019, 1, 1);
+        ca_params.not_after = date_time_ymd(2100, 1, 1);
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let mut ca_name = DistinguishedName::new();
+        ca_name.push(DnType::CommonName, "McLoving test CA");
+        ca_params.distinguished_name = ca_name;
+        let ca_key = KeyPair::generate().unwrap();
+        let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+
+        let mut agent_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        agent_params.not_before = date_time_ymd(agent_not_before, 1, 1);
+        agent_params.not_after = date_time_ymd(agent_not_after, 1, 1);
+        agent_params.extended_key_usages = extended_key_usages;
+        agent_params.key_usages = key_usages;
+        let mut agent_name = DistinguishedName::new();
+        agent_name.push(DnType::CommonName, "McLoving test agent");
+        agent_params.distinguished_name = agent_name;
+        let agent_key = KeyPair::generate().unwrap();
+        let agent = agent_params.signed_by(&agent_key, &ca).unwrap();
+
+        OutboundMtlsConfig {
+            controller_uri: "https://controller.internal:8443".to_owned(),
+            controller_dns_name: "controller.internal".to_owned(),
+            controller_ca_pem: ca.pem().into_bytes(),
+            agent_certificate_pem: agent.pem().into_bytes(),
+            agent_private_key_pem: agent_key.serialize_pem().into_bytes(),
+        }
     }
 
     #[test]
@@ -468,5 +598,69 @@ mod tests {
             config.endpoint(),
             Err(TransportError::EmptyTlsMaterial)
         ));
+    }
+
+    #[test]
+    fn outbound_transport_rejects_malformed_pem_before_connecting() {
+        let config = OutboundMtlsConfig {
+            controller_uri: "https://controller.internal:8443".to_owned(),
+            controller_dns_name: "controller.internal".to_owned(),
+            controller_ca_pem: b"not a PEM certificate".to_vec(),
+            agent_certificate_pem: b"not a PEM certificate".to_vec(),
+            agent_private_key_pem: b"not a PEM key".to_vec(),
+        };
+
+        assert!(matches!(
+            config.endpoint(),
+            Err(TransportError::InvalidControllerCa(_))
+        ));
+    }
+
+    #[test]
+    fn outbound_transport_rejects_expired_or_not_yet_valid_agent_certificates() {
+        let expired = generated_mtls_config(2020, 2021);
+        assert!(matches!(
+            expired.endpoint(),
+            Err(TransportError::InvalidAgentCertificate(_))
+        ));
+
+        let not_yet_valid = generated_mtls_config(2090, 2091);
+        assert!(matches!(
+            not_yet_valid.endpoint(),
+            Err(TransportError::InvalidAgentCertificate(_))
+        ));
+
+        generated_mtls_config(2020, 2090).endpoint().unwrap();
+    }
+
+    #[test]
+    fn outbound_transport_rejects_incompatible_client_certificate_usages() {
+        let server_only = generated_mtls_config_with_usages(
+            2020,
+            2090,
+            vec![ExtendedKeyUsagePurpose::ServerAuth],
+            Vec::new(),
+        );
+        assert!(matches!(
+            server_only.endpoint(),
+            Err(TransportError::InvalidAgentCertificate(message))
+                if message.contains("TLS client authentication")
+        ));
+
+        let no_signature = generated_mtls_config_with_usages(
+            2020,
+            2090,
+            vec![ExtendedKeyUsagePurpose::ClientAuth],
+            vec![KeyUsagePurpose::KeyEncipherment],
+        );
+        assert!(matches!(
+            no_signature.endpoint(),
+            Err(TransportError::InvalidAgentCertificate(message))
+                if message.contains("digital signatures")
+        ));
+
+        generated_mtls_config_with_usages(2020, 2090, Vec::new(), Vec::new())
+            .endpoint()
+            .unwrap();
     }
 }

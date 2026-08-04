@@ -1,5 +1,5 @@
 use mcloving_pipeline_ir::{
-    IR_V1, ParseLimits, SchemaCompatibility, SchemaVersion, compile_strict_yaml,
+    IR_V1, IR_V1_2, ParseLimits, SchemaCompatibility, SchemaVersion, compile_strict_yaml,
     validate_canonical_bytes,
 };
 
@@ -159,7 +159,41 @@ fn schema_compatibility_is_explicit() {
         SchemaCompatibility::ReaderTooOld
     );
     assert_eq!(
+        IR_V1_2.compatibility_with(SchemaVersion { major: 1, minor: 2 }),
+        SchemaCompatibility::Compatible
+    );
+    assert_eq!(
         IR_V1.compatibility_with(SchemaVersion { major: 2, minor: 0 }),
         SchemaCompatibility::MajorMismatch
     );
+}
+
+#[test]
+fn canonical_v1_2_binds_and_validates_the_process_mode() {
+    let pipeline = compile_strict_yaml(
+        "fixture://canonical-mode",
+        r#"
+version: 1
+name: canonical-mode
+stages:
+  - id: test
+    name: Test
+    steps:
+      - process:
+          mode: powershell
+          program: powershell.exe
+"#,
+        ParseLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(pipeline.schema, IR_V1_2);
+    let mut bytes = pipeline.canonical_bytes().unwrap();
+    let program = b"powershell.exe";
+    let program_offset = bytes
+        .windows(program.len())
+        .position(|window| window == program)
+        .expect("canonical program bytes");
+    bytes[program_offset - 5] = 9;
+    let error = validate_canonical_bytes(&bytes).expect_err("invalid mode must be rejected");
+    assert!(error.to_string().contains("invalid process mode"));
 }

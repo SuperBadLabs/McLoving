@@ -628,7 +628,7 @@ Execution classes: `SERIAL`, `BATCH`, `PARALLEL`.
 | W1-B | AGENT-001, AGENT-002, AGENT-003 | DONE | Outbound mTLS contract, fenced sessions, durable journal, Linux process-tree containment |
 | W1-C | UX-001, E2E-001, E2E-002, E2E-003 | DONE | Truthful CLI-driven end-to-end spine and recovery |
 | W2-A | CTRL-003, OPS-001, OPS-002 | DONE | PR #7 merged recoverable execution, staged object truth, restore fencing, retention, and legal holds |
-| W2-B | WIN-001, WIN-002, WIN-003 | DONE | PR #8 merged the Windows service/runtime foundation and hosted destructive fixture; the three product tickets remain active until their production work, recovery, atomic Job, and persistent-host gates close |
+| W2-B | WIN-001, WIN-002, WIN-003 | DONE | PR #8 merged the Windows service/runtime foundation and hosted destructive fixture; all three tickets are now closed on persistent NucBoxG3 with signed-package, controller-loss, cancellation, and physical-reboot evidence |
 | W2-C | AGENT-004, AGENT-005, AGENT-006, WIN-004 | DONE | PR #9 closes production remote work, atomic/replay-safe finalization, non-reusable Linux containment identity, and atomic Windows Job membership |
 | W3-A | IR-003, IR-004, CTRL-004 | DONE | Native pipeline semantics: typed parameters and bounded expressions, digest-pinned reusable components, deterministic matrix expansion, and durable parallel DAG execution |
 | W3-B | SEC-003, AUDIT-001, OPS-003, TEST-001 | DONE | Fenced grants and protected environments, tenant hash-chain audit, staged artifact product journeys, and immutable normalized test truth |
@@ -658,7 +658,6 @@ boundary is too large or authority-sensitive to share a pull request safely.
 
 | Lane | Ticket or ordered chain | Class | Start gate | Streamlined execution rule |
 |---|---|---|---|---|
-| Windows evidence | `WIN-001` -> `WIN-002` -> `WIN-003` | SERIAL | Active | One persistent-Windows evidence generation at a time; the lane may run beside Linux/repository work |
 | Library compiler | `MIG-005` | DONE | `MIG-002`, `MIG-003` are done | Separate deny-authority worker/ledger PR; exact 228-file reconciliation and prefetched-source verification are complete |
 
 ### Parity substrate lanes
@@ -706,8 +705,7 @@ After `DIFF-001` closure, the current three implementation slots are:
 3. `JOBSTATE-001` — independent operational-state fence and prerequisite for
    `TRIG-001` plus the state/policy differential.
 
-The Windows persistent-host campaign continues independently as an isolated
-evidence lane. When a slot merges, select the earliest ready successor on the
+The Windows persistent-host campaign is closed. When a slot merges, select the earliest ready successor on the
 same critical path before opening a lower-value parallel ticket. Do not exceed
 three mutable implementation pull requests merely because more tickets are
 dependency-ready.
@@ -717,7 +715,7 @@ dependency-ready.
 | Ticket | Status | Depends on | Objective and acceptance |
 |---|---|---|---|
 | FOUND-001 | DONE | — | Private monorepo, ADRs 1–15, board, threat model skeleton, CI, clean protected merge |
-| CI-001 | DONE | FOUND-001 | Preserve every protected required check while cancelling superseded PR runs, restoring commit-pinned Rust caches keyed by the lockfile/toolchain, and tiering the full Windows native-service/crash-recovery war gate to Windows-agent-impacting PRs and every push to `main`; a tested Linux router must compare changed source paths, the complete production-and-test package closure, resolved dependency graph, and normalized workspace build policy so an unrelated workspace-member/lockfile addition skips Windows without hiding an agent dependency change; persistent-host `WIN-003` evidence remains a separate release gate |
+| CI-001 | DONE | FOUND-001 | Preserve every protected required check while cancelling superseded PR runs, restoring commit-pinned Rust caches keyed by the lockfile/toolchain, and tiering the full Windows native-service/crash-recovery war gate to Windows-agent-impacting PRs and every push to `main`; a tested Linux router must compare changed source paths, the complete production-and-test package closure, resolved dependency graph, and normalized workspace build policy so an unrelated workspace-member/lockfile addition skips Windows without hiding an agent dependency change; persistent-host `WIN-003` evidence was completed as a separate release gate |
 | ARCH-001 | DONE | FOUND-001 | Finite TLC model; lease type, stale publication rejection, fencing, terminal monotonicity, and completion stability checked in CI |
 | FOUND-002 | DONE | FOUND-001 | Digest-pinned Rust/gitleaks, checksummed tools, documented cache policy, one-command HeMan validation |
 | SEC-001 | DONE | FOUND-001 | Actors, assets, boundaries, assumptions, 24 owned threats, mitigations, residual risk, and verification map |
@@ -751,9 +749,9 @@ dependency-ready.
 | AGENT-005 | DONE | AGENT-004, OPS-001 | One immediate SQLite transaction persists the terminal phase plus complete log/result descriptors before upload; no-follow canonical result paths reject workload redirection; reconnect retains exact authority, verifies every spool digest/size, deterministically replays the original work or cancellation protocol, accepts only exact terminal replay without self-revoking renewal, and idempotently reclaims acknowledged local spools while preserving terminal history; forced response-loss and agent-crash gates converge to one terminal event |
 | AGENT-006 | DONE | AGENT-003 | SQLite journal v2 migrates legacy rows fail-closed and persists Linux boot ID plus `/proc` birth ticks; cancellation revalidates identity before TERM and KILL, never signals a recycled PGID, never treats a missing group leader as proof of an empty group, and returns distinct completed, already-exited, retire-stale, and reconciliation-required outcomes with idempotent controller truth |
 | WIN-004 | DONE | AGENT-003 | Win32 creates every workload suspended with atomic kill-on-close Job membership through `PROC_THREAD_ATTRIBUTE_JOB_LIST`, records durable process identity before resume, and uses a restricted inherited-handle list; native forced-crash gates at every creation boundary and after descendant spawn leave no escaped process |
-| WIN-001 | ACTIVE | AGENT-003, AGENT-004, AGENT-005 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove hosted Windows install/start/stop/uninstall, monotonic session epochs, process restart, and journal reconciliation |
-| WIN-002 | ACTIVE | WIN-001, WIN-004 | Add explicit direct-process, `cmd.exe`, and PowerShell execution modes; isolate each attempt in a race-free Job Object and ACL-owned workspace; prove timeout/cancel/service-crash kills every descendant and preserves durable stdout/stderr/result evidence |
-| WIN-003 | ACTIVE | WIN-002, E2E-003 | Maintain one versioned Linux/Windows semantic-parity matrix and run destructive hosted-Windows proof; then close with a signed package on a persistent Windows host through controller/network interruption and machine reboot, requiring matching terminal outcomes, logs, artifacts, cancellation, stale-authority rejection, and zero escaped descendants |
+| WIN-001 | DONE | AGENT-003, AGENT-004, AGENT-005 | Build a native Windows service agent with the existing outbound enrollment/session protocol and SQLite WAL journal; prove hosted Windows install/start/stop/uninstall, monotonic session epochs, process restart, and journal reconciliation |
+| WIN-002 | DONE | WIN-001, WIN-004 | Add explicit direct-process, `cmd.exe`, and PowerShell execution modes; isolate each attempt in a race-free Job Object and ACL-owned workspace; prove timeout/cancel/service-crash kills every descendant and preserves durable stdout/stderr/result evidence |
+| WIN-003 | DONE | WIN-002, E2E-003 | Maintain one versioned Linux/Windows semantic-parity matrix and run destructive hosted-Windows proof; then close with a signed package on a persistent Windows host through controller/network interruption and machine reboot, requiring matching terminal outcomes, logs, artifacts, cancellation, stale-authority rejection, and zero escaped descendants |
 
 ## Wave 3 — Native product surface
 
@@ -989,9 +987,8 @@ next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed
 only by an explicit cleanup flag. `MIG-005` is next on its own branch
 and no longer waits for unrelated state-transfer work; both join only through
-their required differential evidence. `WIN-001`, `WIN-002`, and `WIN-003`
-remain a separate serial persistent-Windows evidence lane that may run in
-parallel with repository implementation.
+their required differential evidence. The serial persistent-Windows evidence
+lane has closed `WIN-001`, `WIN-002`, and `WIN-003`.
 
 `MIG-005` is complete. The strict-YAML
 `mario-jenkins-oracle-228-shared-libraries-v1` ledger binds the frozen
@@ -1110,11 +1107,10 @@ missing but descendants may remain. Windows process creation now assigns the
 kill-on-close Job atomically before any workload code can execute; native
 crash-boundary gates prove no escaped process.
 
-After `W2-C`, the Windows tickets still require the full controller-driven
-hosted campaign. `WIN-003` additionally requires a signed package on a
-persistent Windows host through controller/network interruption and machine
-reboot. Cross-compilation, a test-only service fixture, or hosted CI alone
-cannot waive either boundary.
+After `W2-C`, the Windows tickets still required the full controller-driven
+hosted campaign. `WIN-003` has now supplied the signed persistent-host package,
+controller-interruption, and physical-reboot proof; cross-compilation and the
+hosted test fixture were not used as substitutes.
 
 Wave 3 is complete in three dependency-ordered batches. `W3-A` and `W3-B`
 establish the native authoring, durable execution, security, audit, artifact,
@@ -1208,7 +1204,393 @@ live status, and the browser journey gate proves the full desktop flow,
 strict-YAML validation, audit/explainability views, clean console, and a
 390-pixel viewport without page overflow. W3-C and Wave 3 are closed.
 
-The still-active `WIN-001`, `WIN-002`, and `WIN-003` persistent-host closure is
-tracked independently and remains a release gate for Windows parity; it does
-not block platform-neutral Wave 3 implementation, and Wave 3 cannot mark those
-tickets done by implication.
+`WIN-001` is closed on NucBoxG3 with the exact modified source archive
+`6a182420c0274034d0ab7213f037b64a70d2e53974fedb292bbad0da05c2c9a9`
+and release binary
+`ee0f042e90215095d5873eec709d0560f3595174a9d3d7ef7e6a321f987c4446`.
+The native Windows 11 SCM gate proves install, two starts and stops, durable
+session epochs `1 -> 2`, WAL integrity, forced-crash reconciliation, complete
+Windows tests, deny-warnings clippy, uninstall, and LAN SSH reachability. The
+read-only 12-file evidence directory is
+`C:\McLoving-Windows-Work\evidence-win001-20260803`; its self-excluding
+manifest SHA-256 is
+`5975d499b76fade9d0a60654c247bd8fe1cad93188bbb60f169cf3aef48a0101`.
+`WIN-002` is closed on the same persistent host. Strict YAML and canonical
+Pipeline IR v1.2 bind exactly `direct`, `windows_cmd`, or `powershell`; unknown
+or inferred modes fail closed, and controller lowering preserves the explicit
+mode through the outbound mTLS work protocol. The exact Windows agent binary
+`34d4ddc58cf9d8f8d635fea2d039b6c95baffbcd8049abfe0a2ab6adbfbf7ed9`
+and HeMan controller
+`58f36b9f4ae0d359dd258386f14a52b540bb46a5d1b80433986c9c697e1d4ccc`
+proved all three modes with durable log digests, cancelled a spawned process
+tree, and then proved the descendant PID absent in a separate Windows job.
+The ACL allowed only `SYSTEM` and Administrators full control, the stopped
+journal was WAL/integrity clean with zero active attempts, and the native war
+gate also covered timeout and service-crash cleanup under Windows PowerShell
+5.1. NucBoxG3's read-only 16-file evidence manifest is
+`1f2282bfe22cf91bf9db96be3fb7fea6ef364bbff2e0e3ed0d8923ac63ad4cae`;
+HeMan's read-only controller/database evidence manifest is
+`272b018f5abbc62ed148d2b3e3e7d90cc8574347d8fd930c603128dbdf5e5460`.
+All one-day test private keys were destroyed after sealing.
+
+`WIN-003` is closed on NucBoxG3 with the signed qualification package built
+natively for the protected-runtime physical-campaign predecessor at commit
+`ee4fffac0b6bcc1b5e901bf2e6dfe3e485fd2e65` and tree
+`4c03ae6727af27b2184c3bd639b1af7d7af3f954`. The exact source bundle SHA-256
+is `4bb82b92d0dcca2056f5f61866f7920b69ab91339f19c8b45bedd7887e252518`;
+the signed binary is
+`b7f9899013f88cf4be36c6c801a09f863b012da1cdd0582c17467cb149cf5019`;
+and the package archive is
+`0da1475c9482d7a51ff7198d85ac18692666275f70affa9ddc21ff761b249f08`.
+The short-lived self-signed Authenticode identity is qualification evidence,
+not `REL-001` production provenance. The packager binds its exact CNG key
+`UniqueName`, requires exactly one `My`-store `-DeleteKey` removal, and emits
+PASS only after the bound key file is absent. The external exact-package
+qualification harness observed 13 CNG key files before and after with zero
+delta; its public trust anchors were removed after the gate. Three historical
+qualification containers exposed by this review were deleted by exact name
+under receipt SHA-256
+`c5f89fe770e1b53eaba5f9380ac55f8eb2210d4cad498f37da301e79f51fc079`.
+
+The outbound mTLS gate proved direct, `cmd.exe`, and PowerShell execution;
+durable stream digests; explicit cancellation with a separately verified dead
+descendant; and controller interruption with one lease expiration, two fenced
+offers, one logical success, and no escaped first child. A physical Windows
+reboot advanced the agent journal session epoch `3 -> 14`, returned the SCM
+service automatically, rejected a fresh-journal stale session, left zero
+active attempts, and killed the pre-reboot PID. Because SCM shutdown allowed
+the live agent to publish exit code 1 before power loss, that rebooted attempt
+has one `failed` terminal, zero lease expirations, and one offer; it was not
+silently retried. A separate post-reboot build succeeded. This exact terminal
+distinction is one valid recovery path, not a claim that machine reboot and
+controller loss have identical retry behavior. The gate also accepts only the
+other observed honest race: one expired lease, exactly two offers, the
+`retry-after-reboot` marker, and one terminal success. That alternate path is
+preserved under manifest
+`beec40cf748645cf48af5bf09e3cb7c65afefd4239392e277e19d42e52fa5284`.
+The final reboot request UUID `1620cf3c-9a42-417c-b7f8-a37ae1350895` and build
+ID `ba0d5fde-ebc4-4891-814b-bfddc1473807` were echoed by the host completion
+and checked by the Rust gate, so a stale completion marker cannot satisfy the
+run.
+
+The final NucBoxG3 package/runtime successor has a read-only 24-file manifest
+SHA-256 of
+`5b952cabe3569deeb9e136ecaf0aea7e21df2f2251ac74b7c1139eafed175c18`.
+Its nested package manifest SHA-256 is
+`8e9916715c75d667db2ade01a029e4e523a47667eb1a5e4f24065e6976634172`
+and verifies directly because the seal includes the exact signed binary and
+cargo metadata. HeMan's 37-covered-file outer evidence bundle is sealed at
+`/sn8100/runs/mcloving/windows/pr25-ee4fffa-final`; its self-excluding manifest
+SHA-256 is
+`1cbd6bb5dc24ad51cd749644cf27c2a0324c853854637bcaa816cb40d9d87ac4`.
+It binds the exact source and package, native host and controller receipts,
+PostgreSQL dump and schema, and cleanup receipts. The separate read-only
+verifier supplement is sealed at `pr25-ee4fffa-verifier` with manifest SHA-256
+`2e380825e8d5e6abaed4940bb1481510541c8aa26fa013ed1a10efec35413e6c`;
+Claude timed out while tool-using and returned no verdict or finding. The
+earlier `pr25-f7ae170-final`,
+`pr25-cfd7aa2-final`, and
+`pr25-9859c7a-final` bundles, plus `pr25-a250c86-final` and
+`pr25-38dd5c8-final`, remain immutable predecessor evidence rather than the
+current reviewed closure. The Nuc seal
+removed the Windows service, installed identity, qualification trust anchors,
+gate private key, and test-only recovery-probe shim; manifest-covered cleanup
+receipts record that state. HeMan's remaining mTLS private keys and isolated
+PostgreSQL fixture were removed after evidence capture and independently
+rechecked. W2-B and the persistent Windows evidence lane are closed;
+`REL-001` remains the separate production-signing dependency.
+
+The final installer contract requires both the exact binary digest and signer
+thumbprint. A native wrong-digest attempt failed before service mutation and
+removed its temporary qualification trust; the accepted install reverified
+the copied binary, removed temporary trust before service start, and left no
+machine-wide qualification certificate after success. Replacement of an
+existing service requires a bounded observed stop, protected prior-binary
+backup, verified binary replacement, and in-place SCM reconfiguration. The
+reviewed installer further creates every new staging, package, and TLS
+generation directory with its restricted security descriptor in the atomic
+Win32 `CreateDirectoryW` call. It rejects reparse ancestors, untrusted owners,
+NULL DACLs, untrusted replacement rights, and raw generic-access grants before
+creating any child. Binary, signer, and all three PEM inputs enter a fresh
+protected `ProgramData` generation and retain their pre-staging digests. The
+service binds to a GUID-named immutable TLS generation whose installed digests
+match those captured from the original regular non-reparse files. Before
+declaring SCM startup healthy, the installed service must produce schema v2
+and a strictly positive session epoch while SCM remains running. Separate
+native probes placed `GateRoot` and
+`PackageRoot` below a public replaceable ancestor; both were rejected before
+service or package mutation. The installer rolls back the whole service
+transaction on every post-identity failure and prunes superseded generations
+only after the running service points to the retained identity.
+
+The production mTLS loader also parses the presented leaf certificate and
+rejects it unless its validity window contains the current time. Generated
+valid, expired, and not-yet-valid leaf tests exercise the same loader, and an
+exact Windows-binary preflight rejected an expired certificate before creating
+a journal or workspace. This closes the review seam where transport startup
+could previously advance the journal before a later TLS handshake exposed an
+invalid client identity.
+
+The installer refuses every pre-existing `PackageRoot`: replacing a DACL
+cannot revoke write/delete handles granted before the elevated run. Upgrades
+therefore select a fresh namespace whose protected descriptor is installed in
+the atomic directory-creation call. A native writable-root preflight proved
+the prior ACL and marker remained byte-for-byte unchanged, with no gate or
+service mutation. Failed transactions remove only the fresh package root they
+created and only after identity, binary, and service rollback has succeeded.
+The exact successor treats caller-writable `GateRoot` as input only. Journal,
+workspace, and executable test scripts live under a fresh atomically protected
+`PackageRoot\runtime` generation. The physical campaign granted ordinary
+Users modify access on `GateRoot`, then proved its ACL and marker unchanged,
+proved no runtime children appeared there, and verified the SCM environment
+and healthy journal exclusively under the restricted runtime root.
+
+PR #25's final review repair is commit
+`eded04319089f182f90278285f6125fc51a34171`, tree
+`7c762a15e12e583d8fdced60c76be0e26f5c3d8d`. The production mTLS preflight
+now rejects a presented client certificate when an Extended Key Usage
+extension excludes TLS client authentication or a Key Usage extension excludes
+digital signatures; absent usage extensions retain the RFC-compatible default.
+An exact native server-auth-only leaf was rejected before service, registry,
+package, journal, or workspace mutation, while the existing service PID,
+registration, and environment remained unchanged. Service replacement now
+accepts only an existing protected runtime rooted at `runtime/agent.db` and
+`runtime/workspaces`, observes it read-only, stops the predecessor, copies the
+SQLite database plus WAL and the complete workspace tree into a fresh protected
+package generation, re-observes equal stopped state, and only then installs and
+starts the new binary. The new service must advance the migrated session epoch;
+rollback restores the original registration, environment, binary, and running
+state before removing the failed generation.
+
+The full physical precursor campaign at commit `3df4ad0` passed every explicit
+Windows mode, cancellation/crash recovery, controller interruption, and a real
+reboot in 79.26 seconds, advancing epoch `3 -> 8`, killing the pre-reboot child,
+and rejecting stale authority. The exact final repair package has source-bundle
+SHA-256 `415a124723bc311a18ac18ee7268e4e28147c9d970b7e8870d101f38973be3c4`,
+archive SHA-256
+`e1d8fb6215309c16481f404ff4b753eb9846c14d65929cb4d1af24998339bc3f`,
+and signed-binary SHA-256
+`fb8a8318d2b2afc2064309362cb8ba7e5e5e424b4d938dea8b9931a16ecee901`.
+The live replacement preserved predecessor epoch `193`, advanced to epoch
+`229`, preserved active attempts `0 -> 0`, and copied two independently created
+durable workspace markers byte-for-byte. NucBoxG3's read-only 27-file evidence
+manifest is
+`80a30bac93ec0ee090b3c2d380305fb71e9609175d1ab477e076ffd0f85f9ab2`;
+the nested package manifest is
+`9c96eb438f2408471ade25f7bd127e5d15571dec86d3fbed23fdf34c68a34ffa`.
+The 41-covered-file cross-host bundle is immutable at
+`/sn8100/runs/mcloving/windows/pr25-eded043-final`, manifest SHA-256
+`8ecd9e79097f30e2ba2ccbf7160e940f3607f4e288e9bb6e1fb8161fa621a487`.
+Cleanup receipts prove no campaign service, install root, gate private key,
+temporary signer trust, test database container, or transient package/source
+path remains. A bounded read-only Claude plan-mode review consumed 15 turns and
+timed out at 180 seconds without a verdict or finding; it made no repository
+mutation. Review threads `PRRT_kwDOTmTe486WOZn1` and
+`PRRT_kwDOTmTe486WOZn4` are addressed by this exact evidence.
+
+The exact-head authenticated-startup closure supersedes the precursor
+attribution above. Commit `11a0e18f860cc6ea39a623e601ad5ff1defb11ee`,
+tree `50ffb804978cd457eba92d3d702d7a1c70516fd7`, publishes a protected
+session receipt only after the controller accepts the mTLS
+`OpenSession` RPC. The installer requires that receipt to match the new
+journal epoch, so a locally valid `clientAuth` certificate issued by an
+untrusted CA cannot turn a pre-connect epoch reservation into install success.
+The native negative gate proved local validation succeeded, controller trust
+failed, no authenticated receipt appeared, and service/package rollback was
+complete.
+
+NucBoxG3 then ran the complete exact-package campaign in 126.32 seconds:
+every explicit Windows mode, cancellation and crash recovery, controller
+interruption, physical reboot, stale-authority rejection, and post-reboot LAN
+SSH all passed. Reboot advanced session epoch `3 -> 8` with zero active
+attempts. A first reboot observation honestly failed because Windows reused
+the numeric workload PID for `svchost.exe`; the preserved diagnosis at
+`/sn8100/runs/mcloving/windows/pr25-11a0e18-failed-pid-reuse` has manifest
+SHA-256
+`87d2fcdb0f1101335638a5200e58fcdddf38a0be33bd20720b5e589b65f398bf`.
+The corrected gate binds PID plus `Win32_Process` creation time, and the clean
+full rerun passed. Same-package live replacement preserved the predecessor
+journal and workspace marker, advanced epoch `55 -> 56`, retained active
+attempts `0 -> 0`, and matched authenticated receipt epoch `56`.
+
+The final bundle, archive, and signed binary SHA-256 values are respectively
+`bf8621cf639dde6183e0ee9f219cfaf6d67516049c24d30afc3c97e5b90f598a`,
+`85ab3eb8117727a8f381b460f1545fdac62c88ac24c0f210fcf1be7bf08d0ba6`,
+and `68aa3779c1c31e91c917c546cc4d5ae643d7cabe59690ff2b03bc64be066e609`.
+NucBoxG3's immutable 28-file manifest is
+`750dd34beddfb95349e631e72f4dfdb203d32e91768a0fbd71b16cd8973fadd5`;
+its nested package manifest is
+`da91469b403c9ea97f5ce9af75da0f47f872d4fdddd80d3d9fc08b6da95b2706`.
+HeMan's immutable 21-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-11a0e18-final`, manifest SHA-256
+`0fe814ce842b6bdd978932f065eed5e8f591c60ad0075706f9ab303e49423e5b`.
+Claude's bounded read-only exact-commit review returned `NO_FINDINGS` without
+mutation. Review threads `PRRT_kwDOTmTe486WPgc3` and
+`PRRT_kwDOTmTe486WPgc9` are addressed by the implementation and final-package
+evidence. `WIN-003` therefore remains `DONE` on exact final-package proof.
+
+The final verifier found that a transient post-authentication reconciliation
+failure could advance the journal on reconnect while the original write-once
+receipt remained pinned to the prior epoch. The follow-up repair makes receipt
+publication an authenticated, atomic, monotonic update: equal epochs are
+idempotent, newer authenticated epochs replace the receipt, and rollback to an
+older epoch is rejected.
+
+The repaired package is bound to commit
+`06df6e82dec68e534c559b6fc90ad15cea1488e1`, tree
+`c50ddee29b0a3bda637e2f1abc154fee88c2a6df`: bundle, archive, and signed
+binary SHA-256 values are respectively
+`53c83a6adcf09cff0f7ca95633f59c465657db6b693c289d76574c4bab3069d5`,
+`3ae5c215581519ecdde0c96ceeec8243a4b6d0355cc6ed4e1927b2d655895ae2`,
+and `596c5646c5a9754e15c6f72e00bd688a013c3dede0f229d01c13e88b4d965ecd`.
+The complete physical campaign passed in 118.80 seconds, including every
+explicit mode, recovery, controller interruption, and reboot (`3 -> 10`).
+After the controller returned, the same protected runtime advanced to journal
+epoch `23` and its authenticated receipt also read `23`, directly proving the
+retry repair. Live same-package replacement then preserved workspace state and
+advanced `23 -> 24` with zero active attempts.
+
+NucBoxG3's immutable 29-file manifest is
+`112b96f4144e8d222e0d51195db08a1385d4dd26bf3de6cd83500dd1e8dbc604`;
+its nested package manifest is
+`0dc85c43c1c08ad24d1e20e1191f37fb3999bf1de1d6ebb2ae2683557bf3abb1`.
+HeMan's immutable 46-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-06df6e8-final`, manifest SHA-256
+`4ec9e0706ddd90c85c96894915994ecfd718384a831f83e3ee112f6098bb3ec4`.
+Final bounded Claude review session `d9b4f97a-307f-44da-94f6-9018998ece32`
+returned `NO_FINDINGS`; the repository was not mutated. Cleanup removed all
+campaign services, install roots, source/package copies, TLS private material,
+database container, and controller unit while preserving only sealed evidence.
+
+### Exact final transactional post-start closure
+
+The exact-head review found that superseded-identity cleanup and the final
+runtime ACL assertion still ran after the service-install transaction's
+`catch`. Commit `99dc9be1912df8b0920e7afc0ce5b496aa6f4ec6`, tree
+`716b2e56b21e56e6b17408ea41dcd4ef68ef6f48`, keeps both post-start checks
+inside that transaction so any failure restores or deletes the service,
+binary, identity, runtime, and fresh package namespace through the established
+rollback path. Read-only Claude verifier session
+`ffc82179-b954-40f7-9397-67c2ab1bb4c5` returned `NO_FINDINGS` without
+repository mutation. An exact-installer gate injected a failure after
+authenticated service start and proved the new service and package root were
+both absent afterward before the unmodified installer was allowed to run.
+
+The final source bundle, archive, and signed binary SHA-256 values are
+respectively
+`3ed49c45b444852475b6740a698f01b29bafe358a77137192ecad03329070b08`,
+`88d88c7271bdc78a016c932b80367505646157c6ea73a3e3d64e3e29b99c0641`,
+and `3a45ee380fe81ef6639f23ed3edee2d45f5cfbd63863823e8b9030317321ee4b`.
+The complete physical campaign passed in 138.47 seconds: every explicit mode,
+recovery, controller interruption, stale-authority rejection, and physical
+reboot passed, advancing epoch `4 -> 15` with zero active attempts. The same
+protected runtime then reauthenticated at journal and receipt epoch `30`;
+same-package replacement preserved workspace state and advanced `30 -> 31`
+with zero active attempts.
+
+NucBoxG3's immutable 30-file manifest is
+`8ddb3ee02e9a42cf8adfacaf57fca0f97b0b74940d7cd407e0f44734f1992997`;
+its nested package manifest is
+`287ff9bf701761023fc094104f5b4274ddfb24362d8b67da7d90c331e1917b86`.
+The immutable 46-covered-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-99dc9be-final`, whose root manifest
+SHA-256 is
+`759ecb5016b55bc106874ed3f3bb73f6e9968af47f930242f1317f743d6da5f6`.
+Final cleanup removed the campaign service, both install namespaces, caller
+input gate and private keys, source/package copies, temporary controller,
+database container, and TLS gate while preserving only read-only evidence.
+Review thread `PRRT_kwDOTmTe486WRAEH` is addressed by this exact implementation
+and physical rollback proof. `WIN-003` remains `DONE`.
+
+### Recovery-ready authenticated-health closure
+
+Exact-head review found that the persistent agent published its authenticated
+session receipt after `OpenSession` but before reconciliation and finalization
+recovery completed. A replacement installer could therefore accept a service
+whose transport authenticated successfully while recovery initialization had
+failed. Commit `f12759e2e4ae8ccc1977193864fb1f1ba58bdc4f`, tree
+`e6793ea05a0284ec01c939f482532cb97dacdfe7`, moves receipt publication behind
+both recovery initializers. The regression fixture seeds an epoch-40 receipt,
+injects recovery-initialization failure for epoch 41, and proves the published
+health receipt remains at 40.
+
+The exact Windows source bundle, archive, and signed binary SHA-256 values are
+respectively
+`5efbe13e6807e80cef4538d009ec8e622dff92296d6de87ff62d07bd893a997f`,
+`7814bd3717c51b2352bf45d6f9b1658a3916b33785540451f388021a7f26dff5`,
+and `ae71f7bfd38b235677b1724c98930449f928a4db32e8758d3da452d334ffa2d2`.
+The complete physical campaign passed in 129.68 seconds: every explicit mode,
+recovery, controller interruption, stale-authority rejection, and physical
+reboot passed, advancing epoch `2 -> 9` with zero active attempts. The same
+runtime then completed authenticated recovery at epoch `44`; exact-package
+replacement preserved workspace state and advanced `44 -> 45` with zero
+active attempts.
+
+NucBoxG3's immutable 30-file evidence manifest is
+`ccab9ec5181e958c356dc3b55faca1890cdf84fa759bf1b3a5a588e503d4f51f`;
+its nested package manifest is
+`65398956aedfde0d6be979522cc42262aee7eccf5fd6b924bcf404cde23691b6`.
+The immutable 48-covered-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-f12759e-final`, whose root manifest
+SHA-256 is
+`b7afa4c61fc1aadca566b6cf17a575cae5ac75163fe34b7b15c56c86fb78b295`.
+The first seal attempt correctly produced no accepted manifest because its
+prepared harness still pinned the predecessor package identity; the harness
+was corrected to the exact binary and signer, its unsealed partial directory
+was removed, and the clean seal plus independent verification passed. Final
+cleanup removed all 20 Windows campaign targets, both install generations,
+the service, private gate key, signer trust, temporary controller, database
+container, and HeMan gate roots while preserving only read-only evidence.
+Review thread `PRRT_kwDOTmTe486WR08q` is addressed by this exact
+implementation and native proof. `WIN-003` remains `DONE`.
+
+### Operator-pinned gate identity and predecessor retirement closure
+
+Final exact-head review found two remaining installer seams. A caller who could
+write `GateRoot` could replace the controller configuration and TLS identity
+before the installer derived their hashes, and successful replacement left the
+predecessor package and private identity on disk. Commits
+`8b1ad06a6a1f003113e0d2a049b1a648119bac33`,
+`dac2111c09c7f03734019a43d5d4189cc5a44f52`, and final commit
+`53b0c8abb38f81697769d73f3712c58f07318ae0`, tree
+`f2d6d3d8163f32fc711b8cdf955a7723c088104c`, close those seams. The elevated
+installer now requires operator-pinned SHA-256 values for the configuration,
+controller CA, agent certificate, and agent private key, verifies them before
+protected staging, and rechecks the protected configuration copy. A native
+negative preflight made `GateRoot` caller-writable, supplied a false pin, and
+proved rejection before service, package, or protected-input mutation.
+
+Replacement now captures and validates the predecessor's complete protected
+package, runtime, and identity paths before mutation. Rollback retains them
+until the new service transaction commits. After commit, normalized
+path-boundary checks prove SCM and its environment no longer reference the
+predecessor; cleanup revokes the predecessor private key first and then removes
+the complete predecessor package. The physical replacement deliberately used
+`pr25-53b0c8a` and `pr25-53b0c8a-replacement`, proving a shared filename prefix
+is not mistaken for path ancestry. It preserved the journal and workspace
+marker, advanced authenticated epoch `15 -> 16`, retained zero active attempts,
+and proved both predecessor key and package absent.
+
+The complete 126.51-second physical campaign passed every explicit Windows
+mode, cancellation/crash recovery, controller interruption, stale-authority
+rejection, and physical reboot, advancing epoch `4 -> 9` with zero active
+attempts. The exact bundle, archive, and signed binary SHA-256 values are
+respectively
+`3567bf664a38580f0c573db41010223802c19def5c7d168fc5bd4ebc11ffebd7`,
+`fee0acb00b36db47a9e3c0dac19d37e419e08d4a07a0b4b441e8d1d4bcbfda7f`,
+and `79ba8d94bf33d73ae2669ff74eba1923a91bf7eb92590bb41e93319d0ca05f75`.
+NucBoxG3's immutable 31-file manifest is
+`d4b711b1a30a58c7d3d0205a053690e8e9156d3f325953aae41623f1d6908b31`,
+with nested package manifest
+`03d39131cda7ca935b086e1638872001544d8c6ae448e396a91f2aaa65d64082`.
+The immutable 49-covered-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-53b0c8a-final`, root manifest SHA-256
+`ee8ace88989f25d059e68fb654dba230b104bf9b7d857ad9704cca111957ac5d`.
+Two precursor qualification attempts stopped without accepted manifests when
+the gates exposed a prefix-comparison false positive and a PowerShell literal
+error; their exact transient namespaces were reset before the clean rerun.
+Final cleanup removed all campaign services, install generations, source and
+package copies, TLS private material, temporary controller, database container,
+and HeMan gate roots while preserving only read-only evidence. Review threads
+`PRRT_kwDOTmTe486WSi65` and `PRRT_kwDOTmTe486WSi69` are addressed by this exact
+implementation and proof. `WIN-003` remains `DONE`.

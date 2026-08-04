@@ -90,6 +90,7 @@ enum ProcessMode {
     #[default]
     Direct,
     WindowsCmd,
+    #[serde(rename = "powershell", alias = "power_shell")]
     PowerShell,
 }
 
@@ -2143,6 +2144,7 @@ mod tests {
             agent_private_key_path: PathBuf::from("agent-key.pem"),
             journal_path: PathBuf::from("agent.db"),
             workspace_root: PathBuf::from("workspace"),
+            session_receipt_path: None,
             minimum_session_epoch: 0,
             lease_seconds: 30,
             poll_interval: Duration::from_millis(500),
@@ -2435,6 +2437,34 @@ mod tests {
             validate_assignment(&config(), 1, assignment(wrong_kind)),
             Err(AgentError::UnsupportedSpec)
         ));
+
+        let windows_cmd = br#"{"version":1,"steps":[{"kind":"process","mode":"windows_cmd","program":"build.cmd"}]}"#;
+        assert!(matches!(
+            validate_assignment(&config(), 1, assignment(windows_cmd))
+                .expect("accept explicit cmd mode")
+                .process
+                .mode,
+            ProcessMode::WindowsCmd
+        ));
+        let powershell = br#"{"version":1,"steps":[{"kind":"process","mode":"powershell","program":"build.ps1"}]}"#;
+        assert!(matches!(
+            validate_assignment(&config(), 1, assignment(powershell))
+                .expect("accept explicit PowerShell mode")
+                .process
+                .mode,
+            ProcessMode::PowerShell
+        ));
+        let legacy_powershell = br#"{"version":1,"steps":[{"kind":"process","mode":"power_shell","program":"build.ps1"}]}"#;
+        assert!(matches!(
+            validate_assignment(&config(), 1, assignment(legacy_powershell))
+                .expect("accept the protocol v1.0 PowerShell spelling")
+                .process
+                .mode,
+            ProcessMode::PowerShell
+        ));
+        let unknown_mode =
+            br#"{"version":1,"steps":[{"kind":"process","mode":"shell","program":"build.ps1"}]}"#;
+        assert!(validate_assignment(&config(), 1, assignment(unknown_mode)).is_err());
     }
 
     #[test]

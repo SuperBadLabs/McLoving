@@ -7,7 +7,7 @@
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use thiserror::Error;
 
 pub mod executor;
@@ -143,6 +143,10 @@ pub struct ReconciliationReport {
 
 #[derive(Debug, Error)]
 pub enum JournalError {
+    #[error("journal filesystem error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("journal path must be an existing regular non-symlink file")]
+    InvalidJournalFile,
     #[error("SQLite journal error: {0}")]
     Sqlite(#[from] rusqlite::Error),
     #[error("numeric authority value exceeds SQLite signed integer range")]
@@ -180,7 +184,94 @@ pub struct Journal {
     connection: Connection,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JournalObservation {
+    pub schema_version: i64,
+    pub journal_mode: String,
+    pub integrity: String,
+    pub session_epoch: u64,
+    pub active_attempts: usize,
+}
+
 impl Journal {
+    /// Observes an existing journal without creating, migrating, or writing it.
+    ///
+    /// Service installers use this path to prove that the service itself
+    /// opened the journal and advanced its fenced session authority. It must
+    /// therefore stay independent from [`Journal::open`], whose production
+    /// contract intentionally initializes and migrates durable state.
+    pub fn observe(path: impl AsRef<Path>) -> Result<JournalObservation, JournalError> {
+        let path = path.as_ref();
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(JournalError::InvalidJournalFile);
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(Duration::from_secs(5))?;
+        connection.execute_batch(
+            "
+            PRAGMA query_only = ON;
+            PRAGMA trusted_schema = OFF;
+            ",
+        )?;
+
+        let schema_version: i64 = connection.query_row(
+            "SELECT schema_version FROM journal_metadata WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if !matches!(schema_version, 1 | SCHEMA_VERSION) {
+            return Err(JournalError::SchemaVersionMismatch {
+                expected: SCHEMA_VERSION,
+                found: schema_version,
+            });
+        }
+        let unknown_phase: Option<String> = connection
+            .query_row(
+                "
+                SELECT phase
+                FROM attempts
+                WHERE phase NOT IN (
+                    'accepted', 'running', 'finalizing', 'succeeded',
+                    'failed', 'cancelling', 'aborted', 'reconciliation_required'
+                )
+                LIMIT 1
+                ",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(phase) = unknown_phase {
+            return Err(JournalError::UnknownPhase(phase));
+        }
+        let session_epoch: i64 = connection.query_row(
+            "SELECT last_session_epoch FROM agent_metadata WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let active_attempts: i64 = connection.query_row(
+            "
+            SELECT count(*)
+            FROM attempts
+            WHERE phase NOT IN ('succeeded', 'failed', 'aborted')
+            ",
+            [],
+            |row| row.get(0),
+        )?;
+        let active_attempts = usize::try_from(from_sql_integer(active_attempts)?)
+            .map_err(|_| JournalError::AuthorityOverflow)?;
+        Ok(JournalObservation {
+            schema_version,
+            journal_mode: connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?,
+            integrity: connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?,
+            session_epoch: from_sql_integer(session_epoch)?,
+            active_attempts,
+        })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
@@ -323,6 +414,19 @@ impl Journal {
         )?;
         transaction.commit()?;
         from_sql_integer(next)
+    }
+
+    /// Returns the last durably reserved session epoch without advancing it.
+    ///
+    /// Persistent-host service gates use this read-only value to prove that
+    /// every SCM restart advances fenced authority across journal reopen.
+    pub fn last_session_epoch(&self) -> Result<u64, JournalError> {
+        let epoch: i64 = self.connection.query_row(
+            "SELECT last_session_epoch FROM agent_metadata WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        from_sql_integer(epoch)
     }
 
     pub fn accept(&mut self, acceptance: &Acceptance) -> Result<AcceptanceAck, JournalError> {
@@ -1309,12 +1413,108 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("agent.db");
         let mut journal = Journal::open(&path).unwrap();
+        assert_eq!(journal.last_session_epoch().unwrap(), 0);
         assert_eq!(journal.reserve_session_epoch(0).unwrap(), 1);
         assert_eq!(journal.reserve_session_epoch(7).unwrap(), 7);
+        assert_eq!(journal.last_session_epoch().unwrap(), 7);
         drop(journal);
 
         let mut reopened = Journal::open(&path).unwrap();
+        assert_eq!(reopened.last_session_epoch().unwrap(), 7);
         assert_eq!(reopened.reserve_session_epoch(2).unwrap(), 8);
+    }
+
+    #[test]
+    fn read_only_observation_refuses_absent_and_preserves_an_existing_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.db");
+        assert!(matches!(
+            Journal::observe(&path),
+            Err(JournalError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        assert!(!path.exists());
+
+        let mut journal = Journal::open(&path).unwrap();
+        assert_eq!(journal.reserve_session_epoch(0).unwrap(), 1);
+        journal.accept(&acceptance()).unwrap();
+        drop(journal);
+        let before = std::fs::read(&path).unwrap();
+        let observation = Journal::observe(&path).unwrap();
+        assert_eq!(observation.schema_version, SCHEMA_VERSION);
+        assert_eq!(observation.journal_mode, "wal");
+        assert_eq!(observation.integrity, "ok");
+        assert_eq!(observation.session_epoch, 1);
+        assert_eq!(observation.active_attempts, 1);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn read_only_observation_reports_an_old_schema_without_migrating_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE journal_metadata (
+                    singleton INTEGER PRIMARY KEY,
+                    schema_version INTEGER NOT NULL
+                );
+                INSERT INTO journal_metadata(singleton, schema_version) VALUES (1, 1);
+                CREATE TABLE agent_metadata (
+                    singleton INTEGER PRIMARY KEY,
+                    last_session_epoch INTEGER NOT NULL
+                );
+                INSERT INTO agent_metadata(singleton, last_session_epoch) VALUES (1, 7);
+                CREATE TABLE attempts (
+                    organization_id TEXT NOT NULL,
+                    attempt_id TEXT NOT NULL,
+                    fence_token INTEGER NOT NULL,
+                    session_epoch INTEGER NOT NULL,
+                    payload_digest BLOB NOT NULL,
+                    phase TEXT NOT NULL,
+                    workspace TEXT NOT NULL,
+                    process_group_id INTEGER,
+                    accepted_at_unix_ms INTEGER NOT NULL,
+                    updated_at_unix_ms INTEGER NOT NULL
+                );
+                ",
+            )
+            .unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+
+        let observation = Journal::observe(&path).unwrap();
+        assert_eq!(observation.schema_version, 1);
+        assert_eq!(observation.session_epoch, 7);
+        assert_eq!(observation.active_attempts, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn read_only_observation_rejects_an_unsupported_schema() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE journal_metadata (
+                    singleton INTEGER PRIMARY KEY,
+                    schema_version INTEGER NOT NULL
+                );
+                INSERT INTO journal_metadata(singleton, schema_version) VALUES (1, 999);
+                ",
+            )
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            Journal::observe(&path),
+            Err(JournalError::SchemaVersionMismatch {
+                expected: SCHEMA_VERSION,
+                found: 999
+            })
+        ));
     }
 
     #[test]

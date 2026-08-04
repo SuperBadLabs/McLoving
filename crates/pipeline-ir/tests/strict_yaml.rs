@@ -1,4 +1,7 @@
-use mcloving_pipeline_ir::{ErrorCode, ParseLimits, YamlValue, compile_strict_yaml, parse_strict};
+use mcloving_pipeline_ir::{
+    ErrorCode, IR_V1_2, ParseLimits, ProcessMode, Step, YamlValue, compile_strict_yaml,
+    parse_strict,
+};
 
 const VALID_PIPELINE: &str = r#"
 version: 1
@@ -73,6 +76,60 @@ fn compiles_the_v1_process_contract() {
     assert_eq!(pipeline.stages.len(), 1);
     assert_eq!(pipeline.stages[0].steps.len(), 1);
     assert_eq!(pipeline.provenance.source_id, "fixture://valid");
+}
+
+#[test]
+fn compiles_explicit_process_modes_without_shell_inference() {
+    let source = r#"
+version: 1
+name: windows-modes
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          mode: direct
+          program: tool.exe
+      - process:
+          mode: windows_cmd
+          program: command.cmd
+      - process:
+          mode: powershell
+          program: command.ps1
+"#;
+    let pipeline = compile_strict_yaml("fixture://windows-modes", source, ParseLimits::default())
+        .expect("compile explicit Windows modes");
+    assert_eq!(pipeline.schema, IR_V1_2);
+    let modes = pipeline.stages[0]
+        .steps
+        .iter()
+        .map(|step| match step {
+            Step::Process(process) => process.mode,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        modes,
+        vec![
+            ProcessMode::Direct,
+            ProcessMode::WindowsCmd,
+            ProcessMode::PowerShell
+        ]
+    );
+}
+
+#[test]
+fn rejects_unknown_process_mode_fail_closed() {
+    let source = VALID_PIPELINE.replace(
+        "          program: cargo",
+        "          mode: shell\n          program: cargo",
+    );
+    let error = compile_strict_yaml("fixture://unknown-mode", &source, ParseLimits::default())
+        .expect_err("unknown process mode must fail closed");
+    assert_eq!(
+        error.path.as_deref(),
+        Some("$.stages[0].steps[0].process.mode")
+    );
+    assert!(error.message.contains("direct, windows_cmd, or powershell"));
 }
 
 #[test]

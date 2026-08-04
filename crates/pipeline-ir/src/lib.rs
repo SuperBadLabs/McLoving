@@ -18,9 +18,9 @@ pub use expression::{
 };
 pub use model::{
     CompileError, CompileErrorCategory, CompilerIdentity, ExpressionBinding, IrValidationError,
-    ParameterDefinition, ParameterType, PipelineIr, ProcessStep, Provenance, SchemaCompatibility,
-    SchemaVersion, Stage, Step, compile_strict_yaml, compile_strict_yaml_with_parameters,
-    instantiate_pipeline, validate_pipeline,
+    ParameterDefinition, ParameterType, PipelineIr, ProcessMode, ProcessStep, Provenance,
+    SchemaCompatibility, SchemaVersion, Stage, Step, compile_strict_yaml,
+    compile_strict_yaml_with_parameters, instantiate_pipeline, validate_pipeline,
 };
 pub use strict_yaml::{
     AdmissionError, ErrorCode, MappingEntry, ParseLimits, SourceLocation, SourceSpan, SpannedValue,
@@ -32,3 +32,6 @@ pub const IR_V1: SchemaVersion = SchemaVersion { major: 1, minor: 0 };
 
 /// Typed parameters and bounded expressions.
 pub const IR_V1_1: SchemaVersion = SchemaVersion { major: 1, minor: 1 };
+
+/// Explicit process execution modes.
+pub const IR_V1_2: SchemaVersion = SchemaVersion { major: 1, minor: 2 };

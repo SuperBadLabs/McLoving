@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use mcloving_agent::{AgentConfig, journal_health, probe_once, run_until_stopped};
+use mcloving_agent::{
+    AgentConfig, journal_health, journal_session_epoch, observe_journal, probe_once,
+    run_until_stopped, validate_outbound_configuration,
+};
 #[cfg(windows)]
 use mcloving_agent::{
     run_creation_boundary_service_smoke, run_execution_service_smoke, run_service_smoke,
@@ -44,7 +47,27 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         "journal-check" => {
             let path = required_path(&arguments, 1, "JOURNAL")?;
             let (mode, integrity, active) = journal_health(&path)?;
-            println!("journal_mode={mode} integrity={integrity} active_attempts={active}");
+            let session_epoch = journal_session_epoch(&path)?;
+            println!(
+                "journal_mode={mode} integrity={integrity} session_epoch={session_epoch} active_attempts={active}"
+            );
+        }
+        "journal-observe" => {
+            let path = required_path(&arguments, 1, "JOURNAL")?;
+            let observation = observe_journal(&path)?;
+            println!(
+                "schema_version={} journal_mode={} integrity={} session_epoch={} active_attempts={}",
+                observation.schema_version,
+                observation.journal_mode,
+                observation.integrity,
+                observation.session_epoch,
+                observation.active_attempts
+            );
+        }
+        "validate-config" => {
+            let config = AgentConfig::from_environment()?;
+            runtime()?.block_on(validate_outbound_configuration(&config))?;
+            println!("configuration-valid");
         }
         "service" => run_windows_service(ServiceMode::Production)?,
         "service-smoke" => {
@@ -82,7 +105,7 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: mcloving-agent [foreground|probe|journal-check PATH|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT MARKER_ROOT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
+                "usage: mcloving-agent [foreground|probe|journal-check PATH|journal-observe PATH|validate-config|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT MARKER_ROOT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
                     .into(),
             );
         }

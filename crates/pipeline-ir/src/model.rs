@@ -11,7 +11,7 @@ use crate::expression::{
 use crate::strict_yaml::{
     AdmissionError, MappingEntry, ParseLimits, SourceSpan, SpannedValue, YamlValue, parse_strict,
 };
-use crate::{IR_V1, IR_V1_1};
+use crate::{IR_V1, IR_V1_1, IR_V1_2};
 
 pub(crate) const MAX_IR_STRING_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_STAGES: usize = 128;
@@ -136,11 +136,32 @@ pub enum Step {
 /// A native direct-process step.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessStep {
+    pub mode: ProcessMode,
     pub program: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub timeout_seconds: Option<u64>,
     pub source_span: SourceSpan,
+}
+
+/// Explicit process creation contract. Shell selection is never inferred from
+/// a filename, extension, or command text.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProcessMode {
+    #[default]
+    Direct,
+    WindowsCmd,
+    PowerShell,
+}
+
+impl ProcessMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::WindowsCmd => "windows_cmd",
+            Self::PowerShell => "powershell",
+        }
+    }
 }
 
 impl PipelineIr {
@@ -225,7 +246,15 @@ pub fn compile_strict_yaml_with_parameters(
     let mut expressions = Vec::new();
     let stages = compile_stages(stages_node, &evaluation_context, &mut expressions)?;
     expressions.sort_by(|left, right| left.path.cmp(&right.path));
-    let schema = if parameters.is_empty() && expressions.is_empty() {
+    let has_explicit_shell_mode = stages.iter().any(|stage| {
+        stage.steps.iter().any(|step| {
+            let Step::Process(process) = step;
+            process.mode != ProcessMode::Direct
+        })
+    });
+    let schema = if has_explicit_shell_mode {
+        IR_V1_2
+    } else if parameters.is_empty() && expressions.is_empty() {
         IR_V1
     } else {
         IR_V1_1
@@ -543,9 +572,21 @@ fn compile_process(
     let env = process
         .optional_resolved_string_mapping("env", parameters, expressions)?
         .unwrap_or_default();
+    let mode = match process.optional_string("mode")?.as_deref() {
+        None | Some("direct") => ProcessMode::Direct,
+        Some("windows_cmd") => ProcessMode::WindowsCmd,
+        Some("powershell") => ProcessMode::PowerShell,
+        Some(_) => {
+            return Err(CompileError::schema(
+                format!("{path}.mode"),
+                "expected exactly direct, windows_cmd, or powershell",
+            ));
+        }
+    };
     let timeout_seconds = process.optional_u64("timeout_seconds")?;
     process.finish()?;
     Ok(ProcessStep {
+        mode,
         program,
         args,
         env,
@@ -601,10 +642,10 @@ fn compile_resolved_string(
 
 /// Validate a Pipeline IR object without consulting its YAML source.
 pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError> {
-    if !matches!(pipeline.schema, IR_V1 | IR_V1_1) {
+    if !matches!(pipeline.schema, IR_V1 | IR_V1_1 | IR_V1_2) {
         return Err(IrValidationError::new(
             "$.schema",
-            "only Pipeline IR v1.0 and v1.1 are accepted",
+            "only Pipeline IR v1.0, v1.1, and v1.2 are accepted",
         ));
     }
     if pipeline.schema == IR_V1
@@ -661,6 +702,12 @@ pub fn validate_pipeline(pipeline: &PipelineIr) -> Result<(), IrValidationError>
         }
         for (step_index, step) in stage.steps.iter().enumerate() {
             let Step::Process(process) = step;
+            if pipeline.schema.minor < IR_V1_2.minor && process.mode != ProcessMode::Direct {
+                return Err(IrValidationError::new(
+                    format!("{path}.steps[{step_index}].process.mode"),
+                    "non-direct process modes require Pipeline IR v1.2",
+                ));
+            }
             if process.program.trim().is_empty() {
                 return Err(IrValidationError::new(
                     format!("{path}.steps[{step_index}].process.program"),
@@ -1007,6 +1054,21 @@ impl MappingView {
             )
             .with_span(span)
         })
+    }
+
+    fn optional_string(&mut self, key: &str) -> Result<Option<String>, CompileError> {
+        let Some(node) = self.take(key) else {
+            return Ok(None);
+        };
+        let span = node.span;
+        let YamlValue::String(value) = node.value else {
+            return Err(CompileError::schema(
+                format!("{}.{}", self.path, key),
+                "expected a string",
+            )
+            .with_span(span));
+        };
+        Ok(Some(value))
     }
 
     fn optional_bool(&mut self, key: &str) -> Result<Option<bool>, CompileError> {

@@ -8,7 +8,7 @@ use crate::expression::{
 };
 use crate::model::{
     MAX_EXPRESSION_BINDINGS, MAX_IR_STRING_BYTES, MAX_PARAMETERS, MAX_STAGES, MAX_STEPS,
-    ParameterType, PipelineIr, SchemaVersion, Step,
+    ParameterType, PipelineIr, ProcessMode, SchemaVersion, Step,
 };
 
 const MAGIC: &[u8] = b"MCLOVING-IR\0";
@@ -53,6 +53,9 @@ pub(crate) fn encode_pipeline(pipeline: &PipelineIr) -> Vec<u8> {
             match step {
                 Step::Process(process) => {
                     writer.u8(1);
+                    if pipeline.schema.minor >= 2 {
+                        writer.process_mode(process.mode);
+                    }
                     writer.string(&process.program);
                     writer.u32(process.args.len());
                     for argument in &process.args {
@@ -111,6 +114,14 @@ impl Writer {
             ParameterType::Bool => 1,
             ParameterType::Integer => 2,
             ParameterType::String => 3,
+        });
+    }
+
+    fn process_mode(&mut self, mode: ProcessMode) {
+        self.u8(match mode {
+            ProcessMode::Direct => 0,
+            ProcessMode::WindowsCmd => 1,
+            ProcessMode::PowerShell => 2,
         });
     }
 
@@ -210,7 +221,7 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
         major: reader.u16()?,
         minor: reader.u16()?,
     };
-    if schema.major != 1 || schema.minor > 1 {
+    if schema.major != 1 || schema.minor > 2 {
         return Err(CanonicalError::new(
             reader.offset.saturating_sub(4),
             "unsupported Pipeline IR schema",
@@ -355,6 +366,17 @@ pub fn validate_canonical_bytes(bytes: &[u8]) -> Result<CanonicalSummary, Canoni
                 ));
             }
             let base = format!("$.stages[{stage_index}].steps[{step_index}].process");
+            if schema.minor >= 2 {
+                match reader.u8()? {
+                    0..=2 => {}
+                    _ => {
+                        return Err(CanonicalError::new(
+                            reader.offset.saturating_sub(1),
+                            "invalid process mode",
+                        ));
+                    }
+                }
+            }
             materialized_fields.insert(format!("{base}.program"), reader.string()?);
             let arguments = reader.count(MAX_STEPS, "argument")?;
             for argument_index in 0..arguments {

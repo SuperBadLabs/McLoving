@@ -122,7 +122,16 @@ function Write-CrashDiagnostics {
 }
 
 $AgentBinary = (Resolve-Path $AgentBinary).Path
-$root = Join-Path $env:RUNNER_TEMP "mcloving-windows-war"
+$temporaryRoot = if (-not [string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) {
+  $env:RUNNER_TEMP
+}
+elseif (-not [string]::IsNullOrWhiteSpace($env:TEMP)) {
+  $env:TEMP
+}
+else {
+  throw "Neither RUNNER_TEMP nor TEMP names a persistent-host temporary directory"
+}
+$root = Join-Path $temporaryRoot "mcloving-windows-war"
 $journal = Join-Path $root "agent.db"
 $workspace = Join-Path $root "workspaces"
 $boundaryScript = Join-Path $root "must-not-run.ps1"
@@ -149,21 +158,42 @@ try {
   New-Service -Name $lifecycleService -BinaryPathName $lifecyclePath `
     -StartupType Manual | Out-Null
   Start-Service $lifecycleService
-  Wait-Until { Test-Path $journal } "first durable journal creation"
+  Wait-Until {
+    if (-not (Test-Path $journal)) { return $false }
+    $observed = & $AgentBinary journal-check $journal 2>$null
+    $LASTEXITCODE -eq 0 -and $observed -match "session_epoch=1"
+  } "first durable service session epoch"
   Stop-Service $lifecycleService
+  $firstHealth = & $AgentBinary journal-check $journal
+  if ($LASTEXITCODE -ne 0 -or $firstHealth -notmatch "session_epoch=1") {
+    throw "first service session did not reserve epoch 1: $firstHealth"
+  }
   Start-Service $lifecycleService
-  Start-Sleep -Milliseconds 250
+  Wait-Until {
+    $observed = & $AgentBinary journal-check $journal 2>$null
+    $LASTEXITCODE -eq 0 -and $observed -match "session_epoch=2"
+  } "second durable service session epoch"
   Stop-Service $lifecycleService
   $health = & $AgentBinary journal-check $journal
-  if ($LASTEXITCODE -ne 0 -or $health -notmatch "journal_mode=wal integrity=ok") {
+  if ($LASTEXITCODE -ne 0 -or
+      $health -notmatch "journal_mode=wal integrity=ok" -or
+      $health -notmatch "session_epoch=2" -or
+      $health -notmatch "active_attempts=0") {
     throw "journal health failed after service restart: $health"
   }
   Remove-TestService $lifecycleService
+  if ($null -ne (Get-Service -Name $lifecycleService -ErrorAction SilentlyContinue)) {
+    throw "service uninstall left $lifecycleService registered"
+  }
+  Write-Output (
+    "windows-agent-lifecycle-ok installed=1 starts=2 stops=2 uninstalled=1 " +
+    "first_session_epoch=1 second_session_epoch=2 journal_mode=wal integrity=ok"
+  )
 
   @'
 "unexpected-resume" | Set-Content -Encoding ascii ran.txt
 Start-Sleep -Seconds 300
-'@ | Set-Content -Encoding utf8NoBOM $boundaryScript
+'@ | Set-Content -Encoding utf8 $boundaryScript
 
   $boundaries = @(
     @{

@@ -4,13 +4,13 @@ use std::str::FromStr;
 
 use sha2::{Digest, Sha256};
 
-use crate::IR_V1;
 use crate::expression::ParameterValue;
 use crate::model::{
-    CompilerIdentity, MAX_IR_STRING_BYTES, MAX_PARAMETERS, ParameterType, PipelineIr, Provenance,
-    Stage, instantiate_pipeline, validate_pipeline,
+    CompilerIdentity, MAX_IR_STRING_BYTES, MAX_PARAMETERS, ParameterType, PipelineIr, ProcessMode,
+    Provenance, Stage, Step, instantiate_pipeline, validate_pipeline,
 };
 use crate::strict_yaml::SourceSpan;
+use crate::{IR_V1, IR_V1_2};
 
 const COMPONENT_MAGIC: &[u8] = b"MCLOVING-COMPONENT\0";
 const EXPANSION_MAGIC: &[u8] = b"MCLOVING-EXPANSION\0";
@@ -539,8 +539,18 @@ pub fn expand_component(
             ),
         )
     })?;
+    let schema = if state.stages.iter().any(|stage| {
+        stage.steps.iter().any(|step| {
+            let Step::Process(process) = step;
+            process.mode != ProcessMode::Direct
+        })
+    }) {
+        IR_V1_2
+    } else {
+        IR_V1
+    };
     let pipeline = PipelineIr {
-        schema: IR_V1,
+        schema,
         name: format!("{EXPANDED_NAME_PREFIX}{}", root_component.name),
         parameters: BTreeMap::new(),
         parameter_values: BTreeMap::new(),

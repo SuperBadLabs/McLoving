@@ -30,7 +30,7 @@ use mcloving_object_store::{
     FilesystemObjectStore, ObjectGap, ObjectRef, ObjectStoreError, PendingObject,
 };
 use mcloving_pipeline_ir::{
-    ParameterType, ParameterValue, ParseLimits, PipelineIr, Step,
+    ParameterType, ParameterValue, ParseLimits, PipelineIr, ProcessMode, Step,
     compile_strict_yaml_with_parameters,
 };
 use serde::{Deserialize, Serialize};
@@ -1785,6 +1785,7 @@ async fn submit(
         })?;
     let (source, parameters) = submission_payload(&headers, &source)?;
     let pipeline = compile_source_with_parameters(&source, parameters)?;
+    validate_execution_platform(&pipeline, &required_platform)?;
     let digest = pipeline.semantic_digest().map_err(|error| {
         ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1895,6 +1896,7 @@ fn execution_spec(steps: &[Step]) -> Value {
         .map(|step| match step {
             Step::Process(process) => json!({
                 "kind": "process",
+                "mode": execution_mode_wire_name(process.mode),
                 "program": process.program,
                 "args": process.args,
                 "env": process.env,
@@ -1903,6 +1905,42 @@ fn execution_spec(steps: &[Step]) -> Value {
         })
         .collect::<Vec<_>>();
     json!({"version": 1, "steps": steps})
+}
+
+fn execution_mode_wire_name(mode: ProcessMode) -> &'static str {
+    match mode {
+        // Protocol 1.0 agents derived this spelling from the Rust variant name.
+        // Keep emitting it until a negotiated feature can version the wire value.
+        ProcessMode::PowerShell => "power_shell",
+        _ => mode.as_str(),
+    }
+}
+
+fn validate_execution_platform(pipeline: &PipelineIr, platform: &str) -> Result<(), ApiError> {
+    if platform == "windows" {
+        return Ok(());
+    }
+    let windows_mode = pipeline
+        .stages
+        .iter()
+        .flat_map(|stage| &stage.steps)
+        .find_map(|step| match step {
+            Step::Process(process)
+                if matches!(
+                    process.mode,
+                    ProcessMode::WindowsCmd | ProcessMode::PowerShell
+                ) =>
+            {
+                Some(process.mode.as_str())
+            }
+            _ => None,
+        });
+    match windows_mode {
+        Some(mode) => Err(pipeline_rejected(format!(
+            "execution mode {mode} requires platform windows"
+        ))),
+        None => Ok(()),
+    }
 }
 
 fn compile_source_with_parameters(
@@ -4322,5 +4360,82 @@ mod tests {
         let error = submission_platform(&headers).expect_err("reject unsupported platform");
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.code, "invalid_platform");
+    }
+
+    #[test]
+    fn execution_spec_preserves_explicit_process_mode() {
+        let pipeline = compile_source_with_parameters(
+            r#"
+version: 1
+name: windows-mode
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          mode: powershell
+          program: build.ps1
+"#,
+            BTreeMap::new(),
+        )
+        .expect("compile explicit Windows process mode");
+        let spec = execution_spec(&pipeline.stages[0].steps);
+        assert_eq!(spec["steps"][0]["mode"], "power_shell");
+        assert_eq!(spec["steps"][0]["program"], "build.ps1");
+    }
+
+    #[test]
+    fn windows_only_execution_modes_require_windows_admission() {
+        for mode in ["windows_cmd", "powershell"] {
+            let pipeline = compile_source_with_parameters(
+                &format!(
+                    r#"
+version: 1
+name: windows-mode
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          mode: {mode}
+          program: build.cmd
+"#
+                ),
+                BTreeMap::new(),
+            )
+            .expect("compile explicit Windows mode");
+
+            let error = validate_execution_platform(&pipeline, "linux")
+                .expect_err("Linux admission must reject Windows-only execution modes");
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error.code, "pipeline_rejected");
+            assert_eq!(
+                error.message,
+                format!("execution mode {mode} requires platform windows")
+            );
+            validate_execution_platform(&pipeline, "windows")
+                .expect("Windows admission accepts Windows execution modes");
+        }
+    }
+
+    #[test]
+    fn direct_execution_mode_is_cross_platform() {
+        let pipeline = compile_source_with_parameters(
+            r#"
+version: 1
+name: direct-mode
+stages:
+  - id: execute
+    name: Execute
+    steps:
+      - process:
+          mode: direct
+          program: tool
+"#,
+            BTreeMap::new(),
+        )
+        .expect("compile direct process mode");
+        validate_execution_platform(&pipeline, "linux").expect("Linux accepts direct mode");
+        validate_execution_platform(&pipeline, "windows").expect("Windows accepts direct mode");
     }
 }

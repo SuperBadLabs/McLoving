@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::future::Future;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -48,6 +49,7 @@ pub struct AgentConfig {
     pub agent_private_key_path: PathBuf,
     pub journal_path: PathBuf,
     pub workspace_root: PathBuf,
+    pub session_receipt_path: Option<PathBuf>,
     pub minimum_session_epoch: u64,
     pub lease_seconds: u32,
     pub poll_interval: Duration,
@@ -186,6 +188,10 @@ impl AgentConfig {
             agent_private_key_path: PathBuf::from(required("MCLOVING_AGENT_PRIVATE_KEY_PATH")?),
             journal_path: PathBuf::from(required("MCLOVING_AGENT_JOURNAL_PATH")?),
             workspace_root: PathBuf::from(required("MCLOVING_AGENT_WORKSPACE_ROOT")?),
+            session_receipt_path: values
+                .get("MCLOVING_AGENT_SESSION_RECEIPT_PATH")
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
             minimum_session_epoch,
             lease_seconds,
             poll_interval: Duration::from_millis(poll_milliseconds),
@@ -279,8 +285,15 @@ fn instance_lock_path(journal_path: &Path) -> PathBuf {
 
 async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<(), AgentError> {
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
-    send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
-    worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await?;
+    publish_recovery_ready_session_receipt(
+        config.session_receipt_path.as_deref(),
+        receipt.session_epoch,
+        async {
+            send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
+            worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await
+        },
+    )
+    .await?;
     let mut reconciliation_tick = interval(RECONCILIATION_INTERVAL);
     reconciliation_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     reconciliation_tick.tick().await;
@@ -309,6 +322,18 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
             }
         }
     }
+}
+
+async fn publish_recovery_ready_session_receipt<F>(
+    path: Option<&Path>,
+    session_epoch: u64,
+    recovery_initialization: F,
+) -> Result<(), AgentError>
+where
+    F: Future<Output = Result<(), AgentError>>,
+{
+    recovery_initialization.await?;
+    publish_authenticated_session_receipt(path, session_epoch)
 }
 
 async fn open_session(
@@ -377,6 +402,57 @@ async fn bounded_open_session_rpc<T>(
         .await
         .map_err(|_| AgentError::OpenSessionTimeout)?
         .map_err(AgentError::from)
+}
+
+fn publish_authenticated_session_receipt(
+    path: Option<&Path>,
+    session_epoch: u64,
+) -> Result<(), AgentError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if path.exists() {
+        let receipt = std::fs::read_to_string(path)?;
+        let existing_epoch = receipt
+            .strip_prefix("session_epoch=")
+            .and_then(|value| value.strip_suffix('\n'))
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "authenticated session receipt is malformed",
+                )
+            })?;
+        match existing_epoch.cmp(&session_epoch) {
+            std::cmp::Ordering::Equal => return Ok(()),
+            std::cmp::Ordering::Greater => {
+                return Err(AgentError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "authenticated session receipt epoch {existing_epoch} is newer than session epoch {session_epoch}"
+                    ),
+                )));
+            }
+            std::cmp::Ordering::Less => {}
+        }
+    }
+    let mut pending = path.as_os_str().to_os_string();
+    pending.push(format!(".pending.{}.{}", std::process::id(), session_epoch));
+    let pending = PathBuf::from(pending);
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending)?;
+        writeln!(file, "session_epoch={session_epoch}")?;
+        file.sync_all()?;
+        std::fs::rename(&pending, path)?;
+        Ok::<(), std::io::Error>(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+    result.map_err(AgentError::Io)
 }
 
 fn require_work_delivery_feature(features: &[String]) -> Result<(), AgentError> {
@@ -860,6 +936,13 @@ async fn outbound_config(config: &AgentConfig) -> Result<OutboundMtlsConfig, Age
     })
 }
 
+/// Validates every local production identity input without opening a network
+/// connection or creating journal/workspace state.
+pub async fn validate_outbound_configuration(config: &AgentConfig) -> Result<(), AgentError> {
+    outbound_config(config).await?.endpoint()?;
+    Ok(())
+}
+
 #[cfg(windows)]
 const fn platform_feature() -> &'static str {
     "windows-job-object-v1"
@@ -1033,6 +1116,17 @@ pub fn journal_health(path: &Path) -> Result<(String, String, usize), AgentError
     ))
 }
 
+pub fn journal_session_epoch(path: &Path) -> Result<u64, AgentError> {
+    let journal = Journal::open(path)?;
+    Ok(journal.last_session_epoch()?)
+}
+
+pub fn observe_journal(
+    path: &Path,
+) -> Result<mcloving_agent_runtime::JournalObservation, AgentError> {
+    Ok(Journal::observe(path)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1052,6 +1146,7 @@ mod tests {
             ("MCLOVING_AGENT_PRIVATE_KEY_PATH", "agent-key.pem"),
             ("MCLOVING_AGENT_JOURNAL_PATH", "agent.db"),
             ("MCLOVING_AGENT_WORKSPACE_ROOT", "workspace"),
+            ("MCLOVING_AGENT_SESSION_RECEIPT_PATH", "session.receipt"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
@@ -1071,6 +1166,10 @@ mod tests {
         let config = AgentConfig::from_values(&values()).unwrap();
         assert_eq!(config.agent_id, "windows-1");
         assert_eq!(config.minimum_session_epoch, 0);
+        assert_eq!(
+            config.session_receipt_path,
+            Some(PathBuf::from("session.receipt"))
+        );
 
         let mut missing = values();
         missing.remove("MCLOVING_AGENT_PRIVATE_KEY_PATH");
@@ -1126,6 +1225,53 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(AgentError::OpenSessionTimeout)));
+    }
+
+    #[test]
+    fn authenticated_session_receipt_is_atomic_and_monotonic() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.receipt");
+        publish_authenticated_session_receipt(Some(&path), 41).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "session_epoch=41\n"
+        );
+
+        publish_authenticated_session_receipt(Some(&path), 42).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "session_epoch=42\n"
+        );
+        assert!(publish_authenticated_session_receipt(Some(&path), 41).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "session_epoch=42\n"
+        );
+        assert!(std::fs::read_dir(directory.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("pending")
+        }));
+    }
+
+    #[tokio::test]
+    async fn failed_recovery_initialization_does_not_publish_health() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.receipt");
+        publish_authenticated_session_receipt(Some(&path), 40).unwrap();
+
+        let result = publish_recovery_ready_session_receipt(Some(&path), 41, async {
+            Err(AgentError::UnsupportedProtocol)
+        })
+        .await;
+
+        assert!(matches!(result, Err(AgentError::UnsupportedProtocol)));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "session_epoch=40\n"
+        );
     }
 
     #[test]
