@@ -42,33 +42,37 @@ lifecycle boundaries, not a hostile-tenant sandbox.
 The persistent-host reboot row is intentionally separate because a hosted CI
 VM cannot supply honest across-reboot evidence. NucBoxG3 ran the exact signed
 qualification package over pinned LAN SSH. A physical reboot advanced the
-journal epoch `3 -> 10`, returned the automatic SCM service, rejected stale
+journal epoch `3 -> 11`, returned the automatic SCM service, rejected stale
 session authority, reported zero active attempts, and left no pre-reboot child.
 The accepted attempt finalized `failed` with exit code 1 during SCM shutdown,
 before the reboot removed connectivity, so it correctly had one offer and no
-lease-expiration retry. Controller loss is a different transition: it produced
-one lease expiration, a higher-fence second offer, eventual success, and no
-escaped first child. A new post-reboot build also succeeded.
+lease-expiration retry. The Rust gate additionally accepts only the alternate
+honest reboot race observed under stress: one lease expiration, exactly two
+offers, a `retry-after-reboot` log marker, and one terminal success. Controller
+loss is a different transition: it produced one lease expiration, a higher-
+fence second offer, eventual success, and no escaped first child. A new post-
+reboot build also succeeded.
 
 The evidence binds final reviewed implementation commit
-`a250c864baa4fe0ad13b22d905568164674182b6`, tree
-`ada4377b5fe30c2ee395a851537766b6fe313ccb`, and signed binary SHA-256
-`03ec3a0fa2c76985aac6ad4d361501d3e0e595f97eeeca1e0b9ceebe9c618ea4`.
+`38dd5c81a3098a53f83c1bcb758f76499409f0de`, tree
+`ea71b1e71c0269bd670f9a9ca0940d2897e27aab`, and signed binary SHA-256
+`5da01172be9332b515c7a4a0952b6a5a611241e393c7c1424444e0e5224399ed`.
 The signer was a short-lived self-signed qualification identity, not
 production `REL-001` provenance. Its exact CNG key identity is bound before
 cleanup, exactly one `My`-store private-key deletion is required, and PASS is
 withheld unless that bound key file is absent. The external exact-package
 qualification harness observed 13 CNG key files before and after with zero
 delta. NucBoxG3's complete 23-file manifest SHA-256 is
-`e5f058248e3d861314bddb7527314df1ba793744952ca7c0259c6f4f09afaf60`;
+`478a6d3d19a7acfa8db6ce05f11cfece825a968cc6e21fe3713ac86f3ebc8860`;
 the nested package manifest SHA-256 is
-`ef4d056e82626cfe1d76660e33fc4aecb22b29a756770a8a4a0f81cb9b2335c8`;
-and the 38-file HeMan outer evidence manifest is
-`6e26f2e1dad9f3261c3641dca03c5e9f3d1d31c5704b287ec2bc699bd0735195`.
+`9f9428873fd4db02df9f8523deb088e4d604f76e5715acb74b8ea5806f41f9da`;
+and the 39-file HeMan outer evidence manifest is
+`b9c1d9e79fdc038525a4f6823aa3a8497ac67c63c3c386ed3f46b49c20d844c7`.
 The exact archive SHA-256 is
-`728885bef6935c3a1405db85a91c73ec7465654632e2741b3524e97a036dc734`.
+`c33931c7dff914ea3fb9a95033c49da197e0cf84697fc0617e4479b731cfb0d8`.
 The earlier `pr25-cfd7aa2-final` and `pr25-9859c7a-final` bundles remain
-immutable predecessor evidence.
+immutable predecessor evidence, as does the later `pr25-a250c86-final`
+installer predecessor.
 Three historical qualification keys were removed by exact CNG container name
 under a manifest-covered remediation receipt.
 The Nuc seal removed its private gate key, service state, installed identity,
@@ -97,3 +101,9 @@ the Rust gate removed any prior marker before publishing that request. The
 entire post-snapshot seam is transactional, and old
 generations are pruned only after successful binding. Production trust remains
 `REL-001` work.
+
+The production mTLS loader parses the presented client leaf certificate and
+rejects expired and not-yet-valid identities before agent runtime startup.
+Generated validity-window tests cover valid, expired, and future leaves; an
+exact Windows-binary preflight also rejected an expired certificate without
+creating a journal or workspace.

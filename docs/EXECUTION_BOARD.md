@@ -1234,14 +1234,14 @@ HeMan's read-only controller/database evidence manifest is
 All one-day test private keys were destroyed after sealing.
 
 `WIN-003` is closed on NucBoxG3 with the signed qualification package built
-natively from the final reviewed installer implementation at commit
-`a250c864baa4fe0ad13b22d905568164674182b6` and tree
-`ada4377b5fe30c2ee395a851537766b6fe313ccb`. The exact source bundle SHA-256
-is `c41491b83c20f788ad70360acac37ef9caa158597a912daeee3a889867778f6a`;
+natively from the final reviewed implementation at commit
+`38dd5c81a3098a53f83c1bcb758f76499409f0de` and tree
+`ea71b1e71c0269bd670f9a9ca0940d2897e27aab`. The exact source bundle SHA-256
+is `96390e00f78ad8de1d8b97aa35ea9162f72782edaa80116bfef1751f65e4fd16`;
 the signed binary is
-`03ec3a0fa2c76985aac6ad4d361501d3e0e595f97eeeca1e0b9ceebe9c618ea4`;
+`5da01172be9332b515c7a4a0952b6a5a611241e393c7c1424444e0e5224399ed`;
 and the package archive is
-`728885bef6935c3a1405db85a91c73ec7465654632e2741b3524e97a036dc734`.
+`c33931c7dff914ea3fb9a95033c49da197e0cf84697fc0617e4479b731cfb0d8`.
 The short-lived self-signed Authenticode identity is qualification evidence,
 not `REL-001` production provenance. The packager binds its exact CNG key
 `UniqueName`, requires exactly one `My`-store `-DeleteKey` removal, and emits
@@ -1256,33 +1256,38 @@ The outbound mTLS gate proved direct, `cmd.exe`, and PowerShell execution;
 durable stream digests; explicit cancellation with a separately verified dead
 descendant; and controller interruption with one lease expiration, two fenced
 offers, one logical success, and no escaped first child. A physical Windows
-reboot advanced the agent journal session epoch `3 -> 10`, returned the SCM
+reboot advanced the agent journal session epoch `3 -> 11`, returned the SCM
 service automatically, rejected a fresh-journal stale session, left zero
 active attempts, and killed the pre-reboot PID. Because SCM shutdown allowed
 the live agent to publish exit code 1 before power loss, that rebooted attempt
 has one `failed` terminal, zero lease expirations, and one offer; it was not
 silently retried. A separate post-reboot build succeeded. This exact terminal
-distinction is the current recovery contract, not a claim that machine reboot
-and controller loss have identical retry behavior. The current reboot request
-UUID `60dd96bd-912f-4cc0-99c0-5500a04585cb` and build ID
-`76230dbc-3e8e-4404-ada6-2fe48e54c451` were echoed by the host completion and
-checked by the Rust gate, so a stale completion marker cannot satisfy the run.
+distinction is one valid recovery path, not a claim that machine reboot and
+controller loss have identical retry behavior. The gate also accepts only the
+other observed honest race: one expired lease, exactly two offers, the
+`retry-after-reboot` marker, and one terminal success. That alternate path is
+preserved under manifest
+`beec40cf748645cf48af5bf09e3cb7c65afefd4239392e277e19d42e52fa5284`.
+The final reboot request UUID `6bea1254-5b4b-4280-a932-c20d101a062c` and build
+ID `a95c9772-d010-4bb2-a8d3-589cf9dc40cf` were echoed by the host completion
+and checked by the Rust gate, so a stale completion marker cannot satisfy the
+run.
 
 The final NucBoxG3 package/runtime successor has a read-only 23-file manifest
 SHA-256 of
-`e5f058248e3d861314bddb7527314df1ba793744952ca7c0259c6f4f09afaf60`.
+`478a6d3d19a7acfa8db6ce05f11cfece825a968cc6e21fe3713ac86f3ebc8860`.
 Its nested package manifest SHA-256 is
-`ef4d056e82626cfe1d76660e33fc4aecb22b29a756770a8a4a0f81cb9b2335c8`
+`9f9428873fd4db02df9f8523deb088e4d604f76e5715acb74b8ea5806f41f9da`
 and verifies directly because the seal includes the exact signed binary and
-cargo metadata. HeMan's 38-file outer evidence bundle is sealed at
-`/sn8100/runs/mcloving/windows/pr25-a250c86-final`; its self-excluding manifest
+cargo metadata. HeMan's 39-file outer evidence bundle is sealed at
+`/sn8100/runs/mcloving/windows/pr25-38dd5c8-final`; its self-excluding manifest
 SHA-256 is
-`6e26f2e1dad9f3261c3641dca03c5e9f3d1d31c5704b287ec2bc699bd0735195`.
+`b9c1d9e79fdc038525a4f6823aa3a8497ac67c63c3c386ed3f46b49c20d844c7`.
 It binds the exact source and package, native host and controller receipts,
 PostgreSQL dump and schema, the read-only verifier's bounded timeout/no-verdict
 receipt, and cleanup receipts. The earlier `pr25-cfd7aa2-final` and
-`pr25-9859c7a-final` bundles remain immutable predecessor evidence rather than
-the current reviewed closure. The Nuc seal
+`pr25-9859c7a-final` bundles, plus `pr25-a250c86-final`, remain immutable
+predecessor evidence rather than the current reviewed closure. The Nuc seal
 removed the Windows service, installed identity, qualification trust anchors,
 gate private key, and test-only recovery-probe shim; manifest-covered cleanup
 receipts record that state. HeMan's remaining mTLS private keys and isolated
@@ -1314,3 +1319,11 @@ signer trust left behind. Separate native probes placed `GateRoot` and
 service or package mutation. The installer rolls back the whole service
 transaction on every post-identity failure and prunes superseded generations
 only after the running service points to the retained identity.
+
+The production mTLS loader also parses the presented leaf certificate and
+rejects it unless its validity window contains the current time. Generated
+valid, expired, and not-yet-valid leaf tests exercise the same loader, and an
+exact Windows-binary preflight rejected an expired certificate before creating
+a journal or workspace. This closes the review seam where transport startup
+could previously advance the journal before a later TLS handshake exposed an
+invalid client identity.
