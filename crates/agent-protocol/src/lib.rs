@@ -358,6 +358,26 @@ impl OutboundMtlsConfig {
                 "certificate is expired or not yet valid".to_owned(),
             ));
         }
+        if let Some(extended_key_usage) = parsed_leaf
+            .extended_key_usage()
+            .map_err(|error| TransportError::InvalidAgentCertificate(error.to_string()))?
+            && !extended_key_usage.value.any
+            && !extended_key_usage.value.client_auth
+        {
+            return Err(TransportError::InvalidAgentCertificate(
+                "certificate extended key usage does not permit TLS client authentication"
+                    .to_owned(),
+            ));
+        }
+        if let Some(key_usage) = parsed_leaf
+            .key_usage()
+            .map_err(|error| TransportError::InvalidAgentCertificate(error.to_string()))?
+            && !key_usage.value.digital_signature()
+        {
+            return Err(TransportError::InvalidAgentCertificate(
+                "certificate key usage does not permit digital signatures".to_owned(),
+            ));
+        }
 
         ClientConfig::builder()
             .with_root_certificates(roots)
@@ -372,7 +392,7 @@ mod tests {
     use super::*;
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
-        ExtendedKeyUsagePurpose, IsCa, KeyPair, date_time_ymd,
+        ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, date_time_ymd,
     };
 
     fn features(values: &[&str]) -> BTreeSet<String> {
@@ -380,6 +400,20 @@ mod tests {
     }
 
     fn generated_mtls_config(agent_not_before: i32, agent_not_after: i32) -> OutboundMtlsConfig {
+        generated_mtls_config_with_usages(
+            agent_not_before,
+            agent_not_after,
+            vec![ExtendedKeyUsagePurpose::ClientAuth],
+            Vec::new(),
+        )
+    }
+
+    fn generated_mtls_config_with_usages(
+        agent_not_before: i32,
+        agent_not_after: i32,
+        extended_key_usages: Vec<ExtendedKeyUsagePurpose>,
+        key_usages: Vec<KeyUsagePurpose>,
+    ) -> OutboundMtlsConfig {
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.not_before = date_time_ymd(2019, 1, 1);
         ca_params.not_after = date_time_ymd(2100, 1, 1);
@@ -393,7 +427,8 @@ mod tests {
         let mut agent_params = CertificateParams::new(Vec::<String>::new()).unwrap();
         agent_params.not_before = date_time_ymd(agent_not_before, 1, 1);
         agent_params.not_after = date_time_ymd(agent_not_after, 1, 1);
-        agent_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        agent_params.extended_key_usages = extended_key_usages;
+        agent_params.key_usages = key_usages;
         let mut agent_name = DistinguishedName::new();
         agent_name.push(DnType::CommonName, "McLoving test agent");
         agent_params.distinguished_name = agent_name;
@@ -596,5 +631,36 @@ mod tests {
         ));
 
         generated_mtls_config(2020, 2090).endpoint().unwrap();
+    }
+
+    #[test]
+    fn outbound_transport_rejects_incompatible_client_certificate_usages() {
+        let server_only = generated_mtls_config_with_usages(
+            2020,
+            2090,
+            vec![ExtendedKeyUsagePurpose::ServerAuth],
+            Vec::new(),
+        );
+        assert!(matches!(
+            server_only.endpoint(),
+            Err(TransportError::InvalidAgentCertificate(message))
+                if message.contains("TLS client authentication")
+        ));
+
+        let no_signature = generated_mtls_config_with_usages(
+            2020,
+            2090,
+            vec![ExtendedKeyUsagePurpose::ClientAuth],
+            vec![KeyUsagePurpose::KeyEncipherment],
+        );
+        assert!(matches!(
+            no_signature.endpoint(),
+            Err(TransportError::InvalidAgentCertificate(message))
+                if message.contains("digital signatures")
+        ));
+
+        generated_mtls_config_with_usages(2020, 2090, Vec::new(), Vec::new())
+            .endpoint()
+            .unwrap();
     }
 }

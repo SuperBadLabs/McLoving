@@ -64,7 +64,7 @@ function Assert-RestrictedTreeAcl([string]$Root) {
         ).Value
         $rules = @($applied.GetAccessRules(
             $true,
-            $false,
+            $true,
             [Security.Principal.SecurityIdentifier]
         ))
         $unexpected = @($rules | Where-Object {
@@ -73,8 +73,14 @@ function Assert-RestrictedTreeAcl([string]$Root) {
             ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne
                 [Security.AccessControl.FileSystemRights]::FullControl
         })
+        # The root itself must block inheritance from its caller-controlled
+        # parent. Descendants created later by the service may safely inherit
+        # the root's exact SYSTEM/Administrators rules; inspect their complete
+        # effective rule set rather than requiring each file to break
+        # inheritance independently.
+        $isRoot = $item.FullName -ieq $rootItem.FullName
         if ($ownerSid -ne "S-1-5-32-544" -or
-            -not $applied.AreAccessRulesProtected -or
+            ($isRoot -and -not $applied.AreAccessRulesProtected) -or
             $rules.Count -ne 2 -or
             $unexpected.Count -ne 0) {
             throw "restricted ACL replacement verification failed: $($item.FullName)"
@@ -675,6 +681,9 @@ $serviceMutationStarted = $false
 $delayedAutoStartWritten = $false
 $environmentWritten = $false
 $journalEpochBefore = [uint64]0
+$priorRuntime = $null
+$priorJournal = $null
+$priorWorkspace = $null
 try {
 @'
 @echo off
@@ -752,6 +761,47 @@ if ($existingServiceConfig) {
         $previousEnvironmentExists = $true
         $previousEnvironment = @($previousEnvironmentProperty.Environment)
     }
+    if (-not $previousEnvironmentExists) {
+        throw "existing service has no runtime environment to migrate"
+    }
+    $previousEnvironmentMap = @{}
+    foreach ($entry in $previousEnvironment) {
+        $separator = $entry.IndexOf('=')
+        if ($separator -le 0) {
+            throw "existing service has an invalid environment entry"
+        }
+        $name = $entry.Substring(0, $separator)
+        if ($previousEnvironmentMap.ContainsKey($name)) {
+            throw "existing service has a duplicate environment entry: $name"
+        }
+        $previousEnvironmentMap[$name] = $entry.Substring($separator + 1)
+    }
+    foreach ($requiredName in @(
+        'MCLOVING_AGENT_JOURNAL_PATH',
+        'MCLOVING_AGENT_WORKSPACE_ROOT'
+    )) {
+        if (-not $previousEnvironmentMap.ContainsKey($requiredName) -or
+            [string]::IsNullOrWhiteSpace($previousEnvironmentMap[$requiredName])) {
+            throw "existing service is missing protected runtime path $requiredName"
+        }
+    }
+    $priorJournal = [IO.Path]::GetFullPath(
+        $previousEnvironmentMap.MCLOVING_AGENT_JOURNAL_PATH
+    )
+    $priorWorkspace = [IO.Path]::GetFullPath(
+        $previousEnvironmentMap.MCLOVING_AGENT_WORKSPACE_ROOT
+    )
+    $priorRuntime = Split-Path -Parent $priorJournal
+    if ((Split-Path -Leaf $priorJournal) -ine 'agent.db' -or
+        (Split-Path -Parent $priorWorkspace) -ine $priorRuntime -or
+        (Split-Path -Leaf $priorWorkspace) -ine 'workspaces' -or
+        $priorRuntime -ieq $GateRoot -or
+        $priorRuntime -ieq $runtimeGeneration) {
+        throw "existing service runtime layout cannot be safely migrated"
+    }
+    Assert-NonReplaceableDirectoryChain $priorRuntime
+    Assert-RestrictedTreeAcl $priorRuntime
+    [void](Get-JournalObservation $stagedBinary $priorJournal)
     $priorStateCaptured = $true
 }
 $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
@@ -766,6 +816,27 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
             )
         }
         $existingService.Dispose()
+    }
+    if ($existingServiceConfig) {
+        $priorObservation = Get-JournalObservation $stagedBinary $priorJournal
+        Copy-Item -LiteralPath $priorJournal -Destination $journal -ErrorAction Stop
+        $priorWal = "${priorJournal}-wal"
+        if (Test-Path -LiteralPath $priorWal -PathType Leaf) {
+            Copy-Item -LiteralPath $priorWal -Destination "${journal}-wal" -ErrorAction Stop
+        }
+        foreach ($priorWorkspaceChild in @(
+            Get-ChildItem -LiteralPath $priorWorkspace -Force -ErrorAction Stop
+        )) {
+            Copy-Item -LiteralPath $priorWorkspaceChild.FullName `
+                -Destination $workspace -Recurse -ErrorAction Stop
+        }
+        Set-RestrictedTreeAcl $runtimeGeneration
+        $migratedObservation = Get-JournalObservation $stagedBinary $journal
+        if ($migratedObservation.SchemaVersion -ne $priorObservation.SchemaVersion -or
+            $migratedObservation.SessionEpoch -ne $priorObservation.SessionEpoch -or
+            $migratedObservation.ActiveAttempts -ne $priorObservation.ActiveAttempts) {
+            throw "migrated journal observation does not match stopped prior runtime"
+        }
     }
     if (Test-Path -LiteralPath $journal) {
         $journalBefore = Get-JournalObservation $stagedBinary $journal
