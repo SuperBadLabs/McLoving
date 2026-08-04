@@ -1188,11 +1188,11 @@ if ($priorPackageRoot) {
             if (-not [IO.Path]::IsPathRooted($candidate)) {
                 return $false
             }
-            $candidate = [IO.Path]::GetFullPath($candidate).TrimEnd('\\', '/')
-            $predecessor = [IO.Path]::GetFullPath($priorPath).TrimEnd('\\', '/')
+            $candidate = [IO.Path]::GetFullPath($candidate).TrimEnd('\', '/')
+            $predecessor = [IO.Path]::GetFullPath($priorPath).TrimEnd('\', '/')
             $candidate.Equals($predecessor, [StringComparison]::OrdinalIgnoreCase) -or
                 $candidate.StartsWith(
-                    "$predecessor\\",
+                    "$predecessor\",
                     [StringComparison]::OrdinalIgnoreCase
                 )
         }).Count -ne 0) {
