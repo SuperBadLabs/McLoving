@@ -7,11 +7,14 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::{
+    ClientConfig, RootCertStore,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+use x509_parser::parse_x509_certificate;
 
 /// Generated Protobuf and gRPC contract.
 pub mod wire {
@@ -345,6 +348,17 @@ impl OutboundMtlsConfig {
         let private_key = PrivateKeyDer::from_pem_slice(&self.agent_private_key_pem)
             .map_err(|error| TransportError::InvalidAgentPrivateKey(error.to_string()))?;
 
+        let leaf = certificates
+            .first()
+            .expect("the certificate chain was already proven non-empty");
+        let (_, parsed_leaf) = parse_x509_certificate(leaf.as_ref())
+            .map_err(|error| TransportError::InvalidAgentCertificate(error.to_string()))?;
+        if !parsed_leaf.validity().is_valid() {
+            return Err(TransportError::InvalidAgentCertificate(
+                "certificate is expired or not yet valid".to_owned(),
+            ));
+        }
+
         ClientConfig::builder()
             .with_root_certificates(roots)
             .with_client_auth_cert(certificates, private_key)
@@ -356,9 +370,43 @@ impl OutboundMtlsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
+        ExtendedKeyUsagePurpose, IsCa, KeyPair, date_time_ymd,
+    };
 
     fn features(values: &[&str]) -> BTreeSet<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn generated_mtls_config(agent_not_before: i32, agent_not_after: i32) -> OutboundMtlsConfig {
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.not_before = date_time_ymd(2019, 1, 1);
+        ca_params.not_after = date_time_ymd(2100, 1, 1);
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let mut ca_name = DistinguishedName::new();
+        ca_name.push(DnType::CommonName, "McLoving test CA");
+        ca_params.distinguished_name = ca_name;
+        let ca_key = KeyPair::generate().unwrap();
+        let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+
+        let mut agent_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        agent_params.not_before = date_time_ymd(agent_not_before, 1, 1);
+        agent_params.not_after = date_time_ymd(agent_not_after, 1, 1);
+        agent_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let mut agent_name = DistinguishedName::new();
+        agent_name.push(DnType::CommonName, "McLoving test agent");
+        agent_params.distinguished_name = agent_name;
+        let agent_key = KeyPair::generate().unwrap();
+        let agent = agent_params.signed_by(&agent_key, &ca).unwrap();
+
+        OutboundMtlsConfig {
+            controller_uri: "https://controller.internal:8443".to_owned(),
+            controller_dns_name: "controller.internal".to_owned(),
+            controller_ca_pem: ca.pem().into_bytes(),
+            agent_certificate_pem: agent.pem().into_bytes(),
+            agent_private_key_pem: agent_key.serialize_pem().into_bytes(),
+        }
     }
 
     #[test]
@@ -531,5 +579,22 @@ mod tests {
             config.endpoint(),
             Err(TransportError::InvalidControllerCa(_))
         ));
+    }
+
+    #[test]
+    fn outbound_transport_rejects_expired_or_not_yet_valid_agent_certificates() {
+        let expired = generated_mtls_config(2020, 2021);
+        assert!(matches!(
+            expired.endpoint(),
+            Err(TransportError::InvalidAgentCertificate(_))
+        ));
+
+        let not_yet_valid = generated_mtls_config(2090, 2091);
+        assert!(matches!(
+            not_yet_valid.endpoint(),
+            Err(TransportError::InvalidAgentCertificate(_))
+        ));
+
+        generated_mtls_config(2020, 2090).endpoint().unwrap();
     }
 }
