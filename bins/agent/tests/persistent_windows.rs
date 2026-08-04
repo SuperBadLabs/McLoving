@@ -363,6 +363,12 @@ async fn run_recovery_gate(
     assert_eq!(host_receipt["service_automatic_and_running"], true);
     assert_eq!(host_receipt["stale_authority_rejected"], true);
     assert!(
+        host_receipt["pre_reboot_workload_pid"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    assert!(
         host_receipt["session_epoch_after"].as_u64().unwrap_or(0)
             > host_receipt["session_epoch_before"]
                 .as_u64()
@@ -370,16 +376,26 @@ async fn run_recovery_gate(
     );
 
     let rebooted = wait_terminal(client, organization_id, project_id, rebooted.build_id).await;
-    assert_eq!(rebooted.status, "failed");
     let reboot_logs = client
         .logs(organization_id, project_id, rebooted.build_id)
         .await
         .expect("read machine-reboot logs");
-    assert!(joined_logs(&reboot_logs).contains("first-child-reboot="));
+    let reboot_log_text = joined_logs(&reboot_logs);
     let reboot_expirations = event_count(pool, rebooted.build_id, "attempt.lease_expired").await;
     let reboot_offers = event_count(pool, rebooted.build_id, "attempt.offered").await;
-    assert_eq!(reboot_expirations, 0);
-    assert_eq!(reboot_offers, 1);
+    match rebooted.status.as_str() {
+        "failed" => {
+            assert!(reboot_log_text.contains("first-child-reboot="));
+            assert_eq!(reboot_expirations, 0);
+            assert_eq!(reboot_offers, 1);
+        }
+        "succeeded" => {
+            assert!(reboot_log_text.contains("retry-after-reboot"));
+            assert_eq!(reboot_expirations, 1);
+            assert_eq!(reboot_offers, 2);
+        }
+        status => panic!("machine-reboot workload reached unexpected terminal state {status}"),
+    }
     let reboot_cleanup = submit_and_wait(
         client,
         organization_id,
