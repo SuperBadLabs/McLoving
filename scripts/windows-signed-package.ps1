@@ -145,18 +145,34 @@ Remove-Item -LiteralPath $buildTarget -Recurse -Force
 $unsignedBinarySha256 = Get-Sha256 $packagedBinary
 
 $subject = "CN=McLoving WIN-003 qualification $SourceCommit"
-$certificate = New-SelfSignedCertificate `
-    -Type CodeSigningCert `
-    -Subject $subject `
-    -CertStoreLocation "Cert:\LocalMachine\My" `
-    -KeyAlgorithm RSA `
-    -KeyLength 3072 `
-    -HashAlgorithm SHA256 `
-    -KeyExportPolicy NonExportable `
-    -NotAfter (Get-Date).AddDays(7)
+$certificate = $null
+$privateKeyUniqueName = $null
+$privateKeyPath = $null
 $packageFailure = $null
 $certificateCleanupFailures = @()
+$privateKeyRemovalCount = 0
+$closure = $null
 try {
+    $certificate = New-SelfSignedCertificate `
+        -Type CodeSigningCert `
+        -Subject $subject `
+        -CertStoreLocation "Cert:\LocalMachine\My" `
+        -KeyAlgorithm RSA `
+        -KeyLength 3072 `
+        -HashAlgorithm SHA256 `
+        -KeyExportPolicy NonExportable `
+        -NotAfter (Get-Date).AddDays(7)
+    $rsaPrivateKey = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
+    if ($null -eq $rsaPrivateKey -or -not ($rsaPrivateKey -is [Security.Cryptography.RSACng])) {
+        throw "qualification certificate must use a CNG RSA private key"
+    }
+    $privateKeyUniqueName = $rsaPrivateKey.Key.UniqueName
+    $privateKeyPath = Join-Path $env:ProgramData "Microsoft\Crypto\Keys\$privateKeyUniqueName"
+    $rsaPrivateKey.Dispose()
+    if (-not (Test-Path -LiteralPath $privateKeyPath -PathType Leaf)) {
+        throw "qualification private key file was not created at its bound CNG path"
+    }
+
     $certificatePath = Join-Path $OutputRoot "win003-signer.cer"
     Export-Certificate -Cert $certificate -FilePath $certificatePath | Out-Null
     Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
@@ -239,25 +255,47 @@ try {
         authenticode_binary = "Valid"
         authenticode_envelope = "Valid"
         private_key_exportable = $false
+        private_key_cleanup = "Remove-Item -DeleteKey"
+        private_key_unique_name = $privateKeyUniqueName
+        private_key_postcondition = "bound CNG key file absent"
+        private_key_destroyed = $false
+        certificate_store_cleanup = "PENDING"
         result = "PASS"
     }
-    $closure | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutputRoot "PACKAGE-CLOSURE.json")
 } catch {
     $packageFailure = $_
 } finally {
-    foreach ($storeName in @("My", "Root", "CA", "TrustedPublisher")) {
-        try {
-            Get-ChildItem "Cert:\LocalMachine\$storeName" -ErrorAction Stop |
-                Where-Object { $_.Thumbprint -eq $certificate.Thumbprint } |
-                Remove-Item -Force -ErrorAction Stop
-            $residualCertificate = Get-ChildItem "Cert:\LocalMachine\$storeName" -ErrorAction Stop |
-                Where-Object { $_.Thumbprint -eq $certificate.Thumbprint }
-            if ($residualCertificate) {
-                throw "qualification certificate remains in $storeName after cleanup"
+    if ($null -ne $certificate) {
+        foreach ($storeName in @("My", "Root", "CA", "TrustedPublisher")) {
+            try {
+                $storeCertificates = @(Get-ChildItem "Cert:\LocalMachine\$storeName" -ErrorAction Stop |
+                    Where-Object { $_.Thumbprint -eq $certificate.Thumbprint })
+                if ($storeName -eq "My" -and $storeCertificates.Count -ne 1) {
+                    throw "expected exactly one qualification certificate in My, found $($storeCertificates.Count)"
+                }
+                foreach ($storeCertificate in $storeCertificates) {
+                    if ($storeName -eq "My") {
+                        Remove-Item -LiteralPath $storeCertificate.PSPath -DeleteKey -Force -ErrorAction Stop
+                        $privateKeyRemovalCount += 1
+                    } else {
+                        Remove-Item -LiteralPath $storeCertificate.PSPath -Force -ErrorAction Stop
+                    }
+                }
+                $residualCertificate = Get-ChildItem "Cert:\LocalMachine\$storeName" -ErrorAction Stop |
+                    Where-Object { $_.Thumbprint -eq $certificate.Thumbprint }
+                if ($residualCertificate) {
+                    throw "qualification certificate remains in $storeName after cleanup"
+                }
+            } catch {
+                $certificateCleanupFailures += "${storeName}: $($_.Exception.Message)"
             }
-        } catch {
-            $certificateCleanupFailures += "${storeName}: $($_.Exception.Message)"
         }
+        if ($privateKeyRemovalCount -ne 1) {
+            $certificateCleanupFailures += "My: expected one private-key removal, observed $privateKeyRemovalCount"
+        }
+    }
+    if ($null -ne $privateKeyPath -and (Test-Path -LiteralPath $privateKeyPath)) {
+        $certificateCleanupFailures += "My: bound CNG private key remains after cleanup: $privateKeyUniqueName"
     }
 }
 if ($packageFailure) {
@@ -269,3 +307,9 @@ if ($packageFailure) {
 if ($certificateCleanupFailures.Count -ne 0) {
     throw "certificate cleanup failed: $($certificateCleanupFailures -join '; ')"
 }
+if ($null -eq $closure) {
+    throw "package closure was not produced"
+}
+$closure["private_key_destroyed"] = $true
+$closure["certificate_store_cleanup"] = "PASS"
+$closure | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $OutputRoot "PACKAGE-CLOSURE.json")
