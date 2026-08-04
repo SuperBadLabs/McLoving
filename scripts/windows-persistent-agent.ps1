@@ -1,5 +1,5 @@
 param(
-    [string]$GateRoot = "C:\McLoving-Windows-War\win002",
+    [string]$GateRoot = "C:\ProgramData\McLoving-Windows-War\win002",
     [string]$ServiceName = "McLovingWin002",
     [string]$BinarySource = "C:\McLoving-Windows-Work\target-win001-20260803\release\mcloving-agent.exe",
     [string]$PackageRoot = "C:\Program Files\McLoving\win002",
@@ -213,6 +213,21 @@ function Assert-NonReplaceableDirectoryChain([string]$Path) {
     }
 }
 
+function Assert-NonReplaceableParentChain([string]$Path) {
+    $cursor = Split-Path -Parent ([IO.Path]::GetFullPath($Path))
+    if ([string]::IsNullOrWhiteSpace($cursor)) {
+        throw "restricted path has no parent: $Path"
+    }
+    while (-not (Test-Path -LiteralPath $cursor)) {
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) {
+            throw "restricted path has no existing ancestor: $Path"
+        }
+        $cursor = $parent
+    }
+    Assert-NonReplaceableDirectoryChain $cursor
+}
+
 function New-RestrictedDirectoryPathAtomic([string]$Path) {
     $missing = [Collections.Generic.Stack[string]]::new()
     $created = [Collections.Generic.Stack[string]]::new()
@@ -364,6 +379,11 @@ function Install-StagedBinary(
 
 $GateRoot = [IO.Path]::GetFullPath($GateRoot)
 $PackageRoot = [IO.Path]::GetFullPath($PackageRoot)
+# Protecting only the final directory is insufficient if another principal can
+# rename/delete that pathname from its parent. Reject replaceable existing
+# ancestors before reading GateRoot inputs or creating PackageRoot children.
+Assert-NonReplaceableParentChain $GateRoot
+Assert-NonReplaceableParentChain $PackageRoot
 $binary = Join-Path $packageRoot "mcloving-agent.exe"
 $stagedBinary = Join-Path $packageRoot "mcloving-agent.installing.exe"
 $backupBinary = Join-Path $packageRoot "mcloving-agent.rollback.exe"
@@ -511,6 +531,7 @@ try {
     } else {
         New-RestrictedDirectoryPathAtomic $PackageRoot
     }
+    Assert-NonReplaceableDirectoryChain $PackageRoot
     New-RestrictedDirectoryAtomic $identityGeneration
     $identityGenerationCreated = $true
     $identityCopies = @(
@@ -540,6 +561,8 @@ try {
     }
     Set-RestrictedTreeAcl $PackageRoot
     Set-RestrictedTreeAcl $GateRoot
+    Assert-NonReplaceableDirectoryChain $PackageRoot
+    Assert-NonReplaceableDirectoryChain $GateRoot
     $restrictedConfigSource = Get-Content -Raw -LiteralPath $configPath
     if ($restrictedConfigSource -cne $configSource) {
         throw "agent configuration changed while the gate ACL was being restricted"

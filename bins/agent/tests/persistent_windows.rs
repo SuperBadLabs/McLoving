@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
@@ -326,21 +327,37 @@ async fn run_recovery_gate(
         .expect("submit machine-reboot workload");
     wait_running(client, organization_id, project_id, rebooted.build_id).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
+    let reboot_completion = root.join("WIN003_REBOOT_COMPLETE.json");
+    match std::fs::remove_file(&reboot_completion) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => panic!("remove stale persistent-host reboot receipt: {error}"),
+    }
+    let reboot_request_id = Uuid::new_v4().to_string();
+    let reboot_build_id = rebooted.build_id.to_string();
     std::fs::write(
         root.join("WIN003_REBOOT_REQUEST.json"),
         serde_json::to_vec_pretty(&json!({
             "schema": "mcloving-win-003-reboot-request-v1",
-            "build_id": rebooted.build_id,
+            "request_id": reboot_request_id,
+            "build_id": reboot_build_id,
         }))
         .expect("serialize reboot request"),
     )
     .expect("publish machine-reboot request");
-    let reboot_completion = root.join("WIN003_REBOOT_COMPLETE.json");
     wait_for_marker(&reboot_completion, Duration::from_secs(300)).await;
     let host_receipt: serde_json::Value = serde_json::from_slice(
         &std::fs::read(&reboot_completion).expect("read persistent-host reboot receipt"),
     )
     .expect("parse persistent-host reboot receipt");
+    assert_eq!(
+        host_receipt["request_id"].as_str(),
+        Some(reboot_request_id.as_str())
+    );
+    assert_eq!(
+        host_receipt["build_id"].as_str(),
+        Some(reboot_build_id.as_str())
+    );
     assert_eq!(host_receipt["result"], "PASS");
     assert_eq!(host_receipt["lan_ssh_reachable"], true);
     assert_eq!(host_receipt["service_automatic_and_running"], true);
