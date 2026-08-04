@@ -1181,7 +1181,20 @@ if ($priorPackageRoot) {
     )
     foreach ($priorPath in @($priorPackageRoot, $priorIdentityGeneration, $priorRuntime)) {
         if (@($committedEnvironment | Where-Object {
-            $_ -like "*=*" -and $_.Substring($_.IndexOf('=') + 1) -ilike "$priorPath*"
+            if ($_ -notlike "*=*") {
+                return $false
+            }
+            $candidate = $_.Substring($_.IndexOf('=') + 1)
+            if (-not [IO.Path]::IsPathRooted($candidate)) {
+                return $false
+            }
+            $candidate = [IO.Path]::GetFullPath($candidate).TrimEnd('\\', '/')
+            $predecessor = [IO.Path]::GetFullPath($priorPath).TrimEnd('\\', '/')
+            $candidate.Equals($predecessor, [StringComparison]::OrdinalIgnoreCase) -or
+                $candidate.StartsWith(
+                    "$predecessor\\",
+                    [StringComparison]::OrdinalIgnoreCase
+                )
         }).Count -ne 0) {
             throw "committed service still references predecessor path: $priorPath"
         }
