@@ -1391,7 +1391,7 @@ mutation. Review threads `PRRT_kwDOTmTe486WOZn1` and
 The exact-head authenticated-startup closure supersedes the precursor
 attribution above. Commit `11a0e18f860cc6ea39a623e601ad5ff1defb11ee`,
 tree `50ffb804978cd457eba92d3d702d7a1c70516fd7`, publishes a protected
-write-once session receipt only after the controller accepts the mTLS
+session receipt only after the controller accepts the mTLS
 `OpenSession` RPC. The installer requires that receipt to match the new
 journal epoch, so a locally valid `clientAuth` certificate issued by an
 untrusted CA cannot turn a pre-connect epoch reservation into install success.
@@ -1428,3 +1428,11 @@ Claude's bounded read-only exact-commit review returned `NO_FINDINGS` without
 mutation. Review threads `PRRT_kwDOTmTe486WPgc3` and
 `PRRT_kwDOTmTe486WPgc9` are closed by the implementation and final-package
 evidence. `WIN-003` therefore remains `DONE` on exact final-package proof.
+
+The final verifier found that a transient post-authentication reconciliation
+failure could advance the journal on reconnect while the original write-once
+receipt remained pinned to the prior epoch. The follow-up repair makes receipt
+publication an authenticated, atomic, monotonic update: equal epochs are
+idempotent, newer authenticated epochs replace the receipt, and rollback to an
+older epoch is rejected. Exact final-head and final-package hashes supersede
+the `11a0e18` precursor values above once the repair campaign is sealed.

@@ -185,3 +185,11 @@ and HeMan's immutable 21-file cross-host manifest is
 `0fe814ce842b6bdd978932f065eed5e8f591c60ad0075706f9ab303e49423e5b`.
 All transient services, containers, package/source copies, TLS private keys,
 and install roots were removed after sealing.
+
+The final verifier identified one retry edge: after the first accepted session,
+a transient reconciliation failure could reserve a newer epoch while the
+write-once receipt stayed pinned to the older one. The follow-up implementation
+keeps the receipt protected and atomic but updates it monotonically after each
+accepted session. Equal epochs are idempotent and older epochs cannot replace a
+newer receipt. Final hashes and exact-package evidence supersede the precursor
+values in this section after the repaired campaign is sealed.

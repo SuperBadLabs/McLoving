@@ -397,10 +397,32 @@ fn publish_authenticated_session_receipt(
         return Ok(());
     };
     if path.exists() {
-        return Ok(());
+        let receipt = std::fs::read_to_string(path)?;
+        let existing_epoch = receipt
+            .strip_prefix("session_epoch=")
+            .and_then(|value| value.strip_suffix('\n'))
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "authenticated session receipt is malformed",
+                )
+            })?;
+        match existing_epoch.cmp(&session_epoch) {
+            std::cmp::Ordering::Equal => return Ok(()),
+            std::cmp::Ordering::Greater => {
+                return Err(AgentError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "authenticated session receipt epoch {existing_epoch} is newer than session epoch {session_epoch}"
+                    ),
+                )));
+            }
+            std::cmp::Ordering::Less => {}
+        }
     }
     let mut pending = path.as_os_str().to_os_string();
-    pending.push(format!(".pending.{}", std::process::id()));
+    pending.push(format!(".pending.{}.{}", std::process::id(), session_epoch));
     let pending = PathBuf::from(pending);
     let result = (|| {
         let mut file = OpenOptions::new()
@@ -1191,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_session_receipt_is_atomic_and_first_session_is_immutable() {
+    fn authenticated_session_receipt_is_atomic_and_monotonic() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.receipt");
         publish_authenticated_session_receipt(Some(&path), 41).unwrap();
@@ -1203,7 +1225,12 @@ mod tests {
         publish_authenticated_session_receipt(Some(&path), 42).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
-            "session_epoch=41\n"
+            "session_epoch=42\n"
+        );
+        assert!(publish_authenticated_session_receipt(Some(&path), 41).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "session_epoch=42\n"
         );
         assert!(std::fs::read_dir(directory.path()).unwrap().all(|entry| {
             !entry
