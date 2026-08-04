@@ -59,6 +59,9 @@ function Assert-RestrictedTreeAcl([string]$Root) {
     }
     foreach ($item in @($rootItem) + $items) {
         $applied = Get-Acl -LiteralPath $item.FullName -ErrorAction Stop
+        $ownerSid = $applied.GetOwner(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
         $rules = @($applied.GetAccessRules(
             $true,
             $false,
@@ -70,7 +73,10 @@ function Assert-RestrictedTreeAcl([string]$Root) {
             ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne
                 [Security.AccessControl.FileSystemRights]::FullControl
         })
-        if (-not $applied.AreAccessRulesProtected -or $rules.Count -ne 2 -or $unexpected.Count -ne 0) {
+        if ($ownerSid -ne "S-1-5-32-544" -or
+            -not $applied.AreAccessRulesProtected -or
+            $rules.Count -ne 2 -or
+            $unexpected.Count -ne 0) {
             throw "restricted ACL replacement verification failed: $($item.FullName)"
         }
     }
@@ -153,6 +159,60 @@ namespace McLoving {
     }
 }
 
+function Assert-NonReplaceableDirectoryChain([string]$Path) {
+    $trustedSids = @(
+        "S-1-5-18",
+        "S-1-5-32-544",
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+    )
+    $dangerousRights =
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    [uint64]$genericRightsMask = 4026531840
+    $cursor = [IO.Path]::GetFullPath($Path)
+    while ($true) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if (-not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "restricted directory ancestor is not a real directory: $($item.FullName)"
+        }
+        $acl = Get-Acl -LiteralPath $item.FullName -ErrorAction Stop
+        $rawDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+            $acl.GetSecurityDescriptorBinaryForm(),
+            0
+        )
+        if ($null -eq $rawDescriptor.DiscretionaryAcl) {
+            throw "restricted directory ancestor has a NULL DACL: $($item.FullName)"
+        }
+        $ownerSid = $acl.GetOwner(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+        if ($ownerSid -notin $trustedSids) {
+            throw "restricted directory ancestor has an untrusted owner: $($item.FullName)"
+        }
+        $replaceableRules = @($acl.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        ) | Where-Object {
+            [uint64]$rightsMask = [int64]$_.FileSystemRights -band 4294967295
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            ($_.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and
+            $_.IdentityReference.Value -notin $trustedSids -and
+            (($rightsMask -band $genericRightsMask) -ne 0 -or
+                ($_.FileSystemRights -band $dangerousRights) -ne 0)
+        })
+        if ($replaceableRules.Count -ne 0) {
+            throw "restricted directory ancestor grants untrusted replacement rights: $($item.FullName)"
+        }
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) { break }
+        $cursor = $parent
+    }
+}
+
 function New-RestrictedDirectoryPathAtomic([string]$Path) {
     $missing = [Collections.Generic.Stack[string]]::new()
     $created = [Collections.Generic.Stack[string]]::new()
@@ -165,19 +225,7 @@ function New-RestrictedDirectoryPathAtomic([string]$Path) {
         }
         $cursor = $parent
     }
-    $ancestorCursor = $cursor
-    while ($true) {
-        $ancestor = Get-Item -LiteralPath $ancestorCursor -Force -ErrorAction Stop
-        if (-not $ancestor.PSIsContainer -or
-            ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "restricted directory ancestor is not a real directory: $($ancestor.FullName)"
-        }
-        $parent = Split-Path -Parent $ancestorCursor
-        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $ancestorCursor) {
-            break
-        }
-        $ancestorCursor = $parent
-    }
+    Assert-NonReplaceableDirectoryChain $cursor
     try {
         while ($missing.Count -ne 0) {
             $createdPath = $missing.Pop()
@@ -205,6 +253,15 @@ function Get-RequiredConfigString([object]$Config, [string]$Name) {
     return $property.Value
 }
 
+function Get-RegularFileSha256([string]$Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "installer input must be a regular non-reparse file: $Path"
+    }
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash.ToLowerInvariant()
+}
+
 function Invoke-AgentConfigValidation([string]$AgentBinary, [hashtable]$Environment) {
     $priorEnvironment = @{}
     try {
@@ -220,6 +277,38 @@ function Invoke-AgentConfigValidation([string]$AgentBinary, [hashtable]$Environm
         foreach ($name in $Environment.Keys) {
             [Environment]::SetEnvironmentVariable($name, $priorEnvironment[$name], "Process")
         }
+    }
+}
+
+function Get-JournalObservation([string]$AgentBinary, [string]$JournalPath) {
+    $item = Get-Item -LiteralPath $JournalPath -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "agent journal must be an existing regular non-reparse file: $JournalPath"
+    }
+    $priorPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = (& $AgentBinary journal-observe $JournalPath 2>&1 | Out-String).Trim()
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $priorPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "read-only journal observation failed: exit=$exitCode output=$output"
+    }
+    $match = [regex]::Match(
+        $output,
+        '^schema_version=(\d+) journal_mode=wal integrity=ok session_epoch=(\d+) active_attempts=(\d+)$'
+    )
+    if (-not $match.Success) {
+        throw "invalid read-only journal observation: $output"
+    }
+    return [pscustomobject]@{
+        SchemaVersion = [uint64]::Parse($match.Groups[1].Value)
+        SessionEpoch = [uint64]::Parse($match.Groups[2].Value)
+        ActiveAttempts = [uint64]::Parse($match.Groups[3].Value)
+        Output = $output
     }
 }
 
@@ -292,9 +381,15 @@ $workspace = Join-Path $GateRoot "workspaces"
 $controllerCaSource = Join-Path $GateRoot "ca.pem"
 $agentCertificateSource = Join-Path $GateRoot "agent.pem"
 $agentPrivateKeySource = Join-Path $GateRoot "agent-key.pem"
+$controllerCaExpectedSha256 = Get-RegularFileSha256 $controllerCaSource
+$agentCertificateExpectedSha256 = Get-RegularFileSha256 $agentCertificateSource
+$agentPrivateKeyExpectedSha256 = Get-RegularFileSha256 $agentPrivateKeySource
 
-$inputStageRoot = Join-Path ([IO.Path]::GetTempPath()) `
-    ("mcloving-install-inputs-" + [Guid]::NewGuid().ToString("N"))
+$commonApplicationData = [Environment]::GetFolderPath(
+    [Environment+SpecialFolder]::CommonApplicationData
+)
+$inputStageRoot = Join-Path $commonApplicationData `
+    ("McLoving-Install-Inputs-" + [Guid]::NewGuid().ToString("N"))
 $protectedBinarySource = Join-Path $inputStageRoot "mcloving-agent.exe"
 $protectedSignerCertificateSource = Join-Path $inputStageRoot "signer.cer"
 $protectedControllerCaPath = Join-Path $inputStageRoot "ca.pem"
@@ -332,7 +427,7 @@ try {
     # protected tree, then authenticate only those immutable copies.
     # The directory is protected before any child is created, so copied files
     # inherit the SYSTEM/Administrators-only boundary immediately.
-    New-RestrictedDirectoryAtomic $inputStageRoot
+    New-RestrictedDirectoryPathAtomic $inputStageRoot
     Copy-Item -LiteralPath $BinarySource -Destination $protectedBinarySource -ErrorAction Stop
     if ($SignerCertificateSource) {
         Copy-Item -LiteralPath $SignerCertificateSource `
@@ -345,6 +440,27 @@ try {
     Copy-Item -LiteralPath $agentPrivateKeySource `
         -Destination $protectedAgentPrivateKeyPath -ErrorAction Stop
     Set-RestrictedTreeAcl $inputStageRoot
+
+    $stagedIdentityHashes = @(
+        [PSCustomObject]@{
+            Path = $protectedControllerCaPath
+            ExpectedSha256 = $controllerCaExpectedSha256
+        },
+        [PSCustomObject]@{
+            Path = $protectedAgentCertificatePath
+            ExpectedSha256 = $agentCertificateExpectedSha256
+        },
+        [PSCustomObject]@{
+            Path = $protectedAgentPrivateKeyPath
+            ExpectedSha256 = $agentPrivateKeyExpectedSha256
+        }
+    )
+    foreach ($stagedIdentity in $stagedIdentityHashes) {
+        $stagedHash = Get-RegularFileSha256 $stagedIdentity.Path
+        if ($stagedHash -cne $stagedIdentity.ExpectedSha256) {
+            throw "TLS identity changed while entering protected staging: $($stagedIdentity.Path)"
+        }
+    }
 
     $sourceHash = (Get-FileHash -Algorithm SHA256 `
         -LiteralPath $protectedBinarySource).Hash.ToLowerInvariant()
@@ -401,24 +517,24 @@ try {
         [PSCustomObject]@{
             Source = $protectedControllerCaPath
             Destination = $controllerCaPath
+            ExpectedSha256 = $controllerCaExpectedSha256
         },
         [PSCustomObject]@{
             Source = $protectedAgentCertificatePath
             Destination = $agentCertificatePath
+            ExpectedSha256 = $agentCertificateExpectedSha256
         },
         [PSCustomObject]@{
             Source = $protectedAgentPrivateKeyPath
             Destination = $agentPrivateKeyPath
+            ExpectedSha256 = $agentPrivateKeyExpectedSha256
         }
     )
     foreach ($identityCopy in $identityCopies) {
         Copy-Item -LiteralPath $identityCopy.Source `
             -Destination $identityCopy.Destination -ErrorAction Stop
-        $sourceIdentityHash = (Get-FileHash -Algorithm SHA256 `
-            -LiteralPath $identityCopy.Source).Hash
-        $installedIdentityHash = (Get-FileHash -Algorithm SHA256 `
-            -LiteralPath $identityCopy.Destination).Hash
-        if ($installedIdentityHash -cne $sourceIdentityHash) {
+        $installedIdentityHash = Get-RegularFileSha256 $identityCopy.Destination
+        if ($installedIdentityHash -cne $identityCopy.ExpectedSha256) {
             throw "installed TLS identity copy hash mismatch: $($identityCopy.Destination)"
         }
     }
@@ -513,6 +629,7 @@ $priorStateCaptured = $false
 $serviceMutationStarted = $false
 $delayedAutoStartWritten = $false
 $environmentWritten = $false
+$journalEpochBefore = [uint64]0
 try {
 @'
 @echo off
@@ -605,6 +722,13 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
         }
         $existingService.Dispose()
     }
+    if (Test-Path -LiteralPath $journal) {
+        $journalBefore = Get-JournalObservation $stagedBinary $journal
+        $journalEpochBefore = $journalBefore.SessionEpoch
+    } elseif ((Test-Path -LiteralPath "${journal}-wal") -or
+        (Test-Path -LiteralPath "${journal}-shm")) {
+        throw "agent journal sidecars exist without the primary journal"
+    }
     $serviceMutationStarted = $true
     if ($binaryExisted) {
         Copy-Item -LiteralPath $binary -Destination $backupBinary -Force
@@ -659,12 +783,40 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
         [ServiceProcess.ServiceControllerStatus]::Running,
         [TimeSpan]::FromSeconds(30)
     )
-    # SCM can transiently report Running before the async production worker
-    # discovers a fatal local startup error and terminates the service process.
-    Start-Sleep -Seconds 2
-    $service.Refresh()
-    if ($service.Status -ne "Running") { throw "persistent agent service did not start" }
-    $service.Dispose()
+    # SCM can transiently report Running before the production worker opens its
+    # durable state. Observe through a read-only connection until this exact
+    # start advances fenced authority; never initialize or migrate the journal
+    # from the installer health path.
+    $journalDeadline = (Get-Date).AddSeconds(30)
+    $journalStarted = $false
+    $journalFailure = "journal did not appear"
+    try {
+        do {
+            $service.Refresh()
+            if ($service.Status -ne "Running") {
+                throw "persistent agent service stopped before journal startup completed"
+            }
+            if (Test-Path -LiteralPath $journal) {
+                try {
+                    $journalAfter = Get-JournalObservation $binary $journal
+                    if ($journalAfter.SchemaVersion -eq 2 -and
+                        $journalAfter.SessionEpoch -gt $journalEpochBefore) {
+                        $journalStarted = $true
+                        break
+                    }
+                    $journalFailure = "epoch did not advance: before=$journalEpochBefore after=$($journalAfter.SessionEpoch) schema=$($journalAfter.SchemaVersion)"
+                } catch {
+                    $journalFailure = $_.Exception.Message
+                }
+            }
+            Start-Sleep -Milliseconds 250
+        } while ((Get-Date) -lt $journalDeadline)
+        if (-not $journalStarted) {
+            throw "persistent agent journal startup check failed: $journalFailure"
+        }
+    } finally {
+        $service.Dispose()
+    }
 } catch {
     $serviceInstallFailure = $_
     $serviceRollbackFailures = @()

@@ -1045,6 +1045,12 @@ pub fn journal_session_epoch(path: &Path) -> Result<u64, AgentError> {
     Ok(journal.last_session_epoch()?)
 }
 
+pub fn observe_journal(
+    path: &Path,
+) -> Result<mcloving_agent_runtime::JournalObservation, AgentError> {
+    Ok(Journal::observe(path)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

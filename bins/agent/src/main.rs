@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use mcloving_agent::{
-    AgentConfig, journal_health, journal_session_epoch, probe_once, run_until_stopped,
-    validate_outbound_configuration,
+    AgentConfig, journal_health, journal_session_epoch, observe_journal, probe_once,
+    run_until_stopped, validate_outbound_configuration,
 };
 #[cfg(windows)]
 use mcloving_agent::{
@@ -52,6 +52,18 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 "journal_mode={mode} integrity={integrity} session_epoch={session_epoch} active_attempts={active}"
             );
         }
+        "journal-observe" => {
+            let path = required_path(&arguments, 1, "JOURNAL")?;
+            let observation = observe_journal(&path)?;
+            println!(
+                "schema_version={} journal_mode={} integrity={} session_epoch={} active_attempts={}",
+                observation.schema_version,
+                observation.journal_mode,
+                observation.integrity,
+                observation.session_epoch,
+                observation.active_attempts
+            );
+        }
         "validate-config" => {
             let config = AgentConfig::from_environment()?;
             runtime()?.block_on(validate_outbound_configuration(&config))?;
@@ -93,7 +105,7 @@ fn dispatch(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             return Err(
-                "usage: mcloving-agent [foreground|probe|journal-check PATH|validate-config|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT MARKER_ROOT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
+                "usage: mcloving-agent [foreground|probe|journal-check PATH|journal-observe PATH|validate-config|service|service-smoke PATH|service-execution-smoke JOURNAL WORKSPACE_ROOT MARKER_ROOT|service-creation-boundary-smoke JOURNAL WORKSPACE_ROOT SCRIPT MARKER BOUNDARY]"
                     .into(),
             );
         }

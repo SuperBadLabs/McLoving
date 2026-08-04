@@ -48,6 +48,170 @@ function New-RestrictedDirectoryAcl {
     return $acl
 }
 
+function Assert-NonReplaceableDirectoryChain([string]$Path) {
+    $trustedSids = @(
+        "S-1-5-18",
+        "S-1-5-32-544",
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+    )
+    $dangerousRights =
+        [Security.AccessControl.FileSystemRights]::Delete -bor
+        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
+    [uint64]$genericRightsMask = 4026531840
+    $cursor = [IO.Path]::GetFullPath($Path)
+    while ($true) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if (-not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "package directory ancestor is not a real directory: $($item.FullName)"
+        }
+        $acl = Get-Acl -LiteralPath $item.FullName -ErrorAction Stop
+        $rawDescriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+            $acl.GetSecurityDescriptorBinaryForm(),
+            0
+        )
+        if ($null -eq $rawDescriptor.DiscretionaryAcl) {
+            throw "package directory ancestor has a NULL DACL: $($item.FullName)"
+        }
+        $ownerSid = $acl.GetOwner(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+        if ($ownerSid -notin $trustedSids) {
+            throw "package directory ancestor has an untrusted owner: $($item.FullName)"
+        }
+        $replaceableRules = @($acl.GetAccessRules(
+            $true,
+            $true,
+            [Security.Principal.SecurityIdentifier]
+        ) | Where-Object {
+            [uint64]$rightsMask = [int64]$_.FileSystemRights -band 4294967295
+            $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            ($_.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -eq 0 -and
+            $_.IdentityReference.Value -notin $trustedSids -and
+            (($rightsMask -band $genericRightsMask) -ne 0 -or
+                ($_.FileSystemRights -band $dangerousRights) -ne 0)
+        })
+        if ($replaceableRules.Count -ne 0) {
+            throw "package directory ancestor grants untrusted replacement rights: $($item.FullName)"
+        }
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) { break }
+        $cursor = $parent
+    }
+}
+
+function New-RestrictedDirectoryAtomic([string]$Path) {
+    if (-not ("McLoving.PackageWin32Directory" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace McLoving {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PackageSecurityAttributes {
+        public int Length;
+        public IntPtr SecurityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool InheritHandle;
+    }
+
+    public static class PackageWin32Directory {
+        [DllImport("kernel32.dll", EntryPoint = "CreateDirectoryW",
+            CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CreateDirectory(
+            string path,
+            ref PackageSecurityAttributes securityAttributes);
+    }
+}
+'@
+    }
+
+    $directoryCreated = $false
+    try {
+        $acl = New-RestrictedDirectoryAcl
+        $descriptor = $acl.GetSecurityDescriptorBinaryForm()
+        $pinnedDescriptor = [Runtime.InteropServices.GCHandle]::Alloc(
+            $descriptor,
+            [Runtime.InteropServices.GCHandleType]::Pinned
+        )
+        try {
+            $attributes = [McLoving.PackageSecurityAttributes]::new()
+            $attributes.Length = [Runtime.InteropServices.Marshal]::SizeOf($attributes)
+            $attributes.SecurityDescriptor = $pinnedDescriptor.AddrOfPinnedObject()
+            $attributes.InheritHandle = $false
+            if (-not [McLoving.PackageWin32Directory]::CreateDirectory($Path, [ref]$attributes)) {
+                $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw [ComponentModel.Win32Exception]::new(
+                    $errorCode,
+                    "atomic restricted-directory creation failed for ${Path}"
+                )
+            }
+            $directoryCreated = $true
+        } finally {
+            if ($pinnedDescriptor.IsAllocated) { $pinnedDescriptor.Free() }
+        }
+        $applied = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $appliedOwner = $applied.GetOwner(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+        $rules = @($applied.GetAccessRules(
+            $true,
+            $false,
+            [Security.Principal.SecurityIdentifier]
+        ))
+        $unexpected = @($rules | Where-Object {
+            $_.IdentityReference.Value -notin @("S-1-5-18", "S-1-5-32-544") -or
+            $_.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -ne
+                [Security.AccessControl.FileSystemRights]::FullControl
+        })
+        if ($appliedOwner -ne "S-1-5-32-544" -or
+            -not $applied.AreAccessRulesProtected -or
+            $rules.Count -ne 2 -or
+            $unexpected.Count -ne 0) {
+            throw "atomic package-directory ACL verification failed: $Path"
+        }
+    } catch {
+        if ($directoryCreated -and (Test-Path -LiteralPath $Path)) {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+}
+
+function New-RestrictedDirectoryPathAtomic([string]$Path) {
+    $missing = [Collections.Generic.Stack[string]]::new()
+    $created = [Collections.Generic.Stack[string]]::new()
+    $cursor = [IO.Path]::GetFullPath($Path)
+    while (-not (Test-Path -LiteralPath $cursor)) {
+        $missing.Push($cursor)
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) {
+            throw "package directory has no existing ancestor: $Path"
+        }
+        $cursor = $parent
+    }
+    Assert-NonReplaceableDirectoryChain $cursor
+    try {
+        while ($missing.Count -ne 0) {
+            $createdPath = $missing.Pop()
+            New-RestrictedDirectoryAtomic $createdPath
+            $created.Push($createdPath)
+        }
+    } catch {
+        while ($created.Count -ne 0) {
+            $createdPath = $created.Pop()
+            if (Test-Path -LiteralPath $createdPath) {
+                Remove-Item -LiteralPath $createdPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        throw
+    }
+}
+
 if (Test-Path -LiteralPath $OutputRoot) {
     throw "refusing to overwrite existing package root: $OutputRoot"
 }
@@ -93,10 +257,7 @@ if ($dirtyPaths.Count -ne 0) {
     throw "source worktree must be clean before package qualification"
 }
 
-$outputParent = Split-Path -Parent $OutputRoot
-New-Item -ItemType Directory -Force -Path $outputParent | Out-Null
-New-Item -ItemType Directory -Path $OutputRoot | Out-Null
-Set-Acl -LiteralPath $OutputRoot -AclObject (New-RestrictedDirectoryAcl)
+New-RestrictedDirectoryPathAtomic $OutputRoot
 $package = Join-Path $OutputRoot "package"
 New-Item -ItemType Directory -Path $package | Out-Null
 $snapshotArchive = Join-Path $OutputRoot "source-tree.tar"
