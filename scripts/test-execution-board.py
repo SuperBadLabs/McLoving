@@ -162,13 +162,56 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
 
     def test_unready_current_slot_fails(self) -> None:
         def unready_slot(text: str) -> str:
-            old = "| 1 | `IDP-001` | ACTIVE |"
-            self.assertIn(old, text)
-            return text.replace(old, "| 1 | `AUTHZ-001` | PENDING |", 1)
+            synthetic_dependency = "TEST-UNREADY"
+            self.assertNotIn(
+                synthetic_dependency,
+                {
+                    match.group(1)
+                    for line in text.splitlines()
+                    if (match := VERIFY.TICKET_ROW.match(line)) is not None
+                },
+            )
+            current = next(
+                (
+                    match
+                    for line in text.splitlines()
+                    if (match := VERIFY.CURRENT_SLOT_ROW.match(line)) is not None
+                ),
+                None,
+            )
+            self.assertIsNotNone(current)
+            assert current is not None
+            _, current_ticket, _ = current.groups()
+            ticket_row = next(
+                (
+                    match
+                    for line in text.splitlines()
+                    if (match := VERIFY.TICKET_ROW.match(line)) is not None
+                    and match.group(1) == current_ticket
+                ),
+                None,
+            )
+            self.assertIsNotNone(ticket_row)
+            assert ticket_row is not None
+            _, _, dependency_cell = ticket_row.groups()
+            dependencies = dependency_cell.strip()
+            replacement = synthetic_dependency
+            if dependencies != "-":
+                replacement = f"{dependencies}, {synthetic_dependency}"
+            old = ticket_row.group(0)
+            new = old.replace(
+                f"| {dependency_cell} |",
+                f"| {replacement} |",
+                1,
+            )
+            synthetic_row = (
+                f"\n| {synthetic_dependency} | DEFERRED | - | verifier fixture |\n"
+            )
+            return text.replace(old, new, 1) + synthetic_row
 
         code, _, stderr = self.run_verifier(board_transform=unready_slot)
         self.assertEqual(code, 1)
-        self.assertIn("unfinished dependencies: IDP-001", stderr)
+        self.assertIn("unfinished dependencies: TEST-UNREADY", stderr)
 
     def test_pinned_protected_main_fails(self) -> None:
         def pin_head(text: str) -> str:
