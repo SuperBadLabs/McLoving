@@ -118,32 +118,44 @@ namespace McLoving {
 '@
     }
 
-    $acl = New-RestrictedAcl $true
-    $descriptor = $acl.GetSecurityDescriptorBinaryForm()
-    $pinnedDescriptor = [Runtime.InteropServices.GCHandle]::Alloc(
-        $descriptor,
-        [Runtime.InteropServices.GCHandleType]::Pinned
-    )
+    $directoryCreated = $false
     try {
-        $attributes = [McLoving.SecurityAttributes]::new()
-        $attributes.Length = [Runtime.InteropServices.Marshal]::SizeOf($attributes)
-        $attributes.SecurityDescriptor = $pinnedDescriptor.AddrOfPinnedObject()
-        $attributes.InheritHandle = $false
-        if (-not [McLoving.Win32Directory]::CreateDirectory($Path, [ref]$attributes)) {
-            $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
-            throw [ComponentModel.Win32Exception]::new(
-                $errorCode,
-                "atomic restricted-directory creation failed for ${Path}"
-            )
+        $acl = New-RestrictedAcl $true
+        $descriptor = $acl.GetSecurityDescriptorBinaryForm()
+        $pinnedDescriptor = [Runtime.InteropServices.GCHandle]::Alloc(
+            $descriptor,
+            [Runtime.InteropServices.GCHandleType]::Pinned
+        )
+        try {
+            $attributes = [McLoving.SecurityAttributes]::new()
+            $attributes.Length = [Runtime.InteropServices.Marshal]::SizeOf($attributes)
+            $attributes.SecurityDescriptor = $pinnedDescriptor.AddrOfPinnedObject()
+            $attributes.InheritHandle = $false
+            if (-not [McLoving.Win32Directory]::CreateDirectory($Path, [ref]$attributes)) {
+                $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                throw [ComponentModel.Win32Exception]::new(
+                    $errorCode,
+                    "atomic restricted-directory creation failed for ${Path}"
+                )
+            }
+            $directoryCreated = $true
+        } finally {
+            if ($pinnedDescriptor.IsAllocated) { $pinnedDescriptor.Free() }
         }
-    } finally {
-        if ($pinnedDescriptor.IsAllocated) { $pinnedDescriptor.Free() }
+        Assert-RestrictedTreeAcl $Path
+    } catch {
+        if ($directoryCreated -and (Test-Path -LiteralPath $Path)) {
+            # The directory is still empty here. Do not recurse into content a
+            # concurrent administrator may have placed in a failed generation.
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        }
+        throw
     }
-    Assert-RestrictedTreeAcl $Path
 }
 
 function New-RestrictedDirectoryPathAtomic([string]$Path) {
     $missing = [Collections.Generic.Stack[string]]::new()
+    $created = [Collections.Generic.Stack[string]]::new()
     $cursor = [IO.Path]::GetFullPath($Path)
     while (-not (Test-Path -LiteralPath $cursor)) {
         $missing.Push($cursor)
@@ -153,13 +165,33 @@ function New-RestrictedDirectoryPathAtomic([string]$Path) {
         }
         $cursor = $parent
     }
-    $ancestor = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
-    if (-not $ancestor.PSIsContainer -or
-        ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "restricted directory ancestor is not a real directory: $($ancestor.FullName)"
+    $ancestorCursor = $cursor
+    while ($true) {
+        $ancestor = Get-Item -LiteralPath $ancestorCursor -Force -ErrorAction Stop
+        if (-not $ancestor.PSIsContainer -or
+            ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "restricted directory ancestor is not a real directory: $($ancestor.FullName)"
+        }
+        $parent = Split-Path -Parent $ancestorCursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $ancestorCursor) {
+            break
+        }
+        $ancestorCursor = $parent
     }
-    while ($missing.Count -ne 0) {
-        New-RestrictedDirectoryAtomic $missing.Pop()
+    try {
+        while ($missing.Count -ne 0) {
+            $createdPath = $missing.Pop()
+            New-RestrictedDirectoryAtomic $createdPath
+            $created.Push($createdPath)
+        }
+    } catch {
+        while ($created.Count -ne 0) {
+            $createdPath = $created.Pop()
+            if (Test-Path -LiteralPath $createdPath) {
+                Remove-Item -LiteralPath $createdPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        throw
     }
 }
 
