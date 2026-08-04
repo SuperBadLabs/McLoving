@@ -42,7 +42,7 @@ lifecycle boundaries, not a hostile-tenant sandbox.
 The persistent-host reboot row is intentionally separate because a hosted CI
 VM cannot supply honest across-reboot evidence. NucBoxG3 ran the exact signed
 qualification package over pinned LAN SSH. A physical reboot advanced the
-journal epoch `3 -> 11`, returned the automatic SCM service, rejected stale
+journal epoch `3 -> 10`, returned the automatic SCM service, rejected stale
 session authority, reported zero active attempts, and left no pre-reboot child.
 The accepted attempt finalized `failed` with exit code 1 during SCM shutdown,
 before the reboot removed connectivity, so it correctly had one offer and no
@@ -54,22 +54,22 @@ fence second offer, eventual success, and no escaped first child. A new post-
 reboot build also succeeded.
 
 The evidence binds final reviewed implementation commit
-`38dd5c81a3098a53f83c1bcb758f76499409f0de`, tree
-`ea71b1e71c0269bd670f9a9ca0940d2897e27aab`, and signed binary SHA-256
-`5da01172be9332b515c7a4a0952b6a5a611241e393c7c1424444e0e5224399ed`.
+`f7ae1705f9194afa76d17d86c54be8275d401338`, tree
+`b03827b342b785f1720aaa500afff9d018e9bb97`, and signed binary SHA-256
+`ebd30c6592f38082d53e557fe52e9e2b93ba9afb8f71fee5f8aef675c9d83c97`.
 The signer was a short-lived self-signed qualification identity, not
 production `REL-001` provenance. Its exact CNG key identity is bound before
 cleanup, exactly one `My`-store private-key deletion is required, and PASS is
 withheld unless that bound key file is absent. The external exact-package
 qualification harness observed 13 CNG key files before and after with zero
 delta. NucBoxG3's complete 23-file manifest SHA-256 is
-`478a6d3d19a7acfa8db6ce05f11cfece825a968cc6e21fe3713ac86f3ebc8860`;
+`1cd54986e8fe63999e7fe156bdfde223859551fd8b035cb310aa935f8caec2ef`;
 the nested package manifest SHA-256 is
-`9f9428873fd4db02df9f8523deb088e4d604f76e5715acb74b8ea5806f41f9da`;
-and the 39-file HeMan outer evidence manifest is
-`b9c1d9e79fdc038525a4f6823aa3a8497ac67c63c3c386ed3f46b49c20d844c7`.
+`1ba895fd4e971416f6e8caf3359b93429f3261cda88feb07cce40dcf1c01746e`;
+and the 41-file HeMan outer evidence manifest is
+`c4b836578c24d1e0c26f7d6bcc293b230bee86491fbe5605120201318df01a0c`.
 The exact archive SHA-256 is
-`c33931c7dff914ea3fb9a95033c49da197e0cf84697fc0617e4479b731cfb0d8`.
+`92a8e6675b2b7aa4574cbf0043a30eff293733c4d4c824e1726f6a8ad1f241a7`.
 The earlier `pr25-cfd7aa2-final` and `pr25-9859c7a-final` bundles remain
 immutable predecessor evidence, as does the later `pr25-a250c86-final`
 installer predecessor.
@@ -107,3 +107,10 @@ rejects expired and not-yet-valid identities before agent runtime startup.
 Generated validity-window tests cover valid, expired, and future leaves; an
 exact Windows-binary preflight also rejected an expired certificate without
 creating a journal or workspace.
+
+The installer never reuses an existing `PackageRoot`, because a tightened DACL
+cannot revoke handles granted before installation. A writable-root preflight
+proved rejection without ACL, marker, gate, or service mutation. Each accepted
+install uses a fresh atomically protected package namespace; failed
+transactions remove only the namespace created by that transaction after
+rollback succeeds, as exercised by the corrupt-journal retry path.
