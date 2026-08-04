@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::future::Future;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -48,6 +49,7 @@ pub struct AgentConfig {
     pub agent_private_key_path: PathBuf,
     pub journal_path: PathBuf,
     pub workspace_root: PathBuf,
+    pub session_receipt_path: Option<PathBuf>,
     pub minimum_session_epoch: u64,
     pub lease_seconds: u32,
     pub poll_interval: Duration,
@@ -186,6 +188,10 @@ impl AgentConfig {
             agent_private_key_path: PathBuf::from(required("MCLOVING_AGENT_PRIVATE_KEY_PATH")?),
             journal_path: PathBuf::from(required("MCLOVING_AGENT_JOURNAL_PATH")?),
             workspace_root: PathBuf::from(required("MCLOVING_AGENT_WORKSPACE_ROOT")?),
+            session_receipt_path: values
+                .get("MCLOVING_AGENT_SESSION_RECEIPT_PATH")
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
             minimum_session_epoch,
             lease_seconds,
             poll_interval: Duration::from_millis(poll_milliseconds),
@@ -279,6 +285,10 @@ fn instance_lock_path(journal_path: &Path) -> PathBuf {
 
 async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<(), AgentError> {
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
+    publish_authenticated_session_receipt(
+        config.session_receipt_path.as_deref(),
+        receipt.session_epoch,
+    )?;
     send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
     worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await?;
     let mut reconciliation_tick = interval(RECONCILIATION_INTERVAL);
@@ -377,6 +387,35 @@ async fn bounded_open_session_rpc<T>(
         .await
         .map_err(|_| AgentError::OpenSessionTimeout)?
         .map_err(AgentError::from)
+}
+
+fn publish_authenticated_session_receipt(
+    path: Option<&Path>,
+    session_epoch: u64,
+) -> Result<(), AgentError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if path.exists() {
+        return Ok(());
+    }
+    let mut pending = path.as_os_str().to_os_string();
+    pending.push(format!(".pending.{}", std::process::id()));
+    let pending = PathBuf::from(pending);
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pending)?;
+        writeln!(file, "session_epoch={session_epoch}")?;
+        file.sync_all()?;
+        std::fs::rename(&pending, path)?;
+        Ok::<(), std::io::Error>(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+    result.map_err(AgentError::Io)
 }
 
 fn require_work_delivery_feature(features: &[String]) -> Result<(), AgentError> {
@@ -1070,6 +1109,7 @@ mod tests {
             ("MCLOVING_AGENT_PRIVATE_KEY_PATH", "agent-key.pem"),
             ("MCLOVING_AGENT_JOURNAL_PATH", "agent.db"),
             ("MCLOVING_AGENT_WORKSPACE_ROOT", "workspace"),
+            ("MCLOVING_AGENT_SESSION_RECEIPT_PATH", "session.receipt"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
@@ -1089,6 +1129,10 @@ mod tests {
         let config = AgentConfig::from_values(&values()).unwrap();
         assert_eq!(config.agent_id, "windows-1");
         assert_eq!(config.minimum_session_epoch, 0);
+        assert_eq!(
+            config.session_receipt_path,
+            Some(PathBuf::from("session.receipt"))
+        );
 
         let mut missing = values();
         missing.remove("MCLOVING_AGENT_PRIVATE_KEY_PATH");
@@ -1144,6 +1188,30 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(AgentError::OpenSessionTimeout)));
+    }
+
+    #[test]
+    fn authenticated_session_receipt_is_atomic_and_first_session_is_immutable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.receipt");
+        publish_authenticated_session_receipt(Some(&path), 41).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "session_epoch=41\n"
+        );
+
+        publish_authenticated_session_receipt(Some(&path), 42).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "session_epoch=41\n"
+        );
+        assert!(std::fs::read_dir(directory.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains("pending")
+        }));
     }
 
     #[test]

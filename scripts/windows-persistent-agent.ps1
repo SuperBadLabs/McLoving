@@ -433,6 +433,7 @@ $agentPrivateKeyPath = Join-Path $identityGeneration "agent-key.pem"
 $scripts = Join-Path $runtimeGeneration "scripts"
 $journal = Join-Path $runtimeGeneration "agent.db"
 $workspace = Join-Path $runtimeGeneration "workspaces"
+$sessionReceipt = Join-Path $runtimeGeneration "authenticated-session.receipt"
 $validationEnvironment = @{
     MCLOVING_AGENT_ID = $agentId
     MCLOVING_AGENT_TRUST_POOL = $trustPool
@@ -444,6 +445,7 @@ $validationEnvironment = @{
     MCLOVING_AGENT_PRIVATE_KEY_PATH = $protectedAgentPrivateKeyPath
     MCLOVING_AGENT_JOURNAL_PATH = $journal
     MCLOVING_AGENT_WORKSPACE_ROOT = $workspace
+    MCLOVING_AGENT_SESSION_RECEIPT_PATH = $sessionReceipt
     MCLOVING_AGENT_LEASE_SECONDS = "5"
     MCLOVING_AGENT_POLL_MILLISECONDS = "50"
     MCLOVING_AGENT_RENEW_MILLISECONDS = "500"
@@ -885,6 +887,7 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
         "MCLOVING_AGENT_PRIVATE_KEY_PATH=$agentPrivateKeyPath",
         "MCLOVING_AGENT_JOURNAL_PATH=$journal",
         "MCLOVING_AGENT_WORKSPACE_ROOT=$workspace",
+        "MCLOVING_AGENT_SESSION_RECEIPT_PATH=$sessionReceipt",
         "MCLOVING_AGENT_LEASE_SECONDS=5",
         "MCLOVING_AGENT_POLL_MILLISECONDS=50",
         "MCLOVING_AGENT_RENEW_MILLISECONDS=500",
@@ -900,9 +903,10 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
         [TimeSpan]::FromSeconds(30)
     )
     # SCM can transiently report Running before the production worker opens its
-    # durable state. Observe through a read-only connection until this exact
-    # start advances fenced authority; never initialize or migrate the journal
-    # from the installer health path.
+    # durable state. Observe until this exact start both advances fenced
+    # authority and publishes the receipt that is written only after the
+    # controller accepts the authenticated open-session RPC. Never initialize
+    # or migrate the journal from the installer health path.
     $journalDeadline = (Get-Date).AddSeconds(30)
     $journalStarted = $false
     $journalFailure = "journal did not appear"
@@ -917,10 +921,20 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
                     $journalAfter = Get-JournalObservation $binary $journal
                     if ($journalAfter.SchemaVersion -eq 2 -and
                         $journalAfter.SessionEpoch -gt $journalEpochBefore) {
-                        $journalStarted = $true
-                        break
+                        if (Test-Path -LiteralPath $sessionReceipt -PathType Leaf) {
+                            $receipt = (Get-Content -Raw -LiteralPath $sessionReceipt).Trim()
+                            if ($receipt -match '^session_epoch=(\d+)$' -and
+                                [uint64]$Matches[1] -eq $journalAfter.SessionEpoch) {
+                                $journalStarted = $true
+                                break
+                            }
+                            $journalFailure = "authenticated session receipt does not match journal epoch: receipt=$receipt epoch=$($journalAfter.SessionEpoch)"
+                        } else {
+                            $journalFailure = "authenticated session receipt did not appear for epoch $($journalAfter.SessionEpoch)"
+                        }
+                    } else {
+                        $journalFailure = "epoch did not advance: before=$journalEpochBefore after=$($journalAfter.SessionEpoch) schema=$($journalAfter.SchemaVersion)"
                     }
-                    $journalFailure = "epoch did not advance: before=$journalEpochBefore after=$($journalAfter.SessionEpoch) schema=$($journalAfter.SchemaVersion)"
                 } catch {
                     $journalFailure = $_.Exception.Message
                 }
@@ -1084,5 +1098,6 @@ foreach ($staleIdentityGeneration in $staleIdentityGenerations) {
 if ($identityCleanupFailures.Count -ne 0) {
     throw "persistent agent started but superseded identity cleanup failed: $($identityCleanupFailures -join '; ')"
 }
+Assert-RestrictedTreeAcl $runtimeGeneration
 $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
 Write-Output "persistent-agent-started service=$ServiceName binary_sha256=$binaryHash"

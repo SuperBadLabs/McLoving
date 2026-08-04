@@ -2144,6 +2144,7 @@ mod tests {
             agent_private_key_path: PathBuf::from("agent-key.pem"),
             journal_path: PathBuf::from("agent.db"),
             workspace_root: PathBuf::from("workspace"),
+            session_receipt_path: None,
             minimum_session_epoch: 0,
             lease_seconds: 30,
             poll_interval: Duration::from_millis(500),
