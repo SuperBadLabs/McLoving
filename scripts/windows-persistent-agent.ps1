@@ -947,6 +947,34 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
     } finally {
         $service.Dispose()
     }
+
+    # Do not commit the installation until every post-start invariant and
+    # superseded-identity cleanup has succeeded. Any failure here must flow
+    # through the same rollback path that restores the previous registration,
+    # environment, binary, runtime, and service state.
+    $identityCleanupFailures = @()
+    $staleIdentityGenerations = @(Get-ChildItem -LiteralPath $PackageRoot -Directory `
+        -Filter "identity-*" -Force -ErrorAction Stop)
+    foreach ($staleIdentityGeneration in $staleIdentityGenerations) {
+        if ($staleIdentityGeneration.Name -ieq (Split-Path -Leaf $identityGeneration)) {
+            continue
+        }
+        try {
+            if (($staleIdentityGeneration.Attributes -band `
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "refusing to remove reparse point"
+            }
+            Remove-Item -LiteralPath $staleIdentityGeneration.FullName `
+                -Recurse -Force -ErrorAction Stop
+        } catch {
+            $identityCleanupFailures += `
+                "$($staleIdentityGeneration.FullName): $($_.Exception.Message)"
+        }
+    }
+    if ($identityCleanupFailures.Count -ne 0) {
+        throw "superseded identity cleanup failed: $($identityCleanupFailures -join '; ')"
+    }
+    Assert-RestrictedTreeAcl $runtimeGeneration
 } catch {
     $serviceInstallFailure = $_
     $serviceRollbackFailures = @()
@@ -1080,24 +1108,5 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
     throw $serviceInstallFailure
 }
 Remove-Item -LiteralPath $stagedBinary, $backupBinary -Force -ErrorAction SilentlyContinue
-$identityCleanupFailures = @()
-$staleIdentityGenerations = @(Get-ChildItem -LiteralPath $PackageRoot -Directory `
-    -Filter "identity-*" -Force -ErrorAction Stop)
-foreach ($staleIdentityGeneration in $staleIdentityGenerations) {
-    if ($staleIdentityGeneration.Name -ieq (Split-Path -Leaf $identityGeneration)) { continue }
-    try {
-        if (($staleIdentityGeneration.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "refusing to remove reparse point"
-        }
-        Remove-Item -LiteralPath $staleIdentityGeneration.FullName `
-            -Recurse -Force -ErrorAction Stop
-    } catch {
-        $identityCleanupFailures += "$($staleIdentityGeneration.FullName): $($_.Exception.Message)"
-    }
-}
-if ($identityCleanupFailures.Count -ne 0) {
-    throw "persistent agent started but superseded identity cleanup failed: $($identityCleanupFailures -join '; ')"
-}
-Assert-RestrictedTreeAcl $runtimeGeneration
 $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
 Write-Output "persistent-agent-started service=$ServiceName binary_sha256=$binaryHash"
