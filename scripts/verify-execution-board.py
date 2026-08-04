@@ -82,19 +82,34 @@ def main() -> None:
                 stderr=subprocess.DEVNULL,
             )
             if worktree_clean.returncode == 0 and index_clean.returncode == 0:
-                committed_date = subprocess.run(
-                    ["git", "log", "-1", "--format=%cs", "--", str(relative_board)],
+                shallow_repository = subprocess.run(
+                    ["git", "rev-parse", "--is-shallow-repository"],
                     cwd=repository,
                     check=False,
                     capture_output=True,
                     text=True,
                 )
-                expected = committed_date.stdout.strip()
-                if committed_date.returncode == 0 and expected and expected != str(updated):
-                    errors.append(
-                        f"execution board Updated date is {updated}; last board "
-                        f"commit is {expected}"
+                if (
+                    shallow_repository.returncode == 0
+                    and shallow_repository.stdout.strip() == "false"
+                ):
+                    committed_date = subprocess.run(
+                        ["git", "log", "-1", "--format=%cs", "--", str(relative_board)],
+                        cwd=repository,
+                        check=False,
+                        capture_output=True,
+                        text=True,
                     )
+                    expected = committed_date.stdout.strip()
+                    if (
+                        committed_date.returncode == 0
+                        and expected
+                        and expected != str(updated)
+                    ):
+                        errors.append(
+                            f"execution board Updated date is {updated}; last board "
+                            f"commit is {expected}"
+                        )
 
     if re.search(r"Protected `main` is `[0-9a-f]{40}`", text):
         errors.append(

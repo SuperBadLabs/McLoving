@@ -86,6 +86,21 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
         self.assertIn("execution-board-ok", stdout)
         self.assertEqual(run.call_count, 2)
 
+    def test_shallow_repository_skips_commit_date_check(self) -> None:
+        worktree_clean = mock.Mock(returncode=0)
+        index_clean = mock.Mock(returncode=0)
+        shallow_repository = mock.Mock(returncode=0, stdout="true\n")
+        with mock.patch.object(
+            VERIFY.subprocess,
+            "run",
+            side_effect=(worktree_clean, index_clean, shallow_repository),
+        ) as run:
+            code, stdout, stderr = self.run_verifier()
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("execution-board-ok", stdout)
+        self.assertEqual(run.call_count, 3)
+
     def test_stale_current_slot_status_fails(self) -> None:
         expected_message = ""
 
