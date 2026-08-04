@@ -65,14 +65,21 @@ def main() -> None:
             # checks the committed form: when history for this file is available,
             # the header must name the date of the commit that last changed it.
             relative_board = board.relative_to(repository)
-            clean = subprocess.run(
+            worktree_clean = subprocess.run(
                 ["git", "diff", "--quiet", "--", str(relative_board)],
                 cwd=repository,
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            if clean.returncode == 0:
+            index_clean = subprocess.run(
+                ["git", "diff", "--cached", "--quiet", "--", str(relative_board)],
+                cwd=repository,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if worktree_clean.returncode == 0 and index_clean.returncode == 0:
                 committed_date = subprocess.run(
                     ["git", "log", "-1", "--format=%cs", "--", str(relative_board)],
                     cwd=repository,

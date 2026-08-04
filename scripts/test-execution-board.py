@@ -11,6 +11,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Callable
+from unittest import mock
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -71,15 +72,47 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertIn("execution-board-ok", stdout)
 
+    def test_staged_board_skips_commit_date_check(self) -> None:
+        worktree_clean = mock.Mock(returncode=0)
+        index_dirty = mock.Mock(returncode=1)
+        with mock.patch.object(
+            VERIFY.subprocess,
+            "run",
+            side_effect=(worktree_clean, index_dirty),
+        ) as run:
+            code, stdout, stderr = self.run_verifier()
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("execution-board-ok", stdout)
+        self.assertEqual(run.call_count, 2)
+
     def test_stale_current_slot_status_fails(self) -> None:
+        expected_message = ""
+
         def stale_status(text: str) -> str:
-            old = "| 2 | `SCM-001` | PENDING |"
-            self.assertIn(old, text)
-            return text.replace(old, "| 2 | `SCM-001` | ACTIVE |", 1)
+            nonlocal expected_message
+            match = next(
+                (
+                    VERIFY.CURRENT_SLOT_ROW.match(line)
+                    for line in text.splitlines()
+                    if VERIFY.CURRENT_SLOT_ROW.match(line)
+                ),
+                None,
+            )
+            self.assertIsNotNone(match)
+            assert match is not None
+            _, _, status = match.groups()
+            replacement = "ACTIVE" if status != "ACTIVE" else "PENDING"
+            old = match.group(0)
+            new = old.replace(f"| {status} |", f"| {replacement} |", 1)
+            expected_message = (
+                f"is {replacement}, ticket table says {status}"
+            )
+            return text.replace(old, new, 1)
 
         code, _, stderr = self.run_verifier(board_transform=stale_status)
         self.assertEqual(code, 1)
-        self.assertIn("ticket table says PENDING", stderr)
+        self.assertIn(expected_message, stderr)
 
     def test_unready_current_slot_fails(self) -> None:
         def unready_slot(text: str) -> str:
@@ -110,8 +143,10 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
 
     def test_invalid_updated_date_fails(self) -> None:
         def invalidate_date(text: str) -> str:
-            self.assertIn("Updated: 2026-08-04", text)
-            return text.replace("Updated: 2026-08-04", "Updated: 2026-99-99", 1)
+            match = VERIFY.UPDATED_ROW.search(text)
+            self.assertIsNotNone(match)
+            assert match is not None
+            return text[: match.start(1)] + "2026-99-99" + text[match.end(1) :]
 
         code, _, stderr = self.run_verifier(board_transform=invalidate_date)
         self.assertEqual(code, 1)
