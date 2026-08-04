@@ -1234,13 +1234,14 @@ HeMan's read-only controller/database evidence manifest is
 All one-day test private keys were destroyed after sealing.
 
 `WIN-003` is closed on NucBoxG3 with the signed qualification package built
-natively from commit `1dd946f0d3c717dd5c3f312dacac7a68c927a7c3` and tree
-`82b93c8916925d7fb8abc415e5fd37efc3ee8b2d`. The source archive SHA-256 is
-`c134565a2a39febdc95b8668f69337bea64bd87a152f1bebd57a5098f27df1ac`;
+natively from the reviewed installer implementation at commit
+`1603c3c1b16c5920b2ec1c233e9534c376a56642` and tree
+`b63c94db086ddd02a0b645fdab7bc980af77272f`. The exact source bundle SHA-256
+is `65e8213e79500c6a36cb5502ab86ac22aa0236a5ab72e17321e83cffee48f63d`;
 the signed binary is
-`2eb8ad27d241249d73641d52f872e9ea62b67e8c7d23d5e8b911cf11485aeb37`;
+`9ce835d4b45019df3767a345be2774b8a0b7567907843ab85b8130dc076b5d88`;
 and the package archive is
-`67356d0c2d0146ec582bdfdabc61578240ebbf1e5132ab03e417b20ed9ac7656`.
+`0fa92a72d4a5cdaedc42ea21a4fbfd5e68686ed195602c64fb4d3bfe39047f94`.
 The short-lived self-signed Authenticode identity is qualification evidence,
 not `REL-001` production provenance; its private key was non-exportable and
 deleted after signing, and its public trust anchors were removed after the
@@ -1250,7 +1251,7 @@ The outbound mTLS gate proved direct, `cmd.exe`, and PowerShell execution;
 durable stream digests; explicit cancellation with a separately verified dead
 descendant; and controller interruption with one lease expiration, two fenced
 offers, one logical success, and no escaped first child. A physical Windows
-reboot advanced the agent journal session epoch `3 -> 8`, returned the SCM
+reboot advanced the agent journal session epoch `3 -> 10`, returned the SCM
 service automatically, rejected a fresh-journal stale session, left zero
 active attempts, and killed the pre-reboot PID. Because SCM shutdown allowed
 the live agent to publish exit code 1 before power loss, that rebooted attempt
@@ -1259,21 +1260,30 @@ silently retried. A separate post-reboot build succeeded. This exact terminal
 distinction is the current recovery contract, not a claim that machine reboot
 and controller loss have identical retry behavior.
 
-The NucBoxG3 read-only evidence manifest SHA-256 is
-`b650f953f84ac0ccea0f5288593e26a74882f830378686a9a3049c68d7c5e3ce`.
-HeMan's controller, PostgreSQL, LAN-host-key, and mirrored host evidence is
-sealed at `/sn8100/runs/mcloving/windows/win003-hardening-20260803`; its manifest
+The NucBoxG3 read-only 17-file evidence manifest SHA-256 is
+`1af0f57056af35042fc56000c3e7ba129607067778d841fabb1097d656df1ddd`.
+HeMan's 27-file outer evidence bundle is sealed at
+`/sn8100/runs/mcloving/windows/pr25-1603c3c-final`; its self-excluding manifest
 SHA-256 is
-`97173f15264c83359891904c7a3bf1763b46cfdcadf007e21027d90f0cd5776b`.
-All temporary mTLS private keys, the Windows service, the qualification trust
-anchors, and the isolated PostgreSQL fixture were removed after independent
-manifest verification. W2-B and the persistent Windows evidence lane are
-closed; `REL-001` remains the separate production-signing dependency.
+`60fe4c09a49347f4e16c2df51bedf3a3d7def398c5439d22302e792901af7070`.
+It binds the exact source and package, native host receipts, controller hash,
+PostgreSQL dump and schema, and cleanup receipts. All temporary mTLS private
+keys, the Windows service and installed identity, qualification trust anchors,
+the test-only recovery-probe shim, and the isolated PostgreSQL fixture were
+removed before sealing; manifest-covered cleanup receipts record that state,
+and the independent verification rechecked both hashes and absence. W2-B and
+the persistent Windows evidence lane are closed; `REL-001` remains the
+separate production-signing dependency.
 
 The final installer contract requires both the exact binary digest and signer
 thumbprint. A native wrong-digest attempt failed before service mutation and
 removed its temporary qualification trust; the accepted install reverified
 the copied binary, removed temporary trust before service start, and left no
 machine-wide qualification certificate after success. Replacement of an
-existing service also requires a bounded observed stop and complete SCM
-deletion before any binary is copied.
+existing service requires a bounded observed stop, protected prior-binary
+backup, verified binary replacement, and in-place SCM reconfiguration. The
+reviewed installer further stages all package and TLS inputs under protected
+canonical roots, binds the service to a GUID-named immutable TLS generation
+whose three PEM digests are verified, rolls back the whole service transaction
+on every post-identity failure, and prunes superseded generations only after
+the running service points to the retained identity.
