@@ -1235,13 +1235,13 @@ All one-day test private keys were destroyed after sealing.
 
 `WIN-003` is closed on NucBoxG3 with the signed qualification package built
 natively from the reviewed installer implementation at commit
-`1603c3c1b16c5920b2ec1c233e9534c376a56642` and tree
-`b63c94db086ddd02a0b645fdab7bc980af77272f`. The exact source bundle SHA-256
-is `65e8213e79500c6a36cb5502ab86ac22aa0236a5ab72e17321e83cffee48f63d`;
+`1373a251069bbef50dc5952adf6378323c2e2504` and tree
+`9fbb5a8783ff5d3473132a95815832854355c9a0`. The exact source bundle SHA-256
+is `5ec105e6f4961d7b13416faecd8a8b19b213104e2ba076490e8d29fa1a39cb0d`;
 the signed binary is
-`9ce835d4b45019df3767a345be2774b8a0b7567907843ab85b8130dc076b5d88`;
+`03f2ef0eeb65d54ac8098381a5b0d99e4966bec577cb9750ac19302555d20282`;
 and the package archive is
-`0fa92a72d4a5cdaedc42ea21a4fbfd5e68686ed195602c64fb4d3bfe39047f94`.
+`4f82484b28832e589e4905059018f0af0216b0658932c9ffb5450289cd1015da`.
 The short-lived self-signed Authenticode identity is qualification evidence,
 not `REL-001` production provenance; its private key was non-exportable and
 deleted after signing, and its public trust anchors were removed after the
@@ -1251,7 +1251,7 @@ The outbound mTLS gate proved direct, `cmd.exe`, and PowerShell execution;
 durable stream digests; explicit cancellation with a separately verified dead
 descendant; and controller interruption with one lease expiration, two fenced
 offers, one logical success, and no escaped first child. A physical Windows
-reboot advanced the agent journal session epoch `3 -> 10`, returned the SCM
+reboot advanced the agent journal session epoch `3 -> 11`, returned the SCM
 service automatically, rejected a fresh-journal stale session, left zero
 active attempts, and killed the pre-reboot PID. Because SCM shutdown allowed
 the live agent to publish exit code 1 before power loss, that rebooted attempt
@@ -1261,11 +1261,11 @@ distinction is the current recovery contract, not a claim that machine reboot
 and controller loss have identical retry behavior.
 
 The NucBoxG3 read-only 17-file evidence manifest SHA-256 is
-`1af0f57056af35042fc56000c3e7ba129607067778d841fabb1097d656df1ddd`.
-HeMan's 27-file outer evidence bundle is sealed at
-`/sn8100/runs/mcloving/windows/pr25-1603c3c-final`; its self-excluding manifest
+`2afb36ec50f4134bcb4a9d4a452543b5af721e67d6e257b5fa1637098b913950`.
+HeMan's 31-file outer evidence bundle is sealed at
+`/sn8100/runs/mcloving/windows/pr25-1373a25-final`; its self-excluding manifest
 SHA-256 is
-`60fe4c09a49347f4e16c2df51bedf3a3d7def398c5439d22302e792901af7070`.
+`530f6e9c07e740c983ada9853da7e2d86ea4d7f4237d958558eec70863509741`.
 It binds the exact source and package, native host receipts, controller hash,
 PostgreSQL dump and schema, and cleanup receipts. All temporary mTLS private
 keys, the Windows service and installed identity, qualification trust anchors,
@@ -1282,8 +1282,10 @@ the copied binary, removed temporary trust before service start, and left no
 machine-wide qualification certificate after success. Replacement of an
 existing service requires a bounded observed stop, protected prior-binary
 backup, verified binary replacement, and in-place SCM reconfiguration. The
-reviewed installer further stages all package and TLS inputs under protected
-canonical roots, binds the service to a GUID-named immutable TLS generation
-whose three PEM digests are verified, rolls back the whole service transaction
+reviewed installer further creates every new staging, package, and TLS
+generation directory with its restricted security descriptor in the atomic
+Win32 `CreateDirectoryW` call, revalidates every existing tree, and binds the
+service to a GUID-named immutable TLS generation whose three PEM digests are
+verified. It rolls back the whole service transaction
 on every post-identity failure, and prunes superseded generations only after
 the running service points to the retained identity.

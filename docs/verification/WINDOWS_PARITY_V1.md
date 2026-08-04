@@ -42,7 +42,7 @@ lifecycle boundaries, not a hostile-tenant sandbox.
 The persistent-host reboot row is intentionally separate because a hosted CI
 VM cannot supply honest across-reboot evidence. NucBoxG3 ran the exact signed
 qualification package over pinned LAN SSH. A physical reboot advanced the
-journal epoch `3 -> 10`, returned the automatic SCM service, rejected stale
+journal epoch `3 -> 11`, returned the automatic SCM service, rejected stale
 session authority, reported zero active attempts, and left no pre-reboot child.
 The accepted attempt finalized `failed` with exit code 1 during SCM shutdown,
 before the reboot removed connectivity, so it correctly had one offer and no
@@ -51,14 +51,14 @@ one lease expiration, a higher-fence second offer, eventual success, and no
 escaped first child. A new post-reboot build also succeeded.
 
 The evidence binds reviewed implementation commit
-`1603c3c1b16c5920b2ec1c233e9534c376a56642`, tree
-`b63c94db086ddd02a0b645fdab7bc980af77272f`, and signed binary SHA-256
-`9ce835d4b45019df3767a345be2774b8a0b7567907843ab85b8130dc076b5d88`.
+`1373a251069bbef50dc5952adf6378323c2e2504`, tree
+`9fbb5a8783ff5d3473132a95815832854355c9a0`, and signed binary SHA-256
+`03f2ef0eeb65d54ac8098381a5b0d99e4966bec577cb9750ac19302555d20282`.
 The signer was a short-lived self-signed qualification identity, not
 production `REL-001` provenance. NucBoxG3 manifest SHA-256 is
-`1af0f57056af35042fc56000c3e7ba129607067778d841fabb1097d656df1ddd`;
+`2afb36ec50f4134bcb4a9d4a452543b5af721e67d6e257b5fa1637098b913950`;
 the HeMan outer evidence manifest is
-`60fe4c09a49347f4e16c2df51bedf3a3d7def398c5439d22302e792901af7070`.
+`530f6e9c07e740c983ada9853da7e2d86ea4d7f4237d958558eec70863509741`.
 Private test keys, service state and installed identity, certificate trust,
 the test-only recovery-probe shim, and the isolated database fixture were
 removed before sealing; manifest-covered cleanup receipts record that state,
@@ -68,7 +68,9 @@ The installer is fail-closed: digest and signer thumbprint are mandatory, a
 wrong-digest native probe leaves both service state and certificate stores
 unchanged, the copied binary is reverified, and temporary self-signed trust is
 removed before the SCM service starts. Package and TLS inputs are copied into
-protected canonical roots before validation; the service points only to a
-GUID-named immutable TLS snapshot whose three PEM digests are verified, the
-entire post-snapshot seam is transactional, and old generations are pruned
+canonical roots created with the restricted security descriptor in the atomic
+Win32 directory-creation call before validation; existing roots are fully
+revalidated. The service points only to a GUID-named immutable TLS snapshot
+whose three PEM digests are verified. The entire post-snapshot seam is
+transactional, and old generations are pruned
 only after successful binding. Production trust remains `REL-001` work.
