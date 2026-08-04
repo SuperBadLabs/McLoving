@@ -1,6 +1,6 @@
 # McLoving execution board
 
-Updated: 2026-08-01
+Updated: 2026-08-04
 
 Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
@@ -837,12 +837,21 @@ unbounded “later Wave 5” escape hatch.
 
 ## Current state and dispatch queue
 
-Protected `main` is `4980247824eae70c8ecc42f3305274811534ff14` after
-PR #20 streamlined the execution topology. Dispatch follows the three-slot
-topology above: `MIG-005`, `IDP-001`, and `SCM-001`. The persistent-Windows campaign remains
-an isolated evidence lane. A slot advances to its earliest dependency-critical
-successor after protected-main merge and exact-head verification; it does not
-wait for the other independent slots.
+The ticket table and batch ledger above are the authoritative status sources;
+this section intentionally does not pin the moving protected-main commit.
+Protected `main` includes the completed compiler, shared-library, state-transfer,
+core differential, identity implementation, and persistent-Windows work. The
+identity ticket remains active until its separately required security evidence
+is attached. The persistent-Windows campaign is closed.
+
+| Slot | Current ticket | Status | Dependency-critical successors |
+|---:|---|---|---|
+| 1 | `IDP-001` | ACTIVE | `AUTHZ-001`, then identity-dependent discovery and client migration |
+| 2 | `SCM-001` | PENDING | `SECRET-001`, `DISC-001`, and `DEP-001` |
+| 3 | `JOBSTATE-001` | PENDING | `TRIG-001` and `DIFF-002` |
+
+A slot advances to its earliest ready successor after protected-main merge and
+exact-head verification; it does not wait for the other independent slots.
 
 Wave 3 is merged through PR #12 at protected-main commit
 `3756c2f0a15ad2c9ba1a9b96464b852a85f4ae1c`; the original Wave 4 migration
@@ -985,10 +994,10 @@ time.
 An injected post-install failure restored repository, build, permalink, and
 next-build-number truth, removed partial evidence, and passed immediate replay.
 The source runtime is retained by default for the dependent phases and removed
-only by an explicit cleanup flag. `MIG-005` is next on its own branch
-and no longer waits for unrelated state-transfer work; both join only through
-their required differential evidence. The serial persistent-Windows evidence
-lane has closed `WIN-001`, `WIN-002`, and `WIN-003`.
+only by an explicit cleanup flag. `MIG-005` then proceeded on its own branch
+without waiting for unrelated state-transfer work; both lines joined only
+through their required differential evidence. The serial persistent-Windows
+evidence lane has closed `WIN-001`, `WIN-002`, and `WIN-003`.
 
 `MIG-005` is complete. The strict-YAML
 `mario-jenkins-oracle-228-shared-libraries-v1` ledger binds the frozen
