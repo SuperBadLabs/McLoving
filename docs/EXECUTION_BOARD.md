@@ -1461,3 +1461,43 @@ Final bounded Claude review session `d9b4f97a-307f-44da-94f6-9018998ece32`
 returned `NO_FINDINGS`; the repository was not mutated. Cleanup removed all
 campaign services, install roots, source/package copies, TLS private material,
 database container, and controller unit while preserving only sealed evidence.
+
+### Exact final transactional post-start closure
+
+The exact-head review found that superseded-identity cleanup and the final
+runtime ACL assertion still ran after the service-install transaction's
+`catch`. Commit `99dc9be1912df8b0920e7afc0ce5b496aa6f4ec6`, tree
+`716b2e56b21e56e6b17408ea41dcd4ef68ef6f48`, keeps both post-start checks
+inside that transaction so any failure restores or deletes the service,
+binary, identity, runtime, and fresh package namespace through the established
+rollback path. Read-only Claude verifier session
+`ffc82179-b954-40f7-9397-67c2ab1bb4c5` returned `NO_FINDINGS` without
+repository mutation. An exact-installer gate injected a failure after
+authenticated service start and proved the new service and package root were
+both absent afterward before the unmodified installer was allowed to run.
+
+The final source bundle, archive, and signed binary SHA-256 values are
+respectively
+`3ed49c45b444852475b6740a698f01b29bafe358a77137192ecad03329070b08`,
+`88d88c7271bdc78a016c932b80367505646157c6ea73a3e3d64e3e29b99c0641`,
+and `3a45ee380fe81ef6639f23ed3edee2d45f5cfbd63863823e8b9030317321ee4b`.
+The complete physical campaign passed in 138.47 seconds: every explicit mode,
+recovery, controller interruption, stale-authority rejection, and physical
+reboot passed, advancing epoch `4 -> 15` with zero active attempts. The same
+protected runtime then reauthenticated at journal and receipt epoch `30`;
+same-package replacement preserved workspace state and advanced `30 -> 31`
+with zero active attempts.
+
+NucBoxG3's immutable 30-file manifest is
+`8ddb3ee02e9a42cf8adfacaf57fca0f97b0b74940d7cd407e0f44734f1992997`;
+its nested package manifest is
+`287ff9bf701761023fc094104f5b4274ddfb24362d8b67da7d90c331e1917b86`.
+The immutable 46-covered-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-99dc9be-final`, whose root manifest
+SHA-256 is
+`759ecb5016b55bc106874ed3f3bb73f6e9968af47f930242f1317f743d6da5f6`.
+Final cleanup removed the campaign service, both install namespaces, caller
+input gate and private keys, source/package copies, temporary controller,
+database container, and TLS gate while preserving only read-only evidence.
+Review thread `PRRT_kwDOTmTe486WRAEH` is addressed by this exact implementation
+and physical rollback proof. `WIN-003` remains `DONE`.

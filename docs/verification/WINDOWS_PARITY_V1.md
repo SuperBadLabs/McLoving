@@ -211,3 +211,36 @@ The immutable 46-file HeMan cross-host closure is
 `4ec9e0706ddd90c85c96894915994ecfd718384a831f83e3ee112f6098bb3ec4`.
 Final read-only Claude verification returned `NO_FINDINGS`. All transient
 Windows and HeMan campaign state was removed after the evidence was sealed.
+
+## Exact final transactional post-start closure
+
+Commit `99dc9be1912df8b0920e7afc0ce5b496aa6f4ec6`, tree
+`716b2e56b21e56e6b17408ea41dcd4ef68ef6f48`, moves superseded-identity
+cleanup and the final runtime ACL assertion inside the service-install
+transaction. A uniquely anchored copy of the exact production installer was
+instrumented to fail after authenticated service start; rollback removed both
+the new service and fresh package root. The unmodified installer then passed
+the complete native campaign. Read-only Claude verifier session
+`ffc82179-b954-40f7-9397-67c2ab1bb4c5` reported `NO_FINDINGS` and made no
+repository mutation.
+
+The exact bundle SHA-256 is
+`3ed49c45b444852475b6740a698f01b29bafe358a77137192ecad03329070b08`;
+the archive SHA-256 is
+`88d88c7271bdc78a016c932b80367505646157c6ea73a3e3d64e3e29b99c0641`;
+the signed binary SHA-256 is
+`3a45ee380fe81ef6639f23ed3edee2d45f5cfbd63863823e8b9030317321ee4b`.
+The 138.47-second physical run passed every explicit execution mode,
+cancellation/crash recovery, controller interruption, stale-authority
+rejection, and reboot, advancing `4 -> 15` with zero active attempts.
+Authenticated reconnect converged the journal and receipt at epoch `30`, and
+same-package replacement preserved workspace state while advancing `30 -> 31`.
+
+NucBoxG3's immutable 30-file evidence manifest is
+`8ddb3ee02e9a42cf8adfacaf57fca0f97b0b74940d7cd407e0f44734f1992997`,
+with nested package manifest
+`287ff9bf701761023fc094104f5b4274ddfb24362d8b67da7d90c331e1917b86`.
+The immutable 46-covered-file HeMan closure is
+`/sn8100/runs/mcloving/windows/pr25-99dc9be-final`, manifest SHA-256
+`759ecb5016b55bc106874ed3f3bb73f6e9968af47f930242f1317f743d6da5f6`.
+All transient Windows and HeMan campaign state was removed after sealing.
