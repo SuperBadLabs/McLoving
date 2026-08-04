@@ -9,6 +9,18 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern("^[0-9a-fA-F]{40}$")]
     [string]$ExpectedSignerThumbprint,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern("^[0-9a-fA-F]{64}$")]
+    [string]$ExpectedAgentConfigSha256,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern("^[0-9a-fA-F]{64}$")]
+    [string]$ExpectedControllerCaSha256,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern("^[0-9a-fA-F]{64}$")]
+    [string]$ExpectedAgentCertificateSha256,
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern("^[0-9a-fA-F]{64}$")]
+    [string]$ExpectedAgentPrivateKeySha256,
     [string]$SignerCertificateSource = ""
 )
 $ErrorActionPreference = "Stop"
@@ -400,19 +412,36 @@ $binary = Join-Path $packageRoot "mcloving-agent.exe"
 $stagedBinary = Join-Path $packageRoot "mcloving-agent.installing.exe"
 $backupBinary = Join-Path $packageRoot "mcloving-agent.rollback.exe"
 $configPath = Join-Path $GateRoot "agent-config.json"
-$configSource = Get-Content -Raw -LiteralPath $configPath
-$config = $configSource | ConvertFrom-Json
-$agentId = Get-RequiredConfigString $config "agent_id"
-$trustPool = Get-RequiredConfigString $config "trust_pool"
-$organizationId = Get-RequiredConfigString $config "organization_id"
-$controllerUri = Get-RequiredConfigString $config "controller_uri"
-$controllerDnsName = Get-RequiredConfigString $config "controller_dns_name"
 $controllerCaSource = Join-Path $GateRoot "ca.pem"
 $agentCertificateSource = Join-Path $GateRoot "agent.pem"
 $agentPrivateKeySource = Join-Path $GateRoot "agent-key.pem"
-$controllerCaExpectedSha256 = Get-RegularFileSha256 $controllerCaSource
-$agentCertificateExpectedSha256 = Get-RegularFileSha256 $agentCertificateSource
-$agentPrivateKeyExpectedSha256 = Get-RegularFileSha256 $agentPrivateKeySource
+$gateInputHashes = @(
+    [PSCustomObject]@{
+        Path = $configPath
+        ExpectedSha256 = $ExpectedAgentConfigSha256.ToLowerInvariant()
+    },
+    [PSCustomObject]@{
+        Path = $controllerCaSource
+        ExpectedSha256 = $ExpectedControllerCaSha256.ToLowerInvariant()
+    },
+    [PSCustomObject]@{
+        Path = $agentCertificateSource
+        ExpectedSha256 = $ExpectedAgentCertificateSha256.ToLowerInvariant()
+    },
+    [PSCustomObject]@{
+        Path = $agentPrivateKeySource
+        ExpectedSha256 = $ExpectedAgentPrivateKeySha256.ToLowerInvariant()
+    }
+)
+foreach ($gateInput in $gateInputHashes) {
+    $sourceInputHash = Get-RegularFileSha256 $gateInput.Path
+    if ($sourceInputHash -cne $gateInput.ExpectedSha256) {
+        throw "operator-pinned gate input hash mismatch: $($gateInput.Path)"
+    }
+}
+$controllerCaExpectedSha256 = $ExpectedControllerCaSha256.ToLowerInvariant()
+$agentCertificateExpectedSha256 = $ExpectedAgentCertificateSha256.ToLowerInvariant()
+$agentPrivateKeyExpectedSha256 = $ExpectedAgentPrivateKeySha256.ToLowerInvariant()
 
 $commonApplicationData = [Environment]::GetFolderPath(
     [Environment+SpecialFolder]::CommonApplicationData
@@ -421,6 +450,7 @@ $inputStageRoot = Join-Path $commonApplicationData `
     ("McLoving-Install-Inputs-" + [Guid]::NewGuid().ToString("N"))
 $protectedBinarySource = Join-Path $inputStageRoot "mcloving-agent.exe"
 $protectedSignerCertificateSource = Join-Path $inputStageRoot "signer.cer"
+$protectedConfigPath = Join-Path $inputStageRoot "agent-config.json"
 $protectedControllerCaPath = Join-Path $inputStageRoot "ca.pem"
 $protectedAgentCertificatePath = Join-Path $inputStageRoot "agent.pem"
 $protectedAgentPrivateKeyPath = Join-Path $inputStageRoot "agent-key.pem"
@@ -434,23 +464,6 @@ $scripts = Join-Path $runtimeGeneration "scripts"
 $journal = Join-Path $runtimeGeneration "agent.db"
 $workspace = Join-Path $runtimeGeneration "workspaces"
 $sessionReceipt = Join-Path $runtimeGeneration "authenticated-session.receipt"
-$validationEnvironment = @{
-    MCLOVING_AGENT_ID = $agentId
-    MCLOVING_AGENT_TRUST_POOL = $trustPool
-    MCLOVING_AGENT_ORGANIZATION_ID = $organizationId
-    MCLOVING_CONTROLLER_URI = $controllerUri
-    MCLOVING_CONTROLLER_DNS_NAME = $controllerDnsName
-    MCLOVING_CONTROLLER_CA_PATH = $protectedControllerCaPath
-    MCLOVING_AGENT_CERTIFICATE_PATH = $protectedAgentCertificatePath
-    MCLOVING_AGENT_PRIVATE_KEY_PATH = $protectedAgentPrivateKeyPath
-    MCLOVING_AGENT_JOURNAL_PATH = $journal
-    MCLOVING_AGENT_WORKSPACE_ROOT = $workspace
-    MCLOVING_AGENT_SESSION_RECEIPT_PATH = $sessionReceipt
-    MCLOVING_AGENT_LEASE_SECONDS = "5"
-    MCLOVING_AGENT_POLL_MILLISECONDS = "50"
-    MCLOVING_AGENT_RENEW_MILLISECONDS = "500"
-    MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS = "250"
-}
 $temporaryTrustStores = @()
 $installFailure = $null
 $trustCleanupFailures = @()
@@ -470,6 +483,8 @@ try {
         Copy-Item -LiteralPath $SignerCertificateSource `
             -Destination $protectedSignerCertificateSource -ErrorAction Stop
     }
+    Copy-Item -LiteralPath $configPath `
+        -Destination $protectedConfigPath -ErrorAction Stop
     Copy-Item -LiteralPath $controllerCaSource `
         -Destination $protectedControllerCaPath -ErrorAction Stop
     Copy-Item -LiteralPath $agentCertificateSource `
@@ -479,6 +494,10 @@ try {
     Set-RestrictedTreeAcl $inputStageRoot
 
     $stagedIdentityHashes = @(
+        [PSCustomObject]@{
+            Path = $protectedConfigPath
+            ExpectedSha256 = $ExpectedAgentConfigSha256.ToLowerInvariant()
+        },
         [PSCustomObject]@{
             Path = $protectedControllerCaPath
             ExpectedSha256 = $controllerCaExpectedSha256
@@ -497,6 +516,34 @@ try {
         if ($stagedHash -cne $stagedIdentity.ExpectedSha256) {
             throw "TLS identity changed while entering protected staging: $($stagedIdentity.Path)"
         }
+    }
+
+    # Parse configuration only from the operator-pinned immutable copy. The
+    # caller-writable GateRoot is never an authority for controller or identity
+    # selection merely because its files agree with one another.
+    $configSource = Get-Content -Raw -LiteralPath $protectedConfigPath
+    $config = $configSource | ConvertFrom-Json
+    $agentId = Get-RequiredConfigString $config "agent_id"
+    $trustPool = Get-RequiredConfigString $config "trust_pool"
+    $organizationId = Get-RequiredConfigString $config "organization_id"
+    $controllerUri = Get-RequiredConfigString $config "controller_uri"
+    $controllerDnsName = Get-RequiredConfigString $config "controller_dns_name"
+    $validationEnvironment = @{
+        MCLOVING_AGENT_ID = $agentId
+        MCLOVING_AGENT_TRUST_POOL = $trustPool
+        MCLOVING_AGENT_ORGANIZATION_ID = $organizationId
+        MCLOVING_CONTROLLER_URI = $controllerUri
+        MCLOVING_CONTROLLER_DNS_NAME = $controllerDnsName
+        MCLOVING_CONTROLLER_CA_PATH = $protectedControllerCaPath
+        MCLOVING_AGENT_CERTIFICATE_PATH = $protectedAgentCertificatePath
+        MCLOVING_AGENT_PRIVATE_KEY_PATH = $protectedAgentPrivateKeyPath
+        MCLOVING_AGENT_JOURNAL_PATH = $journal
+        MCLOVING_AGENT_WORKSPACE_ROOT = $workspace
+        MCLOVING_AGENT_SESSION_RECEIPT_PATH = $sessionReceipt
+        MCLOVING_AGENT_LEASE_SECONDS = "5"
+        MCLOVING_AGENT_POLL_MILLISECONDS = "50"
+        MCLOVING_AGENT_RENEW_MILLISECONDS = "500"
+        MCLOVING_AGENT_TERMINATION_GRACE_MILLISECONDS = "250"
     }
 
     $sourceHash = (Get-FileHash -Algorithm SHA256 `
@@ -686,6 +733,9 @@ $journalEpochBefore = [uint64]0
 $priorRuntime = $null
 $priorJournal = $null
 $priorWorkspace = $null
+$priorPackageRoot = $null
+$priorIdentityGeneration = $null
+$priorAgentPrivateKey = $null
 try {
 @'
 @echo off
@@ -780,7 +830,10 @@ if ($existingServiceConfig) {
     }
     foreach ($requiredName in @(
         'MCLOVING_AGENT_JOURNAL_PATH',
-        'MCLOVING_AGENT_WORKSPACE_ROOT'
+        'MCLOVING_AGENT_WORKSPACE_ROOT',
+        'MCLOVING_CONTROLLER_CA_PATH',
+        'MCLOVING_AGENT_CERTIFICATE_PATH',
+        'MCLOVING_AGENT_PRIVATE_KEY_PATH'
     )) {
         if (-not $previousEnvironmentMap.ContainsKey($requiredName) -or
             [string]::IsNullOrWhiteSpace($previousEnvironmentMap[$requiredName])) {
@@ -793,16 +846,43 @@ if ($existingServiceConfig) {
     $priorWorkspace = [IO.Path]::GetFullPath(
         $previousEnvironmentMap.MCLOVING_AGENT_WORKSPACE_ROOT
     )
+    $priorControllerCa = [IO.Path]::GetFullPath(
+        $previousEnvironmentMap.MCLOVING_CONTROLLER_CA_PATH
+    )
+    $priorAgentCertificate = [IO.Path]::GetFullPath(
+        $previousEnvironmentMap.MCLOVING_AGENT_CERTIFICATE_PATH
+    )
+    $priorAgentPrivateKey = [IO.Path]::GetFullPath(
+        $previousEnvironmentMap.MCLOVING_AGENT_PRIVATE_KEY_PATH
+    )
     $priorRuntime = Split-Path -Parent $priorJournal
+    $priorPackageRoot = Split-Path -Parent $priorRuntime
+    $priorIdentityGeneration = Split-Path -Parent $priorAgentPrivateKey
     if ((Split-Path -Leaf $priorJournal) -ine 'agent.db' -or
         (Split-Path -Parent $priorWorkspace) -ine $priorRuntime -or
         (Split-Path -Leaf $priorWorkspace) -ine 'workspaces' -or
+        (Split-Path -Leaf $priorControllerCa) -ine 'ca.pem' -or
+        (Split-Path -Leaf $priorAgentCertificate) -ine 'agent.pem' -or
+        (Split-Path -Leaf $priorAgentPrivateKey) -ine 'agent-key.pem' -or
+        (Split-Path -Parent $priorControllerCa) -ine $priorIdentityGeneration -or
+        (Split-Path -Parent $priorAgentCertificate) -ine $priorIdentityGeneration -or
+        (Split-Path -Parent $priorIdentityGeneration) -ine $priorPackageRoot -or
+        (Split-Path -Leaf $priorIdentityGeneration) -inotlike 'identity-*' -or
         $priorRuntime -ieq $GateRoot -or
-        $priorRuntime -ieq $runtimeGeneration) {
+        $priorRuntime -ieq $runtimeGeneration -or
+        $priorPackageRoot -ieq $PackageRoot -or
+        $priorPackageRoot -ieq $GateRoot) {
         throw "existing service runtime layout cannot be safely migrated"
     }
-    Assert-NonReplaceableDirectoryChain $priorRuntime
-    Assert-RestrictedTreeAcl $priorRuntime
+    Assert-NonReplaceableDirectoryChain $priorPackageRoot
+    Assert-RestrictedTreeAcl $priorPackageRoot
+    foreach ($priorIdentityFile in @(
+        $priorControllerCa,
+        $priorAgentCertificate,
+        $priorAgentPrivateKey
+    )) {
+        [void](Get-RegularFileSha256 $priorIdentityFile)
+    }
     [void](Get-JournalObservation $stagedBinary $priorJournal)
     $priorStateCaptured = $true
 }
@@ -948,32 +1028,9 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
         $service.Dispose()
     }
 
-    # Do not commit the installation until every post-start invariant and
-    # superseded-identity cleanup has succeeded. Any failure here must flow
-    # through the same rollback path that restores the previous registration,
-    # environment, binary, runtime, and service state.
-    $identityCleanupFailures = @()
-    $staleIdentityGenerations = @(Get-ChildItem -LiteralPath $PackageRoot -Directory `
-        -Filter "identity-*" -Force -ErrorAction Stop)
-    foreach ($staleIdentityGeneration in $staleIdentityGenerations) {
-        if ($staleIdentityGeneration.Name -ieq (Split-Path -Leaf $identityGeneration)) {
-            continue
-        }
-        try {
-            if (($staleIdentityGeneration.Attributes -band `
-                [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw "refusing to remove reparse point"
-            }
-            Remove-Item -LiteralPath $staleIdentityGeneration.FullName `
-                -Recurse -Force -ErrorAction Stop
-        } catch {
-            $identityCleanupFailures += `
-                "$($staleIdentityGeneration.FullName): $($_.Exception.Message)"
-        }
-    }
-    if ($identityCleanupFailures.Count -ne 0) {
-        throw "superseded identity cleanup failed: $($identityCleanupFailures -join '; ')"
-    }
+    # This assertion remains part of the rollback-protected transaction. The
+    # predecessor package must stay intact until the new service has committed
+    # so rollback can still restore its binary, identity, and runtime.
     Assert-RestrictedTreeAcl $runtimeGeneration
 } catch {
     $serviceInstallFailure = $_
@@ -1106,6 +1163,39 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
         throw "service installation failed: $($serviceInstallFailure.Exception.Message); service rollback failed: $($serviceRollbackFailures -join '; ')$retainedBackupDiagnostic"
     }
     throw $serviceInstallFailure
+}
+
+# The replacement transaction has committed. Recheck that SCM points only at
+# the fresh package, revoke the predecessor private key first, then remove its
+# now-unreferenced package tree. Cleanup cannot run earlier because rollback
+# requires the complete predecessor identity and runtime.
+if ($priorPackageRoot) {
+    $committedService = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
+    if ($null -eq $committedService -or $committedService.State -ne 'Running' -or
+        $committedService.PathName -ine $serviceCommand) {
+        throw "replacement committed without the expected running service binding"
+    }
+    $committedEnvironment = @(
+        (Get-ItemProperty -Path $serviceRegistryPath -Name Environment `
+            -ErrorAction Stop).Environment
+    )
+    foreach ($priorPath in @($priorPackageRoot, $priorIdentityGeneration, $priorRuntime)) {
+        if (@($committedEnvironment | Where-Object {
+            $_ -like "*=*" -and $_.Substring($_.IndexOf('=') + 1) -ilike "$priorPath*"
+        }).Count -ne 0) {
+            throw "committed service still references predecessor path: $priorPath"
+        }
+    }
+    Assert-NonReplaceableDirectoryChain $priorPackageRoot
+    Assert-RestrictedTreeAcl $priorPackageRoot
+    Remove-Item -LiteralPath $priorAgentPrivateKey -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $priorAgentPrivateKey) {
+        throw "superseded agent private key remained after revocation"
+    }
+    Remove-Item -LiteralPath $priorPackageRoot -Recurse -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $priorPackageRoot) {
+        throw "superseded package root remained after committed replacement"
+    }
 }
 Remove-Item -LiteralPath $stagedBinary, $backupBinary -Force -ErrorAction SilentlyContinue
 $binaryHash = (Get-FileHash -Algorithm SHA256 $binary).Hash.ToLowerInvariant()
