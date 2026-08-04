@@ -1426,7 +1426,7 @@ HeMan's immutable 21-file cross-host closure is
 `0fe814ce842b6bdd978932f065eed5e8f591c60ad0075706f9ab303e49423e5b`.
 Claude's bounded read-only exact-commit review returned `NO_FINDINGS` without
 mutation. Review threads `PRRT_kwDOTmTe486WPgc3` and
-`PRRT_kwDOTmTe486WPgc9` are closed by the implementation and final-package
+`PRRT_kwDOTmTe486WPgc9` are addressed by the implementation and final-package
 evidence. `WIN-003` therefore remains `DONE` on exact final-package proof.
 
 The final verifier found that a transient post-authentication reconciliation
@@ -1434,5 +1434,30 @@ failure could advance the journal on reconnect while the original write-once
 receipt remained pinned to the prior epoch. The follow-up repair makes receipt
 publication an authenticated, atomic, monotonic update: equal epochs are
 idempotent, newer authenticated epochs replace the receipt, and rollback to an
-older epoch is rejected. Exact final-head and final-package hashes supersede
-the `11a0e18` precursor values above once the repair campaign is sealed.
+older epoch is rejected.
+
+The repaired package is bound to commit
+`06df6e82dec68e534c559b6fc90ad15cea1488e1`, tree
+`c50ddee29b0a3bda637e2f1abc154fee88c2a6df`: bundle, archive, and signed
+binary SHA-256 values are respectively
+`53c83a6adcf09cff0f7ca95633f59c465657db6b693c289d76574c4bab3069d5`,
+`3ae5c215581519ecdde0c96ceeec8243a4b6d0355cc6ed4e1927b2d655895ae2`,
+and `596c5646c5a9754e15c6f72e00bd688a013c3dede0f229d01c13e88b4d965ecd`.
+The complete physical campaign passed in 118.80 seconds, including every
+explicit mode, recovery, controller interruption, and reboot (`3 -> 10`).
+After the controller returned, the same protected runtime advanced to journal
+epoch `23` and its authenticated receipt also read `23`, directly proving the
+retry repair. Live same-package replacement then preserved workspace state and
+advanced `23 -> 24` with zero active attempts.
+
+NucBoxG3's immutable 29-file manifest is
+`112b96f4144e8d222e0d51195db08a1385d4dd26bf3de6cd83500dd1e8dbc604`;
+its nested package manifest is
+`0dc85c43c1c08ad24d1e20e1191f37fb3999bf1de1d6ebb2ae2683557bf3abb1`.
+HeMan's immutable 46-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-06df6e8-final`, manifest SHA-256
+`4ec9e0706ddd90c85c96894915994ecfd718384a831f83e3ee112f6098bb3ec4`.
+Final bounded Claude review session `d9b4f97a-307f-44da-94f6-9018998ece32`
+returned `NO_FINDINGS`; the repository was not mutated. Cleanup removed all
+campaign services, install roots, source/package copies, TLS private material,
+database container, and controller unit while preserving only sealed evidence.

@@ -191,5 +191,23 @@ a transient reconciliation failure could reserve a newer epoch while the
 write-once receipt stayed pinned to the older one. The follow-up implementation
 keeps the receipt protected and atomic but updates it monotonically after each
 accepted session. Equal epochs are idempotent and older epochs cannot replace a
-newer receipt. Final hashes and exact-package evidence supersede the precursor
-values in this section after the repaired campaign is sealed.
+newer receipt.
+
+The exact repaired package is source commit
+`06df6e82dec68e534c559b6fc90ad15cea1488e1`, tree
+`c50ddee29b0a3bda637e2f1abc154fee88c2a6df`, archive SHA-256
+`3ae5c215581519ecdde0c96ceeec8243a4b6d0355cc6ed4e1927b2d655895ae2`,
+and signed-binary SHA-256
+`596c5646c5a9754e15c6f72e00bd688a013c3dede0f229d01c13e88b4d965ecd`.
+The full 118.80-second campaign passed and reboot advanced epoch `3 -> 10`.
+The same runtime then recovered from controller absence at epoch `23` with a
+matching authenticated receipt, proving monotonic receipt convergence on the
+native target. Live replacement preserved state and advanced `23 -> 24`.
+
+NucBoxG3's immutable 29-file evidence manifest is
+`112b96f4144e8d222e0d51195db08a1385d4dd26bf3de6cd83500dd1e8dbc604`.
+The immutable 46-file HeMan cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-06df6e8-final`, manifest
+`4ec9e0706ddd90c85c96894915994ecfd718384a831f83e3ee112f6098bb3ec4`.
+Final read-only Claude verification returned `NO_FINDINGS`. All transient
+Windows and HeMan campaign state was removed after the evidence was sealed.
