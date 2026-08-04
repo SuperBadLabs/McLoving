@@ -46,7 +46,7 @@ function New-RestrictedAcl([bool]$IsDirectory) {
     return $acl
 }
 
-function Set-RestrictedTreeAcl([string]$Root) {
+function Assert-RestrictedTreeAcl([string]$Root) {
     $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
     if (-not $rootItem.PSIsContainer) {
         throw "restricted root must be an existing directory: $Root"
@@ -56,9 +56,6 @@ function Set-RestrictedTreeAcl([string]$Root) {
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "restricted tree contains a reparse point: $($item.FullName)"
         }
-    }
-    foreach ($item in @($rootItem) + $items) {
-        Set-Acl -LiteralPath $item.FullName -AclObject (New-RestrictedAcl $item.PSIsContainer)
     }
     foreach ($item in @($rootItem) + $items) {
         $applied = Get-Acl -LiteralPath $item.FullName -ErrorAction Stop
@@ -76,6 +73,93 @@ function Set-RestrictedTreeAcl([string]$Root) {
         if (-not $applied.AreAccessRulesProtected -or $rules.Count -ne 2 -or $unexpected.Count -ne 0) {
             throw "restricted ACL replacement verification failed: $($item.FullName)"
         }
+    }
+}
+
+function Set-RestrictedTreeAcl([string]$Root) {
+    $rootItem = Get-Item -LiteralPath $Root -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer) {
+        throw "restricted root must be an existing directory: $Root"
+    }
+    $items = @(Get-ChildItem -LiteralPath $rootItem.FullName -Force -Recurse -ErrorAction Stop)
+    foreach ($item in @($rootItem) + $items) {
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "restricted tree contains a reparse point: $($item.FullName)"
+        }
+        Set-Acl -LiteralPath $item.FullName -AclObject (New-RestrictedAcl $item.PSIsContainer)
+    }
+    Assert-RestrictedTreeAcl $rootItem.FullName
+}
+
+function New-RestrictedDirectoryAtomic([string]$Path) {
+    if (-not ("McLoving.Win32Directory" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace McLoving {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SecurityAttributes {
+        public int Length;
+        public IntPtr SecurityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool InheritHandle;
+    }
+
+    public static class Win32Directory {
+        [DllImport("kernel32.dll", EntryPoint = "CreateDirectoryW",
+            CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CreateDirectory(
+            string path,
+            ref SecurityAttributes securityAttributes);
+    }
+}
+'@
+    }
+
+    $acl = New-RestrictedAcl $true
+    $descriptor = $acl.GetSecurityDescriptorBinaryForm()
+    $pinnedDescriptor = [Runtime.InteropServices.GCHandle]::Alloc(
+        $descriptor,
+        [Runtime.InteropServices.GCHandleType]::Pinned
+    )
+    try {
+        $attributes = [McLoving.SecurityAttributes]::new()
+        $attributes.Length = [Runtime.InteropServices.Marshal]::SizeOf($attributes)
+        $attributes.SecurityDescriptor = $pinnedDescriptor.AddrOfPinnedObject()
+        $attributes.InheritHandle = $false
+        if (-not [McLoving.Win32Directory]::CreateDirectory($Path, [ref]$attributes)) {
+            $errorCode = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            throw [ComponentModel.Win32Exception]::new(
+                $errorCode,
+                "atomic restricted-directory creation failed for ${Path}"
+            )
+        }
+    } finally {
+        if ($pinnedDescriptor.IsAllocated) { $pinnedDescriptor.Free() }
+    }
+    Assert-RestrictedTreeAcl $Path
+}
+
+function New-RestrictedDirectoryPathAtomic([string]$Path) {
+    $missing = [Collections.Generic.Stack[string]]::new()
+    $cursor = [IO.Path]::GetFullPath($Path)
+    while (-not (Test-Path -LiteralPath $cursor)) {
+        $missing.Push($cursor)
+        $parent = Split-Path -Parent $cursor
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) {
+            throw "restricted directory has no existing ancestor: $Path"
+        }
+        $cursor = $parent
+    }
+    $ancestor = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+    if (-not $ancestor.PSIsContainer -or
+        ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "restricted directory ancestor is not a real directory: $($ancestor.FullName)"
+    }
+    while ($missing.Count -ne 0) {
+        New-RestrictedDirectoryAtomic $missing.Pop()
     }
 }
 
@@ -216,8 +300,7 @@ try {
     # protected tree, then authenticate only those immutable copies.
     # The directory is protected before any child is created, so copied files
     # inherit the SYSTEM/Administrators-only boundary immediately.
-    New-Item -ItemType Directory -Path $inputStageRoot -ErrorAction Stop | Out-Null
-    Set-RestrictedTreeAcl $inputStageRoot
+    New-RestrictedDirectoryAtomic $inputStageRoot
     Copy-Item -LiteralPath $BinarySource -Destination $protectedBinarySource -ErrorAction Stop
     if ($SignerCertificateSource) {
         Copy-Item -LiteralPath $SignerCertificateSource `
@@ -275,9 +358,12 @@ try {
     # installer mutates ACLs, package contents, the registry, or SCM.
     Invoke-AgentConfigValidation $protectedBinarySource $validationEnvironment
 
-    New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
-    Set-RestrictedTreeAcl $PackageRoot
-    New-Item -ItemType Directory -Path $identityGeneration -ErrorAction Stop | Out-Null
+    if (Test-Path -LiteralPath $PackageRoot) {
+        Set-RestrictedTreeAcl $PackageRoot
+    } else {
+        New-RestrictedDirectoryPathAtomic $PackageRoot
+    }
+    New-RestrictedDirectoryAtomic $identityGeneration
     $identityGenerationCreated = $true
     $identityCopies = @(
         [PSCustomObject]@{
