@@ -282,3 +282,38 @@ removed, and the clean seal plus independent verification passed. Final
 cleanup removed the service, both install generations, all 20 Windows campaign
 targets, temporary signer trust, TLS private material, controller, database
 container, and HeMan gate roots while preserving only read-only evidence.
+
+## Operator-pinned gate identity and predecessor retirement closure
+
+Final review found that `GateRoot` identity hashes were derived from
+caller-writable input and that successful service replacement retained the
+predecessor identity/package tree. Final commit
+`53b0c8abb38f81697769d73f3712c58f07318ae0`, tree
+`f2d6d3d8163f32fc711b8cdf955a7723c088104c`, requires operator-pinned hashes
+for all four gate identity inputs, verifies them before protected staging, and
+rechecks the staged configuration. An exact wrong-pin native preflight proved
+failure before service, package, or protected-input mutation.
+
+The replacement transaction now retains the validated predecessor package for
+rollback, then after commit uses normalized path-boundary comparisons to prove
+the new SCM binding does not reference it. Cleanup revokes the old private key
+before deleting the complete old package. NucBoxG3 deliberately replaced
+`pr25-53b0c8a` with `pr25-53b0c8a-replacement`, preserved journal/workspace
+state, advanced authenticated epoch `15 -> 16`, and proved both predecessor
+key and package absent. The full 126.51-second physical campaign also passed
+all explicit modes, cancellation/crash recovery, controller interruption,
+stale-authority rejection, and reboot (`4 -> 9`) with zero active attempts.
+
+The exact bundle, archive, and signed binary SHA-256 values are
+`3567bf664a38580f0c573db41010223802c19def5c7d168fc5bd4ebc11ffebd7`,
+`fee0acb00b36db47a9e3c0dac19d37e419e08d4a07a0b4b441e8d1d4bcbfda7f`,
+and `79ba8d94bf33d73ae2669ff74eba1923a91bf7eb92590bb41e93319d0ca05f75`.
+The immutable NucBoxG3 31-file manifest is
+`d4b711b1a30a58c7d3d0205a053690e8e9156d3f325953aae41623f1d6908b31`,
+with nested package manifest
+`03d39131cda7ca935b086e1638872001544d8c6ae448e396a91f2aaa65d64082`.
+The immutable 49-covered-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-53b0c8a-final`, manifest
+`ee8ace88989f25d059e68fb654dba230b104bf9b7d857ad9704cca111957ac5d`.
+No precursor failure produced an accepted manifest, and final cleanup removed
+all transient Windows and HeMan state.

@@ -1543,3 +1543,54 @@ the service, private gate key, signer trust, temporary controller, database
 container, and HeMan gate roots while preserving only read-only evidence.
 Review thread `PRRT_kwDOTmTe486WR08q` is addressed by this exact
 implementation and native proof. `WIN-003` remains `DONE`.
+
+### Operator-pinned gate identity and predecessor retirement closure
+
+Final exact-head review found two remaining installer seams. A caller who could
+write `GateRoot` could replace the controller configuration and TLS identity
+before the installer derived their hashes, and successful replacement left the
+predecessor package and private identity on disk. Commits
+`8b1ad06a6a1f003113e0d2a049b1a648119bac33`,
+`dac2111c09c7f03734019a43d5d4189cc5a44f52`, and final commit
+`53b0c8abb38f81697769d73f3712c58f07318ae0`, tree
+`f2d6d3d8163f32fc711b8cdf955a7723c088104c`, close those seams. The elevated
+installer now requires operator-pinned SHA-256 values for the configuration,
+controller CA, agent certificate, and agent private key, verifies them before
+protected staging, and rechecks the protected configuration copy. A native
+negative preflight made `GateRoot` caller-writable, supplied a false pin, and
+proved rejection before service, package, or protected-input mutation.
+
+Replacement now captures and validates the predecessor's complete protected
+package, runtime, and identity paths before mutation. Rollback retains them
+until the new service transaction commits. After commit, normalized
+path-boundary checks prove SCM and its environment no longer reference the
+predecessor; cleanup revokes the predecessor private key first and then removes
+the complete predecessor package. The physical replacement deliberately used
+`pr25-53b0c8a` and `pr25-53b0c8a-replacement`, proving a shared filename prefix
+is not mistaken for path ancestry. It preserved the journal and workspace
+marker, advanced authenticated epoch `15 -> 16`, retained zero active attempts,
+and proved both predecessor key and package absent.
+
+The complete 126.51-second physical campaign passed every explicit Windows
+mode, cancellation/crash recovery, controller interruption, stale-authority
+rejection, and physical reboot, advancing epoch `4 -> 9` with zero active
+attempts. The exact bundle, archive, and signed binary SHA-256 values are
+respectively
+`3567bf664a38580f0c573db41010223802c19def5c7d168fc5bd4ebc11ffebd7`,
+`fee0acb00b36db47a9e3c0dac19d37e419e08d4a07a0b4b441e8d1d4bcbfda7f`,
+and `79ba8d94bf33d73ae2669ff74eba1923a91bf7eb92590bb41e93319d0ca05f75`.
+NucBoxG3's immutable 31-file manifest is
+`d4b711b1a30a58c7d3d0205a053690e8e9156d3f325953aae41623f1d6908b31`,
+with nested package manifest
+`03d39131cda7ca935b086e1638872001544d8c6ae448e396a91f2aaa65d64082`.
+The immutable 49-covered-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-53b0c8a-final`, root manifest SHA-256
+`ee8ace88989f25d059e68fb654dba230b104bf9b7d857ad9704cca111957ac5d`.
+Two precursor qualification attempts stopped without accepted manifests when
+the gates exposed a prefix-comparison false positive and a PowerShell literal
+error; their exact transient namespaces were reset before the clean rerun.
+Final cleanup removed all campaign services, install generations, source and
+package copies, TLS private material, temporary controller, database container,
+and HeMan gate roots while preserving only read-only evidence. Review threads
+`PRRT_kwDOTmTe486WSi65` and `PRRT_kwDOTmTe486WSi69` are addressed by this exact
+implementation and proof. `WIN-003` remains `DONE`.
