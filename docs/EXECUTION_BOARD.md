@@ -1234,7 +1234,7 @@ HeMan's read-only controller/database evidence manifest is
 All one-day test private keys were destroyed after sealing.
 
 `WIN-003` is closed on NucBoxG3 with the signed qualification package built
-natively from the final reviewed implementation at commit
+natively for the protected-runtime physical-campaign predecessor at commit
 `ee4fffac0b6bcc1b5e901bf2e6dfe3e485fd2e65` and tree
 `4c03ae6727af27b2184c3bd639b1af7d7af3f954`. The exact source bundle SHA-256
 is `4bb82b92d0dcca2056f5f61866f7920b69ab91339f19c8b45bedd7887e252518`;
@@ -1344,3 +1344,46 @@ workspace, and executable test scripts live under a fresh atomically protected
 Users modify access on `GateRoot`, then proved its ACL and marker unchanged,
 proved no runtime children appeared there, and verified the SCM environment
 and healthy journal exclusively under the restricted runtime root.
+
+PR #25's final review repair is commit
+`eded04319089f182f90278285f6125fc51a34171`, tree
+`7c762a15e12e583d8fdced60c76be0e26f5c3d8d`. The production mTLS preflight
+now rejects a presented client certificate when an Extended Key Usage
+extension excludes TLS client authentication or a Key Usage extension excludes
+digital signatures; absent usage extensions retain the RFC-compatible default.
+An exact native server-auth-only leaf was rejected before service, registry,
+package, journal, or workspace mutation, while the existing service PID,
+registration, and environment remained unchanged. Service replacement now
+accepts only an existing protected runtime rooted at `runtime/agent.db` and
+`runtime/workspaces`, observes it read-only, stops the predecessor, copies the
+SQLite database plus WAL and the complete workspace tree into a fresh protected
+package generation, re-observes equal stopped state, and only then installs and
+starts the new binary. The new service must advance the migrated session epoch;
+rollback restores the original registration, environment, binary, and running
+state before removing the failed generation.
+
+The full physical precursor campaign at commit `3df4ad0` passed every explicit
+Windows mode, cancellation/crash recovery, controller interruption, and a real
+reboot in 79.26 seconds, advancing epoch `3 -> 8`, killing the pre-reboot child,
+and rejecting stale authority. The exact final repair package has source-bundle
+SHA-256 `415a124723bc311a18ac18ee7268e4e28147c9d970b7e8870d101f38973be3c4`,
+archive SHA-256
+`e1d8fb6215309c16481f404ff4b753eb9846c14d65929cb4d1af24998339bc3f`,
+and signed-binary SHA-256
+`fb8a8318d2b2afc2064309362cb8ba7e5e5e424b4d938dea8b9931a16ecee901`.
+The live replacement preserved predecessor epoch `193`, advanced to epoch
+`229`, preserved active attempts `0 -> 0`, and copied two independently created
+durable workspace markers byte-for-byte. NucBoxG3's read-only 27-file evidence
+manifest is
+`80a30bac93ec0ee090b3c2d380305fb71e9609175d1ab477e076ffd0f85f9ab2`;
+the nested package manifest is
+`9c96eb438f2408471ade25f7bd127e5d15571dec86d3fbed23fdf34c68a34ffa`.
+The 41-covered-file cross-host bundle is immutable at
+`/sn8100/runs/mcloving/windows/pr25-eded043-final`, manifest SHA-256
+`8ecd9e79097f30e2ba2ccbf7160e940f3607f4e288e9bb6e1fb8161fa621a487`.
+Cleanup receipts prove no campaign service, install root, gate private key,
+temporary signer trust, test database container, or transient package/source
+path remains. A bounded read-only Claude plan-mode review consumed 15 turns and
+timed out at 180 seconds without a verdict or finding; it made no repository
+mutation. Review threads `PRRT_kwDOTmTe486WOZn1` and
+`PRRT_kwDOTmTe486WOZn4` are addressed by this exact evidence.

@@ -53,7 +53,7 @@ loss is a different transition: it produced one lease expiration, a higher-
 fence second offer, eventual success, and no escaped first child. A new post-
 reboot build also succeeded.
 
-The evidence binds final reviewed implementation commit
+The protected-runtime physical-campaign evidence binds predecessor commit
 `ee4fffac0b6bcc1b5e901bf2e6dfe3e485fd2e65`, tree
 `4c03ae6727af27b2184c3bd639b1af7d7af3f954`, and signed binary SHA-256
 `b7f9899013f88cf4be36c6c801a09f863b012da1cdd0582c17467cb149cf5019`.
@@ -120,3 +120,38 @@ journal, workspace, and test scripts live under a fresh atomically protected
 to `GateRoot`, then proved its ACL and marker unchanged, proved no runtime
 children appeared there, and verified SCM paths and journal health only under
 the restricted runtime root.
+
+## Final PR #25 review repair
+
+The final review repair binds commit
+`eded04319089f182f90278285f6125fc51a34171`, tree
+`7c762a15e12e583d8fdced60c76be0e26f5c3d8d`, and signed Windows binary
+SHA-256
+`fb8a8318d2b2afc2064309362cb8ba7e5e5e424b4d938dea8b9931a16ecee901`.
+Client-certificate preflight now fails closed when Extended Key Usage excludes
+TLS client authentication or Key Usage excludes digital signatures. An exact
+server-auth-only leaf was rejected before package or service mutation, with the
+existing SCM PID, registration, and environment unchanged.
+
+An upgrade no longer initializes empty authority. It validates the existing
+protected runtime, stops the predecessor, copies its SQLite database and WAL
+plus complete workspace tree into a fresh package generation, verifies the
+migrated stopped observation, and starts only after the new registration and
+environment are durable. NucBoxG3 preserved predecessor epoch `193`, advanced
+the replacement to `229`, retained active attempts `0 -> 0`, and preserved two
+independently created durable workspace markers byte-for-byte. The complete
+physical precursor gate at commit `3df4ad0` also passed all explicit modes,
+recovery, and reboot, advancing epoch `3 -> 8` in 79.26 seconds.
+
+The final archive SHA-256 is
+`e1d8fb6215309c16481f404ff4b753eb9846c14d65929cb4d1af24998339bc3f`.
+NucBoxG3's read-only 27-file evidence manifest is
+`80a30bac93ec0ee090b3c2d380305fb71e9609175d1ab477e076ffd0f85f9ab2`,
+with nested package manifest
+`9c96eb438f2408471ade25f7bd127e5d15571dec86d3fbed23fdf34c68a34ffa`.
+HeMan's immutable 41-file cross-host bundle is
+`/sn8100/runs/mcloving/windows/pr25-eded043-final`, manifest
+`8ecd9e79097f30e2ba2ccbf7160e940f3607f4e288e9bb6e1fb8161fa621a487`.
+Cleanup removed the service, both install roots, gate private key, temporary
+signer trust, qualification database container, and all transient package and
+source paths while preserving the sealed evidence.
