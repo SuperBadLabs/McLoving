@@ -1234,14 +1234,14 @@ HeMan's read-only controller/database evidence manifest is
 All one-day test private keys were destroyed after sealing.
 
 `WIN-003` is closed on NucBoxG3 with the signed qualification package built
-natively from the reviewed installer implementation at commit
-`cfd7aa240d4d402b2191acc887a9bec3535df215` and tree
-`b2629e9d3f142429992ae86ee8917b1c5b6d670c`. The exact source bundle SHA-256
-is `4a28ca69746fd9bcc6e68f71f21d18a1a2a421e0edeba267ed7832feaba1fb60`;
+natively from the final reviewed installer implementation at commit
+`9859c7a2755818352d4c05f8c32683a4c48162e2` and tree
+`32c418621b6ad4a99027d6177ad1c3e4690198f1`. The exact source bundle SHA-256
+is `72b06879decb1d1805d871f0170b4f90f2b2ef7009a7f69b1c2d18e56c36891a`;
 the signed binary is
-`f57cd07a5acc82f7d8e1ad2c8b27cd067056855d3deddae1477398359c8bf73b`;
+`a04653791500577f44ea263b2ae61810ccf239c07592b0fbbce9f6037a2ffdd9`;
 and the package archive is
-`1f1ac6328effa4cd2abaa958ddb0c4289924d6e734cf5d376a80a4b7f468e875`.
+`6cc715f1ba7b50a2e7bbf16d7562aee751b387b8b67f54568b795bd9fa18ee43`.
 The short-lived self-signed Authenticode identity is qualification evidence,
 not `REL-001` production provenance. The packager binds its exact CNG key
 `UniqueName`, requires exactly one `My`-store `-DeleteKey` removal, and emits
@@ -1265,26 +1265,27 @@ silently retried. A separate post-reboot build succeeded. This exact terminal
 distinction is the current recovery contract, not a claim that machine reboot
 and controller loss have identical retry behavior.
 
-The complete NucBoxG3 package/runtime successor has a read-only 20-file
-manifest SHA-256 of
-`750c00979008c3b5c7df2eb139a51e846aa4d3aa09a12299b305b0f3aad71e3d`.
-It records the initial incomplete 17-file Nuc seal from the same `cfd7aa2`
-qualification run,
-`829e16ad7bdb0b7dddd912f65ad38d6a1c74fb775623574d9cecf039decc150b`
-and adds the exact signed binary and cargo metadata required by the nested
-package manifest. HeMan's 37-file outer evidence bundle is sealed at
-`/sn8100/runs/mcloving/windows/pr25-cfd7aa2-final`; its self-excluding manifest
+The final NucBoxG3 package/runtime successor has a read-only 22-file manifest
+SHA-256 of
+`e4640675ba723cb0bc40e0e88733355f5b89f2cce6d3ed8509c5144fe5df59e3`.
+Its nested package manifest SHA-256 is
+`625a44f94351d29f84831a0dccc12fcab3f04f0dec7295a310cf33351f39f3ad`
+and verifies directly because the seal includes the exact signed binary and
+cargo metadata. HeMan's 35-file outer evidence bundle is sealed at
+`/sn8100/runs/mcloving/windows/pr25-9859c7a-final`; its self-excluding manifest
 SHA-256 is
-`52f505055ca559dbc5d8bc3b6c61b676f3afd042f287881a22b9cb5e7b9c31f5`.
+`eaf38a3f7ea99355a7c31d72fcea98ab7df4d7090190ba2311a659c271aaff19`.
 It binds the exact source and package, native host and controller receipts,
-PostgreSQL dump and schema, Claude pre-push `VERIFIER_PASS`, and cleanup
-receipts. The Nuc seal removed the Windows service, installed identity,
-qualification trust anchors, gate private key, and test-only recovery-probe
-shim; manifest-covered cleanup receipts record that state. HeMan's remaining
-mTLS private keys and isolated PostgreSQL fixture were removed after evidence
-capture and independently rechecked before publication. W2-B and the
-persistent Windows evidence lane are closed; `REL-001` remains the separate
-production-signing dependency.
+PostgreSQL dump and schema, the read-only verifier's exact-diff
+`VERIFIER_PASS`, the separately recorded bounded evidence-review timeout, and
+cleanup receipts. The earlier `pr25-cfd7aa2-final` bundle remains immutable
+predecessor evidence rather than the current reviewed closure. The Nuc seal
+removed the Windows service, installed identity, qualification trust anchors,
+gate private key, and test-only recovery-probe shim; manifest-covered cleanup
+receipts record that state. HeMan's remaining mTLS private keys and isolated
+PostgreSQL fixture were removed after evidence capture and independently
+rechecked. W2-B and the persistent Windows evidence lane are closed;
+`REL-001` remains the separate production-signing dependency.
 
 The final installer contract requires both the exact binary digest and signer
 thumbprint. A native wrong-digest attempt failed before service mutation and
@@ -1295,8 +1296,16 @@ existing service requires a bounded observed stop, protected prior-binary
 backup, verified binary replacement, and in-place SCM reconfiguration. The
 reviewed installer further creates every new staging, package, and TLS
 generation directory with its restricted security descriptor in the atomic
-Win32 `CreateDirectoryW` call, revalidates every existing tree, and binds the
-service to a GUID-named immutable TLS generation whose three PEM digests are
-verified. It rolls back the whole service transaction
-on every post-identity failure, and prunes superseded generations only after
-the running service points to the retained identity.
+Win32 `CreateDirectoryW` call. It rejects reparse ancestors, untrusted owners,
+NULL DACLs, untrusted replacement rights, and raw generic-access grants before
+creating any child. Binary, signer, and all three PEM inputs enter a fresh
+protected `ProgramData` generation and retain their pre-staging digests. The
+service binds to a GUID-named immutable TLS generation whose installed digests
+match those captured from the original regular non-reparse files. Before
+declaring SCM startup healthy, the exact staged binary observes any existing
+journal read-only, then the installed service must produce schema v2 and a
+strictly higher session epoch while SCM remains running. A native corrupt-
+journal preflight failed closed with no service, installed binary, or temporary
+signer trust left behind. The installer rolls back the whole service
+transaction on every post-identity failure and prunes superseded generations
+only after the running service points to the retained identity.

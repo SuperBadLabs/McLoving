@@ -50,26 +50,26 @@ lease-expiration retry. Controller loss is a different transition: it produced
 one lease expiration, a higher-fence second offer, eventual success, and no
 escaped first child. A new post-reboot build also succeeded.
 
-The evidence binds reviewed implementation commit
-`cfd7aa240d4d402b2191acc887a9bec3535df215`, tree
-`b2629e9d3f142429992ae86ee8917b1c5b6d670c`, and signed binary SHA-256
-`f57cd07a5acc82f7d8e1ad2c8b27cd067056855d3deddae1477398359c8bf73b`.
+The evidence binds final reviewed implementation commit
+`9859c7a2755818352d4c05f8c32683a4c48162e2`, tree
+`32c418621b6ad4a99027d6177ad1c3e4690198f1`, and signed binary SHA-256
+`a04653791500577f44ea263b2ae61810ccf239c07592b0fbbce9f6037a2ffdd9`.
 The signer was a short-lived self-signed qualification identity, not
 production `REL-001` provenance. Its exact CNG key identity is bound before
 cleanup, exactly one `My`-store private-key deletion is required, and PASS is
 withheld unless that bound key file is absent. The external exact-package
 qualification harness observed 13 CNG key files before and after with zero
-delta. NucBoxG3's complete 20-file
-manifest SHA-256 is
-`750c00979008c3b5c7df2eb139a51e846aa4d3aa09a12299b305b0f3aad71e3d`;
-the HeMan outer evidence manifest is
-`52f505055ca559dbc5d8bc3b6c61b676f3afd042f287881a22b9cb5e7b9c31f5`.
-The initial incomplete 17-file Nuc seal from the same `cfd7aa2` qualification
-run is retained by hash in the successor receipt, and the successor adds the
-exact signed binary and cargo metadata
-required by the nested package manifest. Three historical qualification keys
-were also removed by exact CNG container name under a manifest-covered
-remediation receipt.
+delta. NucBoxG3's complete 22-file manifest SHA-256 is
+`e4640675ba723cb0bc40e0e88733355f5b89f2cce6d3ed8509c5144fe5df59e3`;
+the nested package manifest SHA-256 is
+`625a44f94351d29f84831a0dccc12fcab3f04f0dec7295a310cf33351f39f3ad`;
+and the 35-file HeMan outer evidence manifest is
+`eaf38a3f7ea99355a7c31d72fcea98ab7df4d7090190ba2311a659c271aaff19`.
+The exact archive SHA-256 is
+`6cc715f1ba7b50a2e7bbf16d7562aee751b387b8b67f54568b795bd9fa18ee43`.
+The earlier `pr25-cfd7aa2-final` bundle remains immutable predecessor evidence.
+Three historical qualification keys were removed by exact CNG container name
+under a manifest-covered remediation receipt.
 The Nuc seal removed its private gate key, service state, installed identity,
 certificate trust, and test-only recovery-probe shim; manifest-covered cleanup
 receipts record that state. HeMan's remaining mTLS private keys and isolated
@@ -81,8 +81,14 @@ wrong-digest native probe leaves both service state and certificate stores
 unchanged, the copied binary is reverified, and temporary self-signed trust is
 removed before the SCM service starts. Package and TLS inputs are copied into
 canonical roots created with the restricted security descriptor in the atomic
-Win32 directory-creation call before validation; existing roots are fully
-revalidated. The service points only to a GUID-named immutable TLS snapshot
-whose three PEM digests are verified. The entire post-snapshot seam is
-transactional, and old generations are pruned
-only after successful binding. Production trust remains `REL-001` work.
+Win32 directory-creation call before validation. Existing ancestors must be
+real directories with trusted owners, non-NULL DACLs, and no untrusted direct
+replacement or raw generic-access rights. The service points only to a GUID-
+named immutable TLS snapshot whose three installed PEM digests match hashes
+captured before protected staging. The exact staged binary observes an existing
+journal read-only before mutation; after service start, schema v2 and a strictly
+higher session epoch must be observed while SCM remains running. A corrupt-
+journal native preflight proved rollback with no service, binary, or signer
+trust residue. The entire post-snapshot seam is transactional, and old
+generations are pruned only after successful binding. Production trust remains
+`REL-001` work.
