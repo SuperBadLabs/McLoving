@@ -24,6 +24,10 @@ CURRENT_SLOT_ROW = re.compile(
     r"^\| ([1-9][0-9]*) \| `([A-Z][A-Z0-9-]+)` \| "
     r"([^|]+) \|"
 )
+CURRENT_DISPATCH_HEADER = (
+    "| Slot | Current ticket | Status | Dependency-critical successors |"
+)
+CURRENT_DISPATCH_SEPARATOR = "|---:|---|---|---|"
 OBSOLETE_README_MARKERS = (
     "currently at its architecture-foundation milestone",
     "binary crates are compilable placeholders",
@@ -218,18 +222,53 @@ def main() -> None:
             + ", ".join(stale_classification)
         )
 
+    board_lines = text.splitlines()
+    dispatch_headers = [
+        index
+        for index, line in enumerate(board_lines)
+        if line == CURRENT_DISPATCH_HEADER
+    ]
+    dispatch_rows: list[str] = []
+    if len(dispatch_headers) != 1:
+        errors.append("execution board must contain exactly one current dispatch table")
+    else:
+        header_index = dispatch_headers[0]
+        separator_index = header_index + 1
+        if (
+            separator_index >= len(board_lines)
+            or board_lines[separator_index] != CURRENT_DISPATCH_SEPARATOR
+        ):
+            errors.append("current dispatch table has a malformed separator")
+        else:
+            for line in board_lines[separator_index + 1 :]:
+                if not line.strip():
+                    break
+                dispatch_rows.append(line)
+
     current_slots: dict[int, tuple[str, str]] = {}
     current_ticket_slots: dict[str, int] = {}
-    for line in text.splitlines():
-        match = CURRENT_SLOT_ROW.match(line)
-        if match is None:
+    for line in dispatch_rows:
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 4:
+            errors.append(f"malformed current dispatch row: {line}")
             continue
-        slot_text, ticket, stated_status = match.groups()
-        stated_status = stated_status.strip()
+        slot_text, ticket_cell, stated_status, _ = cells
+        if re.fullmatch(r"[1-9][0-9]*", slot_text) is None:
+            errors.append(f"current dispatch row has invalid slot {slot_text!r}")
+            continue
         slot = int(slot_text)
         if slot in current_slots:
             errors.append(f"current dispatch slot {slot} is declared more than once")
             continue
+        ticket_match = re.fullmatch(r"`([A-Z][A-Z0-9-]+)`", ticket_cell)
+        if ticket_match is None:
+            current_slots[slot] = ("", stated_status)
+            errors.append(
+                f"current dispatch slot {slot} has malformed ticket cell "
+                f"{ticket_cell!r}"
+            )
+            continue
+        ticket = ticket_match.group(1)
         if ticket in current_ticket_slots:
             errors.append(
                 f"current dispatch ticket {ticket} appears in slots "

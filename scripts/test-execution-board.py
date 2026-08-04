@@ -172,6 +172,24 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("has invalid status 'COMPLETE'", stderr)
 
+    def test_malformed_trailing_current_slot_ticket_fails(self) -> None:
+        def malformed_ticket(text: str) -> str:
+            matches = [
+                match
+                for line in text.splitlines()
+                if (match := VERIFY.CURRENT_SLOT_ROW.match(line)) is not None
+            ]
+            self.assertTrue(matches)
+            match = matches[-1]
+            _, ticket, _ = match.groups()
+            old = match.group(0)
+            new = old.replace(f"`{ticket}`", ticket, 1)
+            return text.replace(old, new, 1)
+
+        code, _, stderr = self.run_verifier(board_transform=malformed_ticket)
+        self.assertEqual(code, 1)
+        self.assertIn("has malformed ticket cell", stderr)
+
     def test_unready_current_slot_fails(self) -> None:
         def unready_slot(text: str) -> str:
             old = "| 1 | `IDP-001` | ACTIVE |"
