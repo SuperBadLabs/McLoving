@@ -401,9 +401,6 @@ $trustPool = Get-RequiredConfigString $config "trust_pool"
 $organizationId = Get-RequiredConfigString $config "organization_id"
 $controllerUri = Get-RequiredConfigString $config "controller_uri"
 $controllerDnsName = Get-RequiredConfigString $config "controller_dns_name"
-$scripts = Join-Path $GateRoot "scripts"
-$journal = Join-Path $GateRoot "agent.db"
-$workspace = Join-Path $GateRoot "workspaces"
 $controllerCaSource = Join-Path $GateRoot "ca.pem"
 $agentCertificateSource = Join-Path $GateRoot "agent.pem"
 $agentPrivateKeySource = Join-Path $GateRoot "agent-key.pem"
@@ -423,9 +420,13 @@ $protectedAgentCertificatePath = Join-Path $inputStageRoot "agent.pem"
 $protectedAgentPrivateKeyPath = Join-Path $inputStageRoot "agent-key.pem"
 $identityGeneration = Join-Path $PackageRoot `
     ("identity-" + [Guid]::NewGuid().ToString("N"))
+$runtimeGeneration = Join-Path $PackageRoot "runtime"
 $controllerCaPath = Join-Path $identityGeneration "ca.pem"
 $agentCertificatePath = Join-Path $identityGeneration "agent.pem"
 $agentPrivateKeyPath = Join-Path $identityGeneration "agent-key.pem"
+$scripts = Join-Path $runtimeGeneration "scripts"
+$journal = Join-Path $runtimeGeneration "agent.db"
+$workspace = Join-Path $runtimeGeneration "workspaces"
 $validationEnvironment = @{
     MCLOVING_AGENT_ID = $agentId
     MCLOVING_AGENT_TRUST_POOL = $trustPool
@@ -448,6 +449,7 @@ $trustCleanupFailures = @()
 $inputCleanupFailures = @()
 $packageRootCreated = $false
 $identityGenerationCreated = $false
+$runtimeGenerationCreated = $false
 try {
     # Package and GateRoot inputs may be supplied from locations writable by a
     # non-administrator.  Copy the binary, signer, and TLS identity into a fresh
@@ -536,6 +538,14 @@ try {
     New-RestrictedDirectoryPathAtomic $PackageRoot
     $packageRootCreated = $true
     Assert-NonReplaceableDirectoryChain $PackageRoot
+    # Runtime state must never live beneath the caller-supplied GateRoot. A
+    # DACL replacement cannot revoke a hostile handle opened before elevation,
+    # so establish a fresh protected generation before creating any journal,
+    # workspace, or executable test-script child.
+    New-RestrictedDirectoryAtomic $runtimeGeneration
+    $runtimeGenerationCreated = $true
+    New-RestrictedDirectoryAtomic $scripts
+    New-RestrictedDirectoryAtomic $workspace
     New-RestrictedDirectoryAtomic $identityGeneration
     $identityGenerationCreated = $true
     $identityCopies = @(
@@ -564,15 +574,7 @@ try {
         }
     }
     Set-RestrictedTreeAcl $PackageRoot
-    Set-RestrictedTreeAcl $GateRoot
     Assert-NonReplaceableDirectoryChain $PackageRoot
-    Assert-NonReplaceableDirectoryChain $GateRoot
-    $restrictedConfigSource = Get-Content -Raw -LiteralPath $configPath
-    if ($restrictedConfigSource -cne $configSource) {
-        throw "agent configuration changed while the gate ACL was being restricted"
-    }
-
-    New-Item -ItemType Directory -Force -Path $scripts, $workspace | Out-Null
     Remove-Item -LiteralPath $stagedBinary, $backupBinary -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath $protectedBinarySource -Destination $stagedBinary -Force
     $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedBinary).Hash.ToLowerInvariant()
@@ -624,6 +626,14 @@ if ($installFailure -or $trustCleanupFailures.Count -ne 0 -or
         $primaryFailures += "protected input cleanup: $($inputCleanupFailures -join '; ')"
     }
     $cleanupFailures = @()
+    if ($runtimeGenerationCreated) {
+        try {
+            Remove-Item -LiteralPath $runtimeGeneration -Recurse -Force -ErrorAction Stop
+            $runtimeGenerationCreated = $false
+        } catch {
+            $cleanupFailures += "runtime generation: $($_.Exception.Message)"
+        }
+    }
     if ($identityGenerationCreated) {
         try {
             Remove-Item -LiteralPath $identityGeneration -Recurse -Force -ErrorAction Stop
@@ -722,7 +732,7 @@ if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
 Write-Output "process-gone-$Name"
 '@ | Set-Content -Encoding utf8 (Join-Path $scripts "verify-recovery.ps1")
 
-Set-RestrictedTreeAcl $GateRoot
+Set-RestrictedTreeAcl $runtimeGeneration
 $existingServiceConfig = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
 if ($existingServiceConfig) {
     $existingServiceWasRunning = $existingServiceConfig.State -eq "Running"
@@ -951,6 +961,14 @@ $binaryExisted = Test-Path -LiteralPath $binary -PathType Leaf
             $identityGenerationCreated = $false
         } catch {
             $serviceRollbackFailures += "identity: $($_.Exception.Message)"
+        }
+    }
+    if ($runtimeGenerationCreated) {
+        try {
+            Remove-Item -LiteralPath $runtimeGeneration -Recurse -Force -ErrorAction Stop
+            $runtimeGenerationCreated = $false
+        } catch {
+            $serviceRollbackFailures += "runtime: $($_.Exception.Message)"
         }
     }
     Remove-Item -LiteralPath $stagedBinary -Force -ErrorAction SilentlyContinue
