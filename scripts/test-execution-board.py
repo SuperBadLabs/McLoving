@@ -114,6 +114,49 @@ class ExecutionBoardVerifierTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn(expected_message, stderr)
 
+    def test_nonremaining_current_slot_status_fails(self) -> None:
+        expected_message = ""
+
+        def nonremaining_status(text: str) -> str:
+            nonlocal expected_message
+            match = next(
+                (
+                    VERIFY.CURRENT_SLOT_ROW.match(line)
+                    for line in text.splitlines()
+                    if VERIFY.CURRENT_SLOT_ROW.match(line)
+                ),
+                None,
+            )
+            self.assertIsNotNone(match)
+            assert match is not None
+            _, _, status = match.groups()
+            old = match.group(0)
+            new = old.replace(f"| {status} |", "| DONE |", 1)
+            expected_message = f"is DONE, ticket table says {status}"
+            return text.replace(old, new, 1)
+
+        code, _, stderr = self.run_verifier(board_transform=nonremaining_status)
+        self.assertEqual(code, 1)
+        self.assertIn(expected_message, stderr)
+
+    def test_unknown_trailing_current_slot_status_fails(self) -> None:
+        def unknown_status(text: str) -> str:
+            matches = [
+                match
+                for line in text.splitlines()
+                if (match := VERIFY.CURRENT_SLOT_ROW.match(line)) is not None
+            ]
+            self.assertTrue(matches)
+            match = matches[-1]
+            _, _, status = match.groups()
+            old = match.group(0)
+            new = old.replace(f"| {status} |", "| COMPLETE |", 1)
+            return text.replace(old, new, 1)
+
+        code, _, stderr = self.run_verifier(board_transform=unknown_status)
+        self.assertEqual(code, 1)
+        self.assertIn("has invalid status 'COMPLETE'", stderr)
+
     def test_unready_current_slot_fails(self) -> None:
         def unready_slot(text: str) -> str:
             old = "| 1 | `IDP-001` | ACTIVE |"

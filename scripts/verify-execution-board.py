@@ -10,9 +10,11 @@ from datetime import date
 from pathlib import Path
 
 
+TICKET_STATUSES = ("PENDING", "ACTIVE", "BLOCKED", "DONE", "DEFERRED")
+TICKET_STATUS_PATTERN = "|".join(TICKET_STATUSES)
 TICKET_ROW = re.compile(
     r"^\| ([A-Z][A-Z0-9-]+) \| "
-    r"(PENDING|ACTIVE|BLOCKED|DONE|DEFERRED) \| ([^|]+) \|"
+    rf"({TICKET_STATUS_PATTERN}) \| ([^|]+) \|"
 )
 TICKET_ID = re.compile(r"[A-Z][A-Z0-9-]+")
 EXECUTION_CLASSES = {"SERIAL", "BATCH", "PARALLEL"}
@@ -20,7 +22,7 @@ REMAINING_STATUSES = {"PENDING", "ACTIVE", "BLOCKED"}
 UPDATED_ROW = re.compile(r"^Updated: (\d{4}-\d{2}-\d{2})$", re.MULTILINE)
 CURRENT_SLOT_ROW = re.compile(
     r"^\| ([1-9][0-9]*) \| `([A-Z][A-Z0-9-]+)` \| "
-    r"(PENDING|ACTIVE|BLOCKED) \|"
+    r"([^|]+) \|"
 )
 OBSOLETE_README_MARKERS = (
     "currently at its architecture-foundation milestone",
@@ -208,6 +210,7 @@ def main() -> None:
         if match is None:
             continue
         slot_text, ticket, stated_status = match.groups()
+        stated_status = stated_status.strip()
         slot = int(slot_text)
         if slot in current_slots:
             errors.append(f"current dispatch slot {slot} is declared more than once")
@@ -219,6 +222,11 @@ def main() -> None:
             )
         current_slots[slot] = (ticket, stated_status)
         current_ticket_slots[ticket] = slot
+
+        if stated_status not in TICKET_STATUSES:
+            errors.append(
+                f"current dispatch slot {slot} has invalid status {stated_status!r}"
+            )
 
         if ticket not in tickets:
             errors.append(f"current dispatch slot {slot} references missing ticket {ticket}")
