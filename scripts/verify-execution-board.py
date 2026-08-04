@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Verify ticket dependencies and the remaining execution topology."""
+"""Verify ticket dependencies, execution topology, and current documentation."""
 
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 
@@ -15,6 +17,16 @@ TICKET_ROW = re.compile(
 TICKET_ID = re.compile(r"[A-Z][A-Z0-9-]+")
 EXECUTION_CLASSES = {"SERIAL", "BATCH", "PARALLEL"}
 REMAINING_STATUSES = {"PENDING", "ACTIVE", "BLOCKED"}
+UPDATED_ROW = re.compile(r"^Updated: (\d{4}-\d{2}-\d{2})$", re.MULTILINE)
+CURRENT_SLOT_ROW = re.compile(
+    r"^\| ([1-9][0-9]*) \| `([A-Z][A-Z0-9-]+)` \| "
+    r"(PENDING|ACTIVE|BLOCKED) \|"
+)
+OBSOLETE_README_MARKERS = (
+    "currently at its architecture-foundation milestone",
+    "binary crates are compilable placeholders",
+    "no controller, scheduler, or agent runtime is represented as implemented",
+)
 
 
 def fail(messages: list[str]) -> None:
@@ -24,12 +36,65 @@ def fail(messages: list[str]) -> None:
 
 
 def main() -> None:
-    board = Path(__file__).resolve().parents[1] / "docs" / "EXECUTION_BOARD.md"
+    repository = Path(__file__).resolve().parents[1]
+    board = repository / "docs" / "EXECUTION_BOARD.md"
+    readme = repository / "README.md"
     try:
         text = board.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
         fail([f"cannot read {board}: {error}"])
+    try:
+        readme_text = readme.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        fail([f"cannot read {readme}: {error}"])
     errors: list[str] = []
+
+    updated_matches = UPDATED_ROW.findall(text)
+    if len(updated_matches) != 1:
+        errors.append("execution board must contain exactly one ISO Updated date")
+    else:
+        try:
+            updated = date.fromisoformat(updated_matches[0])
+        except ValueError:
+            errors.append(f"execution board has invalid Updated date: {updated_matches[0]}")
+        else:
+            if updated > date.today():
+                errors.append(f"execution board Updated date is in the future: {updated}")
+
+            # A dirty local board has not acquired its final commit date yet. CI
+            # checks the committed form: when history for this file is available,
+            # the header must name the date of the commit that last changed it.
+            relative_board = board.relative_to(repository)
+            clean = subprocess.run(
+                ["git", "diff", "--quiet", "--", str(relative_board)],
+                cwd=repository,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if clean.returncode == 0:
+                committed_date = subprocess.run(
+                    ["git", "log", "-1", "--format=%cs", "--", str(relative_board)],
+                    cwd=repository,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                expected = committed_date.stdout.strip()
+                if committed_date.returncode == 0 and expected and expected != str(updated):
+                    errors.append(
+                        f"execution board Updated date is {updated}; last board "
+                        f"commit is {expected}"
+                    )
+
+    if re.search(r"Protected `main` is `[0-9a-f]{40}`", text):
+        errors.append(
+            "current-state prose pins protected main to a commit; use ticket and "
+            "batch status instead"
+        )
+    for marker in OBSOLETE_README_MARKERS:
+        if marker in readme_text:
+            errors.append(f"README contains obsolete implementation claim: {marker}")
 
     tickets: dict[str, tuple[str, list[str]]] = {}
     for line in text.splitlines():
@@ -129,6 +194,57 @@ def main() -> None:
             + ", ".join(stale_classification)
         )
 
+    current_slots: dict[int, tuple[str, str]] = {}
+    current_ticket_slots: dict[str, int] = {}
+    for line in text.splitlines():
+        match = CURRENT_SLOT_ROW.match(line)
+        if match is None:
+            continue
+        slot_text, ticket, stated_status = match.groups()
+        slot = int(slot_text)
+        if slot in current_slots:
+            errors.append(f"current dispatch slot {slot} is declared more than once")
+            continue
+        if ticket in current_ticket_slots:
+            errors.append(
+                f"current dispatch ticket {ticket} appears in slots "
+                f"{current_ticket_slots[ticket]} and {slot}"
+            )
+        current_slots[slot] = (ticket, stated_status)
+        current_ticket_slots[ticket] = slot
+
+        if ticket not in tickets:
+            errors.append(f"current dispatch slot {slot} references missing ticket {ticket}")
+            continue
+        actual_status, dependencies = tickets[ticket]
+        if actual_status != stated_status:
+            errors.append(
+                f"current dispatch slot {slot} says {ticket} is {stated_status}, "
+                f"ticket table says {actual_status}"
+            )
+        if actual_status not in REMAINING_STATUSES:
+            errors.append(
+                f"current dispatch slot {slot} references non-remaining ticket "
+                f"{ticket} ({actual_status})"
+            )
+        unready = [
+            dependency
+            for dependency in dependencies
+            if dependency in tickets and tickets[dependency][0] != "DONE"
+        ]
+        if unready:
+            errors.append(
+                f"current dispatch slot {slot} ticket {ticket} has unfinished "
+                f"dependencies: {', '.join(unready)}"
+            )
+
+    if not current_slots:
+        errors.append("current dispatch table has no slots")
+    elif len(current_slots) > 3:
+        errors.append("current dispatch table exceeds the three-slot limit")
+    elif sorted(current_slots) != list(range(1, len(current_slots) + 1)):
+        errors.append("current dispatch slots must be contiguous starting at 1")
+
     if errors:
         fail(errors)
 
@@ -141,6 +257,7 @@ def main() -> None:
     print(
         "execution-board-ok "
         f"tickets={len(tickets)} remaining={len(remaining)} "
+        f"current_slots={len(current_slots)} "
         + " ".join(f"{key.lower()}={value}" for key, value in counts.items())
     )
 

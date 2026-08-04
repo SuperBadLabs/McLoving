@@ -87,6 +87,7 @@ podman run --rm \
   /tools/cargo-deny check
 
 python3 "${repo_root}/scripts/test-windows-agent-impact.py"
+python3 "${repo_root}/scripts/test-execution-board.py"
 python3 "${repo_root}/scripts/verify-execution-board.py"
 "${actionlint_dir}/actionlint" "${repo_root}/.github/workflows/"*.yml
 
