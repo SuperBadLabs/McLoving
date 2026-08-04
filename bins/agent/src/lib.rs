@@ -285,12 +285,15 @@ fn instance_lock_path(journal_path: &Path) -> PathBuf {
 
 async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<(), AgentError> {
     let (mut client, receipt) = open_session(config, stop.clone()).await?;
-    publish_authenticated_session_receipt(
+    publish_recovery_ready_session_receipt(
         config.session_receipt_path.as_deref(),
         receipt.session_epoch,
-    )?;
-    send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
-    worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await?;
+        async {
+            send_reconciliation(config, &mut client, receipt.session_epoch, stop.clone()).await?;
+            worker::recover_finalizations(config, &mut client, receipt.session_epoch, &stop).await
+        },
+    )
+    .await?;
     let mut reconciliation_tick = interval(RECONCILIATION_INTERVAL);
     reconciliation_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     reconciliation_tick.tick().await;
@@ -319,6 +322,18 @@ async fn run_session(config: &AgentConfig, stop: CancellationToken) -> Result<()
             }
         }
     }
+}
+
+async fn publish_recovery_ready_session_receipt<F>(
+    path: Option<&Path>,
+    session_epoch: u64,
+    recovery_initialization: F,
+) -> Result<(), AgentError>
+where
+    F: Future<Output = Result<(), AgentError>>,
+{
+    recovery_initialization.await?;
+    publish_authenticated_session_receipt(path, session_epoch)
 }
 
 async fn open_session(
@@ -1239,6 +1254,24 @@ mod tests {
                 .to_string_lossy()
                 .contains("pending")
         }));
+    }
+
+    #[tokio::test]
+    async fn failed_recovery_initialization_does_not_publish_health() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.receipt");
+        publish_authenticated_session_receipt(Some(&path), 40).unwrap();
+
+        let result = publish_recovery_ready_session_receipt(Some(&path), 41, async {
+            Err(AgentError::UnsupportedProtocol)
+        })
+        .await;
+
+        assert!(matches!(result, Err(AgentError::UnsupportedProtocol)));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "session_epoch=40\n"
+        );
     }
 
     #[test]
