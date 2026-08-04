@@ -42,7 +42,7 @@ lifecycle boundaries, not a hostile-tenant sandbox.
 The persistent-host reboot row is intentionally separate because a hosted CI
 VM cannot supply honest across-reboot evidence. NucBoxG3 ran the exact signed
 qualification package over pinned LAN SSH. A physical reboot advanced the
-journal epoch `3 -> 10`, returned the automatic SCM service, rejected stale
+journal epoch `3 -> 14`, returned the automatic SCM service, rejected stale
 session authority, reported zero active attempts, and left no pre-reboot child.
 The accepted attempt finalized `failed` with exit code 1 during SCM shutdown,
 before the reboot removed connectivity, so it correctly had one offer and no
@@ -54,25 +54,28 @@ fence second offer, eventual success, and no escaped first child. A new post-
 reboot build also succeeded.
 
 The evidence binds final reviewed implementation commit
-`f7ae1705f9194afa76d17d86c54be8275d401338`, tree
-`b03827b342b785f1720aaa500afff9d018e9bb97`, and signed binary SHA-256
-`ebd30c6592f38082d53e557fe52e9e2b93ba9afb8f71fee5f8aef675c9d83c97`.
+`ee4fffac0b6bcc1b5e901bf2e6dfe3e485fd2e65`, tree
+`4c03ae6727af27b2184c3bd639b1af7d7af3f954`, and signed binary SHA-256
+`b7f9899013f88cf4be36c6c801a09f863b012da1cdd0582c17467cb149cf5019`.
 The signer was a short-lived self-signed qualification identity, not
 production `REL-001` provenance. Its exact CNG key identity is bound before
 cleanup, exactly one `My`-store private-key deletion is required, and PASS is
 withheld unless that bound key file is absent. The external exact-package
 qualification harness observed 13 CNG key files before and after with zero
-delta. NucBoxG3's complete 23-file manifest SHA-256 is
-`1cd54986e8fe63999e7fe156bdfde223859551fd8b035cb310aa935f8caec2ef`;
+delta. NucBoxG3's complete 24-file manifest SHA-256 is
+`5b952cabe3569deeb9e136ecaf0aea7e21df2f2251ac74b7c1139eafed175c18`;
 the nested package manifest SHA-256 is
-`1ba895fd4e971416f6e8caf3359b93429f3261cda88feb07cce40dcf1c01746e`;
-and the 41-file HeMan outer evidence manifest is
-`c4b836578c24d1e0c26f7d6bcc293b230bee86491fbe5605120201318df01a0c`.
+`8e9916715c75d667db2ade01a029e4e523a47667eb1a5e4f24065e6976634172`;
+and the 37-covered-file HeMan outer evidence manifest is
+`1cbd6bb5dc24ad51cd749644cf27c2a0324c853854637bcaa816cb40d9d87ac4`.
+The separate bounded read-only verifier supplement manifest is
+`2e380825e8d5e6abaed4940bb1481510541c8aa26fa013ed1a10efec35413e6c`;
+Claude timed out while tool-using and returned no verdict or finding.
 The exact archive SHA-256 is
-`92a8e6675b2b7aa4574cbf0043a30eff293733c4d4c824e1726f6a8ad1f241a7`.
-The earlier `pr25-cfd7aa2-final` and `pr25-9859c7a-final` bundles remain
-immutable predecessor evidence, as does the later `pr25-a250c86-final`
-installer predecessor.
+`0da1475c9482d7a51ff7198d85ac18692666275f70affa9ddc21ff761b249f08`.
+The earlier `pr25-f7ae170-final`, `pr25-cfd7aa2-final`, and
+`pr25-9859c7a-final` bundles remain immutable predecessor evidence, as does the
+`pr25-a250c86-final` installer predecessor.
 Three historical qualification keys were removed by exact CNG container name
 under a manifest-covered remediation receipt.
 The Nuc seal removed its private gate key, service state, installed identity,
@@ -90,11 +93,9 @@ Win32 directory-creation call before validation. Existing ancestors must be
 real directories with trusted owners, non-NULL DACLs, and no untrusted direct
 replacement or raw generic-access rights. The service points only to a GUID-
 named immutable TLS snapshot whose three installed PEM digests match hashes
-captured before protected staging. The exact staged binary observes an existing
-journal read-only before mutation; after service start, schema v2 and a strictly
-higher session epoch must be observed while SCM remains running. A corrupt-
-journal native preflight proved rollback with no service, binary, or signer
-trust residue. Native probes also proved that replaceable ancestors below both
+captured before protected staging. After service start, schema v2 and a
+strictly positive session epoch must be observed while SCM remains running.
+Native probes also proved that replaceable ancestors below both
 `GateRoot` and `PackageRoot` are rejected before service/package mutation. The
 physical reboot completion echoed the current request UUID and build ID, and
 the Rust gate removed any prior marker before publishing that request. The
@@ -113,4 +114,9 @@ cannot revoke handles granted before installation. A writable-root preflight
 proved rejection without ACL, marker, gate, or service mutation. Each accepted
 install uses a fresh atomically protected package namespace; failed
 transactions remove only the namespace created by that transaction after
-rollback succeeds, as exercised by the corrupt-journal retry path.
+rollback succeeds. The caller-writable `GateRoot` is input-only: runtime
+journal, workspace, and test scripts live under a fresh atomically protected
+`PackageRoot\runtime`. The exact physical campaign granted Users modify access
+to `GateRoot`, then proved its ACL and marker unchanged, proved no runtime
+children appeared there, and verified SCM paths and journal health only under
+the restricted runtime root.

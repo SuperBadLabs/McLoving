@@ -1235,13 +1235,13 @@ All one-day test private keys were destroyed after sealing.
 
 `WIN-003` is closed on NucBoxG3 with the signed qualification package built
 natively from the final reviewed implementation at commit
-`f7ae1705f9194afa76d17d86c54be8275d401338` and tree
-`b03827b342b785f1720aaa500afff9d018e9bb97`. The exact source bundle SHA-256
-is `47d899edd70936e35438ba7327ba450f89bb91938b651525f6825c7fbc206f82`;
+`ee4fffac0b6bcc1b5e901bf2e6dfe3e485fd2e65` and tree
+`4c03ae6727af27b2184c3bd639b1af7d7af3f954`. The exact source bundle SHA-256
+is `4bb82b92d0dcca2056f5f61866f7920b69ab91339f19c8b45bedd7887e252518`;
 the signed binary is
-`ebd30c6592f38082d53e557fe52e9e2b93ba9afb8f71fee5f8aef675c9d83c97`;
+`b7f9899013f88cf4be36c6c801a09f863b012da1cdd0582c17467cb149cf5019`;
 and the package archive is
-`92a8e6675b2b7aa4574cbf0043a30eff293733c4d4c824e1726f6a8ad1f241a7`.
+`0da1475c9482d7a51ff7198d85ac18692666275f70affa9ddc21ff761b249f08`.
 The short-lived self-signed Authenticode identity is qualification evidence,
 not `REL-001` production provenance. The packager binds its exact CNG key
 `UniqueName`, requires exactly one `My`-store `-DeleteKey` removal, and emits
@@ -1256,7 +1256,7 @@ The outbound mTLS gate proved direct, `cmd.exe`, and PowerShell execution;
 durable stream digests; explicit cancellation with a separately verified dead
 descendant; and controller interruption with one lease expiration, two fenced
 offers, one logical success, and no escaped first child. A physical Windows
-reboot advanced the agent journal session epoch `3 -> 10`, returned the SCM
+reboot advanced the agent journal session epoch `3 -> 14`, returned the SCM
 service automatically, rejected a fresh-journal stale session, left zero
 active attempts, and killed the pre-reboot PID. Because SCM shutdown allowed
 the live agent to publish exit code 1 before power loss, that rebooted attempt
@@ -1268,24 +1268,28 @@ other observed honest race: one expired lease, exactly two offers, the
 `retry-after-reboot` marker, and one terminal success. That alternate path is
 preserved under manifest
 `beec40cf748645cf48af5bf09e3cb7c65afefd4239392e277e19d42e52fa5284`.
-The final reboot request UUID `30323db2-414b-4ea1-91e0-696176d675cd` and build
-ID `5fa884f4-e0c3-4986-b072-720a6766ca10` were echoed by the host completion
+The final reboot request UUID `1620cf3c-9a42-417c-b7f8-a37ae1350895` and build
+ID `ba0d5fde-ebc4-4891-814b-bfddc1473807` were echoed by the host completion
 and checked by the Rust gate, so a stale completion marker cannot satisfy the
 run.
 
-The final NucBoxG3 package/runtime successor has a read-only 23-file manifest
+The final NucBoxG3 package/runtime successor has a read-only 24-file manifest
 SHA-256 of
-`1cd54986e8fe63999e7fe156bdfde223859551fd8b035cb310aa935f8caec2ef`.
+`5b952cabe3569deeb9e136ecaf0aea7e21df2f2251ac74b7c1139eafed175c18`.
 Its nested package manifest SHA-256 is
-`1ba895fd4e971416f6e8caf3359b93429f3261cda88feb07cce40dcf1c01746e`
+`8e9916715c75d667db2ade01a029e4e523a47667eb1a5e4f24065e6976634172`
 and verifies directly because the seal includes the exact signed binary and
-cargo metadata. HeMan's 41-file outer evidence bundle is sealed at
-`/sn8100/runs/mcloving/windows/pr25-f7ae170-final`; its self-excluding manifest
+cargo metadata. HeMan's 37-covered-file outer evidence bundle is sealed at
+`/sn8100/runs/mcloving/windows/pr25-ee4fffa-final`; its self-excluding manifest
 SHA-256 is
-`c4b836578c24d1e0c26f7d6bcc293b230bee86491fbe5605120201318df01a0c`.
+`1cbd6bb5dc24ad51cd749644cf27c2a0324c853854637bcaa816cb40d9d87ac4`.
 It binds the exact source and package, native host and controller receipts,
-PostgreSQL dump and schema, the read-only verifier's bounded timeout/no-verdict
-receipt, and cleanup receipts. The earlier `pr25-cfd7aa2-final` and
+PostgreSQL dump and schema, and cleanup receipts. The separate read-only
+verifier supplement is sealed at `pr25-ee4fffa-verifier` with manifest SHA-256
+`2e380825e8d5e6abaed4940bb1481510541c8aa26fa013ed1a10efec35413e6c`;
+Claude timed out while tool-using and returned no verdict or finding. The
+earlier `pr25-f7ae170-final`,
+`pr25-cfd7aa2-final`, and
 `pr25-9859c7a-final` bundles, plus `pr25-a250c86-final` and
 `pr25-38dd5c8-final`, remain immutable predecessor evidence rather than the
 current reviewed closure. The Nuc seal
@@ -1311,11 +1315,9 @@ creating any child. Binary, signer, and all three PEM inputs enter a fresh
 protected `ProgramData` generation and retain their pre-staging digests. The
 service binds to a GUID-named immutable TLS generation whose installed digests
 match those captured from the original regular non-reparse files. Before
-declaring SCM startup healthy, the exact staged binary observes any existing
-journal read-only, then the installed service must produce schema v2 and a
-strictly higher session epoch while SCM remains running. A native corrupt-
-journal preflight failed closed with no service, installed binary, or temporary
-signer trust left behind. Separate native probes placed `GateRoot` and
+declaring SCM startup healthy, the installed service must produce schema v2
+and a strictly positive session epoch while SCM remains running. Separate
+native probes placed `GateRoot` and
 `PackageRoot` below a public replaceable ancestor; both were rejected before
 service or package mutation. The installer rolls back the whole service
 transaction on every post-identity failure and prunes superseded generations
@@ -1335,5 +1337,10 @@ therefore select a fresh namespace whose protected descriptor is installed in
 the atomic directory-creation call. A native writable-root preflight proved
 the prior ACL and marker remained byte-for-byte unchanged, with no gate or
 service mutation. Failed transactions remove only the fresh package root they
-created and only after identity, binary, and service rollback has succeeded;
-the corrupt-journal preflight and final campaign exercised that retry path.
+created and only after identity, binary, and service rollback has succeeded.
+The exact successor treats caller-writable `GateRoot` as input only. Journal,
+workspace, and executable test scripts live under a fresh atomically protected
+`PackageRoot\runtime` generation. The physical campaign granted ordinary
+Users modify access on `GateRoot`, then proved its ACL and marker unchanged,
+proved no runtime children appeared there, and verified the SCM environment
+and healthy journal exclusively under the restricted runtime root.
