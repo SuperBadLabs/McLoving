@@ -244,3 +244,41 @@ The immutable 46-covered-file HeMan closure is
 `/sn8100/runs/mcloving/windows/pr25-99dc9be-final`, manifest SHA-256
 `759ecb5016b55bc106874ed3f3bb73f6e9968af47f930242f1317f743d6da5f6`.
 All transient Windows and HeMan campaign state was removed after sealing.
+
+## Recovery-ready authenticated-health closure
+
+Commit `f12759e2e4ae8ccc1977193864fb1f1ba58bdc4f`, tree
+`e6793ea05a0284ec01c939f482532cb97dacdfe7`, publishes authenticated agent
+health only after reconciliation and finalization recovery initialize
+successfully. A regression test starts with an epoch-40 receipt, fails recovery
+initialization for epoch 41, and proves no epoch-41 health receipt is published.
+This prevents service replacement from treating transport authentication alone
+as proof that the recovered agent is ready.
+
+The exact bundle SHA-256 is
+`5efbe13e6807e80cef4538d009ec8e622dff92296d6de87ff62d07bd893a997f`;
+the archive SHA-256 is
+`7814bd3717c51b2352bf45d6f9b1658a3916b33785540451f388021a7f26dff5`;
+the signed binary SHA-256 is
+`ae71f7bfd38b235677b1724c98930449f928a4db32e8758d3da452d334ffa2d2`.
+The 129.68-second native campaign passed every explicit execution mode,
+cancellation/crash recovery, controller interruption, stale-authority
+rejection, and physical reboot, advancing `2 -> 9` with zero active attempts.
+Authenticated reconnect completed recovery at epoch `44`; same-package
+replacement preserved workspace state and advanced `44 -> 45` with zero
+active attempts.
+
+NucBoxG3's immutable 30-file evidence manifest is
+`ccab9ec5181e958c356dc3b55faca1890cdf84fa759bf1b3a5a588e503d4f51f`,
+with nested package manifest
+`65398956aedfde0d6be979522cc42262aee7eccf5fd6b924bcf404cde23691b6`.
+The immutable 48-covered-file HeMan closure is
+`/sn8100/runs/mcloving/windows/pr25-f12759e-final`, manifest SHA-256
+`b7afa4c61fc1aadca566b6cf17a575cae5ac75163fe34b7b15c56c86fb78b295`.
+An initial seal attempt stopped before producing an accepted manifest because
+the prepared evidence harness still pinned the predecessor binary and signer;
+the exact package identities were restored, the unsealed partial directory was
+removed, and the clean seal plus independent verification passed. Final
+cleanup removed the service, both install generations, all 20 Windows campaign
+targets, temporary signer trust, TLS private material, controller, database
+container, and HeMan gate roots while preserving only read-only evidence.

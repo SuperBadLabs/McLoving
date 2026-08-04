@@ -1501,3 +1501,45 @@ input gate and private keys, source/package copies, temporary controller,
 database container, and TLS gate while preserving only read-only evidence.
 Review thread `PRRT_kwDOTmTe486WRAEH` is addressed by this exact implementation
 and physical rollback proof. `WIN-003` remains `DONE`.
+
+### Recovery-ready authenticated-health closure
+
+Exact-head review found that the persistent agent published its authenticated
+session receipt after `OpenSession` but before reconciliation and finalization
+recovery completed. A replacement installer could therefore accept a service
+whose transport authenticated successfully while recovery initialization had
+failed. Commit `f12759e2e4ae8ccc1977193864fb1f1ba58bdc4f`, tree
+`e6793ea05a0284ec01c939f482532cb97dacdfe7`, moves receipt publication behind
+both recovery initializers. The regression fixture seeds an epoch-40 receipt,
+injects recovery-initialization failure for epoch 41, and proves the published
+health receipt remains at 40.
+
+The exact Windows source bundle, archive, and signed binary SHA-256 values are
+respectively
+`5efbe13e6807e80cef4538d009ec8e622dff92296d6de87ff62d07bd893a997f`,
+`7814bd3717c51b2352bf45d6f9b1658a3916b33785540451f388021a7f26dff5`,
+and `ae71f7bfd38b235677b1724c98930449f928a4db32e8758d3da452d334ffa2d2`.
+The complete physical campaign passed in 129.68 seconds: every explicit mode,
+recovery, controller interruption, stale-authority rejection, and physical
+reboot passed, advancing epoch `2 -> 9` with zero active attempts. The same
+runtime then completed authenticated recovery at epoch `44`; exact-package
+replacement preserved workspace state and advanced `44 -> 45` with zero
+active attempts.
+
+NucBoxG3's immutable 30-file evidence manifest is
+`ccab9ec5181e958c356dc3b55faca1890cdf84fa759bf1b3a5a588e503d4f51f`;
+its nested package manifest is
+`65398956aedfde0d6be979522cc42262aee7eccf5fd6b924bcf404cde23691b6`.
+The immutable 48-covered-file cross-host closure is
+`/sn8100/runs/mcloving/windows/pr25-f12759e-final`, whose root manifest
+SHA-256 is
+`b7afa4c61fc1aadca566b6cf17a575cae5ac75163fe34b7b15c56c86fb78b295`.
+The first seal attempt correctly produced no accepted manifest because its
+prepared harness still pinned the predecessor package identity; the harness
+was corrected to the exact binary and signer, its unsealed partial directory
+was removed, and the clean seal plus independent verification passed. Final
+cleanup removed all 20 Windows campaign targets, both install generations,
+the service, private gate key, signer trust, temporary controller, database
+container, and HeMan gate roots while preserving only read-only evidence.
+Review thread `PRRT_kwDOTmTe486WR08q` is addressed by this exact
+implementation and native proof. `WIN-003` remains `DONE`.
