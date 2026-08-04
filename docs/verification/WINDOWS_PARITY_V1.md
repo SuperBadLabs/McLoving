@@ -42,7 +42,7 @@ lifecycle boundaries, not a hostile-tenant sandbox.
 The persistent-host reboot row is intentionally separate because a hosted CI
 VM cannot supply honest across-reboot evidence. NucBoxG3 ran the exact signed
 qualification package over pinned LAN SSH. A physical reboot advanced the
-journal epoch `3 -> 11`, returned the automatic SCM service, rejected stale
+journal epoch `3 -> 10`, returned the automatic SCM service, rejected stale
 session authority, reported zero active attempts, and left no pre-reboot child.
 The accepted attempt finalized `failed` with exit code 1 during SCM shutdown,
 before the reboot removed connectivity, so it correctly had one offer and no
@@ -51,18 +51,30 @@ one lease expiration, a higher-fence second offer, eventual success, and no
 escaped first child. A new post-reboot build also succeeded.
 
 The evidence binds reviewed implementation commit
-`1373a251069bbef50dc5952adf6378323c2e2504`, tree
-`9fbb5a8783ff5d3473132a95815832854355c9a0`, and signed binary SHA-256
-`03f2ef0eeb65d54ac8098381a5b0d99e4966bec577cb9750ac19302555d20282`.
+`cfd7aa240d4d402b2191acc887a9bec3535df215`, tree
+`b2629e9d3f142429992ae86ee8917b1c5b6d670c`, and signed binary SHA-256
+`f57cd07a5acc82f7d8e1ad2c8b27cd067056855d3deddae1477398359c8bf73b`.
 The signer was a short-lived self-signed qualification identity, not
-production `REL-001` provenance. NucBoxG3 manifest SHA-256 is
-`2afb36ec50f4134bcb4a9d4a452543b5af721e67d6e257b5fa1637098b913950`;
+production `REL-001` provenance. Its exact CNG key identity is bound before
+cleanup, exactly one `My`-store private-key deletion is required, and PASS is
+withheld unless that bound key file is absent. The external exact-package
+qualification harness observed 13 CNG key files before and after with zero
+delta. NucBoxG3's complete 20-file
+manifest SHA-256 is
+`750c00979008c3b5c7df2eb139a51e846aa4d3aa09a12299b305b0f3aad71e3d`;
 the HeMan outer evidence manifest is
-`530f6e9c07e740c983ada9853da7e2d86ea4d7f4237d958558eec70863509741`.
-Private test keys, service state and installed identity, certificate trust,
-the test-only recovery-probe shim, and the isolated database fixture were
-removed before sealing; manifest-covered cleanup receipts record that state,
-and independent verification rechecked both hashes and absence afterward.
+`52f505055ca559dbc5d8bc3b6c61b676f3afd042f287881a22b9cb5e7b9c31f5`.
+The initial incomplete 17-file Nuc seal from the same `cfd7aa2` qualification
+run is retained by hash in the successor receipt, and the successor adds the
+exact signed binary and cargo metadata
+required by the nested package manifest. Three historical qualification keys
+were also removed by exact CNG container name under a manifest-covered
+remediation receipt.
+The Nuc seal removed its private gate key, service state, installed identity,
+certificate trust, and test-only recovery-probe shim; manifest-covered cleanup
+receipts record that state. HeMan's remaining mTLS private keys and isolated
+database fixture were removed after evidence capture and independently
+rechecked before publication.
 
 The installer is fail-closed: digest and signer thumbprint are mandatory, a
 wrong-digest native probe leaves both service state and certificate stores

@@ -1235,23 +1235,28 @@ All one-day test private keys were destroyed after sealing.
 
 `WIN-003` is closed on NucBoxG3 with the signed qualification package built
 natively from the reviewed installer implementation at commit
-`1373a251069bbef50dc5952adf6378323c2e2504` and tree
-`9fbb5a8783ff5d3473132a95815832854355c9a0`. The exact source bundle SHA-256
-is `5ec105e6f4961d7b13416faecd8a8b19b213104e2ba076490e8d29fa1a39cb0d`;
+`cfd7aa240d4d402b2191acc887a9bec3535df215` and tree
+`b2629e9d3f142429992ae86ee8917b1c5b6d670c`. The exact source bundle SHA-256
+is `4a28ca69746fd9bcc6e68f71f21d18a1a2a421e0edeba267ed7832feaba1fb60`;
 the signed binary is
-`03f2ef0eeb65d54ac8098381a5b0d99e4966bec577cb9750ac19302555d20282`;
+`f57cd07a5acc82f7d8e1ad2c8b27cd067056855d3deddae1477398359c8bf73b`;
 and the package archive is
-`4f82484b28832e589e4905059018f0af0216b0658932c9ffb5450289cd1015da`.
+`1f1ac6328effa4cd2abaa958ddb0c4289924d6e734cf5d376a80a4b7f468e875`.
 The short-lived self-signed Authenticode identity is qualification evidence,
-not `REL-001` production provenance; its private key was non-exportable and
-deleted after signing, and its public trust anchors were removed after the
-gate.
+not `REL-001` production provenance. The packager binds its exact CNG key
+`UniqueName`, requires exactly one `My`-store `-DeleteKey` removal, and emits
+PASS only after the bound key file is absent. The external exact-package
+qualification harness observed 13 CNG key files before and after with zero
+delta; its public trust anchors were removed after the gate. Three historical
+qualification containers exposed by this review were deleted by exact name
+under receipt SHA-256
+`c5f89fe770e1b53eaba5f9380ac55f8eb2210d4cad498f37da301e79f51fc079`.
 
 The outbound mTLS gate proved direct, `cmd.exe`, and PowerShell execution;
 durable stream digests; explicit cancellation with a separately verified dead
 descendant; and controller interruption with one lease expiration, two fenced
 offers, one logical success, and no escaped first child. A physical Windows
-reboot advanced the agent journal session epoch `3 -> 11`, returned the SCM
+reboot advanced the agent journal session epoch `3 -> 10`, returned the SCM
 service automatically, rejected a fresh-journal stale session, left zero
 active attempts, and killed the pre-reboot PID. Because SCM shutdown allowed
 the live agent to publish exit code 1 before power loss, that rebooted attempt
@@ -1260,20 +1265,26 @@ silently retried. A separate post-reboot build succeeded. This exact terminal
 distinction is the current recovery contract, not a claim that machine reboot
 and controller loss have identical retry behavior.
 
-The NucBoxG3 read-only 17-file evidence manifest SHA-256 is
-`2afb36ec50f4134bcb4a9d4a452543b5af721e67d6e257b5fa1637098b913950`.
-HeMan's 31-file outer evidence bundle is sealed at
-`/sn8100/runs/mcloving/windows/pr25-1373a25-final`; its self-excluding manifest
+The complete NucBoxG3 package/runtime successor has a read-only 20-file
+manifest SHA-256 of
+`750c00979008c3b5c7df2eb139a51e846aa4d3aa09a12299b305b0f3aad71e3d`.
+It records the initial incomplete 17-file Nuc seal from the same `cfd7aa2`
+qualification run,
+`829e16ad7bdb0b7dddd912f65ad38d6a1c74fb775623574d9cecf039decc150b`
+and adds the exact signed binary and cargo metadata required by the nested
+package manifest. HeMan's 37-file outer evidence bundle is sealed at
+`/sn8100/runs/mcloving/windows/pr25-cfd7aa2-final`; its self-excluding manifest
 SHA-256 is
-`530f6e9c07e740c983ada9853da7e2d86ea4d7f4237d958558eec70863509741`.
-It binds the exact source and package, native host receipts, controller hash,
-PostgreSQL dump and schema, and cleanup receipts. All temporary mTLS private
-keys, the Windows service and installed identity, qualification trust anchors,
-the test-only recovery-probe shim, and the isolated PostgreSQL fixture were
-removed before sealing; manifest-covered cleanup receipts record that state,
-and the independent verification rechecked both hashes and absence. W2-B and
-the persistent Windows evidence lane are closed; `REL-001` remains the
-separate production-signing dependency.
+`52f505055ca559dbc5d8bc3b6c61b676f3afd042f287881a22b9cb5e7b9c31f5`.
+It binds the exact source and package, native host and controller receipts,
+PostgreSQL dump and schema, Claude pre-push `VERIFIER_PASS`, and cleanup
+receipts. The Nuc seal removed the Windows service, installed identity,
+qualification trust anchors, gate private key, and test-only recovery-probe
+shim; manifest-covered cleanup receipts record that state. HeMan's remaining
+mTLS private keys and isolated PostgreSQL fixture were removed after evidence
+capture and independently rechecked before publication. W2-B and the
+persistent Windows evidence lane are closed; `REL-001` remains the separate
+production-signing dependency.
 
 The final installer contract requires both the exact binary digest and signer
 thumbprint. A native wrong-digest attempt failed before service mutation and
