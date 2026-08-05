@@ -50,6 +50,12 @@ only the exact destination through an egress policy, give the private spool its
 own bounded volume, and run under a dedicated service identity. Host or adapter
 operator compromise remains outside application-level containment.
 
+V1 is admitted only on Unix hosts where the implementation can synchronize a
+containing directory. Construction preflights that primitive before accepting
+any capture. Other platforms fail closed before creating the private spool or
+publishing a claim; this adapter restriction does not narrow McLoving's
+separate first-class Windows agent execution support.
+
 ## Certified configuration
 
 The canonical configuration digest binds:
@@ -124,7 +130,9 @@ The adapter sends only a scoped bearer-authenticated `GET`, disables redirects
 and ambient proxies, disables the HTTP client's implicit retry policy, applies
 one total/connect timeout, and retries only
 transport failures or HTTP 502-504 up to the configured bound. Authentication
-denials do not retry. A successful response must provide:
+authorization and grant-header construction is validated once during adapter
+construction, before the spool is created or a claim can be published.
+Authentication denials do not retry. A successful response must provide:
 
 - `Content-Type: application/json`;
 - `X-McLoving-Cursor`;

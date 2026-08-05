@@ -245,7 +245,10 @@ pub struct InputAdapter {
     config: AdapterConfig,
     config_sha256: String,
     implementation_sha256: String,
-    read_token: String,
+    authorization: HeaderValue,
+    grant_id_header: HeaderValue,
+    grant_version_header: HeaderValue,
+    grant_scope_header: HeaderValue,
     signing_key: Vec<u8>,
     secret_markers: Vec<Vec<u8>>,
     client: reqwest::Client,
@@ -268,6 +271,11 @@ impl InputAdapter {
             &signing_key,
             &secret_markers,
         )?;
+        let authorization = bearer(&read_token)?;
+        let grant_id_header = request_header(&config.grant_id)?;
+        let grant_version_header = request_header(&config.grant_version)?;
+        let grant_scope_header = request_header(&config.grant_scope)?;
+        ensure_directory_sync_supported()?;
         let config_sha256 = config.canonical_digest()?;
         let endpoint = Url::parse(&config.endpoint_url).map_err(|_| AdapterError::InvalidConfig)?;
         validate_endpoint(&endpoint, config.test_allow_http_loopback)?;
@@ -299,12 +307,20 @@ impl InputAdapter {
         tokio::fs::create_dir_all(&config.spool_dir)
             .await
             .map_err(|_| AdapterError::StateUnavailable)?;
+        // A capture claim is useful only if its directory entry can be made
+        // durable before source access. Fail adapter construction on platforms
+        // without that primitive instead of discovering the limitation after
+        // publishing an unfulfillable claim.
+        sync_directory(&config.spool_dir).await?;
 
         Ok(Self {
             config,
             config_sha256,
             implementation_sha256,
-            read_token,
+            authorization,
+            grant_id_header,
+            grant_version_header,
+            grant_scope_header,
             signing_key,
             secret_markers,
             client,
@@ -370,10 +386,13 @@ impl InputAdapter {
             let result = self
                 .client
                 .get(url.clone())
-                .header(AUTHORIZATION, bearer(&self.read_token)?)
-                .header("x-mcloving-grant-id", &self.config.grant_id)
-                .header("x-mcloving-grant-version", &self.config.grant_version)
-                .header("x-mcloving-grant-scope", &self.config.grant_scope)
+                .header(AUTHORIZATION, self.authorization.clone())
+                .header("x-mcloving-grant-id", self.grant_id_header.clone())
+                .header(
+                    "x-mcloving-grant-version",
+                    self.grant_version_header.clone(),
+                )
+                .header("x-mcloving-grant-scope", self.grant_scope_header.clone())
                 .send()
                 .await;
             match result {
@@ -997,7 +1016,13 @@ fn optional_header(headers: &HeaderMap, name: &str) -> Result<Option<String>, Ad
 }
 
 fn bearer(token: &str) -> Result<HeaderValue, AdapterError> {
-    HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| AdapterError::InvalidConfig)
+    let mut value = request_header(&format!("Bearer {token}"))?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+fn request_header(value: &str) -> Result<HeaderValue, AdapterError> {
+    HeaderValue::from_str(value).map_err(|_| AdapterError::InvalidConfig)
 }
 
 fn receipt_path(spool_dir: &Path, capture_id: Uuid) -> PathBuf {
@@ -1070,6 +1095,17 @@ pub async fn read_bounded_regular_file(
     Ok(bytes)
 }
 
+#[cfg(unix)]
+fn ensure_directory_sync_supported() -> Result<(), AdapterError> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_directory_sync_supported() -> Result<(), AdapterError> {
+    Err(AdapterError::StateUnavailable)
+}
+
+#[cfg(unix)]
 async fn sync_directory(path: &Path) -> Result<(), AdapterError> {
     let directory = tokio::fs::File::open(path)
         .await
@@ -1085,6 +1121,16 @@ async fn sync_directory(path: &Path) -> Result<(), AdapterError> {
         .sync_all()
         .await
         .map_err(|_| AdapterError::StateUnavailable)
+}
+
+#[cfg(not(unix))]
+async fn sync_directory(_path: &Path) -> Result<(), AdapterError> {
+    // The v1 claim protocol requires a durable containing-directory entry
+    // before it may sample a mutable source. Do not silently downgrade that
+    // guarantee on platforms where this implementation has no certified
+    // directory-sync primitive. InputAdapter::new calls this before returning,
+    // so no claim can be published on an unsupported host.
+    Err(AdapterError::StateUnavailable)
 }
 
 pub async fn sha256_file(path: &Path) -> Result<String, AdapterError> {

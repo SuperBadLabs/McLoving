@@ -458,6 +458,45 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
         .await,
         Err(AdapterError::InvalidConfig)
     ));
+
+    let invalid_header_token = format!("{READ_TOKEN}\nsubstituted");
+    let invalid_header_spool = temp.path().join("invalid-header-spool");
+    let mut invalid_header_config = config(&fixture.endpoint, &invalid_header_spool);
+    invalid_header_config.read_token_sha256 = content_sha256(invalid_header_token.as_bytes());
+    assert!(matches!(
+        InputAdapter::new(
+            invalid_header_config,
+            IMPLEMENTATION_SHA256.to_owned(),
+            invalid_header_token,
+            SIGNING_KEY.to_vec(),
+            vec![SECRET_MARKER.to_vec()],
+        )
+        .await,
+        Err(AdapterError::InvalidConfig)
+    ));
+    assert!(
+        !invalid_header_spool.exists(),
+        "invalid authorization must fail before private spool creation"
+    );
+
+    let invalid_grant_spool = temp.path().join("invalid-grant-header-spool");
+    let mut invalid_grant_config = config(&fixture.endpoint, &invalid_grant_spool);
+    invalid_grant_config.grant_scope = "flags:read\nsubstituted".to_owned();
+    assert!(matches!(
+        InputAdapter::new(
+            invalid_grant_config,
+            IMPLEMENTATION_SHA256.to_owned(),
+            READ_TOKEN.to_owned(),
+            SIGNING_KEY.to_vec(),
+            vec![SECRET_MARKER.to_vec()],
+        )
+        .await,
+        Err(AdapterError::InvalidConfig)
+    ));
+    assert!(
+        !invalid_grant_spool.exists(),
+        "invalid grant header must fail before private spool creation"
+    );
     assert!(matches!(
         InputAdapter::new(
             bound_config.clone(),
