@@ -69,7 +69,14 @@ impl Store {
             return invalid("authorization policy digest does not match its canonical content");
         }
 
-        let mut tx = self.pool().begin().await?;
+        let mut tx = self.tenant_transaction(input.organization_id).await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "mcloving.authorization-policy.{}.{}",
+                input.organization_id, input.project_id
+            ))
+            .execute(&mut *tx)
+            .await?;
         let project_exists = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1 FROM projects WHERE organization_id = $1 AND id = $2

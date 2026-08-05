@@ -281,6 +281,45 @@ async fn authz001_backup_restore_verify() {
 }
 
 #[tokio::test]
+async fn concurrent_first_generation_install_has_one_domain_conflict() {
+    let Some(admin) = test_store().await else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    admin
+        .create_project(
+            organization_id,
+            "authz-install-race",
+            project_id,
+            "authorization-install-race",
+        )
+        .await
+        .expect("create authorization race test tenant");
+
+    let first = policy(organization_id, project_id, 1, None, None, Vec::new());
+    let second = first.clone();
+    let first_store = admin.clone();
+    let second_store = admin.clone();
+    let (first_result, second_result) = tokio::join!(
+        first_store.install_authorization_policy(&first),
+        second_store.install_authorization_policy(&second),
+    );
+
+    let outcomes = [first_result, second_result];
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Err(StoreError::AuthorizationConflict(_))))
+            .count(),
+        1,
+        "the losing writer receives the stable authorization conflict contract"
+    );
+}
+
+#[tokio::test]
 async fn imported_policy_is_exact_stale_safe_versioned_and_rollback_capable() {
     let Some(admin) = test_store().await else {
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
