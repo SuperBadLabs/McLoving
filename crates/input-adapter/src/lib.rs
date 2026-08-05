@@ -1049,6 +1049,21 @@ impl InputAdapter {
         Ok(receipt)
     }
 
+    async fn load_stored_or_expired(
+        &self,
+        capture_id: Uuid,
+        publication_deadline_unix_ms: i64,
+    ) -> Result<(Option<CaptureReceipt>, bool), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let receipt = self.load_stored_unlocked(capture_id).await?;
+        if receipt.is_some() {
+            sync_directory(&self.config.spool_dir).await?;
+            return Ok((receipt, false));
+        }
+        let deadline_expired = now_unix_ms()? >= publication_deadline_unix_ms;
+        Ok((None, deadline_expired))
+    }
+
     async fn load_stored_unlocked(
         &self,
         capture_id: Uuid,
@@ -1163,14 +1178,17 @@ impl InputAdapter {
         claim: &CaptureClaim,
     ) -> Result<CaptureReceipt, AdapterError> {
         loop {
-            if let Some(receipt) = self.load_stored(capture_id).await? {
+            let (receipt, deadline_expired) = self
+                .load_stored_or_expired(capture_id, claim.publication_deadline_unix_ms)
+                .await?;
+            if let Some(receipt) = receipt {
                 if receipt.request_sha256 != request_sha256 {
                     return Err(AdapterError::ReplayMismatch);
                 }
                 self.verify_receipt(&receipt)?;
                 return Ok(receipt);
             }
-            if now_unix_ms()? >= claim.publication_deadline_unix_ms {
+            if deadline_expired {
                 return Err(AdapterError::SourceUnavailable);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

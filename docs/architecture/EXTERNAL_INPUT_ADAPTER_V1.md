@@ -107,9 +107,10 @@ the request digest and an absolute publication deadline: the earlier request or
 grant expiry, capped by the complete retry-expanded network window plus a
 60-second local processing/publication window. Receipt publication takes the
 exclusive spool lock and refuses to begin at or after that deadline. A matching
-caller rechecks the receipt under the same lock before applying the deadline,
-so either it waits behind an already-started durable publication and receives
-the exact signed receipt, or it times out and no late receipt can appear. A
+caller atomically checks receipt absence and the deadline while holding the
+same exclusive lock, so either it waits behind an already-started durable
+publication and receives the exact signed receipt, or its timeout decision
+orders before the publisher's deadline fence and no late receipt can appear. A
 claimant also fences that deadline before every outbound attempt and after
 durable rate charging, so an expired publication lease cannot initiate another
 source read. A
