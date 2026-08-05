@@ -1159,7 +1159,7 @@ async fn validate_pipeline(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ProjectConfigure,
     )
     .await?;
     let pipeline =
@@ -1182,7 +1182,7 @@ async fn plan_pipeline(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ProjectConfigure,
     )
     .await?;
     let pipeline =
@@ -1201,7 +1201,7 @@ async fn put_pipeline(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectAdmin,
+        Action::ProjectConfigure,
     )
     .await?;
     let expected_revision = expected_revision(&headers)?;
@@ -1262,7 +1262,7 @@ async fn get_pipeline(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ProjectView,
     )
     .await?;
     let record = state
@@ -1290,7 +1290,7 @@ async fn list_pipelines(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ProjectView,
     )
     .await?;
     state
@@ -1317,7 +1317,7 @@ async fn put_component(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectAdmin,
+        Action::ProjectConfigure,
     )
     .await?;
     let digest = parse_hex_digest_named(&digest_hex, "component")?;
@@ -1374,7 +1374,7 @@ async fn get_component(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ProjectView,
     )
     .await?;
     let digest = parse_hex_digest_named(&digest_hex, "component")?;
@@ -1398,7 +1398,7 @@ async fn list_components(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ProjectView,
     )
     .await?;
     let after = match (&query.after, &query.after_digest) {
@@ -1439,7 +1439,7 @@ async fn list_builds(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ProjectView,
     )
     .await?;
     let after = match (query.after_created_micros, query.after_id) {
@@ -1480,7 +1480,7 @@ async fn build_graph(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ProjectView,
     )
     .await?;
     state
@@ -1502,7 +1502,7 @@ async fn list_approvals(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ProjectView,
     )
     .await?;
     state
@@ -1524,7 +1524,7 @@ async fn create_approval(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectAdmin,
+        Action::ApprovalAct,
     )
     .await?;
     let graph = state
@@ -1592,7 +1592,7 @@ async fn list_test_reports(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::TestRead,
     )
     .await?;
     state
@@ -1767,7 +1767,7 @@ async fn submit(
         &headers,
         organization_id,
         Some(project_id),
-        Action::BuildSubmit,
+        Action::BuildTrigger,
     )
     .await?;
     let required_trust_pool = submission_trust_pool(&headers)?;
@@ -2212,7 +2212,7 @@ async fn status(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ProjectView,
     )
     .await?;
     let snapshot = state
@@ -2245,7 +2245,7 @@ async fn stage_artifact(
         &headers,
         organization_id,
         Some(project_id),
-        Action::BuildSubmit,
+        Action::ArtifactWrite,
     )
     .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
@@ -2362,7 +2362,7 @@ async fn commit_artifact(
         &headers,
         organization_id,
         Some(project_id),
-        Action::BuildSubmit,
+        Action::ArtifactWrite,
     )
     .await?;
     authorize_artifact_agent(&state, &headers, &request.agent_id)?;
@@ -2480,7 +2480,7 @@ async fn list_artifacts(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ArtifactRead,
     )
     .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
@@ -2506,7 +2506,7 @@ async fn artifact_metadata(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ArtifactRead,
     )
     .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
@@ -2533,7 +2533,7 @@ async fn download_artifact(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::ArtifactRead,
     )
     .await?;
     require_build(&state, organization_id, project_id, build_id).await?;
@@ -2641,7 +2641,7 @@ async fn logs(
         &headers,
         organization_id,
         Some(project_id),
-        Action::ProjectRead,
+        Action::LogRead,
     )
     .await?;
     if state
@@ -2737,7 +2737,7 @@ async fn retry_attempt(
         &headers,
         organization_id,
         Some(project_id),
-        Action::BuildSubmit,
+        Action::BuildRetry,
     )
     .await?;
     let graph = state
@@ -3808,6 +3808,8 @@ mod tests {
             organization_id,
             project_roles: BTreeMap::new(),
             service_scopes: [mcloving_controller_store::authz::ServiceScope::ProjectAdmin].into(),
+            mapped_projects: BTreeSet::new(),
+            action_grants: BTreeMap::new(),
         };
         let human = Principal {
             subject: "oidc:alice".to_owned(),
@@ -3819,6 +3821,8 @@ mod tests {
             )]
             .into(),
             service_scopes: BTreeSet::new(),
+            mapped_projects: BTreeSet::new(),
+            action_grants: BTreeMap::new(),
         };
         let state = ApiState::new(
             Store::new(pool),
@@ -3840,7 +3844,7 @@ mod tests {
             &headers,
             organization_id,
             Some(project_id),
-            Action::ProjectAdmin,
+            Action::ProjectConfigure,
         )
         .await
         .expect("human principal is independently authenticated");
@@ -3859,6 +3863,8 @@ mod tests {
             organization_id,
             project_roles: BTreeMap::new(),
             service_scopes: BTreeSet::new(),
+            mapped_projects: BTreeSet::new(),
+            action_grants: BTreeMap::new(),
         };
         let state = ApiState::new(
             Store::new(pool),
@@ -3903,6 +3909,8 @@ mod tests {
             organization_id,
             project_roles: BTreeMap::new(),
             service_scopes: BTreeSet::new(),
+            mapped_projects: BTreeSet::new(),
+            action_grants: BTreeMap::new(),
         };
         let shared = "shared-cross-namespace-secret-token-32-bytes";
         let api_first = ApiState::new(Store::new(pool.clone()), shared, principal.clone()).unwrap();

@@ -126,7 +126,11 @@ and cross-tenant writes are rejected.
 Authentication never grants authority. The Rust policy engine denies by
 default, rejects tenant mismatch before role evaluation, applies a
 least-privilege human project-role matrix, and requires explicit service
-scopes. Scheduler control is service-only.
+scopes. Imported Jenkins policy uses immutable versioned action grants; its
+presence disables role-lattice fallback, missing grants deny, deny wins mapping
+conflicts, and stale identity provenance or generations produce no grant.
+Scheduler control is service-only and cannot be imported from a Jenkins ACL.
+See `AUTHORIZATION_MAPPING_V1.md`.
 
 Schema installation and organization/project bootstrap require a separately
 privileged connection. The runtime tenant role has read-only access to that
@@ -162,3 +166,6 @@ The real-PostgreSQL gate proves:
 - forced-RLS read filtering and cross-tenant write rejection.
 
 Rust unit tests independently prove the authorization matrix and deny defaults.
+Real-PostgreSQL tests prove immutable policy generations, exact source/target
+provenance, conflict and lifecycle fencing, revocation, rollback, audit, RLS,
+and logical restore behavior.

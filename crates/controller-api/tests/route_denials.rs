@@ -52,6 +52,8 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
         ]
         .into_iter()
         .collect::<BTreeSet<_>>(),
+        mapped_projects: BTreeSet::new(),
+        action_grants: BTreeMap::new(),
     };
     let pool = PgPoolOptions::new()
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
@@ -111,6 +113,8 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
         organization_id: Uuid::new_v4(),
         project_roles: BTreeMap::new(),
         service_scopes: BTreeSet::new(),
+        mapped_projects: BTreeSet::new(),
+        action_grants: BTreeMap::new(),
     };
     let app = router(ApiState::new(Store::new(pool), TOKEN, principal).expect("UI API state"));
 

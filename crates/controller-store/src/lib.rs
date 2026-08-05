@@ -7,6 +7,7 @@ use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 mod audit;
+mod authorization_mapping;
 pub mod authz;
 mod dag;
 mod identity;
@@ -19,6 +20,10 @@ mod test_results;
 pub use audit::{
     AuditEvent, AuditExport, AuditPage, AuditRetentionPolicy, MAX_AUDIT_PAGE, NewAuditEvent,
     verify_audit_export, verify_audit_page,
+};
+pub use authorization_mapping::{
+    AuthorizationPolicyReceipt, AuthorizationPolicyWrite, AuthorizationPrincipalMappingWrite,
+    compute_authorization_policy_digest,
 };
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
@@ -107,6 +112,9 @@ pub const CREDENTIAL_NAMESPACE_V22: &str =
 /// Fail-closed PostgreSQL function execution boundary for runtime sessions.
 pub const RUNTIME_FUNCTION_BOUNDARY_V23: &str =
     include_str!("../migrations/0023_runtime_function_boundary.sql");
+/// Immutable, provenance-bound Jenkins authorization policy generations.
+pub const AUTHORIZATION_MAPPING_V24: &str =
+    include_str!("../migrations/0024_authorization_mapping.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -443,6 +451,10 @@ pub enum StoreError {
     InvalidRuntimeConfiguration(String),
     #[error("identity operation conflict: {0}")]
     IdentityConflict(String),
+    #[error("invalid authorization operation: {0}")]
+    InvalidAuthorizationOperation(String),
+    #[error("authorization operation conflict: {0}")]
+    AuthorizationConflict(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -621,6 +633,10 @@ impl Store {
                    ('identity_sessions', 'SELECT'), ('identity_sessions', 'INSERT'),
                    ('identity_sessions', 'UPDATE'), ('identity_sessions', 'DELETE'),
                    ('service_credentials', 'SELECT'),
+                   ('authorization_policy_versions', 'SELECT'),
+                   ('authorization_principal_mappings', 'SELECT'),
+                   ('authorization_action_grants', 'SELECT'),
+                   ('authorization_project_policies', 'SELECT'),
                    ('oidc_login_attempts', 'SELECT'), ('oidc_login_attempts', 'INSERT'),
                    ('oidc_login_attempts', 'UPDATE'), ('oidc_login_attempts', 'DELETE'),
                    ('credential_namespace_reservations', 'SELECT'),
@@ -915,6 +931,10 @@ impl Store {
                    ('state_transfer_scm_evidence'), ('state_transfer_protections'),
                    ('object_retention'), ('legal_holds'), ('node_dependencies'),
                    ('identity_providers'), ('identity_group_snapshots'),
+                   ('authorization_policy_versions'),
+                   ('authorization_principal_mappings'),
+                   ('authorization_action_grants'),
+                   ('authorization_project_policies'),
                    ('oidc_login_attempts'), ('identity_sessions'),
                    ('oidc_token_replays'), ('service_credentials'),
                    ('protected_environments'), ('environment_approvals'),
@@ -943,7 +963,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 40
+             SELECT COUNT(*) = 44
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -972,7 +992,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 40
+                    AND (SELECT COUNT(*) FROM policies) = 44
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1076,6 +1096,7 @@ impl Store {
         apply_migration(&mut tx, 21, IDENTITY_SESSION_LINEAGE_V21).await?;
         apply_migration(&mut tx, 22, CREDENTIAL_NAMESPACE_V22).await?;
         apply_migration(&mut tx, 23, RUNTIME_FUNCTION_BOUNDARY_V23).await?;
+        apply_migration(&mut tx, 24, AUTHORIZATION_MAPPING_V24).await?;
         tx.commit().await?;
         Ok(())
     }
