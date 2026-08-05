@@ -1076,6 +1076,88 @@ async fn reconcile_does_not_close_an_in_flight_fresh_intent() {
 }
 
 #[tokio::test]
+async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
+    let context = Context::new(FixtureMode::DelayedCreateReady).await;
+    let request = context.request();
+    let provision = context.provisioner.provision(&request);
+    let cancel = async {
+        context.fixture.wait_for_create_start().await;
+        context
+            .provisioner
+            .cancel(&cancel_request(
+                &context.config,
+                &request,
+                IMPLEMENTATION_SHA256,
+            ))
+            .await
+    };
+
+    let (provisioned, cancelled) = tokio::join!(provision, cancel);
+    let provisioned = provisioned.expect("in-flight create converges on cancellation");
+    let cancelled = cancelled.expect("concurrent cancellation receipt");
+    assert_eq!(provisioned.body.outcome, LifecycleOutcome::Cancelled);
+    assert_eq!(cancelled.body.outcome, LifecycleOutcome::Cancelled);
+    assert!(provisioned.body.cleanup_confirmed);
+    assert!(cancelled.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().3, 0);
+
+    let replay = context
+        .provisioner
+        .cancel(&cancel_request(
+            &context.config,
+            &request,
+            IMPLEMENTATION_SHA256,
+        ))
+        .await
+        .expect("terminal cancellation replay");
+    assert_eq!(replay.body.outcome, LifecycleOutcome::Cancelled);
+    assert!(replay.body.cleanup_confirmed);
+}
+
+#[tokio::test]
+async fn reconciliation_preserves_expiry_outcome_after_delete_response_loss() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let mut request = context.request();
+    request.instance_expires_at_unix_ms = now_ms() + 500;
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("short-lived ready instance");
+    context.fixture.set_mode(FixtureMode::MalformedDeleteOnce);
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+    let uncertain = context
+        .provisioner
+        .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+        .await
+        .expect("retain uncertain expiry cleanup");
+    assert_eq!(uncertain.body.cleaned, 0);
+    assert_eq!(uncertain.body.ambiguous, 1);
+    assert_eq!(context.fixture.counts().3, 0);
+
+    let recovered = context
+        .provisioner
+        .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+        .await
+        .expect("confirm absent expired instance");
+    assert_eq!(recovered.body.cleaned, 1);
+    assert_eq!(recovered.body.escaped_compute_remaining, 0);
+
+    let lifecycle = context
+        .provisioner
+        .cancel(&cancel_request(
+            &context.config,
+            &request,
+            IMPLEMENTATION_SHA256,
+        ))
+        .await
+        .expect("read retained terminal lifecycle");
+    assert_eq!(lifecycle.body.outcome, LifecycleOutcome::ExpiredCleaned);
+    assert!(lifecycle.body.cleanup_confirmed);
+}
+
+#[tokio::test]
 async fn recovered_absence_preserves_ready_and_deleting_lifecycle_truth() {
     for (state, expected) in [
         ("ready", LifecycleOutcome::AgentLostCleaned),

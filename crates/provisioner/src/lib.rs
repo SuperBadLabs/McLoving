@@ -506,6 +506,35 @@ pub enum LifecycleOutcome {
     ReconciliationRequired,
 }
 
+fn cleanup_directive(outcome: LifecycleOutcome) -> Option<(CleanupReason, LifecycleOutcome)> {
+    match outcome {
+        LifecycleOutcome::Cancelled => {
+            Some((CleanupReason::Cancelled, LifecycleOutcome::Cancelled))
+        }
+        LifecycleOutcome::ExpiredCleaned => {
+            Some((CleanupReason::Expired, LifecycleOutcome::ExpiredCleaned))
+        }
+        LifecycleOutcome::StartupFailedCleaned => Some((
+            CleanupReason::StartupFailed,
+            LifecycleOutcome::StartupFailedCleaned,
+        )),
+        LifecycleOutcome::StartupTimeoutCleaned => Some((
+            CleanupReason::StartupTimeout,
+            LifecycleOutcome::StartupTimeoutCleaned,
+        )),
+        LifecycleOutcome::AgentLostCleaned => {
+            Some((CleanupReason::AgentLost, LifecycleOutcome::AgentLostCleaned))
+        }
+        LifecycleOutcome::SubstitutionDeniedCleaned => Some((
+            CleanupReason::Substitution,
+            LifecycleOutcome::SubstitutionDeniedCleaned,
+        )),
+        LifecycleOutcome::Ready
+        | LifecycleOutcome::CreateAmbiguous
+        | LifecycleOutcome::ReconciliationRequired => None,
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LifecycleReceiptBody {
@@ -901,13 +930,18 @@ impl Provisioner {
         };
 
         let now = now_unix_ms()?;
+        if !self.set_state_from(
+            request.request_id,
+            StoredState::Intent,
+            StoredState::Pending,
+            Some(&instance),
+            now,
+        )? {
+            return self
+                .recover_create_admission_race(request, &request_sha256, &instance)
+                .await;
+        }
         if now >= startup_deadline {
-            self.set_state(
-                request.request_id,
-                StoredState::Deleting,
-                Some(&instance),
-                now,
-            )?;
             return self
                 .cleanup_instance(
                     request,
@@ -921,12 +955,6 @@ impl Provisioner {
         }
 
         if self.validate_instance(&instance, &create, now).is_err() {
-            self.set_state(
-                request.request_id,
-                StoredState::Deleting,
-                Some(&instance),
-                now,
-            )?;
             return self
                 .cleanup_instance(
                     request,
@@ -941,7 +969,17 @@ impl Provisioner {
 
         match instance.state {
             ProviderInstanceState::Ready => {
-                self.set_state(request.request_id, StoredState::Ready, Some(&instance), now)?;
+                if !self.set_state_from(
+                    request.request_id,
+                    StoredState::Pending,
+                    StoredState::Ready,
+                    Some(&instance),
+                    now,
+                )? {
+                    return self
+                        .recover_create_admission_race(request, &request_sha256, &instance)
+                        .await;
+                }
                 self.append_lifecycle_receipt(
                     request,
                     LifecycleEvidence {
@@ -981,12 +1019,6 @@ impl Provisioner {
                 .await
             }
             ProviderInstanceState::Pending | ProviderInstanceState::Deleting => {
-                self.set_state(
-                    request.request_id,
-                    StoredState::Pending,
-                    Some(&instance),
-                    now,
-                )?;
                 self.await_startup(request, &request_sha256, instance, startup_deadline)
                     .await
             }
@@ -1018,6 +1050,11 @@ impl Provisioner {
             }
             return Err(ProvisionerError::StateUnavailable);
         }
+        let (_, cancel_outcome) = self.record_cleanup_intent(
+            request.request_id,
+            CleanupReason::Cancelled,
+            LifecycleOutcome::Cancelled,
+        )?;
         let instance = match stored.instance.take() {
             Some(instance) => instance,
             None => match self.provider_lookup(request.request_id).await {
@@ -1029,7 +1066,7 @@ impl Provisioner {
                         LifecycleEvidence {
                             request_sha256: &stored.request_sha256,
                             instance: None,
-                            outcome: LifecycleOutcome::Cancelled,
+                            outcome: cancel_outcome,
                             cleanup_confirmed: true,
                             ambiguity: false,
                             audit_lineage: &request.audit_lineage,
@@ -1130,9 +1167,13 @@ impl Provisioner {
                     StoredState::Ready => {
                         (StoredState::Deleted, LifecycleOutcome::AgentLostCleaned)
                     }
-                    StoredState::Deleting | StoredState::Deleted => {
-                        (StoredState::Deleted, LifecycleOutcome::Cancelled)
+                    StoredState::Deleting => {
+                        let (_, outcome) = self
+                            .load_cleanup_intent(item.request.request_id)?
+                            .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
+                        (StoredState::Deleted, outcome)
                     }
+                    StoredState::Deleted => (StoredState::Deleted, LifecycleOutcome::Cancelled),
                     StoredState::Intent
                     | StoredState::Ambiguous
                     | StoredState::Pending
@@ -1202,9 +1243,10 @@ impl Provisioner {
                     LifecycleOutcome::StartupTimeoutCleaned,
                 )),
                 (_, true, _, _) => Some((CleanupReason::Expired, LifecycleOutcome::ExpiredCleaned)),
-                (_, _, StoredState::Deleting, _) => {
-                    Some((CleanupReason::Cancelled, LifecycleOutcome::Cancelled))
-                }
+                (_, _, StoredState::Deleting, _) => Some(
+                    self.load_cleanup_intent(item.request.request_id)?
+                        .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled)),
+                ),
                 (_, _, _, ProviderInstanceState::StartupFailed) => Some((
                     CleanupReason::StartupFailed,
                     LifecycleOutcome::StartupFailedCleaned,
@@ -1240,13 +1282,14 @@ impl Provisioner {
                     ambiguous_request_ids.insert(item.request.request_id);
                 }
             } else if instance.state == ProviderInstanceState::Ready {
-                self.set_state(
+                let transitioned = self.set_state_from(
                     item.request.request_id,
+                    item.state,
                     StoredState::Ready,
                     Some(instance),
                     now,
                 )?;
-                if item.state != StoredState::Ready {
+                if transitioned && item.state != StoredState::Ready {
                     self.append_lifecycle_receipt(
                         &item.request,
                         LifecycleEvidence {
@@ -1529,7 +1572,17 @@ impl Provisioner {
             }
             match instance.state {
                 ProviderInstanceState::Ready => {
-                    self.set_state(request.request_id, StoredState::Ready, Some(&instance), now)?;
+                    if !self.set_state_from(
+                        request.request_id,
+                        StoredState::Pending,
+                        StoredState::Ready,
+                        Some(&instance),
+                        now,
+                    )? {
+                        return self
+                            .recover_create_admission_race(request, request_sha256, &instance)
+                            .await;
+                    }
                     return self.append_lifecycle_receipt(
                         request,
                         LifecycleEvidence {
@@ -1610,13 +1663,16 @@ impl Provisioner {
                         .await;
                 }
                 if stored.state == StoredState::Deleting {
+                    let (reason, outcome) = self
+                        .load_cleanup_intent(stored.request.request_id)?
+                        .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
                     return self
                         .cleanup_instance(
                             &stored.request,
                             &stored.request_sha256,
                             &instance,
-                            CleanupReason::Cancelled,
-                            LifecycleOutcome::Cancelled,
+                            reason,
+                            outcome,
                             audit_lineage,
                         )
                         .await;
@@ -1641,12 +1697,21 @@ impl Provisioner {
                 }
                 match instance.state {
                     ProviderInstanceState::Ready => {
-                        self.set_state(
+                        if !self.set_state_from(
                             stored.request.request_id,
+                            stored.state,
                             StoredState::Ready,
                             Some(&instance),
                             now,
-                        )?;
+                        )? {
+                            return self
+                                .recover_create_admission_race(
+                                    &stored.request,
+                                    &stored.request_sha256,
+                                    &instance,
+                                )
+                                .await;
+                        }
                         self.append_lifecycle_receipt(
                             &stored.request,
                             LifecycleEvidence {
@@ -1700,9 +1765,13 @@ impl Provisioner {
                     StoredState::Ready => {
                         (StoredState::Deleted, LifecycleOutcome::AgentLostCleaned)
                     }
-                    StoredState::Deleting | StoredState::Deleted => {
-                        (StoredState::Deleted, LifecycleOutcome::Cancelled)
+                    StoredState::Deleting => {
+                        let (_, outcome) = self
+                            .load_cleanup_intent(stored.request.request_id)?
+                            .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
+                        (StoredState::Deleted, outcome)
                     }
+                    StoredState::Deleted => (StoredState::Deleted, LifecycleOutcome::Cancelled),
                     StoredState::Intent
                     | StoredState::Ambiguous
                     | StoredState::Pending
@@ -1726,9 +1795,14 @@ impl Provisioner {
             }
             Err(_) => {
                 let now = now_unix_ms()?;
+                let retained_state = if stored.state == StoredState::Deleting {
+                    StoredState::Deleting
+                } else {
+                    StoredState::Ambiguous
+                };
                 self.set_state(
                     stored.request.request_id,
-                    StoredState::Ambiguous,
+                    retained_state,
                     stored.instance.as_ref(),
                     now,
                 )?;
@@ -1762,6 +1836,55 @@ impl Provisioner {
             .min(request.expires_at_unix_ms)
             .min(request.instance_expires_at_unix_ms)
             .min(self.config.provider_grant_expires_unix_ms))
+    }
+
+    async fn recover_create_admission_race(
+        &self,
+        request: &ProvisionRequest,
+        request_sha256: &str,
+        instance: &ProviderInstance,
+    ) -> Result<LifecycleReceipt, ProvisionerError> {
+        let stored = self
+            .load_stored_request(request.request_id)?
+            .ok_or(ProvisionerError::StateUnavailable)?;
+        if matches!(stored.state, StoredState::Pending | StoredState::Ready)
+            && stored.latest_receipt.as_ref().is_some_and(|receipt| {
+                receipt.body.outcome == LifecycleOutcome::Ready
+                    && !receipt.body.cleanup_confirmed
+                    && !receipt.body.ambiguity
+            })
+        {
+            let receipt = stored
+                .latest_receipt
+                .ok_or(ProvisionerError::StateUnavailable)?;
+            self.verify_lifecycle_receipt(&receipt)?;
+            return Ok(receipt);
+        }
+        if matches!(
+            stored.state,
+            StoredState::Intent | StoredState::Pending | StoredState::Ready
+        ) && stored.latest_receipt.is_none()
+        {
+            return Box::pin(self.recover_one(stored, &request.audit_lineage)).await;
+        }
+        let (reason, outcome) = self
+            .load_cleanup_intent(request.request_id)?
+            .or_else(|| {
+                stored
+                    .latest_receipt
+                    .as_ref()
+                    .and_then(|receipt| cleanup_directive(receipt.body.outcome))
+            })
+            .unwrap_or((CleanupReason::Superseded, LifecycleOutcome::Cancelled));
+        self.cleanup_instance(
+            request,
+            request_sha256,
+            instance,
+            reason,
+            outcome,
+            &request.audit_lineage,
+        )
+        .await
     }
 
     async fn wait_for_peer_or_recover(
@@ -1806,6 +1929,8 @@ impl Provisioner {
         audit_lineage: &str,
     ) -> Result<LifecycleReceipt, ProvisionerError> {
         let now = now_unix_ms()?;
+        let (reason, success_outcome) =
+            self.record_cleanup_intent(request.request_id, reason, success_outcome)?;
         self.set_state(
             request.request_id,
             StoredState::Deleting,
@@ -2403,6 +2528,96 @@ impl Provisioner {
         sync_database_parent(&self.database_path)
     }
 
+    fn set_state_from(
+        &self,
+        request_id: Uuid,
+        expected: StoredState,
+        state: StoredState,
+        instance: Option<&ProviderInstance>,
+        now: i64,
+    ) -> Result<bool, ProvisionerError> {
+        let instance_json = instance.map(canonical_json).transpose()?;
+        let connection = open_database(&self.database_path)?;
+        let changed = connection
+            .execute(
+                "UPDATE requests SET state = ?3, instance_json = ?4, updated_at_unix_ms = ?5
+                 WHERE request_id = ?1 AND state = ?2",
+                params![
+                    request_id.to_string(),
+                    expected.as_str(),
+                    state.as_str(),
+                    instance_json,
+                    now,
+                ],
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        sync_database_parent(&self.database_path)?;
+        Ok(changed == 1)
+    }
+
+    fn record_cleanup_intent(
+        &self,
+        request_id: Uuid,
+        reason: CleanupReason,
+        outcome: LifecycleOutcome,
+    ) -> Result<(CleanupReason, LifecycleOutcome), ProvisionerError> {
+        let mut connection = open_database(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        transaction
+            .execute(
+                "INSERT INTO cleanup_intents(request_id, reason_json, outcome_json)
+                 VALUES (?1, ?2, ?3) ON CONFLICT(request_id) DO NOTHING",
+                params![
+                    request_id.to_string(),
+                    canonical_json(&reason)?,
+                    canonical_json(&outcome)?,
+                ],
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        let stored: (Vec<u8>, Vec<u8>) = transaction
+            .query_row(
+                "SELECT reason_json, outcome_json FROM cleanup_intents WHERE request_id = ?1",
+                [request_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        transaction
+            .commit()
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        sync_database_parent(&self.database_path)?;
+        Ok((
+            serde_json::from_slice(&stored.0).map_err(|_| ProvisionerError::StateUnavailable)?,
+            serde_json::from_slice(&stored.1).map_err(|_| ProvisionerError::StateUnavailable)?,
+        ))
+    }
+
+    fn load_cleanup_intent(
+        &self,
+        request_id: Uuid,
+    ) -> Result<Option<(CleanupReason, LifecycleOutcome)>, ProvisionerError> {
+        let connection = open_database(&self.database_path)?;
+        let stored: Option<(Vec<u8>, Vec<u8>)> = connection
+            .query_row(
+                "SELECT reason_json, outcome_json FROM cleanup_intents WHERE request_id = ?1",
+                [request_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        stored
+            .map(|(reason, outcome)| {
+                Ok((
+                    serde_json::from_slice(&reason)
+                        .map_err(|_| ProvisionerError::StateUnavailable)?,
+                    serde_json::from_slice(&outcome)
+                        .map_err(|_| ProvisionerError::StateUnavailable)?,
+                ))
+            })
+            .transpose()
+    }
+
     fn load_stored_request(
         &self,
         request_id: Uuid,
@@ -2457,6 +2672,12 @@ impl Provisioner {
             let existing: LifecycleReceipt = parse_json_no_duplicates(&existing)
                 .map_err(|_| ProvisionerError::InvalidStoredReceipt)?;
             self.verify_lifecycle_receipt(&existing)?;
+            if evidence.outcome == LifecycleOutcome::Ready && existing.body.cleanup_confirmed {
+                transaction
+                    .commit()
+                    .map_err(|_| ProvisionerError::StateUnavailable)?;
+                return Ok(existing);
+            }
             if existing.body.outcome == evidence.outcome
                 && existing.body.cleanup_confirmed == evidence.cleanup_confirmed
                 && existing.body.ambiguity == evidence.ambiguity
@@ -2635,6 +2856,12 @@ fn initialize_database(
              ) STRICT;
              CREATE INDEX IF NOT EXISTS requests_active_scope
                  ON requests(tenant_id, project_id, state);
+             CREATE TABLE IF NOT EXISTS cleanup_intents (
+                 request_id TEXT PRIMARY KEY,
+                 reason_json BLOB NOT NULL,
+                 outcome_json BLOB NOT NULL,
+                 FOREIGN KEY(request_id) REFERENCES requests(request_id)
+             ) STRICT;
              CREATE TABLE IF NOT EXISTS evidence (
                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                  request_id TEXT,
