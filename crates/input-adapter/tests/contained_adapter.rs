@@ -99,10 +99,10 @@ async fn read_input(
     );
     response_headers.insert(
         "x-mcloving-observed-at-ms",
-        HeaderValue::from_str(&if mode == "stale" {
-            (now_ms() - 60_000).to_string()
-        } else {
-            now_ms().to_string()
+        HeaderValue::from_str(&match mode {
+            "stale" => (now_ms() - 60_000).to_string(),
+            "minimum_timestamp" => i64::MIN.to_string(),
+            _ => now_ms().to_string(),
         })
         .expect("observed time"),
     );
@@ -309,6 +309,7 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
     ));
     for (mode, expected) in [
         ("stale", "stale_response"),
+        ("minimum_timestamp", "stale_response"),
         ("missing_provenance", "missing_provenance"),
         ("malformed", "malformed_response"),
         ("wrong_schema", "malformed_response"),

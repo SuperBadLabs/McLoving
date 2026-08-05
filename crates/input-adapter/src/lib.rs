@@ -438,8 +438,11 @@ impl InputAdapter {
             return Err(AdapterError::ConfidentialityDenied);
         }
         let captured_at_unix_ms = now_unix_ms()?;
-        if source_observed_at_unix_ms > captured_at_unix_ms
-            || captured_at_unix_ms - source_observed_at_unix_ms > self.config.max_age_ms
+        let source_age_ms = captured_at_unix_ms
+            .checked_sub(source_observed_at_unix_ms)
+            .ok_or(AdapterError::StaleResponse)?;
+        if source_age_ms < 0
+            || source_age_ms > self.config.max_age_ms
             || request
                 .expected_cursor
                 .as_ref()

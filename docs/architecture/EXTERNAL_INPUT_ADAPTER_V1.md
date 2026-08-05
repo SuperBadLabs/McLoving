@@ -141,13 +141,14 @@ Authentication denials do not retry. A successful response must provide:
 - `X-McLoving-Confidentiality`; and
 - an optional `ETag`.
 
-The observed timestamp cannot be in the future or older than the configured
-freshness window. If the request names an exact cursor, it must match. The body
-is read incrementally and rejected before exceeding the byte limit. It must be
-valid JSON, contain no field outside the closed schema, and satisfy every
-required top-level field/type contract. Configuration also has hard upper
-bounds for response size, request rate, timeout, freshness, query keys/values,
-binding text, schema fields, and marker length.
+The observed timestamp age is calculated with checked signed arithmetic and
+cannot be in the future, overflow the Unix-millisecond domain, or exceed the
+configured freshness window. If the request names an exact cursor, it must
+match. The body is read incrementally and rejected before exceeding the byte
+limit. It must be valid JSON, contain no field outside the closed schema, and
+satisfy every required top-level field/type contract. Configuration also has
+hard upper bounds for response size, request rate, timeout, freshness, query
+keys/values, binding text, schema fields, and marker length.
 
 V1 admits `public` and policy-bounded `internal` values. A response labelled
 `secret` is always denied. The adapter also scans every bounded body for the
