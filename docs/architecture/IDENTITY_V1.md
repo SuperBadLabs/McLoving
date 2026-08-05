@@ -1,6 +1,6 @@
 # Identity and authentication v1
 
-Status: IDP-001 implementation candidate.
+Status: IDP-001 complete.
 
 McLoving treats identity as durable controller truth. A principal is never
 identified by a mutable display name or a process-local token file. PostgreSQL
@@ -96,6 +96,6 @@ rotation/replay denial, logout, service provisioning idempotence,
 absolute refresh expiry and reuse-family revocation, atomic service rotation,
 legacy-human binding, scope resolution, credential revocation, service disable/reactivation
 fencing, identity and provider disable, audit-chain
-integrity, and the shipped controller/remote-agent PostgreSQL spine. The final
-ticket close additionally requires rollback/restore evidence and independent
-security review; until those receipts are attached, the board remains ACTIVE.
+integrity, and the shipped controller/remote-agent PostgreSQL spine. The
+independent security and executable rollback/restore closure is recorded in
+[`docs/evidence/IDP-001_SECURITY_REVIEW.md`](../evidence/IDP-001_SECURITY_REVIEW.md).
