@@ -159,6 +159,14 @@ fn consumer(
 }
 
 async fn fixture(store: &Store, slug: &str) -> (Uuid, Uuid, Uuid) {
+    fixture_with_scopes(store, slug, [ServiceScope::ProjectRead].into()).await
+}
+
+async fn fixture_with_scopes(
+    store: &Store,
+    slug: &str,
+    scopes: std::collections::BTreeSet<ServiceScope>,
+) -> (Uuid, Uuid, Uuid) {
     let organization_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
     let identity_id = Uuid::new_v4();
@@ -176,7 +184,7 @@ async fn fixture(store: &Store, slug: &str) -> (Uuid, Uuid, Uuid) {
             organization_id,
             identity_id,
             subject: "service:owner-operator".to_owned(),
-            scopes: [ServiceScope::ProjectRead].into(),
+            scopes,
             actor_subject: "reviewer:consumer-owner".to_owned(),
         })
         .await
@@ -190,6 +198,41 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
         eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
         return;
     };
+    let (unauthorized_organization_id, unauthorized_project_id, unauthorized_identity_id) =
+        fixture_with_scopes(
+            &store,
+            "consumer-unauthorized",
+            [ServiceScope::BuildSubmit].into(),
+        )
+        .await;
+    let unauthorized_source = consumer(
+        unauthorized_organization_id,
+        unauthorized_project_id,
+        unauthorized_identity_id,
+        1,
+        None,
+        ExternalReadAuthority::JenkinsSource,
+    );
+    store
+        .install_external_read_consumer(&unauthorized_source)
+        .await
+        .expect("register source authority for an active but read-ineligible target");
+    let unauthorized_target = consumer(
+        unauthorized_organization_id,
+        unauthorized_project_id,
+        unauthorized_identity_id,
+        2,
+        Some(1),
+        ExternalReadAuthority::McLovingTarget,
+    );
+    assert!(matches!(
+        store
+            .install_external_read_consumer(&unauthorized_target)
+            .await,
+        Err(StoreError::InvalidConsumerMigration(message))
+            if message.contains("lacks required project_view authority")
+    ));
+
     let (organization_id, project_id, identity_id) = fixture(&store, "consumer-flow").await;
 
     let source = consumer(

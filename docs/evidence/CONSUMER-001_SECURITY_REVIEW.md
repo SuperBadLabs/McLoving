@@ -30,7 +30,8 @@ invented and the source manifest was not rewritten.
   endpoint, API version, endpoint/query/pagination, retention/URL/rate semantics,
   evidence digests, observation window, reviewer, and rollback source;
 - target authority requires a retained Jenkins-source generation and exactly
-  zero observed Jenkins reads;
+  zero observed Jenkins reads, plus successful runtime authorization of the
+  exact active target principal for every declared read resource;
 - Jenkins restoration must bind the immediately preceding target generation
   and separate rollback evidence; and
 - migration-only writes, per-consumer advisory serialization, and hash-chained
@@ -55,6 +56,7 @@ remote mTLS agent: 1 passed
 The consumer-specific tests prove stale-digest and independently redigested
 cross-generation source endpoint/contract substitution,
 cross-tenant project substitution, inactive/substituted target identity,
+active target identity without the required project read authority,
 canonical digest mismatch, concurrent first-generation conflict, residual
 Jenkins-read rejection, exact monotonic cutover and rollback, audited history,
 runtime mutation denial, and forced-RLS inclusion. The API-only CLI gate proves

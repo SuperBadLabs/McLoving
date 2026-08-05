@@ -50,10 +50,14 @@ contract. A monotonic pointer selects the current generation.
 Generation one must retain `jenkins_source` authority. A later
 `mcloving_target` generation is rejected unless the immediately prior
 generation is Jenkins-authoritative and the bounded observation reports
-exactly zero Jenkins reads. Restoring Jenkins must immediately follow a target
-generation, name that exact generation, retain the stable binding digest, and
-bind independent rollback evidence. Cutover likewise cannot substitute either
-side. A fresh recutover is another new target generation; pointers never move
+exactly zero Jenkins reads. The cutover transaction also loads the exact active
+target principal through the runtime identity/authorization path and requires
+every declared resource's action (`project_view`, `log_read`, `test_read`, or
+`artifact_read`) for the bound project; identity existence alone is never
+sufficient. Restoring Jenkins must immediately follow a target generation,
+name that exact generation, retain the stable binding digest, and bind
+independent rollback evidence. Cutover likewise cannot substitute either side.
+A fresh recutover is another new target generation; pointers never move
 backward and authority cannot be skipped or repeated. Per-consumer transaction
 advisory locks make simultaneous first writers deterministic.
 
@@ -80,8 +84,8 @@ cross-tenant/missing-authority route denial, normalized tests, and immutable
 artifact retrieval. `crates/controller-store/tests/external_read_consumers.rs`
 uses real PostgreSQL to prove canonical binding, source/target/tenant
 substitution denial, zero-residual-read enforcement, exact monotonic rollback,
-concurrent generation fencing, hash-chained audit, forced RLS, and runtime
-mutation denial.
+active-but-read-ineligible target denial, concurrent generation fencing,
+hash-chained audit, forced RLS, and runtime mutation denial.
 
 This ledger grants no build/effect authority and does not retire Jenkins.
 Population cutover evidence is installed only when the real caller changes;

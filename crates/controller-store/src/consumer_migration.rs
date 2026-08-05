@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::audit::append_audit_record;
+use super::authz::{Action, authorize};
+use super::identity::load_principal;
 use super::{Store, StoreError};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -46,6 +48,17 @@ impl ExternalReadResource {
             Self::Log => "log",
             Self::Queue => "queue",
             Self::TestResult => "test_result",
+        }
+    }
+
+    fn required_action(self) -> Action {
+        match self {
+            Self::Artifact => Action::ArtifactRead,
+            Self::Log => Action::LogRead,
+            Self::TestResult => Action::TestRead,
+            Self::BuildGraph | Self::BuildStatus | Self::JobMetadata | Self::Queue => {
+                Action::ProjectView
+            }
         }
     }
 }
@@ -148,8 +161,8 @@ impl Store {
         if !project_exists {
             return invalid("external read consumer target project does not exist in the tenant");
         }
-        let target_lifecycle = sqlx::query_scalar::<_, String>(
-            "SELECT lifecycle_state FROM identities
+        let target_identity = sqlx::query_as::<_, (String, String)>(
+            "SELECT lifecycle_state, kind FROM identities
              WHERE organization_id = $1 AND id = $2 AND subject = $3",
         )
         .bind(input.organization_id)
@@ -157,12 +170,42 @@ impl Store {
         .bind(&input.target_subject)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(target_lifecycle) = target_lifecycle else {
+        let Some((target_lifecycle, target_kind)) = target_identity else {
             return invalid("external read consumer target identity is absent or substituted");
         };
         if input.authority == ExternalReadAuthority::McLovingTarget && target_lifecycle != "active"
         {
             return invalid("external read consumer target identity is inactive");
+        }
+        if input.authority == ExternalReadAuthority::McLovingTarget {
+            let principal = load_principal(
+                &mut tx,
+                input.organization_id,
+                input.target_identity_id,
+                &input.target_subject,
+                &target_kind,
+            )
+            .await?;
+            let required_actions = input
+                .endpoint_contracts
+                .iter()
+                .map(|contract| contract.resource.required_action())
+                .collect::<BTreeSet<_>>();
+            for action in required_actions {
+                if authorize(
+                    &principal,
+                    input.organization_id,
+                    Some(input.project_id),
+                    action,
+                )
+                .is_err()
+                {
+                    return invalid(format!(
+                        "external read consumer target identity lacks required {} authority",
+                        action.as_str()
+                    ));
+                }
+            }
         }
 
         let current = sqlx::query_as::<_, (i64, String, bool)>(

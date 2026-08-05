@@ -1827,7 +1827,7 @@ async fn provision_service_credential_in_transaction(
     })
 }
 
-async fn load_principal(
+pub(super) async fn load_principal(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     organization_id: Uuid,
     identity_id: Uuid,
