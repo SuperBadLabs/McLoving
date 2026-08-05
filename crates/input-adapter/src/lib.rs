@@ -443,6 +443,13 @@ impl InputAdapter {
         }
         validate_json_content_type(&headers)?;
         let source_cursor = required_header(&headers, "x-mcloving-cursor")?;
+        if request
+            .expected_cursor
+            .as_ref()
+            .is_some_and(|expected| expected != &source_cursor)
+        {
+            return Err(AdapterError::StaleResponse);
+        }
         let source_provenance = required_header(&headers, "x-mcloving-provenance")?;
         let source_observed_at_unix_ms = required_header(&headers, "x-mcloving-observed-at-ms")?
             .parse::<i64>()
@@ -491,13 +498,7 @@ impl InputAdapter {
         let source_age_ms = captured_at_unix_ms
             .checked_sub(source_observed_at_unix_ms)
             .ok_or(AdapterError::StaleResponse)?;
-        if source_age_ms < 0
-            || source_age_ms > self.config.max_age_ms
-            || request
-                .expected_cursor
-                .as_ref()
-                .is_some_and(|expected| expected != &source_cursor)
-        {
+        if source_age_ms < 0 || source_age_ms > self.config.max_age_ms {
             return Err(AdapterError::StaleResponse);
         }
 

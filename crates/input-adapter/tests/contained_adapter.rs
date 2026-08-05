@@ -420,6 +420,12 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         adapter.capture(&cursor_mismatch).await,
         Err(AdapterError::StaleResponse)
     ));
+    let mut oversized_cursor_mismatch = request(&adapter, "main", "oversized");
+    oversized_cursor_mismatch.expected_cursor = Some("other-cursor".to_owned());
+    assert!(matches!(
+        adapter.capture(&oversized_cursor_mismatch).await,
+        Err(AdapterError::StaleResponse)
+    ));
     for (mode, expected) in [
         ("stale", "stale_response"),
         ("minimum_timestamp", "stale_response"),
