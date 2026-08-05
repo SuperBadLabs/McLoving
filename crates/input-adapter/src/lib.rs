@@ -1,0 +1,2329 @@
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use hmac::{Hmac, Mac};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
+use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
+use url::Url;
+use uuid::Uuid;
+
+pub const PROTOCOL_VERSION: &str = "mcloving.input-adapter/v1";
+
+const MAX_BINDING_TEXT_BYTES: usize = 1_024;
+const MAX_QUERY_KEYS: usize = 32;
+const MAX_QUERY_VALUE_BYTES: usize = 4_096;
+const MAX_RESPONSE_BYTES: usize = 8 * 1_024 * 1_024;
+const MAX_RECEIPT_BYTES: usize = MAX_RESPONSE_BYTES + 256 * 1_024;
+const MAX_CA_BUNDLE_BYTES: usize = 1024 * 1_024;
+const MAX_EXECUTABLE_BYTES: u64 = 256 * 1_024 * 1_024;
+const MAX_REQUESTS_PER_MINUTE: usize = 10_000;
+const MAX_TIMEOUT_MS: u64 = 60_000;
+const MAX_LOCAL_RECEIPT_PUBLICATION_MS: u64 = 60_000;
+const MAX_AGE_MS: i64 = 86_400_000;
+const MAX_RATE_LEDGER_BYTES: usize = 2 * 1_024 * 1_024;
+const MAX_CLAIM_BYTES: usize = 512;
+const MAX_SECRET_MARKERS: usize = 256;
+const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 64 * 1_024;
+const MAX_MARKER_COMPARISON_BYTES: usize = 256 * 1_024 * 1_024;
+
+type HmacSha256 = Hmac<Sha256>;
+
+struct DuplicateRejectingSeed;
+
+impl<'de> DeserializeSeed<'de> for DuplicateRejectingSeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateRejectingVisitor)
+    }
+}
+
+struct DuplicateRejectingVisitor;
+
+impl<'de> Visitor<'de> for DuplicateRejectingVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("JSON without duplicate object members")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        DuplicateRejectingSeed.deserialize(deserializer)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        DuplicateRejectingSeed.deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence
+            .next_element_seed(DuplicateRejectingSeed)?
+            .is_some()
+        {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut members = HashSet::new();
+        while let Some(member) = map.next_key::<String>()? {
+            if !members.insert(member) {
+                return Err(A::Error::custom("duplicate JSON object member"));
+            }
+            map.next_value_seed(DuplicateRejectingSeed)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidentiality {
+    Public,
+    Internal,
+    Secret,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JsonKind {
+    Array,
+    Boolean,
+    Null,
+    Number,
+    Object,
+    String,
+}
+
+impl JsonKind {
+    fn matches(self, value: &Value) -> bool {
+        match self {
+            Self::Array => value.is_array(),
+            Self::Boolean => value.is_boolean(),
+            Self::Null => value.is_null(),
+            Self::Number => value.is_number(),
+            Self::Object => value.is_object(),
+            Self::String => value.is_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldSchema {
+    pub name: String,
+    pub kind: JsonKind,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterConfig {
+    pub protocol_version: String,
+    pub schema_version: String,
+    pub adapter_id: String,
+    pub deployment_identity: String,
+    pub operator_identity: String,
+    pub generation: u64,
+    pub endpoint_url: String,
+    pub endpoint_identity: String,
+    pub data_source_identity: String,
+    pub allowed_query_keys: Vec<String>,
+    pub response_schema: Vec<FieldSchema>,
+    pub grant_id: String,
+    pub grant_version: String,
+    pub grant_scope: String,
+    pub grant_expires_unix_ms: i64,
+    pub read_token_sha256: String,
+    pub signing_key_id: String,
+    pub signing_key_sha256: String,
+    pub secret_marker_set_sha256: String,
+    pub max_confidentiality: Confidentiality,
+    pub max_response_bytes: usize,
+    pub max_requests_per_minute: usize,
+    pub timeout_ms: u64,
+    pub max_age_ms: i64,
+    pub retry_attempts: u8,
+    pub spool_dir: PathBuf,
+    #[serde(default)]
+    pub ca_bundle_path: Option<PathBuf>,
+    #[serde(default)]
+    pub ca_bundle_sha256: Option<String>,
+    #[serde(default)]
+    pub test_allow_http_loopback: bool,
+}
+
+impl AdapterConfig {
+    pub fn canonical_digest(&self) -> Result<String, AdapterError> {
+        canonical_digest(self)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureRequest {
+    pub capture_id: Uuid,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub build_id: Uuid,
+    pub attempt_id: Uuid,
+    pub input_name: String,
+    pub adapter_id: String,
+    pub expected_implementation_sha256: String,
+    pub expected_config_sha256: String,
+    pub protocol_version: String,
+    pub schema_version: String,
+    pub expected_generation: u64,
+    pub rollback_from_generation: Option<u64>,
+    pub endpoint_identity: String,
+    pub data_source_identity: String,
+    pub grant_id: String,
+    pub grant_version: String,
+    pub grant_scope: String,
+    pub query: BTreeMap<String, String>,
+    pub expected_cursor: Option<String>,
+    pub requested_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub confidentiality_ceiling: Confidentiality,
+    pub audit_lineage: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureReceipt {
+    pub protocol_version: String,
+    pub schema_version: String,
+    pub capture_id: Uuid,
+    pub request_sha256: String,
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub build_id: Uuid,
+    pub attempt_id: Uuid,
+    pub input_name: String,
+    pub adapter_id: String,
+    pub adapter_implementation_sha256: String,
+    pub adapter_config_sha256: String,
+    pub deployment_identity: String,
+    pub operator_identity: String,
+    pub generation: u64,
+    pub rollback_from_generation: Option<u64>,
+    pub endpoint_identity: String,
+    pub data_source_identity: String,
+    pub grant_id: String,
+    pub grant_version: String,
+    pub grant_scope: String,
+    pub canonical_query: BTreeMap<String, String>,
+    pub source_cursor: String,
+    pub source_etag: Option<String>,
+    pub source_observed_at_unix_ms: i64,
+    pub captured_at_unix_ms: i64,
+    pub publication_deadline_unix_ms: i64,
+    pub source_provenance: String,
+    pub confidentiality: Confidentiality,
+    pub response_sha256: String,
+    pub response: Value,
+    pub retry_count: u8,
+    pub audit_lineage: String,
+    pub signing_key_id: String,
+    pub secret_marker_set_sha256: String,
+    pub signature: String,
+}
+
+struct ValidatedResponseHeaders {
+    source_cursor: String,
+    source_provenance: String,
+    source_observed_at_unix_ms: i64,
+    confidentiality: Confidentiality,
+    source_etag: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureClaim {
+    protocol_version: String,
+    request_sha256: String,
+    publication_deadline_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RateReservation {
+    capture_id: Uuid,
+    expires_at_unix_ms: i64,
+    remaining_attempts: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InFlightRateAttempt {
+    capture_id: Uuid,
+    expires_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RateLedger {
+    // Completion time is no earlier than the actual GET start, so retaining it
+    // for the following minute is conservative even when sending was delayed.
+    attempt_started_at_unix_ms: Vec<i64>,
+    #[serde(default)]
+    in_flight_attempts: Vec<InFlightRateAttempt>,
+    reservations: Vec<RateReservation>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredRateLedger {
+    Current(RateLedger),
+    Legacy(Vec<i64>),
+}
+
+impl RateLedger {
+    fn validate_and_prune(&mut self, now: i64) -> Result<(), AdapterError> {
+        let window_start = now
+            .checked_sub(60_000)
+            .ok_or(AdapterError::StateUnavailable)?;
+        if self.attempt_started_at_unix_ms.len() > MAX_REQUESTS_PER_MINUTE
+            || self
+                .attempt_started_at_unix_ms
+                .iter()
+                .any(|timestamp| *timestamp > now)
+            || self.in_flight_attempts.len() > MAX_REQUESTS_PER_MINUTE
+            || self.reservations.len() > MAX_REQUESTS_PER_MINUTE
+            || self.reservations.iter().any(|reservation| {
+                reservation.remaining_attempts == 0
+                    || reservation.remaining_attempts > MAX_REQUESTS_PER_MINUTE
+            })
+        {
+            return Err(AdapterError::StateUnavailable);
+        }
+        let mut in_flight_capture_ids = HashSet::with_capacity(self.in_flight_attempts.len());
+        if self
+            .in_flight_attempts
+            .iter()
+            .any(|attempt| !in_flight_capture_ids.insert(attempt.capture_id))
+        {
+            return Err(AdapterError::StateUnavailable);
+        }
+        self.attempt_started_at_unix_ms.extend(
+            self.in_flight_attempts
+                .iter()
+                .filter(|attempt| attempt.expires_at_unix_ms <= now)
+                .map(|attempt| attempt.expires_at_unix_ms),
+        );
+        self.in_flight_attempts
+            .retain(|attempt| attempt.expires_at_unix_ms > now);
+        let mut capture_ids = HashSet::with_capacity(self.reservations.len());
+        if self
+            .reservations
+            .iter()
+            .any(|reservation| !capture_ids.insert(reservation.capture_id))
+        {
+            return Err(AdapterError::StateUnavailable);
+        }
+        self.attempt_started_at_unix_ms
+            .retain(|timestamp| *timestamp > window_start);
+        self.reservations
+            .retain(|reservation| reservation.expires_at_unix_ms > now);
+        if self.occupancy()? > MAX_REQUESTS_PER_MINUTE {
+            return Err(AdapterError::StateUnavailable);
+        }
+        Ok(())
+    }
+
+    fn occupancy(&self) -> Result<usize, AdapterError> {
+        self.reservations.iter().try_fold(
+            self.attempt_started_at_unix_ms
+                .len()
+                .checked_add(self.in_flight_attempts.len())
+                .ok_or(AdapterError::StateUnavailable)?,
+            |occupied, reservation| {
+                occupied
+                    .checked_add(reservation.remaining_attempts)
+                    .ok_or(AdapterError::StateUnavailable)
+            },
+        )
+    }
+
+    fn charge_attempt(&mut self, capture_id: Uuid, timeout_ms: u64) -> Result<(), AdapterError> {
+        if self
+            .in_flight_attempts
+            .iter()
+            .any(|attempt| attempt.capture_id == capture_id)
+        {
+            return Err(AdapterError::StateUnavailable);
+        }
+        let reservation = self
+            .reservations
+            .iter_mut()
+            .find(|reservation| reservation.capture_id == capture_id)
+            .ok_or(AdapterError::StateUnavailable)?;
+        reservation.remaining_attempts = reservation
+            .remaining_attempts
+            .checked_sub(1)
+            .ok_or(AdapterError::StateUnavailable)?;
+        let expires_at_unix_ms = reservation
+            .expires_at_unix_ms
+            .checked_add(i64::try_from(timeout_ms).map_err(|_| AdapterError::StateUnavailable)?)
+            .ok_or(AdapterError::StateUnavailable)?;
+        self.in_flight_attempts.push(InFlightRateAttempt {
+            capture_id,
+            expires_at_unix_ms,
+        });
+        self.reservations
+            .retain(|reservation| reservation.remaining_attempts > 0);
+        Ok(())
+    }
+
+    fn complete_attempt(&mut self, capture_id: Uuid, now: i64) -> Result<(), AdapterError> {
+        let index = self
+            .in_flight_attempts
+            .iter()
+            .position(|attempt| attempt.capture_id == capture_id)
+            .ok_or(AdapterError::StateUnavailable)?;
+        self.in_flight_attempts.swap_remove(index);
+        self.attempt_started_at_unix_ms.push(now);
+        Ok(())
+    }
+
+    fn abandon_attempt(&mut self, capture_id: Uuid) -> Result<(), AdapterError> {
+        let index = self
+            .in_flight_attempts
+            .iter()
+            .position(|attempt| attempt.capture_id == capture_id)
+            .ok_or(AdapterError::StateUnavailable)?;
+        self.in_flight_attempts.swap_remove(index);
+        Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AdapterError {
+    #[error("adapter configuration is invalid")]
+    InvalidConfig,
+    #[error("capture request does not match the certified adapter configuration")]
+    BindingMismatch,
+    #[error("capture request is expired or outside its bounded time window")]
+    ExpiredRequest,
+    #[error("read grant is expired")]
+    ExpiredGrant,
+    #[error("query is not admitted by the certified adapter")]
+    QueryDenied,
+    #[error("adapter rate limit exceeded")]
+    RateLimited,
+    #[error("external input source is unavailable after bounded retry")]
+    SourceUnavailable,
+    #[error("external input source denied the scoped read grant")]
+    Unauthorized,
+    #[error("external input response is missing required provenance")]
+    MissingProvenance,
+    #[error("external input response is stale or has an unexpected cursor")]
+    StaleResponse,
+    #[error("external input response is oversized")]
+    OversizedResponse,
+    #[error("external input response is malformed or violates its schema")]
+    MalformedResponse,
+    #[error("external input response exceeds the admitted confidentiality policy")]
+    ConfidentialityDenied,
+    #[error("capture identifier was replayed with different bound content")]
+    ReplayMismatch,
+    #[error("stored capture receipt failed integrity verification")]
+    InvalidStoredReceipt,
+    #[error("adapter private state is unavailable")]
+    StateUnavailable,
+}
+
+impl AdapterError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidConfig => "invalid_config",
+            Self::BindingMismatch => "binding_mismatch",
+            Self::ExpiredRequest => "expired_request",
+            Self::ExpiredGrant => "expired_grant",
+            Self::QueryDenied => "query_denied",
+            Self::RateLimited => "rate_limited",
+            Self::SourceUnavailable => "source_unavailable",
+            Self::Unauthorized => "unauthorized",
+            Self::MissingProvenance => "missing_provenance",
+            Self::StaleResponse => "stale_response",
+            Self::OversizedResponse => "oversized_response",
+            Self::MalformedResponse => "malformed_response",
+            Self::ConfidentialityDenied => "confidentiality_denied",
+            Self::ReplayMismatch => "replay_mismatch",
+            Self::InvalidStoredReceipt => "invalid_stored_receipt",
+            Self::StateUnavailable => "state_unavailable",
+        }
+    }
+}
+
+pub struct InputAdapter {
+    config: AdapterConfig,
+    config_sha256: String,
+    implementation_sha256: String,
+    authorization: HeaderValue,
+    grant_id_header: HeaderValue,
+    grant_version_header: HeaderValue,
+    grant_scope_header: HeaderValue,
+    signing_key: Vec<u8>,
+    secret_markers: Vec<Vec<u8>>,
+    client: reqwest::Client,
+    capture_admission: Mutex<()>,
+}
+
+impl InputAdapter {
+    pub async fn new(
+        config: AdapterConfig,
+        implementation_sha256: String,
+        read_token: String,
+        signing_key: Vec<u8>,
+        secret_markers: Vec<Vec<u8>>,
+    ) -> Result<Self, AdapterError> {
+        validate_config(
+            &config,
+            &implementation_sha256,
+            &read_token,
+            &signing_key,
+            &secret_markers,
+        )?;
+        let authorization = bearer(&read_token)?;
+        let grant_id_header = request_header(&config.grant_id)?;
+        let grant_version_header = request_header(&config.grant_version)?;
+        let grant_scope_header = request_header(&config.grant_scope)?;
+        ensure_directory_sync_supported()?;
+        let config_sha256 = config.canonical_digest()?;
+        let endpoint = Url::parse(&config.endpoint_url).map_err(|_| AdapterError::InvalidConfig)?;
+        validate_endpoint(&endpoint, config.test_allow_http_loopback)?;
+
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(config.timeout_ms))
+            .timeout(Duration::from_millis(config.timeout_ms))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .no_proxy()
+            .user_agent(PROTOCOL_VERSION);
+        if let Some(path) = &config.ca_bundle_path {
+            let pem = read_bounded_regular_file(path, MAX_CA_BUNDLE_BYTES).await?;
+            let actual_ca_sha256 = content_sha256(&pem);
+            if config.ca_bundle_sha256.as_deref() != Some(actual_ca_sha256.as_str()) {
+                return Err(AdapterError::InvalidConfig);
+            }
+            let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+                .map_err(|_| AdapterError::InvalidConfig)?;
+            if certificates.is_empty() {
+                return Err(AdapterError::InvalidConfig);
+            }
+            builder = builder.tls_built_in_root_certs(false);
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+        let client = builder.build().map_err(|_| AdapterError::InvalidConfig)?;
+        ensure_private_spool(&config.spool_dir).await?;
+        drop(lock_spool(&config.spool_dir, true).await?);
+        // A capture claim is useful only if its directory entry can be made
+        // durable before source access. Fail adapter construction on platforms
+        // without that primitive instead of discovering the limitation after
+        // publishing an unfulfillable claim.
+        sync_directory(&config.spool_dir).await?;
+
+        Ok(Self {
+            config,
+            config_sha256,
+            implementation_sha256,
+            authorization,
+            grant_id_header,
+            grant_version_header,
+            grant_scope_header,
+            signing_key,
+            secret_markers,
+            client,
+            capture_admission: Mutex::new(()),
+        })
+    }
+
+    pub fn config_sha256(&self) -> &str {
+        &self.config_sha256
+    }
+
+    pub async fn capture(&self, request: &CaptureRequest) -> Result<CaptureReceipt, AdapterError> {
+        let request_sha256 = canonical_digest(request)?;
+        if let Some(receipt) = self.load_stored(request.capture_id).await? {
+            if receipt.request_sha256 != request_sha256 {
+                return Err(AdapterError::ReplayMismatch);
+            }
+            self.verify_receipt(&receipt)?;
+            return Ok(receipt);
+        }
+        self.validate_request(request)?;
+        let admission = self.capture_admission.lock().await;
+        if let Some(receipt) = self.load_stored(request.capture_id).await? {
+            drop(admission);
+            if receipt.request_sha256 != request_sha256 {
+                return Err(AdapterError::ReplayMismatch);
+            }
+            self.verify_receipt(&receipt)?;
+            return Ok(receipt);
+        }
+        if let Some(claim) = self
+            .matching_claim(request.capture_id, &request_sha256)
+            .await?
+        {
+            drop(admission);
+            return self
+                .await_claimed_receipt(request.capture_id, &request_sha256, &claim)
+                .await;
+        }
+        let spool_admission = lock_spool(&self.config.spool_dir, true).await?;
+        if let Some(claim) = self
+            .matching_claim(request.capture_id, &request_sha256)
+            .await?
+        {
+            drop(spool_admission);
+            drop(admission);
+            return self
+                .await_claimed_receipt(request.capture_id, &request_sha256, &claim)
+                .await;
+        }
+        let claim = CaptureClaim {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            request_sha256: request_sha256.clone(),
+            publication_deadline_unix_ms: claim_publication_deadline_unix_ms(
+                now_unix_ms()?,
+                self.config.timeout_ms,
+                self.config.retry_attempts,
+                request.expires_at_unix_ms,
+                self.config.grant_expires_unix_ms,
+            )?,
+        };
+        self.reserve_rate_unlocked(
+            request.capture_id,
+            claim.publication_deadline_unix_ms,
+            usize::from(self.config.retry_attempts) + 1,
+        )
+        .await?;
+        let claimed = match self
+            .claim_capture_unlocked(request.capture_id, &claim)
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                self.release_rate_reservation_unlocked(request.capture_id)
+                    .await?;
+                return Err(error);
+            }
+        };
+        if !claimed {
+            self.release_rate_reservation_unlocked(request.capture_id)
+                .await?;
+        }
+        drop(spool_admission);
+        drop(admission);
+        if !claimed {
+            let existing_claim = self
+                .matching_claim(request.capture_id, &request_sha256)
+                .await?
+                .ok_or(AdapterError::StateUnavailable)?;
+            return self
+                .await_claimed_receipt(request.capture_id, &request_sha256, &existing_claim)
+                .await;
+        }
+
+        let mut url =
+            Url::parse(&self.config.endpoint_url).map_err(|_| AdapterError::InvalidConfig)?;
+        {
+            let mut query = url.query_pairs_mut();
+            for (name, value) in &request.query {
+                query.append_pair(name, value);
+            }
+        }
+
+        let fetch_result: Result<(ValidatedResponseHeaders, Vec<u8>, u8), AdapterError> = async {
+            let mut retry_count = 0_u8;
+            loop {
+                let attempt_started_at_unix_ms = now_unix_ms()?;
+                if request.expires_at_unix_ms <= attempt_started_at_unix_ms {
+                    return Err(AdapterError::ExpiredRequest);
+                }
+                if self.config.grant_expires_unix_ms <= attempt_started_at_unix_ms {
+                    return Err(AdapterError::ExpiredGrant);
+                }
+                if claim.publication_deadline_unix_ms <= attempt_started_at_unix_ms {
+                    return Err(AdapterError::SourceUnavailable);
+                }
+                self.charge_rate_attempt(request.capture_id).await?;
+                let send_ready_at_unix_ms = now_unix_ms()?;
+                if request.expires_at_unix_ms <= send_ready_at_unix_ms {
+                    self.abandon_rate_attempt(request.capture_id).await?;
+                    return Err(AdapterError::ExpiredRequest);
+                }
+                if self.config.grant_expires_unix_ms <= send_ready_at_unix_ms {
+                    self.abandon_rate_attempt(request.capture_id).await?;
+                    return Err(AdapterError::ExpiredGrant);
+                }
+                if claim.publication_deadline_unix_ms <= send_ready_at_unix_ms {
+                    self.abandon_rate_attempt(request.capture_id).await?;
+                    return Err(AdapterError::SourceUnavailable);
+                }
+                let result = self
+                    .client
+                    .get(url.clone())
+                    .header(AUTHORIZATION, self.authorization.clone())
+                    .header("x-mcloving-grant-id", self.grant_id_header.clone())
+                    .header(
+                        "x-mcloving-grant-version",
+                        self.grant_version_header.clone(),
+                    )
+                    .header("x-mcloving-grant-scope", self.grant_scope_header.clone())
+                    .send()
+                    .await;
+                match result {
+                    Ok(response) if response.status().is_success() => {
+                        let headers =
+                            match self.validate_response_headers(request, response.headers()) {
+                                Ok(headers) => headers,
+                                Err(error) => {
+                                    self.complete_rate_attempt(request.capture_id).await?;
+                                    return Err(error);
+                                }
+                            };
+                        let body_result = self.read_response_body(response).await;
+                        self.complete_rate_attempt(request.capture_id).await?;
+                        match body_result {
+                            Ok(body) => return Ok((headers, body, retry_count)),
+                            Err(AdapterError::SourceUnavailable)
+                                if retry_count < self.config.retry_attempts =>
+                            {
+                                retry_count += 1;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    Ok(response)
+                        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                            || response.status() == reqwest::StatusCode::FORBIDDEN =>
+                    {
+                        self.complete_rate_attempt(request.capture_id).await?;
+                        return Err(AdapterError::Unauthorized);
+                    }
+                    Ok(response)
+                        if matches!(response.status().as_u16(), 502..=504)
+                            && retry_count < self.config.retry_attempts =>
+                    {
+                        self.complete_rate_attempt(request.capture_id).await?;
+                        retry_count += 1;
+                    }
+                    Err(_) if retry_count < self.config.retry_attempts => {
+                        self.complete_rate_attempt(request.capture_id).await?;
+                        retry_count += 1;
+                    }
+                    _ => {
+                        self.complete_rate_attempt(request.capture_id).await?;
+                        return Err(AdapterError::SourceUnavailable);
+                    }
+                }
+            }
+        }
+        .await;
+        self.release_rate_reservation(request.capture_id).await?;
+        let (validated_headers, body, retry_count) = fetch_result?;
+        let ValidatedResponseHeaders {
+            source_cursor,
+            source_provenance,
+            source_observed_at_unix_ms,
+            confidentiality,
+            source_etag,
+        } = validated_headers;
+
+        if self.contains_secret_marker(&body) {
+            return Err(AdapterError::ConfidentialityDenied);
+        }
+        reject_duplicate_json_members(&body)?;
+        let value: Value =
+            serde_json::from_slice(&body).map_err(|_| AdapterError::MalformedResponse)?;
+        if self.contains_secret_marker_in_json(&value) {
+            return Err(AdapterError::ConfidentialityDenied);
+        }
+        validate_schema(&value, &self.config.response_schema)?;
+        let canonical_response =
+            serde_json::to_vec(&value).map_err(|_| AdapterError::MalformedResponse)?;
+        let response_sha256 = sha256_hex(&canonical_response);
+        let captured_at_unix_ms = now_unix_ms()?;
+        if request.expires_at_unix_ms <= captured_at_unix_ms {
+            return Err(AdapterError::ExpiredRequest);
+        }
+        if self.config.grant_expires_unix_ms <= captured_at_unix_ms {
+            return Err(AdapterError::ExpiredGrant);
+        }
+        validate_source_age(
+            captured_at_unix_ms,
+            source_observed_at_unix_ms,
+            self.config.max_age_ms,
+        )?;
+
+        let mut receipt = CaptureReceipt {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            schema_version: self.config.schema_version.clone(),
+            capture_id: request.capture_id,
+            request_sha256,
+            organization_id: request.organization_id,
+            project_id: request.project_id,
+            pipeline_id: request.pipeline_id,
+            build_id: request.build_id,
+            attempt_id: request.attempt_id,
+            input_name: request.input_name.clone(),
+            adapter_id: self.config.adapter_id.clone(),
+            adapter_implementation_sha256: self.implementation_sha256.clone(),
+            adapter_config_sha256: self.config_sha256.clone(),
+            deployment_identity: self.config.deployment_identity.clone(),
+            operator_identity: self.config.operator_identity.clone(),
+            generation: self.config.generation,
+            rollback_from_generation: request.rollback_from_generation,
+            endpoint_identity: self.config.endpoint_identity.clone(),
+            data_source_identity: self.config.data_source_identity.clone(),
+            grant_id: self.config.grant_id.clone(),
+            grant_version: self.config.grant_version.clone(),
+            grant_scope: self.config.grant_scope.clone(),
+            canonical_query: request.query.clone(),
+            source_cursor,
+            source_etag,
+            source_observed_at_unix_ms,
+            captured_at_unix_ms,
+            publication_deadline_unix_ms: claim.publication_deadline_unix_ms,
+            source_provenance,
+            confidentiality,
+            response_sha256,
+            response: value,
+            retry_count,
+            audit_lineage: request.audit_lineage.clone(),
+            signing_key_id: self.config.signing_key_id.clone(),
+            secret_marker_set_sha256: self.config.secret_marker_set_sha256.clone(),
+            signature: String::new(),
+        };
+        receipt.signature = self.sign_receipt(&receipt)?;
+        self.store_receipt(&receipt, claim.publication_deadline_unix_ms)
+            .await?;
+        Ok(receipt)
+    }
+
+    pub fn verify_receipt(&self, receipt: &CaptureReceipt) -> Result<(), AdapterError> {
+        if receipt.adapter_id != self.config.adapter_id
+            || receipt.adapter_implementation_sha256 != self.implementation_sha256
+            || receipt.adapter_config_sha256 != self.config_sha256
+            || receipt.signing_key_id != self.config.signing_key_id
+            || receipt.secret_marker_set_sha256 != self.config.secret_marker_set_sha256
+        {
+            return Err(AdapterError::InvalidStoredReceipt);
+        }
+        let actual = URL_SAFE_NO_PAD
+            .decode(&receipt.signature)
+            .map_err(|_| AdapterError::InvalidStoredReceipt)?;
+        let mut unsigned = receipt.clone();
+        unsigned.signature.clear();
+        let bytes =
+            serde_json::to_vec(&unsigned).map_err(|_| AdapterError::InvalidStoredReceipt)?;
+        let mut mac = HmacSha256::new_from_slice(&self.signing_key)
+            .map_err(|_| AdapterError::InvalidStoredReceipt)?;
+        mac.update(&bytes);
+        mac.verify_slice(&actual)
+            .map_err(|_| AdapterError::InvalidStoredReceipt)?;
+        let canonical_response = serde_json::to_vec(&receipt.response)
+            .map_err(|_| AdapterError::InvalidStoredReceipt)?;
+        if sha256_hex(&canonical_response) != receipt.response_sha256 {
+            return Err(AdapterError::InvalidStoredReceipt);
+        }
+        Ok(())
+    }
+
+    fn validate_request(&self, request: &CaptureRequest) -> Result<(), AdapterError> {
+        let now = now_unix_ms()?;
+        if request.requested_at_unix_ms > now
+            || request.expires_at_unix_ms <= now
+            || request.expires_at_unix_ms <= request.requested_at_unix_ms
+        {
+            return Err(AdapterError::ExpiredRequest);
+        }
+        if self.config.grant_expires_unix_ms <= now {
+            return Err(AdapterError::ExpiredGrant);
+        }
+        if request.capture_id.is_nil()
+            || request.organization_id.is_nil()
+            || request.project_id.is_nil()
+            || request.pipeline_id.is_nil()
+            || request.build_id.is_nil()
+            || request.attempt_id.is_nil()
+            || request.input_name.trim().is_empty()
+            || request.audit_lineage.trim().is_empty()
+            || request.input_name.len() > MAX_BINDING_TEXT_BYTES
+            || request.audit_lineage.len() > MAX_BINDING_TEXT_BYTES
+            || request.adapter_id != self.config.adapter_id
+            || request.expected_implementation_sha256 != self.implementation_sha256
+            || request.expected_config_sha256 != self.config_sha256
+            || request.protocol_version != PROTOCOL_VERSION
+            || request.schema_version != self.config.schema_version
+            || request.expected_generation != self.config.generation
+            || request.endpoint_identity != self.config.endpoint_identity
+            || request.data_source_identity != self.config.data_source_identity
+            || request.grant_id != self.config.grant_id
+            || request.grant_version != self.config.grant_version
+            || request.grant_scope != self.config.grant_scope
+            || request
+                .rollback_from_generation
+                .is_some_and(|generation| generation >= request.expected_generation)
+        {
+            return Err(AdapterError::BindingMismatch);
+        }
+        if request.query.keys().any(|key| {
+            !self
+                .config
+                .allowed_query_keys
+                .iter()
+                .any(|allowed| allowed == key)
+        }) {
+            return Err(AdapterError::QueryDenied);
+        }
+        if request.query.len() > MAX_QUERY_KEYS
+            || request.query.iter().any(|(key, value)| {
+                key.len() > MAX_BINDING_TEXT_BYTES || value.len() > MAX_QUERY_VALUE_BYTES
+            })
+            || request
+                .expected_cursor
+                .as_ref()
+                .is_some_and(|cursor| cursor.len() > MAX_BINDING_TEXT_BYTES)
+        {
+            return Err(AdapterError::QueryDenied);
+        }
+        Ok(())
+    }
+
+    async fn reserve_rate_unlocked(
+        &self,
+        capture_id: Uuid,
+        publication_deadline_unix_ms: i64,
+        outbound_attempt_budget: usize,
+    ) -> Result<(), AdapterError> {
+        let now = now_unix_ms()?;
+        let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
+        ledger.validate_and_prune(now)?;
+        ledger
+            .reservations
+            .retain(|reservation| reservation.capture_id != capture_id);
+        if ledger
+            .occupancy()?
+            .checked_add(outbound_attempt_budget)
+            .ok_or(AdapterError::StateUnavailable)?
+            > self.config.max_requests_per_minute
+        {
+            return Err(AdapterError::RateLimited);
+        }
+        let expires_at_unix_ms =
+            publication_deadline_unix_ms.min(self.config.grant_expires_unix_ms);
+        if expires_at_unix_ms <= now {
+            return Err(AdapterError::StateUnavailable);
+        }
+        expires_at_unix_ms
+            .checked_add(
+                i64::try_from(self.config.timeout_ms)
+                    .map_err(|_| AdapterError::StateUnavailable)?,
+            )
+            .ok_or(AdapterError::StateUnavailable)?;
+        ledger.reservations.push(RateReservation {
+            capture_id,
+            expires_at_unix_ms,
+            remaining_attempts: outbound_attempt_budget,
+        });
+        store_rate_ledger(&self.config.spool_dir, &ledger).await?;
+        Ok(())
+    }
+
+    async fn charge_rate_attempt(&self, capture_id: Uuid) -> Result<(), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let now = now_unix_ms()?;
+        let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
+        ledger.validate_and_prune(now)?;
+        ledger.charge_attempt(capture_id, self.config.timeout_ms)?;
+        if ledger.occupancy()? > self.config.max_requests_per_minute {
+            return Err(AdapterError::StateUnavailable);
+        }
+        store_rate_ledger(&self.config.spool_dir, &ledger).await
+    }
+
+    fn validate_response_headers(
+        &self,
+        request: &CaptureRequest,
+        headers: &HeaderMap,
+    ) -> Result<ValidatedResponseHeaders, AdapterError> {
+        validate_response_header_work_bound(headers)?;
+        if headers
+            .values()
+            .any(|value| self.contains_secret_marker(value.as_bytes()))
+        {
+            return Err(AdapterError::ConfidentialityDenied);
+        }
+        validate_json_content_type(headers)?;
+        let source_cursor = required_header(headers, "x-mcloving-cursor")?;
+        if request
+            .expected_cursor
+            .as_ref()
+            .is_some_and(|expected| expected != &source_cursor)
+        {
+            return Err(AdapterError::StaleResponse);
+        }
+        let source_provenance = required_header(headers, "x-mcloving-provenance")?;
+        let source_observed_at_unix_ms = required_header(headers, "x-mcloving-observed-at-ms")?
+            .parse::<i64>()
+            .map_err(|_| AdapterError::MissingProvenance)?;
+        validate_source_age(
+            now_unix_ms()?,
+            source_observed_at_unix_ms,
+            self.config.max_age_ms,
+        )?;
+        let confidentiality =
+            parse_confidentiality(&required_header(headers, "x-mcloving-confidentiality")?)?;
+        if confidentiality > self.config.max_confidentiality
+            || confidentiality > request.confidentiality_ceiling
+            || confidentiality == Confidentiality::Secret
+        {
+            return Err(AdapterError::ConfidentialityDenied);
+        }
+        Ok(ValidatedResponseHeaders {
+            source_cursor,
+            source_provenance,
+            source_observed_at_unix_ms,
+            confidentiality,
+            source_etag: optional_header(headers, "etag")?,
+        })
+    }
+
+    async fn read_response_body(
+        &self,
+        mut response: reqwest::Response,
+    ) -> Result<Vec<u8>, AdapterError> {
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| AdapterError::SourceUnavailable)?
+        {
+            if body.len().saturating_add(chunk.len()) > self.config.max_response_bytes {
+                return Err(AdapterError::OversizedResponse);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
+    async fn complete_rate_attempt(&self, capture_id: Uuid) -> Result<(), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let now = now_unix_ms()?;
+        let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
+        ledger.validate_and_prune(now)?;
+        ledger.complete_attempt(capture_id, now)?;
+        if ledger.occupancy()? > self.config.max_requests_per_minute {
+            return Err(AdapterError::StateUnavailable);
+        }
+        store_rate_ledger(&self.config.spool_dir, &ledger).await
+    }
+
+    async fn abandon_rate_attempt(&self, capture_id: Uuid) -> Result<(), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let now = now_unix_ms()?;
+        let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
+        ledger.validate_and_prune(now)?;
+        ledger.abandon_attempt(capture_id)?;
+        store_rate_ledger(&self.config.spool_dir, &ledger).await
+    }
+
+    async fn release_rate_reservation(&self, capture_id: Uuid) -> Result<(), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        self.release_rate_reservation_unlocked(capture_id).await
+    }
+
+    async fn release_rate_reservation_unlocked(
+        &self,
+        capture_id: Uuid,
+    ) -> Result<(), AdapterError> {
+        let now = now_unix_ms()?;
+        let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
+        ledger.validate_and_prune(now)?;
+        ledger
+            .reservations
+            .retain(|reservation| reservation.capture_id != capture_id);
+        store_rate_ledger(&self.config.spool_dir, &ledger).await
+    }
+
+    fn sign_receipt(&self, receipt: &CaptureReceipt) -> Result<String, AdapterError> {
+        let mut unsigned = receipt.clone();
+        unsigned.signature.clear();
+        let bytes = serde_json::to_vec(&unsigned).map_err(|_| AdapterError::StateUnavailable)?;
+        let mut mac = HmacSha256::new_from_slice(&self.signing_key)
+            .map_err(|_| AdapterError::InvalidConfig)?;
+        mac.update(&bytes);
+        Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+    }
+
+    fn contains_secret_marker(&self, value: &[u8]) -> bool {
+        self.secret_markers.iter().any(|marker| {
+            marker.len() <= value.len()
+                && value
+                    .windows(marker.len())
+                    .any(|candidate| candidate == marker)
+        })
+    }
+
+    fn contains_secret_marker_in_json(&self, value: &Value) -> bool {
+        match value {
+            Value::String(value) => self.contains_secret_marker(value.as_bytes()),
+            Value::Array(values) => values
+                .iter()
+                .any(|value| self.contains_secret_marker_in_json(value)),
+            Value::Object(values) => values.iter().any(|(key, value)| {
+                self.contains_secret_marker(key.as_bytes())
+                    || self.contains_secret_marker_in_json(value)
+            }),
+            Value::Null | Value::Bool(_) | Value::Number(_) => false,
+        }
+    }
+
+    async fn load_stored(&self, capture_id: Uuid) -> Result<Option<CaptureReceipt>, AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let receipt = self.load_stored_unlocked(capture_id).await?;
+        if receipt.is_some() {
+            sync_directory(&self.config.spool_dir).await?;
+        }
+        Ok(receipt)
+    }
+
+    async fn load_stored_or_expired(
+        &self,
+        capture_id: Uuid,
+        publication_deadline_unix_ms: i64,
+    ) -> Result<(Option<CaptureReceipt>, bool), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let receipt = self.load_stored_unlocked(capture_id).await?;
+        if receipt.is_some() {
+            sync_directory(&self.config.spool_dir).await?;
+            return Ok((receipt, false));
+        }
+        let deadline_expired = now_unix_ms()? >= publication_deadline_unix_ms;
+        Ok((None, deadline_expired))
+    }
+
+    async fn load_stored_unlocked(
+        &self,
+        capture_id: Uuid,
+    ) -> Result<Option<CaptureReceipt>, AdapterError> {
+        let path = receipt_path(&self.config.spool_dir, capture_id);
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(AdapterError::InvalidStoredReceipt),
+        };
+        if !metadata.file_type().is_file()
+            || metadata.len() > u64::try_from(MAX_RECEIPT_BYTES).unwrap_or(u64::MAX)
+        {
+            return Err(AdapterError::InvalidStoredReceipt);
+        }
+        let bytes = read_bounded_regular_file(&path, MAX_RECEIPT_BYTES)
+            .await
+            .map_err(|_| AdapterError::InvalidStoredReceipt)?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| AdapterError::InvalidStoredReceipt)
+    }
+
+    async fn claim_capture_unlocked(
+        &self,
+        capture_id: Uuid,
+        claim: &CaptureClaim,
+    ) -> Result<bool, AdapterError> {
+        let final_path = self.config.spool_dir.join(format!("{capture_id}.claim"));
+        let temp_path = self
+            .config
+            .spool_dir
+            .join(format!(".{capture_id}.{}.claim.tmp", Uuid::new_v4()));
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        let claim_bytes = serde_json::to_vec(claim).map_err(|_| AdapterError::StateUnavailable)?;
+        if claim_bytes.len() > MAX_CLAIM_BYTES {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(AdapterError::StateUnavailable);
+        }
+        use tokio::io::AsyncWriteExt as _;
+        if file.write_all(&claim_bytes).await.is_err() || file.sync_all().await.is_err() {
+            drop(file);
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(AdapterError::StateUnavailable);
+        }
+        drop(file);
+        match tokio::fs::hard_link(&temp_path, &final_path).await {
+            Ok(()) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                sync_directory(&self.config.spool_dir).await?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                if self
+                    .matching_claim(capture_id, &claim.request_sha256)
+                    .await?
+                    .is_some()
+                {
+                    Ok(false)
+                } else {
+                    Err(AdapterError::StateUnavailable)
+                }
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Err(AdapterError::StateUnavailable)
+            }
+        }
+    }
+
+    async fn matching_claim(
+        &self,
+        capture_id: Uuid,
+        request_sha256: &str,
+    ) -> Result<Option<CaptureClaim>, AdapterError> {
+        let path = self.config.spool_dir.join(format!("{capture_id}.claim"));
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(AdapterError::StateUnavailable),
+        }
+        let bytes = read_bounded_regular_file(&path, MAX_CLAIM_BYTES).await?;
+        let existing: CaptureClaim =
+            serde_json::from_slice(&bytes).map_err(|_| AdapterError::InvalidStoredReceipt)?;
+        if existing.protocol_version != PROTOCOL_VERSION
+            || !is_sha256_hex(&existing.request_sha256)
+            || existing.publication_deadline_unix_ms <= 0
+        {
+            return Err(AdapterError::InvalidStoredReceipt);
+        }
+        if existing.request_sha256 == request_sha256 {
+            Ok(Some(existing))
+        } else {
+            Err(AdapterError::ReplayMismatch)
+        }
+    }
+
+    async fn await_claimed_receipt(
+        &self,
+        capture_id: Uuid,
+        request_sha256: &str,
+        claim: &CaptureClaim,
+    ) -> Result<CaptureReceipt, AdapterError> {
+        loop {
+            let (receipt, deadline_expired) = self
+                .load_stored_or_expired(capture_id, claim.publication_deadline_unix_ms)
+                .await?;
+            if let Some(receipt) = receipt {
+                if receipt.request_sha256 != request_sha256 {
+                    return Err(AdapterError::ReplayMismatch);
+                }
+                self.verify_receipt(&receipt)?;
+                return Ok(receipt);
+            }
+            if deadline_expired {
+                return Err(AdapterError::SourceUnavailable);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn store_receipt(
+        &self,
+        receipt: &CaptureReceipt,
+        publication_deadline_unix_ms: i64,
+    ) -> Result<(), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        if now_unix_ms()? >= publication_deadline_unix_ms {
+            return Err(AdapterError::SourceUnavailable);
+        }
+        let final_path = receipt_path(&self.config.spool_dir, receipt.capture_id);
+        let temp_path = self.config.spool_dir.join(format!(
+            ".{}.{}.tmp",
+            receipt.capture_id,
+            std::process::id()
+        ));
+        let bytes = serde_json::to_vec(receipt).map_err(|_| AdapterError::StateUnavailable)?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        {
+            use tokio::io::AsyncWriteExt as _;
+            file.write_all(&bytes)
+                .await
+                .map_err(|_| AdapterError::StateUnavailable)?;
+        }
+        file.sync_all()
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        drop(file);
+        match tokio::fs::hard_link(&temp_path, &final_path).await {
+            Ok(()) => {
+                tokio::fs::remove_file(&temp_path)
+                    .await
+                    .map_err(|_| AdapterError::StateUnavailable)?;
+                sync_directory(&self.config.spool_dir).await?;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                let stored = self
+                    .load_stored_unlocked(receipt.capture_id)
+                    .await?
+                    .ok_or(AdapterError::StateUnavailable)?;
+                if stored == *receipt {
+                    sync_directory(&self.config.spool_dir).await?;
+                    Ok(())
+                } else {
+                    Err(AdapterError::ReplayMismatch)
+                }
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Err(AdapterError::StateUnavailable)
+            }
+        }
+    }
+}
+
+fn claim_publication_deadline_unix_ms(
+    now_unix_ms: i64,
+    timeout_ms: u64,
+    retry_attempts: u8,
+    request_expires_at_unix_ms: i64,
+    grant_expires_at_unix_ms: i64,
+) -> Result<i64, AdapterError> {
+    let network_windows = u64::from(retry_attempts) + 1;
+    let bounded_lifetime_ms = timeout_ms
+        .checked_mul(network_windows)
+        .and_then(|network_wait_ms| network_wait_ms.checked_add(MAX_LOCAL_RECEIPT_PUBLICATION_MS))
+        .and_then(|lifetime_ms| i64::try_from(lifetime_ms).ok())
+        .ok_or(AdapterError::InvalidConfig)?;
+    let bounded_deadline = now_unix_ms
+        .checked_add(bounded_lifetime_ms)
+        .ok_or(AdapterError::InvalidConfig)?;
+    let deadline = bounded_deadline
+        .min(request_expires_at_unix_ms)
+        .min(grant_expires_at_unix_ms);
+    if deadline <= now_unix_ms {
+        Err(AdapterError::InvalidConfig)
+    } else {
+        Ok(deadline)
+    }
+}
+
+#[cfg(unix)]
+type SpoolLock = nix::fcntl::Flock<std::fs::File>;
+
+#[cfg(not(unix))]
+struct SpoolLock;
+
+async fn lock_spool(spool_dir: &Path, exclusive: bool) -> Result<SpoolLock, AdapterError> {
+    #[cfg(unix)]
+    {
+        use nix::fcntl::{Flock, FlockArg};
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        let path = spool_dir.join(".coordination-v1.lock");
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .mode(0o600)
+                .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+                .open(path)
+                .map_err(|_| AdapterError::StateUnavailable)?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| AdapterError::StateUnavailable)?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+                return Err(AdapterError::StateUnavailable);
+            }
+            let operation = if exclusive {
+                FlockArg::LockExclusive
+            } else {
+                FlockArg::LockShared
+            };
+            Flock::lock(file, operation).map_err(|_| AdapterError::StateUnavailable)
+        })
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (spool_dir, exclusive);
+        Err(AdapterError::InvalidConfig)
+    }
+}
+
+async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
+    #[cfg(unix)]
+    {
+        let parent = spool_dir.parent().ok_or(AdapterError::InvalidConfig)?;
+        let parent_metadata = tokio::fs::symlink_metadata(parent)
+            .await
+            .map_err(|_| AdapterError::InvalidConfig)?;
+        if !parent_metadata.file_type().is_dir()
+            || tokio::fs::canonicalize(parent)
+                .await
+                .map_err(|_| AdapterError::InvalidConfig)?
+                != parent
+        {
+            return Err(AdapterError::InvalidConfig);
+        }
+
+        let existed = match tokio::fs::symlink_metadata(spool_dir).await {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => return Err(AdapterError::StateUnavailable),
+        };
+        if !existed {
+            let mut builder = tokio::fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(spool_dir).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(AdapterError::StateUnavailable),
+            }
+        }
+        let metadata = tokio::fs::symlink_metadata(spool_dir)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        if !private_spool_metadata_is_valid(&metadata)
+            || tokio::fs::canonicalize(spool_dir)
+                .await
+                .map_err(|_| AdapterError::InvalidConfig)?
+                != spool_dir
+        {
+            return Err(AdapterError::InvalidConfig);
+        }
+        sync_directory(parent).await?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = spool_dir;
+        Err(AdapterError::InvalidConfig)
+    }
+}
+
+#[cfg(unix)]
+fn private_spool_metadata_is_valid(metadata: &std::fs::Metadata) -> bool {
+    private_spool_metadata_is_valid_for(metadata, nix::unistd::Uid::effective().as_raw())
+}
+
+#[cfg(unix)]
+fn private_spool_metadata_is_valid_for(metadata: &std::fs::Metadata, effective_uid: u32) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    metadata.file_type().is_dir()
+        && metadata.permissions().mode() & 0o077 == 0
+        && metadata.uid() == effective_uid
+}
+
+async fn load_rate_ledger(spool_dir: &Path) -> Result<RateLedger, AdapterError> {
+    let path = spool_dir.join(".rate-v1.json");
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && metadata.len() <= u64::try_from(MAX_RATE_LEDGER_BYTES).unwrap_or(u64::MAX) =>
+        {
+            let bytes = read_bounded_regular_file(&path, MAX_RATE_LEDGER_BYTES).await?;
+            match serde_json::from_slice(&bytes).map_err(|_| AdapterError::StateUnavailable)? {
+                StoredRateLedger::Current(ledger) => Ok(ledger),
+                StoredRateLedger::Legacy(attempt_started_at_unix_ms) => Ok(RateLedger {
+                    attempt_started_at_unix_ms,
+                    in_flight_attempts: Vec::new(),
+                    reservations: Vec::new(),
+                }),
+            }
+        }
+        Ok(_) => Err(AdapterError::StateUnavailable),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(RateLedger::default()),
+        Err(_) => Err(AdapterError::StateUnavailable),
+    }
+}
+
+async fn store_rate_ledger(spool_dir: &Path, ledger: &RateLedger) -> Result<(), AdapterError> {
+    let bytes = serde_json::to_vec(ledger).map_err(|_| AdapterError::StateUnavailable)?;
+    if bytes.len() > MAX_RATE_LEDGER_BYTES {
+        return Err(AdapterError::StateUnavailable);
+    }
+    let final_path = spool_dir.join(".rate-v1.json");
+    let temp_path = spool_dir.join(format!(".rate-v1.{}.tmp", Uuid::new_v4()));
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp_path)
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    use tokio::io::AsyncWriteExt as _;
+    if file.write_all(&bytes).await.is_err() || file.sync_all().await.is_err() {
+        drop(file);
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(AdapterError::StateUnavailable);
+    }
+    drop(file);
+    if tokio::fs::rename(&temp_path, &final_path).await.is_err() {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(AdapterError::StateUnavailable);
+    }
+    sync_directory(spool_dir).await
+}
+
+fn validate_config(
+    config: &AdapterConfig,
+    implementation_sha256: &str,
+    read_token: &str,
+    signing_key: &[u8],
+    secret_markers: &[Vec<u8>],
+) -> Result<(), AdapterError> {
+    if config.protocol_version != PROTOCOL_VERSION
+        || config.schema_version.trim().is_empty()
+        || config.adapter_id.trim().is_empty()
+        || config.deployment_identity.trim().is_empty()
+        || config.operator_identity.trim().is_empty()
+        || config.generation == 0
+        || !config.spool_dir.is_absolute()
+        || config.endpoint_identity.trim().is_empty()
+        || config.data_source_identity.trim().is_empty()
+        || config.grant_id.trim().is_empty()
+        || config.grant_version.trim().is_empty()
+        || config.grant_scope.trim().is_empty()
+        || !is_sha256_hex(&config.read_token_sha256)
+        || config.signing_key_id.trim().is_empty()
+        || !is_sha256_hex(&config.signing_key_sha256)
+        || !is_sha256_hex(&config.secret_marker_set_sha256)
+        || config.max_response_bytes == 0
+        || config.max_response_bytes > MAX_RESPONSE_BYTES
+        || config.max_requests_per_minute == 0
+        || config.max_requests_per_minute > MAX_REQUESTS_PER_MINUTE
+        || config.max_requests_per_minute < usize::from(config.retry_attempts) + 1
+        || config.timeout_ms == 0
+        || config.timeout_ms > MAX_TIMEOUT_MS
+        || config.max_age_ms <= 0
+        || config.max_age_ms > MAX_AGE_MS
+        || config.retry_attempts > 5
+        || !is_sha256_hex(implementation_sha256)
+        || read_token.len() < 32
+        || signing_key.len() < 32
+        || secret_markers.is_empty()
+        || secret_markers.len() > MAX_SECRET_MARKERS
+        || secret_markers.iter().any(Vec::is_empty)
+        || secret_markers
+            .iter()
+            .any(|marker| marker.len() > MAX_BINDING_TEXT_BYTES)
+        || secret_markers
+            .iter()
+            .try_fold(0_usize, |total, marker| total.checked_add(marker.len()))
+            .and_then(|marker_bytes| {
+                config
+                    .max_response_bytes
+                    .checked_mul(2)
+                    .and_then(|body_scan_bytes| {
+                        body_scan_bytes.checked_add(MAX_RESPONSE_HEADER_VALUE_BYTES)
+                    })
+                    .and_then(|scan_bytes| scan_bytes.checked_mul(marker_bytes))
+            })
+            .is_none_or(|work| work > MAX_MARKER_COMPARISON_BYTES)
+        || content_sha256(read_token.as_bytes()) != config.read_token_sha256
+        || content_sha256(signing_key) != config.signing_key_sha256
+        || marker_set_digest(secret_markers) != config.secret_marker_set_sha256
+    {
+        return Err(AdapterError::InvalidConfig);
+    }
+    let mut unique_markers = secret_markers.to_vec();
+    unique_markers.sort();
+    unique_markers.dedup();
+    if unique_markers.len() != secret_markers.len() {
+        return Err(AdapterError::InvalidConfig);
+    }
+    let mut allowed = config.allowed_query_keys.clone();
+    allowed.sort();
+    allowed.dedup();
+    if allowed.len() != config.allowed_query_keys.len()
+        || allowed.len() > MAX_QUERY_KEYS
+        || allowed
+            .iter()
+            .any(|key| key.trim().is_empty() || key.len() > MAX_BINDING_TEXT_BYTES)
+    {
+        return Err(AdapterError::InvalidConfig);
+    }
+    let mut fields = config
+        .response_schema
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect::<Vec<_>>();
+    fields.sort_unstable();
+    fields.dedup();
+    if fields.len() != config.response_schema.len()
+        || fields.len() > MAX_QUERY_KEYS
+        || fields
+            .iter()
+            .any(|name| name.trim().is_empty() || name.len() > MAX_BINDING_TEXT_BYTES)
+        || [
+            &config.schema_version,
+            &config.adapter_id,
+            &config.deployment_identity,
+            &config.operator_identity,
+            &config.endpoint_url,
+            &config.endpoint_identity,
+            &config.data_source_identity,
+            &config.grant_id,
+            &config.grant_version,
+            &config.grant_scope,
+            &config.read_token_sha256,
+            &config.signing_key_id,
+            &config.signing_key_sha256,
+        ]
+        .iter()
+        .any(|value| value.len() > MAX_BINDING_TEXT_BYTES)
+    {
+        return Err(AdapterError::InvalidConfig);
+    }
+    let endpoint = Url::parse(&config.endpoint_url).map_err(|_| AdapterError::InvalidConfig)?;
+    if endpoint.scheme() == "https"
+        && (config.ca_bundle_path.is_none() || config.ca_bundle_sha256.is_none())
+    {
+        return Err(AdapterError::InvalidConfig);
+    }
+    if config.ca_bundle_path.is_some() != config.ca_bundle_sha256.is_some()
+        || config
+            .ca_bundle_sha256
+            .as_ref()
+            .is_some_and(|digest| !is_sha256_hex(digest))
+    {
+        return Err(AdapterError::InvalidConfig);
+    }
+    Ok(())
+}
+
+pub fn marker_set_digest(markers: &[Vec<u8>]) -> String {
+    let mut markers = markers.to_vec();
+    markers.sort();
+    let mut hasher = Sha256::new();
+    for marker in markers {
+        hasher.update(
+            u64::try_from(marker.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        hasher.update(marker);
+    }
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn validate_endpoint(url: &Url, test_allow_http_loopback: bool) -> Result<(), AdapterError> {
+    if url.username() != ""
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(AdapterError::InvalidConfig);
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http"
+            if test_allow_http_loopback
+                && matches!(url.host_str(), Some("127.0.0.1" | "::1" | "localhost")) =>
+        {
+            Ok(())
+        }
+        _ => Err(AdapterError::InvalidConfig),
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn validate_json_content_type(headers: &HeaderMap) -> Result<(), AdapterError> {
+    let mut values = headers.get_all(CONTENT_TYPE).iter();
+    let value = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .ok_or(AdapterError::MalformedResponse)?;
+    if values.next().is_some() {
+        return Err(AdapterError::MalformedResponse);
+    }
+    if value
+        .split(';')
+        .next()
+        .is_none_or(|media_type| media_type.trim() != "application/json")
+    {
+        return Err(AdapterError::MalformedResponse);
+    }
+    Ok(())
+}
+
+fn validate_schema(value: &Value, schema: &[FieldSchema]) -> Result<(), AdapterError> {
+    let object = value.as_object().ok_or(AdapterError::MalformedResponse)?;
+    if object
+        .keys()
+        .any(|name| !schema.iter().any(|field| &field.name == name))
+    {
+        return Err(AdapterError::MalformedResponse);
+    }
+    for field in schema {
+        match object.get(&field.name) {
+            Some(value) if field.kind.matches(value) => {}
+            Some(_) => return Err(AdapterError::MalformedResponse),
+            None if field.required => return Err(AdapterError::MalformedResponse),
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_response_header_work_bound(headers: &HeaderMap) -> Result<(), AdapterError> {
+    let total_value_bytes = headers.values().try_fold(0_usize, |total, value| {
+        total.checked_add(value.as_bytes().len())
+    });
+    if total_value_bytes.is_none_or(|total| total > MAX_RESPONSE_HEADER_VALUE_BYTES) {
+        return Err(AdapterError::OversizedResponse);
+    }
+    Ok(())
+}
+
+fn reject_duplicate_json_members(bytes: &[u8]) -> Result<(), AdapterError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    DuplicateRejectingSeed
+        .deserialize(&mut deserializer)
+        .map_err(|_| AdapterError::MalformedResponse)?;
+    deserializer
+        .end()
+        .map_err(|_| AdapterError::MalformedResponse)
+}
+
+fn parse_confidentiality(value: &str) -> Result<Confidentiality, AdapterError> {
+    match value {
+        "public" => Ok(Confidentiality::Public),
+        "internal" => Ok(Confidentiality::Internal),
+        "secret" => Ok(Confidentiality::Secret),
+        _ => Err(AdapterError::MissingProvenance),
+    }
+}
+
+fn required_header(headers: &HeaderMap, name: &str) -> Result<String, AdapterError> {
+    optional_header(headers, name)?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(AdapterError::MissingProvenance)
+}
+
+fn optional_header(headers: &HeaderMap, name: &str) -> Result<Option<String>, AdapterError> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(AdapterError::MissingProvenance);
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| AdapterError::MissingProvenance)?;
+    if value.len() > MAX_BINDING_TEXT_BYTES {
+        return Err(AdapterError::MissingProvenance);
+    }
+    Ok(Some(value.to_owned()))
+}
+
+fn bearer(token: &str) -> Result<HeaderValue, AdapterError> {
+    let mut value = request_header(&format!("Bearer {token}"))?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+fn request_header(value: &str) -> Result<HeaderValue, AdapterError> {
+    HeaderValue::from_str(value).map_err(|_| AdapterError::InvalidConfig)
+}
+
+fn receipt_path(spool_dir: &Path, capture_id: Uuid) -> PathBuf {
+    spool_dir.join(format!("{capture_id}.json"))
+}
+
+fn canonical_digest<T: Serialize>(value: &T) -> Result<String, AdapterError> {
+    let bytes = serde_json::to_vec(value).map_err(|_| AdapterError::InvalidConfig)?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+pub fn content_sha256(bytes: &[u8]) -> String {
+    sha256_hex(bytes)
+}
+
+fn now_unix_ms() -> Result<i64, AdapterError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| AdapterError::InvalidConfig)?;
+    i64::try_from(duration.as_millis()).map_err(|_| AdapterError::InvalidConfig)
+}
+
+fn validate_source_age(
+    checked_at_unix_ms: i64,
+    source_observed_at_unix_ms: i64,
+    max_age_ms: i64,
+) -> Result<(), AdapterError> {
+    let source_age_ms = checked_at_unix_ms
+        .checked_sub(source_observed_at_unix_ms)
+        .ok_or(AdapterError::StaleResponse)?;
+    if source_age_ms < 0 || source_age_ms > max_age_ms {
+        return Err(AdapterError::StaleResponse);
+    }
+    Ok(())
+}
+
+pub async fn read_bounded_regular_file(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AdapterError> {
+    use tokio::io::AsyncReadExt as _;
+
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX)
+    {
+        return Err(AdapterError::StateUnavailable);
+    }
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    let opened_metadata = file
+        .metadata()
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    if !opened_metadata.file_type().is_file()
+        || opened_metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX)
+    {
+        return Err(AdapterError::StateUnavailable);
+    }
+    let read_limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1_024));
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    if bytes.len() > max_bytes {
+        return Err(AdapterError::StateUnavailable);
+    }
+    Ok(bytes)
+}
+
+pub async fn read_private_bounded_regular_file(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AdapterError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, max_bytes);
+        Err(AdapterError::StateUnavailable)
+    }
+
+    #[cfg(unix)]
+    {
+        use tokio::io::AsyncReadExt as _;
+
+        let metadata = tokio::fs::symlink_metadata(path)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        if !private_credential_metadata_is_valid(&metadata, max_bytes) {
+            return Err(AdapterError::StateUnavailable);
+        }
+
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true).custom_flags(nix::libc::O_NOFOLLOW);
+        let file = options
+            .open(path)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        let opened_metadata = file
+            .metadata()
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        if !private_credential_metadata_is_valid(&opened_metadata, max_bytes) {
+            return Err(AdapterError::StateUnavailable);
+        }
+
+        let read_limit = u64::try_from(max_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1_024));
+        file.take(read_limit)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        if bytes.len() > max_bytes {
+            return Err(AdapterError::StateUnavailable);
+        }
+        Ok(bytes)
+    }
+}
+
+#[cfg(unix)]
+fn private_credential_metadata_is_valid(metadata: &std::fs::Metadata, max_bytes: usize) -> bool {
+    private_credential_metadata_is_valid_for(
+        metadata,
+        max_bytes,
+        nix::unistd::Uid::effective().as_raw(),
+    )
+}
+
+#[cfg(unix)]
+fn private_credential_metadata_is_valid_for(
+    metadata: &std::fs::Metadata,
+    max_bytes: usize,
+    effective_uid: u32,
+) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    metadata.file_type().is_file()
+        && metadata.len() <= u64::try_from(max_bytes).unwrap_or(u64::MAX)
+        && metadata.permissions().mode() & 0o077 == 0
+        && metadata.uid() == effective_uid
+}
+
+#[cfg(unix)]
+fn ensure_directory_sync_supported() -> Result<(), AdapterError> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_directory_sync_supported() -> Result<(), AdapterError> {
+    Err(AdapterError::StateUnavailable)
+}
+
+#[cfg(unix)]
+async fn sync_directory(path: &Path) -> Result<(), AdapterError> {
+    let directory = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    let metadata = directory
+        .metadata()
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    if !metadata.is_dir() {
+        return Err(AdapterError::StateUnavailable);
+    }
+    directory
+        .sync_all()
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)
+}
+
+#[cfg(not(unix))]
+async fn sync_directory(_path: &Path) -> Result<(), AdapterError> {
+    // The v1 claim protocol requires a durable containing-directory entry
+    // before it may sample a mutable source. Do not silently downgrade that
+    // guarantee on platforms where this implementation has no certified
+    // directory-sync primitive. InputAdapter::new calls this before returning,
+    // so no claim can be published on an unsupported host.
+    Err(AdapterError::StateUnavailable)
+}
+
+pub async fn sha256_file(path: &Path) -> Result<String, AdapterError> {
+    use tokio::io::AsyncReadExt as _;
+
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|_| AdapterError::InvalidConfig)?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_EXECUTABLE_BYTES {
+        return Err(AdapterError::InvalidConfig);
+    }
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| AdapterError::InvalidConfig)?;
+    let opened_metadata = file
+        .metadata()
+        .await
+        .map_err(|_| AdapterError::InvalidConfig)?;
+    if !opened_metadata.file_type().is_file() || opened_metadata.len() > MAX_EXECUTABLE_BYTES {
+        return Err(AdapterError::InvalidConfig);
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1_024];
+    let mut total = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|_| AdapterError::InvalidConfig)?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(u64::try_from(read).map_err(|_| AdapterError::InvalidConfig)?)
+            .ok_or(AdapterError::InvalidConfig)?;
+        if total > MAX_EXECUTABLE_BYTES {
+            return Err(AdapterError::InvalidConfig);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{byte:02x}");
+    }
+    Ok(encoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claim_deadline_binds_network_local_and_authority_windows() {
+        assert_eq!(
+            claim_publication_deadline_unix_ms(100, 1, 0, 1_000_000, 1_000_000)
+                .expect("bounded publication deadline"),
+            60_101
+        );
+        assert_eq!(
+            claim_publication_deadline_unix_ms(100, MAX_TIMEOUT_MS, 5, 200_000, 300_000)
+                .expect("authority-bounded publication deadline"),
+            200_000
+        );
+    }
+
+    #[test]
+    fn in_flight_retry_charge_cannot_age_out_before_send_completes() {
+        let capture_id = Uuid::new_v4();
+        let mut ledger = RateLedger {
+            attempt_started_at_unix_ms: Vec::new(),
+            in_flight_attempts: Vec::new(),
+            reservations: vec![RateReservation {
+                capture_id,
+                expires_at_unix_ms: 180_000,
+                remaining_attempts: 3,
+            }],
+        };
+
+        assert_eq!(ledger.occupancy().expect("reserved occupancy"), 3);
+        assert!(ledger.attempt_started_at_unix_ms.is_empty());
+
+        ledger
+            .charge_attempt(capture_id, 60_000)
+            .expect("convert reservation to in-flight charge");
+        assert!(ledger.attempt_started_at_unix_ms.is_empty());
+        assert_eq!(ledger.in_flight_attempts.len(), 1);
+
+        let send_completed_at = 121_000;
+        ledger
+            .validate_and_prune(send_completed_at)
+            .expect("in-flight charge remains live across rate windows");
+        assert_eq!(ledger.in_flight_attempts.len(), 1);
+        ledger
+            .complete_attempt(capture_id, send_completed_at)
+            .expect("complete the charged send");
+
+        assert_eq!(ledger.attempt_started_at_unix_ms, vec![send_completed_at]);
+        assert!(ledger.in_flight_attempts.is_empty());
+        assert_eq!(ledger.reservations[0].remaining_attempts, 2);
+        assert_eq!(
+            ledger.occupancy().expect("charged plus reserved occupancy"),
+            3,
+            "converting a reserved slot to an actual attempt must not free capacity"
+        );
+    }
+
+    #[test]
+    fn unused_retry_reservation_expires_with_the_claim() {
+        let capture_id = Uuid::new_v4();
+        let mut ledger = RateLedger {
+            attempt_started_at_unix_ms: Vec::new(),
+            in_flight_attempts: Vec::new(),
+            reservations: vec![RateReservation {
+                capture_id,
+                expires_at_unix_ms: 100,
+                remaining_attempts: 3,
+            }],
+        };
+
+        assert_eq!(ledger.occupancy().expect("reserved occupancy"), 3);
+        ledger
+            .validate_and_prune(100)
+            .expect("expire unused claim reservation");
+        assert!(ledger.reservations.is_empty());
+        assert_eq!(ledger.occupancy().expect("released occupancy"), 0);
+    }
+
+    #[test]
+    fn in_flight_expiry_overflow_is_rejected() {
+        let capture_id = Uuid::new_v4();
+        let mut ledger = RateLedger {
+            attempt_started_at_unix_ms: Vec::new(),
+            in_flight_attempts: Vec::new(),
+            reservations: vec![RateReservation {
+                capture_id,
+                expires_at_unix_ms: i64::MAX,
+                remaining_attempts: 1,
+            }],
+        };
+
+        assert!(matches!(
+            ledger.charge_attempt(capture_id, 1),
+            Err(AdapterError::StateUnavailable)
+        ));
+        assert!(ledger.in_flight_attempts.is_empty());
+    }
+
+    #[test]
+    fn expired_in_flight_charge_reconciles_then_ages_out() {
+        let capture_id = Uuid::new_v4();
+        let mut ledger = RateLedger {
+            attempt_started_at_unix_ms: Vec::new(),
+            in_flight_attempts: vec![InFlightRateAttempt {
+                capture_id,
+                expires_at_unix_ms: 100,
+            }],
+            reservations: Vec::new(),
+        };
+
+        ledger
+            .validate_and_prune(101)
+            .expect("reconcile stranded in-flight charge");
+        assert!(ledger.in_flight_attempts.is_empty());
+        assert_eq!(ledger.attempt_started_at_unix_ms, vec![100]);
+        assert_eq!(ledger.occupancy().expect("reconciled occupancy"), 1);
+
+        ledger
+            .validate_and_prune(60_101)
+            .expect("age reconciled charge out of the rate window");
+        assert!(ledger.attempt_started_at_unix_ms.is_empty());
+        assert_eq!(ledger.occupancy().expect("released occupancy"), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_file_read_rejects_oversized_content() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("oversized");
+        tokio::fs::write(&path, b"123456789")
+            .await
+            .expect("write fixture");
+
+        assert!(matches!(
+            read_bounded_regular_file(&path, 8).await,
+            Err(AdapterError::StateUnavailable)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_file_read_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("target");
+        let link = directory.path().join("link");
+        tokio::fs::write(&target, b"secret")
+            .await
+            .expect("write fixture");
+        symlink(&target, &link).expect("create symlink");
+
+        assert!(matches!(
+            read_bounded_regular_file(&link, 64).await,
+            Err(AdapterError::StateUnavailable)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_credential_read_requires_owner_only_effective_uid_file() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("credential");
+        tokio::fs::write(&path, b"private-value")
+            .await
+            .expect("write credential fixture");
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .await
+            .expect("make credential world-readable");
+        assert!(matches!(
+            read_private_bounded_regular_file(&path, 64).await,
+            Err(AdapterError::StateUnavailable)
+        ));
+
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .expect("make credential owner-only");
+        assert_eq!(
+            read_private_bounded_regular_file(&path, 64)
+                .await
+                .expect("read private credential"),
+            b"private-value"
+        );
+        let metadata = std::fs::metadata(&path).expect("credential metadata");
+        assert!(!private_credential_metadata_is_valid_for(
+            &metadata,
+            64,
+            metadata.uid().wrapping_add(1),
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_spool_requires_effective_user_ownership() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("set private mode");
+        let metadata = std::fs::symlink_metadata(directory.path()).expect("spool metadata");
+
+        assert_eq!(metadata.uid(), nix::unistd::Uid::effective().as_raw());
+        assert!(private_spool_metadata_is_valid(&metadata));
+        assert!(!private_spool_metadata_is_valid_for(
+            &metadata,
+            metadata.uid().wrapping_add(1),
+        ));
+    }
+
+    #[test]
+    fn rejects_non_loopback_cleartext_endpoint() {
+        let url = Url::parse("http://example.test/input").expect("url");
+        assert!(matches!(
+            validate_endpoint(&url, true),
+            Err(AdapterError::InvalidConfig)
+        ));
+    }
+
+    #[test]
+    fn schema_is_type_sensitive() {
+        let schema = [FieldSchema {
+            name: "enabled".to_owned(),
+            kind: JsonKind::Boolean,
+            required: true,
+        }];
+        assert!(validate_schema(&serde_json::json!({"enabled": true}), &schema).is_ok());
+        assert!(matches!(
+            validate_schema(&serde_json::json!({"enabled": "true"}), &schema),
+            Err(AdapterError::MalformedResponse)
+        ));
+    }
+
+    #[test]
+    fn duplicate_json_members_are_rejected_recursively() {
+        assert!(matches!(
+            reject_duplicate_json_members(br#"{"outer":{"value":1,"value":2}}"#),
+            Err(AdapterError::MalformedResponse)
+        ));
+        assert!(
+            reject_duplicate_json_members(br#"{"value":0.123456789012345678901234567890}"#).is_ok()
+        );
+    }
+
+    #[test]
+    fn response_header_marker_scan_has_an_aggregate_byte_ceiling() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-contained-large-value",
+            HeaderValue::from_bytes(&vec![b'x'; MAX_RESPONSE_HEADER_VALUE_BYTES + 1])
+                .expect("large contained header"),
+        );
+
+        assert!(matches!(
+            validate_response_header_work_bound(&headers),
+            Err(AdapterError::OversizedResponse)
+        ));
+    }
+}
