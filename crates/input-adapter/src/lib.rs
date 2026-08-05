@@ -394,6 +394,13 @@ impl InputAdapter {
 
         let mut retry_count = 0_u8;
         let response = loop {
+            let attempt_started_at_unix_ms = now_unix_ms()?;
+            if request.expires_at_unix_ms <= attempt_started_at_unix_ms {
+                return Err(AdapterError::ExpiredRequest);
+            }
+            if self.config.grant_expires_unix_ms <= attempt_started_at_unix_ms {
+                return Err(AdapterError::ExpiredGrant);
+            }
             let result = self
                 .client
                 .get(url.clone())
@@ -696,8 +703,12 @@ impl InputAdapter {
     }
 
     async fn load_stored(&self, capture_id: Uuid) -> Result<Option<CaptureReceipt>, AdapterError> {
-        let _lock = lock_spool(&self.config.spool_dir, false).await?;
-        self.load_stored_unlocked(capture_id).await
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let receipt = self.load_stored_unlocked(capture_id).await?;
+        if receipt.is_some() {
+            sync_directory(&self.config.spool_dir).await?;
+        }
+        Ok(receipt)
     }
 
     async fn load_stored_unlocked(
@@ -868,6 +879,7 @@ impl InputAdapter {
                     .await?
                     .ok_or(AdapterError::StateUnavailable)?;
                 if stored == *receipt {
+                    sync_directory(&self.config.spool_dir).await?;
                     Ok(())
                 } else {
                     Err(AdapterError::ReplayMismatch)

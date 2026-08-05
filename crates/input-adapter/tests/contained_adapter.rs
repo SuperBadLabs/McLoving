@@ -96,6 +96,15 @@ async fn read_input(
     if mode == "timeout_then_valid" && state.timeout_reads.fetch_add(1, Ordering::SeqCst) == 0 {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
+    if mode == "retry_after_expiry" {
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            HeaderMap::new(),
+            String::new(),
+        )
+            .into_response();
+    }
 
     let branch = query.get("branch").map(String::as_str).unwrap_or("main");
     let mut response_headers = HeaderMap::new();
@@ -798,6 +807,44 @@ async fn request_and_grant_must_remain_live_through_complete_capture() {
             .await,
         Err(AdapterError::ExpiredGrant)
     ));
+}
+
+#[tokio::test]
+async fn request_and_grant_are_rechecked_before_every_source_attempt() {
+    let fixture = start_fixture().await;
+
+    let request_spool = TempDir::new().expect("request retry expiry spool");
+    let request_adapter =
+        make_adapter(config(&fixture.endpoint, request_spool.path()), READ_TOKEN).await;
+    let mut expiring_request = request(&request_adapter, "main", "retry_after_expiry");
+    expiring_request.expires_at_unix_ms = now_ms() + 500;
+    let reads_before_request = fixture.state.reads.load(Ordering::SeqCst);
+    assert!(matches!(
+        request_adapter.capture(&expiring_request).await,
+        Err(AdapterError::ExpiredRequest)
+    ));
+    assert_eq!(
+        fixture.state.reads.load(Ordering::SeqCst) - reads_before_request,
+        1,
+        "an expired request must not authorize a retry GET"
+    );
+
+    let grant_spool = TempDir::new().expect("grant retry expiry spool");
+    let mut grant_config = config(&fixture.endpoint, grant_spool.path());
+    grant_config.grant_expires_unix_ms = now_ms() + 500;
+    let grant_adapter = make_adapter(grant_config, READ_TOKEN).await;
+    let reads_before_grant = fixture.state.reads.load(Ordering::SeqCst);
+    assert!(matches!(
+        grant_adapter
+            .capture(&request(&grant_adapter, "main", "retry_after_expiry"))
+            .await,
+        Err(AdapterError::ExpiredGrant)
+    ));
+    assert_eq!(
+        fixture.state.reads.load(Ordering::SeqCst) - reads_before_grant,
+        1,
+        "an expired grant must not authorize a retry GET"
+    );
 }
 
 #[tokio::test]
