@@ -54,7 +54,8 @@ pinned Rust check: controller-store and CLI passed
 
 The admin tests prove incomplete classification, residual Jenkins writes,
 caller/endpoint/digest substitution, missing action authority, stale generation,
-cross-tenant reads, history mutation, exact rollback, and audit behavior. The
+concurrent first-generation and identity-lifecycle races, cross-tenant reads,
+history mutation, exact rollback, and audit behavior. The
 CLI journey proves bearer-only public API use and the exact revision and desired
 state request.
 

@@ -97,7 +97,8 @@ available until the later rollback window closes.
 to cover the sealed denominator, exact operation coverage, mapping and
 retirement contract validation, residual-write and pending-operation denial,
 least-authority denial, stable source/target binding, stale generations,
-rollback, immutable history, constrained-role RLS, and hash-chained audit.
+concurrent first-generation and lifecycle-transition serialization, rollback,
+immutable history, constrained-role RLS, and hash-chained audit.
 `bins/cli/tests/api_only.rs` proves `mcloving apply` sends the bearer token,
 quoted revision precondition, desired source, slug, and typed parameters to the
 public route without a privileged shortcut. Existing PostgreSQL/API suites

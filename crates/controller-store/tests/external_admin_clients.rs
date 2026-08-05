@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use mcloving_controller_store::{
     ExternalAdminAuthority, ExternalAdminClientWrite, ExternalAdminDisposition,
-    ExternalAdminOperation, ExternalAdminOperationContract, NewServiceIdentity, Store, StoreError,
-    authz::ServiceScope, compute_external_admin_client_digest,
+    ExternalAdminOperation, ExternalAdminOperationContract, IdentityLifecycle, NewServiceIdentity,
+    Store, StoreError, authz::ServiceScope, compute_external_admin_client_digest,
 };
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -268,6 +269,63 @@ async fn cutover_requires_zero_writes_complete_dispositions_and_exact_authority(
         .await
         .expect("register Jenkins admin authority");
 
+    let mut lifecycle_tx = store.pool().begin().await.expect("begin lifecycle race");
+    sqlx::query(
+        "SELECT lifecycle_state FROM identities
+         WHERE organization_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(organization_id)
+    .bind(identity_id)
+    .fetch_one(&mut *lifecycle_tx)
+    .await
+    .expect("lock target identity before lifecycle transition");
+    let raced_target = admin_client(
+        organization_id,
+        project_id,
+        identity_id,
+        2,
+        Some(1),
+        ExternalAdminAuthority::McLovingTarget,
+        true,
+    );
+    let raced_install = store.install_external_admin_client(&raced_target);
+    tokio::pin!(raced_install);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), raced_install.as_mut())
+            .await
+            .is_err(),
+        "admin cutover must wait for an in-flight target lifecycle transition"
+    );
+    sqlx::query(
+        "UPDATE identities
+         SET lifecycle_state = 'disabled', lifecycle_generation = lifecycle_generation + 1
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(identity_id)
+    .execute(&mut *lifecycle_tx)
+    .await
+    .expect("disable target identity while holding its row lock");
+    lifecycle_tx
+        .commit()
+        .await
+        .expect("commit lifecycle transition");
+    assert!(matches!(
+        raced_install.await,
+        Err(StoreError::InvalidAdminMigration(message)) if message.contains("target identity is inactive")
+    ));
+    store
+        .transition_identity_lifecycle(
+            organization_id,
+            identity_id,
+            2,
+            IdentityLifecycle::Active,
+            "restore-target-after-contained-admin-race",
+            "operator:admin-migration-test",
+        )
+        .await
+        .expect("restore target identity after contained race");
+
     let mut pending = admin_client(
         organization_id,
         project_id,
@@ -411,10 +469,19 @@ async fn substitution_omission_stale_generation_and_cross_tenant_reads_fail_clos
         Err(StoreError::InvalidAdminMigration(message)) if message.contains("classify every canonical")
     ));
 
-    store
-        .install_external_admin_client(&source)
-        .await
-        .expect("register exact source authority");
+    let first = store.install_external_admin_client(&source);
+    let second = store.install_external_admin_client(&source);
+    let (left, right) = tokio::join!(first, second);
+    assert_eq!(
+        usize::from(left.is_ok()) + usize::from(right.is_ok()),
+        1,
+        "only one first admin generation may commit"
+    );
+    let conflict = if left.is_err() { left } else { right };
+    assert!(matches!(
+        conflict,
+        Err(StoreError::AdminMigrationConflict(_))
+    ));
     let stale = admin_client(
         organization_id,
         project_id,
