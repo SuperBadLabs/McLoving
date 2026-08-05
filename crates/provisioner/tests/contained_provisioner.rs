@@ -51,6 +51,7 @@ enum FixtureMode {
     DisappearFromFinalInventory,
     DelayedReady,
     DelayedCreateReady,
+    DelayedCreateAfterFinalSnapshot,
     DelayedAbsence,
     DelayedSnapshotFinalInventory,
     SlowInitialInventory,
@@ -276,16 +277,17 @@ async fn create_instance(
     if !authorized(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let delayed_create = {
+    let create_delay_ms = {
         let mut inner = state.inner.lock().expect("fixture state");
         inner.create_started += 1;
-        matches!(
-            inner.mode,
-            FixtureMode::DelayedCreateReady | FixtureMode::DelayedMalformedCreateOnce
-        )
+        match inner.mode {
+            FixtureMode::DelayedCreateAfterFinalSnapshot => 100,
+            FixtureMode::DelayedCreateReady | FixtureMode::DelayedMalformedCreateOnce => 200,
+            _ => 0,
+        }
     };
-    if delayed_create {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    if create_delay_ms != 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(create_delay_ms)).await;
     }
     let mut inner = state.inner.lock().expect("fixture state");
     if inner.mode == FixtureMode::Unauthorized {
@@ -427,7 +429,11 @@ async fn list_instances(
     let delayed_final_snapshot = {
         let mut inner = state.inner.lock().expect("fixture state");
         inner.inventory_started += 1;
-        if inner.mode == FixtureMode::DelayedSnapshotFinalInventory && inner.inventory_started == 2
+        if matches!(
+            inner.mode,
+            FixtureMode::DelayedSnapshotFinalInventory
+                | FixtureMode::DelayedCreateAfterFinalSnapshot
+        ) && inner.inventory_started == 2
         {
             inner.inventory_reads += 1;
             Some(ProviderInventory {
@@ -1775,6 +1781,55 @@ async fn reconciliation_rejects_an_admission_after_its_initial_ledger_snapshot()
         )
         .expect("count reconciliation evidence");
     assert_eq!(evidence, 0);
+}
+
+#[tokio::test]
+async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_snapshot() {
+    let context =
+        Context::with_startup_timeout(FixtureMode::DelayedCreateAfterFinalSnapshot, 1_000).await;
+    let request = context.request();
+    let provision = context.provisioner.provision(&request);
+    let reconcile = async {
+        context.fixture.wait_for_create_start().await;
+        context
+            .provisioner
+            .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+            .await
+    };
+    let (provisioned, reconciled) = tokio::join!(provision, reconcile);
+    let provisioned = provisioned.expect("in-flight create becomes ready");
+    let reconciled = reconciled.expect("reconciliation reports the snapshot race");
+    assert_eq!(provisioned.body.outcome, LifecycleOutcome::Ready);
+    assert_eq!(reconciled.body.active_ready, 0);
+    assert_eq!(reconciled.body.ambiguous, 1);
+    assert!(
+        reconciled
+            .body
+            .ambiguous_request_ids
+            .contains(&request.request_id)
+    );
+    assert_eq!(context.fixture.counts().3, 1);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let state: String = database
+        .query_row(
+            "SELECT state FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read retained ready state");
+    assert_eq!(state, "ready");
+    drop(database);
+
+    let converged = context
+        .provisioner
+        .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+        .await
+        .expect("later reconciliation sees converged ready truth");
+    assert_eq!(converged.body.active_ready, 1);
+    assert_eq!(converged.body.ambiguous, 0);
+    assert!(converged.body.ambiguous_request_ids.is_empty());
 }
 
 #[tokio::test]

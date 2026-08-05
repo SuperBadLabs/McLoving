@@ -1239,6 +1239,15 @@ impl Provisioner {
         }
 
         let (stored, admission_epoch) = self.load_active_requests_with_admission_epoch()?;
+        let initially_ready = stored
+            .iter()
+            .filter(|item| item.state == StoredState::Ready)
+            .filter_map(|item| {
+                item.instance
+                    .as_ref()
+                    .map(|instance| (item.request.request_id, instance.instance_id))
+            })
+            .collect::<HashMap<_, _>>();
         let mut known = BTreeSet::new();
         let mut recovered = 0_u32;
         let mut cleaned = 0_u32;
@@ -1500,6 +1509,7 @@ impl Provisioner {
                     .is_ok()
             {
                 active_instance_ids.insert(instance.instance_id);
+                ambiguous_request_ids.remove(&instance.create.request.request_id);
             } else {
                 escaped_compute_remaining = escaped_compute_remaining
                     .checked_add(1)
@@ -1508,6 +1518,14 @@ impl Provisioner {
         }
         for (request_id, stored) in &admitted_ready {
             if final_request_ids.contains(request_id) {
+                continue;
+            }
+            let retained_instance_id = stored
+                .instance
+                .as_ref()
+                .map(|instance| instance.instance_id);
+            if initially_ready.get(request_id).copied() != retained_instance_id {
+                ambiguous_request_ids.insert(*request_id);
                 continue;
             }
             let (terminal, outcome) = self.absence_terminal(stored, final_observed_at)?;
@@ -1541,14 +1559,14 @@ impl Provisioner {
                     .checked_add(1)
                     .ok_or(ProvisionerError::StateUnavailable)?;
                 cleaned_request_ids.insert(*request_id);
+                ambiguous_request_ids.remove(request_id);
             } else {
-                ambiguous = ambiguous
-                    .checked_add(1)
-                    .ok_or(ProvisionerError::StateUnavailable)?;
                 ambiguous_request_ids.insert(*request_id);
             }
         }
         let active_ready = active_instance_ids.len();
+        ambiguous = u32::try_from(ambiguous_request_ids.len())
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
         let body = ReconcileReceiptBody {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             reconciliation_id: request.reconciliation_id,
