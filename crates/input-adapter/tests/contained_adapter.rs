@@ -111,7 +111,11 @@ async fn read_input(
     response_headers.insert("content-type", HeaderValue::from_static("application/json"));
     response_headers.insert(
         "x-mcloving-cursor",
-        HeaderValue::from_str(&format!("{branch}-cursor-v1")).expect("cursor"),
+        if mode == "blank_cursor" {
+            HeaderValue::from_static("")
+        } else {
+            HeaderValue::from_str(&format!("{branch}-cursor-v1")).expect("cursor")
+        },
     );
     response_headers.insert(
         "x-mcloving-observed-at-ms",
@@ -135,6 +139,8 @@ async fn read_input(
             "x-mcloving-provenance",
             HeaderValue::from_bytes(SECRET_MARKER).expect("marker header"),
         );
+    } else if mode == "blank_provenance" {
+        response_headers.insert("x-mcloving-provenance", HeaderValue::from_static("   "));
     } else if mode != "missing_provenance" {
         response_headers.insert(
             "x-mcloving-provenance",
@@ -418,6 +424,8 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         ("stale", "stale_response"),
         ("minimum_timestamp", "stale_response"),
         ("missing_provenance", "missing_provenance"),
+        ("blank_cursor", "missing_provenance"),
+        ("blank_provenance", "missing_provenance"),
         ("malformed", "malformed_response"),
         ("wrong_schema", "malformed_response"),
         ("oversized", "oversized_response"),

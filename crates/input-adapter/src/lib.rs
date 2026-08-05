@@ -941,7 +941,18 @@ async fn lock_spool(spool_dir: &Path, exclusive: bool) -> Result<SpoolLock, Adap
 async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
+        let parent = spool_dir.parent().ok_or(AdapterError::InvalidConfig)?;
+        let parent_metadata = tokio::fs::symlink_metadata(parent)
+            .await
+            .map_err(|_| AdapterError::InvalidConfig)?;
+        if !parent_metadata.file_type().is_dir()
+            || tokio::fs::canonicalize(parent)
+                .await
+                .map_err(|_| AdapterError::InvalidConfig)?
+                != parent
+        {
+            return Err(AdapterError::InvalidConfig);
+        }
 
         let existed = match tokio::fs::symlink_metadata(spool_dir).await {
             Ok(metadata) => {
@@ -954,10 +965,10 @@ async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
             Err(_) => return Err(AdapterError::StateUnavailable),
         };
         if !existed {
-            tokio::fs::create_dir_all(spool_dir)
-                .await
-                .map_err(|_| AdapterError::StateUnavailable)?;
-            tokio::fs::set_permissions(spool_dir, std::fs::Permissions::from_mode(0o700))
+            let mut builder = tokio::fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder
+                .create(spool_dir)
                 .await
                 .map_err(|_| AdapterError::StateUnavailable)?;
             let metadata = tokio::fs::symlink_metadata(spool_dir)
@@ -967,6 +978,7 @@ async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
                 return Err(AdapterError::InvalidConfig);
             }
         }
+        sync_directory(parent).await?;
         Ok(())
     }
     #[cfg(not(unix))]
@@ -1224,7 +1236,9 @@ fn parse_confidentiality(value: &str) -> Result<Confidentiality, AdapterError> {
 }
 
 fn required_header(headers: &HeaderMap, name: &str) -> Result<String, AdapterError> {
-    optional_header(headers, name)?.ok_or(AdapterError::MissingProvenance)
+    optional_header(headers, name)?
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(AdapterError::MissingProvenance)
 }
 
 fn optional_header(headers: &HeaderMap, name: &str) -> Result<Option<String>, AdapterError> {
