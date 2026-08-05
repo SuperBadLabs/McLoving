@@ -2,10 +2,22 @@
 
 Date: 2026-08-05
 
-Verdict: PASS for the implementation gate at exact head
+Verdict: PASS for the implementation gate at exact implementation head
 `8d342d98969d3a3f67282b45f577cdc8e1110f3d`. All nine protected checks passed,
-and independent exact-head review found no major issues. This receipt is not a
-production caller cutover, owner-retirement, or Jenkins decommissioning receipt.
+and independent exact-head review found no major issues.
+
+PR #31 closure candidate `c6a5dcffbc743ccece63839390da355807900cb2`
+then added only this receipt's final gate counts and the execution-board
+transition from ADMIN-001 to INPUT-001. All nine protected checks passed on that
+exact candidate. Its exact-head review found no implementation defect and one
+P2 audit-document finding: the first receipt revision did not distinguish the
+implementation head from the later closure candidate. This revision corrects
+that finding. The final squash-merge commit is necessarily unknowable from
+inside its own pre-merge contents; the immutable PR #31 exact-head checks plus
+the post-merge protected-main verification are the final closure attestation.
+
+This receipt is not a production caller cutover, owner-retirement, or Jenkins
+decommissioning receipt.
 
 ## Inventory denominator
 
