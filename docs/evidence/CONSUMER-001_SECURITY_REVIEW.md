@@ -2,9 +2,10 @@
 
 Date: 2026-08-04
 
-Verdict: implementation PASS; independent exact-head review and protected-main
-merge are pending. This receipt must not be interpreted as a production caller
-cutover or Jenkins retirement receipt.
+Verdict: PASS. Exact implementation head
+`6c3157adbe04e1166bae7ef6753718d5198793dc` passed all nine protected checks
+and the independent review reported no major issues. This receipt must not be
+interpreted as a production caller cutover or Jenkins retirement receipt.
 
 ## Inventory denominator
 
@@ -91,6 +92,7 @@ external observations; later MIG-008/SEC-004 independent receipts remain
 required. ADMIN-001 must migrate or explicitly retire the same client's write
 slice before any affected Jenkins scope is retired.
 
-Final closure requires a clean independent review of the exact implementation
-head, all protected checks green, protected-main merge verification, and board
-advancement to ADMIN-001.
+The exact implementation review and protected checks are complete. The closure
+commit advances the board to ADMIN-001 and still requires protected-main merge
+verification. `DONE` certifies the migration contract and its executable gates;
+it does not assert that the real Mario caller has stopped reading Jenkins.

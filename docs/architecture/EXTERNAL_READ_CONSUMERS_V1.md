@@ -1,6 +1,7 @@
 # External read consumers v1
 
-Status: CONSUMER-001 implementation under review.
+Status: CONSUMER-001 implementation complete; production caller authority
+remains explicitly Jenkins-source until a later real zero-read receipt.
 
 McLoving migrates Jenkins readers without treating a configured client as a
 completed cutover. The sealed MIG-000 identity/client inventory is the source
