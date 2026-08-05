@@ -42,10 +42,12 @@ enum FixtureMode {
     Unauthorized,
     MalformedCreateOnce,
     MalformedDeleteOnce,
+    DelayedMalformedDeleteOnce,
     SubstituteFinalInventory,
     DuplicateFinalInventory,
     DelayedReady,
     DelayedCreateReady,
+    SlowInitialInventory,
 }
 
 struct Inner {
@@ -294,9 +296,22 @@ async fn list_instances(
     {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let slow_initial = {
+        let inner = state.inner.lock().expect("fixture state");
+        inner.mode == FixtureMode::SlowInitialInventory && inner.inventory_reads == 0
+    };
+    if slow_initial {
+        tokio::time::sleep(std::time::Duration::from_millis(5_100)).await;
+    }
     let mut inner = state.inner.lock().expect("fixture state");
     inner.inventory_reads += 1;
     let mut instances = inner.instances.values().cloned().collect::<Vec<_>>();
+    if slow_initial {
+        let observed_at = now_ms();
+        for instance in &mut instances {
+            instance.observed_at_unix_ms = observed_at;
+        }
+    }
     if inner.mode == FixtureMode::SubstituteFinalInventory && inner.inventory_reads >= 2 {
         for instance in &mut instances {
             instance.effective_agent.template_sha256 = digest(b"substituted-final-template");
@@ -331,31 +346,45 @@ async fn delete_instance(
     {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let mut inner = state.inner.lock().expect("fixture state");
-    let Some(instance) = inner.instances.get(&request.request_id) else {
-        return signed_response(
-            &state,
-            ProviderDeleteResult {
-                request_id: request.request_id,
-                instance_id,
-                absent: true,
-                observed_at_unix_ms: now_ms(),
-            },
-        );
+    let malformed_delay = {
+        let mut inner = state.inner.lock().expect("fixture state");
+        let Some(instance) = inner.instances.get(&request.request_id) else {
+            return signed_response(
+                &state,
+                ProviderDeleteResult {
+                    request_id: request.request_id,
+                    instance_id,
+                    absent: true,
+                    observed_at_unix_ms: now_ms(),
+                },
+            );
+        };
+        if instance.instance_id != instance_id
+            || instance.create.request.tenant_id != request.tenant_id
+            || instance.create.request.project_id != request.project_id
+            || instance.create.request.build_id != request.build_id
+            || instance.create.request.attempt_id != request.attempt_id
+            || instance.create.request.fence_token != request.fence_token
+        {
+            return StatusCode::CONFLICT.into_response();
+        }
+        inner.instances.remove(&request.request_id);
+        inner.deletes += 1;
+        if matches!(
+            inner.mode,
+            FixtureMode::MalformedDeleteOnce | FixtureMode::DelayedMalformedDeleteOnce
+        ) && !inner.malformed_delete_sent
+        {
+            inner.malformed_delete_sent = true;
+            Some(inner.mode == FixtureMode::DelayedMalformedDeleteOnce)
+        } else {
+            None
+        }
     };
-    if instance.instance_id != instance_id
-        || instance.create.request.tenant_id != request.tenant_id
-        || instance.create.request.project_id != request.project_id
-        || instance.create.request.build_id != request.build_id
-        || instance.create.request.attempt_id != request.attempt_id
-        || instance.create.request.fence_token != request.fence_token
-    {
-        return StatusCode::CONFLICT.into_response();
-    }
-    inner.instances.remove(&request.request_id);
-    inner.deletes += 1;
-    if inner.mode == FixtureMode::MalformedDeleteOnce && !inner.malformed_delete_sent {
-        inner.malformed_delete_sent = true;
+    if let Some(delayed) = malformed_delay {
+        if delayed {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
         return Response::builder()
             .status(StatusCode::OK)
             .body(Body::from("{"))
@@ -455,14 +484,23 @@ impl Context {
     }
 
     async fn with_quota(mode: FixtureMode, maximum: u32) -> Self {
+        Self::with_limits(mode, maximum, 300).await
+    }
+
+    async fn with_provider_timeout(mode: FixtureMode, provider_timeout_ms: u64) -> Self {
+        Self::with_limits(mode, 4, provider_timeout_ms).await
+    }
+
+    async fn with_limits(mode: FixtureMode, maximum: u32, provider_timeout_ms: u64) -> Self {
         let fixture = Fixture::start(mode).await;
         let temporary = tempfile::tempdir().expect("temporary directory");
-        let config = configuration(
+        let mut config = configuration(
             &fixture,
             temporary.path().join("state"),
             IMPLEMENTATION_SHA256,
             maximum,
         );
+        config.provider_timeout_ms = provider_timeout_ms;
         let provisioner = Provisioner::new(
             config.clone(),
             IMPLEMENTATION_SHA256.to_owned(),
@@ -963,6 +1001,27 @@ async fn final_inventory_substitution_is_reported_as_escaped_compute() {
 }
 
 #[tokio::test]
+async fn slow_initial_inventory_uses_post_response_validation_time() {
+    let context = Context::with_provider_timeout(FixtureMode::SlowInitialInventory, 7_000).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before slow inventory");
+
+    let receipt = context
+        .provisioner
+        .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+        .await
+        .expect("slow signed inventory remains valid");
+    assert_eq!(receipt.body.active_ready, 1);
+    assert_eq!(receipt.body.cleaned, 0);
+    assert_eq!(receipt.body.escaped_compute_remaining, 0);
+    assert_eq!(context.fixture.counts().3, 1);
+}
+
+#[tokio::test]
 async fn duplicate_final_inventory_identity_is_rejected() {
     let context = Context::new(FixtureMode::Ready).await;
     let request = context.request();
@@ -1165,6 +1224,43 @@ async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
 }
 
 #[tokio::test]
+async fn confirmed_cleanup_dominates_a_concurrent_late_delete_failure() {
+    let context = Context::new(FixtureMode::DelayedMalformedDeleteOnce).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before concurrent cleanup");
+    let first = cancel_request(&context.config, &request, IMPLEMENTATION_SHA256);
+    let second = cancel_request(&context.config, &request, IMPLEMENTATION_SHA256);
+
+    let (first_receipt, second_receipt) = tokio::join!(
+        context.provisioner.cancel(&first),
+        context.provisioner.cancel(&second)
+    );
+    let first_receipt = first_receipt.expect("first converged cleanup receipt");
+    let second_receipt = second_receipt.expect("second converged cleanup receipt");
+    assert_eq!(first_receipt.body.outcome, LifecycleOutcome::Cancelled);
+    assert_eq!(second_receipt.body.outcome, LifecycleOutcome::Cancelled);
+    assert!(first_receipt.body.cleanup_confirmed);
+    assert!(second_receipt.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().3, 0);
+
+    let replay = context
+        .provisioner
+        .cancel(&cancel_request(
+            &context.config,
+            &request,
+            IMPLEMENTATION_SHA256,
+        ))
+        .await
+        .expect("terminal cleanup replay");
+    assert_eq!(replay.body.outcome, LifecycleOutcome::Cancelled);
+    assert!(replay.body.cleanup_confirmed);
+}
+
+#[tokio::test]
 async fn reconciliation_preserves_expiry_outcome_after_delete_response_loss() {
     let context = Context::new(FixtureMode::Ready).await;
     let mut request = context.request();
@@ -1286,6 +1382,49 @@ async fn deleted_crash_recovery_preserves_retained_cleanup_intent() {
         .expect("recover retained cleanup truth");
     assert_eq!(receipt.body.outcome, LifecycleOutcome::ExpiredCleaned);
     assert!(receipt.body.cleanup_confirmed);
+}
+
+#[tokio::test]
+async fn recovery_anchors_startup_timeout_to_immutable_admission_time() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before simulated pending crash");
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    database
+        .execute(
+            "UPDATE requests
+             SET state = 'pending', latest_receipt_json = NULL,
+                 created_at_unix_ms = ?2, updated_at_unix_ms = ?3
+             WHERE request_id = ?1",
+            rusqlite::params![request.request_id.to_string(), now_ms() - 1_000, now_ms(),],
+        )
+        .expect("simulate mutable update after original admission");
+    drop(database);
+
+    let restarted = Provisioner::new(
+        context.config.clone(),
+        IMPLEMENTATION_SHA256.to_owned(),
+        PROVIDER_TOKEN.to_owned(),
+        context.fixture.public_key(),
+        RECEIPT_KEY.to_vec(),
+    )
+    .await
+    .expect("restart provisioner");
+    let receipt = restarted
+        .provision(&request)
+        .await
+        .expect("recover against original startup deadline");
+    assert_eq!(
+        receipt.body.outcome,
+        LifecycleOutcome::StartupTimeoutCleaned
+    );
+    assert!(receipt.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().3, 0);
 }
 
 #[tokio::test]

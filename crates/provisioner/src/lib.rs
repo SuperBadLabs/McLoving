@@ -723,7 +723,7 @@ struct StoredRequest {
     state: StoredState,
     instance: Option<ProviderInstance>,
     latest_receipt: Option<LifecycleReceipt>,
-    updated_at_unix_ms: i64,
+    created_at_unix_ms: i64,
 }
 
 struct LifecycleEvidence<'a> {
@@ -1139,6 +1139,8 @@ impl Provisioner {
         if !initial.complete || initial.instances.len() > MAX_PROVIDER_INSTANCES {
             return Err(ProvisionerError::InvalidProviderResponse);
         }
+        let now = now_unix_ms()?;
+        self.validate_reconcile_request(request, now)?;
         let initial_inventory_sha256 = canonical_digest(&initial)?;
         let mut provider_by_request = HashMap::with_capacity(initial.instances.len());
         let mut provider_instance_ids = BTreeSet::new();
@@ -1167,7 +1169,7 @@ impl Provisioner {
             known.insert(item.request.request_id);
             let Some(instance) = provider_by_request.get(&item.request.request_id) else {
                 let peer_deadline = item
-                    .updated_at_unix_ms
+                    .created_at_unix_ms
                     .checked_add(
                         i64::try_from(self.config.provider_timeout_ms)
                             .map_err(|_| ProvisionerError::InvalidConfig)?
@@ -1263,7 +1265,7 @@ impl Provisioner {
                 item.state,
                 StoredState::Intent | StoredState::Ambiguous | StoredState::Pending
             ) && now
-                >= self.startup_deadline(&item.request, item.updated_at_unix_ms)?;
+                >= self.startup_deadline(&item.request, item.created_at_unix_ms)?;
             let expired = item.request.instance_expires_at_unix_ms <= now;
             let cleanup = match (startup_expired, expired, item.state, instance.state) {
                 (true, _, _, _) => Some((
@@ -1706,7 +1708,7 @@ impl Provisioner {
                         .await;
                 }
                 let startup_deadline =
-                    self.startup_deadline(&stored.request, stored.updated_at_unix_ms)?;
+                    self.startup_deadline(&stored.request, stored.created_at_unix_ms)?;
                 if matches!(
                     stored.state,
                     StoredState::Intent | StoredState::Ambiguous | StoredState::Pending
@@ -1930,7 +1932,7 @@ impl Provisioner {
             .checked_add(1_000)
             .ok_or(ProvisionerError::InvalidConfig)?;
         let deadline = stored
-            .updated_at_unix_ms
+            .created_at_unix_ms
             .checked_add(peer_window)
             .ok_or(ProvisionerError::StateUnavailable)?
             .min(stored.request.expires_at_unix_ms);
@@ -1964,17 +1966,15 @@ impl Provisioner {
         let now = now_unix_ms()?;
         let (reason, success_outcome) =
             self.record_cleanup_intent(request.request_id, reason, success_outcome)?;
-        self.set_state(
-            request.request_id,
-            StoredState::Deleting,
-            Some(instance),
-            now,
-        )?;
+        if let Some(receipt) = self.enter_cleanup(request.request_id, instance, now)? {
+            return Ok(receipt);
+        }
         let deletion = match self.provider_delete(request, instance, reason).await {
             Ok(deletion) => deletion,
             Err(_) => {
-                self.set_state(
+                self.set_state_from(
                     request.request_id,
+                    StoredState::Deleting,
                     StoredState::Deleting,
                     Some(instance),
                     now,
@@ -1997,8 +1997,9 @@ impl Provisioner {
             || deletion.instance_id != instance.instance_id
             || !deletion.absent
         {
-            self.set_state(
+            self.set_state_from(
                 request.request_id,
+                StoredState::Deleting,
                 StoredState::Deleting,
                 Some(instance),
                 now,
@@ -2038,8 +2039,9 @@ impl Provisioner {
                 )
             }
             Ok(Some(_)) | Err(_) => {
-                self.set_state(
+                self.set_state_from(
                     request.request_id,
+                    StoredState::Deleting,
                     StoredState::Deleting,
                     Some(instance),
                     now,
@@ -2058,6 +2060,57 @@ impl Provisioner {
                 )
             }
         }
+    }
+
+    fn enter_cleanup(
+        &self,
+        request_id: Uuid,
+        instance: &ProviderInstance,
+        now: i64,
+    ) -> Result<Option<LifecycleReceipt>, ProvisionerError> {
+        for _ in 0..3 {
+            let stored = self
+                .load_stored_request(request_id)?
+                .ok_or(ProvisionerError::StateUnavailable)?;
+            if stored.state == StoredState::Deleted {
+                let receipt = stored
+                    .latest_receipt
+                    .ok_or(ProvisionerError::StateUnavailable)?;
+                self.verify_lifecycle_receipt(&receipt)?;
+                if !receipt.body.cleanup_confirmed {
+                    return Err(ProvisionerError::StateUnavailable);
+                }
+                if receipt.body.instance_id == Some(instance.instance_id) {
+                    return Ok(Some(receipt));
+                }
+                if receipt.body.instance_id.is_some() {
+                    return Err(ProvisionerError::StateUnavailable);
+                }
+                if self.set_state_from(
+                    request_id,
+                    StoredState::Deleted,
+                    StoredState::Deleting,
+                    Some(instance),
+                    now,
+                )? {
+                    return Ok(None);
+                }
+                continue;
+            }
+            if stored.state == StoredState::Deleting {
+                return Ok(None);
+            }
+            if self.set_state_from(
+                request_id,
+                stored.state,
+                StoredState::Deleting,
+                Some(instance),
+                now,
+            )? {
+                return Ok(None);
+            }
+        }
+        Err(ProvisionerError::StateUnavailable)
     }
 
     async fn delete_orphan(
@@ -2664,7 +2717,7 @@ impl Provisioner {
         let mut statement = connection
             .prepare(
                 "SELECT request_json, request_sha256, state, instance_json, latest_receipt_json,
-                        updated_at_unix_ms
+                        created_at_unix_ms
                  FROM requests
                  WHERE state IN ('intent','ambiguous','pending','ready','deleting')
                  ORDER BY request_id",
@@ -2705,7 +2758,12 @@ impl Provisioner {
             let existing: LifecycleReceipt = parse_json_no_duplicates(&existing)
                 .map_err(|_| ProvisionerError::InvalidStoredReceipt)?;
             self.verify_lifecycle_receipt(&existing)?;
-            if evidence.outcome == LifecycleOutcome::Ready && existing.body.cleanup_confirmed {
+            let same_instance =
+                existing.body.instance_id == evidence.instance.map(|value| value.instance_id);
+            if existing.body.cleanup_confirmed
+                && (evidence.outcome == LifecycleOutcome::Ready
+                    || (evidence.ambiguity && same_instance))
+            {
                 transaction
                     .commit()
                     .map_err(|_| ProvisionerError::StateUnavailable)?;
@@ -2999,7 +3057,7 @@ fn load_stored_request_connection(
     connection
         .query_row(
             "SELECT request_json, request_sha256, state, instance_json, latest_receipt_json,
-                    updated_at_unix_ms
+                    created_at_unix_ms
              FROM requests WHERE request_id = ?1",
             [request_id.to_string()],
             stored_request_from_row,
@@ -3016,7 +3074,7 @@ fn load_stored_request_tx(
     transaction
         .query_row(
             "SELECT request_json, request_sha256, state, instance_json, latest_receipt_json,
-                    updated_at_unix_ms
+                    created_at_unix_ms
              FROM requests WHERE request_id = ?1",
             [request_id.to_string()],
             stored_request_from_row,
@@ -3034,7 +3092,7 @@ fn stored_request_from_row(
     let state: String = row.get(2)?;
     let instance_json: Option<Vec<u8>> = row.get(3)?;
     let receipt_json: Option<Vec<u8>> = row.get(4)?;
-    let updated_at_unix_ms: i64 = row.get(5)?;
+    let created_at_unix_ms: i64 = row.get(5)?;
     Ok((|| {
         let request = serde_json::from_slice(&request_json)
             .map_err(|_| ProvisionerError::StateUnavailable)?;
@@ -3055,7 +3113,7 @@ fn stored_request_from_row(
                 .map(serde_json::from_slice)
                 .transpose()
                 .map_err(|_| ProvisionerError::StateUnavailable)?,
-            updated_at_unix_ms,
+            created_at_unix_ms,
         })
     })())
 }
