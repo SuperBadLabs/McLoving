@@ -36,7 +36,7 @@ tempfile = "=3.27.0"
 tokio-stream = "=0.1.19"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "=0.31.3", features = ["fs"] }
+nix = { version = "=0.31.3", features = ["fs", "user"] }
 
 [lints]
 workspace = true

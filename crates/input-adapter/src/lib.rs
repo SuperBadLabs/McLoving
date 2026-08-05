@@ -933,7 +933,7 @@ async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
 
         let existed = match tokio::fs::symlink_metadata(spool_dir).await {
             Ok(metadata) => {
-                if !metadata.file_type().is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+                if !private_spool_metadata_is_valid(&metadata) {
                     return Err(AdapterError::InvalidConfig);
                 }
                 true
@@ -951,7 +951,7 @@ async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
             let metadata = tokio::fs::symlink_metadata(spool_dir)
                 .await
                 .map_err(|_| AdapterError::StateUnavailable)?;
-            if !metadata.file_type().is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+            if !private_spool_metadata_is_valid(&metadata) {
                 return Err(AdapterError::InvalidConfig);
             }
         }
@@ -962,6 +962,20 @@ async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
         let _ = spool_dir;
         Err(AdapterError::InvalidConfig)
     }
+}
+
+#[cfg(unix)]
+fn private_spool_metadata_is_valid(metadata: &std::fs::Metadata) -> bool {
+    private_spool_metadata_is_valid_for(metadata, nix::unistd::Uid::effective().as_raw())
+}
+
+#[cfg(unix)]
+fn private_spool_metadata_is_valid_for(metadata: &std::fs::Metadata, effective_uid: u32) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    metadata.file_type().is_dir()
+        && metadata.permissions().mode() & 0o077 == 0
+        && metadata.uid() == effective_uid
 }
 
 async fn store_rate_ledger(spool_dir: &Path, times: &[i64]) -> Result<(), AdapterError> {
@@ -1417,6 +1431,24 @@ mod tests {
         assert!(matches!(
             read_bounded_regular_file(&link, 64).await,
             Err(AdapterError::StateUnavailable)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_spool_requires_effective_user_ownership() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("set private mode");
+        let metadata = std::fs::symlink_metadata(directory.path()).expect("spool metadata");
+
+        assert_eq!(metadata.uid(), nix::unistd::Uid::effective().as_raw());
+        assert!(private_spool_metadata_is_valid(&metadata));
+        assert!(!private_spool_metadata_is_valid_for(
+            &metadata,
+            metadata.uid().wrapping_add(1),
         ));
     }
 
