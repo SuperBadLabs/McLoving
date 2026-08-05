@@ -2,9 +2,20 @@
 
 Date: 2026-08-05
 
-Verdict: implementation gate pending the complete exact-head protected checks
-and independent review. This receipt does not claim a Mario production input,
-canary, cutover, rollback, or Jenkins decommissioning event.
+Verdict: PASS for the implementation gate at exact implementation head
+`3d90b73d19a423982ebe67b2297612b542ec19db`. All nine protected checks passed,
+and independent exact-head review found no further actionable issue after forty
+earlier findings were fixed and their threads resolved.
+
+The later PR #32 closure candidate adds only this receipt's final gate counts
+and the execution-board transition from INPUT-001 to PROV-001. Its exact head
+must independently pass the protected checks and review before merge. The final
+squash-merge commit is necessarily unknowable from inside its own pre-merge
+contents; the immutable PR #32 exact-head checks plus post-merge protected-main
+verification are the final closure attestation.
+
+This receipt does not claim a Mario production input, canary, cutover,
+rollback, or Jenkins decommissioning event.
 
 ## Inventory denominator
 
@@ -23,32 +34,139 @@ represented as Mario production truth.
   CA production policy, and double-gated loopback fixture mode;
 - scoped bearer grant identity/version/scope/expiry/content digest, pinned
   HMAC-key and private-CA content digests, and canonical query allowlist;
+- authorization and grant headers validated and cached before spool creation,
+  plus fail-closed Unix directory-durability admission before capture service;
+- effective-user-owned `0700` spool admission and `0600` coordination, rate,
+  claim, and receipt state, with foreign-owned, permissive, non-directory, or
+  relative spools rejected;
 - bounded regular-file reads for configuration, credentials, full CA bundle,
   executable, claims, and receipts, with symlink and oversize denial;
 - tenant/project/pipeline/build/attempt/input, generation, cursor, expiry,
   confidentiality, and audit-lineage binding;
-- bounded timeout, retry, response size, rate, freshness, and typed JSON schema;
+- bounded timeout, retry, response size, rate, freshness, and typed JSON schema,
+  with request/grant expiry and freshness rechecked only after the complete
+  response is captured;
+- checked source-age arithmetic denying future, stale, and overflowing
+  Unix-millisecond timestamps;
 - secret-labelled response denial plus marker-set non-disclosure scanning;
-- marker denial across the complete source header set and response body before
-  any source-derived value can enter a receipt;
+- marker denial across the complete source header set, raw response body, and
+  decoded JSON keys and strings before any source-derived value can enter a
+  receipt;
+- exact singleton cardinality for content type, cursor, provenance, observation
+  time, confidentiality, and ETag, with conflicting duplicates denied;
 - atomic durable capture claims, no-overwrite receipt publication, restart
   replay, substituted-replay denial, directory durability before source access
   and after receipt publication, matching-claim convergence before admission,
   and serialized rate denial before new claim creation;
+- one cross-process exclusive transaction spanning duplicate-claim recheck,
+  durable rate reservation, and claim publication so matching callers converge
+  without consuming another source-read budget;
 - synchronized private claim staging and atomic no-overwrite publication so a
   second adapter process cannot observe a partial request digest;
 - disabled client-library retries so every source read is owned by the explicit
-  bounded retry counter; and
+  bounded retry counter, with the complete possible outbound-attempt budget
+  atomically reserved in a durable spool-scoped ledger before claim publication
+  across adapter processes, each charged slot held as non-prunable in-flight
+  state across the corresponding GET, and its historical timestamp recorded
+  conservatively after send completion;
+- spool-scoped shared/exclusive filesystem coordination preventing receipt
+  readers from returning before publisher file and directory synchronization;
+- duplicate waiters bounded to the claimant's complete retry plus publication
+  window; and
 - complete signed response receipt with source provenance and canonical value
   digest for identical dual-runner consumption.
 
 ## Current executable receipt
 
-Focused pinned-Rust check and clippy pass. The suite currently proves four
-contained end-to-end journeys, four unit contracts, and one sealed-inventory
-denominator check. The complete locked workspace clippy and test gates also
-pass. The final exact-head receipt will record the protected check results after
-implementation review.
+Focused pinned-Rust check and clippy passed. The suite proves seven contained
+end-to-end journeys, seven unit contracts, and one sealed-inventory denominator
+check. The complete locked workspace clippy and test gates also passed, as did
+all nine protected checks on the exact implementation head.
+
+The independent review produced forty actionable findings across twenty-five exact
+implementation heads: implicit client retries; pre-read claim-directory
+durability; rate denial leaving a claim; duplicate capture admission at low
+rate; post-receipt directory durability; secret-marker leakage through response
+headers; visibility of a partially written claim across adapter processes;
+Windows directory-sync failure after claim publication; authorization-header
+validation after claim publication; overflowing source freshness arithmetic;
+secret-marker evasion through JSON escaping; and freshness capture before a
+delayed response body completed; and request/grant expiry during response-body
+capture; ambiguous duplicate source-policy headers; and retries not individually charged against the
+source-read rate ceiling; it was fixed with conservative atomic attempt-budget
+reservation before claim publication and a no-stranded-claim regression.
+The final three findings showed that independent adapter processes did not share
+rate state, duplicate waiters used only one attempt timeout, and waiters could
+observe a linked receipt before directory synchronization. Durable spool-level
+rate state and advisory coordination plus a full retry/publication wait window
+now close those races.
+The last two findings identified a gap between spool-rate reservation and claim
+publication plus ambient-umask exposure of internal receipts. Admission now
+holds one exclusive spool transaction through claim durability, and private
+directory/file modes are verified by executable fixtures.
+The final finding identified relative spool identities that could resolve to
+different state after a working-directory change; configuration now rejects
+them before creating any state.
+The final ownership finding showed that mode checks alone cannot protect state
+inside a `0700` spool owned by another UID. Spool admission now binds directory
+ownership to the adapter's effective UID before accepting or creating state.
+The last two findings identified a retry starting after request or grant expiry
+and a restarted reader accepting a linked receipt before its directory entry
+was proven durable. Every outbound attempt is now deadline-fenced, and every
+stored-receipt replay exclusively synchronizes the spool before returning.
+The final two findings identified an unsynchronized first-time spool entry and
+blank required source provenance. Creation now synchronizes an existing
+canonical parent before admission, and required headers reject empty or
+whitespace-only values.
+The final ordering finding showed that an expected-cursor mismatch could be
+masked by later body processing. Cursor admission now fails before reading any
+body bytes, while freshness remains fenced after complete capture.
+The final freshness-ordering finding showed the same precedence gap for an
+already stale or future observed timestamp. Source age now fails before body
+processing and is rechecked after complete capture for delay-induced staleness.
+The final rate-window finding showed that stamping every reserved retry slot at
+admission could let a later retry age out before its GET began. Durable
+per-capture reservations now retain capacity across rate windows and convert
+one slot to its actual start timestamp immediately before each outbound attempt;
+unused slots release only after the terminal fetch result, and legacy timestamp
+ledgers remain readable.
+The last rate-timing finding showed that durable ledger I/O or scheduling could
+still age a timestamp before the GET started. A charged slot is now durable,
+non-prunable in-flight state until send completion and only then becomes a
+conservative historical timestamp. The paired documentation finding corrected
+`timeout_ms` to a per-attempt bound and records the retry-expanded network
+ceiling.
+The final retry-boundary finding showed that a successful status followed by a
+body-stream reset escaped the per-attempt loop. Header policy and precedence
+checks still run before body sampling, while bounded body transport now remains
+inside the loop and may consume the next reserved attempt only for a transport
+failure; a reset-then-success fixture proves the behavior.
+The final in-flight recovery finding showed that a process exit could otherwise
+consume rate capacity forever. Each charge now carries the checked
+authority-expiry-plus-timeout bound; a stranded charge reconciles into the
+one-minute historical ledger at that deadline and then ages out automatically.
+The last two findings bounded adversarial marker-scan work and removed a
+first-boot race between shared-spool peers. Marker sets must be unique and fit a
+fixed aggregate response-scan budget before state creation; a losing directory
+creator re-reads, validates, and synchronizes the peer-created private spool.
+The final work-bound review required marker length, not only marker count, in
+the adversarial comparison ceiling and required in-flight expiry arithmetic to
+be proven before claim publication. Admission now uses checked
+response-by-total-marker-byte work and checked authority-expiry-plus-timeout;
+overflow and excess work fail without state or source access.
+The last two findings charged only one of the raw/decoded marker scans and found
+that a trailing slash could make final-component symlink metadata follow its
+target. The work ceiling now explicitly charges both scans, and existing or
+new spool paths must themselves canonicalize exactly before admission.
+The final reservation-cleanup finding showed that a claim publication error
+could return after durable rate reservation without releasing that unused
+capacity. Claim failure now removes and durably records release of the matching
+reservation before returning, while the successful and duplicate-claim paths
+retain their existing accounting semantics.
+Each was corrected with a regression fixture or explicit fail-closed platform
+admission where applicable, revalidated on the complete workspace, and resolved
+only after the fix was present on the current head. The final exact-head review
+reported no further actionable security, correctness, or truth-boundary issue.
 
 ## Residual risk and authority boundary
 
