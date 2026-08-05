@@ -194,6 +194,12 @@ async fn read_input(
         "escaped_marker" => {
             r#"{"enabled":true,"value":"mcloving-secret-marker-never-\u0064isclose"}"#.to_owned()
         }
+        "duplicate_escaped_marker" => {
+            r#"{"enabled":true,"value":"mcloving-secret-marker-never-\u0064isclose","value":"safe"}"#.to_owned()
+        }
+        "precise_number" => {
+            r#"{"enabled":true,"value":0.123456789012345678901234567890}"#.to_owned()
+        }
         _ => json!({"enabled": branch == "main", "value": branch}).to_string(),
     };
     if mode == "body_failure_then_valid"
@@ -475,6 +481,7 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         ("secret", "confidentiality_denied"),
         ("marker", "confidentiality_denied"),
         ("escaped_marker", "confidentiality_denied"),
+        ("duplicate_escaped_marker", "malformed_response"),
         ("header_marker", "confidentiality_denied"),
         ("duplicate_content_type", "malformed_response"),
         ("duplicate_cursor", "missing_provenance"),
@@ -584,6 +591,32 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         duplicate.expect("full-window duplicate waiter")
     );
     assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 2);
+}
+
+#[tokio::test]
+async fn exact_json_number_is_preserved_in_the_signed_receipt() {
+    let fixture = start_fixture().await;
+    let directory = TempDir::new().expect("precise number dir");
+    let mut adapter_config = config(&fixture.endpoint, directory.path());
+    adapter_config.response_schema[1].kind = JsonKind::Number;
+    let adapter = make_adapter(adapter_config, READ_TOKEN).await;
+
+    let receipt = adapter
+        .capture(&request(&adapter, "main", "precise_number"))
+        .await
+        .expect("capture exact JSON number");
+
+    assert_eq!(
+        receipt.response["value"].to_string(),
+        "0.123456789012345678901234567890"
+    );
+    let stored = std::fs::read_to_string(
+        directory
+            .path()
+            .join(format!("{}.json", receipt.capture_id)),
+    )
+    .expect("read signed receipt");
+    assert!(stored.contains("0.123456789012345678901234567890"));
 }
 
 #[tokio::test]

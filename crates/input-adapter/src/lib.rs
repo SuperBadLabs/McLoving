@@ -6,7 +6,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
-use serde::{Deserialize, Serialize};
+use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -32,6 +33,100 @@ const MAX_SECRET_MARKERS: usize = 256;
 const MAX_MARKER_COMPARISON_BYTES: usize = 256 * 1_024 * 1_024;
 
 type HmacSha256 = Hmac<Sha256>;
+
+struct DuplicateRejectingSeed;
+
+impl<'de> DeserializeSeed<'de> for DuplicateRejectingSeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateRejectingVisitor)
+    }
+}
+
+struct DuplicateRejectingVisitor;
+
+impl<'de> Visitor<'de> for DuplicateRejectingVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("JSON without duplicate object members")
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_string<E>(self, _value: String) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        DuplicateRejectingSeed.deserialize(deserializer)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(())
+    }
+
+    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        DuplicateRejectingSeed.deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence
+            .next_element_seed(DuplicateRejectingSeed)?
+            .is_some()
+        {}
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut members = HashSet::new();
+        while let Some(member) = map.next_key::<String>()? {
+            if !members.insert(member) {
+                return Err(A::Error::custom("duplicate JSON object member"));
+            }
+            map.next_value_seed(DuplicateRejectingSeed)?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -696,6 +791,7 @@ impl InputAdapter {
         if self.contains_secret_marker(&body) {
             return Err(AdapterError::ConfidentialityDenied);
         }
+        reject_duplicate_json_members(&body)?;
         let value: Value =
             serde_json::from_slice(&body).map_err(|_| AdapterError::MalformedResponse)?;
         if self.contains_secret_marker_in_json(&value) {
@@ -1657,6 +1753,16 @@ fn validate_schema(value: &Value, schema: &[FieldSchema]) -> Result<(), AdapterE
     Ok(())
 }
 
+fn reject_duplicate_json_members(bytes: &[u8]) -> Result<(), AdapterError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    DuplicateRejectingSeed
+        .deserialize(&mut deserializer)
+        .map_err(|_| AdapterError::MalformedResponse)?;
+    deserializer
+        .end()
+        .map_err(|_| AdapterError::MalformedResponse)
+}
+
 fn parse_confidentiality(value: &str) -> Result<Confidentiality, AdapterError> {
     match value {
         "public" => Ok(Confidentiality::Public),
@@ -2066,5 +2172,16 @@ mod tests {
             validate_schema(&serde_json::json!({"enabled": "true"}), &schema),
             Err(AdapterError::MalformedResponse)
         ));
+    }
+
+    #[test]
+    fn duplicate_json_members_are_rejected_recursively() {
+        assert!(matches!(
+            reject_duplicate_json_members(br#"{"outer":{"value":1,"value":2}}"#),
+            Err(AdapterError::MalformedResponse)
+        ));
+        assert!(
+            reject_duplicate_json_members(br#"{"value":0.123456789012345678901234567890}"#).is_ok()
+        );
     }
 }

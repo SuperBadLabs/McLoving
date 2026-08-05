@@ -180,6 +180,10 @@ hard upper bounds for response size, request rate, timeout, freshness, query
 keys/values, binding text, schema fields, marker length/count, and aggregate
 `2 * max_response_bytes * total_marker_bytes` comparison work for the raw and
 decoded JSON scans. Duplicate markers are rejected before spool creation.
+JSON objects with duplicate member names are rejected recursively before a
+`Value` is built, so a later duplicate cannot hide an escaped marker-bearing
+value. JSON numbers retain their exact source precision through typed parsing,
+canonical receipt serialization, digesting, signing, storage, and replay.
 
 V1 admits `public` and policy-bounded `internal` values. A response labelled
 `secret` is always denied. The adapter also scans every bounded body for the

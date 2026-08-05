@@ -76,12 +76,12 @@ represented as Mario production truth.
 
 ## Current executable receipt
 
-The latest suite proves seven contained end-to-end journeys, ten unit
+The latest suite proves eight contained end-to-end journeys, eleven unit
 contracts, and one sealed-inventory denominator check. Focused pinned-Rust,
 complete locked workspace, clippy, and all nine protected checks remain pending
 on the next pushed exact implementation candidate.
 
-The independent review has produced forty-four actionable implementation
+The independent review has produced forty-six actionable implementation
 findings across the implementation-head sequence to date: implicit client
 retries; pre-read claim-directory
 durability; rate denial leaving a claim; duplicate capture admission at low
@@ -176,9 +176,15 @@ The separate closure-documentation review corrected timing language so the
 receipt states the pre-GET expiry fence, pre-body freshness check, and both
 post-capture rechecks instead of implying that validation occurred only after
 body capture.
+The latest JSON-boundary review found that duplicate object members could hide
+an escaped secret marker when deserialization retained only the later value and
+that default JSON-number parsing could round a high-precision value before
+receipt signing. The parser now rejects duplicate members recursively before
+building a value and preserves arbitrary-precision number text through the
+signed receipt; contained fixtures prove both properties.
 Each prior finding was corrected with a regression fixture or explicit
 fail-closed platform admission where applicable and resolved only after its fix
-was present on the reviewed head. The reservation-lifetime fix remains open
+was present on the reviewed head. The latest JSON-boundary fixes remain open
 until the next exact candidate passes the complete gates and independent review.
 
 ## Residual risk and authority boundary
