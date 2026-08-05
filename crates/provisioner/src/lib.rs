@@ -1209,30 +1209,30 @@ impl Provisioner {
                     ambiguous_request_ids.insert(item.request.request_id);
                     continue;
                 }
-                let (terminal, outcome) = match item.state {
-                    StoredState::Ready => {
-                        (StoredState::Deleted, LifecycleOutcome::AgentLostCleaned)
+                let (terminal, outcome) = self.absence_terminal(item, now)?;
+                if !self.set_state_from(item.request.request_id, item.state, terminal, None, now)? {
+                    let current = self
+                        .load_stored_request(item.request.request_id)?
+                        .ok_or(ProvisionerError::StateUnavailable)?;
+                    let cleanup_confirmed = if let Some(receipt) = &current.latest_receipt {
+                        self.verify_lifecycle_receipt(receipt)?;
+                        receipt.body.cleanup_confirmed && !receipt.body.ambiguity
+                    } else {
+                        false
+                    };
+                    if cleanup_confirmed {
+                        cleaned = cleaned
+                            .checked_add(1)
+                            .ok_or(ProvisionerError::StateUnavailable)?;
+                        cleaned_request_ids.insert(item.request.request_id);
+                    } else {
+                        ambiguous = ambiguous
+                            .checked_add(1)
+                            .ok_or(ProvisionerError::StateUnavailable)?;
+                        ambiguous_request_ids.insert(item.request.request_id);
                     }
-                    StoredState::Deleting => {
-                        let (_, outcome) = self
-                            .load_cleanup_intent(item.request.request_id)?
-                            .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
-                        (StoredState::Deleted, outcome)
-                    }
-                    StoredState::Deleted => {
-                        let (_, outcome) = self
-                            .load_cleanup_intent(item.request.request_id)?
-                            .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
-                        (StoredState::Deleted, outcome)
-                    }
-                    StoredState::Intent
-                    | StoredState::Ambiguous
-                    | StoredState::Pending
-                    | StoredState::Failed => {
-                        (StoredState::Failed, LifecycleOutcome::StartupFailedCleaned)
-                    }
-                };
-                self.set_state(item.request.request_id, terminal, None, now)?;
+                    continue;
+                }
                 self.append_lifecycle_receipt(
                     &item.request,
                     LifecycleEvidence {
@@ -1721,6 +1721,10 @@ impl Provisioner {
         stored: StoredRequest,
         audit_lineage: &str,
     ) -> Result<LifecycleReceipt, ProvisionerError> {
+        if let Some(receipt) = stored.latest_receipt.as_ref() {
+            self.verify_lifecycle_receipt(receipt)?;
+            return Ok(receipt.clone());
+        }
         match self.provider_lookup(stored.request.request_id).await {
             Ok(Some(instance)) => {
                 let now = now_unix_ms()?;
@@ -1842,30 +1846,19 @@ impl Provisioner {
             }
             Ok(None) => {
                 let now = now_unix_ms()?;
-                let (terminal, outcome) = match stored.state {
-                    StoredState::Ready => {
-                        (StoredState::Deleted, LifecycleOutcome::AgentLostCleaned)
-                    }
-                    StoredState::Deleting => {
-                        let (_, outcome) = self
-                            .load_cleanup_intent(stored.request.request_id)?
-                            .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
-                        (StoredState::Deleted, outcome)
-                    }
-                    StoredState::Deleted => {
-                        let (_, outcome) = self
-                            .load_cleanup_intent(stored.request.request_id)?
-                            .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
-                        (StoredState::Deleted, outcome)
-                    }
-                    StoredState::Intent
-                    | StoredState::Ambiguous
-                    | StoredState::Pending
-                    | StoredState::Failed => {
-                        (StoredState::Failed, LifecycleOutcome::StartupFailedCleaned)
-                    }
-                };
-                self.set_state(stored.request.request_id, terminal, None, now)?;
+                let (terminal, outcome) = self.absence_terminal(&stored, now)?;
+                if !self.set_state_from(
+                    stored.request.request_id,
+                    stored.state,
+                    terminal,
+                    None,
+                    now,
+                )? {
+                    let current = self
+                        .load_stored_request(stored.request.request_id)?
+                        .ok_or(ProvisionerError::StateUnavailable)?;
+                    return Box::pin(self.recover_one(current, audit_lineage)).await;
+                }
                 self.append_lifecycle_receipt(
                     &stored.request,
                     LifecycleEvidence {
@@ -1886,12 +1879,18 @@ impl Provisioner {
                 } else {
                     StoredState::Ambiguous
                 };
-                self.set_state(
+                if !self.set_state_from(
                     stored.request.request_id,
+                    stored.state,
                     retained_state,
                     stored.instance.as_ref(),
                     now,
-                )?;
+                )? {
+                    let current = self
+                        .load_stored_request(stored.request.request_id)?
+                        .ok_or(ProvisionerError::StateUnavailable)?;
+                    return Box::pin(self.recover_one(current, audit_lineage)).await;
+                }
                 self.append_lifecycle_receipt(
                     &stored.request,
                     LifecycleEvidence {
@@ -1922,6 +1921,48 @@ impl Provisioner {
             .min(request.expires_at_unix_ms)
             .min(request.instance_expires_at_unix_ms)
             .min(self.config.provider_grant_expires_unix_ms))
+    }
+
+    fn absence_terminal(
+        &self,
+        stored: &StoredRequest,
+        observed_at_unix_ms: i64,
+    ) -> Result<(StoredState, LifecycleOutcome), ProvisionerError> {
+        let (terminal, reason, default_outcome) = match stored.state {
+            StoredState::Ready => (
+                StoredState::Deleted,
+                CleanupReason::AgentLost,
+                LifecycleOutcome::AgentLostCleaned,
+            ),
+            StoredState::Deleting | StoredState::Deleted => (
+                StoredState::Deleted,
+                CleanupReason::Cancelled,
+                LifecycleOutcome::Cancelled,
+            ),
+            StoredState::Intent
+            | StoredState::Ambiguous
+            | StoredState::Pending
+            | StoredState::Failed => {
+                if observed_at_unix_ms
+                    >= self.startup_deadline(&stored.request, stored.created_at_unix_ms)?
+                {
+                    (
+                        StoredState::Failed,
+                        CleanupReason::StartupTimeout,
+                        LifecycleOutcome::StartupTimeoutCleaned,
+                    )
+                } else {
+                    (
+                        StoredState::Failed,
+                        CleanupReason::StartupFailed,
+                        LifecycleOutcome::StartupFailedCleaned,
+                    )
+                }
+            }
+        };
+        let (_, outcome) =
+            self.record_cleanup_intent(stored.request.request_id, reason, default_outcome)?;
+        Ok((terminal, outcome))
     }
 
     async fn recover_create_admission_race(

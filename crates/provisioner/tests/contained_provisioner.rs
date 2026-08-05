@@ -1258,6 +1258,62 @@ async fn terminal_cancel_state_survives_late_startup_lookup_failure() {
 }
 
 #[tokio::test]
+async fn terminal_cancel_state_survives_late_recovery_lookup_failure() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before simulated recovery");
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    database
+        .execute(
+            "UPDATE requests SET state = 'pending', latest_receipt_json = NULL
+             WHERE request_id = ?1",
+            [request.request_id.to_string()],
+        )
+        .expect("simulate pending recovery boundary");
+    drop(database);
+    context
+        .fixture
+        .set_mode(FixtureMode::DelayedMalformedLookupOnce);
+
+    let recovery = context.provisioner.provision(&request);
+    let cancel = async {
+        context.fixture.wait_for_lookup_start().await;
+        context
+            .provisioner
+            .cancel(&cancel_request(
+                &context.config,
+                &request,
+                IMPLEMENTATION_SHA256,
+            ))
+            .await
+    };
+    let (recovered, cancelled) = tokio::join!(recovery, cancel);
+    let recovered = recovered.expect("late recovery failure converges on cancellation");
+    let cancelled = cancelled.expect("concurrent cancellation receipt");
+    assert_eq!(recovered.body.outcome, LifecycleOutcome::Cancelled);
+    assert_eq!(cancelled.body.outcome, LifecycleOutcome::Cancelled);
+    assert!(recovered.body.cleanup_confirmed);
+    assert!(cancelled.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().3, 0);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let state: String = database
+        .query_row(
+            "SELECT state FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read terminal state");
+    assert_eq!(state, "deleted");
+}
+
+#[tokio::test]
 async fn immediate_ready_after_startup_deadline_is_cleaned_as_timeout() {
     let context = Context::new(FixtureMode::DelayedCreateReady).await;
     let receipt = context
@@ -1685,6 +1741,7 @@ async fn recovery_anchors_startup_timeout_to_immutable_admission_time() {
         )
         .expect("simulate mutable update after original admission");
     drop(database);
+    context.fixture.remove_instance(request.request_id);
 
     let restarted = Provisioner::new(
         context.config.clone(),
@@ -1748,7 +1805,76 @@ async fn recovered_absence_preserves_ready_and_deleting_lifecycle_truth() {
         assert_eq!(receipt.body.outcome, expected);
         assert!(receipt.body.cleanup_confirmed);
         assert!(!receipt.body.ambiguity);
+
+        let database =
+            rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+                .expect("reopen retained ledger");
+        database
+            .execute(
+                "UPDATE requests SET latest_receipt_json = NULL WHERE request_id = ?1",
+                [request.request_id.to_string()],
+            )
+            .expect("simulate a second crash after terminal state");
+        drop(database);
+        let restarted_again = Provisioner::new(
+            context.config.clone(),
+            IMPLEMENTATION_SHA256.to_owned(),
+            PROVIDER_TOKEN.to_owned(),
+            context.fixture.public_key(),
+            RECEIPT_KEY.to_vec(),
+        )
+        .await
+        .expect("restart provisioner again");
+        let retained = restarted_again
+            .provision(&request)
+            .await
+            .expect("recover durable absence reason");
+        assert_eq!(retained.body.outcome, expected);
+        assert!(retained.body.cleanup_confirmed);
     }
+}
+
+#[tokio::test]
+async fn reconciliation_absence_crash_recovery_preserves_agent_loss() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before reconciliation absence");
+    context.fixture.remove_instance(request.request_id);
+    let reconciled = context
+        .provisioner
+        .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+        .await
+        .expect("reconcile signed absence");
+    assert_eq!(reconciled.body.cleaned, 1);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    database
+        .execute(
+            "UPDATE requests SET latest_receipt_json = NULL WHERE request_id = ?1",
+            [request.request_id.to_string()],
+        )
+        .expect("simulate crash after reconciliation state commit");
+    drop(database);
+    let restarted = Provisioner::new(
+        context.config.clone(),
+        IMPLEMENTATION_SHA256.to_owned(),
+        PROVIDER_TOKEN.to_owned(),
+        context.fixture.public_key(),
+        RECEIPT_KEY.to_vec(),
+    )
+    .await
+    .expect("restart provisioner");
+    let receipt = restarted
+        .provision(&request)
+        .await
+        .expect("recover reconciliation agent-loss truth");
+    assert_eq!(receipt.body.outcome, LifecycleOutcome::AgentLostCleaned);
+    assert!(receipt.body.cleanup_confirmed);
 }
 
 #[tokio::test]
