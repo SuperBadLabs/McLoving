@@ -62,6 +62,331 @@ fn digest(label: &str) -> [u8; 32] {
     Sha256::digest(label.as_bytes()).into()
 }
 
+fn idp001_recovery_ids() -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
+    (
+        Uuid::from_u128(0x4d63_4c6f_7669_6e67_1000_0000_0000_0001),
+        Uuid::from_u128(0x4d63_4c6f_7669_6e67_1000_0000_0000_0002),
+        Uuid::from_u128(0x4d63_4c6f_7669_6e67_1000_0000_0000_0003),
+        Uuid::from_u128(0x4d63_4c6f_7669_6e67_1000_0000_0000_0004),
+        Uuid::from_u128(0x4d63_4c6f_7669_6e67_1000_0000_0000_0005),
+    )
+}
+
+fn idp001_provider(organization_id: Uuid, provider_id: Uuid) -> IdentityProviderWrite {
+    IdentityProviderWrite {
+        organization_id,
+        provider_id,
+        issuer: "https://idp.idp001.test".to_owned(),
+        audience: "mcloving-idp001".to_owned(),
+        authorization_endpoint: "https://idp.idp001.test/authorize".to_owned(),
+        token_endpoint: "https://idp.idp001.test/token".to_owned(),
+        jwks_uri: "https://idp.idp001.test/jwks".to_owned(),
+        client_id: "mcloving-idp001".to_owned(),
+        group_claim: "groups".to_owned(),
+        configuration_generation: 1,
+        configuration_digest: digest("idp001-provider-generation-1"),
+        jwks_generation: 1,
+        jwks_digest: digest("idp001-jwks-generation-1"),
+        enabled: true,
+        actor_subject: "reviewer:idp001-restore".to_owned(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "run only by scripts/test-backup-restore.sh against an isolated source"]
+async fn idp001_backup_restore_seed() {
+    let admin = test_store().await.expect("isolated source database URL");
+    let (organization_id, project_id, provider_id, human_id, service_id) = idp001_recovery_ids();
+    admin
+        .create_project(
+            organization_id,
+            "idp001-recovery",
+            project_id,
+            "identity-restore",
+        )
+        .await
+        .expect("create IDP-001 recovery tenant");
+
+    let provider = idp001_provider(organization_id, provider_id);
+    admin
+        .provision_identity_provider(&provider)
+        .await
+        .expect("provision contained target identity provider");
+    let human = NewHumanIdentity {
+        organization_id,
+        identity_id: human_id,
+        subject: format!("principal:{human_id}"),
+        provider_id,
+        external_subject: "jenkins-user-immutable-1042".to_owned(),
+        source_realm_digest: digest("contained-jenkins-source-realm-v3"),
+        source_identity_id: "jenkins-user-1042".to_owned(),
+        source_membership_generation: 19,
+        alias_history: vec!["alice".to_owned(), "alice.legacy".to_owned()],
+        provenance_digest: digest("contained-mig000-identity-provenance"),
+        actor_subject: "reviewer:idp001-restore".to_owned(),
+    };
+    admin
+        .provision_human_identity(&human)
+        .await
+        .expect("bind immutable source-realm identity");
+    sqlx::query(
+        "INSERT INTO project_memberships(identity_id, organization_id, project_id, role)
+         VALUES ($1, $2, $3, 'developer')",
+    )
+    .bind(human_id)
+    .bind(organization_id)
+    .bind(project_id)
+    .execute(admin.pool())
+    .await
+    .expect("grant reviewed restored human role");
+
+    let runtime = unprivileged_store(&admin).await;
+    let stale_human_token = digest("idp001-human-session-stale");
+    runtime
+        .issue_human_session(
+            &OidcIdentityClaims {
+                organization_id,
+                provider_id,
+                issuer: provider.issuer.clone(),
+                external_subject: human.external_subject.clone(),
+                groups: vec!["jenkins-developers".to_owned()],
+                provider_configuration_generation: provider.configuration_generation,
+                provider_jwks_generation: provider.jwks_generation,
+                id_token_digest: digest("idp001-id-token-generation-1"),
+            },
+            &SessionIssue {
+                session_id: Uuid::from_u128(0x4d63_4c6f_7669_6e67_1000_0000_0000_0006),
+                token_digest: stale_human_token,
+                refresh_token_digest: Some(digest("idp001-refresh-generation-1")),
+                issued_at_unix_ms: 10_000,
+                expires_at_unix_ms: 80_000,
+                refresh_expires_at_unix_ms: Some(90_000),
+            },
+        )
+        .await
+        .expect("issue pre-group-change human session");
+
+    let current_human_token = digest("idp001-human-session-current");
+    runtime
+        .issue_human_session(
+            &OidcIdentityClaims {
+                organization_id,
+                provider_id,
+                issuer: provider.issuer.clone(),
+                external_subject: human.external_subject.clone(),
+                groups: vec![
+                    "jenkins-developers".to_owned(),
+                    "release-reviewers".to_owned(),
+                ],
+                provider_configuration_generation: provider.configuration_generation,
+                provider_jwks_generation: provider.jwks_generation,
+                id_token_digest: digest("idp001-id-token-generation-2"),
+            },
+            &SessionIssue {
+                session_id: Uuid::from_u128(0x4d63_4c6f_7669_6e67_1000_0000_0000_0007),
+                token_digest: current_human_token,
+                refresh_token_digest: Some(digest("idp001-refresh-generation-2")),
+                issued_at_unix_ms: 11_000,
+                expires_at_unix_ms: 80_000,
+                refresh_expires_at_unix_ms: Some(90_000),
+            },
+        )
+        .await
+        .expect("advance the durable group generation");
+    assert!(
+        runtime
+            .authenticate_api_token(organization_id, stale_human_token, 12_000)
+            .await
+            .is_err(),
+        "the source image must preserve the stale-group denial"
+    );
+    runtime
+        .authenticate_api_token(organization_id, current_human_token, 12_000)
+        .await
+        .expect("the current human session authenticates before backup");
+
+    admin
+        .provision_service_identity(&NewServiceIdentity {
+            organization_id,
+            identity_id: service_id,
+            subject: format!("service:idp001:{service_id}"),
+            scopes: BTreeSet::from([ServiceScope::ProjectRead, ServiceScope::BuildSubmit]),
+            actor_subject: "reviewer:idp001-restore".to_owned(),
+        })
+        .await
+        .expect("provision contained service identity");
+    let stale_service_token = digest("idp001-service-token-stale");
+    admin
+        .provision_service_credential(&NewServiceCredential {
+            organization_id,
+            credential_id: Uuid::from_u128(0x4d63_4c6f_7669_6e67_1000_0000_0000_0008),
+            identity_id: service_id,
+            generation: 1,
+            token_digest: stale_service_token,
+            issued_at_unix_ms: 10_000,
+            expires_at_unix_ms: Some(90_000),
+            actor_subject: "reviewer:idp001-restore".to_owned(),
+        })
+        .await
+        .expect("provision first service credential generation");
+    let current_service_token = digest("idp001-service-token-current");
+    admin
+        .provision_service_credential(&NewServiceCredential {
+            organization_id,
+            credential_id: Uuid::from_u128(0x4d63_4c6f_7669_6e67_1000_0000_0000_0009),
+            identity_id: service_id,
+            generation: 2,
+            token_digest: current_service_token,
+            issued_at_unix_ms: 11_000,
+            expires_at_unix_ms: Some(90_000),
+            actor_subject: "reviewer:idp001-restore".to_owned(),
+        })
+        .await
+        .expect("rotate the service credential generation");
+    assert!(
+        runtime
+            .authenticate_api_token(organization_id, stale_service_token, 12_000)
+            .await
+            .is_err(),
+        "the source image must preserve the rotated-service denial"
+    );
+    runtime
+        .authenticate_api_token(organization_id, current_service_token, 12_000)
+        .await
+        .expect("the current service credential authenticates before backup");
+}
+
+#[tokio::test]
+#[ignore = "run only by scripts/test-backup-restore.sh against an isolated restore"]
+async fn idp001_backup_restore_verify() {
+    let admin = test_store().await.expect("isolated restore database URL");
+    let (organization_id, project_id, provider_id, human_id, _) = idp001_recovery_ids();
+    let provider = idp001_provider(organization_id, provider_id);
+    let restored_provider = admin
+        .identity_provider_config(organization_id, provider_id)
+        .await
+        .expect("load restored target identity provider");
+    assert_eq!(restored_provider.issuer, provider.issuer);
+    assert_eq!(
+        restored_provider.configuration_generation,
+        provider.configuration_generation
+    );
+    assert_eq!(
+        restored_provider.configuration_digest,
+        provider.configuration_digest
+    );
+    assert_eq!(restored_provider.jwks_generation, provider.jwks_generation);
+    assert_eq!(restored_provider.jwks_digest, provider.jwks_digest);
+
+    let provenance = sqlx::query_as::<_, (Vec<u8>, String, i64, serde_json::Value, Vec<u8>)>(
+        "SELECT source_realm_digest, source_identity_id,
+                source_membership_generation, alias_history, provenance_digest
+         FROM identities
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(human_id)
+    .fetch_one(admin.pool())
+    .await
+    .expect("read restored source-realm provenance");
+    assert_eq!(provenance.0, digest("contained-jenkins-source-realm-v3"));
+    assert_eq!(provenance.1, "jenkins-user-1042");
+    assert_eq!(provenance.2, 19);
+    assert_eq!(provenance.3, serde_json::json!(["alice", "alice.legacy"]));
+    assert_eq!(provenance.4, digest("contained-mig000-identity-provenance"));
+
+    let runtime = unprivileged_store(&admin).await;
+    assert!(
+        runtime
+            .authenticate_api_token(
+                organization_id,
+                digest("idp001-human-session-stale"),
+                20_000,
+            )
+            .await
+            .is_err(),
+        "restore must not revive a stale-group human session"
+    );
+    let human = runtime
+        .authenticate_api_token(
+            organization_id,
+            digest("idp001-human-session-current"),
+            20_000,
+        )
+        .await
+        .expect("restore preserves the current human session");
+    assert_eq!(human.identity_id, human_id);
+    assert_eq!(human.lifecycle_generation, 1);
+    assert_eq!(human.group_generation, 3);
+    assert_eq!(
+        human.principal.project_roles.get(&project_id),
+        Some(&ProjectRole::Developer)
+    );
+
+    assert!(
+        runtime
+            .authenticate_api_token(
+                organization_id,
+                digest("idp001-service-token-stale"),
+                20_000,
+            )
+            .await
+            .is_err(),
+        "restore must not revive a rotated service credential"
+    );
+    let service = runtime
+        .authenticate_api_token(
+            organization_id,
+            digest("idp001-service-token-current"),
+            20_000,
+        )
+        .await
+        .expect("restore preserves the current service credential");
+    assert_eq!(service.principal.kind, PrincipalKind::Service);
+    assert_eq!(
+        service.principal.service_scopes,
+        BTreeSet::from([ServiceScope::ProjectRead, ServiceScope::BuildSubmit])
+    );
+
+    assert!(
+        admin
+            .provision_human_identity(&NewHumanIdentity {
+                organization_id,
+                identity_id: human_id,
+                subject: format!("principal:{human_id}"),
+                provider_id,
+                external_subject: "jenkins-user-immutable-1042".to_owned(),
+                source_realm_digest: digest("substituted-source-realm"),
+                source_identity_id: "jenkins-user-1042".to_owned(),
+                source_membership_generation: 19,
+                alias_history: vec!["alice".to_owned(), "alice.legacy".to_owned()],
+                provenance_digest: digest("contained-mig000-identity-provenance"),
+                actor_subject: "attacker:restore-substitution".to_owned(),
+            })
+            .await
+            .is_err(),
+        "restored immutable source-realm provenance must reject substitution"
+    );
+
+    let restored_audit_actions = sqlx::query_scalar::<_, i64>(
+        "SELECT count(DISTINCT action)
+         FROM audit_events
+         WHERE organization_id = $1
+           AND action IN (
+             'identity_provider_provisioned',
+             'human_identity_provisioned',
+             'oidc_session_issued',
+             'service_identity_provisioned',
+             'service_credential_provisioned'
+           )",
+    )
+    .bind(organization_id)
+    .fetch_one(admin.pool())
+    .await
+    .expect("count restored identity audit families");
+    assert_eq!(restored_audit_actions, 5);
+}
+
 #[tokio::test]
 async fn controller_authentication_rollout_is_atomic() {
     let Some(admin) = test_store().await else {

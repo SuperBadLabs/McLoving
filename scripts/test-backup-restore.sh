@@ -69,9 +69,26 @@ run_canary() {
       --ignored --exact --test-threads=1
 }
 
+run_identity_canary() {
+  local port="$1"
+  local test_name="$2"
+  "${engine}" run --rm \
+    --network host \
+    --env "MCLOVING_TEST_DATABASE_URL=postgres://mcloving@127.0.0.1:${port}/mcloving" \
+    --volume "${repo_root}:/work:Z" \
+    --workdir /work \
+    "${MCLOVING_RUST_IMAGE}" \
+    cargo test --locked \
+      -p mcloving-controller-store \
+      --test identity_lifecycle \
+      "${test_name}" -- \
+      --ignored --exact --test-threads=1
+}
+
 source_port="$(start_postgres "${source_name}")"
 target_port="$(start_postgres "${target_name}")"
 run_canary "${source_port}" backup_restore_canary_seed
+run_identity_canary "${source_port}" idp001_backup_restore_seed
 
 "${engine}" exec "${source_name}" \
   pg_dump --username mcloving --dbname mcloving \
@@ -88,7 +105,9 @@ test -s "${dump_path}"
   --exit-on-error --no-owner <"${dump_path}"
 
 run_canary "${target_port}" backup_restore_canary_verify
+run_identity_canary "${target_port}" idp001_backup_restore_verify
 
 printf 'backup_restore_drill=passed\n'
+printf 'idp001_identity_restore=passed\n'
 printf 'dump_sha256=%s\n' "$(sha256sum "${dump_path}" | awk '{print $1}')"
 printf 'restore_policy=all_pre_restore_leases_reconciliation_required\n'

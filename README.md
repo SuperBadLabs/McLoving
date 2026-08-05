@@ -19,7 +19,7 @@ drills, identity lifecycle support, and the isolated Jenkins compiler and
 migration evidence planes.
 
 The project is not release-ready. The execution board remains authoritative
-for unfinished identity evidence, authorization mapping, source and trigger
+for authorization mapping, source and trigger
 boundaries, external effects, production qualification, performance, security,
 disaster recovery, and release provenance. Jenkins compatibility claims remain
 bounded by differential receipts; general Scripted Pipeline and binary Jenkins
