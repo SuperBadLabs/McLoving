@@ -125,6 +125,8 @@ owned orphan discovery all enter deletion. Deletion success requires both a
 signed absent result and a fresh signed lookup returning no instance. A timeout,
 partition, malformed/unattested response, or uncertain deletion becomes
 `ambiguous`; it never claims cleanup or silently creates again.
+The deadline is rechecked after every provider lookup, so a late `Ready`
+observation is cleaned as a timeout rather than admitted.
 
 ## Crash, partition, orphan, and scale-down truth
 
@@ -136,7 +138,9 @@ instance identity policy; a later runtime cannot reinterpret retained state
 through another provider scope. The relevant recovery cases are:
 
 - controller crash: replaying the same command returns the retained receipt or
-  performs lookup-only recovery; controller storage is not consulted;
+  performs lookup-only recovery; controller storage is not consulted, and a
+  signed absence preserves `ready` as agent loss and `deleting` as cancellation
+  rather than collapsing either into startup failure;
 - provisioner crash before create: the durable intent is eventually reconciled
   to signed absence without creating;
 - provisioner crash after provider create but before response: signed lookup by

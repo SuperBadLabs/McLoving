@@ -1389,7 +1389,12 @@ impl Provisioner {
                     )
                     .await;
             }
-            tokio::time::sleep(Duration::from_millis(self.config.startup_poll_interval_ms)).await;
+            let remaining_ms = u64::try_from(deadline.saturating_sub(now))
+                .map_err(|_| ProvisionerError::InvalidConfig)?;
+            tokio::time::sleep(Duration::from_millis(
+                self.config.startup_poll_interval_ms.min(remaining_ms),
+            ))
+            .await;
             instance = match self.provider_lookup(request.request_id).await {
                 Ok(Some(candidate)) => candidate,
                 Ok(None) => {
@@ -1428,6 +1433,25 @@ impl Provisioner {
                     );
                 }
             };
+            let now = now_unix_ms()?;
+            if now >= deadline {
+                self.set_state(
+                    request.request_id,
+                    StoredState::Deleting,
+                    Some(&instance),
+                    now,
+                )?;
+                return self
+                    .cleanup_instance(
+                        request,
+                        request_sha256,
+                        &instance,
+                        CleanupReason::StartupTimeout,
+                        LifecycleOutcome::StartupTimeoutCleaned,
+                        &request.audit_lineage,
+                    )
+                    .await;
+            }
             let create = ProviderCreateRequest {
                 protocol_version: PROTOCOL_VERSION.to_owned(),
                 provisioner_id: self.config.provisioner_id.clone(),
@@ -1435,7 +1459,6 @@ impl Provisioner {
                 request_sha256: request_sha256.to_owned(),
                 request: request.clone(),
             };
-            let now = now_unix_ms()?;
             if self.validate_instance(&instance, &create, now).is_err() {
                 self.set_state(
                     request.request_id,
@@ -1587,13 +1610,27 @@ impl Provisioner {
                 }
             }
             Ok(None) => {
-                self.set_state(stored.request.request_id, StoredState::Failed, None, now)?;
+                let (terminal, outcome) = match stored.state {
+                    StoredState::Ready => {
+                        (StoredState::Deleted, LifecycleOutcome::AgentLostCleaned)
+                    }
+                    StoredState::Deleting | StoredState::Deleted => {
+                        (StoredState::Deleted, LifecycleOutcome::Cancelled)
+                    }
+                    StoredState::Intent
+                    | StoredState::Ambiguous
+                    | StoredState::Pending
+                    | StoredState::Failed => {
+                        (StoredState::Failed, LifecycleOutcome::StartupFailedCleaned)
+                    }
+                };
+                self.set_state(stored.request.request_id, terminal, None, now)?;
                 self.append_lifecycle_receipt(
                     &stored.request,
                     LifecycleEvidence {
                         request_sha256: &stored.request_sha256,
                         instance: None,
-                        outcome: LifecycleOutcome::StartupFailedCleaned,
+                        outcome,
                         cleanup_confirmed: true,
                         ambiguity: false,
                         audit_lineage,

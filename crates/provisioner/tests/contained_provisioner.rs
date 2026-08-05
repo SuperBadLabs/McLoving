@@ -44,6 +44,7 @@ enum FixtureMode {
     MalformedDeleteOnce,
     SubstituteFinalInventory,
     DuplicateFinalInventory,
+    DelayedReady,
 }
 
 struct Inner {
@@ -145,6 +146,15 @@ impl Fixture {
             .state = ProviderInstanceState::AgentLost;
     }
 
+    fn remove_instance(&self, request_id: Uuid) {
+        self.state
+            .inner
+            .lock()
+            .expect("fixture state")
+            .instances
+            .remove(&request_id);
+    }
+
     fn set_mode(&self, mode: FixtureMode) {
         self.state.inner.lock().expect("fixture state").mode = mode;
     }
@@ -170,7 +180,7 @@ async fn create_instance(
     }
     inner.creates += 1;
     let provider_state = match inner.mode {
-        FixtureMode::PendingThenReady | FixtureMode::PendingForever => {
+        FixtureMode::PendingThenReady | FixtureMode::PendingForever | FixtureMode::DelayedReady => {
             ProviderInstanceState::Pending
         }
         FixtureMode::StartupFailed => ProviderInstanceState::StartupFailed,
@@ -208,9 +218,15 @@ async fn lookup_instance(
     if !authorized(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let delayed_ready =
+        state.inner.lock().expect("fixture state").mode == FixtureMode::DelayedReady;
+    if delayed_ready {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
     let mut inner = state.inner.lock().expect("fixture state");
     inner.lookups += 1;
-    let ready = inner.mode == FixtureMode::PendingThenReady && inner.lookups >= 2;
+    let ready = (inner.mode == FixtureMode::PendingThenReady && inner.lookups >= 2)
+        || inner.mode == FixtureMode::DelayedReady;
     if ready && let Some(instance) = inner.instances.get_mut(&request_id) {
         instance.state = ProviderInstanceState::Ready;
         instance.observed_at_unix_ms = now_ms();
@@ -958,6 +974,66 @@ async fn pending_instance_becomes_ready_with_bounded_polling() {
         .expect("eventual ready");
     assert_eq!(receipt.body.outcome, LifecycleOutcome::Ready);
     assert!(context.fixture.counts().2 >= 2);
+}
+
+#[tokio::test]
+async fn provider_ready_after_startup_deadline_is_cleaned_as_timeout() {
+    let context = Context::new(FixtureMode::DelayedReady).await;
+    let receipt = context
+        .provisioner
+        .provision(&context.request())
+        .await
+        .expect("late ready cleanup receipt");
+    assert_eq!(
+        receipt.body.outcome,
+        LifecycleOutcome::StartupTimeoutCleaned
+    );
+    assert!(receipt.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().3, 0);
+}
+
+#[tokio::test]
+async fn recovered_absence_preserves_ready_and_deleting_lifecycle_truth() {
+    for (state, expected) in [
+        ("ready", LifecycleOutcome::AgentLostCleaned),
+        ("deleting", LifecycleOutcome::Cancelled),
+    ] {
+        let context = Context::new(FixtureMode::Ready).await;
+        let request = context.request();
+        context
+            .provisioner
+            .provision(&request)
+            .await
+            .expect("ready before simulated crash boundary");
+        context.fixture.remove_instance(request.request_id);
+        let database =
+            rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+                .expect("open retained ledger");
+        database
+            .execute(
+                "UPDATE requests SET state = ?2, latest_receipt_json = NULL WHERE request_id = ?1",
+                rusqlite::params![request.request_id.to_string(), state],
+            )
+            .expect("simulate crash before receipt publication");
+        drop(database);
+
+        let restarted = Provisioner::new(
+            context.config.clone(),
+            IMPLEMENTATION_SHA256.to_owned(),
+            PROVIDER_TOKEN.to_owned(),
+            context.fixture.public_key(),
+            RECEIPT_KEY.to_vec(),
+        )
+        .await
+        .expect("restart provisioner");
+        let receipt = restarted
+            .provision(&request)
+            .await
+            .expect("recover signed absence");
+        assert_eq!(receipt.body.outcome, expected);
+        assert!(receipt.body.cleanup_confirmed);
+        assert!(!receipt.body.ambiguity);
+    }
 }
 
 #[tokio::test]
