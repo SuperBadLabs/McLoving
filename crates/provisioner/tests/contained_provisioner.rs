@@ -140,6 +140,23 @@ impl Fixture {
         id
     }
 
+    fn inject_orphan_with_instance_id(&self, create: ProviderCreateRequest, instance_id: Uuid) {
+        let mut inner = self.state.inner.lock().expect("fixture state");
+        let mut instance = make_instance(&create, ProviderInstanceState::Ready, false);
+        instance.instance_id = instance_id;
+        inner.instances.insert(create.request.request_id, instance);
+    }
+
+    fn substitute_lookup_instance(&self, request_id: Uuid) {
+        let mut inner = self.state.inner.lock().expect("fixture state");
+        let instance = inner
+            .instances
+            .get_mut(&request_id)
+            .expect("fixture instance");
+        instance.instance_id = Uuid::new_v4();
+        instance.effective_agent.template_sha256 = digest(b"substituted-lookup-template");
+    }
+
     fn mark_agent_lost(&self, request_id: Uuid) {
         let mut inner = self.state.inner.lock().expect("fixture state");
         inner
@@ -968,6 +985,39 @@ async fn duplicate_final_inventory_identity_is_rejected() {
 }
 
 #[tokio::test]
+async fn duplicate_initial_inventory_instance_id_is_rejected_before_cleanup() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    let ready = context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready retained instance");
+    let active_instance_id = ready.body.instance_id.expect("ready instance identity");
+    let orphan_request = context.request();
+    let orphan_create = ProviderCreateRequest {
+        protocol_version: mcloving_provisioner::PROTOCOL_VERSION.to_owned(),
+        provisioner_id: context.config.provisioner_id.clone(),
+        provisioner_config_sha256: context.config.canonical_digest().expect("config digest"),
+        request_sha256: digest(&serde_json::to_vec(&orphan_request).expect("request JSON")),
+        request: orphan_request,
+    };
+    context
+        .fixture
+        .inject_orphan_with_instance_id(orphan_create, active_instance_id);
+
+    assert!(matches!(
+        context
+            .provisioner
+            .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256,))
+            .await,
+        Err(ProvisionerError::InvalidProviderResponse)
+    ));
+    assert_eq!(context.fixture.counts().1, 0);
+    assert_eq!(context.fixture.counts().3, 2);
+}
+
+#[tokio::test]
 async fn quota_and_all_certified_bindings_fail_before_provider_access() {
     let context = Context::with_quota(FixtureMode::Ready, 1).await;
     let first = context.request();
@@ -1155,6 +1205,87 @@ async fn reconciliation_preserves_expiry_outcome_after_delete_response_loss() {
         .expect("read retained terminal lifecycle");
     assert_eq!(lifecycle.body.outcome, LifecycleOutcome::ExpiredCleaned);
     assert!(lifecycle.body.cleanup_confirmed);
+}
+
+#[tokio::test]
+async fn cancel_validates_lookup_only_instance_before_cleanup() {
+    let context = Context::new(FixtureMode::MalformedCreateOnce).await;
+    let request = context.request();
+    let ambiguous = context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ambiguous create receipt");
+    assert_eq!(ambiguous.body.outcome, LifecycleOutcome::CreateAmbiguous);
+    context
+        .fixture
+        .substitute_lookup_instance(request.request_id);
+
+    let receipt = context
+        .provisioner
+        .cancel(&cancel_request(
+            &context.config,
+            &request,
+            IMPLEMENTATION_SHA256,
+        ))
+        .await
+        .expect("substituted lookup cleanup receipt");
+    assert_eq!(
+        receipt.body.outcome,
+        LifecycleOutcome::SubstitutionDeniedCleaned
+    );
+    assert!(receipt.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().3, 0);
+}
+
+#[tokio::test]
+async fn deleted_crash_recovery_preserves_retained_cleanup_intent() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before simulated cleanup crash");
+    context.fixture.remove_instance(request.request_id);
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    database
+        .execute(
+            "INSERT INTO cleanup_intents(request_id, reason_json, outcome_json)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                request.request_id.to_string(),
+                serde_json::to_vec(&CleanupReason::Expired).expect("cleanup reason JSON"),
+                serde_json::to_vec(&LifecycleOutcome::ExpiredCleaned)
+                    .expect("cleanup outcome JSON"),
+            ],
+        )
+        .expect("retain cleanup intent");
+    database
+        .execute(
+            "UPDATE requests SET state = 'deleted', latest_receipt_json = NULL
+             WHERE request_id = ?1",
+            [request.request_id.to_string()],
+        )
+        .expect("simulate crash before terminal receipt");
+    drop(database);
+
+    let restarted = Provisioner::new(
+        context.config.clone(),
+        IMPLEMENTATION_SHA256.to_owned(),
+        PROVIDER_TOKEN.to_owned(),
+        context.fixture.public_key(),
+        RECEIPT_KEY.to_vec(),
+    )
+    .await
+    .expect("restart provisioner");
+    let receipt = restarted
+        .provision(&request)
+        .await
+        .expect("recover retained cleanup truth");
+    assert_eq!(receipt.body.outcome, LifecycleOutcome::ExpiredCleaned);
+    assert!(receipt.body.cleanup_confirmed);
 }
 
 #[tokio::test]

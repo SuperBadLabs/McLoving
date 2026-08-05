@@ -1050,16 +1050,16 @@ impl Provisioner {
             }
             return Err(ProvisionerError::StateUnavailable);
         }
-        let (_, cancel_outcome) = self.record_cleanup_intent(
-            request.request_id,
-            CleanupReason::Cancelled,
-            LifecycleOutcome::Cancelled,
-        )?;
         let instance = match stored.instance.take() {
             Some(instance) => instance,
             None => match self.provider_lookup(request.request_id).await {
                 Ok(Some(instance)) => instance,
                 Ok(None) => {
+                    let (_, cancel_outcome) = self.record_cleanup_intent(
+                        request.request_id,
+                        CleanupReason::Cancelled,
+                        LifecycleOutcome::Cancelled,
+                    )?;
                     self.set_state(request.request_id, StoredState::Deleted, None, now)?;
                     return self.append_lifecycle_receipt(
                         &stored.request,
@@ -1075,7 +1075,12 @@ impl Provisioner {
                     );
                 }
                 Err(_) => {
-                    self.set_state(request.request_id, StoredState::Ambiguous, None, now)?;
+                    self.record_cleanup_intent(
+                        request.request_id,
+                        CleanupReason::Cancelled,
+                        LifecycleOutcome::Cancelled,
+                    )?;
+                    self.set_state(request.request_id, StoredState::Deleting, None, now)?;
                     return self.append_lifecycle_receipt(
                         &stored.request,
                         LifecycleEvidence {
@@ -1091,12 +1096,28 @@ impl Provisioner {
                 }
             },
         };
-        self.set_state(
-            request.request_id,
-            StoredState::Deleting,
-            Some(&instance),
-            now,
-        )?;
+        let create = ProviderCreateRequest {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            provisioner_id: self.config.provisioner_id.clone(),
+            provisioner_config_sha256: stored.request.expected_config_sha256.clone(),
+            request_sha256: stored.request_sha256.clone(),
+            request: stored.request.clone(),
+        };
+        if self
+            .validate_instance(&instance, &create, now_unix_ms()?)
+            .is_err()
+        {
+            return self
+                .cleanup_instance(
+                    &stored.request,
+                    &stored.request_sha256,
+                    &instance,
+                    CleanupReason::Substitution,
+                    LifecycleOutcome::SubstitutionDeniedCleaned,
+                    &request.audit_lineage,
+                )
+                .await;
+        }
         self.cleanup_instance(
             &stored.request,
             &stored.request_sha256,
@@ -1120,10 +1141,12 @@ impl Provisioner {
         }
         let initial_inventory_sha256 = canonical_digest(&initial)?;
         let mut provider_by_request = HashMap::with_capacity(initial.instances.len());
+        let mut provider_instance_ids = BTreeSet::new();
         for instance in initial.instances {
-            if provider_by_request
-                .insert(instance.create.request.request_id, instance)
-                .is_some()
+            if !provider_instance_ids.insert(instance.instance_id)
+                || provider_by_request
+                    .insert(instance.create.request.request_id, instance)
+                    .is_some()
             {
                 return Err(ProvisionerError::InvalidProviderResponse);
             }
@@ -1173,7 +1196,12 @@ impl Provisioner {
                             .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
                         (StoredState::Deleted, outcome)
                     }
-                    StoredState::Deleted => (StoredState::Deleted, LifecycleOutcome::Cancelled),
+                    StoredState::Deleted => {
+                        let (_, outcome) = self
+                            .load_cleanup_intent(item.request.request_id)?
+                            .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
+                        (StoredState::Deleted, outcome)
+                    }
                     StoredState::Intent
                     | StoredState::Ambiguous
                     | StoredState::Pending
@@ -1771,7 +1799,12 @@ impl Provisioner {
                             .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
                         (StoredState::Deleted, outcome)
                     }
-                    StoredState::Deleted => (StoredState::Deleted, LifecycleOutcome::Cancelled),
+                    StoredState::Deleted => {
+                        let (_, outcome) = self
+                            .load_cleanup_intent(stored.request.request_id)?
+                            .unwrap_or((CleanupReason::Cancelled, LifecycleOutcome::Cancelled));
+                        (StoredState::Deleted, outcome)
+                    }
                     StoredState::Intent
                     | StoredState::Ambiguous
                     | StoredState::Pending
