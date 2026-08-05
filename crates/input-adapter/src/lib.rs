@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,6 +25,7 @@ const MAX_EXECUTABLE_BYTES: u64 = 256 * 1_024 * 1_024;
 const MAX_REQUESTS_PER_MINUTE: usize = 10_000;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MAX_AGE_MS: i64 = 86_400_000;
+const MAX_RATE_LEDGER_BYTES: usize = 256 * 1_024;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -253,7 +254,6 @@ pub struct InputAdapter {
     secret_markers: Vec<Vec<u8>>,
     client: reqwest::Client,
     capture_admission: Mutex<()>,
-    request_times: Mutex<VecDeque<Instant>>,
 }
 
 impl InputAdapter {
@@ -307,6 +307,7 @@ impl InputAdapter {
         tokio::fs::create_dir_all(&config.spool_dir)
             .await
             .map_err(|_| AdapterError::StateUnavailable)?;
+        drop(lock_spool(&config.spool_dir, true).await?);
         // A capture claim is useful only if its directory entry can be made
         // durable before source access. Fail adapter construction on platforms
         // without that primitive instead of discovering the limitation after
@@ -325,7 +326,6 @@ impl InputAdapter {
             secret_markers,
             client,
             capture_admission: Mutex::new(()),
-            request_times: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -618,19 +618,35 @@ impl InputAdapter {
     }
 
     async fn admit_rate(&self, outbound_attempt_budget: usize) -> Result<(), AdapterError> {
-        let now = Instant::now();
-        let mut times = self.request_times.lock().await;
-        while times
-            .front()
-            .is_some_and(|instant| now.duration_since(*instant) >= Duration::from_secs(60))
-        {
-            times.pop_front();
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let now = now_unix_ms()?;
+        let window_start = now
+            .checked_sub(60_000)
+            .ok_or(AdapterError::StateUnavailable)?;
+        let path = self.config.spool_dir.join(".rate-v1.json");
+        let mut times: Vec<i64> = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata)
+                if metadata.file_type().is_file()
+                    && metadata.len()
+                        <= u64::try_from(MAX_RATE_LEDGER_BYTES).unwrap_or(u64::MAX) =>
+            {
+                let bytes = read_bounded_regular_file(&path, MAX_RATE_LEDGER_BYTES).await?;
+                serde_json::from_slice(&bytes).map_err(|_| AdapterError::StateUnavailable)?
+            }
+            Ok(_) => return Err(AdapterError::StateUnavailable),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Err(AdapterError::StateUnavailable),
+        };
+        if times.len() > MAX_REQUESTS_PER_MINUTE || times.iter().any(|timestamp| *timestamp > now) {
+            return Err(AdapterError::StateUnavailable);
         }
+        times.retain(|timestamp| *timestamp > window_start);
         if times.len().saturating_add(outbound_attempt_budget) > self.config.max_requests_per_minute
         {
             return Err(AdapterError::RateLimited);
         }
         times.extend(std::iter::repeat_n(now, outbound_attempt_budget));
+        store_rate_ledger(&self.config.spool_dir, &times).await?;
         Ok(())
     }
 
@@ -668,6 +684,14 @@ impl InputAdapter {
     }
 
     async fn load_stored(&self, capture_id: Uuid) -> Result<Option<CaptureReceipt>, AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, false).await?;
+        self.load_stored_unlocked(capture_id).await
+    }
+
+    async fn load_stored_unlocked(
+        &self,
+        capture_id: Uuid,
+    ) -> Result<Option<CaptureReceipt>, AdapterError> {
         let path = receipt_path(&self.config.spool_dir, capture_id);
         let metadata = match tokio::fs::symlink_metadata(&path).await {
             Ok(metadata) => metadata,
@@ -762,7 +786,13 @@ impl InputAdapter {
         capture_id: Uuid,
         request_sha256: &str,
     ) -> Result<CaptureReceipt, AdapterError> {
-        let deadline = Instant::now() + Duration::from_millis(self.config.timeout_ms);
+        let wait_windows = u64::from(self.config.retry_attempts) + 2;
+        let wait_ms = self
+            .config
+            .timeout_ms
+            .checked_mul(wait_windows)
+            .ok_or(AdapterError::InvalidConfig)?;
+        let deadline = Instant::now() + Duration::from_millis(wait_ms);
         loop {
             if let Some(receipt) = self.load_stored(capture_id).await? {
                 if receipt.request_sha256 != request_sha256 {
@@ -779,6 +809,7 @@ impl InputAdapter {
     }
 
     async fn store_receipt(&self, receipt: &CaptureReceipt) -> Result<(), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
         let final_path = receipt_path(&self.config.spool_dir, receipt.capture_id);
         let temp_path = self.config.spool_dir.join(format!(
             ".{}.{}.tmp",
@@ -813,7 +844,7 @@ impl InputAdapter {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let _ = tokio::fs::remove_file(&temp_path).await;
                 let stored = self
-                    .load_stored(receipt.capture_id)
+                    .load_stored_unlocked(receipt.capture_id)
                     .await?
                     .ok_or(AdapterError::StateUnavailable)?;
                 if stored == *receipt {
@@ -828,6 +859,79 @@ impl InputAdapter {
             }
         }
     }
+}
+
+#[cfg(unix)]
+type SpoolLock = nix::fcntl::Flock<std::fs::File>;
+
+#[cfg(not(unix))]
+struct SpoolLock;
+
+async fn lock_spool(spool_dir: &Path, exclusive: bool) -> Result<SpoolLock, AdapterError> {
+    #[cfg(unix)]
+    {
+        use nix::fcntl::{Flock, FlockArg};
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let path = spool_dir.join(".coordination-v1.lock");
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .mode(0o600)
+                .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+                .open(path)
+                .map_err(|_| AdapterError::StateUnavailable)?;
+            if !file
+                .metadata()
+                .map_err(|_| AdapterError::StateUnavailable)?
+                .is_file()
+            {
+                return Err(AdapterError::StateUnavailable);
+            }
+            let operation = if exclusive {
+                FlockArg::LockExclusive
+            } else {
+                FlockArg::LockShared
+            };
+            Flock::lock(file, operation).map_err(|_| AdapterError::StateUnavailable)
+        })
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (spool_dir, exclusive);
+        Err(AdapterError::InvalidConfig)
+    }
+}
+
+async fn store_rate_ledger(spool_dir: &Path, times: &[i64]) -> Result<(), AdapterError> {
+    let bytes = serde_json::to_vec(times).map_err(|_| AdapterError::StateUnavailable)?;
+    if bytes.len() > MAX_RATE_LEDGER_BYTES {
+        return Err(AdapterError::StateUnavailable);
+    }
+    let final_path = spool_dir.join(".rate-v1.json");
+    let temp_path = spool_dir.join(format!(".rate-v1.{}.tmp", Uuid::new_v4()));
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut file = options
+        .open(&temp_path)
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    use tokio::io::AsyncWriteExt as _;
+    if file.write_all(&bytes).await.is_err() || file.sync_all().await.is_err() {
+        drop(file);
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(AdapterError::StateUnavailable);
+    }
+    drop(file);
+    if tokio::fs::rename(&temp_path, &final_path).await.is_err() {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(AdapterError::StateUnavailable);
+    }
+    sync_directory(spool_dir).await
 }
 
 fn validate_config(

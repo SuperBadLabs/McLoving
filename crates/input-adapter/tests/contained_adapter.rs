@@ -32,6 +32,7 @@ struct FixtureState {
     reads: AtomicUsize,
     writes: AtomicUsize,
     retry_reads: AtomicUsize,
+    timeout_reads: AtomicUsize,
 }
 
 struct Fixture {
@@ -91,6 +92,9 @@ async fn read_input(
             String::new(),
         )
             .into_response();
+    }
+    if mode == "timeout_then_valid" && state.timeout_reads.fetch_add(1, Ordering::SeqCst) == 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 
     let branch = query.get("branch").map(String::as_str).unwrap_or("main");
@@ -433,6 +437,46 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         second.expect("second process convergence")
     );
     assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 1);
+
+    let shared_rate_spool = TempDir::new().expect("shared rate spool");
+    let mut shared_rate_config = config(&fixture.endpoint, shared_rate_spool.path());
+    shared_rate_config.max_requests_per_minute = 1;
+    shared_rate_config.retry_attempts = 0;
+    let first_rate_process = make_adapter(shared_rate_config.clone(), READ_TOKEN).await;
+    let second_rate_process = make_adapter(shared_rate_config, READ_TOKEN).await;
+    let first_distinct = request(&first_rate_process, "main", "valid");
+    let second_distinct = request(&second_rate_process, "dev", "valid");
+    let reads_before = fixture.state.reads.load(Ordering::SeqCst);
+    let (first, second) = tokio::join!(
+        first_rate_process.capture(&first_distinct),
+        second_rate_process.capture(&second_distinct)
+    );
+    assert!(first.is_ok() ^ second.is_ok());
+    assert!(
+        matches!(first, Err(AdapterError::RateLimited))
+            || matches!(second, Err(AdapterError::RateLimited))
+    );
+    assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 1);
+
+    let retry_wait_spool = TempDir::new().expect("retry wait spool");
+    let mut retry_wait_config = config(&fixture.endpoint, retry_wait_spool.path());
+    retry_wait_config.timeout_ms = 100;
+    retry_wait_config.retry_attempts = 1;
+    retry_wait_config.max_requests_per_minute = 2;
+    let retry_wait_adapter = make_adapter(retry_wait_config, READ_TOKEN).await;
+    let retry_wait_request = request(&retry_wait_adapter, "main", "timeout_then_valid");
+    let reads_before = fixture.state.reads.load(Ordering::SeqCst);
+    let first = retry_wait_adapter.capture(&retry_wait_request);
+    let duplicate = async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        retry_wait_adapter.capture(&retry_wait_request).await
+    };
+    let (first, duplicate) = tokio::join!(first, duplicate);
+    assert_eq!(
+        first.expect("retrying claimant"),
+        duplicate.expect("full-window duplicate waiter")
+    );
+    assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 2);
 }
 
 #[tokio::test]
