@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ const MAX_EXECUTABLE_BYTES: u64 = 256 * 1_024 * 1_024;
 const MAX_REQUESTS_PER_MINUTE: usize = 10_000;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MAX_AGE_MS: i64 = 86_400_000;
-const MAX_RATE_LEDGER_BYTES: usize = 256 * 1_024;
+const MAX_RATE_LEDGER_BYTES: usize = 2 * 1_024 * 1_024;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -181,6 +181,92 @@ pub struct CaptureReceipt {
     pub signing_key_id: String,
     pub secret_marker_set_sha256: String,
     pub signature: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RateReservation {
+    capture_id: Uuid,
+    expires_at_unix_ms: i64,
+    remaining_attempts: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RateLedger {
+    attempt_started_at_unix_ms: Vec<i64>,
+    reservations: Vec<RateReservation>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredRateLedger {
+    Current(RateLedger),
+    Legacy(Vec<i64>),
+}
+
+impl RateLedger {
+    fn validate_and_prune(&mut self, now: i64) -> Result<(), AdapterError> {
+        let window_start = now
+            .checked_sub(60_000)
+            .ok_or(AdapterError::StateUnavailable)?;
+        if self.attempt_started_at_unix_ms.len() > MAX_REQUESTS_PER_MINUTE
+            || self
+                .attempt_started_at_unix_ms
+                .iter()
+                .any(|timestamp| *timestamp > now)
+            || self.reservations.len() > MAX_REQUESTS_PER_MINUTE
+            || self.reservations.iter().any(|reservation| {
+                reservation.remaining_attempts == 0
+                    || reservation.remaining_attempts > MAX_REQUESTS_PER_MINUTE
+            })
+        {
+            return Err(AdapterError::StateUnavailable);
+        }
+        let mut capture_ids = HashSet::with_capacity(self.reservations.len());
+        if self
+            .reservations
+            .iter()
+            .any(|reservation| !capture_ids.insert(reservation.capture_id))
+        {
+            return Err(AdapterError::StateUnavailable);
+        }
+        self.attempt_started_at_unix_ms
+            .retain(|timestamp| *timestamp > window_start);
+        self.reservations
+            .retain(|reservation| reservation.expires_at_unix_ms > now);
+        if self.occupancy()? > MAX_REQUESTS_PER_MINUTE {
+            return Err(AdapterError::StateUnavailable);
+        }
+        Ok(())
+    }
+
+    fn occupancy(&self) -> Result<usize, AdapterError> {
+        self.reservations.iter().try_fold(
+            self.attempt_started_at_unix_ms.len(),
+            |occupied, reservation| {
+                occupied
+                    .checked_add(reservation.remaining_attempts)
+                    .ok_or(AdapterError::StateUnavailable)
+            },
+        )
+    }
+
+    fn charge_attempt(&mut self, capture_id: Uuid, now: i64) -> Result<(), AdapterError> {
+        let reservation = self
+            .reservations
+            .iter_mut()
+            .find(|reservation| reservation.capture_id == capture_id)
+            .ok_or(AdapterError::StateUnavailable)?;
+        reservation.remaining_attempts = reservation
+            .remaining_attempts
+            .checked_sub(1)
+            .ok_or(AdapterError::StateUnavailable)?;
+        self.attempt_started_at_unix_ms.push(now);
+        self.reservations
+            .retain(|reservation| reservation.remaining_attempts > 0);
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -370,11 +456,19 @@ impl InputAdapter {
                 .await_claimed_receipt(request.capture_id, &request_sha256)
                 .await;
         }
-        self.admit_rate_unlocked(usize::from(self.config.retry_attempts) + 1)
-            .await?;
+        self.reserve_rate_unlocked(
+            request.capture_id,
+            request.expires_at_unix_ms,
+            usize::from(self.config.retry_attempts) + 1,
+        )
+        .await?;
         let claimed = self
             .claim_capture_unlocked(request.capture_id, &request_sha256)
             .await?;
+        if !claimed {
+            self.release_rate_reservation_unlocked(request.capture_id)
+                .await?;
+        }
         drop(spool_admission);
         drop(admission);
         if !claimed {
@@ -392,47 +486,55 @@ impl InputAdapter {
             }
         }
 
-        let mut retry_count = 0_u8;
-        let response = loop {
-            let attempt_started_at_unix_ms = now_unix_ms()?;
-            if request.expires_at_unix_ms <= attempt_started_at_unix_ms {
-                return Err(AdapterError::ExpiredRequest);
-            }
-            if self.config.grant_expires_unix_ms <= attempt_started_at_unix_ms {
-                return Err(AdapterError::ExpiredGrant);
-            }
-            let result = self
-                .client
-                .get(url.clone())
-                .header(AUTHORIZATION, self.authorization.clone())
-                .header("x-mcloving-grant-id", self.grant_id_header.clone())
-                .header(
-                    "x-mcloving-grant-version",
-                    self.grant_version_header.clone(),
-                )
-                .header("x-mcloving-grant-scope", self.grant_scope_header.clone())
-                .send()
-                .await;
-            match result {
-                Ok(response) if response.status().is_success() => break response,
-                Ok(response)
-                    if response.status() == reqwest::StatusCode::UNAUTHORIZED
-                        || response.status() == reqwest::StatusCode::FORBIDDEN =>
-                {
-                    return Err(AdapterError::Unauthorized);
+        let fetch_result: Result<(reqwest::Response, u8), AdapterError> = async {
+            let mut retry_count = 0_u8;
+            loop {
+                let attempt_started_at_unix_ms = now_unix_ms()?;
+                if request.expires_at_unix_ms <= attempt_started_at_unix_ms {
+                    return Err(AdapterError::ExpiredRequest);
                 }
-                Ok(response)
-                    if matches!(response.status().as_u16(), 502..=504)
-                        && retry_count < self.config.retry_attempts =>
-                {
-                    retry_count += 1;
+                if self.config.grant_expires_unix_ms <= attempt_started_at_unix_ms {
+                    return Err(AdapterError::ExpiredGrant);
                 }
-                Err(_) if retry_count < self.config.retry_attempts => {
-                    retry_count += 1;
+                self.charge_rate_attempt(request.capture_id).await?;
+                let result = self
+                    .client
+                    .get(url.clone())
+                    .header(AUTHORIZATION, self.authorization.clone())
+                    .header("x-mcloving-grant-id", self.grant_id_header.clone())
+                    .header(
+                        "x-mcloving-grant-version",
+                        self.grant_version_header.clone(),
+                    )
+                    .header("x-mcloving-grant-scope", self.grant_scope_header.clone())
+                    .send()
+                    .await;
+                match result {
+                    Ok(response) if response.status().is_success() => {
+                        return Ok((response, retry_count));
+                    }
+                    Ok(response)
+                        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+                            || response.status() == reqwest::StatusCode::FORBIDDEN =>
+                    {
+                        return Err(AdapterError::Unauthorized);
+                    }
+                    Ok(response)
+                        if matches!(response.status().as_u16(), 502..=504)
+                            && retry_count < self.config.retry_attempts =>
+                    {
+                        retry_count += 1;
+                    }
+                    Err(_) if retry_count < self.config.retry_attempts => {
+                        retry_count += 1;
+                    }
+                    _ => return Err(AdapterError::SourceUnavailable),
                 }
-                _ => return Err(AdapterError::SourceUnavailable),
             }
-        };
+        }
+        .await;
+        self.release_rate_reservation(request.capture_id).await?;
+        let (response, retry_count) = fetch_result?;
 
         let headers = response.headers().clone();
         if headers
@@ -639,39 +741,67 @@ impl InputAdapter {
         Ok(())
     }
 
-    async fn admit_rate_unlocked(
+    async fn reserve_rate_unlocked(
         &self,
+        capture_id: Uuid,
+        request_expires_at_unix_ms: i64,
         outbound_attempt_budget: usize,
     ) -> Result<(), AdapterError> {
         let now = now_unix_ms()?;
-        let window_start = now
-            .checked_sub(60_000)
-            .ok_or(AdapterError::StateUnavailable)?;
-        let path = self.config.spool_dir.join(".rate-v1.json");
-        let mut times: Vec<i64> = match tokio::fs::symlink_metadata(&path).await {
-            Ok(metadata)
-                if metadata.file_type().is_file()
-                    && metadata.len()
-                        <= u64::try_from(MAX_RATE_LEDGER_BYTES).unwrap_or(u64::MAX) =>
-            {
-                let bytes = read_bounded_regular_file(&path, MAX_RATE_LEDGER_BYTES).await?;
-                serde_json::from_slice(&bytes).map_err(|_| AdapterError::StateUnavailable)?
-            }
-            Ok(_) => return Err(AdapterError::StateUnavailable),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(_) => return Err(AdapterError::StateUnavailable),
-        };
-        if times.len() > MAX_REQUESTS_PER_MINUTE || times.iter().any(|timestamp| *timestamp > now) {
-            return Err(AdapterError::StateUnavailable);
-        }
-        times.retain(|timestamp| *timestamp > window_start);
-        if times.len().saturating_add(outbound_attempt_budget) > self.config.max_requests_per_minute
+        let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
+        ledger.validate_and_prune(now)?;
+        ledger
+            .reservations
+            .retain(|reservation| reservation.capture_id != capture_id);
+        if ledger
+            .occupancy()?
+            .checked_add(outbound_attempt_budget)
+            .ok_or(AdapterError::StateUnavailable)?
+            > self.config.max_requests_per_minute
         {
             return Err(AdapterError::RateLimited);
         }
-        times.extend(std::iter::repeat_n(now, outbound_attempt_budget));
-        store_rate_ledger(&self.config.spool_dir, &times).await?;
+        let expires_at_unix_ms = request_expires_at_unix_ms.min(self.config.grant_expires_unix_ms);
+        if expires_at_unix_ms <= now {
+            return Err(AdapterError::StateUnavailable);
+        }
+        ledger.reservations.push(RateReservation {
+            capture_id,
+            expires_at_unix_ms,
+            remaining_attempts: outbound_attempt_budget,
+        });
+        store_rate_ledger(&self.config.spool_dir, &ledger).await?;
         Ok(())
+    }
+
+    async fn charge_rate_attempt(&self, capture_id: Uuid) -> Result<(), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let now = now_unix_ms()?;
+        let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
+        ledger.validate_and_prune(now)?;
+        ledger.charge_attempt(capture_id, now)?;
+        if ledger.occupancy()? > self.config.max_requests_per_minute {
+            return Err(AdapterError::StateUnavailable);
+        }
+        store_rate_ledger(&self.config.spool_dir, &ledger).await
+    }
+
+    async fn release_rate_reservation(&self, capture_id: Uuid) -> Result<(), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        self.release_rate_reservation_unlocked(capture_id).await
+    }
+
+    async fn release_rate_reservation_unlocked(
+        &self,
+        capture_id: Uuid,
+    ) -> Result<(), AdapterError> {
+        let now = now_unix_ms()?;
+        let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
+        ledger.validate_and_prune(now)?;
+        ledger
+            .reservations
+            .retain(|reservation| reservation.capture_id != capture_id);
+        store_rate_ledger(&self.config.spool_dir, &ledger).await
     }
 
     fn sign_receipt(&self, receipt: &CaptureReceipt) -> Result<String, AdapterError> {
@@ -1007,8 +1137,30 @@ fn private_spool_metadata_is_valid_for(metadata: &std::fs::Metadata, effective_u
         && metadata.uid() == effective_uid
 }
 
-async fn store_rate_ledger(spool_dir: &Path, times: &[i64]) -> Result<(), AdapterError> {
-    let bytes = serde_json::to_vec(times).map_err(|_| AdapterError::StateUnavailable)?;
+async fn load_rate_ledger(spool_dir: &Path) -> Result<RateLedger, AdapterError> {
+    let path = spool_dir.join(".rate-v1.json");
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && metadata.len() <= u64::try_from(MAX_RATE_LEDGER_BYTES).unwrap_or(u64::MAX) =>
+        {
+            let bytes = read_bounded_regular_file(&path, MAX_RATE_LEDGER_BYTES).await?;
+            match serde_json::from_slice(&bytes).map_err(|_| AdapterError::StateUnavailable)? {
+                StoredRateLedger::Current(ledger) => Ok(ledger),
+                StoredRateLedger::Legacy(attempt_started_at_unix_ms) => Ok(RateLedger {
+                    attempt_started_at_unix_ms,
+                    reservations: Vec::new(),
+                }),
+            }
+        }
+        Ok(_) => Err(AdapterError::StateUnavailable),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(RateLedger::default()),
+        Err(_) => Err(AdapterError::StateUnavailable),
+    }
+}
+
+async fn store_rate_ledger(spool_dir: &Path, ledger: &RateLedger) -> Result<(), AdapterError> {
+    let bytes = serde_json::to_vec(ledger).map_err(|_| AdapterError::StateUnavailable)?;
     if bytes.len() > MAX_RATE_LEDGER_BYTES {
         return Err(AdapterError::StateUnavailable);
     }
@@ -1445,6 +1597,38 @@ pub async fn sha256_file(path: &Path) -> Result<String, AdapterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_reservations_are_charged_at_attempt_start_across_rate_windows() {
+        let capture_id = Uuid::new_v4();
+        let mut ledger = RateLedger {
+            attempt_started_at_unix_ms: Vec::new(),
+            reservations: vec![RateReservation {
+                capture_id,
+                expires_at_unix_ms: 180_000,
+                remaining_attempts: 3,
+            }],
+        };
+
+        assert_eq!(ledger.occupancy().expect("reserved occupancy"), 3);
+        assert!(ledger.attempt_started_at_unix_ms.is_empty());
+
+        let retry_started_at = 61_000;
+        ledger
+            .validate_and_prune(retry_started_at)
+            .expect("reservation remains live across the first rate window");
+        ledger
+            .charge_attempt(capture_id, retry_started_at)
+            .expect("charge retry at its actual start");
+
+        assert_eq!(ledger.attempt_started_at_unix_ms, vec![retry_started_at]);
+        assert_eq!(ledger.reservations[0].remaining_attempts, 2);
+        assert_eq!(
+            ledger.occupancy().expect("charged plus reserved occupancy"),
+            3,
+            "converting a reserved slot to an actual attempt must not free capacity"
+        );
+    }
 
     #[tokio::test]
     async fn bounded_file_read_rejects_oversized_content() {
