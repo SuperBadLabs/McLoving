@@ -30,8 +30,9 @@ represented as Mario production truth.
 - bounded timeout, retry, response size, rate, freshness, and typed JSON schema;
 - secret-labelled response denial plus marker-set non-disclosure scanning;
 - atomic durable capture claims, no-overwrite receipt publication, restart
-  replay, substituted-replay denial, directory durability before source access,
-  and rate denial before claim creation;
+  replay, substituted-replay denial, directory durability before source access
+  and after receipt publication, matching-claim convergence before admission,
+  and serialized rate denial before new claim creation;
 - disabled client-library retries so every source read is owned by the explicit
   bounded retry counter; and
 - complete signed response receipt with source provenance and canonical value

@@ -357,10 +357,17 @@ async fn outage_rate_generation_and_rollback_are_fail_closed() {
     let mut limited_config = config(&fixture.endpoint, temp.path());
     limited_config.max_requests_per_minute = 1;
     let limited = make_adapter(limited_config, READ_TOKEN).await;
-    limited
-        .capture(&request(&limited, "main", "valid"))
-        .await
-        .expect("first request");
+    let duplicate_request = request(&limited, "main", "valid");
+    let reads_before = fixture.state.reads.load(Ordering::SeqCst);
+    let (first, duplicate) = tokio::join!(
+        limited.capture(&duplicate_request),
+        limited.capture(&duplicate_request)
+    );
+    assert_eq!(
+        first.expect("first request"),
+        duplicate.expect("duplicate request")
+    );
+    assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 1);
     let rate_limited_request = request(&limited, "dev", "valid");
     assert!(matches!(
         limited.capture(&rate_limited_request).await,

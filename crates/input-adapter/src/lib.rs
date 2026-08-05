@@ -249,6 +249,7 @@ pub struct InputAdapter {
     signing_key: Vec<u8>,
     secret_markers: Vec<Vec<u8>>,
     client: reqwest::Client,
+    capture_admission: Mutex<()>,
     request_times: Mutex<VecDeque<Instant>>,
 }
 
@@ -307,6 +308,7 @@ impl InputAdapter {
             signing_key,
             secret_markers,
             client,
+            capture_admission: Mutex::new(()),
             request_times: Mutex::new(VecDeque::new()),
         })
     }
@@ -325,11 +327,30 @@ impl InputAdapter {
             return Ok(receipt);
         }
         self.validate_request(request)?;
-        self.admit_rate().await?;
-        if !self
-            .claim_capture(request.capture_id, &request_sha256)
+        let admission = self.capture_admission.lock().await;
+        if let Some(receipt) = self.load_stored(request.capture_id).await? {
+            drop(admission);
+            if receipt.request_sha256 != request_sha256 {
+                return Err(AdapterError::ReplayMismatch);
+            }
+            self.verify_receipt(&receipt)?;
+            return Ok(receipt);
+        }
+        if self
+            .matching_claim_exists(request.capture_id, &request_sha256)
             .await?
         {
+            drop(admission);
+            return self
+                .await_claimed_receipt(request.capture_id, &request_sha256)
+                .await;
+        }
+        self.admit_rate().await?;
+        let claimed = self
+            .claim_capture(request.capture_id, &request_sha256)
+            .await?;
+        drop(admission);
+        if !claimed {
             return self
                 .await_claimed_receipt(request.capture_id, &request_sha256)
                 .await;
@@ -631,16 +652,37 @@ impl InputAdapter {
                 Ok(true)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing = read_bounded_regular_file(&path, 64).await?;
-                let existing = std::str::from_utf8(&existing)
-                    .map_err(|_| AdapterError::InvalidStoredReceipt)?;
-                if existing == request_sha256 {
+                if self
+                    .matching_claim_exists(capture_id, request_sha256)
+                    .await?
+                {
                     Ok(false)
                 } else {
-                    Err(AdapterError::ReplayMismatch)
+                    Err(AdapterError::StateUnavailable)
                 }
             }
             Err(_) => Err(AdapterError::StateUnavailable),
+        }
+    }
+
+    async fn matching_claim_exists(
+        &self,
+        capture_id: Uuid,
+        request_sha256: &str,
+    ) -> Result<bool, AdapterError> {
+        let path = self.config.spool_dir.join(format!("{capture_id}.claim"));
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(AdapterError::StateUnavailable),
+        }
+        let existing = read_bounded_regular_file(&path, 64).await?;
+        let existing =
+            std::str::from_utf8(&existing).map_err(|_| AdapterError::InvalidStoredReceipt)?;
+        if existing == request_sha256 {
+            Ok(true)
+        } else {
+            Err(AdapterError::ReplayMismatch)
         }
     }
 
@@ -694,6 +736,7 @@ impl InputAdapter {
                 tokio::fs::remove_file(&temp_path)
                     .await
                     .map_err(|_| AdapterError::StateUnavailable)?;
+                sync_directory(&self.config.spool_dir).await?;
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {

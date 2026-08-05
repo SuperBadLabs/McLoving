@@ -99,11 +99,14 @@ caller waits only for the bounded timeout and then receives the exact signed
 receipt. A process crash after claiming but before receipt publication remains
 fail-closed and requires operator reconciliation; it never silently samples the
 mutable source again. Claim contents and the containing spool directory are
-synchronized before any network read. Rate admission runs before claim creation,
-so a denied request cannot strand an unfulfillable claim.
+synchronized before any network read. Matching claimed or completed captures
+bypass source-read admission and converge on the same receipt; new captures are
+serialized through rate admission before claim creation, so a denied request
+cannot strand an unfulfillable claim.
 
-Receipts are written to a unique temporary file, synchronized, and atomically
-linked into the final capture path without overwrite. A restart replays the
+Receipts are written to a unique temporary file, synchronized, atomically
+linked into the final capture path without overwrite, and followed by a spool
+directory synchronization before success. A restart replays the
 same verified receipt without another source read. HMAC-SHA-256 covers the
 complete receipt, and verification also re-hashes the canonical JSON response.
 The HMAC key is not exposed to a pipeline runner. Because the verifier shares
