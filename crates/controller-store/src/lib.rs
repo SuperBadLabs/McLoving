@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{Acquire, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+mod admin_migration;
 mod audit;
 mod authorization_mapping;
 pub mod authz;
@@ -18,6 +19,11 @@ mod security;
 mod state_transfer;
 mod test_results;
 
+pub use admin_migration::{
+    ExternalAdminAuthority, ExternalAdminClientReceipt, ExternalAdminClientWrite,
+    ExternalAdminDisposition, ExternalAdminOperation, ExternalAdminOperationContract,
+    compute_external_admin_client_binding_digest, compute_external_admin_client_digest,
+};
 pub use audit::{
     AuditEvent, AuditExport, AuditPage, AuditRetentionPolicy, MAX_AUDIT_PAGE, NewAuditEvent,
     verify_audit_export, verify_audit_page,
@@ -124,6 +130,9 @@ pub const AUTHORIZATION_MAPPING_V24: &str =
 /// Immutable external-reader contract and authority generations.
 pub const EXTERNAL_READ_CONSUMERS_V25: &str =
     include_str!("../migrations/0025_external_read_consumers.sql");
+/// Immutable administrative-writer contract and authority generations.
+pub const EXTERNAL_ADMIN_CLIENTS_V26: &str =
+    include_str!("../migrations/0026_external_admin_clients.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -468,6 +477,10 @@ pub enum StoreError {
     InvalidConsumerMigration(String),
     #[error("external read consumer migration conflict: {0}")]
     ConsumerMigrationConflict(String),
+    #[error("invalid external admin client migration: {0}")]
+    InvalidAdminMigration(String),
+    #[error("external admin client migration conflict: {0}")]
+    AdminMigrationConflict(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -652,6 +665,8 @@ impl Store {
                    ('authorization_project_policies', 'SELECT'),
                    ('external_read_consumer_versions', 'SELECT'),
                    ('external_read_consumer_current', 'SELECT'),
+                   ('external_admin_client_versions', 'SELECT'),
+                   ('external_admin_client_current', 'SELECT'),
                    ('oidc_login_attempts', 'SELECT'), ('oidc_login_attempts', 'INSERT'),
                    ('oidc_login_attempts', 'UPDATE'), ('oidc_login_attempts', 'DELETE'),
                    ('credential_namespace_reservations', 'SELECT'),
@@ -952,6 +967,8 @@ impl Store {
                    ('authorization_project_policies'),
                    ('external_read_consumer_versions'),
                    ('external_read_consumer_current'),
+                   ('external_admin_client_versions'),
+                   ('external_admin_client_current'),
                    ('oidc_login_attempts'), ('identity_sessions'),
                    ('oidc_token_replays'), ('service_credentials'),
                    ('protected_environments'), ('environment_approvals'),
@@ -980,7 +997,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 46
+             SELECT COUNT(*) = 48
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1009,7 +1026,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 46
+                    AND (SELECT COUNT(*) FROM policies) = 48
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1115,6 +1132,7 @@ impl Store {
         apply_migration(&mut tx, 23, RUNTIME_FUNCTION_BOUNDARY_V23).await?;
         apply_migration(&mut tx, 24, AUTHORIZATION_MAPPING_V24).await?;
         apply_migration(&mut tx, 25, EXTERNAL_READ_CONSUMERS_V25).await?;
+        apply_migration(&mut tx, 26, EXTERNAL_ADMIN_CLIENTS_V26).await?;
         tx.commit().await?;
         Ok(())
     }
