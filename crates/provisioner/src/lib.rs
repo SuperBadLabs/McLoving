@@ -1506,6 +1506,48 @@ impl Provisioner {
                     .ok_or(ProvisionerError::StateUnavailable)?;
             }
         }
+        for (request_id, stored) in &admitted_ready {
+            if final_request_ids.contains(request_id) {
+                continue;
+            }
+            let (terminal, outcome) = self.absence_terminal(stored, final_observed_at)?;
+            let receipt = if self.set_state_from(
+                *request_id,
+                stored.state,
+                terminal,
+                None,
+                final_observed_at,
+            )? {
+                self.append_lifecycle_receipt(
+                    &stored.request,
+                    LifecycleEvidence {
+                        request_sha256: &stored.request_sha256,
+                        instance: None,
+                        outcome,
+                        cleanup_confirmed: true,
+                        ambiguity: false,
+                        audit_lineage: &request.audit_lineage,
+                        observed_at_unix_ms: final_observed_at,
+                    },
+                )?
+            } else {
+                let current = self
+                    .load_stored_request(*request_id)?
+                    .ok_or(ProvisionerError::StateUnavailable)?;
+                Box::pin(self.recover_one(current, &request.audit_lineage)).await?
+            };
+            if receipt.body.cleanup_confirmed && !receipt.body.ambiguity {
+                cleaned = cleaned
+                    .checked_add(1)
+                    .ok_or(ProvisionerError::StateUnavailable)?;
+                cleaned_request_ids.insert(*request_id);
+            } else {
+                ambiguous = ambiguous
+                    .checked_add(1)
+                    .ok_or(ProvisionerError::StateUnavailable)?;
+                ambiguous_request_ids.insert(*request_id);
+            }
+        }
         let active_ready = active_instance_ids.len();
         let body = ReconcileReceiptBody {
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -3212,7 +3254,7 @@ fn initialize_database(
     config_sha256: &str,
     generation: u64,
 ) -> Result<(), ProvisionerError> {
-    let connection = open_database(path)?;
+    let mut connection = open_database(path)?;
     connection
         .execute_batch(
             "PRAGMA journal_mode = DELETE;
@@ -3271,7 +3313,10 @@ fn initialize_database(
              ) STRICT;",
         )
         .map_err(|_| ProvisionerError::StateUnavailable)?;
-    let has_admission_epoch: i64 = connection
+    let migration = connection
+        .transaction_with_behavior(TransactionBehavior::Exclusive)
+        .map_err(|_| ProvisionerError::StateUnavailable)?;
+    let has_admission_epoch: i64 = migration
         .query_row(
             "SELECT count(*) FROM pragma_table_info('metadata') WHERE name = 'admission_epoch'",
             [],
@@ -3279,7 +3324,7 @@ fn initialize_database(
         )
         .map_err(|_| ProvisionerError::StateUnavailable)?;
     if has_admission_epoch == 0 {
-        connection
+        migration
             .execute(
                 "ALTER TABLE metadata ADD COLUMN admission_epoch INTEGER NOT NULL DEFAULT 0
                  CHECK (admission_epoch >= 0)",
@@ -3287,6 +3332,9 @@ fn initialize_database(
             )
             .map_err(|_| ProvisionerError::StateUnavailable)?;
     }
+    migration
+        .commit()
+        .map_err(|_| ProvisionerError::StateUnavailable)?;
     connection
         .execute(
             "INSERT INTO metadata(

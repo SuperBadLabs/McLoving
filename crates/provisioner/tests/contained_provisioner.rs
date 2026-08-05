@@ -48,6 +48,7 @@ enum FixtureMode {
     DelayedMalformedDeleteOnce,
     SubstituteFinalInventory,
     DuplicateFinalInventory,
+    DisappearFromFinalInventory,
     DelayedReady,
     DelayedCreateReady,
     DelayedAbsence,
@@ -452,6 +453,9 @@ async fn list_instances(
     }
     let mut inner = state.inner.lock().expect("fixture state");
     inner.inventory_reads += 1;
+    if inner.mode == FixtureMode::DisappearFromFinalInventory && inner.inventory_reads >= 2 {
+        inner.instances.clear();
+    }
     let mut instances = inner.instances.values().cloned().collect::<Vec<_>>();
     if slow_initial {
         let observed_at = now_ms();
@@ -1155,6 +1159,38 @@ async fn final_inventory_substitution_is_reported_as_escaped_compute() {
     assert_eq!(receipt.body.active_ready, 0);
     assert_eq!(receipt.body.escaped_compute_remaining, 1);
     assert!(receipt.body.active_instance_ids.is_empty());
+}
+
+#[tokio::test]
+async fn final_inventory_absence_closes_the_retained_ready_row() {
+    let context = Context::new(FixtureMode::DisappearFromFinalInventory).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before final inventory disappearance");
+
+    let reconciled = context
+        .provisioner
+        .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+        .await
+        .expect("reconcile final signed absence");
+    assert_eq!(reconciled.body.active_ready, 0);
+    assert_eq!(reconciled.body.cleaned, 1);
+    assert_eq!(reconciled.body.ambiguous, 0);
+    assert_eq!(reconciled.body.escaped_compute_remaining, 0);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let state: String = database
+        .query_row(
+            "SELECT state FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read reconciled state");
+    assert_eq!(state, "deleted");
 }
 
 #[tokio::test]
@@ -2340,6 +2376,64 @@ async fn retained_ledger_rejects_receipt_signing_identity_drift() {
         Err(ProvisionerError::StateUnavailable)
     ));
     assert_eq!(context.fixture.counts().0, 0);
+}
+
+#[tokio::test]
+async fn concurrent_processes_serialize_the_admission_epoch_migration() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    database
+        .execute("ALTER TABLE metadata DROP COLUMN admission_epoch", [])
+        .expect("simulate retained pre-admission-epoch ledger");
+    drop(database);
+
+    let first_config = context.config.clone();
+    let second_config = context.config.clone();
+    let first_provider_key = context.fixture.public_key();
+    let second_provider_key = context.fixture.public_key();
+    let first = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("first migration runtime")
+            .block_on(Provisioner::new(
+                first_config,
+                IMPLEMENTATION_SHA256.to_owned(),
+                PROVIDER_TOKEN.to_owned(),
+                first_provider_key,
+                RECEIPT_KEY.to_vec(),
+            ))
+            .is_ok()
+    });
+    let second = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("second migration runtime")
+            .block_on(Provisioner::new(
+                second_config,
+                IMPLEMENTATION_SHA256.to_owned(),
+                PROVIDER_TOKEN.to_owned(),
+                second_provider_key,
+                RECEIPT_KEY.to_vec(),
+            ))
+            .is_ok()
+    });
+    assert!(first.join().expect("first migration process"));
+    assert!(second.join().expect("second migration process"));
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open migrated ledger");
+    let columns: i64 = database
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('metadata')
+             WHERE name = 'admission_epoch'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count admission epoch columns");
+    assert_eq!(columns, 1);
 }
 
 #[tokio::test]
