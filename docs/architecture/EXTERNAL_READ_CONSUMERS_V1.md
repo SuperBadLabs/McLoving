@@ -23,9 +23,9 @@ tenant/project, plus one or more typed resources:
 | Job metadata | `GET .../pipelines`; `mcloving pipelines`; exclusive lexical slug cursor |
 | Queue and build list | `GET .../builds`; `mcloving builds --status queued`; paired creation-microsecond/build-UUID cursor |
 | Status and graph | `GET .../builds/{build}` and `/graph`; `status` and `graph`; snapshot response |
-| Logs | `GET .../logs`; `logs`/`watch`; complete attempt/fence/sequence/stream cursor |
+| Logs | `GET .../logs`; `logs`/`watch`; complete `after_attempt_id`/fence/sequence/stream cursor |
 | Tests | `GET .../tests`; `tests`; bounded complete normalized report set |
-| Artifacts | `GET .../artifacts` and authenticated content route; `artifacts`/`artifact-download`; immutable digest-bound content |
+| Artifacts | `GET .../artifacts` metadata plus `GET .../artifacts/content?attempt_id=...&name=...`; `artifacts`/`artifact-download`; immutable digest-bound content |
 
 Every request carries a separately revocable service credential or current
 OIDC session. AUTHZ-001 enforces project view plus distinct artifact, test, and
@@ -88,8 +88,9 @@ artifact retrieval. `crates/controller-store/tests/external_read_consumers.rs`
 uses real PostgreSQL to prove canonical binding, source/target/tenant
 substitution denial, zero-residual-read enforcement, exact monotonic rollback,
 active-but-read-ineligible target denial, lifecycle-race serialization,
-resource/endpoint mismatch denial, concurrent generation fencing, hash-chained
-audit, forced RLS, and runtime mutation denial.
+resource/endpoint/query mismatch denial (including the exact log cursor and
+artifact-content selectors), concurrent generation fencing, hash-chained audit,
+forced RLS, and runtime mutation denial.
 
 This ledger grants no build/effect authority and does not retire Jenkins.
 Population cutover evidence is installed only when the real caller changes;

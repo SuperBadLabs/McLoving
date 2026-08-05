@@ -30,6 +30,7 @@ impl ExternalReadAuthority {
 #[serde(rename_all = "snake_case")]
 pub enum ExternalReadResource {
     Artifact,
+    ArtifactContent,
     BuildGraph,
     BuildStatus,
     JobMetadata,
@@ -42,6 +43,7 @@ impl ExternalReadResource {
     fn as_str(self) -> &'static str {
         match self {
             Self::Artifact => "artifact",
+            Self::ArtifactContent => "artifact_content",
             Self::BuildGraph => "build_graph",
             Self::BuildStatus => "build_status",
             Self::JobMetadata => "job_metadata",
@@ -53,7 +55,7 @@ impl ExternalReadResource {
 
     fn required_action(self) -> Action {
         match self {
-            Self::Artifact => Action::ArtifactRead,
+            Self::Artifact | Self::ArtifactContent => Action::ArtifactRead,
             Self::Log => Action::LogRead,
             Self::TestResult => Action::TestRead,
             Self::BuildGraph | Self::BuildStatus | Self::JobMetadata | Self::Queue => {
@@ -66,6 +68,9 @@ impl ExternalReadResource {
         match self {
             Self::Artifact => {
                 "/api/v1/organizations/{organization}/projects/{project}/builds/{build}/artifacts"
+            }
+            Self::ArtifactContent => {
+                "/api/v1/organizations/{organization}/projects/{project}/builds/{build}/artifacts/content"
             }
             Self::BuildGraph => {
                 "/api/v1/organizations/{organization}/projects/{project}/builds/{build}/graph"
@@ -89,7 +94,7 @@ impl ExternalReadResource {
     fn query_names(self) -> &'static [&'static str] {
         match self {
             Self::Log => &[
-                "after_attempt",
+                "after_attempt_id",
                 "after_fence",
                 "after_sequence",
                 "after_stream",
@@ -97,6 +102,7 @@ impl ExternalReadResource {
             ],
             Self::Queue => &["after_created_micros", "after_id", "limit", "status"],
             Self::JobMetadata => &["after", "limit"],
+            Self::ArtifactContent => &["attempt_id", "name"],
             Self::Artifact | Self::BuildGraph | Self::BuildStatus | Self::TestResult => &[],
         }
     }
@@ -571,8 +577,8 @@ fn validate_input(input: &ExternalReadConsumerWrite) -> Result<(), StoreError> {
     {
         return invalid("external read consumer observation window is invalid");
     }
-    if input.endpoint_contracts.is_empty() || input.endpoint_contracts.len() > 7 {
-        return invalid("external read consumer must bind one to seven read resources");
+    if input.endpoint_contracts.is_empty() || input.endpoint_contracts.len() > 8 {
+        return invalid("external read consumer must bind one to eight read resources");
     }
     let mut resources = BTreeSet::new();
     for contract in &input.endpoint_contracts {

@@ -49,7 +49,7 @@ fn contracts() -> Vec<ExternalReadEndpointContract> {
                 .to_owned(),
             query: BTreeMap::from([
                 (
-                    "after_attempt".to_owned(),
+                    "after_attempt_id".to_owned(),
                     "UUID cursor component".to_owned(),
                 ),
                 (
@@ -79,8 +79,20 @@ fn contracts() -> Vec<ExternalReadEndpointContract> {
                 "/api/v1/organizations/{organization}/projects/{project}/builds/{build}/artifacts"
                     .to_owned(),
             query: BTreeMap::new(),
-            pagination: "bounded metadata set; content URL is authenticated and immutable"
+            pagination: "bounded metadata set; no pagination".to_owned(),
+        },
+        ExternalReadEndpointContract {
+            resource: ExternalReadResource::ArtifactContent,
+            endpoint: "/api/v1/organizations/{organization}/projects/{project}/builds/{build}/artifacts/content"
                 .to_owned(),
+            query: BTreeMap::from([
+                (
+                    "attempt_id".to_owned(),
+                    "required producer attempt UUID".to_owned(),
+                ),
+                ("name".to_owned(), "required exact artifact name".to_owned()),
+            ]),
+            pagination: "single authenticated immutable content response; no pagination".to_owned(),
         },
         ExternalReadEndpointContract {
             resource: ExternalReadResource::Queue,
@@ -471,6 +483,20 @@ async fn contract_substitution_tenant_crossing_and_concurrent_first_generation_f
         compute_external_read_consumer_digest(&mislabeled_endpoint),
         Err(StoreError::InvalidConsumerMigration(message))
             if message.contains("endpoint does not match its resource")
+    ));
+
+    let mut incomplete_artifact_content = source.clone();
+    incomplete_artifact_content
+        .endpoint_contracts
+        .iter_mut()
+        .find(|contract| contract.resource == ExternalReadResource::ArtifactContent)
+        .expect("artifact-content contract")
+        .query
+        .remove("attempt_id");
+    assert!(matches!(
+        compute_external_read_consumer_digest(&incomplete_artifact_content),
+        Err(StoreError::InvalidConsumerMigration(message))
+            if message.contains("query contract does not match its resource")
     ));
 
     let mut wrong_tenant = source.clone();

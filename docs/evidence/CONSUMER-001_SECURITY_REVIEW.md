@@ -33,8 +33,10 @@ invented and the source manifest was not rewritten.
   zero observed Jenkins reads, plus successful runtime authorization of the
   exact active target principal for every declared read resource under a row
   lock that serializes lifecycle transitions;
-- resource tags must match exact v1 endpoint templates and query-name sets
-  before they select an authorization action;
+- resource tags must match exact v1 endpoint templates and query-name sets,
+  including `after_attempt_id` for logs and the distinct authenticated artifact
+  content route with required `attempt_id` and `name`, before they select an
+  authorization action;
 - Jenkins restoration must bind the immediately preceding target generation
   and separate rollback evidence; and
 - migration-only writes, per-consumer advisory serialization, and hash-chained
@@ -60,8 +62,9 @@ The consumer-specific tests prove stale-digest and independently redigested
 cross-generation source endpoint/contract substitution,
 cross-tenant project substitution, inactive/substituted target identity,
 active target identity without the required project read authority,
-target lifecycle race serialization, resource/endpoint mismatch, canonical
-digest mismatch, concurrent first-generation conflict, residual Jenkins-read
+target lifecycle race serialization, resource/endpoint/query mismatch including
+artifact-content selector omission, canonical digest mismatch, concurrent
+first-generation conflict, residual Jenkins-read
 rejection, exact monotonic cutover and rollback, audited history, runtime
 mutation denial, and forced-RLS inclusion. The API-only CLI gate proves
 Bearer-authenticated pipeline and queued-build queries with exact cursors plus
