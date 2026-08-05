@@ -203,6 +203,7 @@ struct RateReservation {
 #[serde(deny_unknown_fields)]
 struct InFlightRateAttempt {
     capture_id: Uuid,
+    expires_at_unix_ms: i64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -250,6 +251,14 @@ impl RateLedger {
         {
             return Err(AdapterError::StateUnavailable);
         }
+        self.attempt_started_at_unix_ms.extend(
+            self.in_flight_attempts
+                .iter()
+                .filter(|attempt| attempt.expires_at_unix_ms <= now)
+                .map(|attempt| attempt.expires_at_unix_ms),
+        );
+        self.in_flight_attempts
+            .retain(|attempt| attempt.expires_at_unix_ms > now);
         let mut capture_ids = HashSet::with_capacity(self.reservations.len());
         if self
             .reservations
@@ -282,7 +291,7 @@ impl RateLedger {
         )
     }
 
-    fn charge_attempt(&mut self, capture_id: Uuid) -> Result<(), AdapterError> {
+    fn charge_attempt(&mut self, capture_id: Uuid, timeout_ms: u64) -> Result<(), AdapterError> {
         if self
             .in_flight_attempts
             .iter()
@@ -299,8 +308,14 @@ impl RateLedger {
             .remaining_attempts
             .checked_sub(1)
             .ok_or(AdapterError::StateUnavailable)?;
-        self.in_flight_attempts
-            .push(InFlightRateAttempt { capture_id });
+        let expires_at_unix_ms = reservation
+            .expires_at_unix_ms
+            .checked_add(i64::try_from(timeout_ms).map_err(|_| AdapterError::StateUnavailable)?)
+            .ok_or(AdapterError::StateUnavailable)?;
+        self.in_flight_attempts.push(InFlightRateAttempt {
+            capture_id,
+            expires_at_unix_ms,
+        });
         self.reservations
             .retain(|reservation| reservation.remaining_attempts > 0);
         Ok(())
@@ -831,7 +846,7 @@ impl InputAdapter {
         let now = now_unix_ms()?;
         let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
         ledger.validate_and_prune(now)?;
-        ledger.charge_attempt(capture_id)?;
+        ledger.charge_attempt(capture_id, self.config.timeout_ms)?;
         if ledger.occupancy()? > self.config.max_requests_per_minute {
             return Err(AdapterError::StateUnavailable);
         }
@@ -1753,7 +1768,7 @@ mod tests {
         assert!(ledger.attempt_started_at_unix_ms.is_empty());
 
         ledger
-            .charge_attempt(capture_id)
+            .charge_attempt(capture_id, 60_000)
             .expect("convert reservation to in-flight charge");
         assert!(ledger.attempt_started_at_unix_ms.is_empty());
         assert_eq!(ledger.in_flight_attempts.len(), 1);
@@ -1775,6 +1790,32 @@ mod tests {
             3,
             "converting a reserved slot to an actual attempt must not free capacity"
         );
+    }
+
+    #[test]
+    fn expired_in_flight_charge_reconciles_then_ages_out() {
+        let capture_id = Uuid::new_v4();
+        let mut ledger = RateLedger {
+            attempt_started_at_unix_ms: Vec::new(),
+            in_flight_attempts: vec![InFlightRateAttempt {
+                capture_id,
+                expires_at_unix_ms: 100,
+            }],
+            reservations: Vec::new(),
+        };
+
+        ledger
+            .validate_and_prune(101)
+            .expect("reconcile stranded in-flight charge");
+        assert!(ledger.in_flight_attempts.is_empty());
+        assert_eq!(ledger.attempt_started_at_unix_ms, vec![100]);
+        assert_eq!(ledger.occupancy().expect("reconciled occupancy"), 1);
+
+        ledger
+            .validate_and_prune(60_101)
+            .expect("age reconciled charge out of the rate window");
+        assert!(ledger.attempt_started_at_unix_ms.is_empty());
+        assert_eq!(ledger.occupancy().expect("released occupancy"), 0);
     }
 
     #[tokio::test]

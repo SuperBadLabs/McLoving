@@ -110,6 +110,15 @@ bypass source-read admission and converge on the same receipt; new captures are
 serialized through rate admission before claim creation, so a denied request
 cannot strand an unfulfillable claim.
 
+Admission durably reserves the complete explicit attempt budget. Immediately
+before each GET, one reservation becomes an in-flight charge that cannot age
+out during filesystem coordination, scheduling delay, or response-body
+transport. Completion converts it to a conservative sliding-window timestamp.
+If the adapter exits mid-attempt, the charge reconciles after the earlier of
+request or grant expiry plus the per-attempt timeout, then ages out through the
+same one-minute history; a crash can neither free capacity early nor consume it
+forever.
+
 Claim contents are first synchronized under an unpredictable private temporary
 name, then atomically linked into the final capture path without overwrite.
 Another adapter process can therefore observe either no claim or the complete
