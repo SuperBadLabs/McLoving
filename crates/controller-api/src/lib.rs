@@ -2,6 +2,7 @@
 
 mod oidc;
 
+pub use mcloving_controller_store::BuildCursor;
 pub use oidc::{
     MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
     MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig,
@@ -19,7 +20,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mcloving_controller_store::{
-    ApprovalView, ArtifactMetadata, AuditPage, BuildCursor, BuildGraph, BuildPage, ComponentCursor,
+    ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, ComponentCursor,
     ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
     DagDependency, DagNodeKind, DependencyCondition, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild,
     NewDagNode, NewEnvironmentApproval, ObjectKind, ObjectStatus, PipelinePage, PipelinePutOutcome,

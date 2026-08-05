@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use mcloving_controller_api::{
-    ApprovalRequest, Client, LogCursor, RetryRequest, SubmissionRequest,
+    ApprovalRequest, BuildCursor, Client, LogCursor, RetryRequest, SubmissionRequest,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -77,6 +77,24 @@ pub enum Command {
     },
     Status {
         build: Uuid,
+    },
+    /// List versioned pipeline/job metadata using a stable slug cursor.
+    Pipelines {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// List builds, including the queue via `--status queued`.
+    Builds {
+        #[arg(long)]
+        after_created_micros: Option<i64>,
+        #[arg(long)]
+        after_id: Option<Uuid>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
     },
     Graph {
         build: Uuid,
@@ -250,6 +268,32 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
                     arguments.organization,
                     required_project(arguments.project)?,
                     *build,
+                )
+                .await?,
+        )?,
+        Command::Pipelines { after, limit } => to_value(
+            client
+                .pipelines(
+                    arguments.organization,
+                    required_project(arguments.project)?,
+                    after.as_deref(),
+                    Some(*limit),
+                )
+                .await?,
+        )?,
+        Command::Builds {
+            after_created_micros,
+            after_id,
+            status,
+            limit,
+        } => to_value(
+            client
+                .builds(
+                    arguments.organization,
+                    required_project(arguments.project)?,
+                    build_cursor(*after_created_micros, *after_id)?,
+                    status.as_deref(),
+                    Some(*limit),
                 )
                 .await?,
         )?,
@@ -470,6 +514,20 @@ fn cursor(
     }
 }
 
+fn build_cursor(
+    created_at_unix_micros: Option<i64>,
+    build_id: Option<Uuid>,
+) -> Result<Option<BuildCursor>> {
+    match (created_at_unix_micros, build_id) {
+        (None, None) => Ok(None),
+        (Some(created_at_unix_micros), Some(build_id)) => Ok(Some(BuildCursor {
+            created_at_unix_micros,
+            build_id,
+        })),
+        _ => bail!("--after-created-micros and --after-id must be supplied together"),
+    }
+}
+
 async fn watch(
     client: &Client,
     organization_id: Uuid,
@@ -665,6 +723,20 @@ mod tests {
             )
             .unwrap()
             .is_some()
+        );
+    }
+
+    #[test]
+    fn build_cursor_is_all_or_nothing() {
+        assert!(build_cursor(None, None).unwrap().is_none());
+        assert!(build_cursor(Some(1), None).is_err());
+        assert!(build_cursor(None, Some(Uuid::nil())).is_err());
+        assert_eq!(
+            build_cursor(Some(7), Some(Uuid::nil())).unwrap(),
+            Some(BuildCursor {
+                created_at_unix_micros: 7,
+                build_id: Uuid::nil(),
+            })
         );
     }
 

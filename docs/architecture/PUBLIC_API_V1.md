@@ -1,6 +1,6 @@
 # Public API v1
 
-Status: implemented by UX-001.
+Status: implemented by UX-002 and extended by CONSUMER-001.
 
 The Rust CLI is an HTTP client and has no privileged database or controller
 shortcut. Every protected request requires `Authorization: Bearer <token>`.
@@ -73,6 +73,13 @@ saved cursor remains exact across attempt re-fencing. Every item exposes exact
 `content_hex`; `text` is present only when the
 whole chunk is valid UTF-8, so clients can always reproduce the digest without
 lossy replacement. Errors have stable `code` and `message` fields.
+
+External read-side migration uses only this API. The CLI exposes `pipelines`
+with the stable slug cursor and `builds` with the paired creation-microsecond
+and build-UUID cursor; `builds --status queued` is the queue view. Existing
+`status`, `graph`, `logs`, `watch`, `tests`, `artifacts`, and
+`artifact-download` commands cover the remaining read contract. Partial build
+and log cursors fail locally rather than issuing an ambiguous request.
 
 The Wave 1 deployable profile runs one embedded Linux worker for exactly one
 configured organization. It requires separate
