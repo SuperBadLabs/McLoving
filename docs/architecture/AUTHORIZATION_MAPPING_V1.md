@@ -1,7 +1,6 @@
 # Authorization mapping v1
 
-Status: AUTHZ-001 implementation and recovery complete; independent exact-head
-review pending.
+Status: AUTHZ-001 complete.
 
 McLoving preserves effective Jenkins authorization without forcing independent
 permissions into the native four-role lattice. A reviewed Jenkins job maps to

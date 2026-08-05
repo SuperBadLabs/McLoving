@@ -2,8 +2,10 @@
 
 Date: 2026-08-04
 
-Verdict: implementation and recovery PASS. Final AUTHZ-001 closure remains
-pending an independent exact-head pull-request review.
+Verdict: final PASS. Independent security review of exact implementation head
+`8b9b11dcb6a51f491b3c052beb7cdf2282e55702` found no remaining major issue
+after the reported lifecycle, generation-race, and audit-scope defects were
+fixed and regression-tested.
 
 This is a bounded review of the Jenkins-to-McLoving authorization mapping
 substrate. It is not the later whole-product `SEC-004` campaign, does not certify
@@ -94,6 +96,7 @@ grant and requires a new reviewed policy generation. Exact population policy
 parity remains DIFF-002, and unsupported or unrepresentable policy remains
 ineligible rather than widened.
 
-After a clean independent exact-head review, this receipt may be updated to
-final PASS, AUTHZ-001 may advance to `DONE`, and dispatch slot 1 may advance to
-`CONSUMER-001`.
+The clean independent implementation review, green protected checks, real
+PostgreSQL receipt, and logical restore receipt close AUTHZ-001. Dispatch slot
+1 advances to `CONSUMER-001`; production-population parity remains gated by
+DIFF-002.
