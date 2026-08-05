@@ -2,17 +2,14 @@
 
 Date: 2026-08-05
 
-Verdict: PASS for the implementation gate at exact implementation head
-`3d90b73d19a423982ebe67b2297612b542ec19db`. All nine protected checks passed,
-and independent exact-head review found no further actionable issue after forty
-earlier findings were fixed and their threads resolved.
+Verdict: PENDING for the implementation gate. The latest reservation-lifetime
+fix must pass all nine protected checks and independent exact-head review before
+this receipt can certify a specific implementation head. Prior reviewed heads
+are historical evidence only and do not close INPUT-001.
 
-The later PR #32 closure candidate adds only this receipt's final gate counts
-and the execution-board transition from INPUT-001 to PROV-001. Its exact head
-must independently pass the protected checks and review before merge. The final
-squash-merge commit is necessarily unknowable from inside its own pre-merge
-contents; the immutable PR #32 exact-head checks plus post-merge protected-main
-verification are the final closure attestation.
+The final squash-merge commit is necessarily unknowable from inside its own
+pre-merge contents; the immutable PR #32 exact-head checks plus post-merge
+protected-main verification will form the final closure attestation.
 
 This receipt does not claim a Mario production input, canary, cutover,
 rollback, or Jenkins decommissioning event.
@@ -79,13 +76,14 @@ represented as Mario production truth.
 
 ## Current executable receipt
 
-Focused pinned-Rust check and clippy passed. The suite proves seven contained
-end-to-end journeys, seven unit contracts, and one sealed-inventory denominator
-check. The complete locked workspace clippy and test gates also passed, as did
-all nine protected checks on the exact implementation head.
+The latest suite proves seven contained end-to-end journeys, ten unit
+contracts, and one sealed-inventory denominator check. Focused pinned-Rust,
+complete locked workspace, clippy, and all nine protected checks remain pending
+on the next pushed exact implementation candidate.
 
-The independent review produced forty actionable findings across twenty-five exact
-implementation heads: implicit client retries; pre-read claim-directory
+The independent review has produced forty-four actionable implementation
+findings across the implementation-head sequence to date: implicit client
+retries; pre-read claim-directory
 durability; rate denial leaving a claim; duplicate capture admission at low
 rate; post-receipt directory durability; secret-marker leakage through response
 headers; visibility of a partially written claim across adapter processes;
@@ -164,10 +162,24 @@ could return after durable rate reservation without releasing that unused
 capacity. Claim failure now removes and durably records release of the matching
 reservation before returning, while the successful and duplicate-claim paths
 retain their existing accounting semantics.
-Each was corrected with a regression fixture or explicit fail-closed platform
-admission where applicable, revalidated on the complete workspace, and resolved
-only after the fix was present on the current head. The final exact-head review
-reported no further actionable security, correctness, or truth-boundary issue.
+The first duplicate-wait finding showed that deriving the complete wait from a
+very small source timeout could exhaust the wait during normal local receipt
+processing and durable publication. A follow-up showed that any unfenced fixed
+allowance could still expire before a paused or slow publisher later succeeded.
+Claims now durably bind an absolute authority- and work-bounded publication
+deadline; outbound reads and publication are fenced by it, and the signed
+receipt binds it. A final ordering review moved receipt absence and deadline
+expiry into one transaction under the same exclusive spool lock used by the
+publisher. A waiter can no longer return unavailable before a late receipt
+appears.
+The separate closure-documentation review corrected timing language so the
+receipt states the pre-GET expiry fence, pre-body freshness check, and both
+post-capture rechecks instead of implying that validation occurred only after
+body capture.
+Each prior finding was corrected with a regression fixture or explicit
+fail-closed platform admission where applicable and resolved only after its fix
+was present on the reviewed head. The reservation-lifetime fix remains open
+until the next exact candidate passes the complete gates and independent review.
 
 ## Residual risk and authority boundary
 

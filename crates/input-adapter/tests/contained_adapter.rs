@@ -642,25 +642,18 @@ async fn outage_rate_generation_and_rollback_are_fail_closed() {
         "retry-budget denial must not strand a capture claim"
     );
 
-    let overflowing_expiry_dir = TempDir::new().expect("overflowing expiry dir");
-    let mut overflowing_expiry_config = config(&fixture.endpoint, overflowing_expiry_dir.path());
-    overflowing_expiry_config.grant_expires_unix_ms = i64::MAX;
-    let overflowing_expiry = make_adapter(overflowing_expiry_config, READ_TOKEN).await;
-    let mut overflowing_request = request(&overflowing_expiry, "main", "valid");
-    overflowing_request.expires_at_unix_ms = i64::MAX;
+    let distant_expiry_dir = TempDir::new().expect("distant expiry dir");
+    let mut distant_expiry_config = config(&fixture.endpoint, distant_expiry_dir.path());
+    distant_expiry_config.grant_expires_unix_ms = i64::MAX;
+    let distant_expiry = make_adapter(distant_expiry_config, READ_TOKEN).await;
+    let mut distant_request = request(&distant_expiry, "main", "valid");
+    distant_request.expires_at_unix_ms = i64::MAX;
     let reads_before = fixture.state.reads.load(Ordering::SeqCst);
-    assert!(matches!(
-        overflowing_expiry.capture(&overflowing_request).await,
-        Err(AdapterError::StateUnavailable)
-    ));
-    assert_eq!(fixture.state.reads.load(Ordering::SeqCst), reads_before);
-    assert!(
-        !overflowing_expiry_dir
-            .path()
-            .join(format!("{}.claim", overflowing_request.capture_id))
-            .exists(),
-        "overflowing attempt expiry must fail before claim publication"
-    );
+    distant_expiry
+        .capture(&distant_request)
+        .await
+        .expect("claim deadline safely bounds distant authority expiry");
+    assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 1);
 
     let outage_dir = TempDir::new().expect("outage dir");
     let outage = make_adapter(

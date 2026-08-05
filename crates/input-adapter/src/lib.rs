@@ -556,7 +556,7 @@ impl InputAdapter {
         };
         self.reserve_rate_unlocked(
             request.capture_id,
-            request.expires_at_unix_ms,
+            claim.publication_deadline_unix_ms,
             usize::from(self.config.retry_attempts) + 1,
         )
         .await?;
@@ -856,7 +856,7 @@ impl InputAdapter {
     async fn reserve_rate_unlocked(
         &self,
         capture_id: Uuid,
-        request_expires_at_unix_ms: i64,
+        publication_deadline_unix_ms: i64,
         outbound_attempt_budget: usize,
     ) -> Result<(), AdapterError> {
         let now = now_unix_ms()?;
@@ -873,7 +873,8 @@ impl InputAdapter {
         {
             return Err(AdapterError::RateLimited);
         }
-        let expires_at_unix_ms = request_expires_at_unix_ms.min(self.config.grant_expires_unix_ms);
+        let expires_at_unix_ms =
+            publication_deadline_unix_ms.min(self.config.grant_expires_unix_ms);
         if expires_at_unix_ms <= now {
             return Err(AdapterError::StateUnavailable);
         }
@@ -1924,6 +1925,47 @@ mod tests {
             3,
             "converting a reserved slot to an actual attempt must not free capacity"
         );
+    }
+
+    #[test]
+    fn unused_retry_reservation_expires_with_the_claim() {
+        let capture_id = Uuid::new_v4();
+        let mut ledger = RateLedger {
+            attempt_started_at_unix_ms: Vec::new(),
+            in_flight_attempts: Vec::new(),
+            reservations: vec![RateReservation {
+                capture_id,
+                expires_at_unix_ms: 100,
+                remaining_attempts: 3,
+            }],
+        };
+
+        assert_eq!(ledger.occupancy().expect("reserved occupancy"), 3);
+        ledger
+            .validate_and_prune(100)
+            .expect("expire unused claim reservation");
+        assert!(ledger.reservations.is_empty());
+        assert_eq!(ledger.occupancy().expect("released occupancy"), 0);
+    }
+
+    #[test]
+    fn in_flight_expiry_overflow_is_rejected() {
+        let capture_id = Uuid::new_v4();
+        let mut ledger = RateLedger {
+            attempt_started_at_unix_ms: Vec::new(),
+            in_flight_attempts: Vec::new(),
+            reservations: vec![RateReservation {
+                capture_id,
+                expires_at_unix_ms: i64::MAX,
+                remaining_attempts: 1,
+            }],
+        };
+
+        assert!(matches!(
+            ledger.charge_attempt(capture_id, 1),
+            Err(AdapterError::StateUnavailable)
+        ));
+        assert!(ledger.in_flight_attempts.is_empty());
     }
 
     #[test]

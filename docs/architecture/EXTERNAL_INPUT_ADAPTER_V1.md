@@ -126,11 +126,14 @@ Admission durably reserves the complete explicit attempt budget. Immediately
 before each GET, one reservation becomes an in-flight charge that cannot age
 out during filesystem coordination, scheduling delay, or response-body
 transport. Completion converts it to a conservative sliding-window timestamp.
-If the adapter exits mid-attempt, the charge reconciles after the earlier of
-request or grant expiry plus the per-attempt timeout, then ages out through the
-same one-minute history; a crash can neither free capacity early nor consume it
-forever. The expiry-plus-timeout calculation is checked during admission before
-claim publication.
+Unused reserved attempts expire with the durable claim publication deadline,
+not a potentially later request or grant expiry, so an abandoned claim cannot
+retain source-rate capacity after it is no longer allowed to publish. If the
+adapter exits mid-attempt, the charge reconciles after the claim publication
+deadline plus the per-attempt timeout, then ages out through the same one-minute
+history; a crash can neither free capacity early nor consume it forever. The
+deadline-plus-timeout calculation is checked during admission before claim
+publication.
 
 Claim contents are first synchronized under an unpredictable private temporary
 name, then atomically linked into the final capture path without overwrite.
