@@ -1,10 +1,11 @@
 # ADMIN-001 security and migration closure
 
-Date: 2026-08-04
+Date: 2026-08-05
 
-Verdict: implementation gate pending exact-head protected checks and independent
-review. This receipt is not a production caller cutover, owner-retirement, or
-Jenkins decommissioning receipt.
+Verdict: PASS for the implementation gate at exact head
+`8d342d98969d3a3f67282b45f577cdc8e1110f3d`. All nine protected checks passed,
+and independent exact-head review found no major issues. This receipt is not a
+production caller cutover, owner-retirement, or Jenkins decommissioning receipt.
 
 ## Inventory denominator
 
@@ -42,15 +43,30 @@ not rewrite the source manifest or invent another writer.
 ## Executable receipt
 
 The first real-PostgreSQL run exposed and then corrected the exact RLS preflight
-table count for migration 0026. The final receipt will be replaced with the
-complete clean gate counts at the exact implementation head. Current focused
-evidence is:
+table count for migration 0026. The complete contained PostgreSQL/controller/
+agent gate then passed at the exact implementation head:
 
 ```text
-external admin clients: 3 passed against real PostgreSQL
-CLI API-only journey: 1 passed
-pinned Rust check: controller-store and CLI passed
+controller truth: 42 passed, 2 backup-only ignored
+identity lifecycle: 3 passed, 2 backup-only ignored
+authorization mapping: 4 passed, 2 backup-only ignored
+external read consumers: 2 passed
+external admin clients: 3 passed
+OIDC flow: 2 passed
+execution spine: 7 passed
+deployable runtime: 2 passed
+DIFF-001: 1 passed
+remote mTLS agent: 1 passed
+total: 67 passed, 6 backup-only ignored
 ```
+
+Pinned Rust check, clippy with warnings denied, formatting, the CLI suite, all
+nine protected checks, execution-board tests, and the execution-board verifier
+also passed. The verifier reported 84 tickets and 31 remaining before this
+ticket's board closure. A P2 documentation comment that incorrectly suggested
+input submission was already supported was fixed by naming the actual
+protected-environment approval operation; the superseded thread was resolved
+after clean exact-head review.
 
 The admin tests prove incomplete classification, residual Jenkins writes,
 caller/endpoint/digest substitution, missing action authority, stale generation,
