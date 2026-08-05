@@ -118,15 +118,15 @@ payload cannot be replayed for another request, instance, provider, account,
 region, or generation.
 
 The lifecycle is `intent -> pending -> ready` or a fail-closed cleanup path.
-Pending startup is polled only inside the earlier command, provider-grant,
-instance, and configured startup deadlines. Startup failure, timeout, agent
+Create and pending startup are admitted only inside one absolute earlier
+command, provider-grant, instance, and configured startup deadline. Startup failure, timeout, agent
 loss, cancellation, expiry, effective-spec substitution, supersession, and
 owned orphan discovery all enter deletion. Deletion success requires both a
 signed absent result and a fresh signed lookup returning no instance. A timeout,
 partition, malformed/unattested response, or uncertain deletion becomes
 `ambiguous`; it never claims cleanup or silently creates again.
-The deadline is rechecked after every provider lookup, so a late `Ready`
-observation is cleaned as a timeout rather than admitted.
+The deadline is rechecked after create and every provider lookup, so a late
+`Ready` observation is cleaned as a timeout rather than admitted.
 
 ## Crash, partition, orphan, and scale-down truth
 
@@ -142,7 +142,9 @@ through another provider scope. The relevant recovery cases are:
   signed absence preserves `ready` as agent loss and `deleting` as cancellation
   rather than collapsing either into startup failure;
 - provisioner crash before create: the durable intent is eventually reconciled
-  to signed absence without creating;
+  to signed absence without creating; a fresh absent intent, ambiguous create,
+  or pending record remains non-terminal through the bounded peer-create window
+  so reconciliation cannot race an in-flight provider call;
 - provisioner crash after provider create but before response: signed lookup by
   idempotency key adopts the one provider instance;
 - crash/partition during delete: the record remains deleting/ambiguous until a

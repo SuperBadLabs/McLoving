@@ -45,6 +45,7 @@ enum FixtureMode {
     SubstituteFinalInventory,
     DuplicateFinalInventory,
     DelayedReady,
+    DelayedCreateReady,
 }
 
 struct Inner {
@@ -56,6 +57,7 @@ struct Inner {
     malformed_create_sent: bool,
     malformed_delete_sent: bool,
     inventory_reads: usize,
+    create_started: usize,
 }
 
 #[derive(Clone)]
@@ -91,6 +93,7 @@ impl Fixture {
                 malformed_create_sent: false,
                 malformed_delete_sent: false,
                 inventory_reads: 0,
+                create_started: 0,
             })),
             signing_key,
         };
@@ -158,6 +161,23 @@ impl Fixture {
     fn set_mode(&self, mode: FixtureMode) {
         self.state.inner.lock().expect("fixture state").mode = mode;
     }
+
+    async fn wait_for_create_start(&self) {
+        for _ in 0..100 {
+            if self
+                .state
+                .inner
+                .lock()
+                .expect("fixture state")
+                .create_started
+                != 0
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        panic!("provider create did not start");
+    }
 }
 
 async fn create_instance(
@@ -167,6 +187,14 @@ async fn create_instance(
 ) -> Response {
     if !authorized(&headers) {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    let delayed_create = {
+        let mut inner = state.inner.lock().expect("fixture state");
+        inner.create_started += 1;
+        inner.mode == FixtureMode::DelayedCreateReady
+    };
+    if delayed_create {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     let mut inner = state.inner.lock().expect("fixture state");
     if inner.mode == FixtureMode::Unauthorized {
@@ -860,6 +888,16 @@ async fn lost_delete_response_and_instance_expiry_reconcile_without_escaped_comp
             .cleaned_request_ids
             .contains(&delete_request.request_id)
     );
+    let recovered_lifecycle = delete_context
+        .provisioner
+        .provision(&delete_request)
+        .await
+        .expect("replay recovered delete lifecycle");
+    assert_eq!(
+        recovered_lifecycle.body.outcome,
+        LifecycleOutcome::Cancelled
+    );
+    assert!(recovered_lifecycle.body.cleanup_confirmed);
 
     let expiry_context = Context::new(FixtureMode::Ready).await;
     let mut expiry_request = expiry_context.request();
@@ -990,6 +1028,51 @@ async fn provider_ready_after_startup_deadline_is_cleaned_as_timeout() {
     );
     assert!(receipt.body.cleanup_confirmed);
     assert_eq!(context.fixture.counts().3, 0);
+}
+
+#[tokio::test]
+async fn immediate_ready_after_startup_deadline_is_cleaned_as_timeout() {
+    let context = Context::new(FixtureMode::DelayedCreateReady).await;
+    let receipt = context
+        .provisioner
+        .provision(&context.request())
+        .await
+        .expect("late create cleanup receipt");
+    assert_eq!(
+        receipt.body.outcome,
+        LifecycleOutcome::StartupTimeoutCleaned
+    );
+    assert!(receipt.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().3, 0);
+}
+
+#[tokio::test]
+async fn reconcile_does_not_close_an_in_flight_fresh_intent() {
+    let context = Context::new(FixtureMode::DelayedCreateReady).await;
+    let request = context.request();
+    let provision = context.provisioner.provision(&request);
+    let reconcile = async {
+        context.fixture.wait_for_create_start().await;
+        context
+            .provisioner
+            .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+            .await
+    };
+    let (provisioned, reconciled) = tokio::join!(provision, reconcile);
+    let provisioned = provisioned.expect("in-flight provision result");
+    let reconciled = reconciled.expect("concurrent reconciliation receipt");
+    assert_eq!(
+        provisioned.body.outcome,
+        LifecycleOutcome::StartupTimeoutCleaned
+    );
+    assert_eq!(reconciled.body.cleaned, 0);
+    assert_eq!(reconciled.body.ambiguous, 1);
+    assert!(
+        reconciled
+            .body
+            .ambiguous_request_ids
+            .contains(&request.request_id)
+    );
 }
 
 #[tokio::test]

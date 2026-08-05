@@ -858,6 +858,7 @@ impl Provisioner {
         let now = now_unix_ms()?;
         self.validate_provision_request(request, now)?;
         let request_sha256 = canonical_digest(request)?;
+        let startup_deadline = self.startup_deadline(request, now)?;
 
         if let Some(stored) = self.admit_or_load(request, &request_sha256, now)? {
             if let Some(receipt) = stored.latest_receipt {
@@ -898,6 +899,26 @@ impl Provisioner {
                 );
             }
         };
+
+        let now = now_unix_ms()?;
+        if now >= startup_deadline {
+            self.set_state(
+                request.request_id,
+                StoredState::Deleting,
+                Some(&instance),
+                now,
+            )?;
+            return self
+                .cleanup_instance(
+                    request,
+                    &request_sha256,
+                    &instance,
+                    CleanupReason::StartupTimeout,
+                    LifecycleOutcome::StartupTimeoutCleaned,
+                    &request.audit_lineage,
+                )
+                .await;
+        }
 
         if self.validate_instance(&instance, &create, now).is_err() {
             self.set_state(
@@ -966,7 +987,8 @@ impl Provisioner {
                     Some(&instance),
                     now,
                 )?;
-                self.await_startup(request, &request_sha256, instance).await
+                self.await_startup(request, &request_sha256, instance, startup_deadline)
+                    .await
             }
         }
     }
@@ -1084,12 +1106,41 @@ impl Provisioner {
             }
             known.insert(item.request.request_id);
             let Some(instance) = provider_by_request.get(&item.request.request_id) else {
-                let outcome = if item.state == StoredState::Ready {
-                    LifecycleOutcome::AgentLostCleaned
-                } else {
-                    LifecycleOutcome::Cancelled
+                let peer_deadline = item
+                    .updated_at_unix_ms
+                    .checked_add(
+                        i64::try_from(self.config.provider_timeout_ms)
+                            .map_err(|_| ProvisionerError::InvalidConfig)?
+                            .checked_add(1_000)
+                            .ok_or(ProvisionerError::InvalidConfig)?,
+                    )
+                    .ok_or(ProvisionerError::StateUnavailable)?
+                    .min(item.request.expires_at_unix_ms);
+                let possibly_creating = item.state == StoredState::Intent
+                    || item.state == StoredState::Pending
+                    || (item.state == StoredState::Ambiguous && item.instance.is_none());
+                if possibly_creating && now < peer_deadline {
+                    ambiguous = ambiguous
+                        .checked_add(1)
+                        .ok_or(ProvisionerError::StateUnavailable)?;
+                    ambiguous_request_ids.insert(item.request.request_id);
+                    continue;
+                }
+                let (terminal, outcome) = match item.state {
+                    StoredState::Ready => {
+                        (StoredState::Deleted, LifecycleOutcome::AgentLostCleaned)
+                    }
+                    StoredState::Deleting | StoredState::Deleted => {
+                        (StoredState::Deleted, LifecycleOutcome::Cancelled)
+                    }
+                    StoredState::Intent
+                    | StoredState::Ambiguous
+                    | StoredState::Pending
+                    | StoredState::Failed => {
+                        (StoredState::Failed, LifecycleOutcome::StartupFailedCleaned)
+                    }
                 };
-                self.set_state(item.request.request_id, StoredState::Deleted, None, now)?;
+                self.set_state(item.request.request_id, terminal, None, now)?;
                 self.append_lifecycle_receipt(
                     &item.request,
                     LifecycleEvidence {
@@ -1139,20 +1190,29 @@ impl Provisioner {
                 }
                 continue;
             }
+            let startup_expired = matches!(
+                item.state,
+                StoredState::Intent | StoredState::Ambiguous | StoredState::Pending
+            ) && now
+                >= self.startup_deadline(&item.request, item.updated_at_unix_ms)?;
             let expired = item.request.instance_expires_at_unix_ms <= now;
-            let cleanup = match (expired, item.state, instance.state) {
-                (true, _, _) => Some((CleanupReason::Expired, LifecycleOutcome::ExpiredCleaned)),
-                (_, StoredState::Deleting, _) => {
+            let cleanup = match (startup_expired, expired, item.state, instance.state) {
+                (true, _, _, _) => Some((
+                    CleanupReason::StartupTimeout,
+                    LifecycleOutcome::StartupTimeoutCleaned,
+                )),
+                (_, true, _, _) => Some((CleanupReason::Expired, LifecycleOutcome::ExpiredCleaned)),
+                (_, _, StoredState::Deleting, _) => {
                     Some((CleanupReason::Cancelled, LifecycleOutcome::Cancelled))
                 }
-                (_, _, ProviderInstanceState::StartupFailed) => Some((
+                (_, _, _, ProviderInstanceState::StartupFailed) => Some((
                     CleanupReason::StartupFailed,
                     LifecycleOutcome::StartupFailedCleaned,
                 )),
-                (_, _, ProviderInstanceState::AgentLost) => {
+                (_, _, _, ProviderInstanceState::AgentLost) => {
                     Some((CleanupReason::AgentLost, LifecycleOutcome::AgentLostCleaned))
                 }
-                (_, _, ProviderInstanceState::Deleting) => {
+                (_, _, _, ProviderInstanceState::Deleting) => {
                     Some((CleanupReason::Superseded, LifecycleOutcome::Cancelled))
                 }
                 _ => None,
@@ -1357,18 +1417,8 @@ impl Provisioner {
         request: &ProvisionRequest,
         request_sha256: &str,
         mut instance: ProviderInstance,
+        deadline: i64,
     ) -> Result<LifecycleReceipt, ProvisionerError> {
-        let start = now_unix_ms()?;
-        let configured_deadline = start
-            .checked_add(
-                i64::try_from(self.config.startup_timeout_ms)
-                    .map_err(|_| ProvisionerError::InvalidConfig)?,
-            )
-            .ok_or(ProvisionerError::InvalidConfig)?;
-        let deadline = configured_deadline
-            .min(request.expires_at_unix_ms)
-            .min(request.instance_expires_at_unix_ms)
-            .min(self.config.provider_grant_expires_unix_ms);
         loop {
             let now = now_unix_ms()?;
             if now >= deadline {
@@ -1537,9 +1587,9 @@ impl Provisioner {
         stored: StoredRequest,
         audit_lineage: &str,
     ) -> Result<LifecycleReceipt, ProvisionerError> {
-        let now = now_unix_ms()?;
         match self.provider_lookup(stored.request.request_id).await {
             Ok(Some(instance)) => {
+                let now = now_unix_ms()?;
                 let create = ProviderCreateRequest {
                     protocol_version: PROTOCOL_VERSION.to_owned(),
                     provisioner_id: self.config.provisioner_id.clone(),
@@ -1555,6 +1605,36 @@ impl Provisioner {
                             &instance,
                             CleanupReason::Substitution,
                             LifecycleOutcome::SubstitutionDeniedCleaned,
+                            audit_lineage,
+                        )
+                        .await;
+                }
+                if stored.state == StoredState::Deleting {
+                    return self
+                        .cleanup_instance(
+                            &stored.request,
+                            &stored.request_sha256,
+                            &instance,
+                            CleanupReason::Cancelled,
+                            LifecycleOutcome::Cancelled,
+                            audit_lineage,
+                        )
+                        .await;
+                }
+                let startup_deadline =
+                    self.startup_deadline(&stored.request, stored.updated_at_unix_ms)?;
+                if matches!(
+                    stored.state,
+                    StoredState::Intent | StoredState::Ambiguous | StoredState::Pending
+                ) && now >= startup_deadline
+                {
+                    return self
+                        .cleanup_instance(
+                            &stored.request,
+                            &stored.request_sha256,
+                            &instance,
+                            CleanupReason::StartupTimeout,
+                            LifecycleOutcome::StartupTimeoutCleaned,
                             audit_lineage,
                         )
                         .await;
@@ -1581,8 +1661,13 @@ impl Provisioner {
                         )
                     }
                     ProviderInstanceState::Pending => {
-                        self.await_startup(&stored.request, &stored.request_sha256, instance)
-                            .await
+                        self.await_startup(
+                            &stored.request,
+                            &stored.request_sha256,
+                            instance,
+                            startup_deadline,
+                        )
+                        .await
                     }
                     ProviderInstanceState::StartupFailed
                     | ProviderInstanceState::AgentLost
@@ -1610,6 +1695,7 @@ impl Provisioner {
                 }
             }
             Ok(None) => {
+                let now = now_unix_ms()?;
                 let (terminal, outcome) = match stored.state {
                     StoredState::Ready => {
                         (StoredState::Deleted, LifecycleOutcome::AgentLostCleaned)
@@ -1639,6 +1725,7 @@ impl Provisioner {
                 )
             }
             Err(_) => {
+                let now = now_unix_ms()?;
                 self.set_state(
                     stored.request.request_id,
                     StoredState::Ambiguous,
@@ -1659,6 +1746,22 @@ impl Provisioner {
                 )
             }
         }
+    }
+
+    fn startup_deadline(
+        &self,
+        request: &ProvisionRequest,
+        started_at_unix_ms: i64,
+    ) -> Result<i64, ProvisionerError> {
+        Ok(started_at_unix_ms
+            .checked_add(
+                i64::try_from(self.config.startup_timeout_ms)
+                    .map_err(|_| ProvisionerError::InvalidConfig)?,
+            )
+            .ok_or(ProvisionerError::InvalidConfig)?
+            .min(request.expires_at_unix_ms)
+            .min(request.instance_expires_at_unix_ms)
+            .min(self.config.provider_grant_expires_unix_ms))
     }
 
     async fn wait_for_peer_or_recover(
@@ -1714,7 +1817,7 @@ impl Provisioner {
             Err(_) => {
                 self.set_state(
                     request.request_id,
-                    StoredState::Ambiguous,
+                    StoredState::Deleting,
                     Some(instance),
                     now,
                 )?;
@@ -1738,7 +1841,7 @@ impl Provisioner {
         {
             self.set_state(
                 request.request_id,
-                StoredState::Ambiguous,
+                StoredState::Deleting,
                 Some(instance),
                 now,
             )?;
@@ -1779,7 +1882,7 @@ impl Provisioner {
             Ok(Some(_)) | Err(_) => {
                 self.set_state(
                     request.request_id,
-                    StoredState::Ambiguous,
+                    StoredState::Deleting,
                     Some(instance),
                     now,
                 )?;
