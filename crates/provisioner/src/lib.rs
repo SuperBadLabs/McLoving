@@ -1076,12 +1076,24 @@ impl Provisioner {
             None => match self.provider_lookup(request.request_id).await {
                 Ok(Some(instance)) => instance,
                 Ok(None) => {
+                    let observed_at = now_unix_ms()?;
                     let (_, cancel_outcome) = self.record_cleanup_intent(
                         request.request_id,
                         CleanupReason::Cancelled,
                         LifecycleOutcome::Cancelled,
                     )?;
-                    self.set_state(request.request_id, StoredState::Deleted, None, now)?;
+                    if !self.set_state_from(
+                        request.request_id,
+                        stored.state,
+                        StoredState::Deleted,
+                        None,
+                        observed_at,
+                    )? {
+                        let current = self
+                            .load_stored_request(request.request_id)?
+                            .ok_or(ProvisionerError::StateUnavailable)?;
+                        return Box::pin(self.recover_one(current, &request.audit_lineage)).await;
+                    }
                     return self.append_lifecycle_receipt(
                         &stored.request,
                         LifecycleEvidence {
@@ -1091,17 +1103,29 @@ impl Provisioner {
                             cleanup_confirmed: true,
                             ambiguity: false,
                             audit_lineage: &request.audit_lineage,
-                            observed_at_unix_ms: now,
+                            observed_at_unix_ms: observed_at,
                         },
                     );
                 }
                 Err(_) => {
+                    let observed_at = now_unix_ms()?;
                     self.record_cleanup_intent(
                         request.request_id,
                         CleanupReason::Cancelled,
                         LifecycleOutcome::Cancelled,
                     )?;
-                    self.set_state(request.request_id, StoredState::Deleting, None, now)?;
+                    if !self.set_state_from(
+                        request.request_id,
+                        stored.state,
+                        StoredState::Deleting,
+                        None,
+                        observed_at,
+                    )? {
+                        let current = self
+                            .load_stored_request(request.request_id)?
+                            .ok_or(ProvisionerError::StateUnavailable)?;
+                        return Box::pin(self.recover_one(current, &request.audit_lineage)).await;
+                    }
                     return self.append_lifecycle_receipt(
                         &stored.request,
                         LifecycleEvidence {
@@ -1111,7 +1135,7 @@ impl Provisioner {
                             cleanup_confirmed: false,
                             ambiguity: true,
                             audit_lineage: &request.audit_lineage,
-                            observed_at_unix_ms: now,
+                            observed_at_unix_ms: observed_at,
                         },
                     );
                 }
@@ -1705,12 +1729,17 @@ impl Provisioner {
                         .await;
                 }
                 ProviderInstanceState::Pending | ProviderInstanceState::Deleting => {
-                    self.set_state(
+                    if !self.set_state_from(
                         request.request_id,
+                        StoredState::Pending,
                         StoredState::Pending,
                         Some(&instance),
                         now,
-                    )?;
+                    )? {
+                        return self
+                            .recover_startup_race(request, request_sha256, &instance)
+                            .await;
+                    }
                 }
             }
         }
@@ -1723,7 +1752,9 @@ impl Provisioner {
     ) -> Result<LifecycleReceipt, ProvisionerError> {
         if let Some(receipt) = stored.latest_receipt.as_ref() {
             self.verify_lifecycle_receipt(receipt)?;
-            return Ok(receipt.clone());
+            if receipt.body.cleanup_confirmed && !receipt.body.ambiguity {
+                return Ok(receipt.clone());
+            }
         }
         match self.provider_lookup(stored.request.request_id).await {
             Ok(Some(instance)) => {
