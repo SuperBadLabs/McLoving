@@ -899,6 +899,23 @@ impl Provisioner {
                 .await;
         }
 
+        let now = now_unix_ms()?;
+        if now >= startup_deadline {
+            self.set_state(request.request_id, StoredState::Failed, None, now)?;
+            return self.append_lifecycle_receipt(
+                request,
+                LifecycleEvidence {
+                    request_sha256: &request_sha256,
+                    instance: None,
+                    outcome: LifecycleOutcome::StartupTimeoutCleaned,
+                    cleanup_confirmed: true,
+                    ambiguity: false,
+                    audit_lineage: &request.audit_lineage,
+                    observed_at_unix_ms: now,
+                },
+            );
+        }
+
         let create = ProviderCreateRequest {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             provisioner_id: self.config.provisioner_id.clone(),
@@ -1521,17 +1538,23 @@ impl Provisioner {
             instance = match self.provider_lookup(request.request_id).await {
                 Ok(Some(candidate)) => candidate,
                 Ok(None) => {
-                    self.set_state(request.request_id, StoredState::Deleted, None, now)?;
+                    let observed_at = now_unix_ms()?;
+                    let outcome = if observed_at >= deadline {
+                        LifecycleOutcome::StartupTimeoutCleaned
+                    } else {
+                        LifecycleOutcome::StartupFailedCleaned
+                    };
+                    self.set_state(request.request_id, StoredState::Deleted, None, observed_at)?;
                     return self.append_lifecycle_receipt(
                         request,
                         LifecycleEvidence {
                             request_sha256,
                             instance: None,
-                            outcome: LifecycleOutcome::StartupFailedCleaned,
+                            outcome,
                             cleanup_confirmed: true,
                             ambiguity: false,
                             audit_lineage: &request.audit_lineage,
-                            observed_at_unix_ms: now,
+                            observed_at_unix_ms: observed_at,
                         },
                     );
                 }
@@ -2758,8 +2781,8 @@ impl Provisioner {
             let existing: LifecycleReceipt = parse_json_no_duplicates(&existing)
                 .map_err(|_| ProvisionerError::InvalidStoredReceipt)?;
             self.verify_lifecycle_receipt(&existing)?;
-            let same_instance =
-                existing.body.instance_id == evidence.instance.map(|value| value.instance_id);
+            let same_instance = existing.body.instance_id.is_some()
+                && existing.body.instance_id == evidence.instance.map(|value| value.instance_id);
             if existing.body.cleanup_confirmed
                 && (evidence.outcome == LifecycleOutcome::Ready
                     || (evidence.ambiguity && same_instance))

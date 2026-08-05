@@ -41,12 +41,14 @@ enum FixtureMode {
     StaleObservation,
     Unauthorized,
     MalformedCreateOnce,
+    DelayedMalformedCreateOnce,
     MalformedDeleteOnce,
     DelayedMalformedDeleteOnce,
     SubstituteFinalInventory,
     DuplicateFinalInventory,
     DelayedReady,
     DelayedCreateReady,
+    DelayedAbsence,
     SlowInitialInventory,
 }
 
@@ -210,7 +212,10 @@ async fn create_instance(
     let delayed_create = {
         let mut inner = state.inner.lock().expect("fixture state");
         inner.create_started += 1;
-        inner.mode == FixtureMode::DelayedCreateReady
+        matches!(
+            inner.mode,
+            FixtureMode::DelayedCreateReady | FixtureMode::DelayedMalformedCreateOnce
+        )
     };
     if delayed_create {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -227,9 +232,10 @@ async fn create_instance(
     }
     inner.creates += 1;
     let provider_state = match inner.mode {
-        FixtureMode::PendingThenReady | FixtureMode::PendingForever | FixtureMode::DelayedReady => {
-            ProviderInstanceState::Pending
-        }
+        FixtureMode::PendingThenReady
+        | FixtureMode::PendingForever
+        | FixtureMode::DelayedReady
+        | FixtureMode::DelayedAbsence => ProviderInstanceState::Pending,
         FixtureMode::StartupFailed => ProviderInstanceState::StartupFailed,
         _ => ProviderInstanceState::Ready,
     };
@@ -244,7 +250,11 @@ async fn create_instance(
     inner
         .instances
         .insert(request.request.request_id, instance.clone());
-    if inner.mode == FixtureMode::MalformedCreateOnce && !inner.malformed_create_sent {
+    if matches!(
+        inner.mode,
+        FixtureMode::MalformedCreateOnce | FixtureMode::DelayedMalformedCreateOnce
+    ) && !inner.malformed_create_sent
+    {
         inner.malformed_create_sent = true;
         return Response::builder()
             .status(StatusCode::OK)
@@ -265,13 +275,18 @@ async fn lookup_instance(
     if !authorized(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let delayed_ready =
-        state.inner.lock().expect("fixture state").mode == FixtureMode::DelayedReady;
-    if delayed_ready {
+    let delayed_mode = state.inner.lock().expect("fixture state").mode;
+    if matches!(
+        delayed_mode,
+        FixtureMode::DelayedReady | FixtureMode::DelayedAbsence
+    ) {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     let mut inner = state.inner.lock().expect("fixture state");
     inner.lookups += 1;
+    if inner.mode == FixtureMode::DelayedAbsence {
+        inner.instances.remove(&request_id);
+    }
     let ready = (inner.mode == FixtureMode::PendingThenReady && inner.lookups >= 2)
         || inner.mode == FixtureMode::DelayedReady;
     if ready && let Some(instance) = inner.instances.get_mut(&request_id) {
@@ -484,14 +499,23 @@ impl Context {
     }
 
     async fn with_quota(mode: FixtureMode, maximum: u32) -> Self {
-        Self::with_limits(mode, maximum, 300).await
+        Self::with_limits(mode, maximum, 300, 150).await
     }
 
     async fn with_provider_timeout(mode: FixtureMode, provider_timeout_ms: u64) -> Self {
-        Self::with_limits(mode, 4, provider_timeout_ms).await
+        Self::with_limits(mode, 4, provider_timeout_ms, 150).await
     }
 
-    async fn with_limits(mode: FixtureMode, maximum: u32, provider_timeout_ms: u64) -> Self {
+    async fn with_startup_timeout(mode: FixtureMode, startup_timeout_ms: u64) -> Self {
+        Self::with_limits(mode, 4, 300, startup_timeout_ms).await
+    }
+
+    async fn with_limits(
+        mode: FixtureMode,
+        maximum: u32,
+        provider_timeout_ms: u64,
+        startup_timeout_ms: u64,
+    ) -> Self {
         let fixture = Fixture::start(mode).await;
         let temporary = tempfile::tempdir().expect("temporary directory");
         let mut config = configuration(
@@ -501,6 +525,7 @@ impl Context {
             maximum,
         );
         config.provider_timeout_ms = provider_timeout_ms;
+        config.startup_timeout_ms = startup_timeout_ms;
         let provisioner = Provisioner::new(
             config.clone(),
             IMPLEMENTATION_SHA256.to_owned(),
@@ -1140,6 +1165,22 @@ async fn provider_ready_after_startup_deadline_is_cleaned_as_timeout() {
 }
 
 #[tokio::test]
+async fn lookup_absence_after_startup_deadline_is_classified_as_timeout() {
+    let context = Context::new(FixtureMode::DelayedAbsence).await;
+    let receipt = context
+        .provisioner
+        .provision(&context.request())
+        .await
+        .expect("late absence cleanup receipt");
+    assert_eq!(
+        receipt.body.outcome,
+        LifecycleOutcome::StartupTimeoutCleaned
+    );
+    assert!(receipt.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().3, 0);
+}
+
+#[tokio::test]
 async fn immediate_ready_after_startup_deadline_is_cleaned_as_timeout() {
     let context = Context::new(FixtureMode::DelayedCreateReady).await;
     let receipt = context
@@ -1153,6 +1194,36 @@ async fn immediate_ready_after_startup_deadline_is_cleaned_as_timeout() {
     );
     assert!(receipt.body.cleanup_confirmed);
     assert_eq!(context.fixture.counts().3, 0);
+}
+
+#[tokio::test]
+async fn admission_deadline_is_rechecked_after_durable_intent_before_create() {
+    let context = Context::with_startup_timeout(FixtureMode::Ready, 50).await;
+    let database_path = context.config.state_dir.join("provisioner.sqlite3");
+    let (locked, receiver) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let database = rusqlite::Connection::open(database_path).expect("open blocking ledger");
+        database
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold admission transaction");
+        locked.send(()).expect("signal held transaction");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        database.execute_batch("COMMIT").expect("release ledger");
+    });
+    receiver.recv().expect("wait for held transaction");
+
+    let receipt = context
+        .provisioner
+        .provision(&context.request())
+        .await
+        .expect("deadline terminal receipt");
+    blocker.join().expect("blocking ledger thread");
+    assert_eq!(
+        receipt.body.outcome,
+        LifecycleOutcome::StartupTimeoutCleaned
+    );
+    assert!(receipt.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().0, 0);
 }
 
 #[tokio::test]
@@ -1221,6 +1292,40 @@ async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
         .expect("terminal cancellation replay");
     assert_eq!(replay.body.outcome, LifecycleOutcome::Cancelled);
     assert!(replay.body.cleanup_confirmed);
+}
+
+#[tokio::test]
+async fn instance_less_terminal_receipt_yields_to_late_create_ambiguity() {
+    let context = Context::new(FixtureMode::DelayedMalformedCreateOnce).await;
+    let request = context.request();
+    let provision = context.provisioner.provision(&request);
+    let cancel = async {
+        context.fixture.wait_for_create_start().await;
+        context
+            .provisioner
+            .cancel(&cancel_request(
+                &context.config,
+                &request,
+                IMPLEMENTATION_SHA256,
+            ))
+            .await
+    };
+    let (provisioned, cancelled) = tokio::join!(provision, cancel);
+    let provisioned = provisioned.expect("late ambiguous create receipt");
+    let cancelled = cancelled.expect("early instance-less cancellation receipt");
+    assert_eq!(provisioned.body.outcome, LifecycleOutcome::CreateAmbiguous);
+    assert!(provisioned.body.ambiguity);
+    assert_eq!(cancelled.body.outcome, LifecycleOutcome::Cancelled);
+    assert_eq!(context.fixture.counts().3, 1);
+
+    let reconciled = context
+        .provisioner
+        .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+        .await
+        .expect("clean late ambiguous compute");
+    assert_eq!(reconciled.body.cleaned, 1);
+    assert_eq!(reconciled.body.escaped_compute_remaining, 0);
+    assert_eq!(context.fixture.counts().3, 0);
 }
 
 #[tokio::test]
