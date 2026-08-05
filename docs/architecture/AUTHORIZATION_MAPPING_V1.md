@@ -21,14 +21,17 @@ Imported policy separates:
 - artifact read and write;
 - test read;
 - log read;
-- secret use; and
-- audit read.
+- secret use.
 
-Scheduler control is not mappable from a Jenkins ACL. It remains a separate
-McLoving service scope. A target `allow` must be implied by the normalized
-source Jenkins permission set (or source `overall.administer`); otherwise the
-import fails. Dropping source authority is permitted as an owner-reviewed
-more-restrictive mapping. Unknown permissions never imply target authority.
+Tenant-wide audit read and scheduler control are not mappable from a
+project-scoped Jenkins ACL. They remain separate McLoving service scopes until
+an equivalently scoped API exists; importing them would otherwise create an
+unreachable grant or broaden project authority to the tenant. A target `allow`
+must be implied by the normalized source Jenkins permission set (or source
+`overall.administer`); otherwise the import fails. Inactive source principals
+cannot produce target allows. Dropping source authority is permitted as an
+owner-reviewed more-restrictive mapping. Unknown permissions never imply
+target authority.
 
 ## Durable policy truth
 
@@ -73,8 +76,9 @@ revoked service credentials before authorization.
 Public API routes use the granular actions: configuration validation/planning
 and catalog writes require configure; submissions require trigger; retry is
 independent; approvals require approval action; artifact publication and read
-are distinct; test and log reads are distinct; cancellation, secrets, audit,
-and scheduler control retain their own checks.
+are distinct; test and log reads are distinct; cancellation and secrets retain
+their own project checks; tenant-wide audit and scheduler control retain
+separate service-scope checks.
 
 ## Verification
 
@@ -85,7 +89,10 @@ PostgreSQL:
   rollback;
 - positive and negative action decisions, missing-grant denial, deny-wins
   conflict resolution, and legacy-role fallback suppression;
-- target-authority broadening and scheduler-authority rejection;
+- target-authority broadening, inactive-source allow, and tenant-wide audit and
+  scheduler mapping rejection;
+- deterministic first-generation writer serialization with a stable optimistic
+  conflict for the losing installer;
 - source-realm substitution rejection and exact human provenance binding;
 - live group-generation change, old-session invalidation, and stale-policy
   denial;

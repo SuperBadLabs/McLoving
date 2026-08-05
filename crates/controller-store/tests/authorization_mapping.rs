@@ -821,7 +821,7 @@ async fn service_policy_survives_rotation_and_denies_revoked_credentials() {
 }
 
 #[tokio::test]
-async fn mapping_rejects_broadened_inactive_and_scheduler_authority() {
+async fn mapping_rejects_broadened_inactive_and_tenant_wide_authority() {
     let organization_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
     let identity_id = Uuid::new_v4();
@@ -866,6 +866,18 @@ async fn mapping_rejects_broadened_inactive_and_scheduler_authority() {
     let scheduler_policy = policy(organization_id, project_id, 1, None, None, vec![scheduler]);
     assert!(matches!(
         store.install_authorization_policy(&scheduler_policy).await,
+        Err(StoreError::InvalidAuthorizationOperation(_))
+    ));
+
+    let audit = human_mapping(
+        Uuid::new_v4(),
+        identity_id,
+        1,
+        [(Action::AuditRead, GrantDecision::Allow)].into(),
+    );
+    let audit_policy = policy(organization_id, project_id, 1, None, None, vec![audit]);
+    assert!(matches!(
+        store.install_authorization_policy(&audit_policy).await,
         Err(StoreError::InvalidAuthorizationOperation(_))
     ));
 }

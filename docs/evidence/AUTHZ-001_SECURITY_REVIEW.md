@@ -41,11 +41,14 @@ The real PostgreSQL contract proves:
 - a direct allow plus another matching deny resolves to deny;
 - a seeded legacy `owner` role cannot fill a missing imported permission;
 - a target allow not implied by the source ACL is rejected;
-- Jenkins ACL input cannot grant McLoving scheduler control;
+- Jenkins project ACL input cannot map tenant-wide audit read or scheduler
+  control;
+- disabled or deleted source principals cannot produce target allows;
 - source-realm substitution is rejected;
 - group-generation advancement invalidates the old session and makes the old
   policy grant stale for the new session;
-- optimistic stale updates conflict;
+- concurrent first-generation installation has one winner and one stable
+  optimistic conflict, and stale updates also conflict;
 - a complete empty generation revokes project authority;
 - a retained reviewed policy can be restored only as a new monotonic generation;
 - service policy survives credential rotation while old and explicitly revoked
@@ -54,7 +57,7 @@ The real PostgreSQL contract proves:
 - the runtime role cannot mutate any authorization policy table.
 
 The full controller/PostgreSQL gate passed after the change: 42 controller
-truth tests, three identity lifecycle tests, three non-ignored authorization
+truth tests, three identity lifecycle tests, four non-ignored authorization
 mapping tests, two OIDC API tests, seven execution-spine tests, two deployable
 runtime tests, one DIFF-001 test, and one remote mTLS-agent test.
 

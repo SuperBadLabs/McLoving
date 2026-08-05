@@ -49,7 +49,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const MAPPABLE: [Self; 12] = [
+    pub const MAPPABLE: [Self; 11] = [
         Self::ProjectView,
         Self::BuildTrigger,
         Self::BuildCancel,
@@ -61,7 +61,6 @@ impl Action {
         Self::TestRead,
         Self::LogRead,
         Self::SecretUse,
-        Self::AuditRead,
     ];
 
     pub fn as_str(self) -> &'static str {

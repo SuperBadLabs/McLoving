@@ -415,11 +415,13 @@ fn validate_mapping(mapping: &AuthorizationPrincipalMappingWrite) -> Result<(), 
         .iter()
         .any(|permission| normalized_permission(permission) == "overall.administer");
     for (action, decision) in &mapping.decisions {
+        if !Action::MAPPABLE.contains(action) {
+            return invalid(
+                "Jenkins project ACL mappings cannot represent tenant-wide controller actions",
+            );
+        }
         if *decision == GrantDecision::Allow && mapping.source_lifecycle_state != "active" {
             return invalid("inactive source principals cannot produce target allow decisions");
-        }
-        if *action == Action::SchedulerControl {
-            return invalid("Jenkins ACL mappings cannot grant scheduler control");
         }
         if *decision == GrantDecision::Allow && !source_is_admin && !source_actions.contains(action)
         {
@@ -504,7 +506,6 @@ fn source_actions(permissions: &BTreeSet<String>) -> BTreeSet<Action> {
                 "test.read" | "run.tests" => Some(Action::TestRead),
                 "log.read" | "run.logs" => Some(Action::LogRead),
                 "credential.use" | "credentials.use" => Some(Action::SecretUse),
-                "audit.read" => Some(Action::AuditRead),
                 _ => None,
             },
         )
