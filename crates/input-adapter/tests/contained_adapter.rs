@@ -441,6 +441,7 @@ async fn outage_rate_generation_and_rollback_are_fail_closed() {
     let temp = TempDir::new().expect("temp dir");
     let mut limited_config = config(&fixture.endpoint, temp.path());
     limited_config.max_requests_per_minute = 1;
+    limited_config.retry_attempts = 0;
     let limited = make_adapter(limited_config, READ_TOKEN).await;
     let duplicate_request = request(&limited, "main", "valid");
     let reads_before = fixture.state.reads.load(Ordering::SeqCst);
@@ -464,6 +465,30 @@ async fn outage_rate_generation_and_rollback_are_fail_closed() {
             .join(format!("{}.claim", rate_limited_request.capture_id))
             .exists(),
         "rate denial must not strand a capture claim"
+    );
+
+    let retry_limited_dir = TempDir::new().expect("retry-limited dir");
+    let mut retry_limited_config = config(&fixture.endpoint, retry_limited_dir.path());
+    retry_limited_config.max_requests_per_minute = 3;
+    let retry_limited = make_adapter(retry_limited_config, READ_TOKEN).await;
+    let reads_before = fixture.state.reads.load(Ordering::SeqCst);
+    let retried = retry_limited
+        .capture(&request(&retry_limited, "main", "retry"))
+        .await
+        .expect("reserved bounded retry budget");
+    assert_eq!(retried.retry_count, 2);
+    assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 3);
+    let denied_after_retry = request(&retry_limited, "dev", "valid");
+    assert!(matches!(
+        retry_limited.capture(&denied_after_retry).await,
+        Err(AdapterError::RateLimited)
+    ));
+    assert!(
+        !retry_limited_dir
+            .path()
+            .join(format!("{}.claim", denied_after_retry.capture_id))
+            .exists(),
+        "retry-budget denial must not strand a capture claim"
     );
 
     let outage_dir = TempDir::new().expect("outage dir");

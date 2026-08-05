@@ -361,7 +361,8 @@ impl InputAdapter {
                 .await_claimed_receipt(request.capture_id, &request_sha256)
                 .await;
         }
-        self.admit_rate().await?;
+        self.admit_rate(usize::from(self.config.retry_attempts) + 1)
+            .await?;
         let claimed = self
             .claim_capture(request.capture_id, &request_sha256)
             .await?;
@@ -616,7 +617,7 @@ impl InputAdapter {
         Ok(())
     }
 
-    async fn admit_rate(&self) -> Result<(), AdapterError> {
+    async fn admit_rate(&self, outbound_attempt_budget: usize) -> Result<(), AdapterError> {
         let now = Instant::now();
         let mut times = self.request_times.lock().await;
         while times
@@ -625,10 +626,11 @@ impl InputAdapter {
         {
             times.pop_front();
         }
-        if times.len() >= self.config.max_requests_per_minute {
+        if times.len().saturating_add(outbound_attempt_budget) > self.config.max_requests_per_minute
+        {
             return Err(AdapterError::RateLimited);
         }
-        times.push_back(now);
+        times.extend(std::iter::repeat_n(now, outbound_attempt_budget));
         Ok(())
     }
 
@@ -854,6 +856,7 @@ fn validate_config(
         || config.max_response_bytes > MAX_RESPONSE_BYTES
         || config.max_requests_per_minute == 0
         || config.max_requests_per_minute > MAX_REQUESTS_PER_MINUTE
+        || config.max_requests_per_minute < usize::from(config.retry_attempts) + 1
         || config.timeout_ms == 0
         || config.timeout_ms > MAX_TIMEOUT_MS
         || config.max_age_ms <= 0
