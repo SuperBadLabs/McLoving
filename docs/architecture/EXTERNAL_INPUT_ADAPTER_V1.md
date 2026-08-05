@@ -128,8 +128,12 @@ later independent differential and production gates.
 
 The adapter sends only a scoped bearer-authenticated `GET`, disables redirects
 and ambient proxies, disables the HTTP client's implicit retry policy, applies
-one total/connect timeout, and retries only
-transport failures or HTTP 502-504 up to the configured bound. Authentication
+`timeout_ms` as the connect and total timeout for each outbound attempt, and
+retries only transport failures or HTTP 502-504 up to the configured bound.
+The network-wait ceiling is therefore
+`(retry_attempts + 1) * timeout_ms`; request and grant expiry must cover that
+retry-expanded window plus bounded local admission and durable publication.
+Authentication
 authorization and grant-header construction is validated once during adapter
 construction, before the spool is created or a claim can be published.
 Authentication denials do not retry. A successful response must provide:

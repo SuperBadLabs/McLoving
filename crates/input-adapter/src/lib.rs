@@ -191,10 +191,20 @@ struct RateReservation {
     remaining_attempts: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InFlightRateAttempt {
+    capture_id: Uuid,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RateLedger {
+    // Completion time is no earlier than the actual GET start, so retaining it
+    // for the following minute is conservative even when sending was delayed.
     attempt_started_at_unix_ms: Vec<i64>,
+    #[serde(default)]
+    in_flight_attempts: Vec<InFlightRateAttempt>,
     reservations: Vec<RateReservation>,
 }
 
@@ -215,11 +225,20 @@ impl RateLedger {
                 .attempt_started_at_unix_ms
                 .iter()
                 .any(|timestamp| *timestamp > now)
+            || self.in_flight_attempts.len() > MAX_REQUESTS_PER_MINUTE
             || self.reservations.len() > MAX_REQUESTS_PER_MINUTE
             || self.reservations.iter().any(|reservation| {
                 reservation.remaining_attempts == 0
                     || reservation.remaining_attempts > MAX_REQUESTS_PER_MINUTE
             })
+        {
+            return Err(AdapterError::StateUnavailable);
+        }
+        let mut in_flight_capture_ids = HashSet::with_capacity(self.in_flight_attempts.len());
+        if self
+            .in_flight_attempts
+            .iter()
+            .any(|attempt| !in_flight_capture_ids.insert(attempt.capture_id))
         {
             return Err(AdapterError::StateUnavailable);
         }
@@ -243,7 +262,10 @@ impl RateLedger {
 
     fn occupancy(&self) -> Result<usize, AdapterError> {
         self.reservations.iter().try_fold(
-            self.attempt_started_at_unix_ms.len(),
+            self.attempt_started_at_unix_ms
+                .len()
+                .checked_add(self.in_flight_attempts.len())
+                .ok_or(AdapterError::StateUnavailable)?,
             |occupied, reservation| {
                 occupied
                     .checked_add(reservation.remaining_attempts)
@@ -252,7 +274,14 @@ impl RateLedger {
         )
     }
 
-    fn charge_attempt(&mut self, capture_id: Uuid, now: i64) -> Result<(), AdapterError> {
+    fn charge_attempt(&mut self, capture_id: Uuid) -> Result<(), AdapterError> {
+        if self
+            .in_flight_attempts
+            .iter()
+            .any(|attempt| attempt.capture_id == capture_id)
+        {
+            return Err(AdapterError::StateUnavailable);
+        }
         let reservation = self
             .reservations
             .iter_mut()
@@ -262,9 +291,31 @@ impl RateLedger {
             .remaining_attempts
             .checked_sub(1)
             .ok_or(AdapterError::StateUnavailable)?;
-        self.attempt_started_at_unix_ms.push(now);
+        self.in_flight_attempts
+            .push(InFlightRateAttempt { capture_id });
         self.reservations
             .retain(|reservation| reservation.remaining_attempts > 0);
+        Ok(())
+    }
+
+    fn complete_attempt(&mut self, capture_id: Uuid, now: i64) -> Result<(), AdapterError> {
+        let index = self
+            .in_flight_attempts
+            .iter()
+            .position(|attempt| attempt.capture_id == capture_id)
+            .ok_or(AdapterError::StateUnavailable)?;
+        self.in_flight_attempts.swap_remove(index);
+        self.attempt_started_at_unix_ms.push(now);
+        Ok(())
+    }
+
+    fn abandon_attempt(&mut self, capture_id: Uuid) -> Result<(), AdapterError> {
+        let index = self
+            .in_flight_attempts
+            .iter()
+            .position(|attempt| attempt.capture_id == capture_id)
+            .ok_or(AdapterError::StateUnavailable)?;
+        self.in_flight_attempts.swap_remove(index);
         Ok(())
     }
 }
@@ -497,6 +548,15 @@ impl InputAdapter {
                     return Err(AdapterError::ExpiredGrant);
                 }
                 self.charge_rate_attempt(request.capture_id).await?;
+                let send_ready_at_unix_ms = now_unix_ms()?;
+                if request.expires_at_unix_ms <= send_ready_at_unix_ms {
+                    self.abandon_rate_attempt(request.capture_id).await?;
+                    return Err(AdapterError::ExpiredRequest);
+                }
+                if self.config.grant_expires_unix_ms <= send_ready_at_unix_ms {
+                    self.abandon_rate_attempt(request.capture_id).await?;
+                    return Err(AdapterError::ExpiredGrant);
+                }
                 let result = self
                     .client
                     .get(url.clone())
@@ -509,6 +569,7 @@ impl InputAdapter {
                     .header("x-mcloving-grant-scope", self.grant_scope_header.clone())
                     .send()
                     .await;
+                self.complete_rate_attempt(request.capture_id).await?;
                 match result {
                     Ok(response) if response.status().is_success() => {
                         return Ok((response, retry_count));
@@ -779,10 +840,31 @@ impl InputAdapter {
         let now = now_unix_ms()?;
         let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
         ledger.validate_and_prune(now)?;
-        ledger.charge_attempt(capture_id, now)?;
+        ledger.charge_attempt(capture_id)?;
         if ledger.occupancy()? > self.config.max_requests_per_minute {
             return Err(AdapterError::StateUnavailable);
         }
+        store_rate_ledger(&self.config.spool_dir, &ledger).await
+    }
+
+    async fn complete_rate_attempt(&self, capture_id: Uuid) -> Result<(), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let now = now_unix_ms()?;
+        let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
+        ledger.validate_and_prune(now)?;
+        ledger.complete_attempt(capture_id, now)?;
+        if ledger.occupancy()? > self.config.max_requests_per_minute {
+            return Err(AdapterError::StateUnavailable);
+        }
+        store_rate_ledger(&self.config.spool_dir, &ledger).await
+    }
+
+    async fn abandon_rate_attempt(&self, capture_id: Uuid) -> Result<(), AdapterError> {
+        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        let now = now_unix_ms()?;
+        let mut ledger = load_rate_ledger(&self.config.spool_dir).await?;
+        ledger.validate_and_prune(now)?;
+        ledger.abandon_attempt(capture_id)?;
         store_rate_ledger(&self.config.spool_dir, &ledger).await
     }
 
@@ -1149,6 +1231,7 @@ async fn load_rate_ledger(spool_dir: &Path) -> Result<RateLedger, AdapterError> 
                 StoredRateLedger::Current(ledger) => Ok(ledger),
                 StoredRateLedger::Legacy(attempt_started_at_unix_ms) => Ok(RateLedger {
                     attempt_started_at_unix_ms,
+                    in_flight_attempts: Vec::new(),
                     reservations: Vec::new(),
                 }),
             }
@@ -1599,10 +1682,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retry_reservations_are_charged_at_attempt_start_across_rate_windows() {
+    fn in_flight_retry_charge_cannot_age_out_before_send_completes() {
         let capture_id = Uuid::new_v4();
         let mut ledger = RateLedger {
             attempt_started_at_unix_ms: Vec::new(),
+            in_flight_attempts: Vec::new(),
             reservations: vec![RateReservation {
                 capture_id,
                 expires_at_unix_ms: 180_000,
@@ -1613,15 +1697,23 @@ mod tests {
         assert_eq!(ledger.occupancy().expect("reserved occupancy"), 3);
         assert!(ledger.attempt_started_at_unix_ms.is_empty());
 
-        let retry_started_at = 61_000;
         ledger
-            .validate_and_prune(retry_started_at)
-            .expect("reservation remains live across the first rate window");
-        ledger
-            .charge_attempt(capture_id, retry_started_at)
-            .expect("charge retry at its actual start");
+            .charge_attempt(capture_id)
+            .expect("convert reservation to in-flight charge");
+        assert!(ledger.attempt_started_at_unix_ms.is_empty());
+        assert_eq!(ledger.in_flight_attempts.len(), 1);
 
-        assert_eq!(ledger.attempt_started_at_unix_ms, vec![retry_started_at]);
+        let send_completed_at = 121_000;
+        ledger
+            .validate_and_prune(send_completed_at)
+            .expect("in-flight charge remains live across rate windows");
+        assert_eq!(ledger.in_flight_attempts.len(), 1);
+        ledger
+            .complete_attempt(capture_id, send_completed_at)
+            .expect("complete the charged send");
+
+        assert_eq!(ledger.attempt_started_at_unix_ms, vec![send_completed_at]);
+        assert!(ledger.in_flight_attempts.is_empty());
         assert_eq!(ledger.reservations[0].remaining_attempts, 2);
         assert_eq!(
             ledger.occupancy().expect("charged plus reserved occupancy"),
