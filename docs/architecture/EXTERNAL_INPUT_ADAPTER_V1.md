@@ -104,6 +104,11 @@ bypass source-read admission and converge on the same receipt; new captures are
 serialized through rate admission before claim creation, so a denied request
 cannot strand an unfulfillable claim.
 
+Claim contents are first synchronized under an unpredictable private temporary
+name, then atomically linked into the final capture path without overwrite.
+Another adapter process can therefore observe either no claim or the complete
+64-byte digest, never a partially published claim.
+
 Receipts are written to a unique temporary file, synchronized, atomically
 linked into the final capture path without overwrite, and followed by a spool
 directory synchronization before success. A restart replays the
@@ -139,7 +144,10 @@ binding text, schema fields, and marker length.
 V1 admits `public` and policy-bounded `internal` values. A response labelled
 `secret` is always denied. The adapter also scans every bounded body for the
 independently supplied marker set before JSON parsing and emits only a typed
-error code/message on failure, never the source body or credential. This is a
+error code/message on failure, never the source body or credential. Every
+source-derived response header is scanned by the same marker set before parsing
+or receipt construction, so cursor, provenance, ETag, and incidental headers
+cannot become a disclosure path. This is a
 canary-marker non-disclosure gate, not a claim that arbitrary transformed
 secrets are detectable.
 

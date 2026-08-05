@@ -114,7 +114,12 @@ async fn read_input(
             "internal"
         }),
     );
-    if mode != "missing_provenance" {
+    if mode == "header_marker" {
+        response_headers.insert(
+            "x-mcloving-provenance",
+            HeaderValue::from_bytes(SECRET_MARKER).expect("marker header"),
+        );
+    } else if mode != "missing_provenance" {
         response_headers.insert(
             "x-mcloving-provenance",
             HeaderValue::from_static("fixture://flags/v1"),
@@ -310,6 +315,7 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         ("oversized", "oversized_response"),
         ("secret", "confidentiality_denied"),
         ("marker", "confidentiality_denied"),
+        ("header_marker", "confidentiality_denied"),
     ] {
         let error = adapter
             .capture(&request(&adapter, "main", mode))
@@ -348,6 +354,22 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
     );
     assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 1);
     assert_eq!(fixture.state.writes.load(Ordering::SeqCst), 0);
+
+    let shared_spool = TempDir::new().expect("shared spool");
+    let shared_config = config(&fixture.endpoint, shared_spool.path());
+    let first_process = make_adapter(shared_config.clone(), READ_TOKEN).await;
+    let second_process = make_adapter(shared_config, READ_TOKEN).await;
+    let cross_process_request = request(&first_process, "main", "valid");
+    let reads_before = fixture.state.reads.load(Ordering::SeqCst);
+    let (first, second) = tokio::join!(
+        first_process.capture(&cross_process_request),
+        second_process.capture(&cross_process_request)
+    );
+    assert_eq!(
+        first.expect("first process capture"),
+        second.expect("second process convergence")
+    );
+    assert_eq!(fixture.state.reads.load(Ordering::SeqCst) - reads_before, 1);
 }
 
 #[tokio::test]

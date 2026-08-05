@@ -29,10 +29,14 @@ represented as Mario production truth.
   confidentiality, and audit-lineage binding;
 - bounded timeout, retry, response size, rate, freshness, and typed JSON schema;
 - secret-labelled response denial plus marker-set non-disclosure scanning;
+- marker denial across the complete source header set and response body before
+  any source-derived value can enter a receipt;
 - atomic durable capture claims, no-overwrite receipt publication, restart
   replay, substituted-replay denial, directory durability before source access
   and after receipt publication, matching-claim convergence before admission,
   and serialized rate denial before new claim creation;
+- synchronized private claim staging and atomic no-overwrite publication so a
+  second adapter process cannot observe a partial request digest;
 - disabled client-library retries so every source read is owned by the explicit
   bounded retry counter; and
 - complete signed response receipt with source provenance and canonical value

@@ -398,6 +398,12 @@ impl InputAdapter {
         };
 
         let headers = response.headers().clone();
+        if headers
+            .values()
+            .any(|value| self.contains_secret_marker(value.as_bytes()))
+        {
+            return Err(AdapterError::ConfidentialityDenied);
+        }
         validate_json_content_type(&headers)?;
         let source_cursor = required_header(&headers, "x-mcloving-cursor")?;
         let source_provenance = required_header(&headers, "x-mcloving-provenance")?;
@@ -436,12 +442,7 @@ impl InputAdapter {
             }
             body.extend_from_slice(&chunk);
         }
-        if self.secret_markers.iter().any(|marker| {
-            marker.len() <= body.len()
-                && body
-                    .windows(marker.len())
-                    .any(|candidate| candidate == marker)
-        }) {
+        if self.contains_secret_marker(&body) {
             return Err(AdapterError::ConfidentialityDenied);
         }
         let value: Value =
@@ -610,6 +611,15 @@ impl InputAdapter {
         Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
     }
 
+    fn contains_secret_marker(&self, value: &[u8]) -> bool {
+        self.secret_markers.iter().any(|marker| {
+            marker.len() <= value.len()
+                && value
+                    .windows(marker.len())
+                    .any(|candidate| candidate == marker)
+        })
+    }
+
     async fn load_stored(&self, capture_id: Uuid) -> Result<Option<CaptureReceipt>, AdapterError> {
         let path = receipt_path(&self.config.spool_dir, capture_id);
         let metadata = match tokio::fs::symlink_metadata(&path).await {
@@ -635,23 +645,34 @@ impl InputAdapter {
         capture_id: Uuid,
         request_sha256: &str,
     ) -> Result<bool, AdapterError> {
-        let path = self.config.spool_dir.join(format!("{capture_id}.claim"));
+        let final_path = self.config.spool_dir.join(format!("{capture_id}.claim"));
+        let temp_path = self
+            .config
+            .spool_dir
+            .join(format!(".{capture_id}.{}.claim.tmp", Uuid::new_v4()));
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        match options.open(&path).await {
-            Ok(mut file) => {
-                use tokio::io::AsyncWriteExt as _;
-                file.write_all(request_sha256.as_bytes())
-                    .await
-                    .map_err(|_| AdapterError::StateUnavailable)?;
-                file.sync_all()
-                    .await
-                    .map_err(|_| AdapterError::StateUnavailable)?;
-                drop(file);
+        let mut file = options
+            .open(&temp_path)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        use tokio::io::AsyncWriteExt as _;
+        if file.write_all(request_sha256.as_bytes()).await.is_err()
+            || file.sync_all().await.is_err()
+        {
+            drop(file);
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(AdapterError::StateUnavailable);
+        }
+        drop(file);
+        match tokio::fs::hard_link(&temp_path, &final_path).await {
+            Ok(()) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
                 sync_directory(&self.config.spool_dir).await?;
                 Ok(true)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
                 if self
                     .matching_claim_exists(capture_id, request_sha256)
                     .await?
@@ -661,7 +682,10 @@ impl InputAdapter {
                     Err(AdapterError::StateUnavailable)
                 }
             }
-            Err(_) => Err(AdapterError::StateUnavailable),
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&temp_path).await;
+                Err(AdapterError::StateUnavailable)
+            }
         }
     }
 
