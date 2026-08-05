@@ -982,10 +982,14 @@ fn is_sha256_hex(value: &str) -> bool {
 }
 
 fn validate_json_content_type(headers: &HeaderMap) -> Result<(), AdapterError> {
-    let value = headers
-        .get(CONTENT_TYPE)
+    let mut values = headers.get_all(CONTENT_TYPE).iter();
+    let value = values
+        .next()
         .and_then(|value| value.to_str().ok())
         .ok_or(AdapterError::MalformedResponse)?;
+    if values.next().is_some() {
+        return Err(AdapterError::MalformedResponse);
+    }
     if value
         .split(';')
         .next()
@@ -1029,9 +1033,13 @@ fn required_header(headers: &HeaderMap, name: &str) -> Result<String, AdapterErr
 }
 
 fn optional_header(headers: &HeaderMap, name: &str) -> Result<Option<String>, AdapterError> {
-    let Some(value) = headers.get(name) else {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
         return Ok(None);
     };
+    if values.next().is_some() {
+        return Err(AdapterError::MissingProvenance);
+    }
     let value = value
         .to_str()
         .map_err(|_| AdapterError::MissingProvenance)?;

@@ -129,6 +129,31 @@ async fn read_input(
         );
     }
     response_headers.insert("etag", HeaderValue::from_static("\"fixture-v1\""));
+    match mode {
+        "duplicate_content_type" => response_headers.append(
+            "content-type",
+            HeaderValue::from_static("application/octet-stream"),
+        ),
+        "duplicate_cursor" => response_headers.append(
+            "x-mcloving-cursor",
+            HeaderValue::from_static("conflicting-cursor"),
+        ),
+        "duplicate_provenance" => response_headers.append(
+            "x-mcloving-provenance",
+            HeaderValue::from_static("fixture://conflicting/v1"),
+        ),
+        "duplicate_observed_at" => {
+            response_headers.append("x-mcloving-observed-at-ms", HeaderValue::from_static("0"))
+        }
+        "duplicate_confidentiality" => response_headers.append(
+            "x-mcloving-confidentiality",
+            HeaderValue::from_static("secret"),
+        ),
+        "duplicate_etag" => {
+            response_headers.append("etag", HeaderValue::from_static("\"conflicting\""))
+        }
+        _ => false,
+    };
 
     let body = match mode {
         "malformed" => "{".to_owned(),
@@ -348,6 +373,12 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         ("marker", "confidentiality_denied"),
         ("escaped_marker", "confidentiality_denied"),
         ("header_marker", "confidentiality_denied"),
+        ("duplicate_content_type", "malformed_response"),
+        ("duplicate_cursor", "missing_provenance"),
+        ("duplicate_provenance", "missing_provenance"),
+        ("duplicate_observed_at", "missing_provenance"),
+        ("duplicate_confidentiality", "missing_provenance"),
+        ("duplicate_etag", "missing_provenance"),
     ] {
         let error = adapter
             .capture(&request(&adapter, "main", mode))
