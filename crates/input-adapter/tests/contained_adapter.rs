@@ -357,6 +357,26 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
     adapter
         .verify_receipt(&main_receipt)
         .expect("verify receipt");
+    assert!(main_receipt.publication_deadline_unix_ms > main_receipt.captured_at_unix_ms);
+    assert!(main_receipt.publication_deadline_unix_ms <= main_request.expires_at_unix_ms);
+    assert!(main_receipt.publication_deadline_unix_ms <= adapter_config.grant_expires_unix_ms);
+    let claim: Value = serde_json::from_slice(
+        &tokio::fs::read(
+            temp.path()
+                .join(format!("{}.claim", main_receipt.capture_id)),
+        )
+        .await
+        .expect("read durable capture claim"),
+    )
+    .expect("parse durable capture claim");
+    assert_eq!(
+        claim["request_sha256"],
+        Value::String(main_receipt.request_sha256.clone())
+    );
+    assert_eq!(
+        claim["publication_deadline_unix_ms"],
+        Value::Number(main_receipt.publication_deadline_unix_ms.into())
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

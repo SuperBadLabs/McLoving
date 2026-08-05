@@ -102,11 +102,18 @@ keys outside the certified allowlist never reach the source.
 
 Before a request reaches the source, the adapter atomically creates
 `CAPTURE_ID.claim` containing the canonical request digest. Concurrent or
-cross-process reuse with different content is denied. A matching concurrent
-caller waits for the complete retry-expanded network window plus a fixed
-one-second local publication allowance independent of the configured network
-timeout, then receives the exact signed receipt. A process crash after claiming
-but before receipt publication remains
+cross-process reuse with different content is denied. The durable claim binds
+the request digest and an absolute publication deadline: the earlier request or
+grant expiry, capped by the complete retry-expanded network window plus a
+60-second local processing/publication window. Receipt publication takes the
+exclusive spool lock and refuses to begin at or after that deadline. A matching
+caller rechecks the receipt under the same lock before applying the deadline,
+so either it waits behind an already-started durable publication and receives
+the exact signed receipt, or it times out and no late receipt can appear. A
+claimant also fences that deadline before every outbound attempt and after
+durable rate charging, so an expired publication lease cannot initiate another
+source read. A
+process crash after claiming but before receipt publication remains
 fail-closed and requires operator reconciliation; it never silently samples the
 mutable source again. Claim contents and the containing spool directory are
 synchronized before any network read. Matching claimed or completed captures
@@ -183,9 +190,10 @@ secrets are detectable.
 ## Receipt and runner use
 
 The signed receipt repeats every relevant request/configuration identity and
-adds canonical query, source cursor/ETag/time/provenance, capture time,
-confidentiality, canonical response SHA-256 and value, retry count, marker-set
-digest, signing-key identity, and signature. SHADOW-001 or CANARY-001 must
+adds canonical query, source cursor/ETag/time/provenance, capture time and claim
+publication deadline, confidentiality, canonical response SHA-256 and value,
+retry count, marker-set digest, signing-key identity, and signature. SHADOW-001
+or CANARY-001 must
 capture once and supply the identical receipt/value to both runners; neither
 runner may contact the mutable source independently. Later gates must compare
 response consumption, downstream control flow, effect intent, result, and

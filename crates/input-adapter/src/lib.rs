@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -24,9 +24,10 @@ const MAX_CA_BUNDLE_BYTES: usize = 1024 * 1_024;
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1_024 * 1_024;
 const MAX_REQUESTS_PER_MINUTE: usize = 10_000;
 const MAX_TIMEOUT_MS: u64 = 60_000;
-const MIN_RECEIPT_PUBLICATION_WAIT_MS: u64 = 1_000;
+const MAX_LOCAL_RECEIPT_PUBLICATION_MS: u64 = 60_000;
 const MAX_AGE_MS: i64 = 86_400_000;
 const MAX_RATE_LEDGER_BYTES: usize = 2 * 1_024 * 1_024;
+const MAX_CLAIM_BYTES: usize = 512;
 const MAX_SECRET_MARKERS: usize = 256;
 const MAX_MARKER_COMPARISON_BYTES: usize = 256 * 1_024 * 1_024;
 
@@ -175,6 +176,7 @@ pub struct CaptureReceipt {
     pub source_etag: Option<String>,
     pub source_observed_at_unix_ms: i64,
     pub captured_at_unix_ms: i64,
+    pub publication_deadline_unix_ms: i64,
     pub source_provenance: String,
     pub confidentiality: Confidentiality,
     pub response_sha256: String,
@@ -192,6 +194,14 @@ struct ValidatedResponseHeaders {
     source_observed_at_unix_ms: i64,
     confidentiality: Confidentiality,
     source_etag: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureClaim {
+    protocol_version: String,
+    request_sha256: String,
+    publication_deadline_unix_ms: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -513,26 +523,37 @@ impl InputAdapter {
             self.verify_receipt(&receipt)?;
             return Ok(receipt);
         }
-        if self
-            .matching_claim_exists(request.capture_id, &request_sha256)
+        if let Some(claim) = self
+            .matching_claim(request.capture_id, &request_sha256)
             .await?
         {
             drop(admission);
             return self
-                .await_claimed_receipt(request.capture_id, &request_sha256)
+                .await_claimed_receipt(request.capture_id, &request_sha256, &claim)
                 .await;
         }
         let spool_admission = lock_spool(&self.config.spool_dir, true).await?;
-        if self
-            .matching_claim_exists(request.capture_id, &request_sha256)
+        if let Some(claim) = self
+            .matching_claim(request.capture_id, &request_sha256)
             .await?
         {
             drop(spool_admission);
             drop(admission);
             return self
-                .await_claimed_receipt(request.capture_id, &request_sha256)
+                .await_claimed_receipt(request.capture_id, &request_sha256, &claim)
                 .await;
         }
+        let claim = CaptureClaim {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            request_sha256: request_sha256.clone(),
+            publication_deadline_unix_ms: claim_publication_deadline_unix_ms(
+                now_unix_ms()?,
+                self.config.timeout_ms,
+                self.config.retry_attempts,
+                request.expires_at_unix_ms,
+                self.config.grant_expires_unix_ms,
+            )?,
+        };
         self.reserve_rate_unlocked(
             request.capture_id,
             request.expires_at_unix_ms,
@@ -540,7 +561,7 @@ impl InputAdapter {
         )
         .await?;
         let claimed = match self
-            .claim_capture_unlocked(request.capture_id, &request_sha256)
+            .claim_capture_unlocked(request.capture_id, &claim)
             .await
         {
             Ok(claimed) => claimed,
@@ -557,8 +578,12 @@ impl InputAdapter {
         drop(spool_admission);
         drop(admission);
         if !claimed {
+            let existing_claim = self
+                .matching_claim(request.capture_id, &request_sha256)
+                .await?
+                .ok_or(AdapterError::StateUnavailable)?;
             return self
-                .await_claimed_receipt(request.capture_id, &request_sha256)
+                .await_claimed_receipt(request.capture_id, &request_sha256, &existing_claim)
                 .await;
         }
 
@@ -581,6 +606,9 @@ impl InputAdapter {
                 if self.config.grant_expires_unix_ms <= attempt_started_at_unix_ms {
                     return Err(AdapterError::ExpiredGrant);
                 }
+                if claim.publication_deadline_unix_ms <= attempt_started_at_unix_ms {
+                    return Err(AdapterError::SourceUnavailable);
+                }
                 self.charge_rate_attempt(request.capture_id).await?;
                 let send_ready_at_unix_ms = now_unix_ms()?;
                 if request.expires_at_unix_ms <= send_ready_at_unix_ms {
@@ -590,6 +618,10 @@ impl InputAdapter {
                 if self.config.grant_expires_unix_ms <= send_ready_at_unix_ms {
                     self.abandon_rate_attempt(request.capture_id).await?;
                     return Err(AdapterError::ExpiredGrant);
+                }
+                if claim.publication_deadline_unix_ms <= send_ready_at_unix_ms {
+                    self.abandon_rate_attempt(request.capture_id).await?;
+                    return Err(AdapterError::SourceUnavailable);
                 }
                 let result = self
                     .client
@@ -714,6 +746,7 @@ impl InputAdapter {
             source_etag,
             source_observed_at_unix_ms,
             captured_at_unix_ms,
+            publication_deadline_unix_ms: claim.publication_deadline_unix_ms,
             source_provenance,
             confidentiality,
             response_sha256,
@@ -725,7 +758,8 @@ impl InputAdapter {
             signature: String::new(),
         };
         receipt.signature = self.sign_receipt(&receipt)?;
-        self.store_receipt(&receipt).await?;
+        self.store_receipt(&receipt, claim.publication_deadline_unix_ms)
+            .await?;
         Ok(receipt)
     }
 
@@ -1041,7 +1075,7 @@ impl InputAdapter {
     async fn claim_capture_unlocked(
         &self,
         capture_id: Uuid,
-        request_sha256: &str,
+        claim: &CaptureClaim,
     ) -> Result<bool, AdapterError> {
         let final_path = self.config.spool_dir.join(format!("{capture_id}.claim"));
         let temp_path = self
@@ -1058,10 +1092,13 @@ impl InputAdapter {
             .open(&temp_path)
             .await
             .map_err(|_| AdapterError::StateUnavailable)?;
+        let claim_bytes = serde_json::to_vec(claim).map_err(|_| AdapterError::StateUnavailable)?;
+        if claim_bytes.len() > MAX_CLAIM_BYTES {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(AdapterError::StateUnavailable);
+        }
         use tokio::io::AsyncWriteExt as _;
-        if file.write_all(request_sha256.as_bytes()).await.is_err()
-            || file.sync_all().await.is_err()
-        {
+        if file.write_all(&claim_bytes).await.is_err() || file.sync_all().await.is_err() {
             drop(file);
             let _ = tokio::fs::remove_file(&temp_path).await;
             return Err(AdapterError::StateUnavailable);
@@ -1076,8 +1113,9 @@ impl InputAdapter {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let _ = tokio::fs::remove_file(&temp_path).await;
                 if self
-                    .matching_claim_exists(capture_id, request_sha256)
+                    .matching_claim(capture_id, &claim.request_sha256)
                     .await?
+                    .is_some()
                 {
                     Ok(false)
                 } else {
@@ -1091,22 +1129,28 @@ impl InputAdapter {
         }
     }
 
-    async fn matching_claim_exists(
+    async fn matching_claim(
         &self,
         capture_id: Uuid,
         request_sha256: &str,
-    ) -> Result<bool, AdapterError> {
+    ) -> Result<Option<CaptureClaim>, AdapterError> {
         let path = self.config.spool_dir.join(format!("{capture_id}.claim"));
         match tokio::fs::symlink_metadata(&path).await {
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(AdapterError::StateUnavailable),
         }
-        let existing = read_bounded_regular_file(&path, 64).await?;
-        let existing =
-            std::str::from_utf8(&existing).map_err(|_| AdapterError::InvalidStoredReceipt)?;
-        if existing == request_sha256 {
-            Ok(true)
+        let bytes = read_bounded_regular_file(&path, MAX_CLAIM_BYTES).await?;
+        let existing: CaptureClaim =
+            serde_json::from_slice(&bytes).map_err(|_| AdapterError::InvalidStoredReceipt)?;
+        if existing.protocol_version != PROTOCOL_VERSION
+            || !is_sha256_hex(&existing.request_sha256)
+            || existing.publication_deadline_unix_ms <= 0
+        {
+            return Err(AdapterError::InvalidStoredReceipt);
+        }
+        if existing.request_sha256 == request_sha256 {
+            Ok(Some(existing))
         } else {
             Err(AdapterError::ReplayMismatch)
         }
@@ -1116,9 +1160,8 @@ impl InputAdapter {
         &self,
         capture_id: Uuid,
         request_sha256: &str,
+        claim: &CaptureClaim,
     ) -> Result<CaptureReceipt, AdapterError> {
-        let wait_ms = claimed_receipt_wait_ms(self.config.timeout_ms, self.config.retry_attempts)?;
-        let deadline = Instant::now() + Duration::from_millis(wait_ms);
         loop {
             if let Some(receipt) = self.load_stored(capture_id).await? {
                 if receipt.request_sha256 != request_sha256 {
@@ -1127,15 +1170,22 @@ impl InputAdapter {
                 self.verify_receipt(&receipt)?;
                 return Ok(receipt);
             }
-            if Instant::now() >= deadline {
+            if now_unix_ms()? >= claim.publication_deadline_unix_ms {
                 return Err(AdapterError::SourceUnavailable);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
-    async fn store_receipt(&self, receipt: &CaptureReceipt) -> Result<(), AdapterError> {
+    async fn store_receipt(
+        &self,
+        receipt: &CaptureReceipt,
+        publication_deadline_unix_ms: i64,
+    ) -> Result<(), AdapterError> {
         let _lock = lock_spool(&self.config.spool_dir, true).await?;
+        if now_unix_ms()? >= publication_deadline_unix_ms {
+            return Err(AdapterError::SourceUnavailable);
+        }
         let final_path = receipt_path(&self.config.spool_dir, receipt.capture_id);
         let temp_path = self.config.spool_dir.join(format!(
             ".{}.{}.tmp",
@@ -1192,12 +1242,30 @@ impl InputAdapter {
     }
 }
 
-fn claimed_receipt_wait_ms(timeout_ms: u64, retry_attempts: u8) -> Result<u64, AdapterError> {
+fn claim_publication_deadline_unix_ms(
+    now_unix_ms: i64,
+    timeout_ms: u64,
+    retry_attempts: u8,
+    request_expires_at_unix_ms: i64,
+    grant_expires_at_unix_ms: i64,
+) -> Result<i64, AdapterError> {
     let network_windows = u64::from(retry_attempts) + 1;
-    timeout_ms
+    let bounded_lifetime_ms = timeout_ms
         .checked_mul(network_windows)
-        .and_then(|network_wait_ms| network_wait_ms.checked_add(MIN_RECEIPT_PUBLICATION_WAIT_MS))
-        .ok_or(AdapterError::InvalidConfig)
+        .and_then(|network_wait_ms| network_wait_ms.checked_add(MAX_LOCAL_RECEIPT_PUBLICATION_MS))
+        .and_then(|lifetime_ms| i64::try_from(lifetime_ms).ok())
+        .ok_or(AdapterError::InvalidConfig)?;
+    let bounded_deadline = now_unix_ms
+        .checked_add(bounded_lifetime_ms)
+        .ok_or(AdapterError::InvalidConfig)?;
+    let deadline = bounded_deadline
+        .min(request_expires_at_unix_ms)
+        .min(grant_expires_at_unix_ms);
+    if deadline <= now_unix_ms {
+        Err(AdapterError::InvalidConfig)
+    } else {
+        Ok(deadline)
+    }
 }
 
 #[cfg(unix)]
@@ -1786,14 +1854,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn duplicate_wait_has_a_timeout_independent_publication_floor() {
+    fn claim_deadline_binds_network_local_and_authority_windows() {
         assert_eq!(
-            claimed_receipt_wait_ms(1, 0).expect("bounded duplicate wait"),
-            1_001
+            claim_publication_deadline_unix_ms(100, 1, 0, 1_000_000, 1_000_000)
+                .expect("bounded publication deadline"),
+            60_101
         );
         assert_eq!(
-            claimed_receipt_wait_ms(MAX_TIMEOUT_MS, 5).expect("maximum bounded duplicate wait"),
-            361_000
+            claim_publication_deadline_unix_ms(100, MAX_TIMEOUT_MS, 5, 200_000, 300_000)
+                .expect("authority-bounded publication deadline"),
+            200_000
         );
     }
 
