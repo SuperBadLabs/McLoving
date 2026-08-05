@@ -54,10 +54,13 @@ exactly zero Jenkins reads. The cutover transaction also loads the exact active
 target principal through the runtime identity/authorization path and requires
 every declared resource's action (`project_view`, `log_read`, `test_read`, or
 `artifact_read`) for the bound project; identity existence alone is never
-sufficient. Resource tags must match the exact supported v1 endpoint template
-and query-name set before their required action is derived. The target identity
-row remains locked through commit so lifecycle disable/delete cannot race a
-stale authorization check. Restoring Jenkins must immediately follow a target
+sufficient. The cutover takes the same project authorization advisory lock as
+AUTHZ-001 before loading that principal, including when no policy exists, so a
+concurrent grant or revocation cannot race a stale decision. Resource tags must
+match the exact supported v1 endpoint template and query-name set before their
+required action is derived. The target identity row remains locked through
+commit so lifecycle disable/delete cannot race a stale authorization check.
+Restoring Jenkins must immediately follow a target
 generation, name that exact generation, retain the stable binding digest, and
 bind independent rollback evidence. Cutover likewise cannot substitute either
 side. A fresh recutover is another new target generation; pointers never move
@@ -87,7 +90,7 @@ cross-tenant/missing-authority route denial, normalized tests, and immutable
 artifact retrieval. `crates/controller-store/tests/external_read_consumers.rs`
 uses real PostgreSQL to prove canonical binding, source/target/tenant
 substitution denial, zero-residual-read enforcement, exact monotonic rollback,
-active-but-read-ineligible target denial, lifecycle-race serialization,
+active-but-read-ineligible target denial, lifecycle- and policy-race serialization,
 resource/endpoint/query mismatch denial (including the exact log cursor and
 artifact-content selectors), concurrent generation fencing, hash-chained audit,
 forced RLS, and runtime mutation denial.

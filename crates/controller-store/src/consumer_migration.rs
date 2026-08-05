@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::audit::append_audit_record;
+use super::authorization_mapping::authorization_policy_lock_key;
 use super::authz::{Action, authorize};
 use super::identity::load_principal;
 use super::{Store, StoreError};
@@ -205,6 +206,15 @@ impl Store {
         .await?;
         if !project_exists {
             return invalid("external read consumer target project does not exist in the tenant");
+        }
+        if input.authority == ExternalReadAuthority::McLovingTarget {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(authorization_policy_lock_key(
+                    input.organization_id,
+                    input.project_id,
+                ))
+                .execute(&mut *tx)
+                .await?;
         }
         let target_identity = sqlx::query_as::<_, (String, String)>(
             "SELECT lifecycle_state, kind FROM identities

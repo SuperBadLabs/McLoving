@@ -71,9 +71,9 @@ impl Store {
 
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!(
-                "mcloving.authorization-policy.{}.{}",
-                input.organization_id, input.project_id
+            .bind(authorization_policy_lock_key(
+                input.organization_id,
+                input.project_id,
             ))
             .execute(&mut *tx)
             .await?;
@@ -271,6 +271,10 @@ impl Store {
             grant_count,
         })
     }
+}
+
+pub(super) fn authorization_policy_lock_key(organization_id: Uuid, project_id: Uuid) -> String {
+    format!("mcloving.authorization-policy.{organization_id}.{project_id}")
 }
 
 pub fn compute_authorization_policy_digest(

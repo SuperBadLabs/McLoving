@@ -2,10 +2,13 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use mcloving_controller_store::{
-    ExternalReadAuthority, ExternalReadConsumerWrite, ExternalReadEndpointContract,
-    ExternalReadResource, IdentityLifecycle, NewServiceIdentity, Store, StoreError,
-    authz::ServiceScope, compute_external_read_consumer_digest,
+    AuthorizationPolicyWrite, AuthorizationPrincipalMappingWrite, ExternalReadAuthority,
+    ExternalReadConsumerWrite, ExternalReadEndpointContract, ExternalReadResource,
+    IdentityLifecycle, NewServiceIdentity, Store, StoreError,
+    authz::{Action, GrantDecision, ServiceScope},
+    compute_authorization_policy_digest, compute_external_read_consumer_digest,
 };
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -171,6 +174,62 @@ fn consumer(
     write
 }
 
+fn authorization_policy(
+    organization_id: Uuid,
+    project_id: Uuid,
+    generation: i64,
+    expected_current_generation: Option<i64>,
+    restored_from_generation: Option<i64>,
+    mappings: Vec<AuthorizationPrincipalMappingWrite>,
+) -> AuthorizationPolicyWrite {
+    let mut write = AuthorizationPolicyWrite {
+        organization_id,
+        project_id,
+        generation,
+        expected_current_generation,
+        source_realm_implementation: "jenkins.security.HudsonPrivateSecurityRealm".to_owned(),
+        source_realm_digest: digest("consumer-authz-source-realm-v1"),
+        source_inventory_digest: digest("consumer-authz-inventory-v1"),
+        reviewer: "reviewer:consumer-owner".to_owned(),
+        actor_subject: "service:authz-importer".to_owned(),
+        restored_from_generation,
+        mappings,
+        expected_policy_digest: [0; 32],
+    };
+    write.expected_policy_digest =
+        compute_authorization_policy_digest(&write).expect("canonical authorization digest");
+    write
+}
+
+fn consumer_service_mapping(
+    identity_id: Uuid,
+    target_lifecycle_generation: i64,
+    decisions: BTreeMap<Action, GrantDecision>,
+) -> AuthorizationPrincipalMappingWrite {
+    AuthorizationPrincipalMappingWrite {
+        mapping_id: Uuid::new_v4(),
+        target_identity_id: identity_id,
+        source_identity_id: "jenkins-principal:oracle-admin".to_owned(),
+        source_alias_history: json!([]),
+        source_membership_generation: 1,
+        source_lifecycle_state: "active".to_owned(),
+        source_acl_entry_id: "controller:principal/oracle-admin".to_owned(),
+        source_acl_scope: "owner-designated-oracle-controller".to_owned(),
+        source_acl_generation: "consumer-authz-generation-1".to_owned(),
+        source_permissions: ["job.read", "run.artifacts", "run.tests", "run.logs"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        target_provider_id: None,
+        target_external_subject: None,
+        target_lifecycle_generation,
+        target_group_generation: 1,
+        target_provenance_digest: [0; 32],
+        resulting_role: "external_reader".to_owned(),
+        decisions,
+    }
+}
+
 async fn fixture(store: &Store, slug: &str) -> (Uuid, Uuid, Uuid) {
     fixture_with_scopes(store, slug, [ServiceScope::ProjectRead].into()).await
 }
@@ -317,6 +376,87 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
         )
         .await
         .expect("restore target identity after lifecycle race");
+
+    let read_decisions = [
+        (Action::ProjectView, GrantDecision::Allow),
+        (Action::ArtifactRead, GrantDecision::Allow),
+        (Action::LogRead, GrantDecision::Allow),
+        (Action::TestRead, GrantDecision::Allow),
+    ]
+    .into();
+    let allow_mapping = consumer_service_mapping(identity_id, 3, read_decisions);
+    let allow_policy = authorization_policy(
+        organization_id,
+        project_id,
+        1,
+        None,
+        None,
+        vec![allow_mapping.clone()],
+    );
+    store
+        .install_authorization_policy(&allow_policy)
+        .await
+        .expect("install target read authorization");
+
+    let mut policy_lock = store.pool().begin().await.expect("begin policy race");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "mcloving.authorization-policy.{organization_id}.{project_id}"
+        ))
+        .execute(&mut *policy_lock)
+        .await
+        .expect("hold the project authorization transition lock");
+    let revoke_policy =
+        authorization_policy(organization_id, project_id, 2, Some(1), None, Vec::new());
+    let revoke_install = store.install_authorization_policy(&revoke_policy);
+    tokio::pin!(revoke_install);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), revoke_install.as_mut())
+            .await
+            .is_err(),
+        "policy revocation must wait for the held authorization lock"
+    );
+    let policy_raced_target = consumer(
+        organization_id,
+        project_id,
+        identity_id,
+        2,
+        Some(1),
+        ExternalReadAuthority::McLovingTarget,
+    );
+    let policy_raced_cutover = store.install_external_read_consumer(&policy_raced_target);
+    tokio::pin!(policy_raced_cutover);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), policy_raced_cutover.as_mut())
+            .await
+            .is_err(),
+        "consumer cutover must wait for the same project authorization lock"
+    );
+    policy_lock
+        .commit()
+        .await
+        .expect("release policy race lock");
+    revoke_install
+        .await
+        .expect("commit queued project authorization revocation");
+    assert!(matches!(
+        policy_raced_cutover.await,
+        Err(StoreError::InvalidConsumerMigration(message))
+            if message.contains("lacks required project_view authority")
+    ));
+
+    let restored_policy = authorization_policy(
+        organization_id,
+        project_id,
+        3,
+        Some(2),
+        Some(1),
+        vec![allow_mapping],
+    );
+    store
+        .install_authorization_policy(&restored_policy)
+        .await
+        .expect("restore target read authorization after contained race");
 
     let mut rebound = consumer(
         organization_id,
