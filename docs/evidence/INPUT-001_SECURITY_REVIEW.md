@@ -44,7 +44,8 @@ represented as Mario production truth.
 - tenant/project/pipeline/build/attempt/input, generation, cursor, expiry,
   confidentiality, and audit-lineage binding;
 - bounded timeout, retry, response size, rate, freshness, and typed JSON schema,
-  with request/grant expiry and freshness rechecked only after the complete
+  with request/grant expiry fenced before each outbound attempt, source
+  freshness checked before body sampling, and both rechecked after the complete
   response is captured;
 - checked source-age arithmetic denying future, stale, and overflowing
   Unix-millisecond timestamps;
