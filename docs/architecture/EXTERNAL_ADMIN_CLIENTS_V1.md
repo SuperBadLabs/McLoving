@@ -33,7 +33,7 @@ currently admits five exact authenticated contracts:
 | Build submit | `POST .../builds`; `mcloving submit` | pipeline digest; caller `Idempotency-Key` |
 | Build cancel | `POST .../builds/{build}/cancel`; `mcloving cancel` | durable build-state fence; build ID plus cancellation state |
 | Build retry | `POST .../builds/{build}/attempts/{attempt}/retry`; `mcloving retry` | attempt fence; attempt ID plus request digest |
-| Approval/input act | `POST .../builds/{build}/approvals`; `mcloving approve` | environment/action/expiry; caller-stable approval UUID |
+| Protected-environment approval | `POST .../builds/{build}/approvals`; `mcloving approve` | environment/action/expiry; caller-stable approval UUID |
 
 The ledger rejects an invented endpoint, method, schema, precondition, or
 idempotency rule. An unsupported operation cannot claim v1 support.
