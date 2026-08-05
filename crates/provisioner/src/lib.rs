@@ -726,6 +726,46 @@ struct StoredRequest {
     created_at_unix_ms: i64,
 }
 
+fn lifecycle_receipt_converges(stored: &StoredRequest, receipt: &LifecycleReceipt) -> bool {
+    let request = &stored.request;
+    let same_request = receipt.body.request_id == request.request_id
+        && receipt.body.request_sha256 == stored.request_sha256
+        && receipt.body.tenant_id == request.tenant_id
+        && receipt.body.project_id == request.project_id
+        && receipt.body.build_id == request.build_id
+        && receipt.body.attempt_id == request.attempt_id
+        && receipt.body.fence_token == request.fence_token
+        && receipt.body.request_expected_implementation_sha256
+            == request.expected_implementation_sha256
+        && receipt.body.request_expected_config_sha256 == request.expected_config_sha256
+        && receipt.body.request_expected_generation == request.expected_generation;
+    let same_instance = receipt.body.instance_id
+        == stored
+            .instance
+            .as_ref()
+            .map(|instance| instance.instance_id);
+    if !same_request || !same_instance {
+        return false;
+    }
+    match stored.state {
+        StoredState::Ready => {
+            receipt.body.outcome == LifecycleOutcome::Ready
+                && !receipt.body.cleanup_confirmed
+                && !receipt.body.ambiguity
+                && receipt.body.instance_id.is_some()
+        }
+        StoredState::Ambiguous | StoredState::Deleting => {
+            receipt.body.ambiguity && !receipt.body.cleanup_confirmed
+        }
+        StoredState::Deleted | StoredState::Failed => {
+            receipt.body.cleanup_confirmed
+                && !receipt.body.ambiguity
+                && cleanup_directive(receipt.body.outcome).is_some()
+        }
+        StoredState::Intent | StoredState::Pending => false,
+    }
+}
+
 struct LifecycleEvidence<'a> {
     request_sha256: &'a str,
     instance: Option<&'a ProviderInstance>,
@@ -892,9 +932,12 @@ impl Provisioner {
         let startup_deadline = self.startup_deadline(request, now)?;
 
         if let Some(stored) = self.admit_or_load(request, &request_sha256, now)? {
-            if let Some(receipt) = stored.latest_receipt {
-                self.verify_lifecycle_receipt(&receipt)?;
-                return Ok(receipt);
+            if let Some(receipt) = stored.latest_receipt.as_ref() {
+                self.verify_lifecycle_receipt(receipt)?;
+                if lifecycle_receipt_converges(&stored, receipt) {
+                    return Ok(receipt.clone());
+                }
+                return Box::pin(self.recover_one(stored, &request.audit_lineage)).await;
             }
             return self
                 .wait_for_peer_or_recover(stored, &request.audit_lineage)
@@ -1195,7 +1238,7 @@ impl Provisioner {
             }
         }
 
-        let stored = self.load_active_requests()?;
+        let (stored, admission_epoch) = self.load_active_requests_with_admission_epoch()?;
         let mut known = BTreeSet::new();
         let mut recovered = 0_u32;
         let mut cleaned = 0_u32;
@@ -1496,7 +1539,7 @@ impl Provisioner {
             signature: self.sign(&body)?,
             body,
         };
-        self.store_reconcile_evidence(&receipt)?;
+        self.store_reconcile_evidence(&receipt, admission_epoch)?;
         Ok(receipt)
     }
 
@@ -1724,7 +1767,10 @@ impl Provisioner {
     ) -> Result<LifecycleReceipt, ProvisionerError> {
         if let Some(receipt) = stored.latest_receipt.as_ref() {
             self.verify_lifecycle_receipt(receipt)?;
-            if receipt.body.cleanup_confirmed && !receipt.body.ambiguity {
+            if receipt.body.cleanup_confirmed
+                && !receipt.body.ambiguity
+                && lifecycle_receipt_converges(&stored, receipt)
+            {
                 return Ok(receipt.clone());
             }
         }
@@ -2088,9 +2134,12 @@ impl Provisioner {
             .ok_or(ProvisionerError::StateUnavailable)?
             .min(stored.request.expires_at_unix_ms);
         loop {
-            if let Some(receipt) = stored.latest_receipt {
-                self.verify_lifecycle_receipt(&receipt)?;
-                return Ok(receipt);
+            if let Some(receipt) = stored.latest_receipt.as_ref() {
+                self.verify_lifecycle_receipt(receipt)?;
+                if lifecycle_receipt_converges(&stored, receipt) {
+                    return Ok(receipt.clone());
+                }
+                return Box::pin(self.recover_one(stored, audit_lineage)).await;
             }
             if stored.instance.is_some() || stored.state != StoredState::Intent {
                 return self.recover_one(stored, audit_lineage).await;
@@ -2729,6 +2778,16 @@ impl Provisioner {
                 ],
             )
             .map_err(|_| ProvisionerError::StateUnavailable)?;
+        let epoch_changed = transaction
+            .execute(
+                "UPDATE metadata SET admission_epoch = admission_epoch + 1
+                 WHERE singleton = 1 AND admission_epoch < 9223372036854775807",
+                [],
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        if epoch_changed != 1 {
+            return Err(ProvisionerError::StateUnavailable);
+        }
         transaction
             .commit()
             .map_err(|_| ProvisionerError::StateUnavailable)?;
@@ -2918,6 +2977,51 @@ impl Provisioner {
         Ok(stored)
     }
 
+    fn load_active_requests_with_admission_epoch(
+        &self,
+    ) -> Result<(Vec<StoredRequest>, u64), ProvisionerError> {
+        let mut connection = open_database(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        let epoch: i64 = transaction
+            .query_row(
+                "SELECT admission_epoch FROM metadata WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        let stored = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT request_json, request_sha256, state, instance_json,
+                            latest_receipt_json, created_at_unix_ms
+                     FROM requests
+                     WHERE state IN ('intent','ambiguous','pending','ready','deleting')
+                     ORDER BY request_id",
+                )
+                .map_err(|_| ProvisionerError::StateUnavailable)?;
+            let rows = statement
+                .query_map([], stored_request_from_row)
+                .map_err(|_| ProvisionerError::StateUnavailable)?;
+            let mut stored = Vec::new();
+            for row in rows {
+                stored.push(row.map_err(|_| ProvisionerError::StateUnavailable)??);
+                if stored.len() > MAX_PROVIDER_INSTANCES {
+                    return Err(ProvisionerError::StateUnavailable);
+                }
+            }
+            stored
+        };
+        transaction
+            .commit()
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        Ok((
+            stored,
+            u64::try_from(epoch).map_err(|_| ProvisionerError::StateUnavailable)?,
+        ))
+    }
+
     fn append_lifecycle_receipt(
         &self,
         request: &ProvisionRequest,
@@ -3042,15 +3146,37 @@ impl Provisioner {
         Ok(receipt)
     }
 
-    fn store_reconcile_evidence(&self, receipt: &ReconcileReceipt) -> Result<(), ProvisionerError> {
+    fn store_reconcile_evidence(
+        &self,
+        receipt: &ReconcileReceipt,
+        expected_admission_epoch: u64,
+    ) -> Result<(), ProvisionerError> {
         self.verify_reconcile_receipt(receipt)?;
-        let connection = open_database(&self.database_path)?;
-        connection
+        let mut connection = open_database(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        let admission_epoch: i64 = transaction
+            .query_row(
+                "SELECT admission_epoch FROM metadata WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        if u64::try_from(admission_epoch).map_err(|_| ProvisionerError::StateUnavailable)?
+            != expected_admission_epoch
+        {
+            return Err(ProvisionerError::ReconciliationRequired);
+        }
+        transaction
             .execute(
                 "INSERT INTO evidence(request_id, evidence_kind, receipt_json)
                  VALUES (NULL, 'reconcile', ?1)",
                 [canonical_json(receipt)?],
             )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        transaction
+            .commit()
             .map_err(|_| ProvisionerError::StateUnavailable)?;
         sync_database_parent(&self.database_path)
     }
@@ -3098,7 +3224,8 @@ fn initialize_database(
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
                  provisioner_id TEXT NOT NULL,
-                 ledger_scope_sha256 TEXT NOT NULL
+                 ledger_scope_sha256 TEXT NOT NULL,
+                 admission_epoch INTEGER NOT NULL DEFAULT 0 CHECK (admission_epoch >= 0)
              ) STRICT;
              CREATE TABLE IF NOT EXISTS runtime_generations (
                  config_sha256 TEXT PRIMARY KEY,
@@ -3144,6 +3271,22 @@ fn initialize_database(
              ) STRICT;",
         )
         .map_err(|_| ProvisionerError::StateUnavailable)?;
+    let has_admission_epoch: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('metadata') WHERE name = 'admission_epoch'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ProvisionerError::StateUnavailable)?;
+    if has_admission_epoch == 0 {
+        connection
+            .execute(
+                "ALTER TABLE metadata ADD COLUMN admission_epoch INTEGER NOT NULL DEFAULT 0
+                 CHECK (admission_epoch >= 0)",
+                [],
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+    }
     connection
         .execute(
             "INSERT INTO metadata(

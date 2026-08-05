@@ -51,6 +51,7 @@ enum FixtureMode {
     DelayedReady,
     DelayedCreateReady,
     DelayedAbsence,
+    DelayedSnapshotFinalInventory,
     SlowInitialInventory,
 }
 
@@ -65,6 +66,7 @@ struct Inner {
     snapshot_pending_sent: bool,
     malformed_delete_sent: bool,
     inventory_reads: usize,
+    inventory_started: usize,
     create_started: usize,
     lookup_started: usize,
 }
@@ -104,6 +106,7 @@ impl Fixture {
                 snapshot_pending_sent: false,
                 malformed_delete_sent: false,
                 inventory_reads: 0,
+                inventory_started: 0,
                 create_started: 0,
                 lookup_started: 0,
             })),
@@ -244,6 +247,23 @@ impl Fixture {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
         panic!("provider lookup did not start");
+    }
+
+    async fn wait_for_inventory_start(&self, minimum: usize) {
+        for _ in 0..100 {
+            if self
+                .state
+                .inner
+                .lock()
+                .expect("fixture state")
+                .inventory_started
+                >= minimum
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        panic!("provider inventory did not start");
     }
 }
 
@@ -402,6 +422,26 @@ async fn list_instances(
         || query.get("provisioner_id").map(String::as_str) != Some("contained-provisioner")
     {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    let delayed_final_snapshot = {
+        let mut inner = state.inner.lock().expect("fixture state");
+        inner.inventory_started += 1;
+        if inner.mode == FixtureMode::DelayedSnapshotFinalInventory && inner.inventory_started == 2
+        {
+            inner.inventory_reads += 1;
+            Some(ProviderInventory {
+                provisioner_id: "contained-provisioner".to_owned(),
+                complete: true,
+                observed_at_unix_ms: now_ms(),
+                instances: inner.instances.values().cloned().collect(),
+            })
+        } else {
+            None
+        }
+    };
+    if let Some(snapshot) = delayed_final_snapshot {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        return signed_response(&state, snapshot);
     }
     let slow_initial = {
         let inner = state.inner.lock().expect("fixture state");
@@ -1671,6 +1711,36 @@ async fn reconcile_does_not_close_an_in_flight_fresh_intent() {
 }
 
 #[tokio::test]
+async fn reconciliation_rejects_an_admission_after_its_initial_ledger_snapshot() {
+    let context = Context::new(FixtureMode::DelayedSnapshotFinalInventory).await;
+    let request = context.request();
+    let reconcile_request = reconcile_request(&context.config, IMPLEMENTATION_SHA256);
+    let reconciliation = context.provisioner.reconcile(&reconcile_request);
+    let admission = async {
+        context.fixture.wait_for_inventory_start(2).await;
+        context.provisioner.provision(&request).await
+    };
+    let (reconciled, admitted) = tokio::join!(reconciliation, admission);
+    let admitted = admitted.expect("concurrent admission succeeds");
+    assert_eq!(admitted.body.outcome, LifecycleOutcome::Ready);
+    assert!(matches!(
+        reconciled,
+        Err(ProvisionerError::ReconciliationRequired)
+    ));
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let evidence: i64 = database
+        .query_row(
+            "SELECT count(*) FROM evidence WHERE evidence_kind = 'reconcile'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count reconciliation evidence");
+    assert_eq!(evidence, 0);
+}
+
+#[tokio::test]
 async fn cancellation_wins_an_in_flight_create_and_cleans_returned_compute() {
     let context = Context::new(FixtureMode::DelayedCreateReady).await;
     let request = context.request();
@@ -2076,7 +2146,7 @@ async fn recovered_absence_preserves_ready_and_deleting_lifecycle_truth() {
 async fn reconciliation_absence_crash_recovery_preserves_agent_loss() {
     let context = Context::new(FixtureMode::Ready).await;
     let request = context.request();
-    context
+    let ready = context
         .provisioner
         .provision(&request)
         .await
@@ -2093,10 +2163,13 @@ async fn reconciliation_absence_crash_recovery_preserves_agent_loss() {
         .expect("open retained ledger");
     database
         .execute(
-            "UPDATE requests SET latest_receipt_json = NULL WHERE request_id = ?1",
-            [request.request_id.to_string()],
+            "UPDATE requests SET latest_receipt_json = ?2 WHERE request_id = ?1",
+            rusqlite::params![
+                request.request_id.to_string(),
+                serde_json::to_vec(&ready).expect("ready receipt JSON"),
+            ],
         )
-        .expect("simulate crash after reconciliation state commit");
+        .expect("simulate crash after state commit but before cleanup receipt publication");
     drop(database);
     let restarted = Provisioner::new(
         context.config.clone(),
