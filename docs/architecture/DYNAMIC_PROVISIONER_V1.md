@@ -130,7 +130,10 @@ partition, malformed/unattested response, or uncertain deletion becomes
 
 The private SQLite database uses `synchronous=FULL`, a closed state enum, exact
 request JSON/digest, provider instance evidence, and append-only signed receipt
-rows. The relevant recovery cases are:
+rows. Its immutable ledger scope binds the provisioner, provider endpoint,
+account, region, API and attestation identity, grant scope, agent class, and
+instance identity policy; a later runtime cannot reinterpret retained state
+through another provider scope. The relevant recovery cases are:
 
 - controller crash: replaying the same command returns the retained receipt or
   performs lookup-only recovery; controller storage is not consulted;
@@ -189,7 +192,8 @@ final-inventory substitution with explicit escaped-compute truth and duplicate
 identity denial,
 cutover/rollback generation binding, recursive duplicate-JSON denial,
 pre-state invalid-configuration denial, and provider-token/receipt-key
-non-disclosure.
+non-disclosure. Reopening retained state under a substituted provider scope is
+also denied before any provider access.
 
 `crates/provisioner/tests/mario_inventory.rs` pins and parses the accepted
 MIG-000 manifest and proves the current Mario denominator has zero admitted

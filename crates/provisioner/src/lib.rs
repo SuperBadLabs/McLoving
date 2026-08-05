@@ -707,6 +707,23 @@ struct LifecycleEvidence<'a> {
     observed_at_unix_ms: i64,
 }
 
+#[derive(Serialize)]
+struct LedgerScopeBinding<'a> {
+    protocol_version: &'a str,
+    provisioner_id: &'a str,
+    provider_id: &'a str,
+    provider_endpoint: &'a str,
+    provider_endpoint_identity: &'a str,
+    provider_account_id: &'a str,
+    provider_region: &'a str,
+    provider_api_version: &'a str,
+    provider_grant_scope: &'a str,
+    provider_attestation_key_id: &'a str,
+    provider_attestation_key_sha256: &'a str,
+    agent: &'a AgentSpecification,
+    instance_identity: &'a InstanceIdentityPolicy,
+}
+
 pub struct Provisioner {
     config: ProvisionerConfig,
     config_sha256: String,
@@ -772,9 +789,11 @@ impl Provisioner {
             .build()
             .map_err(|_| ProvisionerError::InvalidConfig)?;
         let config_sha256 = config.canonical_digest()?;
+        let ledger_scope_sha256 = ledger_scope_digest(&config)?;
         initialize_database(
             &database_path,
             &config.provisioner_id,
+            &ledger_scope_sha256,
             &implementation_sha256,
             &config_sha256,
             config.generation,
@@ -2434,6 +2453,7 @@ impl Provisioner {
 fn initialize_database(
     path: &Path,
     provisioner_id: &str,
+    ledger_scope_sha256: &str,
     implementation_sha256: &str,
     config_sha256: &str,
     generation: u64,
@@ -2449,7 +2469,8 @@ fn initialize_database(
              CREATE TABLE IF NOT EXISTS metadata (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
-                 provisioner_id TEXT NOT NULL
+                 provisioner_id TEXT NOT NULL,
+                 ledger_scope_sha256 TEXT NOT NULL
              ) STRICT;
              CREATE TABLE IF NOT EXISTS runtime_generations (
                  config_sha256 TEXT PRIMARY KEY,
@@ -2491,19 +2512,21 @@ fn initialize_database(
         .map_err(|_| ProvisionerError::StateUnavailable)?;
     connection
         .execute(
-            "INSERT INTO metadata(singleton, schema_version, provisioner_id)
-             VALUES (1, 1, ?1) ON CONFLICT(singleton) DO NOTHING",
-            [provisioner_id],
+            "INSERT INTO metadata(
+                 singleton, schema_version, provisioner_id, ledger_scope_sha256
+             ) VALUES (1, 1, ?1, ?2) ON CONFLICT(singleton) DO NOTHING",
+            params![provisioner_id, ledger_scope_sha256],
         )
         .map_err(|_| ProvisionerError::StateUnavailable)?;
-    let stored_id: String = connection
+    let stored_scope: (String, String) = connection
         .query_row(
-            "SELECT provisioner_id FROM metadata WHERE singleton = 1 AND schema_version = 1",
+            "SELECT provisioner_id, ledger_scope_sha256
+             FROM metadata WHERE singleton = 1 AND schema_version = 1",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|_| ProvisionerError::StateUnavailable)?;
-    if stored_id != provisioner_id {
+    if stored_scope.0 != provisioner_id || stored_scope.1 != ledger_scope_sha256 {
         return Err(ProvisionerError::StateUnavailable);
     }
     connection
@@ -2535,6 +2558,24 @@ fn initialize_database(
         return Err(ProvisionerError::StateUnavailable);
     }
     sync_database_parent(path)
+}
+
+fn ledger_scope_digest(config: &ProvisionerConfig) -> Result<String, ProvisionerError> {
+    canonical_digest(&LedgerScopeBinding {
+        protocol_version: &config.protocol_version,
+        provisioner_id: &config.provisioner_id,
+        provider_id: &config.provider_id,
+        provider_endpoint: &config.provider_endpoint,
+        provider_endpoint_identity: &config.provider_endpoint_identity,
+        provider_account_id: &config.provider_account_id,
+        provider_region: &config.provider_region,
+        provider_api_version: &config.provider_api_version,
+        provider_grant_scope: &config.provider_grant_scope,
+        provider_attestation_key_id: &config.provider_attestation_key_id,
+        provider_attestation_key_sha256: &config.provider_attestation_key_sha256,
+        agent: &config.agent,
+        instance_identity: &config.instance_identity,
+    })
 }
 
 fn open_database(path: &Path) -> Result<Connection, ProvisionerError> {

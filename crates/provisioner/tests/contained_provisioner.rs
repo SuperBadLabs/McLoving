@@ -1058,6 +1058,28 @@ async fn invalid_authority_configuration_fails_before_private_state_creation() {
     assert!(!state_dir.exists());
 }
 
+#[tokio::test]
+async fn retained_ledger_rejects_provider_scope_drift() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let state_dir = context.config.state_dir.clone();
+    let mut drifted = context.config.clone();
+    drifted.provider_region = "substituted-region-2".to_owned();
+
+    assert!(matches!(
+        Provisioner::new(
+            drifted,
+            IMPLEMENTATION_SHA256.to_owned(),
+            PROVIDER_TOKEN.to_owned(),
+            context.fixture.public_key(),
+            RECEIPT_KEY.to_vec(),
+        )
+        .await,
+        Err(ProvisionerError::StateUnavailable)
+    ));
+    assert!(state_dir.join("provisioner.sqlite3").is_file());
+    assert_eq!(context.fixture.counts().0, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn standalone_binary_is_bounded_and_does_not_disclose_authority_material() {
     use std::os::unix::fs::OpenOptionsExt as _;
