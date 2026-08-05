@@ -16,6 +16,8 @@ precisely, and executes through native Rust agents on Linux and Windows.
 - Compatibility claims require pinned Jenkins differential evidence.
 - Linux and Windows are first-class execution platforms.
 - Extensions remain capability-specific and out of process.
+- Live external runtime inputs are captured once through a typed, bounded,
+  read-only adapter and replayed identically to compared runners.
 - Production changes are reviewable, auditable, and recoverable.
 
 ## Compatibility contract

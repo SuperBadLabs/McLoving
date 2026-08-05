@@ -1473,6 +1473,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-input-adapter"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64",
+ "hmac",
+ "reqwest",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "mcloving-jenkins-compiler-admission"
 version = "0.0.0"
 dependencies = [
