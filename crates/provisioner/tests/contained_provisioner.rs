@@ -1350,7 +1350,8 @@ async fn lookup_absence_after_startup_deadline_is_classified_as_timeout() {
 
 #[tokio::test]
 async fn terminal_cancel_state_survives_late_startup_lookup_failure() {
-    let context = Context::new(FixtureMode::DelayedMalformedLookupOnce).await;
+    let context =
+        Context::with_startup_timeout(FixtureMode::DelayedMalformedLookupOnce, 1_000).await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -2226,7 +2227,7 @@ async fn reconciliation_absence_crash_recovery_preserves_agent_loss() {
 
 #[tokio::test]
 async fn concurrent_process_instances_converge_on_one_create_and_one_receipt() {
-    let context = Context::new(FixtureMode::PendingThenReady).await;
+    let context = Context::with_startup_timeout(FixtureMode::PendingThenReady, 1_000).await;
     let peer = Provisioner::new(
         context.config.clone(),
         IMPLEMENTATION_SHA256.to_owned(),
