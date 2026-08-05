@@ -183,6 +183,14 @@ pub struct CaptureReceipt {
     pub signature: String,
 }
 
+struct ValidatedResponseHeaders {
+    source_cursor: String,
+    source_provenance: String,
+    source_observed_at_unix_ms: i64,
+    confidentiality: Confidentiality,
+    source_etag: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct RateReservation {
@@ -537,7 +545,7 @@ impl InputAdapter {
             }
         }
 
-        let fetch_result: Result<(reqwest::Response, u8), AdapterError> = async {
+        let fetch_result: Result<(ValidatedResponseHeaders, Vec<u8>, u8), AdapterError> = async {
             let mut retry_count = 0_u8;
             loop {
                 let attempt_started_at_unix_ms = now_unix_ms()?;
@@ -569,81 +577,64 @@ impl InputAdapter {
                     .header("x-mcloving-grant-scope", self.grant_scope_header.clone())
                     .send()
                     .await;
-                self.complete_rate_attempt(request.capture_id).await?;
                 match result {
                     Ok(response) if response.status().is_success() => {
-                        return Ok((response, retry_count));
+                        let headers =
+                            match self.validate_response_headers(request, response.headers()) {
+                                Ok(headers) => headers,
+                                Err(error) => {
+                                    self.complete_rate_attempt(request.capture_id).await?;
+                                    return Err(error);
+                                }
+                            };
+                        let body_result = self.read_response_body(response).await;
+                        self.complete_rate_attempt(request.capture_id).await?;
+                        match body_result {
+                            Ok(body) => return Ok((headers, body, retry_count)),
+                            Err(AdapterError::SourceUnavailable)
+                                if retry_count < self.config.retry_attempts =>
+                            {
+                                retry_count += 1;
+                            }
+                            Err(error) => return Err(error),
+                        }
                     }
                     Ok(response)
                         if response.status() == reqwest::StatusCode::UNAUTHORIZED
                             || response.status() == reqwest::StatusCode::FORBIDDEN =>
                     {
+                        self.complete_rate_attempt(request.capture_id).await?;
                         return Err(AdapterError::Unauthorized);
                     }
                     Ok(response)
                         if matches!(response.status().as_u16(), 502..=504)
                             && retry_count < self.config.retry_attempts =>
                     {
+                        self.complete_rate_attempt(request.capture_id).await?;
                         retry_count += 1;
                     }
                     Err(_) if retry_count < self.config.retry_attempts => {
+                        self.complete_rate_attempt(request.capture_id).await?;
                         retry_count += 1;
                     }
-                    _ => return Err(AdapterError::SourceUnavailable),
+                    _ => {
+                        self.complete_rate_attempt(request.capture_id).await?;
+                        return Err(AdapterError::SourceUnavailable);
+                    }
                 }
             }
         }
         .await;
         self.release_rate_reservation(request.capture_id).await?;
-        let (response, retry_count) = fetch_result?;
-
-        let headers = response.headers().clone();
-        if headers
-            .values()
-            .any(|value| self.contains_secret_marker(value.as_bytes()))
-        {
-            return Err(AdapterError::ConfidentialityDenied);
-        }
-        validate_json_content_type(&headers)?;
-        let source_cursor = required_header(&headers, "x-mcloving-cursor")?;
-        if request
-            .expected_cursor
-            .as_ref()
-            .is_some_and(|expected| expected != &source_cursor)
-        {
-            return Err(AdapterError::StaleResponse);
-        }
-        let source_provenance = required_header(&headers, "x-mcloving-provenance")?;
-        let source_observed_at_unix_ms = required_header(&headers, "x-mcloving-observed-at-ms")?
-            .parse::<i64>()
-            .map_err(|_| AdapterError::MissingProvenance)?;
-        validate_source_age(
-            now_unix_ms()?,
+        let (validated_headers, body, retry_count) = fetch_result?;
+        let ValidatedResponseHeaders {
+            source_cursor,
+            source_provenance,
             source_observed_at_unix_ms,
-            self.config.max_age_ms,
-        )?;
-        let confidentiality =
-            parse_confidentiality(&required_header(&headers, "x-mcloving-confidentiality")?)?;
-        if confidentiality > self.config.max_confidentiality
-            || confidentiality > request.confidentiality_ceiling
-            || confidentiality == Confidentiality::Secret
-        {
-            return Err(AdapterError::ConfidentialityDenied);
-        }
-        let source_etag = optional_header(&headers, "etag")?;
+            confidentiality,
+            source_etag,
+        } = validated_headers;
 
-        let mut response = response;
-        let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| AdapterError::SourceUnavailable)?
-        {
-            if body.len().saturating_add(chunk.len()) > self.config.max_response_bytes {
-                return Err(AdapterError::OversizedResponse);
-            }
-            body.extend_from_slice(&chunk);
-        }
         if self.contains_secret_marker(&body) {
             return Err(AdapterError::ConfidentialityDenied);
         }
@@ -845,6 +836,70 @@ impl InputAdapter {
             return Err(AdapterError::StateUnavailable);
         }
         store_rate_ledger(&self.config.spool_dir, &ledger).await
+    }
+
+    fn validate_response_headers(
+        &self,
+        request: &CaptureRequest,
+        headers: &HeaderMap,
+    ) -> Result<ValidatedResponseHeaders, AdapterError> {
+        if headers
+            .values()
+            .any(|value| self.contains_secret_marker(value.as_bytes()))
+        {
+            return Err(AdapterError::ConfidentialityDenied);
+        }
+        validate_json_content_type(headers)?;
+        let source_cursor = required_header(headers, "x-mcloving-cursor")?;
+        if request
+            .expected_cursor
+            .as_ref()
+            .is_some_and(|expected| expected != &source_cursor)
+        {
+            return Err(AdapterError::StaleResponse);
+        }
+        let source_provenance = required_header(headers, "x-mcloving-provenance")?;
+        let source_observed_at_unix_ms = required_header(headers, "x-mcloving-observed-at-ms")?
+            .parse::<i64>()
+            .map_err(|_| AdapterError::MissingProvenance)?;
+        validate_source_age(
+            now_unix_ms()?,
+            source_observed_at_unix_ms,
+            self.config.max_age_ms,
+        )?;
+        let confidentiality =
+            parse_confidentiality(&required_header(headers, "x-mcloving-confidentiality")?)?;
+        if confidentiality > self.config.max_confidentiality
+            || confidentiality > request.confidentiality_ceiling
+            || confidentiality == Confidentiality::Secret
+        {
+            return Err(AdapterError::ConfidentialityDenied);
+        }
+        Ok(ValidatedResponseHeaders {
+            source_cursor,
+            source_provenance,
+            source_observed_at_unix_ms,
+            confidentiality,
+            source_etag: optional_header(headers, "etag")?,
+        })
+    }
+
+    async fn read_response_body(
+        &self,
+        mut response: reqwest::Response,
+    ) -> Result<Vec<u8>, AdapterError> {
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| AdapterError::SourceUnavailable)?
+        {
+            if body.len().saturating_add(chunk.len()) > self.config.max_response_bytes {
+                return Err(AdapterError::OversizedResponse);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     async fn complete_rate_attempt(&self, capture_id: Uuid) -> Result<(), AdapterError> {

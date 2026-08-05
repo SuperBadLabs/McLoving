@@ -8,7 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::routing::get;
-use axum::{Router, body::Body, response::IntoResponse};
+use axum::{
+    Router,
+    body::{Body, Bytes},
+    response::IntoResponse,
+};
 use mcloving_input_adapter::{
     AdapterConfig, AdapterError, CaptureRequest, Confidentiality, FieldSchema, InputAdapter,
     JsonKind, PROTOCOL_VERSION, content_sha256, marker_set_digest, sha256_file,
@@ -33,6 +37,7 @@ struct FixtureState {
     writes: AtomicUsize,
     retry_reads: AtomicUsize,
     timeout_reads: AtomicUsize,
+    body_failure_reads: AtomicUsize,
 }
 
 struct Fixture {
@@ -191,7 +196,14 @@ async fn read_input(
         }
         _ => json!({"enabled": branch == "main", "value": branch}).to_string(),
     };
-    if mode == "slow_body" {
+    if mode == "body_failure_then_valid"
+        && state.body_failure_reads.fetch_add(1, Ordering::SeqCst) == 0
+    {
+        let stream = tokio_stream::iter([Err::<Bytes, _>(std::io::Error::other(
+            "contained response-body reset",
+        ))]);
+        (StatusCode::OK, response_headers, Body::from_stream(stream)).into_response()
+    } else if mode == "slow_body" {
         let (sender, receiver) = tokio::sync::mpsc::channel(2);
         let midpoint = body.len() / 2;
         let first = body[..midpoint].to_owned();
@@ -475,6 +487,12 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         .await
         .expect("bounded retry");
     assert_eq!(retry_receipt.retry_count, 2);
+
+    let body_retry_receipt = adapter
+        .capture(&request(&adapter, "main", "body_failure_then_valid"))
+        .await
+        .expect("retry after a successful status with a failed body stream");
+    assert_eq!(body_retry_receipt.retry_count, 1);
 
     let concurrent_request = request(&adapter, "main", "valid");
     let reads_before = fixture.state.reads.load(Ordering::SeqCst);
