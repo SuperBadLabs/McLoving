@@ -464,6 +464,12 @@ impl InputAdapter {
             serde_json::to_vec(&value).map_err(|_| AdapterError::MalformedResponse)?;
         let response_sha256 = sha256_hex(&canonical_response);
         let captured_at_unix_ms = now_unix_ms()?;
+        if request.expires_at_unix_ms <= captured_at_unix_ms {
+            return Err(AdapterError::ExpiredRequest);
+        }
+        if self.config.grant_expires_unix_ms <= captured_at_unix_ms {
+            return Err(AdapterError::ExpiredGrant);
+        }
         let source_age_ms = captured_at_unix_ms
             .checked_sub(source_observed_at_unix_ms)
             .ok_or(AdapterError::StaleResponse)?;
@@ -552,7 +558,7 @@ impl InputAdapter {
     fn validate_request(&self, request: &CaptureRequest) -> Result<(), AdapterError> {
         let now = now_unix_ms()?;
         if request.requested_at_unix_ms > now
-            || request.expires_at_unix_ms < now
+            || request.expires_at_unix_ms <= now
             || request.expires_at_unix_ms <= request.requested_at_unix_ms
         {
             return Err(AdapterError::ExpiredRequest);

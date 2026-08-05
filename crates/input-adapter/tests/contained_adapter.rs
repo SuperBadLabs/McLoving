@@ -593,6 +593,32 @@ async fn freshness_is_checked_after_the_complete_body_is_captured() {
 }
 
 #[tokio::test]
+async fn request_and_grant_must_remain_live_through_complete_capture() {
+    let fixture = start_fixture().await;
+
+    let request_spool = TempDir::new().expect("request expiry spool");
+    let request_adapter =
+        make_adapter(config(&fixture.endpoint, request_spool.path()), READ_TOKEN).await;
+    let mut expiring_request = request(&request_adapter, "main", "slow_body");
+    expiring_request.expires_at_unix_ms = now_ms() + 25;
+    assert!(matches!(
+        request_adapter.capture(&expiring_request).await,
+        Err(AdapterError::ExpiredRequest)
+    ));
+
+    let grant_spool = TempDir::new().expect("grant expiry spool");
+    let mut grant_config = config(&fixture.endpoint, grant_spool.path());
+    grant_config.grant_expires_unix_ms = now_ms() + 25;
+    let grant_adapter = make_adapter(grant_config, READ_TOKEN).await;
+    assert!(matches!(
+        grant_adapter
+            .capture(&request(&grant_adapter, "main", "slow_body"))
+            .await,
+        Err(AdapterError::ExpiredGrant)
+    ));
+}
+
+#[tokio::test]
 async fn binary_boundary_uses_files_for_secrets_and_ndjson_for_receipts() {
     let fixture = start_fixture().await;
     let temp = TempDir::new().expect("temp dir");
