@@ -103,8 +103,10 @@ keys outside the certified allowlist never reach the source.
 Before a request reaches the source, the adapter atomically creates
 `CAPTURE_ID.claim` containing the canonical request digest. Concurrent or
 cross-process reuse with different content is denied. A matching concurrent
-caller waits only for the bounded timeout and then receives the exact signed
-receipt. A process crash after claiming but before receipt publication remains
+caller waits for the complete retry-expanded network window plus a fixed
+one-second local publication allowance independent of the configured network
+timeout, then receives the exact signed receipt. A process crash after claiming
+but before receipt publication remains
 fail-closed and requires operator reconciliation; it never silently samples the
 mutable source again. Claim contents and the containing spool directory are
 synchronized before any network read. Matching claimed or completed captures

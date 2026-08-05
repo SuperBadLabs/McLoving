@@ -24,6 +24,7 @@ const MAX_CA_BUNDLE_BYTES: usize = 1024 * 1_024;
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1_024 * 1_024;
 const MAX_REQUESTS_PER_MINUTE: usize = 10_000;
 const MAX_TIMEOUT_MS: u64 = 60_000;
+const MIN_RECEIPT_PUBLICATION_WAIT_MS: u64 = 1_000;
 const MAX_AGE_MS: i64 = 86_400_000;
 const MAX_RATE_LEDGER_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_SECRET_MARKERS: usize = 256;
@@ -1116,12 +1117,7 @@ impl InputAdapter {
         capture_id: Uuid,
         request_sha256: &str,
     ) -> Result<CaptureReceipt, AdapterError> {
-        let wait_windows = u64::from(self.config.retry_attempts) + 2;
-        let wait_ms = self
-            .config
-            .timeout_ms
-            .checked_mul(wait_windows)
-            .ok_or(AdapterError::InvalidConfig)?;
+        let wait_ms = claimed_receipt_wait_ms(self.config.timeout_ms, self.config.retry_attempts)?;
         let deadline = Instant::now() + Duration::from_millis(wait_ms);
         loop {
             if let Some(receipt) = self.load_stored(capture_id).await? {
@@ -1194,6 +1190,14 @@ impl InputAdapter {
             }
         }
     }
+}
+
+fn claimed_receipt_wait_ms(timeout_ms: u64, retry_attempts: u8) -> Result<u64, AdapterError> {
+    let network_windows = u64::from(retry_attempts) + 1;
+    timeout_ms
+        .checked_mul(network_windows)
+        .and_then(|network_wait_ms| network_wait_ms.checked_add(MIN_RECEIPT_PUBLICATION_WAIT_MS))
+        .ok_or(AdapterError::InvalidConfig)
 }
 
 #[cfg(unix)]
@@ -1780,6 +1784,18 @@ pub async fn sha256_file(path: &Path) -> Result<String, AdapterError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_wait_has_a_timeout_independent_publication_floor() {
+        assert_eq!(
+            claimed_receipt_wait_ms(1, 0).expect("bounded duplicate wait"),
+            1_001
+        );
+        assert_eq!(
+            claimed_receipt_wait_ms(MAX_TIMEOUT_MS, 5).expect("maximum bounded duplicate wait"),
+            361_000
+        );
+    }
 
     #[test]
     fn in_flight_retry_charge_cannot_age_out_before_send_completes() {
