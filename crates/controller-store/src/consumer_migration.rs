@@ -61,6 +61,45 @@ impl ExternalReadResource {
             }
         }
     }
+
+    fn endpoint(self) -> &'static str {
+        match self {
+            Self::Artifact => {
+                "/api/v1/organizations/{organization}/projects/{project}/builds/{build}/artifacts"
+            }
+            Self::BuildGraph => {
+                "/api/v1/organizations/{organization}/projects/{project}/builds/{build}/graph"
+            }
+            Self::BuildStatus => {
+                "/api/v1/organizations/{organization}/projects/{project}/builds/{build}"
+            }
+            Self::JobMetadata => {
+                "/api/v1/organizations/{organization}/projects/{project}/pipelines"
+            }
+            Self::Log => {
+                "/api/v1/organizations/{organization}/projects/{project}/builds/{build}/logs"
+            }
+            Self::Queue => "/api/v1/organizations/{organization}/projects/{project}/builds",
+            Self::TestResult => {
+                "/api/v1/organizations/{organization}/projects/{project}/builds/{build}/tests"
+            }
+        }
+    }
+
+    fn query_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Log => &[
+                "after_attempt",
+                "after_fence",
+                "after_sequence",
+                "after_stream",
+                "limit",
+            ],
+            Self::Queue => &["after_created_micros", "after_id", "limit", "status"],
+            Self::JobMetadata => &["after", "limit"],
+            Self::Artifact | Self::BuildGraph | Self::BuildStatus | Self::TestResult => &[],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -163,7 +202,8 @@ impl Store {
         }
         let target_identity = sqlx::query_as::<_, (String, String)>(
             "SELECT lifecycle_state, kind FROM identities
-             WHERE organization_id = $1 AND id = $2 AND subject = $3",
+             WHERE organization_id = $1 AND id = $2 AND subject = $3
+             FOR UPDATE",
         )
         .bind(input.organization_id)
         .bind(input.target_identity_id)
@@ -547,12 +587,29 @@ fn validate_input(input: &ExternalReadConsumerWrite) -> Result<(), StoreError> {
         {
             return invalid("external read endpoint must be a query-free /api/v1 path");
         }
+        if contract.endpoint != contract.resource.endpoint() {
+            return invalid("external read endpoint does not match its resource");
+        }
         if contract.query.len() > 32 {
             return invalid("external read endpoint query contract is too large");
         }
         for (name, value) in &contract.query {
             validate_text("query name", name, 128)?;
             validate_text("query semantics", value, 1024)?;
+        }
+        let query_names = contract
+            .query
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected_query_names = contract
+            .resource
+            .query_names()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if query_names != expected_query_names {
+            return invalid("external read query contract does not match its resource");
         }
     }
     for digest in [

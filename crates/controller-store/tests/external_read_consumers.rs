@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use mcloving_controller_store::{
     ExternalReadAuthority, ExternalReadConsumerWrite, ExternalReadEndpointContract,
@@ -248,6 +249,63 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
         .await
         .expect("register retained Jenkins source authority");
 
+    let mut lifecycle_tx = store.pool().begin().await.expect("begin lifecycle race");
+    sqlx::query(
+        "SELECT lifecycle_state FROM identities
+         WHERE organization_id = $1 AND id = $2 FOR UPDATE",
+    )
+    .bind(organization_id)
+    .bind(identity_id)
+    .fetch_one(&mut *lifecycle_tx)
+    .await
+    .expect("lock target identity before lifecycle transition");
+    let raced_target = consumer(
+        organization_id,
+        project_id,
+        identity_id,
+        2,
+        Some(1),
+        ExternalReadAuthority::McLovingTarget,
+    );
+    let raced_install = store.install_external_read_consumer(&raced_target);
+    tokio::pin!(raced_install);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), raced_install.as_mut())
+            .await
+            .is_err(),
+        "cutover must wait for an in-flight target lifecycle transition"
+    );
+    sqlx::query(
+        "UPDATE identities
+         SET lifecycle_state = 'disabled', lifecycle_generation = lifecycle_generation + 1
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(identity_id)
+    .execute(&mut *lifecycle_tx)
+    .await
+    .expect("disable the identity while holding its lifecycle lock");
+    lifecycle_tx
+        .commit()
+        .await
+        .expect("commit lifecycle transition");
+    assert!(matches!(
+        raced_install.await,
+        Err(StoreError::InvalidConsumerMigration(message))
+            if message.contains("target identity is inactive")
+    ));
+    store
+        .transition_identity_lifecycle(
+            organization_id,
+            identity_id,
+            2,
+            IdentityLifecycle::Active,
+            "restore-target-after-contained-lifecycle-race",
+            "operator:consumer-migration-test",
+        )
+        .await
+        .expect("restore target identity after lifecycle race");
+
     let mut rebound = consumer(
         organization_id,
         project_id,
@@ -302,7 +360,7 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
         .transition_identity_lifecycle(
             organization_id,
             identity_id,
-            1,
+            3,
             IdentityLifecycle::Disabled,
             "contained-target-outage-before-source-restoration",
             "operator:consumer-rollback",
@@ -398,6 +456,21 @@ async fn contract_substitution_tenant_crossing_and_concurrent_first_generation_f
         store.install_external_read_consumer(&substituted).await,
         Err(StoreError::InvalidConsumerMigration(message))
             if message.contains("digest does not match")
+    ));
+
+    let mut mislabeled_endpoint = source.clone();
+    mislabeled_endpoint
+        .endpoint_contracts
+        .iter_mut()
+        .find(|contract| contract.resource == ExternalReadResource::BuildStatus)
+        .expect("build-status contract")
+        .endpoint =
+        "/api/v1/organizations/{organization}/projects/{project}/builds/{build}/artifacts"
+            .to_owned();
+    assert!(matches!(
+        compute_external_read_consumer_digest(&mislabeled_endpoint),
+        Err(StoreError::InvalidConsumerMigration(message))
+            if message.contains("endpoint does not match its resource")
     ));
 
     let mut wrong_tenant = source.clone();

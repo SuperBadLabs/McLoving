@@ -31,7 +31,10 @@ invented and the source manifest was not rewritten.
   evidence digests, observation window, reviewer, and rollback source;
 - target authority requires a retained Jenkins-source generation and exactly
   zero observed Jenkins reads, plus successful runtime authorization of the
-  exact active target principal for every declared read resource;
+  exact active target principal for every declared read resource under a row
+  lock that serializes lifecycle transitions;
+- resource tags must match exact v1 endpoint templates and query-name sets
+  before they select an authorization action;
 - Jenkins restoration must bind the immediately preceding target generation
   and separate rollback evidence; and
 - migration-only writes, per-consumer advisory serialization, and hash-chained
@@ -57,9 +60,10 @@ The consumer-specific tests prove stale-digest and independently redigested
 cross-generation source endpoint/contract substitution,
 cross-tenant project substitution, inactive/substituted target identity,
 active target identity without the required project read authority,
-canonical digest mismatch, concurrent first-generation conflict, residual
-Jenkins-read rejection, exact monotonic cutover and rollback, audited history,
-runtime mutation denial, and forced-RLS inclusion. The API-only CLI gate proves
+target lifecycle race serialization, resource/endpoint mismatch, canonical
+digest mismatch, concurrent first-generation conflict, residual Jenkins-read
+rejection, exact monotonic cutover and rollback, audited history, runtime
+mutation denial, and forced-RLS inclusion. The API-only CLI gate proves
 Bearer-authenticated pipeline and queued-build queries with exact cursors plus
 status and resumable log/watch behavior. Existing protected API and store gates
 cover missing/cross-tenant authorization, stable errors, historical/live build
