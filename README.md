@@ -15,12 +15,12 @@ McLoving has moved beyond its architecture-foundation milestone. Protected
 `main` contains a working PostgreSQL-backed controller and scheduler, outbound
 fenced agents, durable Linux and Windows execution, a public API, CLI and
 static UI, artifact and test-result storage, audit records, backup/restore
-drills, identity lifecycle support, and the isolated Jenkins compiler and
-migration evidence planes.
+drills, identity lifecycle and versioned action-scoped authorization mapping,
+and the isolated Jenkins compiler and migration evidence planes.
 
 The project is not release-ready. The execution board remains authoritative
-for authorization mapping, source and trigger
-boundaries, external effects, production qualification, performance, security,
+for source and trigger boundaries, external effects, external client migration,
+production qualification, performance, security,
 disaster recovery, and release provenance. Jenkins compatibility claims remain
 bounded by differential receipts; general Scripted Pipeline and binary Jenkins
 plugin compatibility are not promised.

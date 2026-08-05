@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::audit::append_audit_record;
-use super::authz::{Principal, PrincipalKind, ProjectRole, ServiceScope};
+use super::authz::{Action, GrantDecision, Principal, PrincipalKind, ProjectRole, ServiceScope};
 use super::{Store, StoreError};
 
 const MAX_GROUPS: usize = 4096;
@@ -1858,6 +1858,75 @@ async fn load_principal(
     for scope in scope_rows {
         service_scopes.insert(parse_scope(&scope)?);
     }
+    let mapped_projects = sqlx::query_scalar::<_, Uuid>(
+        "SELECT project_id FROM authorization_project_policies
+         WHERE organization_id = $1 ORDER BY project_id",
+    )
+    .bind(organization_id)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let grant_rows = sqlx::query_as::<_, (Uuid, String, String)>(
+        "SELECT grants.project_id, grants.action, grants.decision
+         FROM authorization_project_policies current_policy
+         JOIN authorization_policy_versions policy
+           ON policy.organization_id = current_policy.organization_id
+          AND policy.project_id = current_policy.project_id
+          AND policy.generation = current_policy.current_generation
+         JOIN authorization_principal_mappings mapping
+           ON mapping.organization_id = current_policy.organization_id
+          AND mapping.project_id = current_policy.project_id
+          AND mapping.policy_generation = current_policy.current_generation
+         JOIN authorization_action_grants grants
+           ON grants.organization_id = mapping.organization_id
+          AND grants.project_id = mapping.project_id
+          AND grants.policy_generation = mapping.policy_generation
+          AND grants.mapping_id = mapping.mapping_id
+         JOIN identities identity
+           ON identity.organization_id = mapping.organization_id
+          AND identity.id = mapping.target_identity_id
+         WHERE current_policy.organization_id = $1
+           AND mapping.target_identity_id = $2
+           AND identity.lifecycle_state = 'active'
+           AND identity.lifecycle_generation = mapping.target_lifecycle_generation
+           AND identity.group_generation = mapping.target_group_generation
+           AND identity.provider_id IS NOT DISTINCT FROM mapping.target_provider_id
+           AND identity.external_subject IS NOT DISTINCT FROM mapping.target_external_subject
+           AND (
+               identity.kind = 'service'
+               OR (
+                   identity.kind = 'human'
+                   AND identity.source_realm_digest = policy.source_realm_digest
+                   AND identity.source_identity_id = mapping.source_identity_id
+                   AND identity.source_membership_generation = mapping.source_membership_generation
+                   AND identity.alias_history = mapping.source_alias_history
+                   AND identity.provenance_digest = mapping.target_provenance_digest
+               )
+           )
+         ORDER BY grants.project_id, grants.action, grants.decision",
+    )
+    .bind(organization_id)
+    .bind(identity_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut action_grants = BTreeMap::new();
+    for (project_id, action, decision) in grant_rows {
+        let action = Action::parse(&action).ok_or_else(|| {
+            StoreError::InvalidAuthorizationOperation(
+                "stored authorization action is unknown".to_owned(),
+            )
+        })?;
+        let decision = GrantDecision::parse(&decision).ok_or_else(|| {
+            StoreError::InvalidAuthorizationOperation(
+                "stored authorization decision is unknown".to_owned(),
+            )
+        })?;
+        let key = (project_id, action);
+        if decision == GrantDecision::Deny || !action_grants.contains_key(&key) {
+            action_grants.insert(key, decision);
+        }
+    }
     let kind = match kind {
         "human" => PrincipalKind::Human,
         "service" => PrincipalKind::Service,
@@ -1869,6 +1938,8 @@ async fn load_principal(
         organization_id,
         project_roles,
         service_scopes,
+        mapped_projects,
+        action_grants,
     })
 }
 

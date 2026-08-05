@@ -31,15 +31,97 @@ pub enum ServiceScope {
 }
 
 /// Central action vocabulary for controller authorization.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Action {
-    ProjectRead,
-    BuildSubmit,
+    ProjectView,
+    BuildTrigger,
     BuildCancel,
+    ProjectConfigure,
+    ApprovalAct,
+    BuildRetry,
+    ArtifactRead,
+    ArtifactWrite,
+    TestRead,
+    LogRead,
     SecretUse,
-    ProjectAdmin,
     AuditRead,
     SchedulerControl,
+}
+
+impl Action {
+    pub const MAPPABLE: [Self; 11] = [
+        Self::ProjectView,
+        Self::BuildTrigger,
+        Self::BuildCancel,
+        Self::ProjectConfigure,
+        Self::ApprovalAct,
+        Self::BuildRetry,
+        Self::ArtifactRead,
+        Self::ArtifactWrite,
+        Self::TestRead,
+        Self::LogRead,
+        Self::SecretUse,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProjectView => "project_view",
+            Self::BuildTrigger => "build_trigger",
+            Self::BuildCancel => "build_cancel",
+            Self::ProjectConfigure => "project_configure",
+            Self::ApprovalAct => "approval_act",
+            Self::BuildRetry => "build_retry",
+            Self::ArtifactRead => "artifact_read",
+            Self::ArtifactWrite => "artifact_write",
+            Self::TestRead => "test_read",
+            Self::LogRead => "log_read",
+            Self::SecretUse => "secret_use",
+            Self::AuditRead => "audit_read",
+            Self::SchedulerControl => "scheduler_control",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "project_view" => Some(Self::ProjectView),
+            "build_trigger" => Some(Self::BuildTrigger),
+            "build_cancel" => Some(Self::BuildCancel),
+            "project_configure" => Some(Self::ProjectConfigure),
+            "approval_act" => Some(Self::ApprovalAct),
+            "build_retry" => Some(Self::BuildRetry),
+            "artifact_read" => Some(Self::ArtifactRead),
+            "artifact_write" => Some(Self::ArtifactWrite),
+            "test_read" => Some(Self::TestRead),
+            "log_read" => Some(Self::LogRead),
+            "secret_use" => Some(Self::SecretUse),
+            "audit_read" => Some(Self::AuditRead),
+            "scheduler_control" => Some(Self::SchedulerControl),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GrantDecision {
+    Allow,
+    Deny,
+}
+
+impl GrantDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "allow" => Some(Self::Allow),
+            "deny" => Some(Self::Deny),
+            _ => None,
+        }
+    }
 }
 
 /// Fully authenticated identity and its already-loaded grants.
@@ -50,6 +132,10 @@ pub struct Principal {
     pub organization_id: Uuid,
     pub project_roles: BTreeMap<Uuid, ProjectRole>,
     pub service_scopes: BTreeSet<ServiceScope>,
+    /// Projects whose imported Jenkins policy disables role-lattice fallback.
+    pub mapped_projects: BTreeSet<Uuid>,
+    /// Current, provenance-valid action decisions for imported project policy.
+    pub action_grants: BTreeMap<(Uuid, Action), GrantDecision>,
 }
 
 /// Auditable authorization success.
@@ -88,9 +174,18 @@ pub fn authorize(
         return Err(AuthorizationDenied::ProjectRequired);
     }
 
-    let allowed = match principal.kind {
-        PrincipalKind::Service => service_allows(principal, action),
-        PrincipalKind::Human => human_allows(principal, resource_project_id, action)?,
+    let allowed = if let Some(project_id) = resource_project_id
+        && principal.mapped_projects.contains(&project_id)
+    {
+        matches!(
+            principal.action_grants.get(&(project_id, action)),
+            Some(GrantDecision::Allow)
+        )
+    } else {
+        match principal.kind {
+            PrincipalKind::Service => service_allows(principal, action),
+            PrincipalKind::Human => human_allows(principal, resource_project_id, action)?,
+        }
     };
     if !allowed {
         return Err(AuthorizationDenied::NoMatchingGrant);
@@ -106,11 +201,15 @@ pub fn authorize(
 
 fn service_allows(principal: &Principal, action: Action) -> bool {
     let required = match action {
-        Action::ProjectRead => ServiceScope::ProjectRead,
-        Action::BuildSubmit => ServiceScope::BuildSubmit,
+        Action::ProjectView | Action::ArtifactRead | Action::TestRead | Action::LogRead => {
+            ServiceScope::ProjectRead
+        }
+        Action::BuildTrigger | Action::BuildRetry | Action::ArtifactWrite => {
+            ServiceScope::BuildSubmit
+        }
         Action::BuildCancel => ServiceScope::BuildCancel,
+        Action::ProjectConfigure | Action::ApprovalAct => ServiceScope::ProjectAdmin,
         Action::SecretUse => ServiceScope::SecretUse,
-        Action::ProjectAdmin => ServiceScope::ProjectAdmin,
         Action::AuditRead => ServiceScope::AuditRead,
         Action::SchedulerControl => ServiceScope::SchedulerControl,
     };
@@ -130,9 +229,13 @@ fn human_allows(
         return Ok(false);
     };
     Ok(match action {
-        Action::ProjectRead => true,
-        Action::BuildSubmit | Action::BuildCancel => *role >= ProjectRole::Developer,
-        Action::SecretUse | Action::ProjectAdmin => *role >= ProjectRole::Admin,
+        Action::ProjectView | Action::ArtifactRead | Action::TestRead | Action::LogRead => true,
+        Action::BuildTrigger | Action::BuildCancel | Action::BuildRetry | Action::ArtifactWrite => {
+            *role >= ProjectRole::Developer
+        }
+        Action::SecretUse | Action::ProjectConfigure | Action::ApprovalAct => {
+            *role >= ProjectRole::Admin
+        }
         Action::AuditRead | Action::SchedulerControl => false,
     })
 }
@@ -148,6 +251,8 @@ mod tests {
             organization_id,
             project_roles: [(project_id, role)].into(),
             service_scopes: BTreeSet::new(),
+            mapped_projects: BTreeSet::new(),
+            action_grants: BTreeMap::new(),
         }
     }
 
@@ -160,13 +265,15 @@ mod tests {
             organization_id,
             project_roles: BTreeMap::new(),
             service_scopes: BTreeSet::new(),
+            mapped_projects: BTreeSet::new(),
+            action_grants: BTreeMap::new(),
         };
         assert_eq!(
             authorize(
                 &principal,
                 organization_id,
                 Some(Uuid::new_v4()),
-                Action::ProjectRead
+                Action::ProjectView
             ),
             Err(AuthorizationDenied::NoMatchingGrant)
         );
@@ -182,7 +289,7 @@ mod tests {
                 &principal,
                 Uuid::new_v4(),
                 Some(project_id),
-                Action::ProjectAdmin
+                Action::ProjectConfigure
             ),
             Err(AuthorizationDenied::TenantMismatch)
         );
@@ -198,7 +305,7 @@ mod tests {
                 &viewer,
                 organization_id,
                 Some(project_id),
-                Action::ProjectRead
+                Action::ProjectView
             )
             .is_ok()
         );
@@ -207,7 +314,7 @@ mod tests {
                 &viewer,
                 organization_id,
                 Some(project_id),
-                Action::BuildSubmit
+                Action::BuildTrigger
             ),
             Err(AuthorizationDenied::NoMatchingGrant)
         );
@@ -222,6 +329,8 @@ mod tests {
             organization_id,
             project_roles: BTreeMap::new(),
             service_scopes: BTreeSet::new(),
+            mapped_projects: BTreeSet::new(),
+            action_grants: BTreeMap::new(),
         };
         assert_eq!(
             authorize(&principal, organization_id, None, Action::SchedulerControl),
@@ -249,17 +358,54 @@ mod tests {
                 ServiceScope::ProjectAdmin,
             ]
             .into(),
+            mapped_projects: BTreeSet::new(),
+            action_grants: BTreeMap::new(),
         };
         for action in [
-            Action::ProjectRead,
-            Action::BuildSubmit,
+            Action::ProjectView,
+            Action::BuildTrigger,
             Action::BuildCancel,
+            Action::ProjectConfigure,
+            Action::ApprovalAct,
+            Action::BuildRetry,
+            Action::ArtifactRead,
+            Action::ArtifactWrite,
+            Action::TestRead,
+            Action::LogRead,
             Action::SecretUse,
-            Action::ProjectAdmin,
         ] {
             assert_eq!(
                 authorize(&principal, organization_id, None, action),
                 Err(AuthorizationDenied::ProjectRequired)
+            );
+        }
+    }
+
+    #[test]
+    fn mapped_policy_disables_lattice_fallback_and_honors_explicit_decisions() {
+        let organization_id = Uuid::new_v4();
+        let project_id = Uuid::new_v4();
+        let mut principal = human(ProjectRole::Owner, organization_id, project_id);
+        principal.mapped_projects.insert(project_id);
+        principal
+            .action_grants
+            .insert((project_id, Action::ProjectView), GrantDecision::Allow);
+        principal
+            .action_grants
+            .insert((project_id, Action::BuildTrigger), GrantDecision::Deny);
+        assert!(
+            authorize(
+                &principal,
+                organization_id,
+                Some(project_id),
+                Action::ProjectView
+            )
+            .is_ok()
+        );
+        for action in [Action::BuildTrigger, Action::ProjectConfigure] {
+            assert_eq!(
+                authorize(&principal, organization_id, Some(project_id), action),
+                Err(AuthorizationDenied::NoMatchingGrant)
             );
         }
     }

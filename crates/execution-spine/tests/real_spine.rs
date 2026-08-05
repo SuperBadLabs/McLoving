@@ -31,6 +31,8 @@ fn api_state(store: Store, organization_id: Uuid) -> ApiState {
                 ServiceScope::SchedulerControl,
             ]
             .into(),
+            mapped_projects: Default::default(),
+            action_grants: Default::default(),
         },
     )
     .expect("configure API")
