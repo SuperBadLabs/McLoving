@@ -1060,12 +1060,16 @@ impl Provisioner {
         {
             return Err(ProvisionerError::BindingMismatch);
         }
-        if stored.state == StoredState::Deleted {
+        if matches!(stored.state, StoredState::Deleted | StoredState::Failed) {
             if let Some(receipt) = stored.latest_receipt {
                 self.verify_lifecycle_receipt(&receipt)?;
-                return Ok(receipt);
+                if receipt.body.cleanup_confirmed && !receipt.body.ambiguity {
+                    return Ok(receipt);
+                }
             }
-            return Err(ProvisionerError::StateUnavailable);
+            if stored.state == StoredState::Deleted {
+                return Err(ProvisionerError::StateUnavailable);
+            }
         }
         let instance = match stored.instance.take() {
             Some(instance) => instance,
@@ -1539,12 +1543,30 @@ impl Provisioner {
                 Ok(Some(candidate)) => candidate,
                 Ok(None) => {
                     let observed_at = now_unix_ms()?;
-                    let outcome = if observed_at >= deadline {
-                        LifecycleOutcome::StartupTimeoutCleaned
+                    let (reason, outcome) = if observed_at >= deadline {
+                        (
+                            CleanupReason::StartupTimeout,
+                            LifecycleOutcome::StartupTimeoutCleaned,
+                        )
                     } else {
-                        LifecycleOutcome::StartupFailedCleaned
+                        (
+                            CleanupReason::StartupFailed,
+                            LifecycleOutcome::StartupFailedCleaned,
+                        )
                     };
-                    self.set_state(request.request_id, StoredState::Deleted, None, observed_at)?;
+                    let (_, outcome) =
+                        self.record_cleanup_intent(request.request_id, reason, outcome)?;
+                    if !self.set_state_from(
+                        request.request_id,
+                        StoredState::Pending,
+                        StoredState::Deleted,
+                        None,
+                        observed_at,
+                    )? {
+                        return self
+                            .recover_startup_race(request, request_sha256, &instance)
+                            .await;
+                    }
                     return self.append_lifecycle_receipt(
                         request,
                         LifecycleEvidence {
@@ -1559,12 +1581,18 @@ impl Provisioner {
                     );
                 }
                 Err(_) => {
-                    self.set_state(
+                    let observed_at = now_unix_ms()?;
+                    if !self.set_state_from(
                         request.request_id,
+                        StoredState::Pending,
                         StoredState::Ambiguous,
                         Some(&instance),
-                        now,
-                    )?;
+                        observed_at,
+                    )? {
+                        return self
+                            .recover_startup_race(request, request_sha256, &instance)
+                            .await;
+                    }
                     return self.append_lifecycle_receipt(
                         request,
                         LifecycleEvidence {
@@ -1574,7 +1602,7 @@ impl Provisioner {
                             cleanup_confirmed: false,
                             ambiguity: true,
                             audit_lineage: &request.audit_lineage,
-                            observed_at_unix_ms: now,
+                            observed_at_unix_ms: observed_at,
                         },
                     );
                 }
@@ -1943,6 +1971,25 @@ impl Provisioner {
             &request.audit_lineage,
         )
         .await
+    }
+
+    async fn recover_startup_race(
+        &self,
+        request: &ProvisionRequest,
+        request_sha256: &str,
+        instance: &ProviderInstance,
+    ) -> Result<LifecycleReceipt, ProvisionerError> {
+        let stored = self
+            .load_stored_request(request.request_id)?
+            .ok_or(ProvisionerError::StateUnavailable)?;
+        if let Some(receipt) = stored.latest_receipt {
+            self.verify_lifecycle_receipt(&receipt)?;
+            if receipt.body.cleanup_confirmed && !receipt.body.ambiguity {
+                return Ok(receipt);
+            }
+        }
+        self.recover_create_admission_race(request, request_sha256, instance)
+            .await
     }
 
     async fn wait_for_peer_or_recover(

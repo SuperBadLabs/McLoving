@@ -42,6 +42,7 @@ enum FixtureMode {
     Unauthorized,
     MalformedCreateOnce,
     DelayedMalformedCreateOnce,
+    DelayedMalformedLookupOnce,
     MalformedDeleteOnce,
     DelayedMalformedDeleteOnce,
     SubstituteFinalInventory,
@@ -59,9 +60,11 @@ struct Inner {
     deletes: usize,
     lookups: usize,
     malformed_create_sent: bool,
+    malformed_lookup_sent: bool,
     malformed_delete_sent: bool,
     inventory_reads: usize,
     create_started: usize,
+    lookup_started: usize,
 }
 
 #[derive(Clone)]
@@ -95,9 +98,11 @@ impl Fixture {
                 deletes: 0,
                 lookups: 0,
                 malformed_create_sent: false,
+                malformed_lookup_sent: false,
                 malformed_delete_sent: false,
                 inventory_reads: 0,
                 create_started: 0,
+                lookup_started: 0,
             })),
             signing_key,
         };
@@ -199,6 +204,23 @@ impl Fixture {
         }
         panic!("provider create did not start");
     }
+
+    async fn wait_for_lookup_start(&self) {
+        for _ in 0..100 {
+            if self
+                .state
+                .inner
+                .lock()
+                .expect("fixture state")
+                .lookup_started
+                != 0
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        panic!("provider lookup did not start");
+    }
 }
 
 async fn create_instance(
@@ -234,6 +256,7 @@ async fn create_instance(
     let provider_state = match inner.mode {
         FixtureMode::PendingThenReady
         | FixtureMode::PendingForever
+        | FixtureMode::DelayedMalformedLookupOnce
         | FixtureMode::DelayedReady
         | FixtureMode::DelayedAbsence => ProviderInstanceState::Pending,
         FixtureMode::StartupFailed => ProviderInstanceState::StartupFailed,
@@ -275,12 +298,28 @@ async fn lookup_instance(
     if !authorized(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let delayed_mode = state.inner.lock().expect("fixture state").mode;
+    let (delayed_mode, malformed_lookup) = {
+        let mut inner = state.inner.lock().expect("fixture state");
+        inner.lookup_started += 1;
+        let malformed_lookup =
+            inner.mode == FixtureMode::DelayedMalformedLookupOnce && !inner.malformed_lookup_sent;
+        if malformed_lookup {
+            inner.malformed_lookup_sent = true;
+        }
+        (inner.mode, malformed_lookup)
+    };
     if matches!(
         delayed_mode,
         FixtureMode::DelayedReady | FixtureMode::DelayedAbsence
-    ) {
+    ) || malformed_lookup
+    {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if malformed_lookup {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::from("{"))
+            .expect("malformed lookup fixture response");
     }
     let mut inner = state.inner.lock().expect("fixture state");
     inner.lookups += 1;
@@ -1181,6 +1220,44 @@ async fn lookup_absence_after_startup_deadline_is_classified_as_timeout() {
 }
 
 #[tokio::test]
+async fn terminal_cancel_state_survives_late_startup_lookup_failure() {
+    let context = Context::new(FixtureMode::DelayedMalformedLookupOnce).await;
+    let request = context.request();
+    let provision = context.provisioner.provision(&request);
+    let cancel = async {
+        context.fixture.wait_for_lookup_start().await;
+        context
+            .provisioner
+            .cancel(&cancel_request(
+                &context.config,
+                &request,
+                IMPLEMENTATION_SHA256,
+            ))
+            .await
+    };
+
+    let (provisioned, cancelled) = tokio::join!(provision, cancel);
+    let provisioned = provisioned.expect("late lookup failure converges on cancellation");
+    let cancelled = cancelled.expect("concurrent cancellation receipt");
+    assert_eq!(provisioned.body.outcome, LifecycleOutcome::Cancelled);
+    assert_eq!(cancelled.body.outcome, LifecycleOutcome::Cancelled);
+    assert!(provisioned.body.cleanup_confirmed);
+    assert!(cancelled.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().3, 0);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let state: String = database
+        .query_row(
+            "SELECT state FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read terminal state");
+    assert_eq!(state, "deleted");
+}
+
+#[tokio::test]
 async fn immediate_ready_after_startup_deadline_is_cleaned_as_timeout() {
     let context = Context::new(FixtureMode::DelayedCreateReady).await;
     let receipt = context
@@ -1224,6 +1301,50 @@ async fn admission_deadline_is_rechecked_after_durable_intent_before_create() {
     );
     assert!(receipt.body.cleanup_confirmed);
     assert_eq!(context.fixture.counts().0, 0);
+}
+
+#[tokio::test]
+async fn cancel_preserves_a_confirmed_failed_startup_receipt() {
+    let context = Context::with_startup_timeout(FixtureMode::Ready, 50).await;
+    let request = context.request();
+    let database_path = context.config.state_dir.join("provisioner.sqlite3");
+    let (locked, receiver) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let database = rusqlite::Connection::open(database_path).expect("open blocking ledger");
+        database
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold admission transaction");
+        locked.send(()).expect("signal held transaction");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        database.execute_batch("COMMIT").expect("release ledger");
+    });
+    receiver.recv().expect("wait for held transaction");
+
+    let failed = context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("confirmed startup timeout");
+    blocker.join().expect("blocking ledger thread");
+    assert_eq!(failed.body.outcome, LifecycleOutcome::StartupTimeoutCleaned);
+    assert!(failed.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts(), (0, 0, 0, 0));
+
+    let cancelled = context
+        .provisioner
+        .cancel(&cancel_request(
+            &context.config,
+            &request,
+            IMPLEMENTATION_SHA256,
+        ))
+        .await
+        .expect("return existing failed-startup receipt");
+    assert_eq!(
+        cancelled.body.outcome,
+        LifecycleOutcome::StartupTimeoutCleaned
+    );
+    assert_eq!(cancelled.signature, failed.signature);
+    assert_eq!(context.fixture.counts(), (0, 0, 0, 0));
 }
 
 #[tokio::test]
@@ -1486,6 +1607,60 @@ async fn deleted_crash_recovery_preserves_retained_cleanup_intent() {
         .await
         .expect("recover retained cleanup truth");
     assert_eq!(receipt.body.outcome, LifecycleOutcome::ExpiredCleaned);
+    assert!(receipt.body.cleanup_confirmed);
+}
+
+#[tokio::test]
+async fn signed_absence_crash_recovery_preserves_startup_outcome() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before simulated signed-absence crash");
+    context.fixture.remove_instance(request.request_id);
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    database
+        .execute(
+            "INSERT INTO cleanup_intents(request_id, reason_json, outcome_json)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                request.request_id.to_string(),
+                serde_json::to_vec(&CleanupReason::StartupTimeout).expect("cleanup reason JSON"),
+                serde_json::to_vec(&LifecycleOutcome::StartupTimeoutCleaned)
+                    .expect("cleanup outcome JSON"),
+            ],
+        )
+        .expect("retain signed-absence cleanup intent");
+    database
+        .execute(
+            "UPDATE requests SET state = 'deleted', instance_json = NULL,
+                                 latest_receipt_json = NULL
+             WHERE request_id = ?1",
+            [request.request_id.to_string()],
+        )
+        .expect("simulate crash before signed-absence receipt");
+    drop(database);
+
+    let restarted = Provisioner::new(
+        context.config.clone(),
+        IMPLEMENTATION_SHA256.to_owned(),
+        PROVIDER_TOKEN.to_owned(),
+        context.fixture.public_key(),
+        RECEIPT_KEY.to_vec(),
+    )
+    .await
+    .expect("restart provisioner");
+    let receipt = restarted
+        .provision(&request)
+        .await
+        .expect("recover signed-absence startup truth");
+    assert_eq!(
+        receipt.body.outcome,
+        LifecycleOutcome::StartupTimeoutCleaned
+    );
     assert!(receipt.body.cleanup_confirmed);
 }
 
