@@ -821,7 +821,7 @@ async fn service_policy_survives_rotation_and_denies_revoked_credentials() {
 }
 
 #[tokio::test]
-async fn mapping_rejects_broadened_and_scheduler_authority() {
+async fn mapping_rejects_broadened_inactive_and_scheduler_authority() {
     let organization_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
     let identity_id = Uuid::new_v4();
@@ -841,6 +841,21 @@ async fn mapping_rejects_broadened_and_scheduler_authority() {
         store.install_authorization_policy(&broadened).await,
         Err(StoreError::InvalidAuthorizationOperation(_))
     ));
+
+    for lifecycle in ["disabled", "deleted"] {
+        let mut inactive = human_mapping(
+            Uuid::new_v4(),
+            identity_id,
+            1,
+            [(Action::ProjectView, GrantDecision::Allow)].into(),
+        );
+        inactive.source_lifecycle_state = lifecycle.to_owned();
+        let inactive_policy = policy(organization_id, project_id, 1, None, None, vec![inactive]);
+        assert!(matches!(
+            store.install_authorization_policy(&inactive_policy).await,
+            Err(StoreError::InvalidAuthorizationOperation(_))
+        ));
+    }
 
     let scheduler = human_mapping(
         Uuid::new_v4(),

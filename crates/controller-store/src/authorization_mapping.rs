@@ -415,6 +415,9 @@ fn validate_mapping(mapping: &AuthorizationPrincipalMappingWrite) -> Result<(), 
         .iter()
         .any(|permission| normalized_permission(permission) == "overall.administer");
     for (action, decision) in &mapping.decisions {
+        if *decision == GrantDecision::Allow && mapping.source_lifecycle_state != "active" {
+            return invalid("inactive source principals cannot produce target allow decisions");
+        }
         if *action == Action::SchedulerControl {
             return invalid("Jenkins ACL mappings cannot grant scheduler control");
         }
