@@ -16,6 +16,8 @@ precisely, and executes through native Rust agents on Linux and Windows.
 - Compatibility claims require pinned Jenkins differential evidence.
 - Linux and Windows are first-class execution platforms.
 - Extensions remain capability-specific and out of process.
+- Dynamic compute is created only through a typed, fenced, out-of-process
+  provisioner with exact immutable agent policy and confirmed cleanup evidence.
 - Live external runtime inputs are captured once through a typed, bounded,
   read-only adapter and replayed identically to compared runners.
 - Production changes are reviewable, auditable, and recoverable.
