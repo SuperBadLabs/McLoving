@@ -34,10 +34,11 @@ represented as Mario production truth.
 
 ## Current executable receipt
 
-Focused pinned-Rust check and clippy pass. The contained suite currently proves
-three end-to-end journeys plus two unit contracts. The final exact-head receipt
-will record the complete workspace/protected check results after implementation
-review.
+Focused pinned-Rust check and clippy pass. The suite currently proves four
+contained end-to-end journeys, two unit contracts, and one sealed-inventory
+denominator check. The complete locked workspace clippy and test gates also
+pass. The final exact-head receipt will record the protected check results after
+implementation review.
 
 ## Residual risk and authority boundary
 
