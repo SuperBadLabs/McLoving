@@ -895,6 +895,30 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
     ));
     assert!(!marker_work_spool.exists());
 
+    let header_marker_work_spool = temp.path().join("header-marker-work-spool");
+    let header_marker_work = (0_u8..5)
+        .map(|index| {
+            let mut marker = vec![b'x'; 1_024];
+            marker[0] = index.saturating_add(1);
+            marker
+        })
+        .collect::<Vec<_>>();
+    let mut header_marker_work_config = config(&fixture.endpoint, &header_marker_work_spool);
+    header_marker_work_config.max_response_bytes = 1;
+    header_marker_work_config.secret_marker_set_sha256 = marker_set_digest(&header_marker_work);
+    assert!(matches!(
+        InputAdapter::new(
+            header_marker_work_config,
+            IMPLEMENTATION_SHA256.to_owned(),
+            READ_TOKEN.to_owned(),
+            SIGNING_KEY.to_vec(),
+            header_marker_work,
+        )
+        .await,
+        Err(AdapterError::InvalidConfig)
+    ));
+    assert!(!header_marker_work_spool.exists());
+
     let racing_spool = temp.path().join("racing-shared-spool");
     let racing_config = config(&fixture.endpoint, &racing_spool);
     let first = InputAdapter::new(

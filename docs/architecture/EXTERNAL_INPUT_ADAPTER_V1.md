@@ -181,8 +181,10 @@ limit. It must be valid JSON, contain no field outside the closed schema, and
 satisfy every required top-level field/type contract. Configuration also has
 hard upper bounds for response size, request rate, timeout, freshness, query
 keys/values, binding text, schema fields, marker length/count, and aggregate
-`2 * max_response_bytes * total_marker_bytes` comparison work for the raw and
-decoded JSON scans. Duplicate markers are rejected before spool creation.
+`(2 * max_response_bytes + 65_536) * total_marker_bytes` comparison work for
+the raw-body, decoded-JSON, and response-header-value scans. Total response
+header value bytes are rejected above 64 KiB before marker scanning. Duplicate
+markers are rejected before spool creation.
 JSON objects with duplicate member names are rejected recursively before a
 `Value` is built, so a later duplicate cannot hide an escaped marker-bearing
 value. JSON numbers retain their exact source precision through typed parsing,

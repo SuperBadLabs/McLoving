@@ -30,6 +30,7 @@ const MAX_AGE_MS: i64 = 86_400_000;
 const MAX_RATE_LEDGER_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_CLAIM_BYTES: usize = 512;
 const MAX_SECRET_MARKERS: usize = 256;
+const MAX_RESPONSE_HEADER_VALUE_BYTES: usize = 64 * 1_024;
 const MAX_MARKER_COMPARISON_BYTES: usize = 256 * 1_024 * 1_024;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -1006,6 +1007,7 @@ impl InputAdapter {
         request: &CaptureRequest,
         headers: &HeaderMap,
     ) -> Result<ValidatedResponseHeaders, AdapterError> {
+        validate_response_header_work_bound(headers)?;
         if headers
             .values()
             .any(|value| self.contains_secret_marker(value.as_bytes()))
@@ -1592,8 +1594,15 @@ fn validate_config(
         || secret_markers
             .iter()
             .try_fold(0_usize, |total, marker| total.checked_add(marker.len()))
-            .and_then(|marker_bytes| config.max_response_bytes.checked_mul(marker_bytes))
-            .and_then(|one_pass| one_pass.checked_mul(2))
+            .and_then(|marker_bytes| {
+                config
+                    .max_response_bytes
+                    .checked_mul(2)
+                    .and_then(|body_scan_bytes| {
+                        body_scan_bytes.checked_add(MAX_RESPONSE_HEADER_VALUE_BYTES)
+                    })
+                    .and_then(|scan_bytes| scan_bytes.checked_mul(marker_bytes))
+            })
             .is_none_or(|work| work > MAX_MARKER_COMPARISON_BYTES)
         || content_sha256(read_token.as_bytes()) != config.read_token_sha256
         || content_sha256(signing_key) != config.signing_key_sha256
@@ -1749,6 +1758,16 @@ fn validate_schema(value: &Value, schema: &[FieldSchema]) -> Result<(), AdapterE
             None if field.required => return Err(AdapterError::MalformedResponse),
             None => {}
         }
+    }
+    Ok(())
+}
+
+fn validate_response_header_work_bound(headers: &HeaderMap) -> Result<(), AdapterError> {
+    let total_value_bytes = headers.values().try_fold(0_usize, |total, value| {
+        total.checked_add(value.as_bytes().len())
+    });
+    if total_value_bytes.is_none_or(|total| total > MAX_RESPONSE_HEADER_VALUE_BYTES) {
+        return Err(AdapterError::OversizedResponse);
     }
     Ok(())
 }
@@ -2291,5 +2310,20 @@ mod tests {
         assert!(
             reject_duplicate_json_members(br#"{"value":0.123456789012345678901234567890}"#).is_ok()
         );
+    }
+
+    #[test]
+    fn response_header_marker_scan_has_an_aggregate_byte_ceiling() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-contained-large-value",
+            HeaderValue::from_bytes(&vec![b'x'; MAX_RESPONSE_HEADER_VALUE_BYTES + 1])
+                .expect("large contained header"),
+        );
+
+        assert!(matches!(
+            validate_response_header_work_bound(&headers),
+            Err(AdapterError::OversizedResponse)
+        ));
     }
 }

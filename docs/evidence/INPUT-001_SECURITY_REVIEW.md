@@ -2,8 +2,8 @@
 
 Date: 2026-08-05
 
-Verdict: PENDING for the implementation gate. The latest credential-file
-ownership/mode fix must pass all nine protected checks and independent
+Verdict: PENDING for the implementation gate. The latest response-header
+marker-work fix must pass all nine protected checks and independent
 exact-head review before this receipt can certify a specific implementation
 head. Prior reviewed heads are historical evidence only and do not close
 INPUT-001.
@@ -77,12 +77,12 @@ represented as Mario production truth.
 
 ## Current executable receipt
 
-The latest suite proves eight contained end-to-end journeys, twelve unit
+The latest suite proves eight contained end-to-end journeys, thirteen unit
 contracts, and one sealed-inventory denominator check. Focused pinned-Rust,
 complete locked workspace, clippy, and all nine protected checks remain pending
 on the next pushed exact implementation candidate.
 
-The independent review has produced forty-seven actionable implementation
+The independent review has produced forty-eight actionable implementation
 findings across the implementation-head sequence to date: implicit client
 retries; pre-read claim-directory
 durability; rate denial leaving a claim; duplicate capture admission at low
@@ -188,9 +188,14 @@ token and receipt-signing key files readable by group or other users. Credential
 admission now requires a regular, no-follow, size-bounded file owned by the
 effective UID with no group/other permission bits before either authority is
 loaded.
+The latest bounded-work review found that response-header marker scanning was
+outside both the body-derived comparison budget and an explicit header byte
+ceiling. Header values now have a 64-KiB aggregate pre-scan limit, and
+configuration admission charges that entire allowance alongside both bounded
+body scans against the fixed comparison-work ceiling.
 Each prior finding was corrected with a regression fixture or explicit
 fail-closed platform admission where applicable and resolved only after its fix
-was present on the reviewed head. The credential-file fix remains open until
+was present on the reviewed head. The response-header work-bound fix remains open until
 the next exact candidate passes the complete gates and independent review.
 
 ## Residual risk and authority boundary
