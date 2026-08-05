@@ -136,6 +136,8 @@ jobs:
         run: cargo +1.97.1 test --locked -p mcloving-controller-store --test postgres_truth
       - name: Run durable identity lifecycle and tenant-isolation tests
         run: cargo +1.97.1 test --locked -p mcloving-controller-store --test identity_lifecycle
+      - name: Run external read consumer cutover and rollback tests
+        run: cargo +1.97.1 test --locked -p mcloving-controller-store --test external_read_consumers
       - name: Run contained OIDC protocol and session tests
         run: cargo +1.97.1 test --locked -p mcloving-controller-api --test oidc_flow
       - name: Run shipped-controller credential rollout and rollback tests

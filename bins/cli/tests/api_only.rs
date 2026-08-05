@@ -22,6 +22,14 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
     let polls = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route(
+            &format!("/api/v1/organizations/{organization}/projects/{project}/pipelines"),
+            get(pipelines),
+        )
+        .route(
+            &format!("/api/v1/organizations/{organization}/projects/{project}/builds"),
+            get(builds),
+        )
+        .route(
             &format!("/api/v1/organizations/{organization}/projects/{project}/pipelines/validate"),
             post(validate),
         )
@@ -49,6 +57,44 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
         .await
         .unwrap();
     let common = || (format!("http://{address}"), organization, Some(project));
+
+    let (server_url, organization, project) = common();
+    let pipeline_page = execute(&Arguments {
+        server: server_url,
+        token: TOKEN.to_owned(),
+        organization,
+        project,
+        output: OutputMode::Json,
+        command: Command::Pipelines {
+            after: Some("legacy-job".to_owned()),
+            limit: 17,
+        },
+    })
+    .await
+    .unwrap();
+    let pipeline_page = structured(pipeline_page);
+    assert_eq!(pipeline_page["items"][0]["slug"], "replacement-job");
+    assert_eq!(pipeline_page["next_after"], "replacement-job");
+
+    let (server_url, organization, project) = common();
+    let build_page = execute(&Arguments {
+        server: server_url,
+        token: TOKEN.to_owned(),
+        organization,
+        project,
+        output: OutputMode::Json,
+        command: Command::Builds {
+            after_created_micros: Some(1_234_567),
+            after_id: Some(build),
+            status: Some("queued".to_owned()),
+            limit: 23,
+        },
+    })
+    .await
+    .unwrap();
+    let build_page = structured(build_page);
+    assert_eq!(build_page["items"][0]["status"], "queued");
+    assert_eq!(build_page["next_after"]["build_id"], build.to_string());
 
     let (server_url, organization, project) = common();
     let validated = execute(&Arguments {
@@ -98,8 +144,93 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
     assert_eq!(watched["resume_after"]["stream"], "stdout");
     assert_eq!(polls.load(Ordering::SeqCst), 2);
 
+    let (server_url, organization, project) = common();
+    let unavailable = execute(&Arguments {
+        server: server_url,
+        token: TOKEN.to_owned(),
+        organization,
+        project,
+        output: OutputMode::Json,
+        command: Command::Watch {
+            build: Uuid::new_v4(),
+            interval_ms: 0,
+            max_polls: Some(1),
+            after_attempt: None,
+            after_fence: None,
+            after_sequence: None,
+            after_stream: None,
+        },
+    })
+    .await
+    .expect("an unavailable status endpoint produces an uncertain receipt");
+    let unavailable = structured(unavailable);
+    assert_eq!(unavailable["state"], "uncertain");
+    assert_eq!(unavailable["reason"], "status_request_failed");
+
     tokio::fs::remove_file(pipeline).await.unwrap();
     server.abort();
+}
+
+async fn pipelines(
+    Query(query): Query<BTreeMap<String, String>>,
+    headers: HeaderMap,
+) -> Json<Value> {
+    require_token(&headers);
+    assert_eq!(query.get("after").map(String::as_str), Some("legacy-job"));
+    assert_eq!(query.get("limit").map(String::as_str), Some("17"));
+    Json(json!({
+        "items": [{
+            "organization_id": Uuid::nil(),
+            "project_id": Uuid::nil(),
+            "pipeline_id": Uuid::nil(),
+            "slug": "replacement-job",
+            "revision": 1,
+            "source": "version: 1",
+            "source_sha256": vec![0_u8; 32],
+            "semantic_digest": vec![1_u8; 32],
+            "schema_major": 1,
+            "schema_minor": 0,
+            "parameter_schema": {},
+            "created_at_unix_ms": 1,
+            "updated_at_unix_ms": 1
+        }],
+        "next_after": "replacement-job"
+    }))
+}
+
+async fn builds(
+    State(state): State<MockState>,
+    Query(query): Query<BTreeMap<String, String>>,
+    headers: HeaderMap,
+) -> Json<Value> {
+    require_token(&headers);
+    assert_eq!(
+        query.get("after_created_micros").map(String::as_str),
+        Some("1234567")
+    );
+    let expected_build_id = state.build.to_string();
+    assert_eq!(
+        query.get("after_id").map(String::as_str),
+        Some(expected_build_id.as_str())
+    );
+    assert_eq!(query.get("status").map(String::as_str), Some("queued"));
+    assert_eq!(query.get("limit").map(String::as_str), Some("23"));
+    Json(json!({
+        "items": [{
+            "build_id": state.build,
+            "pipeline_digest": vec![2_u8; 32],
+            "status": "queued",
+            "priority": 0,
+            "dag_mode": false,
+            "created_at_unix_ms": 1_234,
+            "created_at_unix_micros": 1_234_567,
+            "completed_at_unix_ms": null
+        }],
+        "next_after": {
+            "created_at_unix_micros": 1_234_567,
+            "build_id": state.build
+        }
+    }))
 }
 
 #[derive(Clone)]

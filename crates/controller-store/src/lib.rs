@@ -9,6 +9,7 @@ use uuid::Uuid;
 mod audit;
 mod authorization_mapping;
 pub mod authz;
+mod consumer_migration;
 mod dag;
 mod identity;
 mod product;
@@ -24,6 +25,10 @@ pub use audit::{
 pub use authorization_mapping::{
     AuthorizationPolicyReceipt, AuthorizationPolicyWrite, AuthorizationPrincipalMappingWrite,
     compute_authorization_policy_digest,
+};
+pub use consumer_migration::{
+    ExternalReadAuthority, ExternalReadConsumerReceipt, ExternalReadConsumerWrite,
+    ExternalReadEndpointContract, ExternalReadResource, compute_external_read_consumer_digest,
 };
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
@@ -115,6 +120,9 @@ pub const RUNTIME_FUNCTION_BOUNDARY_V23: &str =
 /// Immutable, provenance-bound Jenkins authorization policy generations.
 pub const AUTHORIZATION_MAPPING_V24: &str =
     include_str!("../migrations/0024_authorization_mapping.sql");
+/// Immutable external-reader contract and authority generations.
+pub const EXTERNAL_READ_CONSUMERS_V25: &str =
+    include_str!("../migrations/0025_external_read_consumers.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -455,6 +463,10 @@ pub enum StoreError {
     InvalidAuthorizationOperation(String),
     #[error("authorization operation conflict: {0}")]
     AuthorizationConflict(String),
+    #[error("invalid external read consumer migration: {0}")]
+    InvalidConsumerMigration(String),
+    #[error("external read consumer migration conflict: {0}")]
+    ConsumerMigrationConflict(String),
     #[error("audit chain for tenant {organization_id} is corrupt at sequence {sequence}")]
     CorruptAuditChain {
         organization_id: Uuid,
@@ -637,6 +649,8 @@ impl Store {
                    ('authorization_principal_mappings', 'SELECT'),
                    ('authorization_action_grants', 'SELECT'),
                    ('authorization_project_policies', 'SELECT'),
+                   ('external_read_consumer_versions', 'SELECT'),
+                   ('external_read_consumer_current', 'SELECT'),
                    ('oidc_login_attempts', 'SELECT'), ('oidc_login_attempts', 'INSERT'),
                    ('oidc_login_attempts', 'UPDATE'), ('oidc_login_attempts', 'DELETE'),
                    ('credential_namespace_reservations', 'SELECT'),
@@ -935,6 +949,8 @@ impl Store {
                    ('authorization_principal_mappings'),
                    ('authorization_action_grants'),
                    ('authorization_project_policies'),
+                   ('external_read_consumer_versions'),
+                   ('external_read_consumer_current'),
                    ('oidc_login_attempts'), ('identity_sessions'),
                    ('oidc_token_replays'), ('service_credentials'),
                    ('protected_environments'), ('environment_approvals'),
@@ -963,7 +979,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 44
+             SELECT COUNT(*) = 46
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -992,7 +1008,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 44
+                    AND (SELECT COUNT(*) FROM policies) = 46
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1097,6 +1113,7 @@ impl Store {
         apply_migration(&mut tx, 22, CREDENTIAL_NAMESPACE_V22).await?;
         apply_migration(&mut tx, 23, RUNTIME_FUNCTION_BOUNDARY_V23).await?;
         apply_migration(&mut tx, 24, AUTHORIZATION_MAPPING_V24).await?;
+        apply_migration(&mut tx, 25, EXTERNAL_READ_CONSUMERS_V25).await?;
         tx.commit().await?;
         Ok(())
     }
