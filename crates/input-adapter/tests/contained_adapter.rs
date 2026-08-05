@@ -260,6 +260,13 @@ fn config(endpoint: &str, spool_dir: &Path) -> AdapterConfig {
 }
 
 async fn make_adapter(config: AdapterConfig, token: &str) -> InputAdapter {
+    #[cfg(unix)]
+    if config.spool_dir.exists() {
+        use std::os::unix::fs::PermissionsExt as _;
+        tokio::fs::set_permissions(&config.spool_dir, std::fs::Permissions::from_mode(0o700))
+            .await
+            .expect("make test spool private");
+    }
     InputAdapter::new(
         config,
         IMPLEMENTATION_SHA256.to_owned(),
@@ -320,6 +327,38 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
     adapter
         .verify_receipt(&main_receipt)
         .expect("verify receipt");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        assert_eq!(
+            std::fs::metadata(temp.path())
+                .expect("spool metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        for path in [
+            temp.path().join(".coordination-v1.lock"),
+            temp.path().join(".rate-v1.json"),
+            temp.path()
+                .join(format!("{}.claim", main_receipt.capture_id)),
+            temp.path()
+                .join(format!("{}.json", main_receipt.capture_id)),
+        ] {
+            assert_eq!(
+                std::fs::metadata(&path)
+                    .expect("private state metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+                "private mode for {}",
+                path.display()
+            );
+        }
+    }
 
     let dev_receipt = adapter
         .capture(&request(&adapter, "dev", "valid"))
@@ -423,7 +462,9 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
     assert_eq!(fixture.state.writes.load(Ordering::SeqCst), 0);
 
     let shared_spool = TempDir::new().expect("shared spool");
-    let shared_config = config(&fixture.endpoint, shared_spool.path());
+    let mut shared_config = config(&fixture.endpoint, shared_spool.path());
+    shared_config.max_requests_per_minute = 1;
+    shared_config.retry_attempts = 0;
     let first_process = make_adapter(shared_config.clone(), READ_TOKEN).await;
     let second_process = make_adapter(shared_config, READ_TOKEN).await;
     let cross_process_request = request(&first_process, "main", "valid");
@@ -579,6 +620,30 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
     let fixture = start_fixture().await;
     let temp = TempDir::new().expect("temp dir");
     let bound_config = config(&fixture.endpoint, temp.path());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let permissive_spool = temp.path().join("permissive-spool");
+        tokio::fs::create_dir(&permissive_spool)
+            .await
+            .expect("create permissive spool");
+        tokio::fs::set_permissions(&permissive_spool, std::fs::Permissions::from_mode(0o755))
+            .await
+            .expect("set permissive mode");
+        assert!(matches!(
+            InputAdapter::new(
+                config(&fixture.endpoint, &permissive_spool),
+                IMPLEMENTATION_SHA256.to_owned(),
+                READ_TOKEN.to_owned(),
+                SIGNING_KEY.to_vec(),
+                vec![SECRET_MARKER.to_vec()],
+            )
+            .await,
+            Err(AdapterError::InvalidConfig)
+        ));
+    }
     assert!(matches!(
         InputAdapter::new(
             bound_config.clone(),

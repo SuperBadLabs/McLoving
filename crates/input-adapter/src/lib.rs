@@ -304,9 +304,7 @@ impl InputAdapter {
             }
         }
         let client = builder.build().map_err(|_| AdapterError::InvalidConfig)?;
-        tokio::fs::create_dir_all(&config.spool_dir)
-            .await
-            .map_err(|_| AdapterError::StateUnavailable)?;
+        ensure_private_spool(&config.spool_dir).await?;
         drop(lock_spool(&config.spool_dir, true).await?);
         // A capture claim is useful only if its directory entry can be made
         // durable before source access. Fail adapter construction on platforms
@@ -361,11 +359,23 @@ impl InputAdapter {
                 .await_claimed_receipt(request.capture_id, &request_sha256)
                 .await;
         }
-        self.admit_rate(usize::from(self.config.retry_attempts) + 1)
+        let spool_admission = lock_spool(&self.config.spool_dir, true).await?;
+        if self
+            .matching_claim_exists(request.capture_id, &request_sha256)
+            .await?
+        {
+            drop(spool_admission);
+            drop(admission);
+            return self
+                .await_claimed_receipt(request.capture_id, &request_sha256)
+                .await;
+        }
+        self.admit_rate_unlocked(usize::from(self.config.retry_attempts) + 1)
             .await?;
         let claimed = self
-            .claim_capture(request.capture_id, &request_sha256)
+            .claim_capture_unlocked(request.capture_id, &request_sha256)
             .await?;
+        drop(spool_admission);
         drop(admission);
         if !claimed {
             return self
@@ -617,8 +627,10 @@ impl InputAdapter {
         Ok(())
     }
 
-    async fn admit_rate(&self, outbound_attempt_budget: usize) -> Result<(), AdapterError> {
-        let _lock = lock_spool(&self.config.spool_dir, true).await?;
+    async fn admit_rate_unlocked(
+        &self,
+        outbound_attempt_budget: usize,
+    ) -> Result<(), AdapterError> {
         let now = now_unix_ms()?;
         let window_start = now
             .checked_sub(60_000)
@@ -711,7 +723,7 @@ impl InputAdapter {
             .map_err(|_| AdapterError::InvalidStoredReceipt)
     }
 
-    async fn claim_capture(
+    async fn claim_capture_unlocked(
         &self,
         capture_id: Uuid,
         request_sha256: &str,
@@ -723,6 +735,10 @@ impl InputAdapter {
             .join(format!(".{capture_id}.{}.claim.tmp", Uuid::new_v4()));
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
         let mut file = options
             .open(&temp_path)
             .await
@@ -819,6 +835,10 @@ impl InputAdapter {
         let bytes = serde_json::to_vec(receipt).map_err(|_| AdapterError::StateUnavailable)?;
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
         let mut file = options
             .open(&temp_path)
             .await
@@ -871,7 +891,7 @@ async fn lock_spool(spool_dir: &Path, exclusive: bool) -> Result<SpoolLock, Adap
     #[cfg(unix)]
     {
         use nix::fcntl::{Flock, FlockArg};
-        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
         let path = spool_dir.join(".coordination-v1.lock");
         tokio::task::spawn_blocking(move || {
@@ -883,11 +903,10 @@ async fn lock_spool(spool_dir: &Path, exclusive: bool) -> Result<SpoolLock, Adap
                 .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
                 .open(path)
                 .map_err(|_| AdapterError::StateUnavailable)?;
-            if !file
+            let metadata = file
                 .metadata()
-                .map_err(|_| AdapterError::StateUnavailable)?
-                .is_file()
-            {
+                .map_err(|_| AdapterError::StateUnavailable)?;
+            if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
                 return Err(AdapterError::StateUnavailable);
             }
             let operation = if exclusive {
@@ -907,6 +926,44 @@ async fn lock_spool(spool_dir: &Path, exclusive: bool) -> Result<SpoolLock, Adap
     }
 }
 
+async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let existed = match tokio::fs::symlink_metadata(spool_dir).await {
+            Ok(metadata) => {
+                if !metadata.file_type().is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+                    return Err(AdapterError::InvalidConfig);
+                }
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(_) => return Err(AdapterError::StateUnavailable),
+        };
+        if !existed {
+            tokio::fs::create_dir_all(spool_dir)
+                .await
+                .map_err(|_| AdapterError::StateUnavailable)?;
+            tokio::fs::set_permissions(spool_dir, std::fs::Permissions::from_mode(0o700))
+                .await
+                .map_err(|_| AdapterError::StateUnavailable)?;
+            let metadata = tokio::fs::symlink_metadata(spool_dir)
+                .await
+                .map_err(|_| AdapterError::StateUnavailable)?;
+            if !metadata.file_type().is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+                return Err(AdapterError::InvalidConfig);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = spool_dir;
+        Err(AdapterError::InvalidConfig)
+    }
+}
+
 async fn store_rate_ledger(spool_dir: &Path, times: &[i64]) -> Result<(), AdapterError> {
     let bytes = serde_json::to_vec(times).map_err(|_| AdapterError::StateUnavailable)?;
     if bytes.len() > MAX_RATE_LEDGER_BYTES {
@@ -916,6 +973,10 @@ async fn store_rate_ledger(spool_dir: &Path, times: &[i64]) -> Result<(), Adapte
     let temp_path = spool_dir.join(format!(".rate-v1.{}.tmp", Uuid::new_v4()));
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
     let mut file = options
         .open(&temp_path)
         .await
