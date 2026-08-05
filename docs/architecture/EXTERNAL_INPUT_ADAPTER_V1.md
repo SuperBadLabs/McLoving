@@ -34,9 +34,16 @@ proxy inheritance, scheduler, controller database, agent RPC, controller
 filesystem, unrelated secret, connector-control, or effect authority. The
 configured endpoint cannot contain user information, a query, or a fragment.
 Production HTTPS requires a configured content-pinned private CA bundle and
-does not inherit the host root set.
+does not inherit the host root set. The complete bounded PEM bundle is loaded,
+not only its first certificate.
 Cleartext is admitted only for loopback fixtures and requires both the
 configuration flag and `MCLOVING_INPUT_ADAPTER_TEST_MODE=1`.
+
+Configuration, bearer-token, signing-key, marker-set, private-CA, executable,
+claim, and receipt reads have explicit byte ceilings and require regular,
+non-symlink files. Receipt absence is distinguished from invalid or substituted
+receipt state. Runtime deployment must still protect the containing directories
+from untrusted writers.
 
 The runtime should mount configuration and credential files read-only, expose
 only the exact destination through an egress policy, give the private spool its

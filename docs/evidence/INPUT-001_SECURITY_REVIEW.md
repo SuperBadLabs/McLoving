@@ -23,6 +23,8 @@ represented as Mario production truth.
   CA production policy, and double-gated loopback fixture mode;
 - scoped bearer grant identity/version/scope/expiry/content digest, pinned
   HMAC-key and private-CA content digests, and canonical query allowlist;
+- bounded regular-file reads for configuration, credentials, full CA bundle,
+  executable, claims, and receipts, with symlink and oversize denial;
 - tenant/project/pipeline/build/attempt/input, generation, cursor, expiry,
   confidentiality, and audit-lineage binding;
 - bounded timeout, retry, response size, rate, freshness, and typed JSON schema;
@@ -35,7 +37,7 @@ represented as Mario production truth.
 ## Current executable receipt
 
 Focused pinned-Rust check and clippy pass. The suite currently proves four
-contained end-to-end journeys, two unit contracts, and one sealed-inventory
+contained end-to-end journeys, four unit contracts, and one sealed-inventory
 denominator check. The complete locked workspace clippy and test gates also
 pass. The final exact-head receipt will record the protected check results after
 implementation review.

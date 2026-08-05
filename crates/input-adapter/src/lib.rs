@@ -19,6 +19,9 @@ const MAX_BINDING_TEXT_BYTES: usize = 1_024;
 const MAX_QUERY_KEYS: usize = 32;
 const MAX_QUERY_VALUE_BYTES: usize = 4_096;
 const MAX_RESPONSE_BYTES: usize = 8 * 1_024 * 1_024;
+const MAX_RECEIPT_BYTES: usize = MAX_RESPONSE_BYTES + 256 * 1_024;
+const MAX_CA_BUNDLE_BYTES: usize = 1024 * 1_024;
+const MAX_EXECUTABLE_BYTES: u64 = 256 * 1_024 * 1_024;
 const MAX_REQUESTS_PER_MINUTE: usize = 10_000;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MAX_AGE_MS: i64 = 86_400_000;
@@ -275,18 +278,20 @@ impl InputAdapter {
             .no_proxy()
             .user_agent(PROTOCOL_VERSION);
         if let Some(path) = &config.ca_bundle_path {
-            let pem = tokio::fs::read(path)
-                .await
-                .map_err(|_| AdapterError::InvalidConfig)?;
+            let pem = read_bounded_regular_file(path, MAX_CA_BUNDLE_BYTES).await?;
             let actual_ca_sha256 = content_sha256(&pem);
             if config.ca_bundle_sha256.as_deref() != Some(actual_ca_sha256.as_str()) {
                 return Err(AdapterError::InvalidConfig);
             }
-            let certificate =
-                reqwest::Certificate::from_pem(&pem).map_err(|_| AdapterError::InvalidConfig)?;
-            builder = builder
-                .tls_built_in_root_certs(false)
-                .add_root_certificate(certificate);
+            let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+                .map_err(|_| AdapterError::InvalidConfig)?;
+            if certificates.is_empty() {
+                return Err(AdapterError::InvalidConfig);
+            }
+            builder = builder.tls_built_in_root_certs(false);
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
         }
         let client = builder.build().map_err(|_| AdapterError::InvalidConfig)?;
         tokio::fs::create_dir_all(&config.spool_dir)
@@ -585,13 +590,22 @@ impl InputAdapter {
 
     async fn load_stored(&self, capture_id: Uuid) -> Result<Option<CaptureReceipt>, AdapterError> {
         let path = receipt_path(&self.config.spool_dir, capture_id);
-        match tokio::fs::read(path).await {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|_| AdapterError::InvalidStoredReceipt),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(AdapterError::StateUnavailable),
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(AdapterError::InvalidStoredReceipt),
+        };
+        if !metadata.file_type().is_file()
+            || metadata.len() > u64::try_from(MAX_RECEIPT_BYTES).unwrap_or(u64::MAX)
+        {
+            return Err(AdapterError::InvalidStoredReceipt);
         }
+        let bytes = read_bounded_regular_file(&path, MAX_RECEIPT_BYTES)
+            .await
+            .map_err(|_| AdapterError::InvalidStoredReceipt)?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| AdapterError::InvalidStoredReceipt)
     }
 
     async fn claim_capture(
@@ -614,9 +628,9 @@ impl InputAdapter {
                 Ok(true)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing = tokio::fs::read_to_string(path)
-                    .await
-                    .map_err(|_| AdapterError::StateUnavailable)?;
+                let existing = read_bounded_regular_file(&path, 64).await?;
+                let existing = std::str::from_utf8(&existing)
+                    .map_err(|_| AdapterError::InvalidStoredReceipt)?;
                 if existing == request_sha256 {
                     Ok(false)
                 } else {
@@ -946,16 +960,129 @@ fn now_unix_ms() -> Result<i64, AdapterError> {
     i64::try_from(duration.as_millis()).map_err(|_| AdapterError::InvalidConfig)
 }
 
+pub async fn read_bounded_regular_file(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AdapterError> {
+    use tokio::io::AsyncReadExt as _;
+
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    if !metadata.file_type().is_file()
+        || metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX)
+    {
+        return Err(AdapterError::StateUnavailable);
+    }
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    let opened_metadata = file
+        .metadata()
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    if !opened_metadata.file_type().is_file()
+        || opened_metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX)
+    {
+        return Err(AdapterError::StateUnavailable);
+    }
+    let read_limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1_024));
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    if bytes.len() > max_bytes {
+        return Err(AdapterError::StateUnavailable);
+    }
+    Ok(bytes)
+}
+
 pub async fn sha256_file(path: &Path) -> Result<String, AdapterError> {
-    let bytes = tokio::fs::read(path)
+    use tokio::io::AsyncReadExt as _;
+
+    let metadata = tokio::fs::symlink_metadata(path)
         .await
         .map_err(|_| AdapterError::InvalidConfig)?;
-    Ok(sha256_hex(&bytes))
+    if !metadata.file_type().is_file() || metadata.len() > MAX_EXECUTABLE_BYTES {
+        return Err(AdapterError::InvalidConfig);
+    }
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| AdapterError::InvalidConfig)?;
+    let opened_metadata = file
+        .metadata()
+        .await
+        .map_err(|_| AdapterError::InvalidConfig)?;
+    if !opened_metadata.file_type().is_file() || opened_metadata.len() > MAX_EXECUTABLE_BYTES {
+        return Err(AdapterError::InvalidConfig);
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1_024];
+    let mut total = 0_u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|_| AdapterError::InvalidConfig)?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(u64::try_from(read).map_err(|_| AdapterError::InvalidConfig)?)
+            .ok_or(AdapterError::InvalidConfig)?;
+        if total > MAX_EXECUTABLE_BYTES {
+            return Err(AdapterError::InvalidConfig);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut encoded, "{byte:02x}");
+    }
+    Ok(encoded)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bounded_file_read_rejects_oversized_content() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("oversized");
+        tokio::fs::write(&path, b"123456789")
+            .await
+            .expect("write fixture");
+
+        assert!(matches!(
+            read_bounded_regular_file(&path, 8).await,
+            Err(AdapterError::StateUnavailable)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_file_read_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("target");
+        let link = directory.path().join("link");
+        tokio::fs::write(&target, b"secret")
+            .await
+            .expect("write fixture");
+        symlink(&target, &link).expect("create symlink");
+
+        assert!(matches!(
+            read_bounded_regular_file(&link, 64).await,
+            Err(AdapterError::StateUnavailable)
+        ));
+    }
 
     #[test]
     fn rejects_non_loopback_cleartext_endpoint() {

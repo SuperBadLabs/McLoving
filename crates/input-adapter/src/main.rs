@@ -1,10 +1,15 @@
 use std::path::PathBuf;
 
-use mcloving_input_adapter::{AdapterConfig, CaptureRequest, InputAdapter, sha256_file};
+use mcloving_input_adapter::{
+    AdapterConfig, CaptureRequest, InputAdapter, read_bounded_regular_file, sha256_file,
+};
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const MAX_REQUEST_BYTES: u64 = 64 * 1_024;
+const MAX_CONFIG_BYTES: usize = 64 * 1_024;
+const MAX_CREDENTIAL_BYTES: usize = 4 * 1_024;
+const MAX_MARKER_FILE_BYTES: usize = 64 * 1_024;
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -32,20 +37,27 @@ async fn run() -> Result<(), ()> {
     let token_path = required_path("MCLOVING_INPUT_ADAPTER_READ_TOKEN_FILE")?;
     let signing_key_path = required_path("MCLOVING_INPUT_ADAPTER_SIGNING_KEY_FILE")?;
     let secret_markers_path = required_path("MCLOVING_INPUT_ADAPTER_SECRET_MARKERS_FILE")?;
-    let config_bytes = tokio::fs::read(&config_path).await.map_err(|_| ())?;
+    let config_bytes = read_bounded_regular_file(&config_path, MAX_CONFIG_BYTES)
+        .await
+        .map_err(|_| ())?;
     let config: AdapterConfig = serde_json::from_slice(&config_bytes).map_err(|_| ())?;
     if config.test_allow_http_loopback
         && std::env::var("MCLOVING_INPUT_ADAPTER_TEST_MODE").as_deref() != Ok("1")
     {
         return Err(());
     }
-    let read_token = tokio::fs::read_to_string(token_path)
+    let read_token = String::from_utf8(
+        read_bounded_regular_file(&token_path, MAX_CREDENTIAL_BYTES)
+            .await
+            .map_err(|_| ())?,
+    )
+    .map_err(|_| ())?
+    .trim()
+    .to_owned();
+    let signing_key = read_bounded_regular_file(&signing_key_path, MAX_CREDENTIAL_BYTES)
         .await
-        .map_err(|_| ())?
-        .trim()
-        .to_owned();
-    let signing_key = tokio::fs::read(signing_key_path).await.map_err(|_| ())?;
-    let secret_markers = tokio::fs::read(secret_markers_path)
+        .map_err(|_| ())?;
+    let secret_markers = read_bounded_regular_file(&secret_markers_path, MAX_MARKER_FILE_BYTES)
         .await
         .map_err(|_| ())?
         .split(|byte| *byte == b'\n')
