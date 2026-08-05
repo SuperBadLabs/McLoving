@@ -120,7 +120,8 @@ async fn read_input(
     response_headers.insert(
         "x-mcloving-observed-at-ms",
         HeaderValue::from_str(&match mode {
-            "stale" => (now_ms() - 60_000).to_string(),
+            "stale" | "stale_oversized" => (now_ms() - 60_000).to_string(),
+            "future_oversized" => (now_ms() + 60_000).to_string(),
             "minimum_timestamp" => i64::MIN.to_string(),
             _ => now_ms().to_string(),
         })
@@ -176,7 +177,9 @@ async fn read_input(
 
     let body = match mode {
         "malformed" => "{".to_owned(),
-        "oversized" => json!({"enabled": true, "value": "x".repeat(4_096)}).to_string(),
+        "oversized" | "stale_oversized" | "future_oversized" => {
+            json!({"enabled": true, "value": "x".repeat(4_096)}).to_string()
+        }
         "wrong_schema" => json!({"enabled": "yes", "value": branch}).to_string(),
         "marker" | "secret" => json!({
             "enabled": true,
@@ -428,6 +431,8 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
     ));
     for (mode, expected) in [
         ("stale", "stale_response"),
+        ("stale_oversized", "stale_response"),
+        ("future_oversized", "stale_response"),
         ("minimum_timestamp", "stale_response"),
         ("missing_provenance", "missing_provenance"),
         ("blank_cursor", "missing_provenance"),

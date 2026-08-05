@@ -454,6 +454,11 @@ impl InputAdapter {
         let source_observed_at_unix_ms = required_header(&headers, "x-mcloving-observed-at-ms")?
             .parse::<i64>()
             .map_err(|_| AdapterError::MissingProvenance)?;
+        validate_source_age(
+            now_unix_ms()?,
+            source_observed_at_unix_ms,
+            self.config.max_age_ms,
+        )?;
         let confidentiality =
             parse_confidentiality(&required_header(&headers, "x-mcloving-confidentiality")?)?;
         if confidentiality > self.config.max_confidentiality
@@ -495,12 +500,11 @@ impl InputAdapter {
         if self.config.grant_expires_unix_ms <= captured_at_unix_ms {
             return Err(AdapterError::ExpiredGrant);
         }
-        let source_age_ms = captured_at_unix_ms
-            .checked_sub(source_observed_at_unix_ms)
-            .ok_or(AdapterError::StaleResponse)?;
-        if source_age_ms < 0 || source_age_ms > self.config.max_age_ms {
-            return Err(AdapterError::StaleResponse);
-        }
+        validate_source_age(
+            captured_at_unix_ms,
+            source_observed_at_unix_ms,
+            self.config.max_age_ms,
+        )?;
 
         let mut receipt = CaptureReceipt {
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -1297,6 +1301,20 @@ fn now_unix_ms() -> Result<i64, AdapterError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| AdapterError::InvalidConfig)?;
     i64::try_from(duration.as_millis()).map_err(|_| AdapterError::InvalidConfig)
+}
+
+fn validate_source_age(
+    checked_at_unix_ms: i64,
+    source_observed_at_unix_ms: i64,
+    max_age_ms: i64,
+) -> Result<(), AdapterError> {
+    let source_age_ms = checked_at_unix_ms
+        .checked_sub(source_observed_at_unix_ms)
+        .ok_or(AdapterError::StaleResponse)?;
+    if source_age_ms < 0 || source_age_ms > max_age_ms {
+        return Err(AdapterError::StaleResponse);
+    }
+    Ok(())
 }
 
 pub async fn read_bounded_regular_file(
