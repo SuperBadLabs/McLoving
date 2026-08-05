@@ -52,7 +52,9 @@ operator compromise remains outside application-level containment.
 
 V1 is admitted only on Unix hosts where the implementation can synchronize a
 containing directory. Construction preflights that primitive before accepting
-any capture. Other platforms fail closed before creating the private spool or
+any capture. The final spool path must be absolute, canonical, non-symlink,
+`0700`, and owned by the adapter's effective UID whether it already exists or
+is concurrently created by a peer. Other platforms fail closed before creating the private spool or
 publishing a claim; this adapter restriction does not narrow McLoving's
 separate first-class Windows agent execution support.
 
@@ -163,8 +165,8 @@ limit. It must be valid JSON, contain no field outside the closed schema, and
 satisfy every required top-level field/type contract. Configuration also has
 hard upper bounds for response size, request rate, timeout, freshness, query
 keys/values, binding text, schema fields, marker length/count, and aggregate
-`max_response_bytes * total_marker_bytes` comparison work. Duplicate markers
-are rejected before spool creation.
+`2 * max_response_bytes * total_marker_bytes` comparison work for the raw and
+decoded JSON scans. Duplicate markers are rejected before spool creation.
 
 V1 admits `public` and policy-bounded `internal` values. A response labelled
 `secret` is always denied. The adapter also scans every bounded body for the

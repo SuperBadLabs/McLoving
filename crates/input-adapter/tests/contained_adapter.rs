@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -707,6 +707,7 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::symlink;
 
         let permissive_spool = temp.path().join("permissive-spool");
         tokio::fs::create_dir(&permissive_spool)
@@ -718,6 +719,28 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
         assert!(matches!(
             InputAdapter::new(
                 config(&fixture.endpoint, &permissive_spool),
+                IMPLEMENTATION_SHA256.to_owned(),
+                READ_TOKEN.to_owned(),
+                SIGNING_KEY.to_vec(),
+                vec![SECRET_MARKER.to_vec()],
+            )
+            .await,
+            Err(AdapterError::InvalidConfig)
+        ));
+
+        let symlink_target = temp.path().join("symlink-spool-target");
+        tokio::fs::create_dir(&symlink_target)
+            .await
+            .expect("create symlink target");
+        tokio::fs::set_permissions(&symlink_target, std::fs::Permissions::from_mode(0o700))
+            .await
+            .expect("make symlink target private");
+        let symlink_spool = temp.path().join("symlink-spool");
+        symlink(&symlink_target, &symlink_spool).expect("create spool symlink");
+        let trailing_symlink_spool = PathBuf::from(format!("{}/", symlink_spool.display()));
+        assert!(matches!(
+            InputAdapter::new(
+                config(&fixture.endpoint, &trailing_symlink_spool),
                 IMPLEMENTATION_SHA256.to_owned(),
                 READ_TOKEN.to_owned(),
                 SIGNING_KEY.to_vec(),
@@ -807,7 +830,7 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
     assert!(!duplicate_marker_spool.exists());
 
     let marker_work_spool = temp.path().join("marker-work-spool");
-    let marker_work = (0_u8..65)
+    let marker_work = (0_u8..17)
         .map(|index| vec![index.saturating_add(1)])
         .collect::<Vec<_>>();
     let mut marker_work_config = config(&fixture.endpoint, &marker_work_spool);

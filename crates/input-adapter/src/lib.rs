@@ -1250,12 +1250,7 @@ async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
         }
 
         let existed = match tokio::fs::symlink_metadata(spool_dir).await {
-            Ok(metadata) => {
-                if !private_spool_metadata_is_valid(&metadata) {
-                    return Err(AdapterError::InvalidConfig);
-                }
-                true
-            }
+            Ok(_) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(_) => return Err(AdapterError::StateUnavailable),
         };
@@ -1267,12 +1262,17 @@ async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(_) => return Err(AdapterError::StateUnavailable),
             }
-            let metadata = tokio::fs::symlink_metadata(spool_dir)
+        }
+        let metadata = tokio::fs::symlink_metadata(spool_dir)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        if !private_spool_metadata_is_valid(&metadata)
+            || tokio::fs::canonicalize(spool_dir)
                 .await
-                .map_err(|_| AdapterError::StateUnavailable)?;
-            if !private_spool_metadata_is_valid(&metadata) {
-                return Err(AdapterError::InvalidConfig);
-            }
+                .map_err(|_| AdapterError::InvalidConfig)?
+                != spool_dir
+        {
+            return Err(AdapterError::InvalidConfig);
         }
         sync_directory(parent).await?;
         Ok(())
@@ -1398,6 +1398,7 @@ fn validate_config(
             .iter()
             .try_fold(0_usize, |total, marker| total.checked_add(marker.len()))
             .and_then(|marker_bytes| config.max_response_bytes.checked_mul(marker_bytes))
+            .and_then(|one_pass| one_pass.checked_mul(2))
             .is_none_or(|work| work > MAX_MARKER_COMPARISON_BYTES)
         || content_sha256(read_token.as_bytes()) != config.read_token_sha256
         || content_sha256(signing_key) != config.signing_key_sha256
