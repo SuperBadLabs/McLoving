@@ -622,6 +622,26 @@ async fn outage_rate_generation_and_rollback_are_fail_closed() {
         "retry-budget denial must not strand a capture claim"
     );
 
+    let overflowing_expiry_dir = TempDir::new().expect("overflowing expiry dir");
+    let mut overflowing_expiry_config = config(&fixture.endpoint, overflowing_expiry_dir.path());
+    overflowing_expiry_config.grant_expires_unix_ms = i64::MAX;
+    let overflowing_expiry = make_adapter(overflowing_expiry_config, READ_TOKEN).await;
+    let mut overflowing_request = request(&overflowing_expiry, "main", "valid");
+    overflowing_request.expires_at_unix_ms = i64::MAX;
+    let reads_before = fixture.state.reads.load(Ordering::SeqCst);
+    assert!(matches!(
+        overflowing_expiry.capture(&overflowing_request).await,
+        Err(AdapterError::StateUnavailable)
+    ));
+    assert_eq!(fixture.state.reads.load(Ordering::SeqCst), reads_before);
+    assert!(
+        !overflowing_expiry_dir
+            .path()
+            .join(format!("{}.claim", overflowing_request.capture_id))
+            .exists(),
+        "overflowing attempt expiry must fail before claim publication"
+    );
+
     let outage_dir = TempDir::new().expect("outage dir");
     let outage = make_adapter(
         config("http://127.0.0.1:9/input", outage_dir.path()),
@@ -787,8 +807,8 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
     assert!(!duplicate_marker_spool.exists());
 
     let marker_work_spool = temp.path().join("marker-work-spool");
-    let marker_work = (0_u8..9)
-        .map(|index| vec![b'a' + index])
+    let marker_work = (0_u8..65)
+        .map(|index| vec![index.saturating_add(1)])
         .collect::<Vec<_>>();
     let mut marker_work_config = config(&fixture.endpoint, &marker_work_spool);
     marker_work_config.max_response_bytes = 8 * 1_024 * 1_024;

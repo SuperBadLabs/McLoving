@@ -27,7 +27,7 @@ const MAX_TIMEOUT_MS: u64 = 60_000;
 const MAX_AGE_MS: i64 = 86_400_000;
 const MAX_RATE_LEDGER_BYTES: usize = 2 * 1_024 * 1_024;
 const MAX_SECRET_MARKERS: usize = 256;
-const MAX_MARKER_SCAN_WORK: usize = 64 * 1_024 * 1_024;
+const MAX_MARKER_COMPARISON_BYTES: usize = 256 * 1_024 * 1_024;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -834,6 +834,12 @@ impl InputAdapter {
         if expires_at_unix_ms <= now {
             return Err(AdapterError::StateUnavailable);
         }
+        expires_at_unix_ms
+            .checked_add(
+                i64::try_from(self.config.timeout_ms)
+                    .map_err(|_| AdapterError::StateUnavailable)?,
+            )
+            .ok_or(AdapterError::StateUnavailable)?;
         ledger.reservations.push(RateReservation {
             capture_id,
             expires_at_unix_ms,
@@ -1388,10 +1394,11 @@ fn validate_config(
         || secret_markers
             .iter()
             .any(|marker| marker.len() > MAX_BINDING_TEXT_BYTES)
-        || config
-            .max_response_bytes
-            .checked_mul(secret_markers.len())
-            .is_none_or(|work| work > MAX_MARKER_SCAN_WORK)
+        || secret_markers
+            .iter()
+            .try_fold(0_usize, |total, marker| total.checked_add(marker.len()))
+            .and_then(|marker_bytes| config.max_response_bytes.checked_mul(marker_bytes))
+            .is_none_or(|work| work > MAX_MARKER_COMPARISON_BYTES)
         || content_sha256(read_token.as_bytes()) != config.read_token_sha256
         || content_sha256(signing_key) != config.signing_key_sha256
         || marker_set_digest(secret_markers) != config.secret_marker_set_sha256
