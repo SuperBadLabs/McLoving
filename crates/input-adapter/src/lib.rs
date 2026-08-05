@@ -26,6 +26,8 @@ const MAX_REQUESTS_PER_MINUTE: usize = 10_000;
 const MAX_TIMEOUT_MS: u64 = 60_000;
 const MAX_AGE_MS: i64 = 86_400_000;
 const MAX_RATE_LEDGER_BYTES: usize = 2 * 1_024 * 1_024;
+const MAX_SECRET_MARKERS: usize = 256;
+const MAX_MARKER_SCAN_WORK: usize = 64 * 1_024 * 1_024;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1254,10 +1256,11 @@ async fn ensure_private_spool(spool_dir: &Path) -> Result<(), AdapterError> {
         if !existed {
             let mut builder = tokio::fs::DirBuilder::new();
             builder.mode(0o700);
-            builder
-                .create(spool_dir)
-                .await
-                .map_err(|_| AdapterError::StateUnavailable)?;
+            match builder.create(spool_dir).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(AdapterError::StateUnavailable),
+            }
             let metadata = tokio::fs::symlink_metadata(spool_dir)
                 .await
                 .map_err(|_| AdapterError::StateUnavailable)?;
@@ -1380,14 +1383,25 @@ fn validate_config(
         || read_token.len() < 32
         || signing_key.len() < 32
         || secret_markers.is_empty()
+        || secret_markers.len() > MAX_SECRET_MARKERS
         || secret_markers.iter().any(Vec::is_empty)
         || secret_markers
             .iter()
             .any(|marker| marker.len() > MAX_BINDING_TEXT_BYTES)
+        || config
+            .max_response_bytes
+            .checked_mul(secret_markers.len())
+            .is_none_or(|work| work > MAX_MARKER_SCAN_WORK)
         || content_sha256(read_token.as_bytes()) != config.read_token_sha256
         || content_sha256(signing_key) != config.signing_key_sha256
         || marker_set_digest(secret_markers) != config.secret_marker_set_sha256
     {
+        return Err(AdapterError::InvalidConfig);
+    }
+    let mut unique_markers = secret_markers.to_vec();
+    unique_markers.sort();
+    unique_markers.dedup();
+    if unique_markers.len() != secret_markers.len() {
         return Err(AdapterError::InvalidConfig);
     }
     let mut allowed = config.allowed_query_keys.clone();

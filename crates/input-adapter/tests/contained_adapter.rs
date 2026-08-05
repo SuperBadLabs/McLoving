@@ -769,6 +769,63 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
         Err(AdapterError::InvalidConfig)
     ));
 
+    let duplicate_marker_spool = temp.path().join("duplicate-marker-spool");
+    let duplicate_markers = vec![SECRET_MARKER.to_vec(), SECRET_MARKER.to_vec()];
+    let mut duplicate_marker_config = config(&fixture.endpoint, &duplicate_marker_spool);
+    duplicate_marker_config.secret_marker_set_sha256 = marker_set_digest(&duplicate_markers);
+    assert!(matches!(
+        InputAdapter::new(
+            duplicate_marker_config,
+            IMPLEMENTATION_SHA256.to_owned(),
+            READ_TOKEN.to_owned(),
+            SIGNING_KEY.to_vec(),
+            duplicate_markers,
+        )
+        .await,
+        Err(AdapterError::InvalidConfig)
+    ));
+    assert!(!duplicate_marker_spool.exists());
+
+    let marker_work_spool = temp.path().join("marker-work-spool");
+    let marker_work = (0_u8..9)
+        .map(|index| vec![b'a' + index])
+        .collect::<Vec<_>>();
+    let mut marker_work_config = config(&fixture.endpoint, &marker_work_spool);
+    marker_work_config.max_response_bytes = 8 * 1_024 * 1_024;
+    marker_work_config.secret_marker_set_sha256 = marker_set_digest(&marker_work);
+    assert!(matches!(
+        InputAdapter::new(
+            marker_work_config,
+            IMPLEMENTATION_SHA256.to_owned(),
+            READ_TOKEN.to_owned(),
+            SIGNING_KEY.to_vec(),
+            marker_work,
+        )
+        .await,
+        Err(AdapterError::InvalidConfig)
+    ));
+    assert!(!marker_work_spool.exists());
+
+    let racing_spool = temp.path().join("racing-shared-spool");
+    let racing_config = config(&fixture.endpoint, &racing_spool);
+    let first = InputAdapter::new(
+        racing_config.clone(),
+        IMPLEMENTATION_SHA256.to_owned(),
+        READ_TOKEN.to_owned(),
+        SIGNING_KEY.to_vec(),
+        vec![SECRET_MARKER.to_vec()],
+    );
+    let second = InputAdapter::new(
+        racing_config,
+        IMPLEMENTATION_SHA256.to_owned(),
+        READ_TOKEN.to_owned(),
+        SIGNING_KEY.to_vec(),
+        vec![SECRET_MARKER.to_vec()],
+    );
+    let (first, second) = tokio::join!(first, second);
+    assert!(first.is_ok());
+    assert!(second.is_ok());
+
     let https_dir = TempDir::new().expect("https dir");
     let https_without_ca = config("https://inputs.example.test/v1", https_dir.path());
     assert!(matches!(

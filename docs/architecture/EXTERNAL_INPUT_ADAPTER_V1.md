@@ -161,7 +161,9 @@ match. The body is read incrementally and rejected before exceeding the byte
 limit. It must be valid JSON, contain no field outside the closed schema, and
 satisfy every required top-level field/type contract. Configuration also has
 hard upper bounds for response size, request rate, timeout, freshness, query
-keys/values, binding text, schema fields, and marker length.
+keys/values, binding text, schema fields, marker length/count, and aggregate
+`max_response_bytes * marker_count` scan work. Duplicate markers are rejected
+before spool creation.
 
 V1 admits `public` and policy-bounded `internal` values. A response labelled
 `secret` is always denied. The adapter also scans every bounded body for the
