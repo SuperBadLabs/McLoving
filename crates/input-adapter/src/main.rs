@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use mcloving_input_adapter::{
-    AdapterConfig, CaptureRequest, InputAdapter, read_bounded_regular_file, sha256_file,
+    AdapterConfig, CaptureRequest, InputAdapter, read_bounded_regular_file,
+    read_private_bounded_regular_file, sha256_file,
 };
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -47,14 +48,14 @@ async fn run() -> Result<(), ()> {
         return Err(());
     }
     let read_token = String::from_utf8(
-        read_bounded_regular_file(&token_path, MAX_CREDENTIAL_BYTES)
+        read_private_bounded_regular_file(&token_path, MAX_CREDENTIAL_BYTES)
             .await
             .map_err(|_| ())?,
     )
     .map_err(|_| ())?
     .trim()
     .to_owned();
-    let signing_key = read_bounded_regular_file(&signing_key_path, MAX_CREDENTIAL_BYTES)
+    let signing_key = read_private_bounded_regular_file(&signing_key_path, MAX_CREDENTIAL_BYTES)
         .await
         .map_err(|_| ())?;
     let secret_markers = read_bounded_regular_file(&secret_markers_path, MAX_MARKER_FILE_BYTES)

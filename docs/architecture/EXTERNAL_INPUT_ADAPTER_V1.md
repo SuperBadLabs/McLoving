@@ -44,6 +44,9 @@ claim, and receipt reads have explicit byte ceilings and require regular,
 non-symlink files. Receipt absence is distinguished from invalid or substituted
 receipt state. Runtime deployment must still protect the containing directories
 from untrusted writers.
+Bearer-token and signing-key files additionally must be owned by the effective
+UID with no group or other permission bits; final-component symlinks are denied
+at open time before either authority is loaded.
 
 The runtime should mount configuration and credential files read-only, expose
 only the exact destination through an egress policy, give the private spool its

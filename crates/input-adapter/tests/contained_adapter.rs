@@ -1056,6 +1056,54 @@ async fn binary_boundary_uses_files_for_secrets_and_ndjson_for_receipts() {
     tokio::fs::write(&markers_path, SECRET_MARKER)
         .await
         .expect("write markers");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        tokio::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644))
+            .await
+            .expect("make token insecure");
+        tokio::fs::set_permissions(&signing_key_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .expect("make signing key owner-only");
+        let insecure_token_status = Command::new(executable)
+            .env("MCLOVING_INPUT_ADAPTER_CONFIG", &config_path)
+            .env("MCLOVING_INPUT_ADAPTER_READ_TOKEN_FILE", &token_path)
+            .env("MCLOVING_INPUT_ADAPTER_SIGNING_KEY_FILE", &signing_key_path)
+            .env("MCLOVING_INPUT_ADAPTER_SECRET_MARKERS_FILE", &markers_path)
+            .env("MCLOVING_INPUT_ADAPTER_TEST_MODE", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .expect("run with insecure token");
+        assert!(!insecure_token_status.success());
+
+        tokio::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .expect("make token owner-only");
+        tokio::fs::set_permissions(&signing_key_path, std::fs::Permissions::from_mode(0o644))
+            .await
+            .expect("make signing key insecure");
+        let insecure_signing_key_status = Command::new(executable)
+            .env("MCLOVING_INPUT_ADAPTER_CONFIG", &config_path)
+            .env("MCLOVING_INPUT_ADAPTER_READ_TOKEN_FILE", &token_path)
+            .env("MCLOVING_INPUT_ADAPTER_SIGNING_KEY_FILE", &signing_key_path)
+            .env("MCLOVING_INPUT_ADAPTER_SECRET_MARKERS_FILE", &markers_path)
+            .env("MCLOVING_INPUT_ADAPTER_TEST_MODE", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .expect("run with insecure signing key");
+        assert!(!insecure_signing_key_status.success());
+
+        tokio::fs::set_permissions(&signing_key_path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .expect("make signing key owner-only");
+    }
 
     let config_sha256 = config.canonical_digest().expect("config digest");
     let mut query = BTreeMap::new();

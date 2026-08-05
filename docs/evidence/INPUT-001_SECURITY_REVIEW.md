@@ -2,18 +2,15 @@
 
 Date: 2026-08-05
 
-Verdict: PASS for the implementation gate at exact implementation head
-`fc2b5f5b978af6ab04916d4eb88c4740c36d38b1`. All nine protected checks passed,
-and independent exact-head review found no further actionable issue after
-forty-six implementation findings were fixed and their threads resolved. One
-additional closure-documentation wording finding was also fixed and resolved.
+Verdict: PENDING for the implementation gate. The latest credential-file
+ownership/mode fix must pass all nine protected checks and independent
+exact-head review before this receipt can certify a specific implementation
+head. Prior reviewed heads are historical evidence only and do not close
+INPUT-001.
 
-The later PR #32 closure candidate adds only this receipt's final gate counts
-and the execution-board transition from INPUT-001 to PROV-001. Its exact head
-must independently pass the protected checks and review before merge. The final
-squash-merge commit is necessarily unknowable from inside its own pre-merge
-contents; the immutable PR #32 exact-head checks plus post-merge protected-main
-verification are the final closure attestation.
+The final squash-merge commit is necessarily unknowable from inside its own
+pre-merge contents; the immutable PR #32 exact-head checks plus post-merge
+protected-main verification will form the final closure attestation.
 
 This receipt does not claim a Mario production input, canary, cutover,
 rollback, or Jenkins decommissioning event.
@@ -80,13 +77,13 @@ represented as Mario production truth.
 
 ## Current executable receipt
 
-Focused pinned-Rust check and clippy passed. The suite proves eight contained
-end-to-end journeys, eleven unit contracts, and one sealed-inventory denominator
-check. The complete locked workspace clippy and test gates also passed, as did
-all nine protected checks on the exact implementation head.
+The latest suite proves eight contained end-to-end journeys, twelve unit
+contracts, and one sealed-inventory denominator check. Focused pinned-Rust,
+complete locked workspace, clippy, and all nine protected checks remain pending
+on the next pushed exact implementation candidate.
 
-The independent review produced forty-six actionable implementation findings
-across thirty exact implementation heads: implicit client
+The independent review has produced forty-seven actionable implementation
+findings across the implementation-head sequence to date: implicit client
 retries; pre-read claim-directory
 durability; rate denial leaving a claim; duplicate capture admission at low
 rate; post-receipt directory durability; secret-marker leakage through response
@@ -186,10 +183,15 @@ that default JSON-number parsing could round a high-precision value before
 receipt signing. The parser now rejects duplicate members recursively before
 building a value and preserves arbitrary-precision number text through the
 signed receipt; contained fixtures prove both properties.
+The latest credential-boundary review found that the binary accepted bearer
+token and receipt-signing key files readable by group or other users. Credential
+admission now requires a regular, no-follow, size-bounded file owned by the
+effective UID with no group/other permission bits before either authority is
+loaded.
 Each prior finding was corrected with a regression fixture or explicit
 fail-closed platform admission where applicable and resolved only after its fix
-was present on the reviewed head. The final exact-head review reported no
-further actionable security, correctness, or truth-boundary issue.
+was present on the reviewed head. The credential-file fix remains open until
+the next exact candidate passes the complete gates and independent review.
 
 ## Residual risk and authority boundary
 

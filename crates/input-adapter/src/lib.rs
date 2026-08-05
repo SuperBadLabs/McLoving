@@ -1889,6 +1889,79 @@ pub async fn read_bounded_regular_file(
     Ok(bytes)
 }
 
+pub async fn read_private_bounded_regular_file(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AdapterError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, max_bytes);
+        Err(AdapterError::StateUnavailable)
+    }
+
+    #[cfg(unix)]
+    {
+        use tokio::io::AsyncReadExt as _;
+
+        let metadata = tokio::fs::symlink_metadata(path)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        if !private_credential_metadata_is_valid(&metadata, max_bytes) {
+            return Err(AdapterError::StateUnavailable);
+        }
+
+        let mut options = tokio::fs::OpenOptions::new();
+        options.read(true).custom_flags(nix::libc::O_NOFOLLOW);
+        let file = options
+            .open(path)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        let opened_metadata = file
+            .metadata()
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        if !private_credential_metadata_is_valid(&opened_metadata, max_bytes) {
+            return Err(AdapterError::StateUnavailable);
+        }
+
+        let read_limit = u64::try_from(max_bytes)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1_024));
+        file.take(read_limit)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| AdapterError::StateUnavailable)?;
+        if bytes.len() > max_bytes {
+            return Err(AdapterError::StateUnavailable);
+        }
+        Ok(bytes)
+    }
+}
+
+#[cfg(unix)]
+fn private_credential_metadata_is_valid(metadata: &std::fs::Metadata, max_bytes: usize) -> bool {
+    private_credential_metadata_is_valid_for(
+        metadata,
+        max_bytes,
+        nix::unistd::Uid::effective().as_raw(),
+    )
+}
+
+#[cfg(unix)]
+fn private_credential_metadata_is_valid_for(
+    metadata: &std::fs::Metadata,
+    max_bytes: usize,
+    effective_uid: u32,
+) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    metadata.file_type().is_file()
+        && metadata.len() <= u64::try_from(max_bytes).unwrap_or(u64::MAX)
+        && metadata.permissions().mode() & 0o077 == 0
+        && metadata.uid() == effective_uid
+}
+
 #[cfg(unix)]
 fn ensure_directory_sync_supported() -> Result<(), AdapterError> {
     Ok(())
@@ -2130,6 +2203,41 @@ mod tests {
         assert!(matches!(
             read_bounded_regular_file(&link, 64).await,
             Err(AdapterError::StateUnavailable)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_credential_read_requires_owner_only_effective_uid_file() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("credential");
+        tokio::fs::write(&path, b"private-value")
+            .await
+            .expect("write credential fixture");
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .await
+            .expect("make credential world-readable");
+        assert!(matches!(
+            read_private_bounded_regular_file(&path, 64).await,
+            Err(AdapterError::StateUnavailable)
+        ));
+
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .expect("make credential owner-only");
+        assert_eq!(
+            read_private_bounded_regular_file(&path, 64)
+                .await
+                .expect("read private credential"),
+            b"private-value"
+        );
+        let metadata = std::fs::metadata(&path).expect("credential metadata");
+        assert!(!private_credential_metadata_is_valid_for(
+            &metadata,
+            64,
+            metadata.uid().wrapping_add(1),
         ));
     }
 
