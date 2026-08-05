@@ -1,6 +1,6 @@
 # Public API v1
 
-Status: implemented by UX-002 and extended by CONSUMER-001.
+Status: implemented by UX-002 and extended by CONSUMER-001 and ADMIN-001.
 
 The Rust CLI is an HTTP client and has no privileged database or controller
 shortcut. Every protected request requires `Authorization: Bearer <token>`.
@@ -80,6 +80,16 @@ and build-UUID cursor; `builds --status queued` is the queue view. Existing
 `status`, `graph`, `logs`, `watch`, `tests`, `artifacts`, and
 `artifact-download` commands cover the remaining read contract. Partial build
 and log cursors fail locally rather than issuing an ambiguous request.
+
+External administrative migration also uses only this API. `mcloving apply`
+converges a pipeline definition through `PUT .../pipelines/{pipeline}` with a
+mandatory quoted `If-Match` revision; revision zero creates, the current
+revision updates or returns unchanged, and stale revisions fail with the stable
+precondition error. `submit`, `cancel`, `retry`, and `approve` retain their
+separate action authorization, idempotency/fencing, and audit contracts. The
+complete supported/retired/pending write-operation denominator is defined in
+`EXTERNAL_ADMIN_CLIENTS_V1.md`; the API does not silently translate unsupported
+Jenkins controller operations.
 
 The Wave 1 deployable profile runs one embedded Linux worker for exactly one
 configured organization. It requires separate

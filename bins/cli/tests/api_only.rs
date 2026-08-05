@@ -6,7 +6,7 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use mcloving_cli::{Arguments, Command, CommandOutput, OutputMode, execute};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -18,12 +18,19 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
     let organization = Uuid::new_v4();
     let project = Uuid::new_v4();
     let build = Uuid::new_v4();
+    let pipeline_id = Uuid::new_v4();
     let attempt = Uuid::new_v4();
     let polls = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route(
             &format!("/api/v1/organizations/{organization}/projects/{project}/pipelines"),
             get(pipelines),
+        )
+        .route(
+            &format!(
+                "/api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline_id}"
+            ),
+            put(apply_pipeline),
         )
         .route(
             &format!("/api/v1/organizations/{organization}/projects/{project}/builds"),
@@ -45,6 +52,7 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
             polls: polls.clone(),
             build,
             attempt,
+            pipeline_id,
         });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -75,6 +83,27 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
     let pipeline_page = structured(pipeline_page);
     assert_eq!(pipeline_page["items"][0]["slug"], "replacement-job");
     assert_eq!(pipeline_page["next_after"], "replacement-job");
+
+    let (server_url, organization, project) = common();
+    let applied = execute(&Arguments {
+        server: server_url,
+        token: TOKEN.to_owned(),
+        organization,
+        project,
+        output: OutputMode::Json,
+        command: Command::Apply {
+            pipeline_id,
+            slug: "replacement-job".to_owned(),
+            expected_revision: 7,
+            pipeline: pipeline.clone(),
+            parameters: vec!["count=3".to_owned()],
+        },
+    })
+    .await
+    .unwrap();
+    let applied = structured(applied);
+    assert_eq!(applied["pipeline_id"], pipeline_id.to_string());
+    assert_eq!(applied["revision"], 8);
 
     let (server_url, organization, project) = common();
     let build_page = execute(&Arguments {
@@ -198,6 +227,37 @@ async fn pipelines(
     }))
 }
 
+async fn apply_pipeline(
+    State(state): State<MockState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    require_token(&headers);
+    assert_eq!(
+        headers
+            .get("if-match")
+            .and_then(|value| value.to_str().ok()),
+        Some("\"7\"")
+    );
+    assert_eq!(body["slug"], "replacement-job");
+    assert_eq!(body["parameters"]["count"], 3);
+    Json(json!({
+        "organization_id": Uuid::nil(),
+        "project_id": Uuid::nil(),
+        "pipeline_id": state.pipeline_id,
+        "slug": "replacement-job",
+        "revision": 8,
+        "source": body["source"],
+        "source_sha256": vec![0_u8; 32],
+        "semantic_digest": vec![1_u8; 32],
+        "schema_major": 1,
+        "schema_minor": 0,
+        "parameter_schema": {},
+        "created_at_unix_ms": 1,
+        "updated_at_unix_ms": 2
+    }))
+}
+
 async fn builds(
     State(state): State<MockState>,
     Query(query): Query<BTreeMap<String, String>>,
@@ -238,6 +298,7 @@ struct MockState {
     polls: Arc<AtomicUsize>,
     build: Uuid,
     attempt: Uuid,
+    pipeline_id: Uuid,
 }
 
 async fn validate(headers: HeaderMap) -> Json<Value> {

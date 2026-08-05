@@ -7,7 +7,8 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use mcloving_controller_api::{
-    ApprovalRequest, BuildCursor, Client, LogCursor, RetryRequest, SubmissionRequest,
+    ApprovalRequest, BuildCursor, Client, LogCursor, PipelineUpsertRequest, RetryRequest,
+    SubmissionRequest,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -45,6 +46,17 @@ pub enum Command {
         parameters: Vec<String>,
     },
     Plan {
+        pipeline: PathBuf,
+        #[arg(long = "parameter", value_name = "NAME=JSON")]
+        parameters: Vec<String>,
+    },
+    /// Create or converge a pipeline through the authenticated public v1 API.
+    Apply {
+        pipeline_id: Uuid,
+        #[arg(long)]
+        slug: String,
+        #[arg(long)]
+        expected_revision: i64,
         pipeline: PathBuf,
         #[arg(long = "parameter", value_name = "NAME=JSON")]
         parameters: Vec<String>,
@@ -210,6 +222,33 @@ pub async fn execute(arguments: &Arguments) -> Result<CommandOutput> {
                         arguments.organization,
                         required_project(arguments.project)?,
                         &request,
+                    )
+                    .await?,
+            )?
+        }
+        Command::Apply {
+            pipeline_id,
+            slug,
+            expected_revision,
+            pipeline,
+            parameters,
+        } => {
+            if *expected_revision < 0 {
+                bail!("--expected-revision must be non-negative");
+            }
+            let source = read_pipeline_source(pipeline).await?;
+            to_value(
+                client
+                    .put_pipeline(
+                        arguments.organization,
+                        required_project(arguments.project)?,
+                        *pipeline_id,
+                        *expected_revision,
+                        &PipelineUpsertRequest {
+                            slug: slug.clone(),
+                            source,
+                            parameters: parse_parameters(parameters)?,
+                        },
                     )
                     .await?,
             )?
@@ -460,13 +499,17 @@ pub fn render(mode: OutputMode, output: CommandOutput) -> Result<String> {
 }
 
 async fn submission_request(path: &PathBuf, parameters: &[String]) -> Result<SubmissionRequest> {
-    let source = tokio::fs::read_to_string(path)
-        .await
-        .with_context(|| format!("read {}", path.display()))?;
+    let source = read_pipeline_source(path).await?;
     Ok(SubmissionRequest {
         source,
         parameters: parse_parameters(parameters)?,
     })
+}
+
+async fn read_pipeline_source(path: &PathBuf) -> Result<String> {
+    tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("read {}", path.display()))
 }
 
 fn parse_parameters(parameters: &[String]) -> Result<BTreeMap<String, Value>> {
