@@ -5,6 +5,7 @@ CREATE TABLE external_read_consumer_versions (
         CHECK (consumer_id = btrim(consumer_id) AND length(consumer_id) BETWEEN 1 AND 256),
     generation bigint NOT NULL CHECK (generation > 0),
     authority text NOT NULL CHECK (authority IN ('jenkins_source', 'mcloving_target')),
+    binding_digest bytea NOT NULL CHECK (octet_length(binding_digest) = 32),
     contract_digest bytea NOT NULL CHECK (octet_length(contract_digest) = 32),
     source_inventory_digest bytea NOT NULL CHECK (octet_length(source_inventory_digest) = 32),
     source_inventory_generation text NOT NULL

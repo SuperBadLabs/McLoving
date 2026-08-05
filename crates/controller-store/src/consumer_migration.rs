@@ -102,6 +102,7 @@ pub struct ExternalReadConsumerReceipt {
     pub consumer_id: String,
     pub generation: i64,
     pub authority: ExternalReadAuthority,
+    pub binding_digest: [u8; 32],
     pub contract_digest: [u8; 32],
 }
 
@@ -117,6 +118,7 @@ impl Store {
         input: &ExternalReadConsumerWrite,
     ) -> Result<ExternalReadConsumerReceipt, StoreError> {
         validate_input(input)?;
+        let binding_digest = compute_external_read_consumer_binding_digest(input)?;
         let contract_digest = compute_external_read_consumer_digest(input)?;
         if contract_digest != input.expected_contract_digest {
             return invalid("external read consumer digest does not match canonical content");
@@ -163,8 +165,9 @@ impl Store {
             return invalid("external read consumer target identity is inactive");
         }
 
-        let current = sqlx::query_as::<_, (i64, String)>(
-            "SELECT current.current_generation, version.authority
+        let current = sqlx::query_as::<_, (i64, String, bool)>(
+            "SELECT current.current_generation, version.authority,
+                    version.binding_digest = $4
              FROM external_read_consumer_current AS current
              JOIN external_read_consumer_versions AS version
                ON version.organization_id = current.organization_id
@@ -178,12 +181,18 @@ impl Store {
         .bind(input.organization_id)
         .bind(input.project_id)
         .bind(&input.consumer_id)
+        .bind(binding_digest.as_slice())
         .fetch_optional(&mut *tx)
         .await?;
         if current.as_ref().map(|row| row.0) != input.expected_current_generation {
             return Err(StoreError::ConsumerMigrationConflict(
                 "external read consumer current generation changed".to_owned(),
             ));
+        }
+        if current.as_ref().is_some_and(|row| !row.2) {
+            return invalid(
+                "external read consumer binding changed across an authority transition",
+            );
         }
         let required_generation = match current.as_ref() {
             Some(row) => row.0.checked_add(1).ok_or_else(|| {
@@ -207,7 +216,7 @@ impl Store {
         sqlx::query(
             "INSERT INTO external_read_consumer_versions (
                  organization_id, project_id, consumer_id, generation, authority,
-                 contract_digest, source_inventory_digest, source_inventory_generation,
+                 binding_digest, contract_digest, source_inventory_digest, source_inventory_generation,
                  source_endpoint, source_caller, target_identity_id, target_subject,
                  target_api_base, target_api_version, endpoint_contracts,
                  retention_semantics, url_semantics, rate_limit_per_minute,
@@ -220,7 +229,8 @@ impl Store {
              ) VALUES (
                  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                  $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                 $21, $22, $23, $24, $25, $26, $27, $28, $29, $30
+                 $21, $22, $23, $24, $25, $26, $27, $28, $29, $30,
+                 $31
              )",
         )
         .bind(input.organization_id)
@@ -228,6 +238,7 @@ impl Store {
         .bind(&input.consumer_id)
         .bind(input.generation)
         .bind(input.authority.as_str())
+        .bind(binding_digest.as_slice())
         .bind(contract_digest.as_slice())
         .bind(input.source_inventory_digest.as_slice())
         .bind(&input.source_inventory_generation)
@@ -297,6 +308,7 @@ impl Store {
                 "consumer_id": input.consumer_id,
                 "generation": input.generation,
                 "authority": input.authority.as_str(),
+                "binding_digest": hex::encode(binding_digest),
                 "contract_digest": hex::encode(contract_digest),
                 "source_inventory_digest": hex::encode(input.source_inventory_digest),
                 "source_reads_observed": input.source_reads_observed,
@@ -315,6 +327,7 @@ impl Store {
             consumer_id: input.consumer_id.clone(),
             generation: input.generation,
             authority: input.authority,
+            binding_digest,
             contract_digest,
         })
     }
@@ -326,33 +339,12 @@ pub fn compute_external_read_consumer_digest(
     validate_input(input)?;
     let mut hasher = Sha256::new();
     hash(&mut hasher, b"mcloving-external-read-consumer-v1");
-    hash(&mut hasher, input.organization_id.as_bytes());
-    hash(&mut hasher, input.project_id.as_bytes());
-    hash(&mut hasher, input.consumer_id.as_bytes());
+    hash(
+        &mut hasher,
+        &compute_external_read_consumer_binding_digest(input)?,
+    );
     hash(&mut hasher, &input.generation.to_be_bytes());
     hash(&mut hasher, input.authority.as_str().as_bytes());
-    hash(&mut hasher, &input.source_inventory_digest);
-    hash(&mut hasher, input.source_inventory_generation.as_bytes());
-    hash(&mut hasher, input.source_endpoint.as_bytes());
-    hash(&mut hasher, input.source_caller.as_bytes());
-    hash(&mut hasher, input.target_identity_id.as_bytes());
-    hash(&mut hasher, input.target_subject.as_bytes());
-    hash(&mut hasher, input.target_api_base.as_bytes());
-    hash(&mut hasher, input.target_api_version.as_bytes());
-    let mut contracts = input.endpoint_contracts.iter().collect::<Vec<_>>();
-    contracts.sort_by_key(|contract| contract.resource);
-    for contract in contracts {
-        hash(&mut hasher, contract.resource.as_str().as_bytes());
-        hash(&mut hasher, contract.endpoint.as_bytes());
-        for (name, value) in &contract.query {
-            hash(&mut hasher, name.as_bytes());
-            hash(&mut hasher, value.as_bytes());
-        }
-        hash(&mut hasher, contract.pagination.as_bytes());
-    }
-    hash(&mut hasher, input.retention_semantics.as_bytes());
-    hash(&mut hasher, input.url_semantics.as_bytes());
-    hash(&mut hasher, &input.rate_limit_per_minute.to_be_bytes());
     hash(
         &mut hasher,
         &input.observation_started_unix_ms.to_be_bytes(),
@@ -381,9 +373,43 @@ pub fn compute_external_read_consumer_digest(
     Ok(hasher.finalize().into())
 }
 
+pub fn compute_external_read_consumer_binding_digest(
+    input: &ExternalReadConsumerWrite,
+) -> Result<[u8; 32], StoreError> {
+    validate_input(input)?;
+    let mut hasher = Sha256::new();
+    hash(&mut hasher, b"mcloving-external-read-consumer-binding-v1");
+    hash(&mut hasher, input.organization_id.as_bytes());
+    hash(&mut hasher, input.project_id.as_bytes());
+    hash(&mut hasher, input.consumer_id.as_bytes());
+    hash(&mut hasher, &input.source_inventory_digest);
+    hash(&mut hasher, input.source_inventory_generation.as_bytes());
+    hash(&mut hasher, input.source_endpoint.as_bytes());
+    hash(&mut hasher, input.source_caller.as_bytes());
+    hash(&mut hasher, input.target_identity_id.as_bytes());
+    hash(&mut hasher, input.target_subject.as_bytes());
+    hash(&mut hasher, input.target_api_base.as_bytes());
+    hash(&mut hasher, input.target_api_version.as_bytes());
+    let mut contracts = input.endpoint_contracts.iter().collect::<Vec<_>>();
+    contracts.sort_by_key(|contract| contract.resource);
+    for contract in contracts {
+        hash(&mut hasher, contract.resource.as_str().as_bytes());
+        hash(&mut hasher, contract.endpoint.as_bytes());
+        for (name, value) in &contract.query {
+            hash(&mut hasher, name.as_bytes());
+            hash(&mut hasher, value.as_bytes());
+        }
+        hash(&mut hasher, contract.pagination.as_bytes());
+    }
+    hash(&mut hasher, input.retention_semantics.as_bytes());
+    hash(&mut hasher, input.url_semantics.as_bytes());
+    hash(&mut hasher, &input.rate_limit_per_minute.to_be_bytes());
+    Ok(hasher.finalize().into())
+}
+
 fn validate_transition(
     input: &ExternalReadConsumerWrite,
-    current: Option<&(i64, String)>,
+    current: Option<&(i64, String, bool)>,
 ) -> Result<(), StoreError> {
     match (current, input.authority) {
         (None, ExternalReadAuthority::JenkinsSource) => {
@@ -395,7 +421,7 @@ fn validate_transition(
         (None, ExternalReadAuthority::McLovingTarget) => {
             return invalid("McLoving authority requires a retained Jenkins source generation");
         }
-        (Some((_, authority)), ExternalReadAuthority::McLovingTarget)
+        (Some((_, authority, _)), ExternalReadAuthority::McLovingTarget)
             if authority == ExternalReadAuthority::JenkinsSource.as_str() =>
         {
             if input.source_reads_observed != 0 {
@@ -406,7 +432,7 @@ fn validate_transition(
                 return invalid("McLoving cutover cannot carry rollback fields");
             }
         }
-        (Some((generation, authority)), ExternalReadAuthority::JenkinsSource)
+        (Some((generation, authority, _)), ExternalReadAuthority::JenkinsSource)
             if authority == ExternalReadAuthority::McLovingTarget.as_str() =>
         {
             if input.rollback_from_generation != Some(*generation)

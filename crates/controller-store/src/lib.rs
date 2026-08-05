@@ -28,7 +28,8 @@ pub use authorization_mapping::{
 };
 pub use consumer_migration::{
     ExternalReadAuthority, ExternalReadConsumerReceipt, ExternalReadConsumerWrite,
-    ExternalReadEndpointContract, ExternalReadResource, compute_external_read_consumer_digest,
+    ExternalReadEndpointContract, ExternalReadResource,
+    compute_external_read_consumer_binding_digest, compute_external_read_consumer_digest,
 };
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,

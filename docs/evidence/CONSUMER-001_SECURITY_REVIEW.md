@@ -24,6 +24,8 @@ invented and the source manifest was not rewritten.
 - paired build and complete log cursors fail locally when incomplete;
 - migration 0025 stores immutable, canonical per-consumer authority generations
   and a monotonic current pointer under forced tenant RLS;
+- a stable binding digest prevents authority transitions from substituting the
+  caller, source endpoint, target identity/API, or query/rate/retention contract;
 - generations bind caller/target identity, tenant/project, source inventory and
   endpoint, API version, endpoint/query/pagination, retention/URL/rate semantics,
   evidence digests, observation window, reviewer, and rollback source;
@@ -50,7 +52,8 @@ DIFF-001: 1 passed
 remote mTLS agent: 1 passed
 ```
 
-The consumer-specific tests prove source endpoint and contract substitution,
+The consumer-specific tests prove stale-digest and independently redigested
+cross-generation source endpoint/contract substitution,
 cross-tenant project substitution, inactive/substituted target identity,
 canonical digest mismatch, concurrent first-generation conflict, residual
 Jenkins-read rejection, exact monotonic cutover and rollback, audited history,

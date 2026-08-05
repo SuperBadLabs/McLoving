@@ -196,10 +196,27 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
         None,
         ExternalReadAuthority::JenkinsSource,
     );
-    store
+    let source_receipt = store
         .install_external_read_consumer(&source)
         .await
         .expect("register retained Jenkins source authority");
+
+    let mut rebound = consumer(
+        organization_id,
+        project_id,
+        identity_id,
+        2,
+        Some(1),
+        ExternalReadAuthority::McLovingTarget,
+    );
+    rebound.source_endpoint = "https://substituted.invalid/jenkins".to_owned();
+    rebound.expected_contract_digest =
+        compute_external_read_consumer_digest(&rebound).expect("rebound contract digest");
+    assert!(matches!(
+        store.install_external_read_consumer(&rebound).await,
+        Err(StoreError::InvalidConsumerMigration(message))
+            if message.contains("binding changed")
+    ));
 
     let mut residual = consumer(
         organization_id,
@@ -226,10 +243,14 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
         Some(1),
         ExternalReadAuthority::McLovingTarget,
     );
-    store
+    let target_receipt = store
         .install_external_read_consumer(&target)
         .await
         .expect("cut over read authority");
+    assert_eq!(
+        target_receipt.binding_digest, source_receipt.binding_digest,
+        "an authority transition preserves the exact caller and endpoint binding"
+    );
     store
         .transition_identity_lifecycle(
             organization_id,
@@ -271,6 +292,7 @@ async fn cutover_requires_zero_source_reads_and_rollback_restores_exact_authorit
         .expect("restore the exact source authority");
     assert_eq!(receipt.authority, ExternalReadAuthority::JenkinsSource);
     assert_eq!(receipt.generation, 3);
+    assert_eq!(receipt.binding_digest, source_receipt.binding_digest);
 
     let current: (i64, String) = sqlx::query_as(
         "SELECT current.current_generation, version.authority

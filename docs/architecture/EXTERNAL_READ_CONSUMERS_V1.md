@@ -43,17 +43,19 @@ binds source inventory/generation/endpoint/caller, target identity/subject/API
 version, typed endpoint contracts, rate/retention/URL semantics, observation
 window and source-read count, positive/negative authorization, historical/live
 equivalence, artifact, pagination/resume, outage, rollback evidence, reviewer,
-and a canonical SHA-256 contract digest. A monotonic pointer selects the
-current generation.
+and a canonical SHA-256 contract digest. A separate stable binding digest covers
+the sealed source caller/endpoint and target identity/API/query/rate/retention
+contract. A monotonic pointer selects the current generation.
 
 Generation one must retain `jenkins_source` authority. A later
 `mcloving_target` generation is rejected unless the immediately prior
 generation is Jenkins-authoritative and the bounded observation reports
 exactly zero Jenkins reads. Restoring Jenkins must immediately follow a target
-generation, name that exact generation, and bind independent rollback
-evidence. A fresh recutover is another new target generation; pointers never
-move backward and authority cannot be skipped or repeated. Per-consumer
-transaction advisory locks make simultaneous first writers deterministic.
+generation, name that exact generation, retain the stable binding digest, and
+bind independent rollback evidence. Cutover likewise cannot substitute either
+side. A fresh recutover is another new target generation; pointers never move
+backward and authority cannot be skipped or repeated. Per-consumer transaction
+advisory locks make simultaneous first writers deterministic.
 
 Each successful registration, cutover, or restoration appends a hash-chained
 tenant audit event. Only the migration role can write the ledger. The runtime
