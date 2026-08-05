@@ -538,9 +538,17 @@ impl InputAdapter {
             usize::from(self.config.retry_attempts) + 1,
         )
         .await?;
-        let claimed = self
+        let claimed = match self
             .claim_capture_unlocked(request.capture_id, &request_sha256)
-            .await?;
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                self.release_rate_reservation_unlocked(request.capture_id)
+                    .await?;
+                return Err(error);
+            }
+        };
         if !claimed {
             self.release_rate_reservation_unlocked(request.capture_id)
                 .await?;
