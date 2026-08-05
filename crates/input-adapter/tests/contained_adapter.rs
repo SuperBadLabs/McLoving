@@ -621,6 +621,23 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
     let temp = TempDir::new().expect("temp dir");
     let bound_config = config(&fixture.endpoint, temp.path());
 
+    let mut relative_spool_config = bound_config.clone();
+    let relative_spool =
+        Path::new(&format!("relative-input-spool-{}", Uuid::new_v4())).to_path_buf();
+    relative_spool_config.spool_dir = relative_spool.clone();
+    assert!(matches!(
+        InputAdapter::new(
+            relative_spool_config,
+            IMPLEMENTATION_SHA256.to_owned(),
+            READ_TOKEN.to_owned(),
+            SIGNING_KEY.to_vec(),
+            vec![SECRET_MARKER.to_vec()],
+        )
+        .await,
+        Err(AdapterError::InvalidConfig)
+    ));
+    assert!(!relative_spool.exists());
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;

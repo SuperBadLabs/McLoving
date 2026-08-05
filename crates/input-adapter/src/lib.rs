@@ -1008,6 +1008,7 @@ fn validate_config(
         || config.deployment_identity.trim().is_empty()
         || config.operator_identity.trim().is_empty()
         || config.generation == 0
+        || !config.spool_dir.is_absolute()
         || config.endpoint_identity.trim().is_empty()
         || config.data_source_identity.trim().is_empty()
         || config.grant_id.trim().is_empty()
