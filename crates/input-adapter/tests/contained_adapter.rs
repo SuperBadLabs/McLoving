@@ -361,10 +361,18 @@ async fn outage_rate_generation_and_rollback_are_fail_closed() {
         .capture(&request(&limited, "main", "valid"))
         .await
         .expect("first request");
+    let rate_limited_request = request(&limited, "dev", "valid");
     assert!(matches!(
-        limited.capture(&request(&limited, "dev", "valid")).await,
+        limited.capture(&rate_limited_request).await,
         Err(AdapterError::RateLimited)
     ));
+    assert!(
+        !temp
+            .path()
+            .join(format!("{}.claim", rate_limited_request.capture_id))
+            .exists(),
+        "rate denial must not strand a capture claim"
+    );
 
     let outage_dir = TempDir::new().expect("outage dir");
     let outage = make_adapter(

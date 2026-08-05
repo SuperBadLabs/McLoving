@@ -275,6 +275,7 @@ impl InputAdapter {
             .connect_timeout(Duration::from_millis(config.timeout_ms))
             .timeout(Duration::from_millis(config.timeout_ms))
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .no_proxy()
             .user_agent(PROTOCOL_VERSION);
         if let Some(path) = &config.ca_bundle_path {
@@ -324,6 +325,7 @@ impl InputAdapter {
             return Ok(receipt);
         }
         self.validate_request(request)?;
+        self.admit_rate().await?;
         if !self
             .claim_capture(request.capture_id, &request_sha256)
             .await?
@@ -332,7 +334,6 @@ impl InputAdapter {
                 .await_claimed_receipt(request.capture_id, &request_sha256)
                 .await;
         }
-        self.admit_rate().await?;
 
         let mut url =
             Url::parse(&self.config.endpoint_url).map_err(|_| AdapterError::InvalidConfig)?;
@@ -625,6 +626,8 @@ impl InputAdapter {
                 file.sync_all()
                     .await
                     .map_err(|_| AdapterError::StateUnavailable)?;
+                drop(file);
+                sync_directory(&self.config.spool_dir).await?;
                 Ok(true)
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -998,6 +1001,23 @@ pub async fn read_bounded_regular_file(
         return Err(AdapterError::StateUnavailable);
     }
     Ok(bytes)
+}
+
+async fn sync_directory(path: &Path) -> Result<(), AdapterError> {
+    let directory = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    let metadata = directory
+        .metadata()
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)?;
+    if !metadata.is_dir() {
+        return Err(AdapterError::StateUnavailable);
+    }
+    directory
+        .sync_all()
+        .await
+        .map_err(|_| AdapterError::StateUnavailable)
 }
 
 pub async fn sha256_file(path: &Path) -> Result<String, AdapterError> {

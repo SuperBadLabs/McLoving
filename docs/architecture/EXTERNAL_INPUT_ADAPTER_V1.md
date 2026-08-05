@@ -98,7 +98,9 @@ cross-process reuse with different content is denied. A matching concurrent
 caller waits only for the bounded timeout and then receives the exact signed
 receipt. A process crash after claiming but before receipt publication remains
 fail-closed and requires operator reconciliation; it never silently samples the
-mutable source again.
+mutable source again. Claim contents and the containing spool directory are
+synchronized before any network read. Rate admission runs before claim creation,
+so a denied request cannot strand an unfulfillable claim.
 
 Receipts are written to a unique temporary file, synchronized, and atomically
 linked into the final capture path without overwrite. A restart replays the
@@ -111,7 +113,8 @@ later independent differential and production gates.
 ## Source and response policy
 
 The adapter sends only a scoped bearer-authenticated `GET`, disables redirects
-and ambient proxies, applies one total/connect timeout, and retries only
+and ambient proxies, disables the HTTP client's implicit retry policy, applies
+one total/connect timeout, and retries only
 transport failures or HTTP 502-504 up to the configured bound. Authentication
 denials do not retry. A successful response must provide:
 
