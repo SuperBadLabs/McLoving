@@ -749,6 +749,8 @@ struct LedgerScopeBinding<'a> {
     provider_grant_scope: &'a str,
     provider_attestation_key_id: &'a str,
     provider_attestation_key_sha256: &'a str,
+    receipt_signing_key_id: &'a str,
+    receipt_signing_key_sha256: &'a str,
     agent: &'a AgentSpecification,
     instance_identity: &'a InstanceIdentityPolicy,
 }
@@ -1019,12 +1021,6 @@ impl Provisioner {
                 } else {
                     (CleanupReason::AgentLost, LifecycleOutcome::AgentLostCleaned)
                 };
-                self.set_state(
-                    request.request_id,
-                    StoredState::Deleting,
-                    Some(&instance),
-                    now,
-                )?;
                 self.cleanup_instance(
                     request,
                     &request_sha256,
@@ -1089,10 +1085,10 @@ impl Provisioner {
                         None,
                         observed_at,
                     )? {
-                        let current = self
-                            .load_stored_request(request.request_id)?
-                            .ok_or(ProvisionerError::StateUnavailable)?;
-                        return Box::pin(self.recover_one(current, &request.audit_lineage)).await;
+                        return Box::pin(
+                            self.recover_cancel_race(request.request_id, &request.audit_lineage),
+                        )
+                        .await;
                     }
                     return self.append_lifecycle_receipt(
                         &stored.request,
@@ -1121,10 +1117,10 @@ impl Provisioner {
                         None,
                         observed_at,
                     )? {
-                        let current = self
-                            .load_stored_request(request.request_id)?
-                            .ok_or(ProvisionerError::StateUnavailable)?;
-                        return Box::pin(self.recover_one(current, &request.audit_lineage)).await;
+                        return Box::pin(
+                            self.recover_cancel_race(request.request_id, &request.audit_lineage),
+                        )
+                        .await;
                     }
                     return self.append_lifecycle_receipt(
                         &stored.request,
@@ -1540,12 +1536,6 @@ impl Provisioner {
         loop {
             let now = now_unix_ms()?;
             if now >= deadline {
-                self.set_state(
-                    request.request_id,
-                    StoredState::Deleting,
-                    Some(&instance),
-                    now,
-                )?;
                 return self
                     .cleanup_instance(
                         request,
@@ -1633,12 +1623,6 @@ impl Provisioner {
             };
             let now = now_unix_ms()?;
             if now >= deadline {
-                self.set_state(
-                    request.request_id,
-                    StoredState::Deleting,
-                    Some(&instance),
-                    now,
-                )?;
                 return self
                     .cleanup_instance(
                         request,
@@ -1658,12 +1642,6 @@ impl Provisioner {
                 request: request.clone(),
             };
             if self.validate_instance(&instance, &create, now).is_err() {
-                self.set_state(
-                    request.request_id,
-                    StoredState::Deleting,
-                    Some(&instance),
-                    now,
-                )?;
                 return self
                     .cleanup_instance(
                         request,
@@ -1711,12 +1689,6 @@ impl Provisioner {
                         } else {
                             (CleanupReason::AgentLost, LifecycleOutcome::AgentLostCleaned)
                         };
-                    self.set_state(
-                        request.request_id,
-                        StoredState::Deleting,
-                        Some(&instance),
-                        now,
-                    )?;
                     return self
                         .cleanup_instance(
                             request,
@@ -2054,14 +2026,51 @@ impl Provisioner {
         let stored = self
             .load_stored_request(request.request_id)?
             .ok_or(ProvisionerError::StateUnavailable)?;
-        if let Some(receipt) = stored.latest_receipt {
-            self.verify_lifecycle_receipt(&receipt)?;
+        if let Some(receipt) = stored.latest_receipt.as_ref() {
+            self.verify_lifecycle_receipt(receipt)?;
             if receipt.body.cleanup_confirmed && !receipt.body.ambiguity {
-                return Ok(receipt);
+                return Ok(receipt.clone());
             }
+        }
+        if stored.state == StoredState::Ambiguous {
+            return Box::pin(self.recover_one(stored, &request.audit_lineage)).await;
         }
         self.recover_create_admission_race(request, request_sha256, instance)
             .await
+    }
+
+    async fn recover_cancel_race(
+        &self,
+        request_id: Uuid,
+        audit_lineage: &str,
+    ) -> Result<LifecycleReceipt, ProvisionerError> {
+        for _ in 0..3 {
+            let stored = self
+                .load_stored_request(request_id)?
+                .ok_or(ProvisionerError::StateUnavailable)?;
+            if let Some(receipt) = stored.latest_receipt.as_ref() {
+                self.verify_lifecycle_receipt(receipt)?;
+                if receipt.body.cleanup_confirmed && !receipt.body.ambiguity {
+                    return Ok(receipt.clone());
+                }
+            }
+            if stored.state == StoredState::Deleting {
+                return Box::pin(self.recover_one(stored, audit_lineage)).await;
+            }
+            if self.set_state_from(
+                request_id,
+                stored.state,
+                StoredState::Deleting,
+                stored.instance.as_ref(),
+                now_unix_ms()?,
+            )? {
+                let current = self
+                    .load_stored_request(request_id)?
+                    .ok_or(ProvisionerError::StateUnavailable)?;
+                return Box::pin(self.recover_one(current, audit_lineage)).await;
+            }
+        }
+        Err(ProvisionerError::StateUnavailable)
     }
 
     async fn wait_for_peer_or_recover(
@@ -2161,12 +2170,43 @@ impl Provisioner {
         }
         match self.provider_lookup(request.request_id).await {
             Ok(None) => {
+                let observed_at = now_unix_ms()?;
                 let terminal = if success_outcome == LifecycleOutcome::Ready {
                     StoredState::Failed
                 } else {
                     StoredState::Deleted
                 };
-                self.set_state(request.request_id, terminal, Some(instance), now)?;
+                if !self.set_state_from(
+                    request.request_id,
+                    StoredState::Deleting,
+                    terminal,
+                    Some(instance),
+                    observed_at,
+                )? {
+                    let current = self
+                        .load_stored_request(request.request_id)?
+                        .ok_or(ProvisionerError::StateUnavailable)?;
+                    if let Some(receipt) = current.latest_receipt {
+                        self.verify_lifecycle_receipt(&receipt)?;
+                        if receipt.body.cleanup_confirmed
+                            && !receipt.body.ambiguity
+                            && receipt.body.instance_id == Some(instance.instance_id)
+                        {
+                            return Ok(receipt);
+                        }
+                    }
+                    if current.state != terminal
+                        || current.instance.as_ref().map(|value| value.instance_id)
+                            != Some(instance.instance_id)
+                    {
+                        return Box::pin(self.recover_create_admission_race(
+                            request,
+                            request_sha256,
+                            instance,
+                        ))
+                        .await;
+                    }
+                }
                 self.append_lifecycle_receipt(
                     request,
                     LifecycleEvidence {
@@ -2176,7 +2216,7 @@ impl Provisioner {
                         cleanup_confirmed: true,
                         ambiguity: false,
                         audit_lineage,
-                        observed_at_unix_ms: now_unix_ms()?,
+                        observed_at_unix_ms: observed_at,
                     },
                 )
             }
@@ -3167,6 +3207,8 @@ fn ledger_scope_digest(config: &ProvisionerConfig) -> Result<String, Provisioner
         provider_grant_scope: &config.provider_grant_scope,
         provider_attestation_key_id: &config.provider_attestation_key_id,
         provider_attestation_key_sha256: &config.provider_attestation_key_sha256,
+        receipt_signing_key_id: &config.receipt_signing_key_id,
+        receipt_signing_key_sha256: &config.receipt_signing_key_sha256,
         agent: &config.agent,
         instance_identity: &config.instance_identity,
     })

@@ -178,6 +178,16 @@ impl Fixture {
             .state = ProviderInstanceState::AgentLost;
     }
 
+    fn mark_ready(&self, request_id: Uuid) {
+        let mut inner = self.state.inner.lock().expect("fixture state");
+        let instance = inner
+            .instances
+            .get_mut(&request_id)
+            .expect("fixture instance");
+        instance.state = ProviderInstanceState::Ready;
+        instance.observed_at_unix_ms = now_ms();
+    }
+
     fn remove_instance(&self, request_id: Uuid) {
         self.state
             .inner
@@ -1396,6 +1406,74 @@ async fn lookup_only_cancel_recovers_a_concurrent_concrete_cleanup() {
 }
 
 #[tokio::test]
+async fn lookup_only_cancel_retains_intent_when_create_wins_the_state_race() {
+    let context = Context::new(FixtureMode::DelayedMalformedCreateOnce).await;
+    let request = context.request();
+    let ambiguous = context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ambiguous create before lookup-only cancel");
+    assert_eq!(ambiguous.body.outcome, LifecycleOutcome::CreateAmbiguous);
+    let instance = context.fixture.instance(request.request_id);
+    context
+        .fixture
+        .set_mode(FixtureMode::DelayedMalformedLookupOnce);
+
+    let cancellation = cancel_request(&context.config, &request, IMPLEMENTATION_SHA256);
+    let cancel = context.provisioner.cancel(&cancellation);
+    let concurrent_create = async {
+        context.fixture.wait_for_lookup_start().await;
+        let database =
+            rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+                .expect("open retained ledger");
+        database
+            .execute(
+                "UPDATE requests SET state = 'pending', instance_json = ?2
+                 WHERE request_id = ?1",
+                rusqlite::params![
+                    request.request_id.to_string(),
+                    serde_json::to_vec(&instance).expect("instance JSON"),
+                ],
+            )
+            .expect("publish concurrent create winner");
+    };
+    let (cancelled, ()) = tokio::join!(cancel, concurrent_create);
+    let cancelled = cancelled.expect("retained cancellation intent cleans concurrent instance");
+    assert_eq!(cancelled.body.outcome, LifecycleOutcome::Cancelled);
+    assert!(cancelled.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().3, 0);
+}
+
+#[tokio::test]
+async fn stale_pending_refresh_recovers_a_concurrent_ambiguous_winner() {
+    let context =
+        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 1_000)
+            .await;
+    let request = context.request();
+    let provision = context.provisioner.provision(&request);
+    let concurrent_ambiguity = async {
+        context.fixture.wait_for_lookup_start().await;
+        let database =
+            rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+                .expect("open retained ledger");
+        database
+            .execute(
+                "UPDATE requests SET state = 'ambiguous' WHERE request_id = ?1",
+                [request.request_id.to_string()],
+            )
+            .expect("publish concurrent ambiguity");
+        context.fixture.mark_ready(request.request_id);
+    };
+    let (recovered, ()) = tokio::join!(provision, concurrent_ambiguity);
+    let recovered = recovered.expect("stale ambiguity returns to normal recovery");
+    assert_eq!(recovered.body.outcome, LifecycleOutcome::Ready);
+    assert!(!recovered.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().1, 0);
+    assert_eq!(context.fixture.counts().3, 1);
+}
+
+#[tokio::test]
 async fn delayed_pending_refresh_cannot_reactivate_confirmed_cleanup() {
     let context =
         Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 1_000)
@@ -1421,6 +1499,44 @@ async fn delayed_pending_refresh_cannot_reactivate_confirmed_cleanup() {
     assert!(provisioned.body.cleanup_confirmed);
     assert!(cancelled.body.cleanup_confirmed);
     assert_eq!(context.fixture.counts().2, 2);
+    assert_eq!(context.fixture.counts().3, 0);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let state: String = database
+        .query_row(
+            "SELECT state FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read terminal state");
+    assert_eq!(state, "deleted");
+}
+
+#[tokio::test]
+async fn post_lookup_timeout_cannot_reactivate_confirmed_cleanup() {
+    let context =
+        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 50).await;
+    let request = context.request();
+    let provision = context.provisioner.provision(&request);
+    let cancel = async {
+        context.fixture.wait_for_lookup_start().await;
+        context
+            .provisioner
+            .cancel(&cancel_request(
+                &context.config,
+                &request,
+                IMPLEMENTATION_SHA256,
+            ))
+            .await
+    };
+    let (provisioned, cancelled) = tokio::join!(provision, cancel);
+    let provisioned = provisioned.expect("late timeout converges on cancellation");
+    let cancelled = cancelled.expect("concurrent cancellation receipt");
+    assert_eq!(provisioned.body.outcome, LifecycleOutcome::Cancelled);
+    assert_eq!(cancelled.body.outcome, LifecycleOutcome::Cancelled);
+    assert!(provisioned.body.cleanup_confirmed);
+    assert!(cancelled.body.cleanup_confirmed);
     assert_eq!(context.fixture.counts().3, 0);
 
     let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
@@ -2116,6 +2232,40 @@ async fn retained_ledger_rejects_provider_scope_drift() {
         Err(ProvisionerError::StateUnavailable)
     ));
     assert!(state_dir.join("provisioner.sqlite3").is_file());
+    assert_eq!(context.fixture.counts().0, 0);
+}
+
+#[tokio::test]
+async fn retained_ledger_rejects_receipt_signing_identity_drift() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let mut identifier_drift = context.config.clone();
+    identifier_drift.receipt_signing_key_id = "replacement-receipt-key".to_owned();
+    assert!(matches!(
+        Provisioner::new(
+            identifier_drift,
+            IMPLEMENTATION_SHA256.to_owned(),
+            PROVIDER_TOKEN.to_owned(),
+            context.fixture.public_key(),
+            RECEIPT_KEY.to_vec(),
+        )
+        .await,
+        Err(ProvisionerError::StateUnavailable)
+    ));
+
+    let replacement_key = b"replacement-receipt-signing-key-000000000000000000000000";
+    let mut material_drift = context.config.clone();
+    material_drift.receipt_signing_key_sha256 = digest(replacement_key);
+    assert!(matches!(
+        Provisioner::new(
+            material_drift,
+            IMPLEMENTATION_SHA256.to_owned(),
+            PROVIDER_TOKEN.to_owned(),
+            context.fixture.public_key(),
+            replacement_key.to_vec(),
+        )
+        .await,
+        Err(ProvisionerError::StateUnavailable)
+    ));
     assert_eq!(context.fixture.counts().0, 0);
 }
 
