@@ -1222,32 +1222,55 @@ impl Provisioner {
             return Err(ProvisionerError::InvalidProviderResponse);
         }
         let final_inventory_sha256 = canonical_digest(&final_inventory)?;
+        let final_observed_at = now_unix_ms()?;
         let final_active = self.load_active_requests()?;
         let admitted_ready = final_active
             .iter()
             .filter(|item| item.state == StoredState::Ready)
-            .map(|item| item.request.request_id)
-            .collect::<BTreeSet<_>>();
-        let escaped_compute_remaining = final_inventory
-            .instances
-            .iter()
-            .filter(|instance| {
-                !admitted_ready.contains(&instance.create.request.request_id)
-                    || instance.state != ProviderInstanceState::Ready
-                    || instance.create.request.instance_expires_at_unix_ms <= now
-            })
-            .count();
-        let active_ready = final_inventory
-            .instances
-            .len()
-            .checked_sub(escaped_compute_remaining)
-            .ok_or(ProvisionerError::StateUnavailable)?;
-        let active_instance_ids = final_inventory
-            .instances
-            .iter()
-            .filter(|instance| admitted_ready.contains(&instance.create.request.request_id))
-            .map(|instance| instance.instance_id)
-            .collect();
+            .map(|item| (item.request.request_id, item))
+            .collect::<HashMap<_, _>>();
+        let mut active_instance_ids = BTreeSet::new();
+        let mut final_request_ids = BTreeSet::new();
+        let mut final_instance_ids = BTreeSet::new();
+        let mut escaped_compute_remaining = 0_usize;
+        for instance in &final_inventory.instances {
+            if !final_request_ids.insert(instance.create.request.request_id)
+                || !final_instance_ids.insert(instance.instance_id)
+            {
+                return Err(ProvisionerError::InvalidProviderResponse);
+            }
+            let Some(stored) = admitted_ready.get(&instance.create.request.request_id) else {
+                escaped_compute_remaining = escaped_compute_remaining
+                    .checked_add(1)
+                    .ok_or(ProvisionerError::StateUnavailable)?;
+                continue;
+            };
+            let expected_create = ProviderCreateRequest {
+                protocol_version: PROTOCOL_VERSION.to_owned(),
+                provisioner_id: self.config.provisioner_id.clone(),
+                provisioner_config_sha256: stored.request.expected_config_sha256.clone(),
+                request_sha256: stored.request_sha256.clone(),
+                request: stored.request.clone(),
+            };
+            let retained_instance_matches = stored
+                .instance
+                .as_ref()
+                .is_some_and(|retained| retained.instance_id == instance.instance_id);
+            if instance.state == ProviderInstanceState::Ready
+                && instance.create.request.instance_expires_at_unix_ms > final_observed_at
+                && retained_instance_matches
+                && self
+                    .validate_instance(instance, &expected_create, final_observed_at)
+                    .is_ok()
+            {
+                active_instance_ids.insert(instance.instance_id);
+            } else {
+                escaped_compute_remaining = escaped_compute_remaining
+                    .checked_add(1)
+                    .ok_or(ProvisionerError::StateUnavailable)?;
+            }
+        }
+        let active_ready = active_instance_ids.len();
         let body = ReconcileReceiptBody {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             reconciliation_id: request.reconciliation_id,
@@ -1258,7 +1281,7 @@ impl Provisioner {
             provider_id: self.config.provider_id.clone(),
             provider_account_id: self.config.provider_account_id.clone(),
             provider_region: self.config.provider_region.clone(),
-            observed_at_unix_ms: now_unix_ms()?,
+            observed_at_unix_ms: final_observed_at,
             active_ready: u32::try_from(active_ready)
                 .map_err(|_| ProvisionerError::StateUnavailable)?,
             recovered,

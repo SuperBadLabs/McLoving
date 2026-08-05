@@ -42,6 +42,8 @@ enum FixtureMode {
     Unauthorized,
     MalformedCreateOnce,
     MalformedDeleteOnce,
+    SubstituteFinalInventory,
+    DuplicateFinalInventory,
 }
 
 struct Inner {
@@ -52,6 +54,7 @@ struct Inner {
     lookups: usize,
     malformed_create_sent: bool,
     malformed_delete_sent: bool,
+    inventory_reads: usize,
 }
 
 #[derive(Clone)]
@@ -86,6 +89,7 @@ impl Fixture {
                 lookups: 0,
                 malformed_create_sent: false,
                 malformed_delete_sent: false,
+                inventory_reads: 0,
             })),
             signing_key,
         };
@@ -229,12 +233,25 @@ async fn list_instances(
     {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let inner = state.inner.lock().expect("fixture state");
+    let mut inner = state.inner.lock().expect("fixture state");
+    inner.inventory_reads += 1;
+    let mut instances = inner.instances.values().cloned().collect::<Vec<_>>();
+    if inner.mode == FixtureMode::SubstituteFinalInventory && inner.inventory_reads >= 2 {
+        for instance in &mut instances {
+            instance.effective_agent.template_sha256 = digest(b"substituted-final-template");
+        }
+    }
+    if inner.mode == FixtureMode::DuplicateFinalInventory
+        && inner.inventory_reads >= 2
+        && let Some(instance) = instances.first().cloned()
+    {
+        instances.push(instance);
+    }
     let payload = ProviderInventory {
         provisioner_id: "contained-provisioner".to_owned(),
         complete: true,
         observed_at_unix_ms: now_ms(),
-        instances: inner.instances.values().cloned().collect(),
+        instances,
     };
     signed_response(&state, payload)
 }
@@ -849,6 +866,51 @@ async fn lost_delete_response_and_instance_expiry_reconcile_without_escaped_comp
     assert_eq!(expired.body.cleaned, 1);
     assert_eq!(expired.body.escaped_compute_remaining, 0);
     assert_eq!(expiry_context.fixture.counts().3, 0);
+}
+
+#[tokio::test]
+async fn final_inventory_substitution_is_reported_as_escaped_compute() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before final inventory substitution");
+    context
+        .fixture
+        .set_mode(FixtureMode::SubstituteFinalInventory);
+
+    let receipt = context
+        .provisioner
+        .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+        .await
+        .expect("retain escaped-compute truth");
+    assert_eq!(receipt.body.active_ready, 0);
+    assert_eq!(receipt.body.escaped_compute_remaining, 1);
+    assert!(receipt.body.active_instance_ids.is_empty());
+}
+
+#[tokio::test]
+async fn duplicate_final_inventory_identity_is_rejected() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before duplicate final inventory");
+    context
+        .fixture
+        .set_mode(FixtureMode::DuplicateFinalInventory);
+
+    assert!(matches!(
+        context
+            .provisioner
+            .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+            .await,
+        Err(ProvisionerError::InvalidProviderResponse)
+    ));
 }
 
 #[tokio::test]

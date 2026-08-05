@@ -185,6 +185,8 @@ cross-process one-create/one-receipt convergence, stale/reordered fences,
 quota exhaustion, invalid network/volume/provider/account/region/image/
 bootstrap bindings, cancellation, ambiguous create plus restart recovery,
 lost delete-response recovery, orphan cleanup, agent loss, expiry/scale-down,
+final-inventory substitution with explicit escaped-compute truth and duplicate
+identity denial,
 cutover/rollback generation binding, recursive duplicate-JSON denial,
 pre-state invalid-configuration denial, and provider-token/receipt-key
 non-disclosure.
