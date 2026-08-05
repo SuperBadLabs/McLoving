@@ -2195,13 +2195,7 @@ impl Provisioner {
                     now,
                 ],
             )
-            .map_err(|error| {
-                if matches!(error, rusqlite::Error::SqliteFailure(_, _)) {
-                    ProvisionerError::ReplayMismatch
-                } else {
-                    ProvisionerError::StateUnavailable
-                }
-            })?;
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
         transaction
             .commit()
             .map_err(|_| ProvisionerError::StateUnavailable)?;
@@ -3078,7 +3072,7 @@ fn prepare_private_state_dir(path: &Path) -> Result<(), ProvisionerError> {
         .map_err(|_| ProvisionerError::StateUnavailable)?;
     if !metadata.file_type().is_dir()
         || metadata.file_type().is_symlink()
-        || metadata.permissions().mode() & 0o777 != 0o700
+        || metadata.permissions().mode() & 0o7777 != 0o700
         || metadata.uid() != nix::unistd::geteuid().as_raw()
         || canonical != path
     {
@@ -3111,7 +3105,7 @@ fn prepare_private_database_file(path: &Path) -> Result<(), ProvisionerError> {
         .map_err(|_| ProvisionerError::StateUnavailable)?;
     if !metadata.file_type().is_file()
         || metadata.uid() != nix::unistd::geteuid().as_raw()
-        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.permissions().mode() & 0o7777 != 0o600
     {
         return Err(ProvisionerError::InvalidConfig);
     }

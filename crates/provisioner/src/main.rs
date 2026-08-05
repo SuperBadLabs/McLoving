@@ -124,7 +124,11 @@ async fn read_bounded_line(input: &mut BufReader<tokio::io::Stdin>) -> Result<Op
     loop {
         let buffer = input.fill_buf().await.map_err(|_| ())?;
         if buffer.is_empty() {
-            return if line.is_empty() { Ok(None) } else { Err(()) };
+            return if line.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(line))
+            };
         }
         let consumed = buffer
             .iter()

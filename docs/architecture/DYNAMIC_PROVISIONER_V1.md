@@ -193,7 +193,9 @@ identity denial,
 cutover/rollback generation binding, recursive duplicate-JSON denial,
 pre-state invalid-configuration denial, and provider-token/receipt-key
 non-disclosure. Reopening retained state under a substituted provider scope is
-also denied before any provider access.
+also denied before any provider access. Exact state-directory/database modes
+reject special permission bits, and the standalone process accepts a bounded
+final NDJSON frame whether or not it ends with a newline.
 
 `crates/provisioner/tests/mario_inventory.rs` pins and parses the accepted
 MIG-000 manifest and proves the current Mario denominator has zero admitted

@@ -1080,8 +1080,63 @@ async fn retained_ledger_rejects_provider_scope_drift() {
     assert_eq!(context.fixture.counts().0, 0);
 }
 
+#[tokio::test]
+async fn state_directory_and_database_reject_special_permission_bits() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let fixture = Fixture::start(FixtureMode::Ready).await;
+    let temporary = tempfile::tempdir().expect("temporary directory");
+
+    let sticky_state = temporary.path().join("sticky-state");
+    std::fs::create_dir(&sticky_state).expect("create sticky state directory");
+    std::fs::set_permissions(&sticky_state, std::fs::Permissions::from_mode(0o1700))
+        .expect("set sticky state permissions");
+    let sticky_config = configuration(&fixture, sticky_state, IMPLEMENTATION_SHA256, 1);
+    assert!(matches!(
+        Provisioner::new(
+            sticky_config,
+            IMPLEMENTATION_SHA256.to_owned(),
+            PROVIDER_TOKEN.to_owned(),
+            fixture.public_key(),
+            RECEIPT_KEY.to_vec(),
+        )
+        .await,
+        Err(ProvisionerError::InvalidConfig)
+    ));
+
+    let state_with_special_database = temporary.path().join("special-database-state");
+    std::fs::create_dir(&state_with_special_database).expect("create private state directory");
+    std::fs::set_permissions(
+        &state_with_special_database,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .expect("set private state permissions");
+    let database_path = state_with_special_database.join("provisioner.sqlite3");
+    std::fs::write(&database_path, []).expect("create database file");
+    std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o4600))
+        .expect("set special database permissions");
+    let database_config = configuration(
+        &fixture,
+        state_with_special_database,
+        IMPLEMENTATION_SHA256,
+        1,
+    );
+    assert!(matches!(
+        Provisioner::new(
+            database_config,
+            IMPLEMENTATION_SHA256.to_owned(),
+            PROVIDER_TOKEN.to_owned(),
+            fixture.public_key(),
+            RECEIPT_KEY.to_vec(),
+        )
+        .await,
+        Err(ProvisionerError::InvalidConfig)
+    ));
+    assert_eq!(fixture.counts().0, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn standalone_binary_is_bounded_and_does_not_disclose_authority_material() {
+async fn standalone_binary_accepts_final_frame_and_does_not_disclose_authority_material() {
     use std::os::unix::fs::OpenOptionsExt as _;
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt as _;
@@ -1146,7 +1201,6 @@ async fn standalone_binary_is_bounded_and_does_not_disclose_authority_material()
         .write_all(&serde_json::to_vec(&command).expect("command JSON"))
         .await
         .expect("write command");
-    stdin.write_all(b"\n").await.expect("write newline");
     stdin.shutdown().await.expect("close child stdin");
     drop(stdin);
     let output = child.wait_with_output().await.expect("wait for binary");
