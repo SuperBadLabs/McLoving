@@ -87,8 +87,12 @@ fn contracts() -> Vec<ExternalReadEndpointContract> {
             query: BTreeMap::from([
                 ("status".to_owned(), "exact value queued".to_owned()),
                 (
-                    "after_created_micros+after_id".to_owned(),
-                    "paired exclusive cursor".to_owned(),
+                    "after_created_micros".to_owned(),
+                    "signed 64-bit paired cursor component".to_owned(),
+                ),
+                (
+                    "after_id".to_owned(),
+                    "UUID paired cursor component".to_owned(),
                 ),
                 ("limit".to_owned(), "1..1000".to_owned()),
             ]),
