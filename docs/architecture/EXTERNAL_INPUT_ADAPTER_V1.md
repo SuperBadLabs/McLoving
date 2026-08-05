@@ -33,7 +33,8 @@ The adapter has no method field, write-capable endpoint, redirect following,
 proxy inheritance, scheduler, controller database, agent RPC, controller
 filesystem, unrelated secret, connector-control, or effect authority. The
 configured endpoint cannot contain user information, a query, or a fragment.
-Production uses HTTPS with normal PKI or a configured private CA bundle.
+Production HTTPS requires a configured content-pinned private CA bundle and
+does not inherit the host root set.
 Cleartext is admitted only for loopback fixtures and requires both the
 configuration flag and `MCLOVING_INPUT_ADAPTER_TEST_MODE=1`.
 
@@ -50,11 +51,11 @@ The canonical configuration digest binds:
 - adapter, deployment, and operator identities plus monotonic generation;
 - exact endpoint, endpoint identity, and data-source identity;
 - query-key allowlist and top-level typed JSON field schema;
-- read-grant identity, version, scope, and expiry;
-- receipt-signing key identity and secret-marker-set digest;
+- read-grant identity, version, scope, expiry, and bearer-token digest;
+- receipt-signing key identity/content digest and secret-marker-set digest;
 - confidentiality ceiling;
 - response-size, request-rate, timeout, freshness, and retry bounds;
-- private spool path and TLS trust configuration; and
+- private spool path and exact private-CA bundle path/content digest; and
 - the loopback-only test flag.
 
 The caller must present that digest and the exact running executable SHA-256.

@@ -10,7 +10,7 @@ use axum::routing::get;
 use axum::{Router, response::IntoResponse};
 use mcloving_input_adapter::{
     AdapterConfig, AdapterError, CaptureRequest, Confidentiality, FieldSchema, InputAdapter,
-    JsonKind, PROTOCOL_VERSION, marker_set_digest, sha256_file,
+    JsonKind, PROTOCOL_VERSION, content_sha256, marker_set_digest, sha256_file,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -18,7 +18,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use uuid::Uuid;
 
-const READ_TOKEN: &str = "fixture-read-token";
+const READ_TOKEN: &str = "fixture-read-token-32-bytes-minimum-value";
+const WRONG_TOKEN: &str = "wrong-read-token-32-bytes-minimum-value";
 const SIGNING_KEY: &[u8] = b"fixture-adapter-signing-key-32-bytes-minimum";
 const SECRET_MARKER: &[u8] = b"mcloving-secret-marker-never-disclose";
 const IMPLEMENTATION_SHA256: &str =
@@ -71,7 +72,7 @@ async fn read_input(
     if headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
-        != Some("Bearer fixture-read-token")
+        != Some("Bearer fixture-read-token-32-bytes-minimum-value")
         || headers
             .get("x-mcloving-grant-scope")
             .and_then(|value| value.to_str().ok())
@@ -177,7 +178,9 @@ fn config(endpoint: &str, spool_dir: &Path) -> AdapterConfig {
         grant_version: "1".to_owned(),
         grant_scope: "flags:read".to_owned(),
         grant_expires_unix_ms: now_ms() + 60_000,
+        read_token_sha256: content_sha256(READ_TOKEN.as_bytes()),
         signing_key_id: "fixture-signing-key-v1".to_owned(),
+        signing_key_sha256: content_sha256(SIGNING_KEY),
         secret_marker_set_sha256: marker_set_digest(&markers),
         max_confidentiality: Confidentiality::Internal,
         max_response_bytes: 1_024,
@@ -187,6 +190,7 @@ fn config(endpoint: &str, spool_dir: &Path) -> AdapterConfig {
         retry_attempts: 2,
         spool_dir: spool_dir.to_path_buf(),
         ca_bundle_path: None,
+        ca_bundle_sha256: None,
         test_allow_http_loopback: true,
     }
 }
@@ -316,11 +320,9 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
     }
 
     let unauthorized_dir = TempDir::new().expect("unauthorized dir");
-    let unauthorized = make_adapter(
-        config(&fixture.endpoint, unauthorized_dir.path()),
-        "wrong-token",
-    )
-    .await;
+    let mut unauthorized_config = config(&fixture.endpoint, unauthorized_dir.path());
+    unauthorized_config.read_token_sha256 = content_sha256(WRONG_TOKEN.as_bytes());
+    let unauthorized = make_adapter(unauthorized_config, WRONG_TOKEN).await;
     assert!(matches!(
         unauthorized
             .capture(&request(&unauthorized, "main", "valid"))
@@ -401,6 +403,70 @@ async fn outage_rate_generation_and_rollback_are_fail_closed() {
         .await
         .expect("rollback generation");
     assert_eq!(rollback_receipt.rollback_from_generation, Some(2));
+}
+
+#[tokio::test]
+async fn credential_ca_and_expiry_substitution_fail_before_use() {
+    let fixture = start_fixture().await;
+    let temp = TempDir::new().expect("temp dir");
+    let bound_config = config(&fixture.endpoint, temp.path());
+    assert!(matches!(
+        InputAdapter::new(
+            bound_config.clone(),
+            IMPLEMENTATION_SHA256.to_owned(),
+            WRONG_TOKEN.to_owned(),
+            SIGNING_KEY.to_vec(),
+            vec![SECRET_MARKER.to_vec()],
+        )
+        .await,
+        Err(AdapterError::InvalidConfig)
+    ));
+    assert!(matches!(
+        InputAdapter::new(
+            bound_config.clone(),
+            IMPLEMENTATION_SHA256.to_owned(),
+            READ_TOKEN.to_owned(),
+            b"substituted-signing-key-32-bytes-minimum".to_vec(),
+            vec![SECRET_MARKER.to_vec()],
+        )
+        .await,
+        Err(AdapterError::InvalidConfig)
+    ));
+
+    let https_dir = TempDir::new().expect("https dir");
+    let https_without_ca = config("https://inputs.example.test/v1", https_dir.path());
+    assert!(matches!(
+        InputAdapter::new(
+            https_without_ca,
+            IMPLEMENTATION_SHA256.to_owned(),
+            READ_TOKEN.to_owned(),
+            SIGNING_KEY.to_vec(),
+            vec![SECRET_MARKER.to_vec()],
+        )
+        .await,
+        Err(AdapterError::InvalidConfig)
+    ));
+
+    let adapter = make_adapter(bound_config, READ_TOKEN).await;
+    let mut expired_request = request(&adapter, "main", "valid");
+    expired_request.requested_at_unix_ms = now_ms() - 20_000;
+    expired_request.expires_at_unix_ms = now_ms() - 10_000;
+    assert!(matches!(
+        adapter.capture(&expired_request).await,
+        Err(AdapterError::ExpiredRequest)
+    ));
+
+    let expired_grant_dir = TempDir::new().expect("expired grant dir");
+    let mut expired_grant_config = config(&fixture.endpoint, expired_grant_dir.path());
+    expired_grant_config.grant_expires_unix_ms = now_ms() - 1;
+    let expired_grant = make_adapter(expired_grant_config, READ_TOKEN).await;
+    assert!(matches!(
+        expired_grant
+            .capture(&request(&expired_grant, "main", "valid"))
+            .await,
+        Err(AdapterError::ExpiredGrant)
+    ));
+    assert_eq!(fixture.state.writes.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

@@ -83,7 +83,9 @@ pub struct AdapterConfig {
     pub grant_version: String,
     pub grant_scope: String,
     pub grant_expires_unix_ms: i64,
+    pub read_token_sha256: String,
     pub signing_key_id: String,
+    pub signing_key_sha256: String,
     pub secret_marker_set_sha256: String,
     pub max_confidentiality: Confidentiality,
     pub max_response_bytes: usize,
@@ -94,6 +96,8 @@ pub struct AdapterConfig {
     pub spool_dir: PathBuf,
     #[serde(default)]
     pub ca_bundle_path: Option<PathBuf>,
+    #[serde(default)]
+    pub ca_bundle_sha256: Option<String>,
     #[serde(default)]
     pub test_allow_http_loopback: bool,
 }
@@ -274,6 +278,10 @@ impl InputAdapter {
             let pem = tokio::fs::read(path)
                 .await
                 .map_err(|_| AdapterError::InvalidConfig)?;
+            let actual_ca_sha256 = content_sha256(&pem);
+            if config.ca_bundle_sha256.as_deref() != Some(actual_ca_sha256.as_str()) {
+                return Err(AdapterError::InvalidConfig);
+            }
             let certificate =
                 reqwest::Certificate::from_pem(&pem).map_err(|_| AdapterError::InvalidConfig)?;
             builder = builder
@@ -709,8 +717,10 @@ fn validate_config(
         || config.grant_id.trim().is_empty()
         || config.grant_version.trim().is_empty()
         || config.grant_scope.trim().is_empty()
+        || !is_sha256_hex(&config.read_token_sha256)
         || config.signing_key_id.trim().is_empty()
-        || config.secret_marker_set_sha256.len() != 64
+        || !is_sha256_hex(&config.signing_key_sha256)
+        || !is_sha256_hex(&config.secret_marker_set_sha256)
         || config.max_response_bytes == 0
         || config.max_response_bytes > MAX_RESPONSE_BYTES
         || config.max_requests_per_minute == 0
@@ -720,17 +730,16 @@ fn validate_config(
         || config.max_age_ms <= 0
         || config.max_age_ms > MAX_AGE_MS
         || config.retry_attempts > 5
-        || implementation_sha256.len() != 64
-        || !implementation_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-        || read_token.trim().is_empty()
+        || !is_sha256_hex(implementation_sha256)
+        || read_token.len() < 32
         || signing_key.len() < 32
         || secret_markers.is_empty()
         || secret_markers.iter().any(Vec::is_empty)
         || secret_markers
             .iter()
             .any(|marker| marker.len() > MAX_BINDING_TEXT_BYTES)
+        || content_sha256(read_token.as_bytes()) != config.read_token_sha256
+        || content_sha256(signing_key) != config.signing_key_sha256
         || marker_set_digest(secret_markers) != config.secret_marker_set_sha256
     {
         return Err(AdapterError::InvalidConfig);
@@ -769,10 +778,26 @@ fn validate_config(
             &config.grant_id,
             &config.grant_version,
             &config.grant_scope,
+            &config.read_token_sha256,
             &config.signing_key_id,
+            &config.signing_key_sha256,
         ]
         .iter()
         .any(|value| value.len() > MAX_BINDING_TEXT_BYTES)
+    {
+        return Err(AdapterError::InvalidConfig);
+    }
+    let endpoint = Url::parse(&config.endpoint_url).map_err(|_| AdapterError::InvalidConfig)?;
+    if endpoint.scheme() == "https"
+        && (config.ca_bundle_path.is_none() || config.ca_bundle_sha256.is_none())
+    {
+        return Err(AdapterError::InvalidConfig);
+    }
+    if config.ca_bundle_path.is_some() != config.ca_bundle_sha256.is_some()
+        || config
+            .ca_bundle_sha256
+            .as_ref()
+            .is_some_and(|digest| !is_sha256_hex(digest))
     {
         return Err(AdapterError::InvalidConfig);
     }
@@ -818,6 +843,13 @@ fn validate_endpoint(url: &Url, test_allow_http_loopback: bool) -> Result<(), Ad
         }
         _ => Err(AdapterError::InvalidConfig),
     }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn validate_json_content_type(headers: &HeaderMap) -> Result<(), AdapterError> {
@@ -901,6 +933,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(&mut encoded, "{byte:02x}");
     }
     encoded
+}
+
+pub fn content_sha256(bytes: &[u8]) -> String {
+    sha256_hex(bytes)
 }
 
 fn now_unix_ms() -> Result<i64, AdapterError> {

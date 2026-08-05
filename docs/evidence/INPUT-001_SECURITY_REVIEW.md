@@ -21,8 +21,8 @@ represented as Mario production truth.
   immutable configuration binding;
 - one exact GET-only endpoint, no redirects, no ambient proxies, HTTPS/private
   CA production policy, and double-gated loopback fixture mode;
-- scoped bearer grant identity/version/scope/expiry and canonical query
-  allowlist;
+- scoped bearer grant identity/version/scope/expiry/content digest, pinned
+  HMAC-key and private-CA content digests, and canonical query allowlist;
 - tenant/project/pipeline/build/attempt/input, generation, cursor, expiry,
   confidentiality, and audit-lineage binding;
 - bounded timeout, retry, response size, rate, freshness, and typed JSON schema;
