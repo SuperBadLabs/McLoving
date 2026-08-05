@@ -437,19 +437,6 @@ impl InputAdapter {
         {
             return Err(AdapterError::ConfidentialityDenied);
         }
-        let captured_at_unix_ms = now_unix_ms()?;
-        let source_age_ms = captured_at_unix_ms
-            .checked_sub(source_observed_at_unix_ms)
-            .ok_or(AdapterError::StaleResponse)?;
-        if source_age_ms < 0
-            || source_age_ms > self.config.max_age_ms
-            || request
-                .expected_cursor
-                .as_ref()
-                .is_some_and(|expected| expected != &source_cursor)
-        {
-            return Err(AdapterError::StaleResponse);
-        }
         let source_etag = optional_header(&headers, "etag")?;
 
         let mut response = response;
@@ -469,10 +456,26 @@ impl InputAdapter {
         }
         let value: Value =
             serde_json::from_slice(&body).map_err(|_| AdapterError::MalformedResponse)?;
+        if self.contains_secret_marker_in_json(&value) {
+            return Err(AdapterError::ConfidentialityDenied);
+        }
         validate_schema(&value, &self.config.response_schema)?;
         let canonical_response =
             serde_json::to_vec(&value).map_err(|_| AdapterError::MalformedResponse)?;
         let response_sha256 = sha256_hex(&canonical_response);
+        let captured_at_unix_ms = now_unix_ms()?;
+        let source_age_ms = captured_at_unix_ms
+            .checked_sub(source_observed_at_unix_ms)
+            .ok_or(AdapterError::StaleResponse)?;
+        if source_age_ms < 0
+            || source_age_ms > self.config.max_age_ms
+            || request
+                .expected_cursor
+                .as_ref()
+                .is_some_and(|expected| expected != &source_cursor)
+        {
+            return Err(AdapterError::StaleResponse);
+        }
 
         let mut receipt = CaptureReceipt {
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -640,6 +643,20 @@ impl InputAdapter {
                     .windows(marker.len())
                     .any(|candidate| candidate == marker)
         })
+    }
+
+    fn contains_secret_marker_in_json(&self, value: &Value) -> bool {
+        match value {
+            Value::String(value) => self.contains_secret_marker(value.as_bytes()),
+            Value::Array(values) => values
+                .iter()
+                .any(|value| self.contains_secret_marker_in_json(value)),
+            Value::Object(values) => values.iter().any(|(key, value)| {
+                self.contains_secret_marker(key.as_bytes())
+                    || self.contains_secret_marker_in_json(value)
+            }),
+            Value::Null | Value::Bool(_) | Value::Number(_) => false,
+        }
     }
 
     async fn load_stored(&self, capture_id: Uuid) -> Result<Option<CaptureReceipt>, AdapterError> {

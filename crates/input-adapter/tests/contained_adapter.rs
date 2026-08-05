@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::routing::get;
-use axum::{Router, response::IntoResponse};
+use axum::{Router, body::Body, response::IntoResponse};
 use mcloving_input_adapter::{
     AdapterConfig, AdapterError, CaptureRequest, Confidentiality, FieldSchema, InputAdapter,
     JsonKind, PROTOCOL_VERSION, content_sha256, marker_set_digest, sha256_file,
@@ -16,6 +17,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 const READ_TOKEN: &str = "fixture-read-token-32-bytes-minimum-value";
@@ -67,7 +69,7 @@ async fn read_input(
     State(state): State<Arc<FixtureState>>,
     Query(query): Query<BTreeMap<String, String>>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> axum::response::Response {
     state.reads.fetch_add(1, Ordering::SeqCst);
     if headers
         .get("authorization")
@@ -78,7 +80,7 @@ async fn read_input(
             .and_then(|value| value.to_str().ok())
             != Some("flags:read")
     {
-        return (StatusCode::UNAUTHORIZED, HeaderMap::new(), String::new());
+        return (StatusCode::UNAUTHORIZED, HeaderMap::new(), String::new()).into_response();
     }
 
     let mode = query.get("mode").map(String::as_str).unwrap_or("valid");
@@ -87,7 +89,8 @@ async fn read_input(
             StatusCode::SERVICE_UNAVAILABLE,
             HeaderMap::new(),
             String::new(),
-        );
+        )
+            .into_response();
     }
 
     let branch = query.get("branch").map(String::as_str).unwrap_or("main");
@@ -136,9 +139,36 @@ async fn read_input(
             "value": String::from_utf8_lossy(SECRET_MARKER)
         })
         .to_string(),
+        "escaped_marker" => {
+            r#"{"enabled":true,"value":"mcloving-secret-marker-never-\u0064isclose"}"#.to_owned()
+        }
         _ => json!({"enabled": branch == "main", "value": branch}).to_string(),
     };
-    (StatusCode::OK, response_headers, body)
+    if mode == "slow_body" {
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        let midpoint = body.len() / 2;
+        let first = body[..midpoint].to_owned();
+        let second = body[midpoint..].to_owned();
+        tokio::spawn(async move {
+            sender
+                .send(Ok::<_, Infallible>(first))
+                .await
+                .expect("send first body chunk");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            sender
+                .send(Ok::<_, Infallible>(second))
+                .await
+                .expect("send second body chunk");
+        });
+        (
+            StatusCode::OK,
+            response_headers,
+            Body::from_stream(ReceiverStream::new(receiver)),
+        )
+            .into_response()
+    } else {
+        (StatusCode::OK, response_headers, body).into_response()
+    }
 }
 
 async fn write_input(State(state): State<Arc<FixtureState>>) -> StatusCode {
@@ -316,6 +346,7 @@ async fn contained_boundary_is_typed_bounded_replay_safe_and_read_only() {
         ("oversized", "oversized_response"),
         ("secret", "confidentiality_denied"),
         ("marker", "confidentiality_denied"),
+        ("escaped_marker", "confidentiality_denied"),
         ("header_marker", "confidentiality_denied"),
     ] {
         let error = adapter
@@ -544,6 +575,21 @@ async fn credential_ca_and_expiry_substitution_fail_before_use() {
         Err(AdapterError::ExpiredGrant)
     ));
     assert_eq!(fixture.state.writes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn freshness_is_checked_after_the_complete_body_is_captured() {
+    let fixture = start_fixture().await;
+    let slow_spool = TempDir::new().expect("slow spool");
+    let mut slow_config = config(&fixture.endpoint, slow_spool.path());
+    slow_config.max_age_ms = 25;
+    let slow_adapter = make_adapter(slow_config, READ_TOKEN).await;
+    assert!(matches!(
+        slow_adapter
+            .capture(&request(&slow_adapter, "main", "slow_body"))
+            .await,
+        Err(AdapterError::StaleResponse)
+    ));
 }
 
 #[tokio::test]
