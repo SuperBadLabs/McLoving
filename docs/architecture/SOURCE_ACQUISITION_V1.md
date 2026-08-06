@@ -89,15 +89,20 @@ use. At initialization the process resolves the dynamic loader and shared
 libraries for the sealed Git, helper, and askpass images, requires that exact
 set to equal the configured runtime closure, and opens every closure file by
 descriptor. Runtime files must be root-owned regular files with no group/world
-write permission; construction verifies their complete content digests and
-retains their device, inode, size, mode, owner, modification time, and
-unforgeable change time. Git runs with immediate symbol binding and a private
-descriptor-backed library directory whose exact symlink inventory names only
-those closure files. Both retained/path metadata fingerprints and directory
-topology are reverified before every invocation, so an atomic package replacement
-or in-place change fails closed without repeatedly hashing the complete closure.
-Missing, extra, reordered, substituted, mutable, or same-name closure entries
-fail closed. Credential material is also revalidated before every Git invocation. A
+write permission. Construction verifies their complete content digests, copies
+each library and loader into a sealed memory file, and retains the original
+path's device, inode, size, mode, owner, modification time, and unforgeable
+change time. Git runs with immediate symbol binding and a private
+descriptor-backed library directory whose exact links target only inherited
+sealed descriptors. The sealed Git, helper, and askpass ELF images are
+deterministically rewritten to name the retained loader descriptor as their
+interpreter, so neither initial process startup nor internal children reopen an
+ambient loader or library path. Original-path metadata fingerprints, memory-file
+seals, and directory topology are reverified before every invocation. An atomic
+package replacement or in-place change therefore fails closed, while a change
+after verification cannot alter the sealed bytes used by the child. Missing,
+extra, reordered, substituted, mutable, or same-name closure entries fail
+closed. Credential material is also revalidated before every Git invocation. A
 caller must present the acquirer, Git, helper, and canonical-configuration
 hashes. Any implementation, runtime closure, Git, helper, repository, grant,
 policy, or generation substitution fails before Git or network access.
@@ -220,9 +225,10 @@ leaf. Publication and timeout decisions share the same exclusive output-root
 lock. A claim is checked before any completed receipt can replay. After final
 rename and root synchronization, the deadline is checked before and after claim
 removal. If either check is late or any post-rename synchronization/finalization
-step fails, the claim exists or is recreated and the public acquisition
-directory is atomically renamed to an unpredictable hidden quarantine before
-the root lock is released, then removed. A late snapshot
+step fails, the public acquisition directory is first atomically renamed to an
+unpredictable hidden quarantine and that removal is synchronized. Only then is
+an absent ambiguity claim recreated and synchronized; cleanup follows while the
+root lock remains held. A late snapshot
 therefore cannot replay or remain at its public path after a caller has accepted
 timeout. Failed and expired staging trees recursively restore owner-write
 directory modes before removal without following symlinks.

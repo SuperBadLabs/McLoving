@@ -46,6 +46,7 @@ type HmacSha256 = Hmac<Sha256>;
 struct VerifiedFile {
     file: std::fs::File,
     invocation_path: PathBuf,
+    sha256: String,
 }
 
 struct VerifiedRuntimeFile {
@@ -71,7 +72,7 @@ struct RuntimeDirectory {
     path: PathBuf,
     _directory: std::fs::File,
     invocation_path: PathBuf,
-    links: Vec<(OsString, PathBuf)>,
+    links: Vec<(OsString, PathBuf, PathBuf)>,
 }
 
 impl RuntimeDirectory {
@@ -103,12 +104,12 @@ impl RuntimeDirectory {
             let expected_names = self
                 .links
                 .iter()
-                .map(|(name, _)| name.clone())
+                .map(|(name, _, _)| name.clone())
                 .collect::<BTreeSet<_>>();
             if actual_names != expected_names {
                 return Err(SourceError::BindingMismatch);
             }
-            for (name, target) in &self.links {
+            for (name, target, _) in &self.links {
                 let link_path = self.invocation_path.join(name);
                 let metadata = std::fs::symlink_metadata(&link_path)
                     .map_err(|_| SourceError::BindingMismatch)?;
@@ -131,7 +132,7 @@ impl Drop for RuntimeDirectory {
             use std::os::unix::fs::PermissionsExt as _;
 
             let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o700));
-            for (name, _) in &self.links {
+            for (name, _, _) in &self.links {
                 let _ = std::fs::remove_file(self.path.join(name));
             }
             let _ = std::fs::remove_dir(&self.path);
@@ -607,14 +608,14 @@ impl SourceAcquirer {
             return Err(SourceError::InvalidConfig);
         }
         ensure_private_output_root(&config.output_root).await?;
-        let git_executable = snapshot_verified_file(
+        let source_git_executable = snapshot_verified_file(
             &config.git_executable_path,
             &config.git_executable_sha256,
             "mcloving-git",
             0o500,
         )
         .await?;
-        let git_remote_https_executable = snapshot_verified_file(
+        let source_git_remote_https_executable = snapshot_verified_file(
             &config.git_remote_https_executable_path,
             &config.git_remote_https_executable_sha256,
             "mcloving-git-remote-https",
@@ -623,7 +624,7 @@ impl SourceAcquirer {
         .await?;
         let askpass_executable_path =
             std::env::current_exe().map_err(|_| SourceError::InvalidConfig)?;
-        let askpass_executable = snapshot_verified_file(
+        let source_askpass_executable = snapshot_verified_file(
             &askpass_executable_path,
             &implementation_sha256,
             "mcloving-source-askpass",
@@ -638,15 +639,42 @@ impl SourceAcquirer {
             _ => return Err(SourceError::InvalidConfig),
         };
         let runtime_closure = open_runtime_closure(&config.runtime_closure).await?;
-        let runtime_directory =
-            create_runtime_directory(&config.output_root, &config.runtime_closure)?;
+        let git_interpreter =
+            bound_runtime_interpreter(&source_git_executable, &runtime_closure).await?;
+        let helper_interpreter =
+            bound_runtime_interpreter(&source_git_remote_https_executable, &runtime_closure)
+                .await?;
+        let askpass_interpreter =
+            bound_runtime_interpreter(&source_askpass_executable, &runtime_closure).await?;
+        let git_executable = snapshot_with_bound_interpreter(
+            &source_git_executable,
+            &config.git_executable_sha256,
+            "mcloving-git-bound",
+            &git_interpreter,
+        )
+        .await?;
+        let git_remote_https_executable = snapshot_with_bound_interpreter(
+            &source_git_remote_https_executable,
+            &config.git_remote_https_executable_sha256,
+            "mcloving-git-remote-https-bound",
+            &helper_interpreter,
+        )
+        .await?;
+        let askpass_executable = snapshot_with_bound_interpreter(
+            &source_askpass_executable,
+            &implementation_sha256,
+            "mcloving-source-askpass-bound",
+            &askpass_interpreter,
+        )
+        .await?;
+        let runtime_directory = create_runtime_directory(&config.output_root, &runtime_closure)?;
         let observed_runtime = trace_runtime_closure(
             &[
                 git_executable.invocation_path.clone(),
                 git_remote_https_executable.invocation_path.clone(),
                 askpass_executable.invocation_path.clone(),
             ],
-            Some(&runtime_directory.invocation_path),
+            Some(&runtime_directory),
         )
         .await?;
         let configured_runtime = config
@@ -1698,13 +1726,12 @@ impl SourceAcquirer {
         let credential =
             read_private_bounded_regular_file(&self.credential_path, MAX_AUTHORITY_BYTES).await?;
         if sha256_hex(&credential) != self.config.credential_sha256
-            || sha256_open_file(&self.git_executable.file).await?
-                != self.config.git_executable_sha256
+            || sha256_open_file(&self.git_executable.file).await? != self.git_executable.sha256
             || sha256_open_file(&self.git_remote_https_executable.file).await?
-                != self.config.git_remote_https_executable_sha256
+                != self.git_remote_https_executable.sha256
             || verify_askpass
                 && sha256_open_file(&self.askpass_executable.file).await?
-                    != self.implementation_sha256
+                    != self.askpass_executable.sha256
         {
             return Err(SourceError::BindingMismatch);
         }
@@ -2569,28 +2596,45 @@ async fn open_runtime_closure(
     }
     #[cfg(target_os = "linux")]
     {
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 
         let mut verified = Vec::with_capacity(bindings.len());
         for binding in bindings {
             let file = std::fs::OpenOptions::new()
                 .read(true)
-                .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+                .custom_flags(nix::libc::O_NOFOLLOW)
                 .open(&binding.path)
                 .map_err(|_| SourceError::InvalidConfig)?;
             let metadata = file.metadata().map_err(|_| SourceError::InvalidConfig)?;
+            let mut bytes_file = tokio::fs::File::from_std(
+                file.try_clone().map_err(|_| SourceError::InvalidConfig)?,
+            );
+            bytes_file
+                .seek(SeekFrom::Start(0))
+                .await
+                .map_err(|_| SourceError::InvalidConfig)?;
+            let bytes = read_bounded(
+                bytes_file,
+                usize::try_from(MAX_EXECUTABLE_BYTES).unwrap_or(usize::MAX),
+            )
+            .await
+            .map_err(|_| SourceError::InvalidConfig)?;
             if !metadata.file_type().is_file()
                 || metadata.len() > MAX_EXECUTABLE_BYTES
                 || metadata.uid() != 0
                 || metadata.permissions().mode() & 0o022 != 0
-                || sha256_open_file(&file).await? != binding.sha256
+                || sha256_hex(&bytes) != binding.sha256
             {
                 return Err(SourceError::InvalidConfig);
             }
+            let snapshot = sealed_verified_file(&bytes, "mcloving-source-runtime", 0o500).await?;
+            fcntl(&snapshot.file, FcntlArg::F_SETFD(FdFlag::empty()))
+                .map_err(|_| SourceError::InvalidConfig)?;
             verified.push(VerifiedRuntimeFile {
                 binding: binding.clone(),
                 metadata: runtime_metadata(&metadata),
-                file,
+                file: snapshot.file,
             });
         }
         Ok(verified)
@@ -2605,6 +2649,12 @@ async fn verify_runtime_closure_files(runtime: &[VerifiedRuntimeFile]) -> Result
     }
     #[cfg(target_os = "linux")]
     {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+
+        let required_seals = SealFlag::F_SEAL_SEAL
+            | SealFlag::F_SEAL_SHRINK
+            | SealFlag::F_SEAL_GROW
+            | SealFlag::F_SEAL_WRITE;
         for entry in runtime {
             let path_metadata =
                 std::fs::metadata(&entry.binding.path).map_err(|_| SourceError::BindingMismatch)?;
@@ -2615,7 +2665,11 @@ async fn verify_runtime_closure_files(runtime: &[VerifiedRuntimeFile]) -> Result
             if !path_metadata.file_type().is_file()
                 || !descriptor_metadata.file_type().is_file()
                 || runtime_metadata(&path_metadata) != entry.metadata
-                || runtime_metadata(&descriptor_metadata) != entry.metadata
+                || descriptor_metadata.len() != entry.metadata.bytes
+                || fcntl(&entry.file, FcntlArg::F_GET_SEALS)
+                    .map_err(|_| SourceError::BindingMismatch)?
+                    & required_seals.bits()
+                    != required_seals.bits()
             {
                 return Err(SourceError::BindingMismatch);
             }
@@ -2643,7 +2697,7 @@ fn runtime_metadata(metadata: &std::fs::Metadata) -> RuntimeMetadata {
 
 async fn trace_runtime_closure(
     executables: &[PathBuf],
-    runtime_directory: Option<&Path>,
+    runtime_directory: Option<&RuntimeDirectory>,
 ) -> Result<BTreeSet<PathBuf>, SourceError> {
     let mut closure = BTreeSet::new();
     for executable in executables {
@@ -2659,7 +2713,7 @@ async fn trace_runtime_closure(
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         if let Some(runtime_directory) = runtime_directory {
-            command.env("LD_LIBRARY_PATH", runtime_directory);
+            command.env("LD_LIBRARY_PATH", &runtime_directory.invocation_path);
         }
         let mut child = command.spawn().map_err(|_| SourceError::InvalidConfig)?;
         let stdout = child.stdout.take().ok_or(SourceError::InvalidConfig)?;
@@ -2710,6 +2764,18 @@ async fn trace_runtime_closure(
                     .filter(|path| path.starts_with('/'))
             };
             if let Some(candidate) = candidate {
+                if let Some(binding) = runtime_directory.and_then(|directory| {
+                    let candidate_path = Path::new(candidate);
+                    directory.links.iter().find_map(|(name, target, binding)| {
+                        (candidate_path == target
+                            || candidate_path.parent() == Some(&directory.invocation_path)
+                                && candidate_path.file_name() == Some(name.as_os_str()))
+                        .then(|| binding.clone())
+                    })
+                }) {
+                    closure.insert(binding);
+                    continue;
+                }
                 let canonical =
                     std::fs::canonicalize(candidate).map_err(|_| SourceError::InvalidConfig)?;
                 if !canonical.is_absolute() {
@@ -2737,12 +2803,6 @@ async fn snapshot_verified_file(
     }
     #[cfg(target_os = "linux")]
     {
-        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
-        use nix::sys::memfd::{MFdFlags, memfd_create};
-        use nix::sys::stat::{Mode, fchmod};
-        use std::io::Write as _;
-        use std::os::fd::AsRawFd as _;
-        use std::os::fd::OwnedFd;
         use std::os::unix::fs::OpenOptionsExt as _;
 
         let source = std::fs::OpenOptions::new()
@@ -2763,13 +2823,35 @@ async fn snapshot_verified_file(
         if sha256_hex(&bytes) != expected_sha256 {
             return Err(SourceError::InvalidConfig);
         }
+        sealed_verified_file(&bytes, snapshot_name, mode).await
+    }
+}
+
+async fn sealed_verified_file(
+    bytes: &[u8],
+    snapshot_name: &str,
+    mode: u32,
+) -> Result<VerifiedFile, SourceError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (bytes, snapshot_name, mode);
+        Err(SourceError::InvalidConfig)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+        use nix::sys::stat::{Mode, fchmod};
+        use std::io::Write as _;
+        use std::os::fd::{AsRawFd as _, OwnedFd};
+
         let descriptor: OwnedFd = memfd_create(
             snapshot_name,
             MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING,
         )
         .map_err(|_| SourceError::InvalidConfig)?;
         let mut file = std::fs::File::from(descriptor);
-        file.write_all(&bytes)
+        file.write_all(bytes)
             .map_err(|_| SourceError::InvalidConfig)?;
         file.sync_all().map_err(|_| SourceError::InvalidConfig)?;
         fchmod(&file, Mode::from_bits_truncate(mode)).map_err(|_| SourceError::InvalidConfig)?;
@@ -2781,28 +2863,232 @@ async fn snapshot_verified_file(
             .map_err(|_| SourceError::InvalidConfig)?;
         let observed_seals =
             fcntl(&file, FcntlArg::F_GET_SEALS).map_err(|_| SourceError::InvalidConfig)?;
+        let sha256 = sha256_hex(bytes);
         if observed_seals & required_seals.bits() != required_seals.bits()
-            || sha256_open_file(&file).await? != expected_sha256
+            || sha256_open_file(&file).await? != sha256
         {
             return Err(SourceError::InvalidConfig);
         }
         let descriptor = file.as_raw_fd();
-        let invocation_path =
-            PathBuf::from(format!("/proc/{}/fd/{descriptor}", std::process::id()));
         Ok(VerifiedFile {
             file,
-            invocation_path,
+            invocation_path: PathBuf::from(format!("/proc/{}/fd/{descriptor}", std::process::id())),
+            sha256,
         })
     }
 }
 
+async fn snapshot_with_bound_interpreter(
+    source: &VerifiedFile,
+    expected_source_sha256: &str,
+    snapshot_name: &str,
+    interpreter: &Path,
+) -> Result<VerifiedFile, SourceError> {
+    let bytes = verified_file_bytes(source).await?;
+    if sha256_hex(&bytes) != expected_source_sha256 {
+        return Err(SourceError::InvalidConfig);
+    }
+    let bytes = bind_elf_interpreter(bytes, interpreter)?;
+    sealed_verified_file(&bytes, snapshot_name, 0o500).await
+}
+
+async fn verified_elf_interpreter(source: &VerifiedFile) -> Result<PathBuf, SourceError> {
+    let bytes = verified_file_bytes(source).await?;
+    elf_interpreter(&bytes)
+}
+
+async fn verified_file_bytes(source: &VerifiedFile) -> Result<Vec<u8>, SourceError> {
+    let mut file = tokio::fs::File::from_std(
+        source
+            .file
+            .try_clone()
+            .map_err(|_| SourceError::InvalidConfig)?,
+    );
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(|_| SourceError::InvalidConfig)?;
+    read_bounded(
+        file,
+        usize::try_from(MAX_EXECUTABLE_BYTES).unwrap_or(usize::MAX),
+    )
+    .await
+    .map_err(|_| SourceError::InvalidConfig)
+}
+
+async fn bound_runtime_interpreter(
+    executable: &VerifiedFile,
+    runtime: &[VerifiedRuntimeFile],
+) -> Result<PathBuf, SourceError> {
+    use std::os::fd::AsRawFd as _;
+
+    let interpreter = verified_elf_interpreter(executable).await?;
+    let canonical = std::fs::canonicalize(interpreter).map_err(|_| SourceError::InvalidConfig)?;
+    let binding = runtime
+        .iter()
+        .find(|entry| entry.binding.path == canonical)
+        .ok_or(SourceError::InvalidConfig)?;
+    Ok(PathBuf::from(format!(
+        "/proc/self/fd/{}",
+        binding.file.as_raw_fd()
+    )))
+}
+
+fn elf_interpreter(bytes: &[u8]) -> Result<PathBuf, SourceError> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let (offset, length) = elf_interpreter_range(bytes)?;
+    let field = bytes
+        .get(offset..offset + length)
+        .ok_or(SourceError::InvalidConfig)?;
+    let terminator = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(SourceError::InvalidConfig)?;
+    if terminator == 0 || field[terminator + 1..].iter().any(|byte| *byte != 0) {
+        return Err(SourceError::InvalidConfig);
+    }
+    let path = PathBuf::from(OsStr::from_bytes(&field[..terminator]));
+    if !path.is_absolute() {
+        return Err(SourceError::InvalidConfig);
+    }
+    Ok(path)
+}
+
+fn bind_elf_interpreter(mut bytes: Vec<u8>, interpreter: &Path) -> Result<Vec<u8>, SourceError> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let replacement = interpreter.as_os_str().as_bytes();
+    let (offset, length) = elf_interpreter_range(&bytes)?;
+    if replacement.is_empty()
+        || replacement.contains(&0)
+        || replacement
+            .len()
+            .checked_add(1)
+            .is_none_or(|size| size > length)
+    {
+        return Err(SourceError::InvalidConfig);
+    }
+    bytes[offset..offset + length].fill(0);
+    bytes[offset..offset + replacement.len()].copy_from_slice(replacement);
+    Ok(bytes)
+}
+
+fn elf_interpreter_range(bytes: &[u8]) -> Result<(usize, usize), SourceError> {
+    if bytes.get(..4) != Some(b"\x7fELF") {
+        return Err(SourceError::InvalidConfig);
+    }
+    let class = *bytes.get(4).ok_or(SourceError::InvalidConfig)?;
+    let little_endian = match bytes.get(5) {
+        Some(1) => true,
+        Some(2) => false,
+        _ => return Err(SourceError::InvalidConfig),
+    };
+    let (program_offset, entry_size, entry_count, offset_field, size_field) = match class {
+        1 => (
+            u64::from(elf_u32(bytes, 28, little_endian)?),
+            usize::from(elf_u16(bytes, 42, little_endian)?),
+            usize::from(elf_u16(bytes, 44, little_endian)?),
+            4,
+            16,
+        ),
+        2 => (
+            elf_u64(bytes, 32, little_endian)?,
+            usize::from(elf_u16(bytes, 54, little_endian)?),
+            usize::from(elf_u16(bytes, 56, little_endian)?),
+            8,
+            32,
+        ),
+        _ => return Err(SourceError::InvalidConfig),
+    };
+    let program_offset = usize::try_from(program_offset).map_err(|_| SourceError::InvalidConfig)?;
+    let mut interpreter = None;
+    for index in 0..entry_count {
+        let entry = program_offset
+            .checked_add(
+                index
+                    .checked_mul(entry_size)
+                    .ok_or(SourceError::InvalidConfig)?,
+            )
+            .ok_or(SourceError::InvalidConfig)?;
+        if elf_u32(bytes, entry, little_endian)? != 3 {
+            continue;
+        }
+        let offset = if class == 1 {
+            u64::from(elf_u32(bytes, entry + offset_field, little_endian)?)
+        } else {
+            elf_u64(bytes, entry + offset_field, little_endian)?
+        };
+        let length = if class == 1 {
+            u64::from(elf_u32(bytes, entry + size_field, little_endian)?)
+        } else {
+            elf_u64(bytes, entry + size_field, little_endian)?
+        };
+        let range = (
+            usize::try_from(offset).map_err(|_| SourceError::InvalidConfig)?,
+            usize::try_from(length).map_err(|_| SourceError::InvalidConfig)?,
+        );
+        if interpreter.replace(range).is_some() {
+            return Err(SourceError::InvalidConfig);
+        }
+    }
+    let (offset, length) = interpreter.ok_or(SourceError::InvalidConfig)?;
+    if length == 0
+        || offset
+            .checked_add(length)
+            .is_none_or(|end| end > bytes.len())
+    {
+        return Err(SourceError::InvalidConfig);
+    }
+    Ok((offset, length))
+}
+
+fn elf_u16(bytes: &[u8], offset: usize, little_endian: bool) -> Result<u16, SourceError> {
+    let value: [u8; 2] = bytes
+        .get(offset..offset + 2)
+        .ok_or(SourceError::InvalidConfig)?
+        .try_into()
+        .map_err(|_| SourceError::InvalidConfig)?;
+    Ok(if little_endian {
+        u16::from_le_bytes(value)
+    } else {
+        u16::from_be_bytes(value)
+    })
+}
+
+fn elf_u32(bytes: &[u8], offset: usize, little_endian: bool) -> Result<u32, SourceError> {
+    let value: [u8; 4] = bytes
+        .get(offset..offset + 4)
+        .ok_or(SourceError::InvalidConfig)?
+        .try_into()
+        .map_err(|_| SourceError::InvalidConfig)?;
+    Ok(if little_endian {
+        u32::from_le_bytes(value)
+    } else {
+        u32::from_be_bytes(value)
+    })
+}
+
+fn elf_u64(bytes: &[u8], offset: usize, little_endian: bool) -> Result<u64, SourceError> {
+    let value: [u8; 8] = bytes
+        .get(offset..offset + 8)
+        .ok_or(SourceError::InvalidConfig)?
+        .try_into()
+        .map_err(|_| SourceError::InvalidConfig)?;
+    Ok(if little_endian {
+        u64::from_le_bytes(value)
+    } else {
+        u64::from_be_bytes(value)
+    })
+}
+
 fn create_runtime_directory(
     output_root: &Path,
-    bindings: &[RuntimeBinding],
+    runtime: &[VerifiedRuntimeFile],
 ) -> Result<RuntimeDirectory, SourceError> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (output_root, bindings);
+        let _ = (output_root, runtime);
         Err(SourceError::InvalidConfig)
     }
     #[cfg(target_os = "linux")]
@@ -2814,18 +3100,20 @@ fn create_runtime_directory(
         std::fs::create_dir(&path).map_err(|_| SourceError::StateUnavailable)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| SourceError::StateUnavailable)?;
-        let mut links = Vec::with_capacity(bindings.len());
-        for binding in bindings {
-            let name = binding
+        let mut links = Vec::with_capacity(runtime.len());
+        for entry in runtime {
+            let name = entry
+                .binding
                 .path
                 .file_name()
                 .ok_or(SourceError::InvalidConfig)?
                 .to_os_string();
-            if links.iter().any(|(existing, _)| existing == &name) {
+            if links.iter().any(|(existing, _, _)| existing == &name) {
                 return Err(SourceError::InvalidConfig);
             }
-            symlink(&binding.path, path.join(&name)).map_err(|_| SourceError::StateUnavailable)?;
-            links.push((name, binding.path.clone()));
+            let target = PathBuf::from(format!("/proc/self/fd/{}", entry.file.as_raw_fd()));
+            symlink(&target, path.join(&name)).map_err(|_| SourceError::StateUnavailable)?;
+            links.push((name, target, entry.binding.path.clone()));
         }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500))
             .map_err(|_| SourceError::StateUnavailable)?;
@@ -3527,15 +3815,16 @@ async fn withdraw_late_publication(
     final_path: &Path,
 ) -> Result<(), SourceError> {
     let claim_path = claim_path(root, acquisition_id);
-    if !claim_path.exists() {
-        let bytes = serde_json::to_vec(claim).map_err(|_| SourceError::StateUnavailable)?;
-        write_new_file(&claim_path, &bytes, 0o600).await?;
-    }
     let quarantine = root.join(format!(".expired-{acquisition_id}-{}", Uuid::new_v4()));
     tokio::fs::rename(final_path, &quarantine)
         .await
         .map_err(|_| SourceError::StateUnavailable)?;
     sync_directory(root).await?;
+    if !claim_path.exists() {
+        let bytes = serde_json::to_vec(claim).map_err(|_| SourceError::StateUnavailable)?;
+        write_new_file(&claim_path, &bytes, 0o600).await?;
+        sync_directory(root).await?;
+    }
     make_tree_owner_writable(&quarantine).await?;
     tokio::fs::remove_dir_all(&quarantine)
         .await
@@ -3584,6 +3873,27 @@ mod tests {
         ));
         assert!(!acquisition_path(root, acquisition_id).exists());
         assert!(claim_path(root, acquisition_id).exists());
+        assert!(std::fs::read_dir(root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".expired-")
+        }));
+
+        let withdrawn_id = Uuid::new_v4();
+        let withdrawn_path = acquisition_path(root, withdrawn_id);
+        create_private_directory(&withdrawn_path).await.unwrap();
+        let withdrawn_claim = AcquisitionClaim {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            request_sha256: "b".repeat(64),
+            publication_deadline_unix_ms: now_unix_ms().unwrap() - 1,
+        };
+        withdraw_late_publication(root, withdrawn_id, &withdrawn_claim, &withdrawn_path)
+            .await
+            .unwrap();
+        assert!(!withdrawn_path.exists());
+        assert!(claim_path(root, withdrawn_id).exists());
         assert!(std::fs::read_dir(root).unwrap().all(|entry| {
             !entry
                 .unwrap()

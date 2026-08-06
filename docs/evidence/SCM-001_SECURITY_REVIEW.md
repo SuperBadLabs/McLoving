@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced twenty-nine actionable threads so far. The
+Independent review has produced thirty-one actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -189,14 +189,31 @@ The first protected run of that replacement exposed test-load amplification,
 not an authority bypass: re-hashing the complete runtime closure before every
 Git command made three parallel contained fixtures cross their test-only
 readiness or request windows on the slower hosted runner. Construction still
-hashes every configured runtime file. Per-command verification now compares the
-retained and canonical-path device, inode, size, mode, owner, modification time,
-and kernel-maintained change time plus the exact private directory topology;
-atomic replacement and in-place mutation still fail closed without repeatedly
-reading every library byte. Contained tests cache identical closure discovery
+hashes every configured runtime file. Per-command verification compares the
+canonical-path device, inode, size, mode, owner, modification time, and
+kernel-maintained change time plus sealed-memory state and the exact private
+directory topology; atomic replacement and in-place mutation still fail closed
+without repeatedly reading every library byte. Contained tests cache identical
+closure discovery
 and use ten-minute fixture authority windows plus a one-minute readiness bound;
 the production request, grant, command, and publication bounds are unchanged.
 The complete focused and locked workspace gates pass with that repair on HeMan.
+
+Review of the first runtime-closure head found two final descriptor/durability
+gaps. Runtime-directory links still targeted the original library paths, and
+claim recreation could fail before a late public path was withdrawn. The
+replacement copies every attested loader/library into a sealed memory file,
+keeps those descriptors inherited by Git and its internal children, points the
+private library directory only at those descriptors, and rewrites the sealed
+Git/helper/askpass ELF interpreter field to the retained loader descriptor.
+Neither an OS-rollout rename in the verification/spawn interval nor initial ELF
+startup can reopen ambient runtime bytes. Late withdrawal now renames the public
+path to quarantine and synchronizes its absence before it attempts claim
+recreation; the claim and its parent are then synchronized before hidden cleanup.
+The focused final-publication proof covers both an already-present claim and the
+post-removal claim-recreation path. The thirtieth and thirty-first findings
+cannot contribute closure until the replacement exact head is independently
+reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
