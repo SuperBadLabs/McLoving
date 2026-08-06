@@ -46,6 +46,7 @@ enum FixtureMode {
     DelayedSnapshotPendingThenMalformed,
     MalformedDeleteOnce,
     DelayedMalformedDeleteOnce,
+    DelayedCleanupAbsentThenLive,
     SubstituteFinalInventory,
     DuplicateFinalInventory,
     DisappearFromFinalInventory,
@@ -393,8 +394,11 @@ async fn lookup_instance(
         } else {
             None
         };
-        let snapshot_absent = inner.mode == FixtureMode::DelayedSnapshotAbsentThenPendingThenReady
-            && !inner.snapshot_pending_sent;
+        let snapshot_absent = matches!(
+            inner.mode,
+            FixtureMode::DelayedSnapshotAbsentThenPendingThenReady
+                | FixtureMode::DelayedCleanupAbsentThenLive
+        ) && !inner.snapshot_pending_sent;
         if snapshot_absent {
             inner.snapshot_pending_sent = true;
         }
@@ -592,7 +596,9 @@ async fn delete_instance(
         {
             return StatusCode::CONFLICT.into_response();
         }
-        inner.instances.remove(&request.request_id);
+        if inner.mode != FixtureMode::DelayedCleanupAbsentThenLive {
+            inner.instances.remove(&request.request_id);
+        }
         inner.deletes += 1;
         if matches!(
             inner.mode,
@@ -1393,11 +1399,11 @@ async fn pending_instance_becomes_ready_with_bounded_polling() {
 async fn startup_absence_yields_to_a_newer_pending_revision() {
     let context = Context::with_startup_timeout(
         FixtureMode::DelayedSnapshotAbsentThenPendingThenReady,
-        1_000,
+        10_000,
     )
     .await;
     let request = context.request();
-    let stale_absence = context.provisioner.provision(&request);
+    let stale_absence = Box::pin(context.provisioner.provision(&request));
     let positive_peer = async {
         context.fixture.wait_for_lookup_start().await;
         let database =
@@ -1410,11 +1416,17 @@ async fn startup_absence_yields_to_a_newer_pending_revision() {
                 [request.request_id.to_string()],
             )
             .expect("publish newer pending observation through legacy trigger");
+        context.fixture.mark_ready(request.request_id);
+        Box::pin(context.provisioner.provision(&request))
+            .await
+            .expect("positive startup peer publishes ready receipt")
     };
-    let (stale_absence, ()) = tokio::join!(stale_absence, positive_peer);
+    let (stale_absence, positive_peer) = tokio::join!(stale_absence, positive_peer);
     let stale_absence = stale_absence.expect("stale startup absence converges on ready truth");
     assert_eq!(stale_absence.body.outcome, LifecycleOutcome::Ready);
+    assert_eq!(positive_peer.body.outcome, LifecycleOutcome::Ready);
     assert!(!stale_absence.body.cleanup_confirmed);
+    assert!(!positive_peer.body.cleanup_confirmed);
     assert_eq!(context.fixture.counts().1, 0);
     assert_eq!(context.fixture.counts().3, 1);
 
@@ -2352,6 +2364,49 @@ async fn confirmed_cleanup_dominates_a_concurrent_late_delete_failure() {
         .expect("terminal cleanup replay");
     assert_eq!(replay.body.outcome, LifecycleOutcome::Cancelled);
     assert!(replay.body.cleanup_confirmed);
+}
+
+#[tokio::test]
+async fn cleanup_confirmation_absence_yields_to_a_newer_live_revision() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("ready before concurrent cleanup confirmation");
+    context
+        .fixture
+        .set_mode(FixtureMode::DelayedCleanupAbsentThenLive);
+    let first = cancel_request(&context.config, &request, IMPLEMENTATION_SHA256);
+    let second = cancel_request(&context.config, &request, IMPLEMENTATION_SHA256);
+
+    let (first_receipt, second_receipt) = tokio::join!(
+        context.provisioner.cancel(&first),
+        context.provisioner.cancel(&second)
+    );
+    let first_receipt = first_receipt.expect("stale absence recovers newer live truth");
+    let second_receipt = second_receipt.expect("live confirmation remains ambiguous");
+    for receipt in [&first_receipt, &second_receipt] {
+        assert_eq!(
+            receipt.body.outcome,
+            LifecycleOutcome::ReconciliationRequired
+        );
+        assert!(receipt.body.ambiguity);
+        assert!(!receipt.body.cleanup_confirmed);
+    }
+    assert_eq!(context.fixture.counts().3, 1);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let state: String = database
+        .query_row(
+            "SELECT state FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read cleanup state after confirmation race");
+    assert_eq!(state, "deleting");
 }
 
 #[tokio::test]
