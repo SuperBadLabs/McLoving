@@ -276,6 +276,39 @@ async fn contained_runtime_closure(executables: &[PathBuf]) -> Vec<RuntimeBindin
         .clone()
 }
 
+#[test]
+fn sealed_resolver_runs_without_credential_authority() {
+    let binary = env!("CARGO_BIN_EXE_mcloving-source-acquirer");
+    let output = Command::new(binary)
+        .env_clear()
+        .env("MCLOVING_SOURCE_ACQUIRER_RESOLVER", "1")
+        .env("MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST", "localhost")
+        .env("MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT", "443")
+        .output()
+        .expect("credential-free resolver process");
+    assert!(output.status.success());
+    assert!(!output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .all(|line| line.parse::<std::net::IpAddr>().is_ok())
+    );
+
+    let tainted = Command::new(binary)
+        .env_clear()
+        .env("MCLOVING_SOURCE_ACQUIRER_RESOLVER", "1")
+        .env("MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST", "localhost")
+        .env("MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT", "443")
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
+            "/credential/must-not-enter-resolver",
+        )
+        .status()
+        .expect("tainted resolver process");
+    assert!(!tainted.success());
+}
+
 #[tokio::test]
 async fn exact_revision_replay_later_commit_and_sparse_truth() {
     let repositories = tempfile::tempdir().expect("repositories tempdir");
@@ -1250,7 +1283,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     write_private(&credential_path, CREDENTIAL);
     write_private(&signing_key_path, SIGNING_KEY);
     write_private(&marker_path, &[CREDENTIAL, b"\n"].concat());
-    let repository_url = format!("http://{address}/private.git");
+    let repository_url = format!("http://localhost:{}/private.git", address.port());
     let runtime_closure =
         inspect_runtime_closure(&[git.clone(), bound_git_remote_https.clone(), binary.clone()])
             .await

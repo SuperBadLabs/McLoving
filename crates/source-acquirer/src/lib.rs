@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::io::SeekFrom;
+use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -41,6 +42,13 @@ const MAX_MARKERS: usize = 256;
 const MAX_MARKER_BYTES: usize = 256 * 1_024;
 const FILTER_IGNORED_WARNING: &[u8] = b"warning: filtering not recognized by server, ignoring";
 const SYSTEM_PRELOAD_PATH: &[u8] = b"/etc/ld.so.preload\0";
+const MAX_RESOLVER_OUTPUT_BYTES: usize = 4 * 1_024;
+const MAX_RESOLVER_STDERR_BYTES: usize = 4 * 1_024;
+const MAX_RESOLVER_ADDRESSES: usize = 32;
+const RESOLVER_TIMEOUT: Duration = Duration::from_secs(10);
+const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
+const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
+const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1527,7 +1535,7 @@ impl SourceAcquirer {
         credential_bearing: bool,
         transport_root: Option<&Path>,
     ) -> Result<Vec<u8>, SourceError> {
-        self.verify_runtime_authority(credential_bearing).await?;
+        self.verify_runtime_authority(true).await?;
         self.git_exec_directory.verify(
             &self.git_executable.invocation_path,
             &self.git_remote_https_executable.invocation_path,
@@ -1546,6 +1554,11 @@ impl SourceAcquirer {
             )
         } else {
             (Duration::from_millis(self.config.command_timeout_ms), false)
+        };
+        let endpoint_resolutions = if credential_bearing {
+            self.resolve_network_endpoint(&arguments, timeout).await?
+        } else {
+            Vec::new()
         };
         let mut command = Command::new(&self.git_executable.invocation_path);
         command
@@ -1590,6 +1603,9 @@ impl SourceAcquirer {
                 "-c",
                 "protocol.https.allow=always",
             ]);
+        for resolution in endpoint_resolutions {
+            command.args(["-c", &format!("http.curloptResolve={resolution}")]);
+        }
         if credential_bearing {
             command
                 .env("GIT_ASKPASS", &self.askpass_executable.invocation_path)
@@ -1746,6 +1762,101 @@ impl SourceAcquirer {
             return Err(SourceError::SourceUnavailable);
         }
         Ok(stdout)
+    }
+
+    async fn resolve_network_endpoint(
+        &self,
+        arguments: &[OsString],
+        command_timeout: Duration,
+    ) -> Result<Vec<String>, SourceError> {
+        let endpoint = arguments
+            .iter()
+            .filter_map(|argument| argument.to_str())
+            .filter_map(|argument| Url::parse(argument).ok())
+            .find(|url| {
+                url.scheme() == "https"
+                    || self.config.test_allow_http_loopback && url.scheme() == "http"
+            });
+        let Some(endpoint) = endpoint else {
+            return Ok(Vec::new());
+        };
+        let host = endpoint.host_str().ok_or(SourceError::SourceUnavailable)?;
+        if host.parse::<IpAddr>().is_ok() {
+            return Ok(Vec::new());
+        }
+        let port = endpoint
+            .port_or_known_default()
+            .ok_or(SourceError::SourceUnavailable)?;
+        let mut command = Command::new(&self.askpass_executable.invocation_path);
+        command
+            .env_clear()
+            .env(RESOLVER_MODE_ENV, "1")
+            .env(RESOLVER_HOST_ENV, host)
+            .env(RESOLVER_PORT_ENV, port.to_string())
+            .env("HOME", "/nonexistent")
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .env("LD_BIND_NOW", "1")
+            .env("LD_LIBRARY_PATH", &self.runtime_directory.invocation_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command
+            .spawn()
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        #[cfg(unix)]
+        let process_group_id = Some(
+            i32::try_from(child.id().ok_or(SourceError::SourceUnavailable)?)
+                .map_err(|_| SourceError::SourceUnavailable)?,
+        );
+        #[cfg(not(unix))]
+        let process_group_id = None;
+        let stdout = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
+        let stderr = child.stderr.take().ok_or(SourceError::StateUnavailable)?;
+        let stdout_task = tokio::spawn(read_bounded(stdout, MAX_RESOLVER_OUTPUT_BYTES));
+        let stderr_task = tokio::spawn(read_bounded(stderr, MAX_RESOLVER_STDERR_BYTES));
+        let status =
+            match tokio::time::timeout(command_timeout.min(RESOLVER_TIMEOUT), child.wait()).await {
+                Ok(status) => status.map_err(|_| SourceError::SourceUnavailable)?,
+                Err(_) => {
+                    terminate_child(&mut child, process_group_id).await?;
+                    stdout_task.abort();
+                    stderr_task.abort();
+                    let _ = stdout_task.await;
+                    let _ = stderr_task.await;
+                    return Err(SourceError::SourceUnavailable);
+                }
+            };
+        let stdout = stdout_task
+            .await
+            .map_err(|_| SourceError::SourceUnavailable)?
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        let _stderr = stderr_task
+            .await
+            .map_err(|_| SourceError::SourceUnavailable)?
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        if !status.success() || stdout.is_empty() {
+            return Err(SourceError::SourceUnavailable);
+        }
+        let stdout = std::str::from_utf8(&stdout).map_err(|_| SourceError::SourceUnavailable)?;
+        let addresses = stdout
+            .lines()
+            .map(|line| line.parse::<IpAddr>())
+            .collect::<Result<BTreeSet<_>, _>>()
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        if addresses.is_empty() || addresses.len() > MAX_RESOLVER_ADDRESSES {
+            return Err(SourceError::SourceUnavailable);
+        }
+        Ok(addresses
+            .into_iter()
+            .map(|address| match address {
+                IpAddr::V4(address) => format!("{host}:{port}:{address}"),
+                IpAddr::V6(address) => format!("{host}:{port}:[{address}]"),
+            })
+            .collect())
     }
 
     async fn verify_runtime_authority(&self, verify_askpass: bool) -> Result<(), SourceError> {

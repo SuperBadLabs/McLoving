@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use mcloving_source_acquirer::{
@@ -12,6 +14,11 @@ const MAX_CONFIG_BYTES: usize = 256 * 1_024;
 const MAX_CREDENTIAL_BYTES: usize = 64 * 1_024;
 const MAX_SIGNING_KEY_BYTES: usize = 64 * 1_024;
 const MAX_MARKER_FILE_BYTES: usize = 256 * 1_024;
+const MAX_RESOLVER_HOST_BYTES: usize = 253;
+const MAX_RESOLVER_ADDRESSES: usize = 32;
+const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
+const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
+const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -29,7 +36,9 @@ enum Output {
 
 #[tokio::main]
 async fn main() {
-    let result = if std::env::var("MCLOVING_SOURCE_ACQUIRER_ASKPASS").as_deref() == Ok("1") {
+    let result = if std::env::var(RESOLVER_MODE_ENV).as_deref() == Ok("1") {
+        run_resolver().await
+    } else if std::env::var("MCLOVING_SOURCE_ACQUIRER_ASKPASS").as_deref() == Ok("1") {
         run_askpass().await
     } else {
         run().await
@@ -37,6 +46,52 @@ async fn main() {
     if result.is_err() {
         std::process::exit(1);
     }
+}
+
+async fn run_resolver() -> Result<(), ()> {
+    for credential_env in [
+        "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
+        "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME",
+        "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_SHA256",
+        "MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE",
+        "MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE",
+    ] {
+        if std::env::var_os(credential_env).is_some() {
+            return Err(());
+        }
+    }
+    let host = std::env::var(RESOLVER_HOST_ENV).map_err(|_| ())?;
+    if host.is_empty()
+        || host.len() > MAX_RESOLVER_HOST_BYTES
+        || !host.is_ascii()
+        || host.contains(['\r', '\n', '\0'])
+    {
+        return Err(());
+    }
+    let port = std::env::var(RESOLVER_PORT_ENV)
+        .map_err(|_| ())?
+        .parse::<u16>()
+        .map_err(|_| ())?;
+    if port == 0 {
+        return Err(());
+    }
+    let addresses = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|_| ())?
+        .map(|address| address.ip())
+        .collect::<BTreeSet<IpAddr>>();
+    if addresses.is_empty() || addresses.len() > MAX_RESOLVER_ADDRESSES {
+        return Err(());
+    }
+    let mut output = tokio::io::stdout();
+    for address in addresses {
+        output
+            .write_all(address.to_string().as_bytes())
+            .await
+            .map_err(|_| ())?;
+        output.write_all(b"\n").await.map_err(|_| ())?;
+    }
+    output.flush().await.map_err(|_| ())
 }
 
 async fn run_askpass() -> Result<(), ()> {

@@ -7,9 +7,9 @@ Status: REOPENED. The earlier implementation candidate
 nineteen focused tests after ten findings were fixed, but later exact-head
 review correctly identified additional executable/helper binding,
 authority-snapshot immutability, credential-marker, retained-directory, and
-test-readiness gaps. The replacement implementation has twenty-three focused
+test-readiness gaps. The replacement implementation has twenty-four focused
 source-acquisition tests: two boundary unit tests, four protocol tests,
-fifteen contained end-to-end tests, and two sealed-inventory tests. This receipt
+sixteen contained end-to-end tests, and two sealed-inventory tests. This receipt
 cannot return to PASS until its replacement exact head independently passes
 review and every protected check.
 
@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced thirty-three actionable threads so far. The
+Independent review has produced thirty-four actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -240,6 +240,24 @@ preserve selected ancestor gitlinks. The
 thirty-third finding cannot contribute closure until the replacement exact head
 is independently reverified.
 
+Review of that exact head found that NSS and other resolver modules selected by
+`nsswitch.conf` can be loaded only after process startup, outside the traced
+startup closure, while the Git/HTTPS-helper environment carries credential-file
+authority. The replacement performs repository endpoint resolution in the
+sealed, runtime-bound acquirer snapshot before launching each credential-bearing
+network command. The resolver child receives a cleared environment containing
+only hostname, port, fixed locale, and sealed-runtime controls, and explicitly
+refuses credential, signing-key, or secret-marker inputs. Its numeric output and
+diagnostics are bounded and its process group is deadline-limited. Git receives
+the numeric results through `http.curloptResolve`; the original hostname remains
+the TLS identity, while disabled redirects and proxies prevent a second ambient
+endpoint lookup. A focused proof verifies successful numeric resolution and
+fail-closed rejection of a tainted resolver environment, and the credentialed
+smart-HTTP proof now uses `localhost` so acquisition succeeds only through the
+pinned mapping without disclosing credential bytes. The thirty-fourth finding
+cannot contribute closure until the replacement exact head is independently
+reverified.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
@@ -247,7 +265,7 @@ fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
 suite, strict Clippy, formatting, and the rerun protected checks pass.
 
 The replacement implementation currently passes `git diff --check`, Rust
-formatting, strict source-acquirer Clippy, and all twenty-three focused
+formatting, strict source-acquirer Clippy, and all twenty-four focused
 source-acquisition tests plus the complete locked workspace suite on HeMan.
 Protected checks and independent exact-head verification remain required before
 closure.

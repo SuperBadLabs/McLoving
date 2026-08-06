@@ -75,6 +75,20 @@ and recursive submodule commands are disabled. Cleartext loopback or local
 `file` fixtures require both the configuration flag and
 `MCLOVING_SOURCE_ACQUIRER_TEST_MODE=1`.
 
+Before a credential-bearing network command, the acquirer starts its sealed,
+runtime-bound implementation snapshot in a dedicated resolver mode. That child
+receives only the endpoint hostname and port in a cleared environment and
+refuses to run if any credential-file, credential-digest, signing-key, or
+secret-marker authority is present. Its numeric results and diagnostics are
+bounded, its process group is deadline-limited, and any malformed, empty,
+excessive, failed, or timed-out result fails source acquisition. The parent
+passes the resulting addresses to Git only through repeated
+`http.curloptResolve` entries while preserving the original HTTPS hostname for
+TLS verification. Because redirects and proxies are disabled, the
+credential-bearing Git/HTTPS-helper chain does not invoke ambient NSS service
+modules for the admitted repository endpoint. Literal IP endpoints require no
+resolver child.
+
 The process opens itself, Git, the HTTPS remote helper, and any private CA
 without following a final symlink, hashes the exact bytes, copies them into
 anonymous memory-backed files, and applies write/grow/shrink/further-seal
