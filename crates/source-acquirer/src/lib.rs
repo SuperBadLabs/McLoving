@@ -34,6 +34,7 @@ const MAX_CONFIGURED_SUBMODULES: usize = 1_024;
 const MAX_CONFIGURED_DEPTH: u32 = 1_000_000;
 const MAX_CONFIGURED_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
 const MAX_LOCAL_PUBLICATION_MS: u64 = 2 * 60 * 1_000;
+const TRANSPORT_QUOTA_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const MAX_AUTHORITY_BYTES: usize = 64 * 1_024;
 const MAX_MARKERS: usize = 256;
 const MAX_MARKER_BYTES: usize = 256 * 1_024;
@@ -792,6 +793,7 @@ impl SourceAcquirer {
                             .unwrap_or(usize::MAX)
                             .min(usize::MAX - 1),
                         publication_deadline_unix_ms,
+                        &repositories_dir,
                     )
                     .await;
                 self.ensure_transport_quota(&repositories_dir).await?;
@@ -1144,7 +1146,7 @@ impl SourceAcquirer {
             OsString::from(&repository.authenticated_ref),
         ]);
         let fetch = self
-            .run_credential_git_until(arguments, MAX_GIT_METADATA_BYTES, deadline)
+            .run_credential_git_until(arguments, MAX_GIT_METADATA_BYTES, deadline, transport_root)
             .await;
         self.ensure_transport_quota(transport_root).await?;
         fetch?;
@@ -1212,6 +1214,7 @@ impl SourceAcquirer {
                 ],
                 MAX_AUTHORITY_BYTES,
                 deadline,
+                transport_root,
             )
             .await;
         self.ensure_transport_quota(transport_root).await?;
@@ -1301,7 +1304,7 @@ impl SourceAcquirer {
         arguments: Vec<OsString>,
         max_stdout: usize,
     ) -> Result<Vec<u8>, SourceError> {
-        self.run_git_with_deadline(arguments, max_stdout, None, false)
+        self.run_git_with_deadline(arguments, max_stdout, None, false, None)
             .await
     }
 
@@ -1311,7 +1314,7 @@ impl SourceAcquirer {
         max_stdout: usize,
         deadline_unix_ms: i64,
     ) -> Result<Vec<u8>, SourceError> {
-        self.run_git_with_deadline(arguments, max_stdout, Some(deadline_unix_ms), false)
+        self.run_git_with_deadline(arguments, max_stdout, Some(deadline_unix_ms), false, None)
             .await
     }
 
@@ -1320,9 +1323,16 @@ impl SourceAcquirer {
         arguments: Vec<OsString>,
         max_stdout: usize,
         deadline_unix_ms: i64,
+        transport_root: &Path,
     ) -> Result<Vec<u8>, SourceError> {
-        self.run_git_with_deadline(arguments, max_stdout, Some(deadline_unix_ms), true)
-            .await
+        self.run_git_with_deadline(
+            arguments,
+            max_stdout,
+            Some(deadline_unix_ms),
+            true,
+            Some(transport_root),
+        )
+        .await
     }
 
     async fn run_git_with_deadline(
@@ -1331,6 +1341,7 @@ impl SourceAcquirer {
         max_stdout: usize,
         deadline_unix_ms: Option<i64>,
         credential_bearing: bool,
+        transport_root: Option<&Path>,
     ) -> Result<Vec<u8>, SourceError> {
         self.verify_runtime_authority(credential_bearing).await?;
         self.git_exec_directory.verify(
@@ -1433,29 +1444,38 @@ impl SourceAcquirer {
         #[cfg(unix)]
         let process_group_id = i32::try_from(child.id().ok_or(SourceError::SourceUnavailable)?)
             .map_err(|_| SourceError::SourceUnavailable)?;
+        #[cfg(unix)]
+        let process_group_id = Some(process_group_id);
+        #[cfg(not(unix))]
+        let process_group_id = None;
         let stdout = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
         let stderr = child.stderr.take().ok_or(SourceError::StateUnavailable)?;
         let stdout_task = tokio::spawn(read_bounded(stdout, max_stdout));
         let stderr_task = tokio::spawn(read_bounded(stderr, MAX_GIT_STDERR_BYTES));
-        let status = match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(status) => status.map_err(|_| SourceError::SourceUnavailable)?,
-            Err(_) => {
-                #[cfg(unix)]
-                match nix::sys::signal::killpg(
-                    nix::unistd::Pid::from_raw(process_group_id),
-                    nix::sys::signal::Signal::SIGKILL,
-                ) {
-                    Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-                    Err(_) => return Err(SourceError::StateUnavailable),
-                }
-                #[cfg(not(unix))]
-                child
-                    .start_kill()
-                    .map_err(|_| SourceError::StateUnavailable)?;
-                tokio::time::timeout(Duration::from_secs(5), child.wait())
-                    .await
-                    .map_err(|_| SourceError::StateUnavailable)?
-                    .map_err(|_| SourceError::StateUnavailable)?;
+        let started = tokio::time::Instant::now();
+        let status = loop {
+            let quota_result = if let Some(root) = transport_root {
+                self.ensure_transport_quota(root).await.map(|_| ())
+            } else {
+                Ok(())
+            };
+            if let Err(error) = quota_result {
+                terminate_child(&mut child, process_group_id).await?;
+                stdout_task.abort();
+                stderr_task.abort();
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                return Err(error);
+            }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|_| SourceError::SourceUnavailable)?
+            {
+                break status;
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                terminate_child(&mut child, process_group_id).await?;
                 stdout_task.abort();
                 stderr_task.abort();
                 let _ = stdout_task.await;
@@ -1466,6 +1486,8 @@ impl SourceAcquirer {
                     SourceError::SourceUnavailable
                 });
             }
+            tokio::time::sleep(TRANSPORT_QUOTA_POLL_INTERVAL.min(timeout.saturating_sub(elapsed)))
+                .await;
         };
         let stdout = stdout_task
             .await
@@ -2164,6 +2186,32 @@ fn now_unix_ms() -> Result<i64, SourceError> {
     i64::try_from(duration.as_millis()).map_err(|_| SourceError::StateUnavailable)
 }
 
+async fn terminate_child(
+    child: &mut tokio::process::Child,
+    process_group_id: Option<i32>,
+) -> Result<(), SourceError> {
+    #[cfg(unix)]
+    match nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(process_group_id.ok_or(SourceError::StateUnavailable)?),
+        nix::sys::signal::Signal::SIGKILL,
+    ) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+        Err(_) => return Err(SourceError::StateUnavailable),
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = process_group_id;
+        child
+            .start_kill()
+            .map_err(|_| SourceError::StateUnavailable)?;
+    }
+    tokio::time::timeout(Duration::from_secs(5), child.wait())
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?
+        .map_err(|_| SourceError::StateUnavailable)?;
+    Ok(())
+}
+
 async fn read_bounded<R>(reader: R, max_bytes: usize) -> Result<Vec<u8>, std::io::Error>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -2800,9 +2848,11 @@ async fn allocated_storage_bytes(root: &Path) -> Result<u64, SourceError> {
         while index < directories.len() {
             let directory = directories[index].clone();
             index += 1;
-            let mut entries = tokio::fs::read_dir(&directory)
-                .await
-                .map_err(|_| SourceError::StateUnavailable)?;
+            let mut entries = match tokio::fs::read_dir(&directory).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return Err(SourceError::StateUnavailable),
+            };
             while let Some(entry) = entries
                 .next_entry()
                 .await
@@ -2812,9 +2862,11 @@ async fn allocated_storage_bytes(root: &Path) -> Result<u64, SourceError> {
                 if entries_seen > MAX_CONFIGURED_FILES.saturating_mul(4) {
                     return Err(SourceError::LimitExceeded);
                 }
-                let metadata = tokio::fs::symlink_metadata(entry.path())
-                    .await
-                    .map_err(|_| SourceError::StateUnavailable)?;
+                let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => return Err(SourceError::StateUnavailable),
+                };
                 if metadata.file_type().is_dir() {
                     directories.push(entry.path());
                 } else if !metadata.file_type().is_file() {

@@ -112,12 +112,15 @@ NDJSON frame is capped at 64 KiB.
 The acquirer initializes a private bare partial-clone repository, installs no
 working-tree hooks, and fetches exactly the configured URL and requested full
 ref with `blob:none`, no tag-following, and the configured depth. Git object
-storage is measured after every command against the configuration-bound
-transport-staging quota; only selected blobs and required `.gitmodules` content
-are fetched lazily, and a quota breach fails before publication. An admitted
-repository endpoint must support filtered fetch and exact reachable promisor-
-object wants; inability or refusal is a typed source-unavailable failure. The private
-volume must reserve the configured transport plus materialization ceilings.
+storage is monitored while every credential-bearing Git command runs and is
+measured again after every command against the configuration-bound
+transport-staging quota. The complete Git process group is killed when the live
+monitor observes a breach; only selected blobs and required `.gitmodules`
+content are fetched lazily, and a quota breach fails before publication. An
+admitted repository endpoint must support filtered fetch and exact reachable
+promisor-object wants; inability or refusal is a typed source-unavailable
+failure. The private volume must reserve the configured transport plus
+materialization ceilings.
 `FETCH_HEAD^{commit}` must equal the
 request's full commit before any source is published. A later movement of the
 same ref is delivered only by a new request naming the later exact commit; a
