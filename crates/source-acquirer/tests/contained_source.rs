@@ -16,7 +16,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use mcloving_source_acquirer::{
     AcquisitionRequest, PROTOCOL_VERSION, RepositoryBinding, SourceAcquirer, SourceConfig,
-    SourceError, SubmoduleRequest, TrustClass, content_sha256, marker_set_digest, sha256_file,
+    SourceError, SubmoduleRequest, TrustClass, content_sha256, inspect_runtime_closure,
+    marker_set_digest, runtime_closure_digest, sha256_file,
 };
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt as _;
@@ -126,10 +127,20 @@ impl Context {
             git_executable_path.parent().expect("git parent"),
             ["--version"],
         );
-        let implementation_sha256 =
-            sha256_file(&std::env::current_exe().expect("contained source test executable"))
-                .await
-                .expect("contained source implementation digest");
+        let implementation_path =
+            std::env::current_exe().expect("contained source test executable");
+        let implementation_sha256 = sha256_file(&implementation_path)
+            .await
+            .expect("contained source implementation digest");
+        let runtime_closure = inspect_runtime_closure(&[
+            git_executable_path.clone(),
+            git_remote_https_executable_path.clone(),
+            implementation_path,
+        ])
+        .await
+        .expect("contained runtime closure");
+        let runtime_closure_sha256 =
+            runtime_closure_digest(&runtime_closure).expect("runtime closure digest");
         let config = SourceConfig {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             schema_version: "source-acquisition-v1".to_owned(),
@@ -151,6 +162,8 @@ impl Context {
             git_executable_sha256: git_sha256,
             git_remote_https_executable_path,
             git_remote_https_executable_sha256: git_remote_https_sha256,
+            runtime_closure,
+            runtime_closure_sha256,
             git_version,
             grant_id: "contained-grant".to_owned(),
             grant_version: "grant-v1".to_owned(),
@@ -405,6 +418,37 @@ async fn untrusted_fork_is_denied_before_source_access() {
         context.acquirer.acquire(&malformed_submodule_path).await,
         Err(SourceError::SubmoduleMismatch)
     ));
+}
+
+#[tokio::test]
+async fn repository_that_ignores_blob_filter_is_denied_without_publication() {
+    let repositories = tempfile::tempdir().expect("repositories tempdir");
+    let root = RepositoryFixture::new(repositories.path(), "filter-refusal-root");
+    root.write("README.md", b"small unfiltered source\n");
+    let commit = root.commit("filter refusal");
+    run_git(&root.bare, ["config", "uploadpack.allowFilter", "false"]);
+    let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+    let request = context.request(&commit);
+    assert!(matches!(
+        context.acquirer.acquire(&request).await,
+        Err(SourceError::SourceUnavailable)
+    ));
+    assert!(
+        std::fs::read_dir(&context.config.output_root)
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".stage-"))
+    );
+    assert!(
+        !context
+            .config
+            .output_root
+            .join(request.acquisition_id.to_string())
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -728,6 +772,24 @@ async fn git_execution_uses_the_verified_open_inode_after_path_replacement() {
     config.git_executable_path = bound_git.clone();
     config.git_executable_sha256 = sha256_file(&bound_git).await.unwrap();
     config.output_root = authority_root.join("open-git-inode-output");
+    let mut incomplete_runtime = config.clone();
+    incomplete_runtime.generation += 1;
+    incomplete_runtime.output_root = authority_root.join("incomplete-runtime-output");
+    incomplete_runtime.runtime_closure.pop();
+    incomplete_runtime.runtime_closure_sha256 =
+        runtime_closure_digest(&incomplete_runtime.runtime_closure).unwrap();
+    assert!(matches!(
+        SourceAcquirer::new(
+            incomplete_runtime,
+            context.implementation_sha256.clone(),
+            context.credential_path.clone(),
+            CREDENTIAL,
+            SIGNING_KEY.to_vec(),
+            vec![CREDENTIAL.to_vec()],
+        )
+        .await,
+        Err(SourceError::InvalidConfig)
+    ));
     let acquirer = context.acquirer_for(config.clone()).await;
 
     let replacement_marker = authority_root.join("replacement-executed");
@@ -748,6 +810,10 @@ async fn git_execution_uses_the_verified_open_inode_after_path_replacement() {
     request.expected_git_sha256 = config.git_executable_sha256;
     request.expected_config_sha256 = acquirer.config_sha256().to_owned();
     let receipt = acquirer.acquire(&request).await.unwrap();
+    assert_eq!(
+        receipt.runtime_closure_sha256,
+        config.runtime_closure_sha256
+    );
     assert!(!replacement_marker.exists());
     assert_eq!(
         std::fs::read(
@@ -1149,6 +1215,11 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     write_private(&signing_key_path, SIGNING_KEY);
     write_private(&marker_path, &[CREDENTIAL, b"\n"].concat());
     let repository_url = format!("http://{address}/private.git");
+    let runtime_closure =
+        inspect_runtime_closure(&[git.clone(), bound_git_remote_https.clone(), binary.clone()])
+            .await
+            .unwrap();
+    let runtime_closure_sha256 = runtime_closure_digest(&runtime_closure).unwrap();
     let mut config = SourceConfig {
         protocol_version: PROTOCOL_VERSION.to_owned(),
         schema_version: "source-acquisition-v1".to_owned(),
@@ -1170,6 +1241,8 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         git_executable_sha256: sha256_file(&git).await.unwrap(),
         git_remote_https_executable_path: bound_git_remote_https.clone(),
         git_remote_https_executable_sha256: sha256_file(&bound_git_remote_https).await.unwrap(),
+        runtime_closure,
+        runtime_closure_sha256,
         git_version: git_output(git.parent().unwrap(), ["--version"]),
         grant_id: "contained-http-grant".to_owned(),
         grant_version: "grant-v1".to_owned(),

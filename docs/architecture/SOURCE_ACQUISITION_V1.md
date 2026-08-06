@@ -38,8 +38,9 @@ credential, unrelated secret, dependency resolver, cache, trigger, connector,
 observer, or effect authority. Pipeline runners never receive the source
 credential and cannot ask the acquirer to run an arbitrary Git command.
 
-V1 is admitted only on Linux hosts with sealed-memory-file support. The output root must be absolute, canonical,
-owned by the effective UID, non-symlink, and mode `0700`. Configuration,
+V1 is admitted only on Linux hosts with sealed-memory-file support. The output
+root must be absolute, canonical, owned by the effective UID, non-symlink, and
+mode `0700`. Configuration,
 credential, signing-key, marker, executable, claim, receipt, and retained
 manifest reads are bounded and reject non-regular or final-component symlink
 files. Credential and signing-key files must be owned by the effective UID and
@@ -57,6 +58,8 @@ The canonical configuration digest binds:
 - provider identity, exact normalized repository URL/identity, and fork policy;
 - exact Git executable path/SHA-256/version and exact HTTPS remote-helper
   executable path/SHA-256;
+- the strictly ordered canonical absolute path and SHA-256 of every resolved
+  dynamic-runtime file plus the digest of that complete closure;
 - grant identity/version/scope/expiry and credential SHA-256;
 - receipt-key identity/content digest and secret-marker-set digest;
 - allowed ref prefixes, submodule repositories, sparse roots, and maximum depth;
@@ -82,10 +85,19 @@ snapshot as `git` and `git-upload-pack` and the sealed transport helper as
 `git-remote-http` and `git-remote-https`, preventing ambient lookup by Git's
 internal children as well as its transport. Original-path replacement or
 in-place mutation therefore cannot substitute bytes between verification and
-use. Credential material is also revalidated before every Git invocation. A
+use. At initialization the process resolves the dynamic loader and shared
+libraries for the sealed Git, helper, and askpass images, requires that exact
+set to equal the configured runtime closure, and opens every closure file by
+descriptor. Runtime files must be root-owned regular files with no group/world
+write permission and retain the configured inode and content digest. Git runs
+with immediate symbol binding and a private descriptor-backed library directory
+whose exact symlink inventory names only those closure files; both the retained
+files and directory topology are reverified before every invocation. Missing,
+extra, reordered, substituted, mutable, or same-name closure entries fail
+closed. Credential material is also revalidated before every Git invocation. A
 caller must present the acquirer, Git, helper, and canonical-configuration
-hashes. Any implementation, Git, helper, repository, grant, policy, or
-generation substitution fails before Git or network access.
+hashes. Any implementation, runtime closure, Git, helper, repository, grant,
+policy, or generation substitution fails before Git or network access.
 
 ## Acquisition request
 
@@ -122,8 +134,10 @@ measurement from the repository root; three failed restarts fail closed and
 terminate the process group. Only selected blobs and required `.gitmodules`
 content are fetched lazily, and a quota breach fails before publication. An
 admitted repository endpoint must support filtered fetch and exact reachable
-promisor-object wants; inability or refusal is a typed source-unavailable
-failure. The private volume must reserve the configured transport plus
+promisor-object wants. A successful server response that warns it ignored
+`blob:none` is treated as refusal and is a typed source-unavailable failure;
+the acquirer never accepts an unfiltered fallback. The private volume must
+reserve the configured transport plus
 materialization ceilings.
 `FETCH_HEAD^{commit}` must equal the
 request's full commit before any source is published. A later movement of the
@@ -199,15 +213,21 @@ atomically renamed to its final acquisition-ID path. Each final file mode and
 nested-directory mode is fsynced after chmod and before rename. Every retained file and
 directory, including the acquisition root, is made read-only before publication,
 and replay revalidates every directory's owner and exact mode as well as every
-leaf. Publication and timeout
-decisions share the same exclusive output-root lock so a late snapshot cannot
-appear after a caller has accepted timeout. Failed and expired staging trees
-recursively restore owner-write directory modes before removal without following
-symlinks.
+leaf. Publication and timeout decisions share the same exclusive output-root
+lock. A claim is checked before any completed receipt can replay. After final
+rename and root synchronization, the deadline is checked before and after claim
+removal. If either check is late or any post-rename synchronization/finalization
+step fails, the claim exists or is recreated and the public acquisition
+directory is atomically renamed to an unpredictable hidden quarantine before
+the root lock is released, then removed. A late snapshot
+therefore cannot replay or remain at its public path after a caller has accepted
+timeout. Failed and expired staging trees recursively restore owner-write
+directory modes before removal without following symlinks.
 
 The canonical manifest binds path, Git mode, Git object ID, byte length, and
 SHA-256 for every materialized entry plus each submodule boundary. The receipt
-repeats every relevant request/configuration identity and adds the resolved
+repeats every relevant request/configuration identity, including the certified
+runtime-closure digest, and adds the resolved
 commit/tree, complete submodule graph, sparse/depth options, manifest/content
 digests, output-relative identity, counts/bytes, acquisition time, publication
 deadline, and signing-key identity. HMAC-SHA-256 covers the complete receipt;
@@ -228,8 +248,9 @@ credential success/denial/non-disclosure, replay mismatch, concurrent
 deduplication, restart replay, sparse/depth behavior, recursive submodules,
 submodule substitution/cycles, unsafe paths/symlinks, file/count/byte/time
 bounds, cleanup, configuration/Git/executable drift and path replacement,
-credential-marker completeness, retained-directory mode drift, generation
-cutover, rollback binding, and differential snapshot truth.
+credential-marker completeness, runtime-closure omission, filtered-fetch
+refusal, retained-directory mode drift, late final-publication withdrawal,
+generation cutover, rollback binding, and differential snapshot truth.
 
 An inventory test separately pins the accepted Mario manifests and proves that
 their current denominator contains zero admitted live SCM configurations or

@@ -39,12 +39,92 @@ const MAX_TRANSPORT_QUOTA_SCAN_RESTARTS: usize = 3;
 const MAX_AUTHORITY_BYTES: usize = 64 * 1_024;
 const MAX_MARKERS: usize = 256;
 const MAX_MARKER_BYTES: usize = 256 * 1_024;
+const FILTER_IGNORED_WARNING: &[u8] = b"warning: filtering not recognized by server, ignoring";
 
 type HmacSha256 = Hmac<Sha256>;
 
 struct VerifiedFile {
     file: std::fs::File,
     invocation_path: PathBuf,
+}
+
+struct VerifiedRuntimeFile {
+    binding: RuntimeBinding,
+    file: std::fs::File,
+    device: u64,
+    inode: u64,
+}
+
+struct RuntimeDirectory {
+    path: PathBuf,
+    _directory: std::fs::File,
+    invocation_path: PathBuf,
+    links: Vec<(OsString, PathBuf)>,
+}
+
+impl RuntimeDirectory {
+    fn verify(&self) -> Result<(), SourceError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(SourceError::InvalidConfig)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+            let metadata = std::fs::metadata(&self.invocation_path)
+                .map_err(|_| SourceError::BindingMismatch)?;
+            if !metadata.file_type().is_dir()
+                || metadata.permissions().mode() & 0o7777 != 0o500
+                || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+            {
+                return Err(SourceError::BindingMismatch);
+            }
+            let actual_names = std::fs::read_dir(&self.invocation_path)
+                .map_err(|_| SourceError::BindingMismatch)?
+                .map(|entry| {
+                    entry
+                        .map(|entry| entry.file_name())
+                        .map_err(|_| SourceError::BindingMismatch)
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            let expected_names = self
+                .links
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<BTreeSet<_>>();
+            if actual_names != expected_names {
+                return Err(SourceError::BindingMismatch);
+            }
+            for (name, target) in &self.links {
+                let link_path = self.invocation_path.join(name);
+                let metadata = std::fs::symlink_metadata(&link_path)
+                    .map_err(|_| SourceError::BindingMismatch)?;
+                if !metadata.file_type().is_symlink()
+                    || std::fs::read_link(link_path).map_err(|_| SourceError::BindingMismatch)?
+                        != *target
+                {
+                    return Err(SourceError::BindingMismatch);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+impl Drop for RuntimeDirectory {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o700));
+            for (name, _) in &self.links {
+                let _ = std::fs::remove_file(self.path.join(name));
+            }
+            let _ = std::fs::remove_dir(&self.path);
+        }
+    }
 }
 
 struct GitExecDirectory {
@@ -219,6 +299,13 @@ pub struct RepositoryBinding {
     pub repository_url: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeBinding {
+    pub path: PathBuf,
+    pub sha256: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceConfig {
@@ -238,6 +325,8 @@ pub struct SourceConfig {
     pub git_executable_sha256: String,
     pub git_remote_https_executable_path: PathBuf,
     pub git_remote_https_executable_sha256: String,
+    pub runtime_closure: Vec<RuntimeBinding>,
+    pub runtime_closure_sha256: String,
     pub git_version: String,
     pub grant_id: String,
     pub grant_version: String,
@@ -357,6 +446,7 @@ pub struct AcquisitionReceipt {
     pub acquirer_implementation_sha256: String,
     pub git_implementation_sha256: String,
     pub git_remote_https_implementation_sha256: String,
+    pub runtime_closure_sha256: String,
     pub git_version: String,
     pub acquirer_config_sha256: String,
     pub deployment_identity: String,
@@ -474,6 +564,8 @@ pub struct SourceAcquirer {
     git_remote_https_executable: VerifiedFile,
     askpass_executable: VerifiedFile,
     ca_bundle: Option<VerifiedFile>,
+    runtime_closure: Vec<VerifiedRuntimeFile>,
+    runtime_directory: RuntimeDirectory,
     git_exec_directory: GitExecDirectory,
     credential_path: PathBuf,
     signing_key: Vec<u8>,
@@ -533,6 +625,26 @@ impl SourceAcquirer {
             (None, None) => None,
             _ => return Err(SourceError::InvalidConfig),
         };
+        let runtime_closure = open_runtime_closure(&config.runtime_closure).await?;
+        let runtime_directory =
+            create_runtime_directory(&config.output_root, &config.runtime_closure)?;
+        let observed_runtime = trace_runtime_closure(
+            &[
+                git_executable.invocation_path.clone(),
+                git_remote_https_executable.invocation_path.clone(),
+                askpass_executable.invocation_path.clone(),
+            ],
+            Some(&runtime_directory.invocation_path),
+        )
+        .await?;
+        let configured_runtime = config
+            .runtime_closure
+            .iter()
+            .map(|binding| binding.path.clone())
+            .collect::<BTreeSet<_>>();
+        if observed_runtime != configured_runtime {
+            return Err(SourceError::InvalidConfig);
+        }
         let git_exec_directory = create_git_exec_directory(
             &config.output_root,
             &git_executable.invocation_path,
@@ -549,6 +661,8 @@ impl SourceAcquirer {
             git_remote_https_executable,
             askpass_executable,
             ca_bundle,
+            runtime_closure,
+            runtime_directory,
             git_exec_directory,
             credential_path,
             signing_key,
@@ -577,15 +691,15 @@ impl SourceAcquirer {
         let _root_lock = lock_output_root(&self.config.output_root).await?;
         let now = now_unix_ms()?;
         let request_sha256 = self.validate_request(request, now)?;
+        if claim_path(&self.config.output_root, request.acquisition_id).exists() {
+            return Err(SourceError::AmbiguousClaim);
+        }
         if let Some(receipt) = self.load_receipt(request.acquisition_id).await? {
             if receipt.request_sha256 != request_sha256 {
                 return Err(SourceError::ReplayMismatch);
             }
             self.verify_receipt(&receipt).await?;
             return Ok(receipt);
-        }
-        if claim_path(&self.config.output_root, request.acquisition_id).exists() {
-            return Err(SourceError::AmbiguousClaim);
         }
         self.verify_runtime_authority(true).await?;
         let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
@@ -885,6 +999,7 @@ impl SourceAcquirer {
                 .config
                 .git_remote_https_executable_sha256
                 .clone(),
+            runtime_closure_sha256: self.config.runtime_closure_sha256.clone(),
             git_version: self.config.git_version.clone(),
             acquirer_config_sha256: self.config_sha256.clone(),
             deployment_identity: self.config.deployment_identity.clone(),
@@ -927,15 +1042,17 @@ impl SourceAcquirer {
         set_mode(stage, 0o500).await?;
         sync_directory(stage).await?;
         self.ensure_before_deadline(publication_deadline_unix_ms)?;
-        let final_path = acquisition_path(&self.config.output_root, request.acquisition_id);
-        if tokio::fs::rename(stage, &final_path).await.is_err() {
-            return Err(SourceError::StateUnavailable);
-        }
-        sync_directory(&self.config.output_root).await?;
-        tokio::fs::remove_file(claim_path(&self.config.output_root, request.acquisition_id))
-            .await
-            .map_err(|_| SourceError::StateUnavailable)?;
-        sync_directory(&self.config.output_root).await?;
+        publish_stage(
+            &self.config.output_root,
+            stage,
+            request.acquisition_id,
+            &AcquisitionClaim {
+                protocol_version: PROTOCOL_VERSION.to_owned(),
+                request_sha256: request_sha256.to_owned(),
+                publication_deadline_unix_ms,
+            },
+        )
+        .await?;
         Ok(receipt)
     }
 
@@ -1371,6 +1488,8 @@ impl SourceAcquirer {
             .env("LC_ALL", "C")
             .env("PATH", &self.git_exec_directory.invocation_path)
             .env("HOME", "/nonexistent")
+            .env("LD_BIND_NOW", "1")
+            .env("LD_LIBRARY_PATH", &self.runtime_directory.invocation_path)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_EXEC_PATH", &self.git_exec_directory.invocation_path)
@@ -1550,6 +1669,13 @@ impl SourceAcquirer {
             .map_err(|_| SourceError::LimitExceeded)?;
         self.reject_secret_markers(&stdout)?;
         self.reject_secret_markers(&stderr)?;
+        if credential_bearing
+            && stderr
+                .windows(FILTER_IGNORED_WARNING.len())
+                .any(|window| window == FILTER_IGNORED_WARNING)
+        {
+            return Err(SourceError::SourceUnavailable);
+        }
         if !status.success() {
             return Err(SourceError::SourceUnavailable);
         }
@@ -1575,6 +1701,8 @@ impl SourceAcquirer {
         {
             return Err(SourceError::BindingMismatch);
         }
+        verify_runtime_closure_files(&self.runtime_closure).await?;
+        self.runtime_directory.verify()?;
         Ok(())
     }
 
@@ -1604,6 +1732,7 @@ impl SourceAcquirer {
             || receipt.git_implementation_sha256 != self.config.git_executable_sha256
             || receipt.git_remote_https_implementation_sha256
                 != self.config.git_remote_https_executable_sha256
+            || receipt.runtime_closure_sha256 != self.config.runtime_closure_sha256
             || receipt.git_version != self.config.git_version
             || receipt.acquirer_config_sha256 != self.config_sha256
             || receipt.deployment_identity != self.config.deployment_identity
@@ -1809,6 +1938,8 @@ fn validate_config(
     signing_key: &[u8],
     markers: &[Vec<u8>],
 ) -> Result<(), SourceError> {
+    let runtime_closure_digest_matches = runtime_closure_digest(&config.runtime_closure)
+        .is_ok_and(|digest| digest == config.runtime_closure_sha256);
     if config.protocol_version != PROTOCOL_VERSION
         || [
             &config.schema_version,
@@ -1831,6 +1962,7 @@ fn validate_config(
         || !is_sha256_hex(implementation_sha256)
         || !is_sha256_hex(&config.git_executable_sha256)
         || !is_sha256_hex(&config.git_remote_https_executable_sha256)
+        || !is_sha256_hex(&config.runtime_closure_sha256)
         || !is_sha256_hex(&config.credential_sha256)
         || !is_sha256_hex(&config.receipt_signing_key_sha256)
         || !is_sha256_hex(&config.secret_marker_set_sha256)
@@ -1862,6 +1994,24 @@ fn validate_config(
         || config.command_timeout_ms == 0
         || config.command_timeout_ms > MAX_CONFIGURED_TIMEOUT_MS
         || config.allowed_ref_prefixes.is_empty()
+        || config.runtime_closure.is_empty()
+        || config.runtime_closure.iter().any(|binding| {
+            !binding.path.is_absolute()
+                || !is_sha256_hex(&binding.sha256)
+                || std::fs::canonicalize(&binding.path).ok().as_ref() != Some(&binding.path)
+        })
+        || config
+            .runtime_closure
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || config
+            .runtime_closure
+            .iter()
+            .filter_map(|binding| binding.path.file_name())
+            .collect::<BTreeSet<_>>()
+            .len()
+            != config.runtime_closure.len()
+        || !runtime_closure_digest_matches
     {
         return Err(SourceError::InvalidConfig);
     }
@@ -2378,6 +2528,174 @@ pub async fn sha256_file(path: &Path) -> Result<String, SourceError> {
     Ok(sha256_hex(&bytes))
 }
 
+pub fn runtime_closure_digest(bindings: &[RuntimeBinding]) -> Result<String, SourceError> {
+    canonical_digest(&bindings)
+}
+
+pub async fn inspect_runtime_closure(
+    executables: &[PathBuf],
+) -> Result<Vec<RuntimeBinding>, SourceError> {
+    let paths = trace_runtime_closure(executables, None).await?;
+    let mut bindings = Vec::with_capacity(paths.len());
+    for path in paths {
+        bindings.push(RuntimeBinding {
+            sha256: sha256_file(&path).await?,
+            path,
+        });
+    }
+    bindings.sort();
+    Ok(bindings)
+}
+
+async fn open_runtime_closure(
+    bindings: &[RuntimeBinding],
+) -> Result<Vec<VerifiedRuntimeFile>, SourceError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = bindings;
+        Err(SourceError::InvalidConfig)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+        let mut verified = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+                .open(&binding.path)
+                .map_err(|_| SourceError::InvalidConfig)?;
+            let metadata = file.metadata().map_err(|_| SourceError::InvalidConfig)?;
+            if !metadata.file_type().is_file()
+                || metadata.len() > MAX_EXECUTABLE_BYTES
+                || metadata.uid() != 0
+                || metadata.permissions().mode() & 0o022 != 0
+                || sha256_open_file(&file).await? != binding.sha256
+            {
+                return Err(SourceError::InvalidConfig);
+            }
+            verified.push(VerifiedRuntimeFile {
+                binding: binding.clone(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                file,
+            });
+        }
+        Ok(verified)
+    }
+}
+
+async fn verify_runtime_closure_files(runtime: &[VerifiedRuntimeFile]) -> Result<(), SourceError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = runtime;
+        Err(SourceError::BindingMismatch)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        for entry in runtime {
+            let metadata =
+                std::fs::metadata(&entry.binding.path).map_err(|_| SourceError::BindingMismatch)?;
+            if !metadata.file_type().is_file()
+                || metadata.dev() != entry.device
+                || metadata.ino() != entry.inode
+                || metadata.uid() != 0
+                || metadata.permissions().mode() & 0o022 != 0
+                || sha256_open_file(&entry.file).await? != entry.binding.sha256
+            {
+                return Err(SourceError::BindingMismatch);
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn trace_runtime_closure(
+    executables: &[PathBuf],
+    runtime_directory: Option<&Path>,
+) -> Result<BTreeSet<PathBuf>, SourceError> {
+    let mut closure = BTreeSet::new();
+    for executable in executables {
+        let mut command = Command::new(executable);
+        command
+            .env_clear()
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .env("LD_BIND_NOW", "1")
+            .env("LD_TRACE_LOADED_OBJECTS", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(runtime_directory) = runtime_directory {
+            command.env("LD_LIBRARY_PATH", runtime_directory);
+        }
+        let mut child = command.spawn().map_err(|_| SourceError::InvalidConfig)?;
+        let stdout = child.stdout.take().ok_or(SourceError::InvalidConfig)?;
+        let stderr = child.stderr.take().ok_or(SourceError::InvalidConfig)?;
+        let stdout_task = tokio::spawn(read_bounded(stdout, MAX_BINDING_TEXT_BYTES * 16));
+        let stderr_task = tokio::spawn(read_bounded(stderr, MAX_BINDING_TEXT_BYTES));
+        let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(status) => status.map_err(|_| SourceError::InvalidConfig)?,
+            Err(_) => {
+                child.start_kill().map_err(|_| SourceError::InvalidConfig)?;
+                let _ = child.wait().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                return Err(SourceError::InvalidConfig);
+            }
+        };
+        let stdout = stdout_task
+            .await
+            .map_err(|_| SourceError::InvalidConfig)?
+            .map_err(|_| SourceError::InvalidConfig)?;
+        let stderr = stderr_task
+            .await
+            .map_err(|_| SourceError::InvalidConfig)?
+            .map_err(|_| SourceError::InvalidConfig)?;
+        if !status.success() || !stderr.is_empty() {
+            return Err(SourceError::InvalidConfig);
+        }
+        let output = std::str::from_utf8(&stdout).map_err(|_| SourceError::InvalidConfig)?;
+        for line in output
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let candidate = if let Some((_, resolved)) = line.split_once("=>") {
+                let path = resolved
+                    .split_ascii_whitespace()
+                    .next()
+                    .ok_or(SourceError::InvalidConfig)?;
+                if path == "not" {
+                    return Err(SourceError::InvalidConfig);
+                }
+                Some(path)
+            } else {
+                line.split_ascii_whitespace()
+                    .next()
+                    .filter(|path| path.starts_with('/'))
+            };
+            if let Some(candidate) = candidate {
+                let canonical =
+                    std::fs::canonicalize(candidate).map_err(|_| SourceError::InvalidConfig)?;
+                if !canonical.is_absolute() {
+                    return Err(SourceError::InvalidConfig);
+                }
+                closure.insert(canonical);
+            } else if !line.starts_with("linux-vdso") && line != "statically linked" {
+                return Err(SourceError::InvalidConfig);
+            }
+        }
+    }
+    Ok(closure)
+}
+
 async fn snapshot_verified_file(
     path: &Path,
     expected_sha256: &str,
@@ -2446,6 +2764,58 @@ async fn snapshot_verified_file(
         Ok(VerifiedFile {
             file,
             invocation_path,
+        })
+    }
+}
+
+fn create_runtime_directory(
+    output_root: &Path,
+    bindings: &[RuntimeBinding],
+) -> Result<RuntimeDirectory, SourceError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (output_root, bindings);
+        Err(SourceError::InvalidConfig)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
+
+        let path = output_root.join(format!(".runtime-{}", Uuid::new_v4()));
+        std::fs::create_dir(&path).map_err(|_| SourceError::StateUnavailable)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let mut links = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            let name = binding
+                .path
+                .file_name()
+                .ok_or(SourceError::InvalidConfig)?
+                .to_os_string();
+            if links.iter().any(|(existing, _)| existing == &name) {
+                return Err(SourceError::InvalidConfig);
+            }
+            symlink(&binding.path, path.join(&name)).map_err(|_| SourceError::StateUnavailable)?;
+            links.push((name, binding.path.clone()));
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500))
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let invocation_path = PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            directory.as_raw_fd()
+        ));
+        Ok(RuntimeDirectory {
+            path,
+            _directory: directory,
+            invocation_path,
+            links,
         })
     }
 }
@@ -3086,10 +3456,112 @@ async fn sync_directory(_path: &Path) -> Result<(), SourceError> {
     Err(SourceError::InvalidConfig)
 }
 
+async fn publish_stage(
+    root: &Path,
+    stage: &Path,
+    acquisition_id: Uuid,
+    claim: &AcquisitionClaim,
+) -> Result<(), SourceError> {
+    let final_path = acquisition_path(root, acquisition_id);
+    tokio::fs::rename(stage, &final_path)
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?;
+    if sync_directory(root).await.is_err() {
+        withdraw_late_publication(root, acquisition_id, claim, &final_path).await?;
+        return Err(SourceError::StateUnavailable);
+    }
+    if now_unix_ms()? >= claim.publication_deadline_unix_ms {
+        withdraw_late_publication(root, acquisition_id, claim, &final_path).await?;
+        return Err(SourceError::ExpiredRequest);
+    }
+    if tokio::fs::remove_file(claim_path(root, acquisition_id))
+        .await
+        .is_err()
+    {
+        withdraw_late_publication(root, acquisition_id, claim, &final_path).await?;
+        return Err(SourceError::StateUnavailable);
+    }
+    if sync_directory(root).await.is_err() {
+        withdraw_late_publication(root, acquisition_id, claim, &final_path).await?;
+        return Err(SourceError::StateUnavailable);
+    }
+    if now_unix_ms()? >= claim.publication_deadline_unix_ms {
+        withdraw_late_publication(root, acquisition_id, claim, &final_path).await?;
+        return Err(SourceError::ExpiredRequest);
+    }
+    Ok(())
+}
+
+async fn withdraw_late_publication(
+    root: &Path,
+    acquisition_id: Uuid,
+    claim: &AcquisitionClaim,
+    final_path: &Path,
+) -> Result<(), SourceError> {
+    let claim_path = claim_path(root, acquisition_id);
+    if !claim_path.exists() {
+        let bytes = serde_json::to_vec(claim).map_err(|_| SourceError::StateUnavailable)?;
+        write_new_file(&claim_path, &bytes, 0o600).await?;
+    }
+    let quarantine = root.join(format!(".expired-{acquisition_id}-{}", Uuid::new_v4()));
+    tokio::fs::rename(final_path, &quarantine)
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?;
+    sync_directory(root).await?;
+    make_tree_owner_writable(&quarantine).await?;
+    tokio::fs::remove_dir_all(&quarantine)
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?;
+    sync_directory(root).await
+}
+
 fn acquisition_path(root: &Path, acquisition_id: Uuid) -> PathBuf {
     root.join(acquisition_id.to_string())
 }
 
 fn claim_path(root: &Path, acquisition_id: Uuid) -> PathBuf {
     root.join(format!("{acquisition_id}.claim.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn expired_final_publication_is_withdrawn_while_claim_remains() {
+        let temporary = tempfile::tempdir().expect("publication tempdir");
+        let root = temporary.path();
+        let acquisition_id = Uuid::new_v4();
+        let stage = root.join("stage");
+        create_private_directory(&stage).await.unwrap();
+        write_new_file(&stage.join("receipt.json"), b"{}", 0o400)
+            .await
+            .unwrap();
+        let claim = AcquisitionClaim {
+            protocol_version: PROTOCOL_VERSION.to_owned(),
+            request_sha256: "a".repeat(64),
+            publication_deadline_unix_ms: now_unix_ms().unwrap() - 1,
+        };
+        write_new_file(
+            &claim_path(root, acquisition_id),
+            &serde_json::to_vec(&claim).unwrap(),
+            0o600,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            publish_stage(root, &stage, acquisition_id, &claim).await,
+            Err(SourceError::ExpiredRequest)
+        ));
+        assert!(!acquisition_path(root, acquisition_id).exists());
+        assert!(claim_path(root, acquisition_id).exists());
+        assert!(std::fs::read_dir(root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".expired-")
+        }));
+    }
 }

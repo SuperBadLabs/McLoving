@@ -7,11 +7,11 @@ Status: REOPENED. The earlier implementation candidate
 nineteen focused tests after ten findings were fixed, but later exact-head
 review correctly identified additional executable/helper binding,
 authority-snapshot immutability, credential-marker, retained-directory, and
-test-readiness gaps. The replacement implementation has
-twenty focused source-acquisition tests: four protocol tests, fourteen contained
-end-to-end tests, and two sealed-inventory tests. This receipt cannot return to
-PASS until its replacement exact head independently passes review and every
-protected check.
+test-readiness gaps. The replacement implementation has twenty-two focused
+source-acquisition tests: one final-publication unit test, four protocol tests,
+fifteen contained end-to-end tests, and two sealed-inventory tests. This receipt
+cannot return to PASS until its replacement exact head independently passes
+review and every protected check.
 
 PR #34 now keeps SCM-001 active and DEP-001 blocked while the reopened findings
 are verified. A later closure-only head may restore the execution-board
@@ -42,8 +42,9 @@ not substituted for a live source-acquisition denominator.
   object format, source identity, trust class, fork policy, submodule graph,
   sparse roots, depth, tenant/build/attempt identities, expiry, and audit lineage;
 - sealed immutable Git, HTTPS-helper, askpass, and CA snapshots, a private-only
-  Git child-command path, plus credential revalidation before every Git
-  invocation;
+  Git child-command path, a content/inode-bound root-owned dynamic-runtime
+  closure exposed through a descriptor-backed library directory, plus
+  credential and runtime revalidation before every Git invocation;
 - exact primary, fork, and submodule repository allowlists, including
   fail-closed untrusted-fork and repository-substitution denial;
 - smart-HTTP askpass delivery that preserves credential bytes exactly while
@@ -53,8 +54,9 @@ not substituted for a live source-acquisition denominator.
   case-fold collision, special-file, unsafe-symlink, mode, path, file, byte,
   submodule, network, and command-time bounds;
 - durable first-writer claims, a cross-process output-root lock, private staging,
-  atomic publication, deterministic replay, retained-output verification, and
-  fail-closed ambiguity retention; and
+  deadline-fenced atomic publication with late-path withdrawal, deterministic
+  claim-first replay, retained-output verification, and fail-closed ambiguity
+  retention; and
 - HMAC-signed receipts binding the exact request, authority, implementation,
   configuration, repository trees, full retained tree inventory, content
   digests, generation, and rollback lineage.
@@ -63,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced twenty-six actionable threads so far. The
+Independent review has produced twenty-nine actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -164,6 +166,25 @@ which also terminates the complete Git process group. The twenty-fifth and
 twenty-sixth findings cannot contribute closure until this replacement exact
 head is independently reverified.
 
+Review of that replacement found three remaining fail-open seams. First,
+dynamically loaded Git/helper runtime files were not part of the executable
+attestation. Second, a server could report success while warning that it ignored
+`blob:none`. Third, final rename and root synchronization could cross the signed
+publication deadline before the existing last check. The replacement now binds
+the strictly ordered complete loader/library closure into configuration and
+receipts, retains root-owned non-writable runtime files by descriptor, traces
+the sealed Git/helper/askpass images through an exact descriptor-backed library
+directory, and revalidates every file and directory link before each command.
+An omitted closure member is denied at construction. Any credential-bearing
+command that reports the server ignored filtering is source-unavailable and
+leaves no publication. Final publication now checks the deadline after rename
+and root synchronization and again after claim removal; a late path is
+atomically moved out of its public name under the root lock while an ambiguity
+claim remains. The focused final-publication proof forces the post-rename
+expired case and verifies that neither a public nor quarantine path remains.
+The twenty-seventh through twenty-ninth findings cannot contribute closure
+until this replacement exact head is independently reverified.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
@@ -171,9 +192,10 @@ fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
 suite, strict Clippy, formatting, and the rerun protected checks pass.
 
 The replacement implementation currently passes `git diff --check`, Rust
-formatting, strict source-acquirer Clippy, and all twenty focused
-source-acquisition tests on HeMan. Full locked-workspace, protected-check, and
-independent exact-head verification remain required before closure.
+formatting, strict source-acquirer Clippy, and all twenty-two focused
+source-acquisition tests plus the complete locked workspace suite on HeMan.
+Protected checks and independent exact-head verification remain required before
+closure.
 
 ## Residual risk and authority boundary
 
