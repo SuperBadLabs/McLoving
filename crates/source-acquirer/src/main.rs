@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use mcloving_source_acquirer::{
-    AcquisitionRequest, SourceAcquirer, SourceConfig, parse_json_no_duplicates,
+    AcquisitionRequest, SourceAcquirer, SourceConfig, content_sha256, parse_json_no_duplicates,
     read_bounded_regular_file, read_private_bounded_regular_file, sha256_file,
 };
 use serde::Serialize;
@@ -45,12 +45,15 @@ async fn run_askpass() -> Result<(), ()> {
         std::env::var("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME").map_err(|_| ())?
     } else if prompt.contains("Password") {
         let path = required_path("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE")?;
-        String::from_utf8(
-            read_private_bounded_regular_file(&path, MAX_CREDENTIAL_BYTES)
-                .await
-                .map_err(|_| ())?,
-        )
-        .map_err(|_| ())?
+        let credential = read_private_bounded_regular_file(&path, MAX_CREDENTIAL_BYTES)
+            .await
+            .map_err(|_| ())?;
+        if content_sha256(&credential)
+            != std::env::var("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_SHA256").map_err(|_| ())?
+        {
+            return Err(());
+        }
+        String::from_utf8(credential).map_err(|_| ())?
     } else {
         return Err(());
     };

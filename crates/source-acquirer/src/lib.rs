@@ -639,6 +639,7 @@ impl SourceAcquirer {
                             &mut exact_paths,
                             &mut folded_paths,
                         )?;
+                        create_relative_directories(&tree_dir, Path::new(&full_path)).await?;
                         manifest.push(ManifestEntry {
                             path: full_path,
                             git_mode: entry.mode,
@@ -1221,6 +1222,10 @@ impl SourceAcquirer {
                 .env(
                     "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME",
                     &self.config.credential_username,
+                )
+                .env(
+                    "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_SHA256",
+                    &self.config.credential_sha256,
                 );
         }
         if self.config.test_allow_http_loopback {

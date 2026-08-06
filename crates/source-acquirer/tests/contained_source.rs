@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
@@ -24,6 +24,7 @@ use url::Url;
 use uuid::Uuid;
 
 const CREDENTIAL: &[u8] = b"contained-source-credential-marker-00000001";
+const ROTATED_CREDENTIAL: &[u8] = b"rotated-source-credential-marker-000000001";
 const SIGNING_KEY: &[u8] = b"contained-source-receipt-signing-key-00000000000000000001";
 
 struct RepositoryFixture {
@@ -512,6 +513,38 @@ async fn exact_submodule_graph_is_materialized_without_submodule_commands() {
         Err(SourceError::LimitExceeded)
     ));
 
+    let mut gitlink_config = context.config.clone();
+    gitlink_config.generation += 2;
+    gitlink_config.max_files = 2;
+    gitlink_config.output_root = context
+        .credential_path
+        .parent()
+        .unwrap()
+        .join("gitlink-only-output");
+    let gitlink_acquirer = context.acquirer_for(gitlink_config.clone()).await;
+    let mut gitlink_request = request.clone();
+    gitlink_request.acquisition_id = Uuid::new_v4();
+    gitlink_request.expected_generation = gitlink_config.generation;
+    gitlink_request.expected_config_sha256 = gitlink_acquirer.config_sha256().to_owned();
+    gitlink_request.sparse_roots = vec![
+        "deps/child/missing".to_owned(),
+        "deps/child-copy/missing".to_owned(),
+    ];
+    let gitlink_receipt = gitlink_acquirer
+        .acquire(&gitlink_request)
+        .await
+        .expect("gitlink-only acquisition");
+    assert_eq!(gitlink_receipt.materialized_files, 2);
+    let gitlink_tree = gitlink_config
+        .output_root
+        .join(&gitlink_receipt.output_relative_path);
+    assert!(gitlink_tree.join("deps/child").is_dir());
+    assert!(gitlink_tree.join("deps/child-copy").is_dir());
+    assert_eq!(
+        gitlink_acquirer.acquire(&gitlink_request).await.unwrap(),
+        gitlink_receipt
+    );
+
     let mut substituted = context.request(&root_commit);
     let mut wrong = request.submodules[0].clone();
     wrong.repository_identity = "repository/substituted".to_owned();
@@ -833,6 +866,8 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     let authorized_requests = Arc::new(AtomicUsize::new(0));
     let unauthorized_requests = Arc::new(AtomicUsize::new(0));
     let response_delay_ms = Arc::new(AtomicU64::new(0));
+    let rotate_credential_on_unauthorized = Arc::new(AtomicBool::new(false));
+    let credential_path = temporary.path().join("credential");
     let state = SmartHttpState {
         project_root: temporary.path().to_owned(),
         expected_authorization: format!(
@@ -842,6 +877,8 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         authorized_requests: Arc::clone(&authorized_requests),
         unauthorized_requests: Arc::clone(&unauthorized_requests),
         response_delay_ms: Arc::clone(&response_delay_ms),
+        credential_path: credential_path.clone(),
+        rotate_credential_on_unauthorized: Arc::clone(&rotate_credential_on_unauthorized),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -859,7 +896,6 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
 
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_mcloving-source-acquirer"));
     let git = git_executable();
-    let credential_path = temporary.path().join("credential");
     let signing_key_path = temporary.path().join("signing-key");
     let marker_path = temporary.path().join("markers");
     let config_path = temporary.path().join("config.json");
@@ -972,6 +1008,52 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     );
     assert!(authorized_requests.load(Ordering::SeqCst) >= 2);
     assert!(unauthorized_requests.load(Ordering::SeqCst) >= 1);
+
+    config.output_root = temporary.path().join("rotated-after-verification-output");
+    request.acquisition_id = Uuid::new_v4();
+    request.expected_config_sha256 = config.canonical_digest().unwrap();
+    request.requested_at_unix_ms = now_ms() - 1_000;
+    request.expires_at_unix_ms = now_ms() + 60_000;
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    rotate_credential_on_unauthorized.store(true, Ordering::SeqCst);
+    let authorized_before_rotation = authorized_requests.load(Ordering::SeqCst);
+    let mut rotated = tokio::process::Command::new(&binary)
+        .env_clear()
+        .env("MCLOVING_SOURCE_ACQUIRER_CONFIG", &config_path)
+        .env("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE", &credential_path)
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE",
+            &signing_key_path,
+        )
+        .env("MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE", &marker_path)
+        .env("MCLOVING_SOURCE_ACQUIRER_TEST_MODE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("rotated-credential standalone source acquirer");
+    rotated
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .await
+        .unwrap();
+    let rotated_output = rotated.wait_with_output().await.unwrap();
+    assert!(rotated_output.status.success());
+    assert!(!contains(&rotated_output.stdout, CREDENTIAL));
+    assert!(!contains(&rotated_output.stderr, CREDENTIAL));
+    assert!(!contains(&rotated_output.stdout, ROTATED_CREDENTIAL));
+    assert!(!contains(&rotated_output.stderr, ROTATED_CREDENTIAL));
+    let rotated_response: serde_json::Value =
+        serde_json::from_slice(&rotated_output.stdout).unwrap();
+    assert_eq!(rotated_response["ok"], false);
+    assert_eq!(rotated_response["code"], "source_unavailable");
+    assert_eq!(
+        authorized_requests.load(Ordering::SeqCst),
+        authorized_before_rotation
+    );
+    assert_eq!(std::fs::read(&credential_path).unwrap(), ROTATED_CREDENTIAL);
 
     let denied_credential: &[u8] = b"denied-source-credential-marker-00000001";
     write_private(&credential_path, denied_credential);
@@ -1140,6 +1222,8 @@ struct SmartHttpState {
     authorized_requests: Arc<AtomicUsize>,
     unauthorized_requests: Arc<AtomicUsize>,
     response_delay_ms: Arc<AtomicU64>,
+    credential_path: PathBuf,
+    rotate_credential_on_unauthorized: Arc<AtomicBool>,
 }
 
 async fn smart_http(
@@ -1159,6 +1243,13 @@ async fn smart_http(
         == Some(state.expected_authorization.as_str());
     if !authorized {
         state.unauthorized_requests.fetch_add(1, Ordering::SeqCst);
+        if state
+            .rotate_credential_on_unauthorized
+            .swap(false, Ordering::SeqCst)
+        {
+            std::fs::write(&state.credential_path, ROTATED_CREDENTIAL)
+                .expect("rotate credential after verification");
+        }
         return Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header("www-authenticate", "Basic realm=\"contained-git\"")

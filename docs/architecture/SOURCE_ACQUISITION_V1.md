@@ -112,6 +112,9 @@ The credential reaches Git byte-for-byte only through the acquirer's bounded,
 implementation-hash-revalidated askpass mode; non-UTF-8 or newline-bearing
 grants are ineligible. It never appears in argv, configuration, receipt,
 diagnostics, or the output tree.
+Askpass re-hashes the exact bytes it reads against the configured credential
+digest before writing those same bytes, so a path replacement between parent
+verification and the remote prompt fails closed.
 The Git child receives a cleared environment containing only fixed locale/path,
 askpass, CA, and protocol-control values. All stderr is bounded and reduced to
 typed errors after secret-marker scanning. Each credential-bearing fetch is
@@ -139,7 +142,9 @@ Symlink targets must be relative and resolve within the same snapshot. Special
 files, unsafe symlinks, duplicate/colliding paths, case-fold collisions at any
 ancestor or leaf, and unexpected gitlinks fail closed before publication. The
 global materialized-file count includes every admitted gitlink even when sparse
-selection omits all of that submodule's child files.
+selection omits all of that submodule's child files. A selected gitlink always
+materializes its read-only directory boundary, including gitlink-only sparse
+results, so first publication and replay verify the same tree shape.
 
 Sparse roots select complete path components, not string prefixes. The receipt
 records both the full repository tree identity and the exact materialized
