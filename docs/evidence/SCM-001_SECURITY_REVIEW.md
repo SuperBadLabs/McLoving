@@ -2,16 +2,20 @@
 
 Date: 2026-08-05
 
-Verdict: PASS for the implementation gate at exact implementation head
-`d1bfbfab6fea9261090e74f441ebbb1a0d7e7a93`. All nine protected checks passed,
-and the focused gate passed with nineteen source-acquisition tests: four
-protocol tests, thirteen contained end-to-end tests, and two sealed-inventory
-tests. Independent exact-head review found no further actionable issue after
-ten implementation findings were fixed and their threads resolved.
+Status: REOPENED. The earlier implementation candidate
+`d1bfbfab6fea9261090e74f441ebbb1a0d7e7a93` passed all nine protected checks and
+nineteen focused tests after ten findings were fixed, but later exact-head
+review correctly identified additional executable-binding, credential-marker,
+retained-directory, and test-readiness gaps. The replacement implementation has
+twenty focused source-acquisition tests: four protocol tests, fourteen contained
+end-to-end tests, and two sealed-inventory tests. This receipt cannot return to
+PASS until its replacement exact head independently passes review and every
+protected check.
 
-The later PR #34 closure candidate adds only this receipt and the execution-board
-transition from SCM-001 to DEP-001. Its exact head must independently pass the
-protected checks and review before merge. The final squash-merge commit is
+PR #34 now keeps SCM-001 active and DEP-001 blocked while the reopened findings
+are verified. A later closure-only head may restore the execution-board
+transition only after the replacement implementation head passes protected
+checks and independent review. The final squash-merge commit is
 necessarily unknowable from inside its own pre-merge contents; the immutable PR
 #34 exact-head checks plus post-merge protected-main verification are the final
 closure attestation.
@@ -36,7 +40,8 @@ not substituted for a live source-acquisition denominator.
 - provider, repository, authenticated full ref, exact SHA-1 or SHA-256 commit,
   object format, source identity, trust class, fork policy, submodule graph,
   sparse roots, depth, tenant/build/attempt identities, expiry, and audit lineage;
-- runtime Git, credential, and CA revalidation before every Git invocation;
+- verified-open Git, askpass, and CA consumption plus credential revalidation
+  before every Git invocation;
 - exact primary, fork, and submodule repository allowlists, including
   fail-closed untrusted-fork and repository-substitution denial;
 - smart-HTTP askpass delivery that preserves credential bytes exactly while
@@ -56,7 +61,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review produced ten actionable implementation findings. The
+Independent review has produced fifteen actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -73,16 +78,28 @@ digest validation, ancestor-aware case-fold reservation, and materialized
 gitlink boundaries. Focused regressions cover every finding. Every thread was
 resolved only after its fix was pushed.
 
+The later closure review found that a certified marker set could omit the
+credential itself, Git was still spawned by a separately verified pathname,
+replay did not validate every nested-directory mode, and the short deadline
+test synchronized before process initialization was complete. Its fifth thread
+correctly kept SCM-001 open while those root findings remained. The replacement
+requires the exact credential in the marker set, consumes Git, askpass, and CA
+through verified open handles, validates owner and mode for every retained
+directory, and emits a test-only readiness event only after standalone process
+initialization. The new open-inode substitution proof and extended marker,
+directory, and deadline proofs pass locally; their threads remain unresolved
+until the pushed replacement exact head is independently verified.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
 `refs/heads/main`; the previously failing submodule proof, full locked workspace
 suite, strict Clippy, formatting, and the rerun protected checks pass.
 
-The final implementation head passed `git diff --check`, Rust formatting,
-`clippy -D warnings`, the full locked workspace suite, all nineteen focused
-source-acquisition tests, all nine protected checks, and independent exact-head
-review.
+The replacement implementation currently passes `git diff --check`, Rust
+formatting, strict source-acquirer Clippy, and all twenty focused
+source-acquisition tests on HeMan. Full locked-workspace, protected-check, and
+independent exact-head verification remain required before closure.
 
 ## Residual risk and authority boundary
 

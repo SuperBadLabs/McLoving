@@ -399,6 +399,26 @@ async fn source_secret_marker_is_denied_without_publication_or_disclosure() {
     root.write("leaked.txt", CREDENTIAL);
     let commit = root.commit("secret marker");
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+    let omitted_markers = vec![b"unrelated-certified-secret-marker".to_vec()];
+    let mut omitted_config = context.config.clone();
+    omitted_config.output_root = context
+        .credential_path
+        .parent()
+        .unwrap()
+        .join("omitted-credential-marker-output");
+    omitted_config.secret_marker_set_sha256 = marker_set_digest(&omitted_markers);
+    assert!(matches!(
+        SourceAcquirer::new(
+            omitted_config,
+            context.implementation_sha256.clone(),
+            context.credential_path.clone(),
+            CREDENTIAL,
+            SIGNING_KEY.to_vec(),
+            omitted_markers,
+        )
+        .await,
+        Err(SourceError::InvalidConfig)
+    ));
     let request = context.request(&commit);
     let error = context.acquirer.acquire(&request).await.unwrap_err();
     assert!(matches!(error, SourceError::Unauthorized));
@@ -605,10 +625,22 @@ async fn retained_tree_tampering_is_rejected_on_replay() {
     let repositories = tempfile::tempdir().expect("repositories tempdir");
     let root = RepositoryFixture::new(repositories.path(), "root");
     root.write("README.md", b"trusted content\n");
+    root.write("src/nested.txt", b"nested trusted content\n");
     let commit = root.commit("trusted");
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
     let request = context.request(&commit);
     let receipt = context.acquirer.acquire(&request).await.unwrap();
+    let retained_directory = context
+        .config
+        .output_root
+        .join(&receipt.output_relative_path)
+        .join("src");
+    std::fs::set_permissions(&retained_directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(
+        context.acquirer.acquire(&request).await,
+        Err(SourceError::InvalidStoredReceipt)
+    ));
+    std::fs::set_permissions(&retained_directory, std::fs::Permissions::from_mode(0o500)).unwrap();
     let retained = context
         .config
         .output_root
@@ -620,6 +652,57 @@ async fn retained_tree_tampering_is_rejected_on_replay() {
         context.acquirer.acquire(&request).await,
         Err(SourceError::InvalidStoredReceipt)
     ));
+}
+
+#[tokio::test]
+async fn git_execution_uses_the_verified_open_inode_after_path_replacement() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let repositories = tempfile::tempdir().expect("repositories tempdir");
+    let root = RepositoryFixture::new(repositories.path(), "root");
+    root.write("README.md", b"trusted source\n");
+    let commit = root.commit("trusted source");
+    let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+    let authority_root = context.credential_path.parent().unwrap();
+    let bound_git = authority_root.join("bound-git");
+    std::fs::copy(&context.config.git_executable_path, &bound_git).unwrap();
+    std::fs::set_permissions(&bound_git, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let mut config = context.config.clone();
+    config.generation += 1;
+    config.git_executable_path = bound_git.clone();
+    config.git_executable_sha256 = sha256_file(&bound_git).await.unwrap();
+    config.output_root = authority_root.join("open-git-inode-output");
+    let acquirer = context.acquirer_for(config.clone()).await;
+
+    let replacement_marker = authority_root.join("replacement-executed");
+    let replacement = authority_root.join("replacement-git");
+    std::fs::write(
+        &replacement,
+        format!(
+            "#!/bin/sh\nprintf compromised > '{}'\nexit 97\n",
+            replacement_marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o500)).unwrap();
+    std::fs::rename(&replacement, &bound_git).unwrap();
+
+    let mut request = context.request(&commit);
+    request.expected_generation = config.generation;
+    request.expected_git_sha256 = config.git_executable_sha256;
+    request.expected_config_sha256 = acquirer.config_sha256().to_owned();
+    let receipt = acquirer.acquire(&request).await.unwrap();
+    assert!(!replacement_marker.exists());
+    assert_eq!(
+        std::fs::read(
+            config
+                .output_root
+                .join(receipt.output_relative_path)
+                .join("README.md")
+        )
+        .unwrap(),
+        b"trusted source\n"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1155,6 +1238,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
 
     config.command_timeout_ms = 30_000;
     config.output_root = temporary.path().join("deadline-output");
+    let ready_path = temporary.path().join("deadline-ready");
     request.acquisition_id = Uuid::new_v4();
     request.expected_config_sha256 = config.canonical_digest().unwrap();
     std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
@@ -1169,13 +1253,14 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         )
         .env("MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE", &marker_path)
         .env("MCLOVING_SOURCE_ACQUIRER_TEST_MODE", "1")
+        .env("MCLOVING_SOURCE_ACQUIRER_TEST_READY_FILE", &ready_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("deadline-bounded standalone source acquirer");
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while !config.output_root.exists() {
+        while !ready_path.exists() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })

@@ -109,6 +109,12 @@ async fn run() -> Result<(), ()> {
 
     let mut input = BufReader::new(tokio::io::stdin());
     let mut output = tokio::io::stdout();
+    if let Some(path) = std::env::var_os("MCLOVING_SOURCE_ACQUIRER_TEST_READY_FILE") {
+        if std::env::var("MCLOVING_SOURCE_ACQUIRER_TEST_MODE").as_deref() != Ok("1") {
+            return Err(());
+        }
+        write_test_ready_file(&PathBuf::from(path)).await?;
+    }
     while let Some(line) = match read_bounded_line(&mut input).await {
         Ok(line) => line,
         Err(()) => {
@@ -146,6 +152,18 @@ async fn run() -> Result<(), ()> {
         write_output(&mut output, &response).await?;
     }
     Ok(())
+}
+
+async fn write_test_ready_file(path: &std::path::Path) -> Result<(), ()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path).await.map_err(|_| ())?;
+    file.write_all(b"ready\n").await.map_err(|_| ())?;
+    file.sync_all().await.map_err(|_| ())
 }
 
 async fn read_bounded_line<R>(input: &mut R) -> Result<Option<Vec<u8>>, ()>

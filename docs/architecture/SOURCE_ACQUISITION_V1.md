@@ -71,13 +71,15 @@ and recursive submodule commands are disabled. Cleartext loopback or local
 `file` fixtures require both the configuration flag and
 `MCLOVING_SOURCE_ACQUIRER_TEST_MODE=1`.
 
-The process hashes itself and the configured Git executable before accepting a
-request, retains the resolved executable path as the askpass identity, and
-re-hashes Git plus credential and CA material before every Git invocation. The
-askpass implementation is additionally re-hashed before every
-credential-bearing fetch. A caller must present both executable hashes and the
-exact canonical configuration digest. Any implementation, Git, repository,
-grant, policy, or generation substitution fails before Git or network access.
+The process opens itself and the configured Git executable without following a
+final symlink, hashes those exact open files before accepting a request, and
+executes only those retained file descriptors. Git, askpass, and any private CA
+bundle are re-hashed and consumed through the same open handles, so replacing a
+configured path cannot substitute bytes between verification and use. Credential
+material is also revalidated before every Git invocation. A caller must
+present both executable hashes and the exact canonical configuration digest.
+Any implementation, Git, repository, grant, policy, or generation substitution
+fails before Git or network access.
 
 ## Acquisition request
 
@@ -111,7 +113,9 @@ stale request cannot silently receive it.
 The credential reaches Git byte-for-byte only through the acquirer's bounded,
 implementation-hash-revalidated askpass mode; non-UTF-8 or newline-bearing
 grants are ineligible. It never appears in argv, configuration, receipt,
-diagnostics, or the output tree.
+diagnostics, or the output tree. Configuration is invalid unless the certified
+secret-marker set contains the exact credential bytes, so the credential is
+always denied if repository content attempts to reproduce it.
 Askpass re-hashes the exact bytes it reads against the configured credential
 digest before writing those same bytes, so a path replacement between parent
 verification and the remote prompt fails closed.
@@ -170,11 +174,12 @@ never silently re-fetches a mutable ref.
 Objects and materialized files are built below an unpredictable private staging
 directory. Every file and directory is synchronized, the canonical manifest and
 signed receipt are written and synchronized, and the complete directory is
-atomically renamed to its final acquisition-ID path. The output tree is made
-read-only before publication. Publication and timeout decisions share the same
-exclusive output-root lock so a late snapshot cannot appear after a caller has
-accepted timeout. Failed and expired staging directories are removed without
-following symlinks.
+atomically renamed to its final acquisition-ID path. Every retained file and
+directory is made read-only before publication, and replay revalidates every
+directory's owner and exact mode as well as every leaf. Publication and timeout
+decisions share the same exclusive output-root lock so a late snapshot cannot
+appear after a caller has accepted timeout. Failed and expired staging
+directories are removed without following symlinks.
 
 The canonical manifest binds path, Git mode, Git object ID, byte length, and
 SHA-256 for every materialized entry plus each submodule boundary. The receipt
@@ -198,8 +203,9 @@ It covers exact and later commits, ref movement/substitution, untrusted forks,
 credential success/denial/non-disclosure, replay mismatch, concurrent
 deduplication, restart replay, sparse/depth behavior, recursive submodules,
 submodule substitution/cycles, unsafe paths/symlinks, file/count/byte/time
-bounds, cleanup, configuration/Git/executable drift, generation cutover,
-rollback binding, and differential snapshot truth.
+bounds, cleanup, configuration/Git/executable drift and path replacement,
+credential-marker completeness, retained-directory mode drift, generation
+cutover, rollback binding, and differential snapshot truth.
 
 An inventory test separately pins the accepted Mario manifests and proves that
 their current denominator contains zero admitted live SCM configurations or

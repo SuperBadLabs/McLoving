@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
+use std::io::SeekFrom;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -11,7 +12,7 @@ use hmac::{Hmac, Mac as _};
 use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use url::Url;
@@ -36,6 +37,11 @@ const MAX_MARKERS: usize = 256;
 const MAX_MARKER_BYTES: usize = 256 * 1_024;
 
 type HmacSha256 = Hmac<Sha256>;
+
+struct VerifiedFile {
+    file: std::fs::File,
+    invocation_path: PathBuf,
+}
 
 struct DuplicateRejectingSeed;
 
@@ -391,7 +397,9 @@ pub struct SourceAcquirer {
     config: SourceConfig,
     config_sha256: String,
     implementation_sha256: String,
-    askpass_executable_path: PathBuf,
+    git_executable: VerifiedFile,
+    askpass_executable: VerifiedFile,
+    ca_bundle: Option<VerifiedFile>,
     credential_path: PathBuf,
     signing_key: Vec<u8>,
     secret_marker_matcher: AhoCorasick,
@@ -419,19 +427,17 @@ impl SourceAcquirer {
         if credential_on_disk != credential {
             return Err(SourceError::InvalidConfig);
         }
-        if sha256_file(&config.git_executable_path).await? != config.git_executable_sha256 {
-            return Err(SourceError::InvalidConfig);
-        }
+        let git_executable =
+            open_verified_file(&config.git_executable_path, &config.git_executable_sha256).await?;
         let askpass_executable_path =
             std::env::current_exe().map_err(|_| SourceError::InvalidConfig)?;
-        if sha256_file(&askpass_executable_path).await? != implementation_sha256 {
-            return Err(SourceError::InvalidConfig);
-        }
-        if let (Some(path), Some(expected)) = (&config.ca_bundle_path, &config.ca_bundle_sha256)
-            && sha256_file(path).await? != *expected
-        {
-            return Err(SourceError::InvalidConfig);
-        }
+        let askpass_executable =
+            open_verified_file(&askpass_executable_path, &implementation_sha256).await?;
+        let ca_bundle = match (&config.ca_bundle_path, &config.ca_bundle_sha256) {
+            (Some(path), Some(expected)) => Some(open_verified_file(path, expected).await?),
+            (None, None) => None,
+            _ => return Err(SourceError::InvalidConfig),
+        };
         ensure_private_output_root(&config.output_root).await?;
         let config_sha256 = config.canonical_digest()?;
         let secret_marker_matcher =
@@ -440,7 +446,9 @@ impl SourceAcquirer {
             config,
             config_sha256,
             implementation_sha256,
-            askpass_executable_path,
+            git_executable,
+            askpass_executable,
+            ca_bundle,
             credential_path,
             signing_key,
             secret_marker_matcher,
@@ -1175,7 +1183,7 @@ impl SourceAcquirer {
         } else {
             (Duration::from_millis(self.config.command_timeout_ms), false)
         };
-        let mut command = Command::new(&self.config.git_executable_path);
+        let mut command = Command::new(&self.git_executable.invocation_path);
         command
             .env_clear()
             .env("LANG", "C")
@@ -1213,7 +1221,7 @@ impl SourceAcquirer {
             ]);
         if credential_bearing {
             command
-                .env("GIT_ASKPASS", &self.askpass_executable_path)
+                .env("GIT_ASKPASS", &self.askpass_executable.invocation_path)
                 .env("MCLOVING_SOURCE_ACQUIRER_ASKPASS", "1")
                 .env(
                     "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
@@ -1234,8 +1242,8 @@ impl SourceAcquirer {
         if self.config.test_allow_file_repositories {
             command.args(["-c", "protocol.file.allow=always"]);
         }
-        if let Some(path) = &self.config.ca_bundle_path {
-            command.env("GIT_SSL_CAINFO", path);
+        if let Some(ca_bundle) = &self.ca_bundle {
+            command.env("GIT_SSL_CAINFO", &ca_bundle.invocation_path);
         }
         command
             .args(arguments)
@@ -1305,16 +1313,16 @@ impl SourceAcquirer {
         let credential =
             read_private_bounded_regular_file(&self.credential_path, MAX_AUTHORITY_BYTES).await?;
         if sha256_hex(&credential) != self.config.credential_sha256
-            || sha256_file(&self.config.git_executable_path).await?
+            || sha256_open_file(&self.git_executable.file).await?
                 != self.config.git_executable_sha256
             || verify_askpass
-                && sha256_file(&self.askpass_executable_path).await? != self.implementation_sha256
+                && sha256_open_file(&self.askpass_executable.file).await?
+                    != self.implementation_sha256
         {
             return Err(SourceError::BindingMismatch);
         }
-        if let (Some(path), Some(expected)) =
-            (&self.config.ca_bundle_path, &self.config.ca_bundle_sha256)
-            && sha256_file(path).await? != *expected
+        if let (Some(ca_bundle), Some(expected)) = (&self.ca_bundle, &self.config.ca_bundle_sha256)
+            && sha256_open_file(&ca_bundle.file).await? != *expected
         {
             return Err(SourceError::BindingMismatch);
         }
@@ -1583,6 +1591,7 @@ fn validate_config(
         || markers.is_empty()
         || markers.len() > MAX_MARKERS
         || markers.iter().any(Vec::is_empty)
+        || !markers.iter().any(|marker| marker.as_slice() == credential)
         || config.max_files == 0
         || config.max_files > MAX_CONFIGURED_FILES
         || config.max_total_bytes == 0
@@ -2077,6 +2086,73 @@ pub async fn sha256_file(path: &Path) -> Result<String, SourceError> {
     Ok(sha256_hex(&bytes))
 }
 
+async fn open_verified_file(
+    path: &Path,
+    expected_sha256: &str,
+) -> Result<VerifiedFile, SourceError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, expected_sha256);
+        Err(SourceError::InvalidConfig)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| SourceError::InvalidConfig)?;
+        let metadata = file.metadata().map_err(|_| SourceError::InvalidConfig)?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_EXECUTABLE_BYTES {
+            return Err(SourceError::InvalidConfig);
+        }
+        if sha256_open_file(&file).await? != expected_sha256 {
+            return Err(SourceError::InvalidConfig);
+        }
+        let descriptor = file.as_raw_fd();
+        #[cfg(target_os = "linux")]
+        let invocation_path =
+            PathBuf::from(format!("/proc/{}/fd/{descriptor}", std::process::id()));
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let invocation_path = {
+            use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+
+            fcntl(&file, FcntlArg::F_SETFD(FdFlag::empty()))
+                .map_err(|_| SourceError::InvalidConfig)?;
+            PathBuf::from(format!("/dev/fd/{descriptor}"))
+        };
+        Ok(VerifiedFile {
+            file,
+            invocation_path,
+        })
+    }
+}
+
+async fn sha256_open_file(file: &std::fs::File) -> Result<String, SourceError> {
+    let cloned = file.try_clone().map_err(|_| SourceError::InvalidConfig)?;
+    let mut file = tokio::fs::File::from_std(cloned);
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(|_| SourceError::InvalidConfig)?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|_| SourceError::InvalidConfig)?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_EXECUTABLE_BYTES {
+        return Err(SourceError::InvalidConfig);
+    }
+    let bytes = read_bounded(
+        file,
+        usize::try_from(MAX_EXECUTABLE_BYTES).unwrap_or(usize::MAX),
+    )
+    .await
+    .map_err(|_| SourceError::InvalidConfig)?;
+    Ok(sha256_hex(&bytes))
+}
+
 #[cfg(unix)]
 type OutputRootLock = nix::fcntl::Flock<std::fs::File>;
 
@@ -2382,6 +2458,7 @@ async fn inventory_materialized_tree(
                 .await
                 .map_err(|_| SourceError::InvalidStoredReceipt)?;
             if metadata.file_type().is_dir() {
+                validate_retained_metadata(&metadata, true, 0o500)?;
                 directory_paths.insert(relative);
                 directories.push(path);
             } else if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
