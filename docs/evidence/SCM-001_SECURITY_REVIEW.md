@@ -7,9 +7,9 @@ Status: REOPENED. The earlier implementation candidate
 nineteen focused tests after ten findings were fixed, but later exact-head
 review correctly identified additional executable/helper binding,
 authority-snapshot immutability, credential-marker, retained-directory, and
-test-readiness gaps. The replacement implementation has twenty-four focused
+test-readiness gaps. The replacement implementation has twenty-five focused
 source-acquisition tests: two boundary unit tests, four protocol tests,
-sixteen contained end-to-end tests, and two sealed-inventory tests. This receipt
+seventeen contained end-to-end tests, and two sealed-inventory tests. This receipt
 cannot return to PASS until its replacement exact head independently passes
 review and every protected check.
 
@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced thirty-seven actionable threads so far. The
+Independent review has produced forty actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -288,6 +288,19 @@ terminated as a process group before acquisition returns, and no monitoring
 iteration reconstructs a relative window. The thirty-seventh finding cannot
 contribute closure until the replacement exact head is independently reverified.
 
+Review of that exact head found three related scheduling seams: the monotonic
+anchor followed the wall-clock sample, a newly spawned Git process could reach
+askpass before the parent's post-spawn check, and either exit-selection branch
+could accept a result after the absolute deadline. The replacement captures the
+monotonic anchor before reading wall time, passes the effective signed
+request/command deadline into the sealed askpass environment, and makes askpass
+deny credential release both before opening authority and immediately before
+output. Both successful child-exit paths independently compare the same absolute
+monotonic instant before accepting status. An expired-askpass regression proves
+that no credential bytes or diagnostics are emitted. The thirty-eighth through
+fortieth findings cannot contribute closure until the replacement exact head is
+independently reverified.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
@@ -295,7 +308,7 @@ fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
 suite, strict Clippy, formatting, and the rerun protected checks pass.
 
 The replacement implementation currently passes `git diff --check`, Rust
-formatting, strict source-acquirer Clippy, and all twenty-four focused
+formatting, strict source-acquirer Clippy, and all twenty-five focused
 source-acquisition tests plus the complete locked workspace suite on HeMan.
 Protected checks and independent exact-head verification remain required before
 closure.

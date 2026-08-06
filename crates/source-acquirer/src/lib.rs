@@ -49,6 +49,7 @@ const RESOLVER_TIMEOUT: Duration = Duration::from_secs(10);
 const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
+const CREDENTIAL_DEADLINE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1560,9 +1561,11 @@ impl SourceAcquirer {
             &self.git_executable.invocation_path,
             &self.git_remote_https_executable.invocation_path,
         )?;
+        let command_anchor = tokio::time::Instant::now();
+        let wall_anchor = now_unix_ms()?;
         let (timeout, deadline_limited) = if let Some(deadline) = deadline_unix_ms {
             let remaining = deadline
-                .checked_sub(now_unix_ms()?)
+                .checked_sub(wall_anchor)
                 .ok_or(SourceError::ExpiredRequest)?;
             if remaining <= 0 {
                 return Err(SourceError::ExpiredRequest);
@@ -1575,7 +1578,12 @@ impl SourceAcquirer {
         } else {
             (Duration::from_millis(self.config.command_timeout_ms), false)
         };
-        let command_deadline = tokio::time::Instant::now()
+        let timeout_milliseconds =
+            i64::try_from(timeout.as_millis()).map_err(|_| SourceError::StateUnavailable)?;
+        let credential_deadline_unix_ms = wall_anchor
+            .checked_add(timeout_milliseconds)
+            .ok_or(SourceError::StateUnavailable)?;
+        let command_deadline = command_anchor
             .checked_add(timeout)
             .ok_or(SourceError::StateUnavailable)?;
         let endpoint_resolution = match (credential_bearing, repository_url) {
@@ -1657,6 +1665,10 @@ impl SourceAcquirer {
                 .env(
                     "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_SHA256",
                     &self.config.credential_sha256,
+                )
+                .env(
+                    CREDENTIAL_DEADLINE_ENV,
+                    credential_deadline_unix_ms.to_string(),
                 );
         }
         if self.config.test_allow_http_loopback {
@@ -1743,6 +1755,17 @@ impl SourceAcquirer {
             };
             match event {
                 MonitorEvent::Exited(status) => {
+                    if command_deadline <= tokio::time::Instant::now() {
+                        stdout_task.abort();
+                        stderr_task.abort();
+                        let _ = stdout_task.await;
+                        let _ = stderr_task.await;
+                        return Err(if deadline_limited {
+                            SourceError::ExpiredRequest
+                        } else {
+                            SourceError::SourceUnavailable
+                        });
+                    }
                     break status.map_err(|_| SourceError::SourceUnavailable)?;
                 }
                 MonitorEvent::Quota(Err(error)) => {
@@ -1770,6 +1793,17 @@ impl SourceAcquirer {
                     };
                     match event {
                         MonitorEvent::Exited(status) => {
+                            if command_deadline <= tokio::time::Instant::now() {
+                                stdout_task.abort();
+                                stderr_task.abort();
+                                let _ = stdout_task.await;
+                                let _ = stderr_task.await;
+                                return Err(if deadline_limited {
+                                    SourceError::ExpiredRequest
+                                } else {
+                                    SourceError::SourceUnavailable
+                                });
+                            }
                             break status.map_err(|_| SourceError::SourceUnavailable)?;
                         }
                         MonitorEvent::Poll => continue,

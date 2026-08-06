@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use mcloving_source_acquirer::{
     AcquisitionRequest, SourceAcquirer, SourceConfig, content_sha256, parse_json_no_duplicates,
@@ -19,6 +20,7 @@ const MAX_RESOLVER_ADDRESSES: usize = 32;
 const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
+const CREDENTIAL_DEADLINE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS";
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -53,6 +55,7 @@ async fn run_resolver() -> Result<(), ()> {
         "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
         "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME",
         "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_SHA256",
+        CREDENTIAL_DEADLINE_ENV,
         "MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE",
         "MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE",
     ] {
@@ -95,6 +98,7 @@ async fn run_resolver() -> Result<(), ()> {
 }
 
 async fn run_askpass() -> Result<(), ()> {
+    ensure_before_credential_deadline()?;
     let prompt = std::env::args().nth(1).ok_or(())?;
     let value = if prompt.contains("Username") {
         std::env::var("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME").map_err(|_| ())?
@@ -115,10 +119,23 @@ async fn run_askpass() -> Result<(), ()> {
     if value.is_empty() || value.contains(['\r', '\n']) {
         return Err(());
     }
+    ensure_before_credential_deadline()?;
     let mut output = tokio::io::stdout();
     output.write_all(value.as_bytes()).await.map_err(|_| ())?;
     output.write_all(b"\n").await.map_err(|_| ())?;
     output.flush().await.map_err(|_| ())
+}
+
+fn ensure_before_credential_deadline() -> Result<(), ()> {
+    let deadline = std::env::var(CREDENTIAL_DEADLINE_ENV)
+        .map_err(|_| ())?
+        .parse::<i64>()
+        .map_err(|_| ())?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ())?;
+    let now = i64::try_from(now.as_millis()).map_err(|_| ())?;
+    if now >= deadline { Err(()) } else { Ok(()) }
 }
 
 async fn run() -> Result<(), ()> {

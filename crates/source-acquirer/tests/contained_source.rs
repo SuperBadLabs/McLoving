@@ -309,6 +309,29 @@ fn sealed_resolver_runs_without_credential_authority() {
     assert!(!tainted.success());
 }
 
+#[test]
+fn sealed_askpass_refuses_credential_release_after_deadline() {
+    let binary = env!("CARGO_BIN_EXE_mcloving-source-acquirer");
+    let output = Command::new(binary)
+        .arg("Password for https://localhost")
+        .env_clear()
+        .env("MCLOVING_SOURCE_ACQUIRER_ASKPASS", "1")
+        .env("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS", "1")
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
+            "/credential/must-not-open-after-deadline",
+        )
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_SHA256",
+            content_sha256(CREDENTIAL),
+        )
+        .output()
+        .expect("expired askpass process");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
 #[tokio::test]
 async fn exact_revision_replay_later_commit_and_sparse_truth() {
     let repositories = tempfile::tempdir().expect("repositories tempdir");

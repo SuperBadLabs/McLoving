@@ -85,9 +85,10 @@ refuses to run if any credential-file, credential-digest, signing-key, or
 secret-marker authority is present. Its numeric results and diagnostics are
 bounded, its process group and the following Git child share one monotonic
 command/request deadline, and any malformed, empty, excessive, failed, or
-timed-out result fails source acquisition. The parent rechecks that shared
-absolute deadline before and immediately after Git startup, and Git's process
-monitor uses that same instant rather than restarting a relative duration, then
+timed-out result fails source acquisition. The parent captures the monotonic
+anchor before sampling wall-clock expiry, rechecks the resulting absolute
+deadline before and immediately after Git startup, checks it again before
+accepting either exit path, and never restarts a relative duration. The parent
 passes the resulting addresses to Git only through repeated
 `http.curloptResolve` entries while preserving the original HTTPS hostname for
 TLS verification. Because redirects and proxies are disabled, the
@@ -184,7 +185,11 @@ secret-marker set contains the exact credential bytes, so the credential is
 always denied if repository content attempts to reproduce it.
 Askpass re-hashes the exact bytes it reads against the configured credential
 digest before writing those same bytes, so a path replacement between parent
-verification and the remote prompt fails closed.
+verification and the remote prompt fails closed. It also receives the earlier
+of the signed request/publication deadline and configured command deadline, and
+rechecks that bound before opening credential authority and immediately before
+writing any username or credential bytes. A Git process delayed across startup
+therefore cannot obtain authentication after its admitted authority expires.
 The Git child receives a cleared environment containing only fixed locale/path,
 askpass, CA, and protocol-control values. All stderr is bounded and reduced to
 typed errors after secret-marker scanning. Each credential-bearing fetch is
