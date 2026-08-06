@@ -192,15 +192,19 @@ Symlink targets must be relative and resolve within the same snapshot. Special
 files, unsafe symlinks, duplicate/colliding paths, Unicode compatibility-
 normalized full-case-fold collisions at any ancestor or leaf, and unexpected
 gitlinks fail closed before publication. The
-global materialized-file count includes every admitted gitlink even when sparse
-selection omits all of that submodule's child files. A selected gitlink always
+global materialized-file count includes every selected gitlink even when sparse
+selection omits all of that submodule's child files. A gitlink selected directly
+or as the component-boundary ancestor of a selected submodule path always
 materializes its read-only directory boundary, including gitlink-only sparse
-results, so first publication and replay verify the same tree shape.
+results, so first publication and replay verify the same tree shape. Ordinary
+file and symlink leaves are selected only when equal to or below a sparse root;
+they are never materialized merely because a requested root names an impossible
+descendant below that leaf.
 
 Sparse roots select complete path components, not string prefixes. The receipt
 records both the full repository tree identity and the exact materialized
 manifest so omitted paths cannot be mistaken for missing source. Empty sparse
-results are denied.
+results are denied without publishing an out-of-scope leaf ancestor.
 
 The root tree's `.gitmodules` declarations and every gitlink are parsed without
 executing repository code. They must match the request's complete recursive

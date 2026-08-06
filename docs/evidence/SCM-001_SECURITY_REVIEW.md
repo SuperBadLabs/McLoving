@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced thirty-two actionable threads so far. The
+Independent review has produced thirty-three actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -226,6 +226,19 @@ verifies that the ambient pathname is absent and the exact empty descriptor is
 present, while every contained Git/helper/askpass proof executes through the
 patched loader. The thirty-second finding cannot contribute closure until the
 replacement exact head is independently reverified.
+
+Review of that exact head found that the shared sparse-selection predicate
+treated ordinary file and symlink leaves as ancestors of requested sparse
+roots. A request for a nonexistent descendant below a leaf could therefore
+materialize and sign the entire out-of-scope leaf. The replacement selects
+ordinary leaves only when equal to or below a sparse root and reserves
+reverse-prefix ancestor selection exclusively for gitlink directory boundaries.
+The exact-revision contained proof now requests a descendant below an ordinary
+blob and verifies typed empty-result denial with no publication, the durable
+ambiguity claim retained, and no leaf disclosure; the existing submodule proofs
+preserve selected ancestor gitlinks. The
+thirty-third finding cannot contribute closure until the replacement exact head
+is independently reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the

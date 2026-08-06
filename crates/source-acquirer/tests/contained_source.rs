@@ -306,6 +306,7 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
 
     root.write("README.md", b"second\n");
     root.write("src/later.txt", b"later\n");
+    root.write("deps", b"private leaf outside the requested subtree\n");
     let second = root.commit("second");
     let mut later = context.request(&second);
     later.sparse_roots = vec!["src".to_owned()];
@@ -323,6 +324,27 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
     assert_eq!(
         std::fs::read(later_output.join("src/later.txt")).unwrap(),
         b"later\n"
+    );
+
+    let mut descendant_of_leaf = context.request(&second);
+    descendant_of_leaf.sparse_roots = vec!["deps/child".to_owned()];
+    assert!(matches!(
+        context.acquirer.acquire(&descendant_of_leaf).await,
+        Err(SourceError::SubmoduleMismatch)
+    ));
+    assert!(
+        !context
+            .config
+            .output_root
+            .join(descendant_of_leaf.acquisition_id.to_string())
+            .exists()
+    );
+    assert!(
+        context
+            .config
+            .output_root
+            .join(format!("{}.claim.json", descendant_of_leaf.acquisition_id))
+            .exists()
     );
 
     let stale = context.request(&first);

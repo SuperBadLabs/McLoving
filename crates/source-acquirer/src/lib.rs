@@ -926,7 +926,7 @@ impl SourceAcquirer {
                         exact_commit: expected.exact_commit.clone(),
                         ancestry,
                     });
-                    if self.path_selected(&full_path, &request.sparse_roots) {
+                    if self.gitlink_path_selected(&full_path, &request.sparse_roots) {
                         self.reserve_manifest_path(
                             &full_path,
                             &mut exact_paths,
@@ -1462,9 +1462,14 @@ impl SourceAcquirer {
                     || path
                         .strip_prefix(root)
                         .is_some_and(|suffix| suffix.starts_with('/'))
-                    || root
-                        .strip_prefix(path)
-                        .is_some_and(|suffix| suffix.starts_with('/'))
+            })
+    }
+
+    fn gitlink_path_selected(&self, path: &str, sparse_roots: &[String]) -> bool {
+        self.path_selected(path, sparse_roots)
+            || sparse_roots.iter().any(|root| {
+                root.strip_prefix(path)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
             })
     }
 
