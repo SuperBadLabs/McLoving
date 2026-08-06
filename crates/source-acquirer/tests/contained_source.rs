@@ -36,6 +36,7 @@ impl RepositoryFixture {
         let work = root.join(format!("{name}-work"));
         let bare = root.join(format!("{name}.git"));
         run_git(root, ["init", "--bare", path_text(&bare)]);
+        run_git(&bare, ["symbolic-ref", "HEAD", "refs/heads/main"]);
         run_git(root, ["init", "-b", "main", path_text(&work)]);
         run_git(&work, ["config", "user.email", "source@example.invalid"]);
         run_git(&work, ["config", "user.name", "Contained Source"]);
@@ -50,6 +51,7 @@ impl RepositoryFixture {
             root,
             ["init", "--bare", "--object-format=sha256", path_text(&bare)],
         );
+        run_git(&bare, ["symbolic-ref", "HEAD", "refs/heads/main"]);
         run_git(
             root,
             [
