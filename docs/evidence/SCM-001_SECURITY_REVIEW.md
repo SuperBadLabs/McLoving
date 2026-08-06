@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced thirty-six actionable threads so far. The
+Independent review has produced thirty-seven actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -278,6 +278,15 @@ therefore cannot compose two independent timeout windows or extend credential
 authority past the admitted command/request deadline. The thirty-sixth finding
 cannot contribute closure until the replacement exact head is independently
 reverified.
+
+Review of that exact head found that the post-resolution remainder was restarted
+after synchronous Git startup, so startup latency itself remained outside the
+monitor's bound. The replacement retains one absolute monotonic deadline from
+before resolution through pre-spawn validation, immediate post-spawn validation,
+pipe setup, quota polling, and process exit. An expired post-spawn child is
+terminated as a process group before acquisition returns, and no monitoring
+iteration reconstructs a relative window. The thirty-seventh finding cannot
+contribute closure until the replacement exact head is independently reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the

@@ -86,7 +86,8 @@ secret-marker authority is present. Its numeric results and diagnostics are
 bounded, its process group and the following Git child share one monotonic
 command/request deadline, and any malformed, empty, excessive, failed, or
 timed-out result fails source acquisition. The parent rechecks that shared
-deadline before it installs credential authority and starts Git, then
+absolute deadline before and immediately after Git startup, and Git's process
+monitor uses that same instant rather than restarting a relative duration, then
 passes the resulting addresses to Git only through repeated
 `http.curloptResolve` entries while preserving the original HTTPS hostname for
 TLS verification. Because redirects and proxies are disabled, the

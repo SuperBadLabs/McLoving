@@ -1575,7 +1575,9 @@ impl SourceAcquirer {
         } else {
             (Duration::from_millis(self.config.command_timeout_ms), false)
         };
-        let command_started = tokio::time::Instant::now();
+        let command_deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or(SourceError::StateUnavailable)?;
         let endpoint_resolution = match (credential_bearing, repository_url) {
             (true, Some(repository_url)) => {
                 self.resolve_network_endpoint(repository_url, timeout).await
@@ -1583,10 +1585,10 @@ impl SourceAcquirer {
             (false, None) => Ok(Vec::new()),
             _ => return Err(SourceError::StateUnavailable),
         };
-        let timeout = timeout
-            .checked_sub(command_started.elapsed())
+        let remaining = command_deadline
+            .checked_duration_since(tokio::time::Instant::now())
             .unwrap_or(Duration::ZERO);
-        if timeout.is_zero() {
+        if remaining.is_zero() {
             return Err(if deadline_limited {
                 SourceError::ExpiredRequest
             } else {
@@ -1674,6 +1676,13 @@ impl SourceAcquirer {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
+        if command_deadline <= tokio::time::Instant::now() {
+            return Err(if deadline_limited {
+                SourceError::ExpiredRequest
+            } else {
+                SourceError::SourceUnavailable
+            });
+        }
         let mut child = command
             .spawn()
             .map_err(|_| SourceError::SourceUnavailable)?;
@@ -1684,6 +1693,14 @@ impl SourceAcquirer {
         let process_group_id = Some(process_group_id);
         #[cfg(not(unix))]
         let process_group_id = None;
+        if command_deadline <= tokio::time::Instant::now() {
+            terminate_child(&mut child, process_group_id).await?;
+            return Err(if deadline_limited {
+                SourceError::ExpiredRequest
+            } else {
+                SourceError::SourceUnavailable
+            });
+        }
         let stdout = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
         let stderr = child.stderr.take().ok_or(SourceError::StateUnavailable)?;
         let stdout_task = tokio::spawn(read_bounded(stdout, max_stdout));
@@ -1694,10 +1711,9 @@ impl SourceAcquirer {
             Poll,
             TimedOut,
         }
-        let started = tokio::time::Instant::now();
         let status = loop {
-            let remaining = timeout
-                .checked_sub(started.elapsed())
+            let remaining = command_deadline
+                .checked_duration_since(tokio::time::Instant::now())
                 .unwrap_or(Duration::ZERO);
             if remaining.is_zero() {
                 terminate_child(&mut child, process_group_id).await?;
@@ -1738,8 +1754,8 @@ impl SourceAcquirer {
                     return Err(error);
                 }
                 MonitorEvent::Quota(Ok(())) => {
-                    let remaining = timeout
-                        .checked_sub(started.elapsed())
+                    let remaining = command_deadline
+                        .checked_duration_since(tokio::time::Instant::now())
                         .unwrap_or(Duration::ZERO);
                     let event = if remaining.is_zero() {
                         MonitorEvent::TimedOut
