@@ -55,6 +55,7 @@ enum FixtureMode {
     DelayedCreateAfterFinalSnapshot,
     DelayedPendingRefreshAfterInitialSnapshot,
     DelayedAbsence,
+    DelayedSnapshotAbsentThenPendingThenReady,
     DelayedEmptyFinalInventoryOnce,
     DelayedInitialInventoryResponse,
     DelayedSnapshotFinalInventory,
@@ -323,6 +324,7 @@ async fn create_instance(
         | FixtureMode::DelayedMalformedLookupOnce
         | FixtureMode::DelayedSnapshotPendingThenMalformed
         | FixtureMode::DelayedPendingRefreshAfterInitialSnapshot
+        | FixtureMode::DelayedSnapshotAbsentThenPendingThenReady
         | FixtureMode::DelayedReady
         | FixtureMode::DelayedAbsence => ProviderInstanceState::Pending,
         FixtureMode::StartupFailed => ProviderInstanceState::StartupFailed,
@@ -364,7 +366,13 @@ async fn lookup_instance(
     if !authorized(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let (delayed_mode, malformed_lookup, snapshot_pending, malformed_after_snapshot) = {
+    let (
+        delayed_mode,
+        malformed_lookup,
+        snapshot_pending,
+        snapshot_absent,
+        malformed_after_snapshot,
+    ) = {
         let mut inner = state.inner.lock().expect("fixture state");
         inner.lookup_started += 1;
         inner.lookups += 1;
@@ -385,6 +393,11 @@ async fn lookup_instance(
         } else {
             None
         };
+        let snapshot_absent = inner.mode == FixtureMode::DelayedSnapshotAbsentThenPendingThenReady
+            && !inner.snapshot_pending_sent;
+        if snapshot_absent {
+            inner.snapshot_pending_sent = true;
+        }
         let malformed_after_snapshot = inner.mode
             == FixtureMode::DelayedSnapshotPendingThenMalformed
             && inner.lookups >= 3
@@ -396,12 +409,22 @@ async fn lookup_instance(
             inner.mode,
             malformed_lookup,
             snapshot_pending,
+            snapshot_absent,
             malformed_after_snapshot,
         )
     };
     if let Some(snapshot_pending) = snapshot_pending {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         return signed_response(&state, snapshot_pending);
+    }
+    if snapshot_absent {
+        let snapshot = ProviderLookup {
+            request_id,
+            observed_at_unix_ms: now_ms(),
+            instance: None,
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        return signed_response(&state, snapshot);
     }
     if delayed_mode == FixtureMode::DelayedPendingRefreshAfterInitialSnapshot {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -423,6 +446,8 @@ async fn lookup_instance(
         inner.instances.remove(&request_id);
     }
     let ready = (inner.mode == FixtureMode::PendingThenReady && inner.lookups >= 2)
+        || (inner.mode == FixtureMode::DelayedSnapshotAbsentThenPendingThenReady
+            && inner.lookups >= 4)
         || inner.mode == FixtureMode::DelayedReady;
     if ready && let Some(instance) = inner.instances.get_mut(&request_id) {
         instance.state = ProviderInstanceState::Ready;
@@ -1362,6 +1387,49 @@ async fn pending_instance_becomes_ready_with_bounded_polling() {
         .expect("eventual ready");
     assert_eq!(receipt.body.outcome, LifecycleOutcome::Ready);
     assert!(context.fixture.counts().2 >= 2);
+}
+
+#[tokio::test]
+async fn startup_absence_yields_to_a_newer_pending_revision() {
+    let context = Context::with_startup_timeout(
+        FixtureMode::DelayedSnapshotAbsentThenPendingThenReady,
+        1_000,
+    )
+    .await;
+    let request = context.request();
+    let stale_absence = context.provisioner.provision(&request);
+    let positive_peer = async {
+        context.fixture.wait_for_lookup_start().await;
+        let database =
+            rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+                .expect("open retained ledger for positive startup peer");
+        database
+            .execute(
+                "UPDATE requests SET state = state, instance_json = instance_json
+                 WHERE request_id = ?1",
+                [request.request_id.to_string()],
+            )
+            .expect("publish newer pending observation through legacy trigger");
+    };
+    let (stale_absence, ()) = tokio::join!(stale_absence, positive_peer);
+    let stale_absence = stale_absence.expect("stale startup absence converges on ready truth");
+    assert_eq!(stale_absence.body.outcome, LifecycleOutcome::Ready);
+    assert!(!stale_absence.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().1, 0);
+    assert_eq!(context.fixture.counts().3, 1);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let retained: (String, i64) = database
+        .query_row(
+            "SELECT state,
+                    (SELECT count(*) FROM cleanup_intents WHERE request_id = ?1)
+             FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read state and cleanup intent after startup race");
+    assert_eq!(retained, ("ready".to_owned(), 0));
 }
 
 #[tokio::test]

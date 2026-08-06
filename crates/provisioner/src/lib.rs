@@ -1669,10 +1669,24 @@ impl Provisioner {
                 self.config.startup_poll_interval_ms.min(remaining_ms),
             ))
             .await;
+            let lookup_stored = self
+                .load_stored_request(request.request_id)?
+                .ok_or(ProvisionerError::StateUnavailable)?;
             instance = match self.provider_lookup(request.request_id).await {
                 Ok(Some(candidate)) => candidate,
                 Ok(None) => {
                     let observed_at = now_unix_ms()?;
+                    if lookup_stored.state != StoredState::Pending
+                        || lookup_stored
+                            .instance
+                            .as_ref()
+                            .map(|stored_instance| stored_instance.instance_id)
+                            != Some(instance.instance_id)
+                    {
+                        return self
+                            .recover_startup_race(request, request_sha256, &instance)
+                            .await;
+                    }
                     let (reason, outcome) = if observed_at >= deadline {
                         (
                             CleanupReason::StartupTimeout,
@@ -1684,19 +1698,18 @@ impl Provisioner {
                             LifecycleOutcome::StartupFailedCleaned,
                         )
                     };
-                    let (_, outcome) =
-                        self.record_cleanup_intent(request.request_id, reason, outcome)?;
-                    if !self.set_state_from(
-                        request.request_id,
-                        StoredState::Pending,
+                    let Some(outcome) = self.transition_cleanup_from_revision(
+                        &lookup_stored,
                         StoredState::Deleted,
-                        None,
+                        reason,
+                        outcome,
                         observed_at,
-                    )? {
+                    )?
+                    else {
                         return self
                             .recover_startup_race(request, request_sha256, &instance)
                             .await;
-                    }
+                    };
                     return self.append_lifecycle_receipt(
                         request,
                         LifecycleEvidence {
@@ -2085,6 +2098,23 @@ impl Provisioner {
     ) -> Result<Option<LifecycleOutcome>, ProvisionerError> {
         let (terminal, reason, default_outcome) =
             self.absence_disposition(stored, observed_at_unix_ms)?;
+        self.transition_cleanup_from_revision(
+            stored,
+            terminal,
+            reason,
+            default_outcome,
+            observed_at_unix_ms,
+        )
+    }
+
+    fn transition_cleanup_from_revision(
+        &self,
+        stored: &StoredRequest,
+        terminal: StoredState,
+        reason: CleanupReason,
+        default_outcome: LifecycleOutcome,
+        observed_at_unix_ms: i64,
+    ) -> Result<Option<LifecycleOutcome>, ProvisionerError> {
         let expected_revision =
             i64::try_from(stored.state_revision).map_err(|_| ProvisionerError::StateUnavailable)?;
         let mut connection = open_database(&self.database_path)?;
