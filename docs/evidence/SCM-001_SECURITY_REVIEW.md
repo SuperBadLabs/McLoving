@@ -63,7 +63,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced eighteen actionable threads so far. The
+Independent review has produced twenty actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -110,8 +110,19 @@ command directory as the sole `PATH`, exposes only the sealed Git snapshot as
 `git` and `git-upload-pack`, and verifies those links alongside the sealed
 HTTP/HTTPS helper links before every invocation. Both contained file transport
 and credentialed smart-HTTP now pass with no ambient command directory in
-`PATH`. The eighteenth thread remains open until the replacement exact head is
-independently reverified.
+`PATH`. The eighteenth thread was replied to and resolved after the replacement
+head was pushed and its focused and full-workspace tests passed.
+
+Review of that replacement found that ancestor collision keys still used
+lowercasing instead of normalization plus full Unicode case folding, and that
+the acquisition root remained owner-writable after publication even though its
+retained children were read-only. The next replacement derives every ancestor
+key with compatibility normalization and full default case folding, sets the
+complete acquisition root to mode `0500` before atomic publication, and requires
+that exact root mode during replay. Focused proofs cover both `Straße`/`STRASSE`
+and composed/decomposed ancestor collisions plus published-root mode drift. The
+nineteenth and twentieth findings cannot contribute closure until the
+replacement exact head is independently reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the

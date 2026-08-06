@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use aho_corasick::AhoCorasick;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use caseless::Caseless as _;
 use hmac::{Hmac, Mac as _};
 use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use unicode_normalization::UnicodeNormalization as _;
 use url::Url;
 use uuid::Uuid;
 
@@ -903,10 +905,17 @@ impl SourceAcquirer {
         sync_directory(stage).await?;
 
         self.ensure_before_deadline(publication_deadline_unix_ms)?;
+        set_mode(stage, 0o500).await?;
+        sync_directory(stage).await?;
+        if let Err(error) = self.ensure_before_deadline(publication_deadline_unix_ms) {
+            let _ = set_mode(stage, 0o700).await;
+            return Err(error);
+        }
         let final_path = acquisition_path(&self.config.output_root, request.acquisition_id);
-        tokio::fs::rename(stage, &final_path)
-            .await
-            .map_err(|_| SourceError::StateUnavailable)?;
+        if tokio::fs::rename(stage, &final_path).await.is_err() {
+            let _ = set_mode(stage, 0o700).await;
+            return Err(SourceError::StateUnavailable);
+        }
         sync_directory(&self.config.output_root).await?;
         tokio::fs::remove_file(claim_path(&self.config.output_root, request.acquisition_id))
             .await
@@ -1196,7 +1205,7 @@ impl SourceAcquirer {
                 prefix.push('/');
             }
             prefix.push_str(component);
-            let folded = prefix.to_lowercase();
+            let folded = compatibility_case_key(&prefix);
             if folded_paths
                 .get(&folded)
                 .is_some_and(|reserved| reserved != &prefix)
@@ -1520,7 +1529,7 @@ impl SourceAcquirer {
         }
         let acquisition_root = acquisition_path(&self.config.output_root, receipt.acquisition_id);
         let tree_root = acquisition_root.join("tree");
-        validate_retained_directory(&acquisition_root, 0o700).await?;
+        validate_retained_directory(&acquisition_root, 0o500).await?;
         validate_retained_directory(&tree_root, 0o500).await?;
         validate_retained_file(&acquisition_root.join("manifest.json"), 0o400).await?;
         validate_retained_file(&acquisition_root.join("receipt.json"), 0o400).await?;
@@ -1910,6 +1919,16 @@ fn prefixed_path(prefix: &str, path: &str) -> Result<String, SourceError> {
     } else {
         Ok(format!("{prefix}/{path}"))
     }
+}
+
+fn compatibility_case_key(path: &str) -> String {
+    path.chars()
+        .nfd()
+        .default_case_fold()
+        .nfkd()
+        .default_case_fold()
+        .nfkd()
+        .collect()
 }
 
 fn validate_relative_path(path: &str, max_path_bytes: usize) -> Result<(), SourceError> {

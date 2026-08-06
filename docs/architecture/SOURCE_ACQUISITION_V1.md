@@ -149,8 +149,9 @@ symlinks (`120000`), and expected submodule gitlinks (`160000`) are admitted.
 Paths must be canonical UTF-8 relative paths, remain below the snapshot root,
 contain no `.git` component, and satisfy configured path/count/byte limits.
 Symlink targets must be relative and resolve within the same snapshot. Special
-files, unsafe symlinks, duplicate/colliding paths, case-fold collisions at any
-ancestor or leaf, and unexpected gitlinks fail closed before publication. The
+files, unsafe symlinks, duplicate/colliding paths, Unicode compatibility-
+normalized full-case-fold collisions at any ancestor or leaf, and unexpected
+gitlinks fail closed before publication. The
 global materialized-file count includes every admitted gitlink even when sparse
 selection omits all of that submodule's child files. A selected gitlink always
 materializes its read-only directory boundary, including gitlink-only sparse
@@ -181,8 +182,9 @@ Objects and materialized files are built below an unpredictable private staging
 directory. Every file and directory is synchronized, the canonical manifest and
 signed receipt are written and synchronized, and the complete directory is
 atomically renamed to its final acquisition-ID path. Every retained file and
-directory is made read-only before publication, and replay revalidates every
-directory's owner and exact mode as well as every leaf. Publication and timeout
+directory, including the acquisition root, is made read-only before publication,
+and replay revalidates every directory's owner and exact mode as well as every
+leaf. Publication and timeout
 decisions share the same exclusive output-root lock so a late snapshot cannot
 appear after a caller has accepted timeout. Failed and expired staging
 directories are removed without following symlinks.

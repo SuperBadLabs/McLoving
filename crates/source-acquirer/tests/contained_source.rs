@@ -607,12 +607,12 @@ async fn unsafe_symlink_fails_closed_and_retains_ambiguity_claim() {
 }
 
 #[tokio::test]
-async fn case_folded_ancestor_collisions_fail_before_publication() {
+async fn unicode_case_folded_and_normalized_ancestor_collisions_fail_before_publication() {
     let repositories = tempfile::tempdir().expect("repositories tempdir");
     let root = RepositoryFixture::new(repositories.path(), "root");
-    root.write("Dir/a.txt", b"upper ancestor\n");
-    root.write("dir/b.txt", b"lower ancestor\n");
-    let commit = root.commit("case-folded ancestors");
+    root.write("Straße/a.txt", b"full-fold ancestor\n");
+    root.write("STRASSE/b.txt", b"expanded-fold ancestor\n");
+    let commit = root.commit("Unicode case-folded ancestors");
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
     let request = context.request(&commit);
     assert!(matches!(
@@ -624,6 +624,29 @@ async fn case_folded_ancestor_collisions_fail_before_publication() {
             .config
             .output_root
             .join(request.acquisition_id.to_string())
+            .exists()
+    );
+
+    let normalization_repositories = tempfile::tempdir().expect("normalization repositories");
+    let normalization_root = RepositoryFixture::new(normalization_repositories.path(), "root");
+    normalization_root.write("Café/a.txt", b"composed ancestor\n");
+    normalization_root.write("Cafe\u{301}/b.txt", b"decomposed ancestor\n");
+    let normalization_commit = normalization_root.commit("Unicode-normalized ancestors");
+    let normalization_context =
+        Context::new(&normalization_root, Vec::new(), Vec::new(), false).await;
+    let normalization_request = normalization_context.request(&normalization_commit);
+    assert!(matches!(
+        normalization_context
+            .acquirer
+            .acquire(&normalization_request)
+            .await,
+        Err(SourceError::UnsafeTree)
+    ));
+    assert!(
+        !normalization_context
+            .config
+            .output_root
+            .join(normalization_request.acquisition_id.to_string())
             .exists()
     );
 }
@@ -640,6 +663,24 @@ async fn retained_tree_tampering_is_rejected_on_replay() {
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
     let request = context.request(&commit);
     let receipt = context.acquirer.acquire(&request).await.unwrap();
+    let acquisition_root = context
+        .config
+        .output_root
+        .join(receipt.acquisition_id.to_string());
+    assert_eq!(
+        std::fs::metadata(&acquisition_root)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o500
+    );
+    std::fs::set_permissions(&acquisition_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(
+        context.acquirer.acquire(&request).await,
+        Err(SourceError::InvalidStoredReceipt)
+    ));
+    std::fs::set_permissions(&acquisition_root, std::fs::Permissions::from_mode(0o500)).unwrap();
     let retained_directory = context
         .config
         .output_root
