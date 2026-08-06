@@ -75,9 +75,12 @@ and recursive submodule commands are disabled. Cleartext loopback or local
 `file` fixtures require both the configuration flag and
 `MCLOVING_SOURCE_ACQUIRER_TEST_MODE=1`.
 
-Before a credential-bearing network command, the acquirer starts its sealed,
-runtime-bound implementation snapshot in a dedicated resolver mode. That child
-receives only the endpoint hostname and port in a cleared environment and
+Before every credential-bearing network command, including a lazy promisor
+object read, the acquirer passes the configured normalized repository URL as a
+separate trusted parameter rather than trying to infer it from Git's command
+arguments, then starts its sealed, runtime-bound implementation snapshot in a
+dedicated resolver mode. That child receives only the URL's endpoint hostname
+and port in a cleared environment and
 refuses to run if any credential-file, credential-digest, signing-key, or
 secret-marker authority is present. Its numeric results and diagnostics are
 bounded, its process group is deadline-limited, and any malformed, empty,

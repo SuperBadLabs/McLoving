@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced thirty-four actionable threads so far. The
+Independent review has produced thirty-five actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -257,6 +257,17 @@ smart-HTTP proof now uses `localhost` so acquisition succeeds only through the
 pinned mapping without disclosing credential bytes. The thirty-fourth finding
 cannot contribute closure until the replacement exact head is independently
 reverified.
+
+Review of that exact head found that endpoint discovery incorrectly searched
+the Git command arguments even though authenticated fetch names the configured
+`origin` remote and lazy promisor reads name only `cat-file` plus an object. The
+replacement passes the authenticated repository URL explicitly through every
+credential-bearing Git boundary, including fetch, `.gitmodules`, and ordinary
+blob reads, and resolves that trusted URL before the credential environment is
+installed. No credential-bearing call infers its endpoint from Git argv or can
+silently omit `http.curloptResolve` for a hostname-backed admitted repository.
+The thirty-fifth finding cannot contribute closure until the replacement exact
+head is independently reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the

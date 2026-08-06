@@ -874,6 +874,7 @@ impl SourceAcquirer {
                 .read_gitmodules(
                     &git_dir,
                     &entries,
+                    &repository.binding.repository_url,
                     publication_deadline_unix_ms,
                     &repositories_dir,
                 )
@@ -976,6 +977,7 @@ impl SourceAcquirer {
                         usize::try_from(self.config.max_file_bytes)
                             .unwrap_or(usize::MAX)
                             .min(usize::MAX - 1),
+                        &repository.binding.repository_url,
                         publication_deadline_unix_ms,
                         &repositories_dir,
                     )
@@ -1333,7 +1335,13 @@ impl SourceAcquirer {
             OsString::from(&repository.authenticated_ref),
         ]);
         let fetch = self
-            .run_credential_git_until(arguments, MAX_GIT_METADATA_BYTES, deadline, transport_root)
+            .run_credential_git_until(
+                arguments,
+                MAX_GIT_METADATA_BYTES,
+                &repository.binding.repository_url,
+                deadline,
+                transport_root,
+            )
             .await;
         self.ensure_transport_quota(transport_root).await?;
         fetch?;
@@ -1381,6 +1389,7 @@ impl SourceAcquirer {
         &self,
         git_dir: &Path,
         entries: &[GitTreeEntry],
+        repository_url: &str,
         deadline: i64,
         transport_root: &Path,
     ) -> Result<BTreeMap<String, String>, SourceError> {
@@ -1400,6 +1409,7 @@ impl SourceAcquirer {
                     OsString::from(&entry.object_id),
                 ],
                 MAX_AUTHORITY_BYTES,
+                repository_url,
                 deadline,
                 transport_root,
             )
@@ -1496,7 +1506,7 @@ impl SourceAcquirer {
         arguments: Vec<OsString>,
         max_stdout: usize,
     ) -> Result<Vec<u8>, SourceError> {
-        self.run_git_with_deadline(arguments, max_stdout, None, false, None)
+        self.run_git_with_deadline(arguments, max_stdout, None, false, None, None)
             .await
     }
 
@@ -1506,14 +1516,22 @@ impl SourceAcquirer {
         max_stdout: usize,
         deadline_unix_ms: i64,
     ) -> Result<Vec<u8>, SourceError> {
-        self.run_git_with_deadline(arguments, max_stdout, Some(deadline_unix_ms), false, None)
-            .await
+        self.run_git_with_deadline(
+            arguments,
+            max_stdout,
+            Some(deadline_unix_ms),
+            false,
+            None,
+            None,
+        )
+        .await
     }
 
     async fn run_credential_git_until(
         &self,
         arguments: Vec<OsString>,
         max_stdout: usize,
+        repository_url: &str,
         deadline_unix_ms: i64,
         transport_root: &Path,
     ) -> Result<Vec<u8>, SourceError> {
@@ -1522,6 +1540,7 @@ impl SourceAcquirer {
             max_stdout,
             Some(deadline_unix_ms),
             true,
+            Some(repository_url),
             Some(transport_root),
         )
         .await
@@ -1533,6 +1552,7 @@ impl SourceAcquirer {
         max_stdout: usize,
         deadline_unix_ms: Option<i64>,
         credential_bearing: bool,
+        repository_url: Option<&str>,
         transport_root: Option<&Path>,
     ) -> Result<Vec<u8>, SourceError> {
         self.verify_runtime_authority(true).await?;
@@ -1555,10 +1575,13 @@ impl SourceAcquirer {
         } else {
             (Duration::from_millis(self.config.command_timeout_ms), false)
         };
-        let endpoint_resolutions = if credential_bearing {
-            self.resolve_network_endpoint(&arguments, timeout).await?
-        } else {
-            Vec::new()
+        let endpoint_resolutions = match (credential_bearing, repository_url) {
+            (true, Some(repository_url)) => {
+                self.resolve_network_endpoint(repository_url, timeout)
+                    .await?
+            }
+            (false, None) => Vec::new(),
+            _ => return Err(SourceError::StateUnavailable),
         };
         let mut command = Command::new(&self.git_executable.invocation_path);
         command
@@ -1766,20 +1789,15 @@ impl SourceAcquirer {
 
     async fn resolve_network_endpoint(
         &self,
-        arguments: &[OsString],
+        repository_url: &str,
         command_timeout: Duration,
     ) -> Result<Vec<String>, SourceError> {
-        let endpoint = arguments
-            .iter()
-            .filter_map(|argument| argument.to_str())
-            .filter_map(|argument| Url::parse(argument).ok())
-            .find(|url| {
-                url.scheme() == "https"
-                    || self.config.test_allow_http_loopback && url.scheme() == "http"
-            });
-        let Some(endpoint) = endpoint else {
+        let endpoint = Url::parse(repository_url).map_err(|_| SourceError::SourceUnavailable)?;
+        if endpoint.scheme() != "https"
+            && !(self.config.test_allow_http_loopback && endpoint.scheme() == "http")
+        {
             return Ok(Vec::new());
-        };
+        }
         let host = endpoint.host_str().ok_or(SourceError::SourceUnavailable)?;
         if host.parse::<IpAddr>().is_ok() {
             return Ok(Vec::new());
