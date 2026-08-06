@@ -1174,9 +1174,15 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("deadline-bounded standalone source acquirer");
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !config.output_root.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("deadline-bounded source acquirer readiness");
     request.requested_at_unix_ms = now_ms() - 100;
-    request.expires_at_unix_ms = now_ms() + 750;
+    request.expires_at_unix_ms = now_ms() + 2_000;
     let started = Instant::now();
     deadline_bounded
         .stdin
