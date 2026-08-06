@@ -38,6 +38,8 @@ impl RepositoryFixture {
         let bare = root.join(format!("{name}.git"));
         run_git(root, ["init", "--bare", path_text(&bare)]);
         run_git(&bare, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(&bare, ["config", "uploadpack.allowFilter", "true"]);
+        run_git(&bare, ["config", "uploadpack.allowAnySHA1InWant", "true"]);
         run_git(root, ["init", "-b", "main", path_text(&work)]);
         run_git(&work, ["config", "user.email", "source@example.invalid"]);
         run_git(&work, ["config", "user.name", "Contained Source"]);
@@ -53,6 +55,8 @@ impl RepositoryFixture {
             ["init", "--bare", "--object-format=sha256", path_text(&bare)],
         );
         run_git(&bare, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(&bare, ["config", "uploadpack.allowFilter", "true"]);
+        run_git(&bare, ["config", "uploadpack.allowAnySHA1InWant", "true"]);
         run_git(
             root,
             [
@@ -161,6 +165,7 @@ impl Context {
             max_files: 1_000,
             max_total_bytes: 2 * 1_024 * 1_024,
             max_file_bytes: 1024 * 1_024,
+            max_transport_bytes: 16 * 1_024 * 1_024,
             max_path_bytes: 512,
             max_submodules: 16,
             command_timeout_ms: 30_000,
@@ -949,6 +954,101 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
             .exists()
     );
 
+    let transport_repositories = tempfile::tempdir().expect("transport repositories");
+    let transport_root = RepositoryFixture::new(transport_repositories.path(), "root");
+    let mut omitted_blob = vec![0_u8; 4 * 1_024 * 1_024];
+    let mut random_state = 0x9e37_79b9_u32;
+    for byte in &mut omitted_blob {
+        random_state ^= random_state << 13;
+        random_state ^= random_state >> 17;
+        random_state ^= random_state << 5;
+        *byte = random_state.to_le_bytes()[0];
+    }
+    transport_root.write("selected.txt", b"selected transport bytes\n");
+    transport_root.write("omitted.bin", &omitted_blob);
+    let transport_commit = transport_root.commit("transport bounds");
+    let transport_context = Context::new(&transport_root, Vec::new(), Vec::new(), false).await;
+    let mut filtered_config = transport_context.config.clone();
+    filtered_config.generation += 1;
+    filtered_config.allowed_sparse_roots =
+        vec!["selected.txt".to_owned(), "omitted.bin".to_owned()];
+    filtered_config.max_transport_bytes = 512 * 1_024;
+    filtered_config.output_root = transport_context
+        .credential_path
+        .parent()
+        .unwrap()
+        .join("filtered-transport-output");
+    let filtered = transport_context
+        .acquirer_for(filtered_config.clone())
+        .await;
+    let mut filtered_request = transport_context.request(&transport_commit);
+    filtered_request.expected_generation = filtered_config.generation;
+    filtered_request.expected_config_sha256 = filtered.config_sha256().to_owned();
+    filtered_request.sparse_roots = vec!["selected.txt".to_owned()];
+    let filtered_receipt = filtered.acquire(&filtered_request).await.unwrap();
+    assert!(filtered_receipt.transport_bytes <= filtered_config.max_transport_bytes);
+    assert!(filtered_receipt.transport_bytes < u64::try_from(omitted_blob.len()).unwrap());
+
+    let mut transport_limited_config = filtered_config.clone();
+    transport_limited_config.generation += 1;
+    transport_limited_config.max_total_bytes = 64 * 1_024;
+    transport_limited_config.max_file_bytes = 64 * 1_024;
+    transport_limited_config.output_root = transport_context
+        .credential_path
+        .parent()
+        .unwrap()
+        .join("transport-quota-output");
+    let transport_limited = transport_context
+        .acquirer_for(transport_limited_config.clone())
+        .await;
+    let mut transport_request = transport_context.request(&transport_commit);
+    transport_request.expected_generation = transport_limited_config.generation;
+    transport_request.expected_config_sha256 = transport_limited.config_sha256().to_owned();
+    transport_request.sparse_roots = vec!["omitted.bin".to_owned()];
+    assert!(matches!(
+        transport_limited.acquire(&transport_request).await,
+        Err(SourceError::LimitExceeded)
+    ));
+    assert!(
+        std::fs::read_dir(&transport_limited_config.output_root)
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".stage-"))
+    );
+
+    let mut rename_failure_config = context.config.clone();
+    rename_failure_config.generation += 5;
+    rename_failure_config.output_root = context
+        .credential_path
+        .parent()
+        .unwrap()
+        .join("rename-failure-output");
+    let rename_failure = context.acquirer_for(rename_failure_config.clone()).await;
+    let mut rename_failure_request = context.request(&commit);
+    rename_failure_request.expected_generation = rename_failure_config.generation;
+    rename_failure_request.expected_config_sha256 = rename_failure.config_sha256().to_owned();
+    let colliding_final = rename_failure_config
+        .output_root
+        .join(rename_failure_request.acquisition_id.to_string());
+    std::fs::create_dir(&colliding_final).unwrap();
+    std::fs::write(colliding_final.join("collision"), b"retain collision\n").unwrap();
+    assert!(matches!(
+        rename_failure.acquire(&rename_failure_request).await,
+        Err(SourceError::StateUnavailable)
+    ));
+    assert!(
+        std::fs::read_dir(&rename_failure_config.output_root)
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".stage-"))
+    );
+
     let drift_request = context.request(&commit);
     write_private(
         &context.credential_path,
@@ -1084,6 +1184,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         max_files: 100,
         max_total_bytes: 1024 * 1024,
         max_file_bytes: 1024 * 1024,
+        max_transport_bytes: 16 * 1024 * 1024,
         max_path_bytes: 512,
         max_submodules: 0,
         command_timeout_ms: 30_000,
@@ -1179,7 +1280,12 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     assert!(!contains(&output.stdout, CREDENTIAL));
     assert!(!contains(&output.stderr, CREDENTIAL));
     let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(response["ok"], true);
+    assert_eq!(
+        response["ok"],
+        true,
+        "standalone response: {response}; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         response["receipt"]["repository_trees"][0]["resolved_commit"],
         request.exact_commit

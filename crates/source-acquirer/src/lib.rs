@@ -250,6 +250,7 @@ pub struct SourceConfig {
     pub max_files: usize,
     pub max_total_bytes: u64,
     pub max_file_bytes: u64,
+    pub max_transport_bytes: u64,
     pub max_path_bytes: usize,
     pub max_submodules: usize,
     pub command_timeout_ms: u64,
@@ -372,6 +373,7 @@ pub struct AcquisitionReceipt {
     pub content_sha256: String,
     pub materialized_files: usize,
     pub materialized_bytes: u64,
+    pub transport_bytes: u64,
     pub output_relative_path: String,
     pub acquired_at_unix_ms: i64,
     pub publication_deadline_unix_ms: i64,
@@ -610,6 +612,7 @@ impl SourceAcquirer {
             )
             .await;
         if result.is_err() {
+            let _ = make_tree_owner_writable(&stage).await;
             let _ = tokio::fs::remove_dir_all(&stage).await;
         }
         result
@@ -663,6 +666,7 @@ impl SourceAcquirer {
                 request.depth,
                 &git_dir,
                 publication_deadline_unix_ms,
+                &repositories_dir,
             )
             .await?;
             let resolved_tree = self
@@ -681,7 +685,14 @@ impl SourceAcquirer {
                 return Err(SourceError::SourceUnavailable);
             }
             let entries = self.list_tree(&git_dir, &repository.exact_commit).await?;
-            let module_declarations = self.read_gitmodules(&git_dir, &entries).await?;
+            let module_declarations = self
+                .read_gitmodules(
+                    &git_dir,
+                    &entries,
+                    publication_deadline_unix_ms,
+                    &repositories_dir,
+                )
+                .await?;
             let mut observed_local_gitlinks = BTreeSet::new();
 
             for entry in entries {
@@ -768,8 +779,8 @@ impl SourceAcquirer {
                     continue;
                 }
                 self.reserve_manifest_path(&full_path, &mut exact_paths, &mut folded_paths)?;
-                let blob = self
-                    .run_git(
+                let blob_result = self
+                    .run_credential_git_until(
                         vec![
                             OsString::from("--git-dir"),
                             git_dir.as_os_str().to_owned(),
@@ -780,8 +791,11 @@ impl SourceAcquirer {
                         usize::try_from(self.config.max_file_bytes)
                             .unwrap_or(usize::MAX)
                             .min(usize::MAX - 1),
+                        publication_deadline_unix_ms,
                     )
-                    .await?;
+                    .await;
+                self.ensure_transport_quota(&repositories_dir).await?;
+                let blob = blob_result?;
                 let blob_bytes =
                     u64::try_from(blob.len()).map_err(|_| SourceError::LimitExceeded)?;
                 if blob_bytes > self.config.max_file_bytes {
@@ -841,6 +855,7 @@ impl SourceAcquirer {
         let manifest_bytes =
             serde_json::to_vec(&manifest).map_err(|_| SourceError::StateUnavailable)?;
         let manifest_sha256 = sha256_hex(&manifest_bytes);
+        let transport_bytes = self.ensure_transport_quota(&repositories_dir).await?;
         write_new_file(&stage.join("manifest.json"), &manifest_bytes, 0o600).await?;
         sync_tree(&tree_dir).await?;
         make_tree_read_only(&tree_dir).await?;
@@ -885,6 +900,7 @@ impl SourceAcquirer {
             content_sha256: manifest_sha256,
             materialized_files: manifest.len(),
             materialized_bytes,
+            transport_bytes,
             output_relative_path: format!("{}/tree", request.acquisition_id),
             acquired_at_unix_ms,
             publication_deadline_unix_ms,
@@ -900,20 +916,16 @@ impl SourceAcquirer {
         tokio::fs::remove_dir_all(&repositories_dir)
             .await
             .map_err(|_| SourceError::StateUnavailable)?;
-        set_mode(&stage.join("manifest.json"), 0o400).await?;
-        set_mode(&stage.join("receipt.json"), 0o400).await?;
+        set_file_mode_and_sync(&stage.join("manifest.json"), 0o400).await?;
+        set_file_mode_and_sync(&stage.join("receipt.json"), 0o400).await?;
         sync_directory(stage).await?;
 
         self.ensure_before_deadline(publication_deadline_unix_ms)?;
         set_mode(stage, 0o500).await?;
         sync_directory(stage).await?;
-        if let Err(error) = self.ensure_before_deadline(publication_deadline_unix_ms) {
-            let _ = set_mode(stage, 0o700).await;
-            return Err(error);
-        }
+        self.ensure_before_deadline(publication_deadline_unix_ms)?;
         let final_path = acquisition_path(&self.config.output_root, request.acquisition_id);
         if tokio::fs::rename(stage, &final_path).await.is_err() {
-            let _ = set_mode(stage, 0o700).await;
             return Err(SourceError::StateUnavailable);
         }
         sync_directory(&self.config.output_root).await?;
@@ -1067,12 +1079,22 @@ impl SourceAcquirer {
         }
     }
 
+    async fn ensure_transport_quota(&self, root: &Path) -> Result<u64, SourceError> {
+        let bytes = allocated_storage_bytes(root).await?;
+        if bytes > self.config.max_transport_bytes {
+            Err(SourceError::LimitExceeded)
+        } else {
+            Ok(bytes)
+        }
+    }
+
     async fn fetch_repository(
         &self,
         repository: &RepositoryWork,
         depth: u32,
         git_dir: &Path,
         deadline: i64,
+        transport_root: &Path,
     ) -> Result<(), SourceError> {
         create_private_directory(git_dir).await?;
         let mut init_arguments = vec![OsString::from("init"), OsString::from("--bare")];
@@ -1082,22 +1104,50 @@ impl SourceAcquirer {
         init_arguments.push(git_dir.as_os_str().to_owned());
         self.run_git_until(init_arguments, MAX_GIT_METADATA_BYTES, deadline)
             .await?;
+        self.ensure_transport_quota(transport_root).await?;
+        for (key, value) in [
+            (
+                "remote.origin.url",
+                repository.binding.repository_url.as_str(),
+            ),
+            ("remote.origin.promisor", "true"),
+            ("remote.origin.partialclonefilter", "blob:none"),
+            ("extensions.partialClone", "origin"),
+        ] {
+            self.run_git_until(
+                vec![
+                    OsString::from("--git-dir"),
+                    git_dir.as_os_str().to_owned(),
+                    OsString::from("config"),
+                    OsString::from(key),
+                    OsString::from(value),
+                ],
+                MAX_GIT_METADATA_BYTES,
+                deadline,
+            )
+            .await?;
+            self.ensure_transport_quota(transport_root).await?;
+        }
         self.ensure_before_deadline(deadline)?;
         let mut arguments = vec![
             OsString::from("--git-dir"),
             git_dir.as_os_str().to_owned(),
             OsString::from("fetch"),
+            OsString::from("--filter=blob:none"),
             OsString::from("--no-tags"),
             OsString::from("--force"),
         ];
         arguments.push(OsString::from(format!("--depth={depth}")));
         arguments.extend([
             OsString::from("--"),
-            OsString::from(&repository.binding.repository_url),
+            OsString::from("origin"),
             OsString::from(&repository.authenticated_ref),
         ]);
-        self.run_credential_git_until(arguments, MAX_GIT_METADATA_BYTES, deadline)
-            .await?;
+        let fetch = self
+            .run_credential_git_until(arguments, MAX_GIT_METADATA_BYTES, deadline)
+            .await;
+        self.ensure_transport_quota(transport_root).await?;
+        fetch?;
         self.ensure_before_deadline(deadline)?;
         let resolved = self
             .git_text(
@@ -1142,6 +1192,8 @@ impl SourceAcquirer {
         &self,
         git_dir: &Path,
         entries: &[GitTreeEntry],
+        deadline: i64,
+        transport_root: &Path,
     ) -> Result<BTreeMap<String, String>, SourceError> {
         let Some(entry) = entries.iter().find(|entry| entry.path == ".gitmodules") else {
             return Ok(BTreeMap::new());
@@ -1149,8 +1201,8 @@ impl SourceAcquirer {
         if entry.mode != "100644" || entry.kind != "blob" {
             return Err(SourceError::SubmoduleMismatch);
         }
-        let bytes = self
-            .run_git(
+        let bytes_result = self
+            .run_credential_git_until(
                 vec![
                     OsString::from("--git-dir"),
                     git_dir.as_os_str().to_owned(),
@@ -1159,8 +1211,11 @@ impl SourceAcquirer {
                     OsString::from(&entry.object_id),
                 ],
                 MAX_AUTHORITY_BYTES,
+                deadline,
             )
-            .await?;
+            .await;
+        self.ensure_transport_quota(transport_root).await?;
+        let bytes = bytes_result?;
         self.reject_secret_markers(&bytes)?;
         parse_gitmodules(&bytes, self.config.max_path_bytes)
     }
@@ -1330,6 +1385,10 @@ impl SourceAcquirer {
                 "-c",
                 "fetch.fsckObjects=true",
                 "-c",
+                "fetch.unpackLimit=1",
+                "-c",
+                "transfer.unpackLimit=1",
+                "-c",
                 "protocol.allow=never",
                 "-c",
                 "protocol.https.allow=always",
@@ -1480,6 +1539,7 @@ impl SourceAcquirer {
             || receipt.signing_key_id != self.config.receipt_signing_key_id
             || receipt.secret_marker_set_sha256 != self.config.secret_marker_set_sha256
             || receipt.output_relative_path != format!("{}/tree", receipt.acquisition_id)
+            || receipt.transport_bytes > self.config.max_transport_bytes
         {
             return Err(SourceError::InvalidStoredReceipt);
         }
@@ -1720,6 +1780,8 @@ fn validate_config(
         || config.max_file_bytes == 0
         || config.max_file_bytes > config.max_total_bytes
         || config.max_file_bytes > MAX_CONFIGURED_FILE_BYTES
+        || config.max_transport_bytes == 0
+        || config.max_transport_bytes > MAX_CONFIGURED_BYTES
         || config.max_path_bytes == 0
         || config.max_path_bytes > MAX_CONFIGURED_PATH_BYTES
         || config.max_submodules > MAX_CONFIGURED_SUBMODULES
@@ -2718,6 +2780,61 @@ async fn sync_tree(root: &Path) -> Result<(), SourceError> {
     Ok(())
 }
 
+async fn allocated_storage_bytes(root: &Path) -> Result<u64, SourceError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let root_metadata = tokio::fs::symlink_metadata(root)
+            .await
+            .map_err(|_| SourceError::StateUnavailable)?;
+        if !root_metadata.file_type().is_dir() {
+            return Err(SourceError::StateUnavailable);
+        }
+        let mut total = root_metadata
+            .len()
+            .max(root_metadata.blocks().saturating_mul(512));
+        let mut entries_seen = 0_usize;
+        let mut directories = vec![root.to_owned()];
+        let mut index = 0;
+        while index < directories.len() {
+            let directory = directories[index].clone();
+            index += 1;
+            let mut entries = tokio::fs::read_dir(&directory)
+                .await
+                .map_err(|_| SourceError::StateUnavailable)?;
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|_| SourceError::StateUnavailable)?
+            {
+                entries_seen = entries_seen.saturating_add(1);
+                if entries_seen > MAX_CONFIGURED_FILES.saturating_mul(4) {
+                    return Err(SourceError::LimitExceeded);
+                }
+                let metadata = tokio::fs::symlink_metadata(entry.path())
+                    .await
+                    .map_err(|_| SourceError::StateUnavailable)?;
+                if metadata.file_type().is_dir() {
+                    directories.push(entry.path());
+                } else if !metadata.file_type().is_file() {
+                    return Err(SourceError::StateUnavailable);
+                }
+                let allocated = metadata.len().max(metadata.blocks().saturating_mul(512));
+                total = total
+                    .checked_add(allocated)
+                    .ok_or(SourceError::LimitExceeded)?;
+            }
+        }
+        Ok(total)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Err(SourceError::InvalidConfig)
+    }
+}
+
 async fn make_tree_read_only(root: &Path) -> Result<(), SourceError> {
     #[cfg(unix)]
     {
@@ -2743,7 +2860,8 @@ async fn make_tree_read_only(root: &Path) -> Result<(), SourceError> {
                     directories.push(entry.path());
                 } else if metadata.file_type().is_file() {
                     let executable = metadata.permissions().mode() & 0o100 != 0;
-                    set_mode(&entry.path(), if executable { 0o500 } else { 0o400 }).await?;
+                    set_file_mode_and_sync(&entry.path(), if executable { 0o500 } else { 0o400 })
+                        .await?;
                 } else if !metadata.file_type().is_symlink() {
                     return Err(SourceError::UnsafeTree);
                 }
@@ -2751,6 +2869,7 @@ async fn make_tree_read_only(root: &Path) -> Result<(), SourceError> {
         }
         for directory in directories.into_iter().rev() {
             set_mode(&directory, 0o500).await?;
+            sync_directory(&directory).await?;
         }
         Ok(())
     }
@@ -2759,6 +2878,52 @@ async fn make_tree_read_only(root: &Path) -> Result<(), SourceError> {
         let _ = root;
         Err(SourceError::InvalidConfig)
     }
+}
+
+async fn make_tree_owner_writable(root: &Path) -> Result<(), SourceError> {
+    let metadata = match tokio::fs::symlink_metadata(root).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(SourceError::StateUnavailable),
+    };
+    if !metadata.file_type().is_dir() {
+        return Err(SourceError::StateUnavailable);
+    }
+    let mut directories = vec![root.to_owned()];
+    let mut index = 0;
+    while index < directories.len() {
+        let directory = directories[index].clone();
+        index += 1;
+        set_mode(&directory, 0o700).await?;
+        let mut entries = tokio::fs::read_dir(&directory)
+            .await
+            .map_err(|_| SourceError::StateUnavailable)?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|_| SourceError::StateUnavailable)?
+        {
+            let metadata = tokio::fs::symlink_metadata(entry.path())
+                .await
+                .map_err(|_| SourceError::StateUnavailable)?;
+            if metadata.file_type().is_dir() {
+                directories.push(entry.path());
+            } else if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+                return Err(SourceError::StateUnavailable);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn set_file_mode_and_sync(path: &Path, mode: u32) -> Result<(), SourceError> {
+    set_mode(path, mode).await?;
+    tokio::fs::File::open(path)
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?
+        .sync_all()
+        .await
+        .map_err(|_| SourceError::StateUnavailable)
 }
 
 async fn set_mode(path: &Path, mode: u32) -> Result<(), SourceError> {

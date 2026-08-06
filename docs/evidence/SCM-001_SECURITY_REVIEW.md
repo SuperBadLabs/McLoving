@@ -63,7 +63,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced twenty actionable threads so far. The
+Independent review has produced twenty-three actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -123,6 +123,21 @@ that exact root mode during replay. Focused proofs cover both `Straße`/`STRASSE
 and composed/decomposed ancestor collisions plus published-root mode drift. The
 nineteenth and twentieth findings cannot contribute closure until the
 replacement exact head is independently reverified.
+
+Review of that replacement found that positive history depth did not bound the
+reachable blob pack, failed read-only stages restored only their root mode, and
+final child mode changes were not individually fsynced. The next replacement
+uses a `blob:none` promisor fetch, lazily retrieves only selected blobs and
+required `.gitmodules`, checks configuration-bound allocated transport storage
+after every Git command, and records the admitted transport bytes in the signed
+receipt. A proof admits a small sparse selection while omitting an incompressible
+four-MiB blob under a 512-KiB transport ceiling, then proves selecting that blob
+fails the quota and leaves no stage. A forced final-path collision separately
+proves a fully read-only stage recursively restores write authority and is
+removed after rename failure. Final file and directory chmods are fsynced before
+atomic publication. The twenty-first through twenty-third
+findings cannot contribute closure until the replacement exact head is
+independently reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the

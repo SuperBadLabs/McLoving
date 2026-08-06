@@ -60,7 +60,7 @@ The canonical configuration digest binds:
 - grant identity/version/scope/expiry and credential SHA-256;
 - receipt-key identity/content digest and secret-marker-set digest;
 - allowed ref prefixes, submodule repositories, sparse roots, and maximum depth;
-- fetch/process timeout, file/count/byte/path/submodule bounds;
+- fetch/process timeout, transport-staging, file/count/byte/path/submodule bounds;
 - private output root, optional private-CA path/content digest; and
 - the loopback/file-fixture flag, which also requires explicit test mode.
 
@@ -109,9 +109,16 @@ NDJSON frame is capped at 64 KiB.
 
 ## Exact-ref and repository policy
 
-The acquirer initializes a private bare repository, installs no working-tree
-hooks, and fetches exactly the configured URL and requested full ref. It applies
-the configured depth and no tag-following. `FETCH_HEAD^{commit}` must equal the
+The acquirer initializes a private bare partial-clone repository, installs no
+working-tree hooks, and fetches exactly the configured URL and requested full
+ref with `blob:none`, no tag-following, and the configured depth. Git object
+storage is measured after every command against the configuration-bound
+transport-staging quota; only selected blobs and required `.gitmodules` content
+are fetched lazily, and a quota breach fails before publication. An admitted
+repository endpoint must support filtered fetch and exact reachable promisor-
+object wants; inability or refusal is a typed source-unavailable failure. The private
+volume must reserve the configured transport plus materialization ceilings.
+`FETCH_HEAD^{commit}` must equal the
 request's full commit before any source is published. A later movement of the
 same ref is delivered only by a new request naming the later exact commit; a
 stale request cannot silently receive it.
@@ -181,13 +188,15 @@ never silently re-fetches a mutable ref.
 Objects and materialized files are built below an unpredictable private staging
 directory. Every file and directory is synchronized, the canonical manifest and
 signed receipt are written and synchronized, and the complete directory is
-atomically renamed to its final acquisition-ID path. Every retained file and
+atomically renamed to its final acquisition-ID path. Each final file mode and
+nested-directory mode is fsynced after chmod and before rename. Every retained file and
 directory, including the acquisition root, is made read-only before publication,
 and replay revalidates every directory's owner and exact mode as well as every
 leaf. Publication and timeout
 decisions share the same exclusive output-root lock so a late snapshot cannot
-appear after a caller has accepted timeout. Failed and expired staging
-directories are removed without following symlinks.
+appear after a caller has accepted timeout. Failed and expired staging trees
+recursively restore owner-write directory modes before removal without following
+symlinks.
 
 The canonical manifest binds path, Git mode, Git object ID, byte length, and
 SHA-256 for every materialized entry plus each submodule boundary. The receipt
