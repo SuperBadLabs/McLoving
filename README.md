@@ -17,6 +17,10 @@ fenced agents, durable Linux and Windows execution, a public API, CLI and
 static UI, artifact and test-result storage, audit records, backup/restore
 drills, identity lifecycle and versioned action-scoped authorization mapping,
 and the isolated Jenkins compiler and migration evidence planes.
+The contained parity substrate also includes a standalone, signed, fenced
+dynamic-agent provisioner protocol; the sealed Mario inventory currently
+contains zero admitted live dynamic provisioners, so no production dynamic
+compute claim follows from that implementation.
 
 The project is not release-ready. The execution board remains authoritative
 for source and trigger boundaries, external effects, external client migration,

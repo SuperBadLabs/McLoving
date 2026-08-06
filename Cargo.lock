@@ -1570,6 +1570,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-provisioner"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64",
+ "hmac",
+ "nix",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "mcloving-state-machine"
 version = "0.0.0"
 
