@@ -35,6 +35,7 @@ const MAX_CONFIGURED_DEPTH: u32 = 1_000_000;
 const MAX_CONFIGURED_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
 const MAX_LOCAL_PUBLICATION_MS: u64 = 2 * 60 * 1_000;
 const TRANSPORT_QUOTA_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const MAX_TRANSPORT_QUOTA_SCAN_RESTARTS: usize = 3;
 const MAX_AUTHORITY_BYTES: usize = 64 * 1_024;
 const MAX_MARKERS: usize = 256;
 const MAX_MARKER_BYTES: usize = 256 * 1_024;
@@ -1452,29 +1453,18 @@ impl SourceAcquirer {
         let stderr = child.stderr.take().ok_or(SourceError::StateUnavailable)?;
         let stdout_task = tokio::spawn(read_bounded(stdout, max_stdout));
         let stderr_task = tokio::spawn(read_bounded(stderr, MAX_GIT_STDERR_BYTES));
+        enum MonitorEvent {
+            Exited(std::io::Result<std::process::ExitStatus>),
+            Quota(Result<(), SourceError>),
+            Poll,
+            TimedOut,
+        }
         let started = tokio::time::Instant::now();
         let status = loop {
-            let quota_result = if let Some(root) = transport_root {
-                self.ensure_transport_quota(root).await.map(|_| ())
-            } else {
-                Ok(())
-            };
-            if let Err(error) = quota_result {
-                terminate_child(&mut child, process_group_id).await?;
-                stdout_task.abort();
-                stderr_task.abort();
-                let _ = stdout_task.await;
-                let _ = stderr_task.await;
-                return Err(error);
-            }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|_| SourceError::SourceUnavailable)?
-            {
-                break status;
-            }
-            let elapsed = started.elapsed();
-            if elapsed >= timeout {
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
                 terminate_child(&mut child, process_group_id).await?;
                 stdout_task.abort();
                 stderr_task.abort();
@@ -1486,8 +1476,69 @@ impl SourceAcquirer {
                     SourceError::SourceUnavailable
                 });
             }
-            tokio::time::sleep(TRANSPORT_QUOTA_POLL_INTERVAL.min(timeout.saturating_sub(elapsed)))
-                .await;
+            let event = if let Some(root) = transport_root {
+                tokio::select! {
+                    status = child.wait() => MonitorEvent::Exited(status),
+                    quota = self.ensure_transport_quota(root) => {
+                        MonitorEvent::Quota(quota.map(|_| ()))
+                    }
+                    _ = tokio::time::sleep(remaining) => MonitorEvent::TimedOut,
+                }
+            } else {
+                tokio::select! {
+                    status = child.wait() => MonitorEvent::Exited(status),
+                    _ = tokio::time::sleep(remaining) => MonitorEvent::TimedOut,
+                }
+            };
+            match event {
+                MonitorEvent::Exited(status) => {
+                    break status.map_err(|_| SourceError::SourceUnavailable)?;
+                }
+                MonitorEvent::Quota(Err(error)) => {
+                    terminate_child(&mut child, process_group_id).await?;
+                    stdout_task.abort();
+                    stderr_task.abort();
+                    let _ = stdout_task.await;
+                    let _ = stderr_task.await;
+                    return Err(error);
+                }
+                MonitorEvent::Quota(Ok(())) => {
+                    let remaining = timeout
+                        .checked_sub(started.elapsed())
+                        .unwrap_or(Duration::ZERO);
+                    let event = if remaining.is_zero() {
+                        MonitorEvent::TimedOut
+                    } else {
+                        tokio::select! {
+                            status = child.wait() => MonitorEvent::Exited(status),
+                            _ = tokio::time::sleep(TRANSPORT_QUOTA_POLL_INTERVAL) => {
+                                MonitorEvent::Poll
+                            }
+                            _ = tokio::time::sleep(remaining) => MonitorEvent::TimedOut,
+                        }
+                    };
+                    match event {
+                        MonitorEvent::Exited(status) => {
+                            break status.map_err(|_| SourceError::SourceUnavailable)?;
+                        }
+                        MonitorEvent::Poll => continue,
+                        MonitorEvent::TimedOut => {}
+                        MonitorEvent::Quota(_) => unreachable!(),
+                    }
+                }
+                MonitorEvent::TimedOut => {}
+                MonitorEvent::Poll => unreachable!(),
+            }
+            terminate_child(&mut child, process_group_id).await?;
+            stdout_task.abort();
+            stderr_task.abort();
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(if deadline_limited {
+                SourceError::ExpiredRequest
+            } else {
+                SourceError::SourceUnavailable
+            });
         };
         let stdout = stdout_task
             .await
@@ -2829,6 +2880,19 @@ async fn sync_tree(root: &Path) -> Result<(), SourceError> {
 }
 
 async fn allocated_storage_bytes(root: &Path) -> Result<u64, SourceError> {
+    for restart in 0..=MAX_TRANSPORT_QUOTA_SCAN_RESTARTS {
+        if let Some(bytes) = allocated_storage_bytes_once(root).await? {
+            return Ok(bytes);
+        }
+        if restart == MAX_TRANSPORT_QUOTA_SCAN_RESTARTS {
+            return Err(SourceError::StateUnavailable);
+        }
+        tokio::task::yield_now().await;
+    }
+    Err(SourceError::StateUnavailable)
+}
+
+async fn allocated_storage_bytes_once(root: &Path) -> Result<Option<u64>, SourceError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
@@ -2850,21 +2914,25 @@ async fn allocated_storage_bytes(root: &Path) -> Result<u64, SourceError> {
             index += 1;
             let mut entries = match tokio::fs::read_dir(&directory).await {
                 Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(_) => return Err(SourceError::StateUnavailable),
             };
-            while let Some(entry) = entries
-                .next_entry()
-                .await
-                .map_err(|_| SourceError::StateUnavailable)?
-            {
+            loop {
+                let entry = match entries.next_entry().await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(None);
+                    }
+                    Err(_) => return Err(SourceError::StateUnavailable),
+                };
                 entries_seen = entries_seen.saturating_add(1);
                 if entries_seen > MAX_CONFIGURED_FILES.saturating_mul(4) {
                     return Err(SourceError::LimitExceeded);
                 }
                 let metadata = match tokio::fs::symlink_metadata(entry.path()).await {
                     Ok(metadata) => metadata,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                     Err(_) => return Err(SourceError::StateUnavailable),
                 };
                 if metadata.file_type().is_dir() {
@@ -2878,7 +2946,7 @@ async fn allocated_storage_bytes(root: &Path) -> Result<u64, SourceError> {
                     .ok_or(SourceError::LimitExceeded)?;
             }
         }
-        Ok(total)
+        Ok(Some(total))
     }
     #[cfg(not(unix))]
     {

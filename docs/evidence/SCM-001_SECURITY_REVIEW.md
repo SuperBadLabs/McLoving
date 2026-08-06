@@ -63,7 +63,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced twenty-four actionable threads so far. The
+Independent review has produced twenty-six actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -151,6 +151,18 @@ independent checks. The four-MiB selected-blob/512-KiB ceiling proof now exercis
 the live command monitor and still proves typed quota denial plus complete stage
 cleanup. The twenty-fourth finding cannot contribute closure until the
 replacement exact head is independently reverified.
+
+Review of that replacement found that a long allocation traversal serialized
+deadline and child-exit handling, and that treating an entry which disappeared
+during Git's atomic rename as absent could certify a partial measurement. The
+next replacement selects child exit and the exact command/request deadline
+concurrently with every allocation traversal, so neither a slow scan nor a
+contended filesystem can extend credential-bearing authority. Any directory or
+entry disappearance now discards the entire measurement and restarts it from
+the repository root; three failed restarts produce a fail-closed state error
+which also terminates the complete Git process group. The twenty-fifth and
+twenty-sixth findings cannot contribute closure until this replacement exact
+head is independently reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the

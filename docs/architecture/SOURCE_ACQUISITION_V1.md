@@ -115,7 +115,11 @@ ref with `blob:none`, no tag-following, and the configured depth. Git object
 storage is monitored while every credential-bearing Git command runs and is
 measured again after every command against the configuration-bound
 transport-staging quota. The complete Git process group is killed when the live
-monitor observes a breach; only selected blobs and required `.gitmodules`
+monitor observes a breach. Child exit and the exact command/request deadline
+remain concurrent with every allocation traversal. A file or directory that
+disappears during measurement invalidates the complete snapshot and restarts
+measurement from the repository root; three failed restarts fail closed and
+terminate the process group. Only selected blobs and required `.gitmodules`
 content are fetched lazily, and a quota breach fails before publication. An
 admitted repository endpoint must support filtered fetch and exact reachable
 promisor-object wants; inability or refusal is a typed source-unavailable
