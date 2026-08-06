@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
@@ -211,8 +211,12 @@ impl Context {
     }
 
     async fn second_acquirer(&self) -> SourceAcquirer {
+        self.acquirer_for(self.config.clone()).await
+    }
+
+    async fn acquirer_for(&self, config: SourceConfig) -> SourceAcquirer {
         SourceAcquirer::new(
-            self.config.clone(),
+            config,
             self.implementation_sha256.clone(),
             self.credential_path.clone(),
             CREDENTIAL,
@@ -546,6 +550,7 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
     let repositories = tempfile::tempdir().expect("repositories tempdir");
     let root = RepositoryFixture::new(repositories.path(), "root");
     root.write("oversized.txt", b"five!\n");
+    root.write("small.txt", b"four");
     let commit = root.commit("bounded");
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
 
@@ -557,16 +562,7 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
         .parent()
         .unwrap()
         .join("limited-output");
-    let limited = SourceAcquirer::new(
-        limited_config.clone(),
-        context.implementation_sha256.clone(),
-        context.credential_path.clone(),
-        CREDENTIAL,
-        SIGNING_KEY.to_vec(),
-        vec![CREDENTIAL.to_vec()],
-    )
-    .await
-    .unwrap();
+    let limited = context.acquirer_for(limited_config.clone()).await;
     let mut request = context.request(&commit);
     request.expected_generation = limited_config.generation;
     request.expected_config_sha256 = limited.config_sha256().to_owned();
@@ -583,6 +579,58 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
                 .to_string_lossy()
                 .starts_with(".stage-"))
     );
+
+    let mut count_config = context.config.clone();
+    count_config.generation += 2;
+    count_config.max_files = 1;
+    count_config.output_root = context
+        .credential_path
+        .parent()
+        .unwrap()
+        .join("count-output");
+    let count_limited = context.acquirer_for(count_config.clone()).await;
+    let mut count_request = context.request(&commit);
+    count_request.expected_generation = count_config.generation;
+    count_request.expected_config_sha256 = count_limited.config_sha256().to_owned();
+    assert!(matches!(
+        count_limited.acquire(&count_request).await,
+        Err(SourceError::LimitExceeded)
+    ));
+
+    let mut total_config = context.config.clone();
+    total_config.generation += 3;
+    total_config.max_total_bytes = 8;
+    total_config.max_file_bytes = 8;
+    total_config.output_root = context
+        .credential_path
+        .parent()
+        .unwrap()
+        .join("total-output");
+    let total_limited = context.acquirer_for(total_config.clone()).await;
+    let mut total_request = context.request(&commit);
+    total_request.expected_generation = total_config.generation;
+    total_request.expected_config_sha256 = total_limited.config_sha256().to_owned();
+    assert!(matches!(
+        total_limited.acquire(&total_request).await,
+        Err(SourceError::LimitExceeded)
+    ));
+
+    let mut path_config = context.config.clone();
+    path_config.generation += 4;
+    path_config.max_path_bytes = 8;
+    path_config.output_root = context
+        .credential_path
+        .parent()
+        .unwrap()
+        .join("path-output");
+    let path_limited = context.acquirer_for(path_config.clone()).await;
+    let mut path_request = context.request(&commit);
+    path_request.expected_generation = path_config.generation;
+    path_request.expected_config_sha256 = path_limited.config_sha256().to_owned();
+    assert!(matches!(
+        path_limited.acquire(&path_request).await,
+        Err(SourceError::UnsafeTree)
+    ));
 
     let mut control_request = context.request(&commit);
     control_request.audit_lineage = "audit/source\nsubstituted".to_owned();
@@ -648,6 +696,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     let commit = repository.commit("private source");
     let authorized_requests = Arc::new(AtomicUsize::new(0));
     let unauthorized_requests = Arc::new(AtomicUsize::new(0));
+    let response_delay_ms = Arc::new(AtomicU64::new(0));
     let state = SmartHttpState {
         project_root: temporary.path().to_owned(),
         expected_authorization: format!(
@@ -656,6 +705,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         ),
         authorized_requests: Arc::clone(&authorized_requests),
         unauthorized_requests: Arc::clone(&unauthorized_requests),
+        response_delay_ms: Arc::clone(&response_delay_ms),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -821,13 +871,70 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         .await
         .unwrap();
     let denied_output = denied.wait_with_output().await.unwrap();
-    server.abort();
     assert!(denied_output.status.success());
     assert!(!contains(&denied_output.stdout, denied_credential));
     assert!(!contains(&denied_output.stderr, denied_credential));
     let denied_response: serde_json::Value = serde_json::from_slice(&denied_output.stdout).unwrap();
     assert_eq!(denied_response["ok"], false);
     assert_eq!(denied_response["code"], "source_unavailable");
+
+    write_private(&credential_path, CREDENTIAL);
+    write_private(&marker_path, &[CREDENTIAL, b"\n"].concat());
+    config.credential_sha256 = content_sha256(CREDENTIAL);
+    config.secret_marker_set_sha256 = marker_set_digest(&[CREDENTIAL.to_vec()]);
+    config.command_timeout_ms = 50;
+    config.output_root = temporary.path().join("timeout-output");
+    request.acquisition_id = Uuid::new_v4();
+    request.expected_config_sha256 = config.canonical_digest().unwrap();
+    request.requested_at_unix_ms = now_ms() - 1_000;
+    request.expires_at_unix_ms = now_ms() + 60_000;
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    response_delay_ms.store(250, Ordering::SeqCst);
+    let mut timed_out = tokio::process::Command::new(&binary)
+        .env_clear()
+        .env("MCLOVING_SOURCE_ACQUIRER_CONFIG", &config_path)
+        .env("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE", &credential_path)
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE",
+            &signing_key_path,
+        )
+        .env("MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE", &marker_path)
+        .env("MCLOVING_SOURCE_ACQUIRER_TEST_MODE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("timed-out standalone source acquirer");
+    timed_out
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .await
+        .unwrap();
+    let timeout_output = timed_out.wait_with_output().await.unwrap();
+    server.abort();
+    assert!(timeout_output.status.success());
+    assert!(!contains(&timeout_output.stdout, CREDENTIAL));
+    assert!(!contains(&timeout_output.stderr, CREDENTIAL));
+    let timeout_response: serde_json::Value =
+        serde_json::from_slice(&timeout_output.stdout).unwrap();
+    assert_eq!(timeout_response["ok"], false);
+    assert_eq!(timeout_response["code"], "source_unavailable");
+    let retained_names = std::fs::read_dir(&config.output_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        retained_names
+            .iter()
+            .any(|name| name.ends_with(".claim.json"))
+    );
+    assert!(
+        !retained_names
+            .iter()
+            .any(|name| name.starts_with(".stage-"))
+    );
 }
 
 #[derive(Clone)]
@@ -836,6 +943,7 @@ struct SmartHttpState {
     expected_authorization: String,
     authorized_requests: Arc<AtomicUsize>,
     unauthorized_requests: Arc<AtomicUsize>,
+    response_delay_ms: Arc<AtomicU64>,
 }
 
 async fn smart_http(
@@ -845,6 +953,10 @@ async fn smart_http(
     headers: HeaderMap,
     body: Body,
 ) -> Response<Body> {
+    let response_delay_ms = state.response_delay_ms.load(Ordering::SeqCst);
+    if response_delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(response_delay_ms)).await;
+    }
     let authorized = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
