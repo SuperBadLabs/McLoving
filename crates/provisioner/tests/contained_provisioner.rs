@@ -51,6 +51,7 @@ enum FixtureMode {
     DisappearFromFinalInventory,
     DelayedReady,
     DelayedCreateReady,
+    DelayedCreateAfterInitialSnapshot,
     DelayedCreateAfterFinalSnapshot,
     DelayedAbsence,
     DelayedSnapshotFinalInventory,
@@ -281,7 +282,8 @@ async fn create_instance(
         let mut inner = state.inner.lock().expect("fixture state");
         inner.create_started += 1;
         match inner.mode {
-            FixtureMode::DelayedCreateAfterFinalSnapshot => 100,
+            FixtureMode::DelayedCreateAfterInitialSnapshot
+            | FixtureMode::DelayedCreateAfterFinalSnapshot => 100,
             FixtureMode::DelayedCreateReady | FixtureMode::DelayedMalformedCreateOnce => 200,
             _ => 0,
         }
@@ -426,15 +428,17 @@ async fn list_instances(
     {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let delayed_final_snapshot = {
+    let delayed_inventory_snapshot = {
         let mut inner = state.inner.lock().expect("fixture state");
         inner.inventory_started += 1;
-        if matches!(
+        let delayed_initial = inner.mode == FixtureMode::DelayedCreateAfterInitialSnapshot
+            && inner.inventory_started == 1;
+        let delayed_final = matches!(
             inner.mode,
             FixtureMode::DelayedSnapshotFinalInventory
                 | FixtureMode::DelayedCreateAfterFinalSnapshot
-        ) && inner.inventory_started == 2
-        {
+        ) && inner.inventory_started == 2;
+        if delayed_initial || delayed_final {
             inner.inventory_reads += 1;
             Some(ProviderInventory {
                 provisioner_id: "contained-provisioner".to_owned(),
@@ -446,7 +450,7 @@ async fn list_instances(
             None
         }
     };
-    if let Some(snapshot) = delayed_final_snapshot {
+    if let Some(snapshot) = delayed_inventory_snapshot {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         return signed_response(&state, snapshot);
     }
@@ -1781,6 +1785,42 @@ async fn reconciliation_rejects_an_admission_after_its_initial_ledger_snapshot()
         )
         .expect("count reconciliation evidence");
     assert_eq!(evidence, 0);
+}
+
+#[tokio::test]
+async fn reconciliation_retains_a_ready_transition_after_its_initial_inventory_snapshot() {
+    let context =
+        Context::with_startup_timeout(FixtureMode::DelayedCreateAfterInitialSnapshot, 1_000).await;
+    let request = context.request();
+    let provision = context.provisioner.provision(&request);
+    let reconcile = async {
+        context.fixture.wait_for_create_start().await;
+        context
+            .provisioner
+            .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+            .await
+    };
+    let (provisioned, reconciled) = tokio::join!(provision, reconcile);
+    let provisioned = provisioned.expect("in-flight create becomes ready");
+    let reconciled = reconciled.expect("reconciliation preserves the live instance");
+    assert_eq!(provisioned.body.outcome, LifecycleOutcome::Ready);
+    assert_eq!(reconciled.body.active_ready, 1);
+    assert_eq!(reconciled.body.cleaned, 0);
+    assert_eq!(reconciled.body.ambiguous, 0);
+    assert!(reconciled.body.ambiguous_request_ids.is_empty());
+    assert_eq!(context.fixture.counts().1, 0);
+    assert_eq!(context.fixture.counts().3, 1);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let state: String = database
+        .query_row(
+            "SELECT state FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read retained ready state");
+    assert_eq!(state, "ready");
 }
 
 #[tokio::test]

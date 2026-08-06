@@ -1219,6 +1219,15 @@ impl Provisioner {
     ) -> Result<ReconcileReceipt, ProvisionerError> {
         let now = now_unix_ms()?;
         self.validate_reconcile_request(request, now)?;
+        let ready_before_initial_inventory = self
+            .load_active_requests()?
+            .into_iter()
+            .filter(|item| item.state == StoredState::Ready)
+            .filter_map(|item| {
+                item.instance
+                    .map(|instance| (item.request.request_id, instance.instance_id))
+            })
+            .collect::<HashMap<_, _>>();
         let initial = self.provider_inventory().await?;
         if !initial.complete || initial.instances.len() > MAX_PROVIDER_INSTANCES {
             return Err(ProvisionerError::InvalidProviderResponse);
@@ -1239,15 +1248,6 @@ impl Provisioner {
         }
 
         let (stored, admission_epoch) = self.load_active_requests_with_admission_epoch()?;
-        let initially_ready = stored
-            .iter()
-            .filter(|item| item.state == StoredState::Ready)
-            .filter_map(|item| {
-                item.instance
-                    .as_ref()
-                    .map(|instance| (item.request.request_id, instance.instance_id))
-            })
-            .collect::<HashMap<_, _>>();
         let mut known = BTreeSet::new();
         let mut recovered = 0_u32;
         let mut cleaned = 0_u32;
@@ -1261,6 +1261,17 @@ impl Provisioner {
             }
             known.insert(item.request.request_id);
             let Some(instance) = provider_by_request.get(&item.request.request_id) else {
+                let retained_instance_id =
+                    item.instance.as_ref().map(|instance| instance.instance_id);
+                if item.state == StoredState::Ready
+                    && ready_before_initial_inventory
+                        .get(&item.request.request_id)
+                        .copied()
+                        != retained_instance_id
+                {
+                    ambiguous_request_ids.insert(item.request.request_id);
+                    continue;
+                }
                 let peer_deadline = item
                     .created_at_unix_ms
                     .checked_add(
@@ -1524,7 +1535,7 @@ impl Provisioner {
                 .instance
                 .as_ref()
                 .map(|instance| instance.instance_id);
-            if initially_ready.get(request_id).copied() != retained_instance_id {
+            if ready_before_initial_inventory.get(request_id).copied() != retained_instance_id {
                 ambiguous_request_ids.insert(*request_id);
                 continue;
             }
