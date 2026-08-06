@@ -53,6 +53,7 @@ enum FixtureMode {
     DelayedCreateReady,
     DelayedCreateAfterInitialSnapshot,
     DelayedCreateAfterFinalSnapshot,
+    DelayedPendingRefreshAfterInitialSnapshot,
     DelayedAbsence,
     DelayedEmptyFinalInventoryOnce,
     DelayedInitialInventoryResponse,
@@ -152,6 +153,14 @@ impl Fixture {
         )
     }
 
+    fn lookup_starts(&self) -> usize {
+        self.state
+            .inner
+            .lock()
+            .expect("fixture state")
+            .lookup_started
+    }
+
     fn inject_orphan(&self, create: ProviderCreateRequest) -> Uuid {
         let mut inner = self.state.inner.lock().expect("fixture state");
         let instance = make_instance(&create, ProviderInstanceState::Ready, false);
@@ -238,6 +247,10 @@ impl Fixture {
     }
 
     async fn wait_for_lookup_start(&self) {
+        self.wait_for_lookup_start_after(0).await;
+    }
+
+    async fn wait_for_lookup_start_after(&self, minimum: usize) {
         for _ in 0..100 {
             if self
                 .state
@@ -245,7 +258,7 @@ impl Fixture {
                 .lock()
                 .expect("fixture state")
                 .lookup_started
-                != 0
+                > minimum
             {
                 return;
             }
@@ -309,6 +322,7 @@ async fn create_instance(
         | FixtureMode::PendingForever
         | FixtureMode::DelayedMalformedLookupOnce
         | FixtureMode::DelayedSnapshotPendingThenMalformed
+        | FixtureMode::DelayedPendingRefreshAfterInitialSnapshot
         | FixtureMode::DelayedReady
         | FixtureMode::DelayedAbsence => ProviderInstanceState::Pending,
         FixtureMode::StartupFailed => ProviderInstanceState::StartupFailed,
@@ -389,7 +403,9 @@ async fn lookup_instance(
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         return signed_response(&state, snapshot_pending);
     }
-    if matches!(
+    if delayed_mode == FixtureMode::DelayedPendingRefreshAfterInitialSnapshot {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    } else if matches!(
         delayed_mode,
         FixtureMode::DelayedReady | FixtureMode::DelayedAbsence
     ) || malformed_lookup
@@ -437,6 +453,9 @@ async fn list_instances(
             && inner.inventory_started == 1;
         let delayed_initial_response = inner.mode == FixtureMode::DelayedInitialInventoryResponse
             && inner.inventory_started == 1;
+        let delayed_pending_initial = inner.mode
+            == FixtureMode::DelayedPendingRefreshAfterInitialSnapshot
+            && inner.inventory_started == 1;
         let delayed_empty_final = inner.mode == FixtureMode::DelayedEmptyFinalInventoryOnce
             && inner.inventory_started == 2;
         let delayed_final = matches!(
@@ -444,13 +463,22 @@ async fn list_instances(
             FixtureMode::DelayedSnapshotFinalInventory
                 | FixtureMode::DelayedCreateAfterFinalSnapshot
         ) && inner.inventory_started == 2;
-        if delayed_initial || delayed_initial_response || delayed_empty_final || delayed_final {
+        if delayed_initial
+            || delayed_initial_response
+            || delayed_pending_initial
+            || delayed_empty_final
+            || delayed_final
+        {
             inner.inventory_reads += 1;
             Some(ProviderInventory {
                 provisioner_id: "contained-provisioner".to_owned(),
                 complete: true,
-                observed_at_unix_ms: now_ms(),
-                instances: if delayed_empty_final {
+                observed_at_unix_ms: if delayed_initial_response {
+                    now_ms() + 4_000
+                } else {
+                    now_ms()
+                },
+                instances: if delayed_empty_final || delayed_pending_initial {
                     Vec::new()
                 } else {
                     inner.instances.values().cloned().collect()
@@ -1860,6 +1888,78 @@ async fn reconciliation_uses_inventory_observation_for_the_create_peer_window() 
 }
 
 #[tokio::test]
+async fn reconciliation_absence_yields_to_a_newer_concrete_pending_observation() {
+    let context = Context::with_startup_timeout(
+        FixtureMode::DelayedPendingRefreshAfterInitialSnapshot,
+        3_000,
+    )
+    .await;
+    let request = context.request();
+    let provision = context.provisioner.provision(&request);
+    let reconcile = async {
+        context.fixture.wait_for_lookup_start().await;
+        let database =
+            rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+                .expect("open retained ledger");
+        let created_at_unix_ms: i64 = database
+            .query_row(
+                "SELECT created_at_unix_ms FROM requests WHERE request_id = ?1",
+                [request.request_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("read admission time");
+        drop(database);
+        let peer_deadline = created_at_unix_ms
+            + i64::try_from(context.config.provider_timeout_ms).expect("provider timeout")
+            + 1_000;
+        let delay_ms = (peer_deadline + 50).saturating_sub(now_ms());
+        tokio::time::sleep(std::time::Duration::from_millis(
+            u64::try_from(delay_ms).expect("nonnegative delay"),
+        ))
+        .await;
+
+        let observed_lookups = context.fixture.lookup_starts();
+        context
+            .fixture
+            .wait_for_lookup_start_after(observed_lookups)
+            .await;
+        let reconciled = context
+            .provisioner
+            .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+            .await
+            .expect("newer concrete Pending observation wins");
+        let database =
+            rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+                .expect("reopen retained ledger");
+        let state: String = database
+            .query_row(
+                "SELECT state FROM requests WHERE request_id = ?1",
+                [request.request_id.to_string()],
+                |row| row.get(0),
+            )
+            .expect("read retained Pending state");
+        (reconciled, state, context.fixture.counts())
+    };
+    let (provisioned, (reconciled, state, counts)) = tokio::join!(provision, reconcile);
+    let provisioned = provisioned.expect("eventual Pending startup timeout is cleaned");
+    assert_eq!(
+        provisioned.body.outcome,
+        LifecycleOutcome::StartupTimeoutCleaned
+    );
+    assert_eq!(reconciled.body.cleaned, 0);
+    assert_eq!(reconciled.body.ambiguous, 1);
+    assert!(
+        reconciled
+            .body
+            .ambiguous_request_ids
+            .contains(&request.request_id)
+    );
+    assert_eq!(state, "pending");
+    assert_eq!(counts.1, 0);
+    assert_eq!(counts.3, 1);
+}
+
+#[tokio::test]
 async fn reconciliation_absence_yields_to_a_newer_same_instance_ready_observation() {
     let context = Context::new(FixtureMode::Ready).await;
     let request = context.request();
@@ -2599,13 +2699,18 @@ async fn retained_ledger_rejects_receipt_signing_identity_drift() {
 }
 
 #[tokio::test]
-async fn concurrent_processes_serialize_the_admission_epoch_migration() {
+async fn concurrent_processes_serialize_the_ledger_migration_and_fence_legacy_writes() {
     let context = Context::new(FixtureMode::Ready).await;
     let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
         .expect("open retained ledger");
     database
-        .execute("ALTER TABLE metadata DROP COLUMN admission_epoch", [])
-        .expect("simulate retained pre-admission-epoch ledger");
+        .execute_batch(
+            "DROP TRIGGER requests_legacy_state_revision_exhausted;
+             DROP TRIGGER requests_legacy_state_revision;
+             ALTER TABLE metadata DROP COLUMN admission_epoch;
+             ALTER TABLE requests DROP COLUMN state_revision;",
+        )
+        .expect("simulate retained pre-epoch ledger");
     drop(database);
 
     let first_config = context.config.clone();
@@ -2654,6 +2759,60 @@ async fn concurrent_processes_serialize_the_admission_epoch_migration() {
         )
         .expect("count admission epoch columns");
     assert_eq!(columns, 1);
+    let revision_columns: i64 = database
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('requests')
+             WHERE name = 'state_revision'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count state revision columns");
+    assert_eq!(revision_columns, 1);
+    let compatibility_triggers: i64 = database
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name IN (
+                   'requests_legacy_state_revision',
+                   'requests_legacy_state_revision_exhausted'
+               )",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count legacy compatibility triggers");
+    assert_eq!(compatibility_triggers, 2);
+    drop(database);
+
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("provision after migration");
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("reopen migrated ledger");
+    let revision_before: i64 = database
+        .query_row(
+            "SELECT state_revision FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read revision before legacy write");
+    database
+        .execute(
+            "UPDATE requests SET state = state, instance_json = instance_json
+             WHERE request_id = ?1",
+            [request.request_id.to_string()],
+        )
+        .expect("simulate admitted legacy state writer");
+    let revision_after: i64 = database
+        .query_row(
+            "SELECT state_revision FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read revision after legacy write");
+    assert_eq!(revision_after, revision_before + 1);
 }
 
 #[tokio::test]

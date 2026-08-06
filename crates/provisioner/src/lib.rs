@@ -1220,7 +1220,7 @@ impl Provisioner {
     ) -> Result<ReconcileReceipt, ProvisionerError> {
         let now = now_unix_ms()?;
         self.validate_reconcile_request(request, now)?;
-        let ready_before_initial_inventory = self.load_ready_revisions()?;
+        let concrete_before_initial_inventory = self.load_concrete_revisions()?;
         let initial = self.provider_inventory().await?;
         if !initial.complete || initial.instances.len() > MAX_PROVIDER_INSTANCES {
             return Err(ProvisionerError::InvalidProviderResponse);
@@ -1255,15 +1255,15 @@ impl Provisioner {
             }
             known.insert(item.request.request_id);
             let Some(instance) = provider_by_request.get(&item.request.request_id) else {
-                let retained_ready_revision = item
+                let retained_concrete_revision = item
                     .instance
                     .as_ref()
                     .map(|instance| (instance.instance_id, item.state_revision));
-                if item.state == StoredState::Ready
-                    && ready_before_initial_inventory
+                if item.instance.is_some()
+                    && concrete_before_initial_inventory
                         .get(&item.request.request_id)
                         .copied()
-                        != retained_ready_revision
+                        != retained_concrete_revision
                 {
                     ambiguous_request_ids.insert(item.request.request_id);
                     continue;
@@ -1281,7 +1281,10 @@ impl Provisioner {
                 let possibly_creating = item.state == StoredState::Intent
                     || item.state == StoredState::Pending
                     || (item.state == StoredState::Ambiguous && item.instance.is_none());
-                if possibly_creating && initial_observed_at < peer_deadline {
+                let peer_absence_safe_at = peer_deadline
+                    .checked_add(MAX_CLOCK_SKEW_MS)
+                    .ok_or(ProvisionerError::StateUnavailable)?;
+                if possibly_creating && initial_observed_at < peer_absence_safe_at {
                     ambiguous = ambiguous
                         .checked_add(1)
                         .ok_or(ProvisionerError::StateUnavailable)?;
@@ -1476,7 +1479,7 @@ impl Provisioner {
             }
         }
 
-        let ready_before_final_inventory = self.load_ready_revisions()?;
+        let concrete_before_final_inventory = self.load_concrete_revisions()?;
         let final_inventory = self.provider_inventory().await?;
         if !final_inventory.complete || final_inventory.instances.len() > MAX_PROVIDER_INSTANCES {
             return Err(ProvisionerError::InvalidProviderResponse);
@@ -1535,16 +1538,18 @@ impl Provisioner {
             if final_request_ids.contains(request_id) {
                 continue;
             }
-            let retained_ready_revision = stored
+            let retained_concrete_revision = stored
                 .instance
                 .as_ref()
                 .map(|instance| (instance.instance_id, stored.state_revision));
-            let retained_instance_id = retained_ready_revision.map(|(instance_id, _)| instance_id);
-            let ready_before_initial = ready_before_initial_inventory
+            let retained_instance_id =
+                retained_concrete_revision.map(|(instance_id, _)| instance_id);
+            let concrete_before_initial = concrete_before_initial_inventory
                 .get(request_id)
                 .map(|(instance_id, _)| *instance_id);
-            if ready_before_initial != retained_instance_id
-                || ready_before_final_inventory.get(request_id).copied() != retained_ready_revision
+            if concrete_before_initial != retained_instance_id
+                || concrete_before_final_inventory.get(request_id).copied()
+                    != retained_concrete_revision
             {
                 ambiguous_request_ids.insert(*request_id);
                 continue;
@@ -3096,11 +3101,10 @@ impl Provisioner {
         Ok(stored)
     }
 
-    fn load_ready_revisions(&self) -> Result<HashMap<Uuid, (Uuid, u64)>, ProvisionerError> {
+    fn load_concrete_revisions(&self) -> Result<HashMap<Uuid, (Uuid, u64)>, ProvisionerError> {
         Ok(self
             .load_active_requests()?
             .into_iter()
-            .filter(|item| item.state == StoredState::Ready)
             .filter_map(|item| {
                 item.instance.map(|instance| {
                     (
@@ -3442,6 +3446,30 @@ fn initialize_database(
             )
             .map_err(|_| ProvisionerError::StateUnavailable)?;
     }
+    migration
+        .execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS requests_legacy_state_revision_exhausted
+             BEFORE UPDATE OF state, instance_json ON requests
+             FOR EACH ROW
+             WHEN NEW.state_revision = OLD.state_revision
+                  AND OLD.state_revision >= 9223372036854775807
+             BEGIN
+                 SELECT RAISE(ABORT, 'state revision exhausted');
+             END;
+
+             CREATE TRIGGER IF NOT EXISTS requests_legacy_state_revision
+             AFTER UPDATE OF state, instance_json ON requests
+             FOR EACH ROW
+             WHEN NEW.state_revision = OLD.state_revision
+                  AND OLD.state_revision < 9223372036854775807
+             BEGIN
+                 UPDATE requests
+                    SET state_revision = OLD.state_revision + 1
+                  WHERE request_id = NEW.request_id
+                    AND state_revision = OLD.state_revision;
+             END;",
+        )
+        .map_err(|_| ProvisionerError::StateUnavailable)?;
     migration
         .commit()
         .map_err(|_| ProvisionerError::StateUnavailable)?;
