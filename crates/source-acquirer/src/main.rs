@@ -1,12 +1,18 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mcloving_source_acquirer::{
     AcquisitionRequest, SourceAcquirer, SourceConfig, content_sha256, parse_json_no_duplicates,
     read_bounded_regular_file, read_private_bounded_regular_file, sha256_file,
 };
+#[cfg(unix)]
+use nix::sys::signal::{SigEvent, SigevNotify, Signal};
+#[cfg(unix)]
+use nix::sys::timer::{Expiration, Timer, TimerSetTimeFlags};
+#[cfg(unix)]
+use nix::time::ClockId;
 use serde::Serialize;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
@@ -98,6 +104,8 @@ async fn run_resolver() -> Result<(), ()> {
 }
 
 async fn run_askpass() -> Result<(), ()> {
+    #[cfg(unix)]
+    let _credential_deadline_timer = arm_credential_deadline()?;
     ensure_before_credential_deadline()?;
     let prompt = std::env::args().nth(1).ok_or(())?;
     let value = if prompt.contains("Username") {
@@ -126,16 +134,53 @@ async fn run_askpass() -> Result<(), ()> {
     output.flush().await.map_err(|_| ())
 }
 
+#[cfg(unix)]
+fn arm_credential_deadline() -> Result<Timer, ()> {
+    let clock = ClockId::CLOCK_MONOTONIC;
+    let monotonic_anchor = clock.now().map_err(|_| ())?;
+    let deadline = credential_deadline_unix_ms()?;
+    let wall_anchor = unix_time_ms()?;
+    let remaining = deadline
+        .checked_sub(wall_anchor)
+        .filter(|value| *value > 0)
+        .ok_or(())?;
+    let remaining = u64::try_from(remaining).map_err(|_| ())?;
+    let absolute_deadline =
+        monotonic_anchor + nix::sys::time::TimeSpec::from(Duration::from_millis(remaining));
+    let event = SigEvent::new(SigevNotify::SigevSignal {
+        signal: Signal::SIGKILL,
+        si_value: 0,
+    });
+    let mut timer = Timer::new(clock, event).map_err(|_| ())?;
+    timer
+        .set(
+            Expiration::OneShot(absolute_deadline),
+            TimerSetTimeFlags::TFD_TIMER_ABSTIME,
+        )
+        .map_err(|_| ())?;
+    Ok(timer)
+}
+
 fn ensure_before_credential_deadline() -> Result<(), ()> {
-    let deadline = std::env::var(CREDENTIAL_DEADLINE_ENV)
+    if unix_time_ms()? >= credential_deadline_unix_ms()? {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+fn credential_deadline_unix_ms() -> Result<i64, ()> {
+    std::env::var(CREDENTIAL_DEADLINE_ENV)
         .map_err(|_| ())?
         .parse::<i64>()
-        .map_err(|_| ())?;
+        .map_err(|_| ())
+}
+
+fn unix_time_ms() -> Result<i64, ()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ())?;
-    let now = i64::try_from(now.as_millis()).map_err(|_| ())?;
-    if now >= deadline { Err(()) } else { Ok(()) }
+    i64::try_from(now.as_millis()).map_err(|_| ())
 }
 
 async fn run() -> Result<(), ()> {

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -330,6 +330,55 @@ fn sealed_askpass_refuses_credential_release_after_deadline() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sealed_askpass_kernel_timer_kills_blocked_emission_at_deadline() {
+    use std::io::Read as _;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::Stdio;
+
+    let binary = env!("CARGO_BIN_EXE_mcloving-source-acquirer");
+    let deadline = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .saturating_add(250);
+    let username = "u".repeat(100 * 1_024);
+    let mut child = Command::new(binary)
+        .arg("Username for https://localhost")
+        .env_clear()
+        .env("MCLOVING_SOURCE_ACQUIRER_ASKPASS", "1")
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS",
+            deadline.to_string(),
+        )
+        .env("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME", &username)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("deadline-armed askpass process");
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll askpass process") {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(3) {
+            child.kill().expect("kill overdue askpass process");
+            panic!("askpass kernel deadline did not terminate the process");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let mut emitted = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut emitted)
+        .unwrap();
+    assert_eq!(status.signal(), Some(nix::libc::SIGKILL));
+    assert!(emitted.len() < username.len());
 }
 
 #[tokio::test]

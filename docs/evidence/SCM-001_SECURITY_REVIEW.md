@@ -7,9 +7,9 @@ Status: REOPENED. The earlier implementation candidate
 nineteen focused tests after ten findings were fixed, but later exact-head
 review correctly identified additional executable/helper binding,
 authority-snapshot immutability, credential-marker, retained-directory, and
-test-readiness gaps. The replacement implementation has twenty-five focused
+test-readiness gaps. The replacement implementation has twenty-six focused
 source-acquisition tests: two boundary unit tests, four protocol tests,
-seventeen contained end-to-end tests, and two sealed-inventory tests. This receipt
+eighteen contained end-to-end tests, and two sealed-inventory tests. This receipt
 cannot return to PASS until its replacement exact head independently passes
 review and every protected check.
 
@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced forty actionable threads so far. The
+Independent review has produced forty-one actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -301,6 +301,15 @@ that no credential bytes or diagnostics are emitted. The thirty-eighth through
 fortieth findings cannot contribute closure until the replacement exact head is
 independently reverified.
 
+Review of that exact head found that askpass could still be descheduled between
+its final user-space check and asynchronous output. The replacement arms a safe
+POSIX `CLOCK_MONOTONIC` absolute timer with kernel-delivered `SIGKILL` before
+askpass opens credential authority and retains the timer through the complete
+output operation. A Linux regression fills the askpass pipe, deliberately
+blocks credential emission across the deadline, and proves the kernel kills the
+sealed process before it can finish writing. The forty-first finding cannot
+contribute closure until the replacement exact head is independently reverified.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
@@ -308,7 +317,7 @@ fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
 suite, strict Clippy, formatting, and the rerun protected checks pass.
 
 The replacement implementation currently passes `git diff --check`, Rust
-formatting, strict source-acquirer Clippy, and all twenty-five focused
+formatting, strict source-acquirer Clippy, and all twenty-six focused
 source-acquisition tests plus the complete locked workspace suite on HeMan.
 Protected checks and independent exact-head verification remain required before
 closure.

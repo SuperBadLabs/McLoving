@@ -188,8 +188,12 @@ digest before writing those same bytes, so a path replacement between parent
 verification and the remote prompt fails closed. It also receives the earlier
 of the signed request/publication deadline and configured command deadline, and
 rechecks that bound before opening credential authority and immediately before
-writing any username or credential bytes. A Git process delayed across startup
-therefore cannot obtain authentication after its admitted authority expires.
+writing any username or credential bytes. On Unix it first arms a POSIX
+`CLOCK_MONOTONIC` absolute timer whose kernel-delivered `SIGKILL` remains active
+through the complete output operation, making credential emission impossible
+after the deadline even if askpass is descheduled while its stdout pipe is
+blocked. A Git process delayed across startup therefore cannot obtain
+authentication after its admitted authority expires.
 The Git child receives a cleared environment containing only fixed locale/path,
 askpass, CA, and protocol-control values. All stderr is bounded and reduced to
 typed errors after secret-marker scanning. Each credential-bearing fetch is
