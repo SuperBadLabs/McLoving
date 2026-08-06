@@ -84,7 +84,10 @@ The provider, grant issuer, provisioner operator, host, private CA, provider
 attestation key, and receipt-signing key remain trusted within their declared
 scopes. The provisioner and receipt verifier share signing authority, so their
 collusion can forge lifecycle evidence. No real Mario provider class is
-admitted by this ticket. DIFF-003, SHADOW-001, CANARY-001, CUTOVER-001,
-ROLLBACK-001, RECUTOVER-001, DECOM-001, SEC-004, WAR-001, and DR-001 remain
-mandatory before any production dynamic-agent authority transition or release
-claim.
+admitted by this ticket. DIFF-003, SHADOW-001, and CANARY-001 remain mandatory
+before any production dynamic-agent authority grant. CUTOVER-001, ROLLBACK-001,
+RECUTOVER-001, DECOM-001, and MIG-009 remain mandatory for the subsequent
+authority-transfer, reversal, final-transfer, decommission, and closure chain.
+SEC-004 and WAR-001 remain release-readiness gates at their board-defined
+points; DR-001 follows MIG-009 and is a final-release gate, not a prerequisite
+for the authority transition. This receipt waives none of those gates.
