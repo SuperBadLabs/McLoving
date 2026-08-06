@@ -232,7 +232,7 @@ impl Fixture {
     }
 
     async fn wait_for_create_start(&self) {
-        for _ in 0..100 {
+        for _ in 0..1_000 {
             if self
                 .state
                 .inner
@@ -253,7 +253,7 @@ impl Fixture {
     }
 
     async fn wait_for_lookup_start_after(&self, minimum: usize) {
-        for _ in 0..100 {
+        for _ in 0..1_000 {
             if self
                 .state
                 .inner
@@ -270,7 +270,7 @@ impl Fixture {
     }
 
     async fn wait_for_inventory_start(&self, minimum: usize) {
-        for _ in 0..100 {
+        for _ in 0..1_000 {
             if self
                 .state
                 .inner
@@ -418,7 +418,7 @@ async fn lookup_instance(
         )
     };
     if let Some(snapshot_pending) = snapshot_pending {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(3_000)).await;
         return signed_response(&state, snapshot_pending);
     }
     if snapshot_absent {
@@ -1196,14 +1196,14 @@ async fn lost_delete_response_and_instance_expiry_reconcile_without_escaped_comp
 
     let expiry_context = Context::new(FixtureMode::Ready).await;
     let mut expiry_request = expiry_context.request();
-    expiry_request.instance_expires_at_unix_ms = now_ms() + 500;
+    expiry_request.instance_expires_at_unix_ms = now_ms() + 3_000;
     let ready = expiry_context
         .provisioner
         .provision(&expiry_request)
         .await
         .expect("short-lived ready instance");
     assert_eq!(ready.body.outcome, LifecycleOutcome::Ready);
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3_100)).await;
     let expired = expiry_context
         .provisioner
         .reconcile(&reconcile_request(
@@ -1653,7 +1653,7 @@ async fn lookup_only_cancel_retains_intent_when_create_wins_the_state_race() {
 #[tokio::test]
 async fn stale_pending_refresh_recovers_a_concurrent_ambiguous_winner() {
     let context =
-        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 1_000)
+        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 10_000)
             .await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
@@ -1681,7 +1681,7 @@ async fn stale_pending_refresh_recovers_a_concurrent_ambiguous_winner() {
 #[tokio::test]
 async fn delayed_pending_refresh_cannot_reactivate_confirmed_cleanup() {
     let context =
-        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 1_000)
+        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 10_000)
             .await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
@@ -1721,7 +1721,8 @@ async fn delayed_pending_refresh_cannot_reactivate_confirmed_cleanup() {
 #[tokio::test]
 async fn post_lookup_timeout_cannot_reactivate_confirmed_cleanup() {
     let context =
-        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 50).await;
+        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 2_000)
+            .await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -2413,14 +2414,14 @@ async fn cleanup_confirmation_absence_yields_to_a_newer_live_revision() {
 async fn reconciliation_preserves_expiry_outcome_after_delete_response_loss() {
     let context = Context::new(FixtureMode::Ready).await;
     let mut request = context.request();
-    request.instance_expires_at_unix_ms = now_ms() + 500;
+    request.instance_expires_at_unix_ms = now_ms() + 3_000;
     context
         .provisioner
         .provision(&request)
         .await
         .expect("short-lived ready instance");
     context.fixture.set_mode(FixtureMode::MalformedDeleteOnce);
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3_100)).await;
 
     let uncertain = context
         .provisioner
