@@ -50,10 +50,10 @@ struct GitExecDirectory {
 }
 
 impl GitExecDirectory {
-    fn verify(&self, remote_helper: &Path) -> Result<(), SourceError> {
+    fn verify(&self, git: &Path, remote_helper: &Path) -> Result<(), SourceError> {
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = remote_helper;
+            let _ = (git, remote_helper);
             Err(SourceError::InvalidConfig)
         }
         #[cfg(target_os = "linux")]
@@ -68,10 +68,15 @@ impl GitExecDirectory {
             {
                 return Err(SourceError::BindingMismatch);
             }
-            for name in ["git-remote-http", "git-remote-https"] {
+            for (name, target) in [
+                ("git", git),
+                ("git-upload-pack", git),
+                ("git-remote-http", remote_helper),
+                ("git-remote-https", remote_helper),
+            ] {
                 if std::fs::read_link(self.invocation_path.join(name))
                     .map_err(|_| SourceError::BindingMismatch)?
-                    != remote_helper
+                    != target
                 {
                     return Err(SourceError::BindingMismatch);
                 }
@@ -88,8 +93,14 @@ impl Drop for GitExecDirectory {
             use std::os::unix::fs::PermissionsExt as _;
 
             let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o700));
-            let _ = std::fs::remove_file(self.path.join("git-remote-http"));
-            let _ = std::fs::remove_file(self.path.join("git-remote-https"));
+            for name in [
+                "git",
+                "git-upload-pack",
+                "git-remote-http",
+                "git-remote-https",
+            ] {
+                let _ = std::fs::remove_file(self.path.join(name));
+            }
             let _ = std::fs::remove_dir(&self.path);
         }
     }
@@ -518,6 +529,7 @@ impl SourceAcquirer {
         };
         let git_exec_directory = create_git_exec_directory(
             &config.output_root,
+            &git_executable.invocation_path,
             &git_remote_https_executable.invocation_path,
         )?;
         let config_sha256 = config.canonical_digest()?;
@@ -1257,8 +1269,10 @@ impl SourceAcquirer {
         credential_bearing: bool,
     ) -> Result<Vec<u8>, SourceError> {
         self.verify_runtime_authority(credential_bearing).await?;
-        self.git_exec_directory
-            .verify(&self.git_remote_https_executable.invocation_path)?;
+        self.git_exec_directory.verify(
+            &self.git_executable.invocation_path,
+            &self.git_remote_https_executable.invocation_path,
+        )?;
         let (timeout, deadline_limited) = if let Some(deadline) = deadline_unix_ms {
             let remaining = deadline
                 .checked_sub(now_unix_ms()?)
@@ -1279,7 +1293,7 @@ impl SourceAcquirer {
             .env_clear()
             .env("LANG", "C")
             .env("LC_ALL", "C")
-            .env("PATH", "/usr/bin:/bin")
+            .env("PATH", &self.git_exec_directory.invocation_path)
             .env("HOME", "/nonexistent")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -2258,11 +2272,12 @@ async fn snapshot_verified_file(
 
 fn create_git_exec_directory(
     output_root: &Path,
+    git: &Path,
     remote_helper: &Path,
 ) -> Result<GitExecDirectory, SourceError> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (output_root, remote_helper);
+        let _ = (output_root, git, remote_helper);
         Err(SourceError::InvalidConfig)
     }
     #[cfg(target_os = "linux")]
@@ -2274,10 +2289,14 @@ fn create_git_exec_directory(
         std::fs::create_dir(&path).map_err(|_| SourceError::StateUnavailable)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| SourceError::StateUnavailable)?;
-        symlink(remote_helper, path.join("git-remote-http"))
-            .map_err(|_| SourceError::StateUnavailable)?;
-        symlink(remote_helper, path.join("git-remote-https"))
-            .map_err(|_| SourceError::StateUnavailable)?;
+        for (name, target) in [
+            ("git", git),
+            ("git-upload-pack", git),
+            ("git-remote-http", remote_helper),
+            ("git-remote-https", remote_helper),
+        ] {
+            symlink(target, path.join(name)).map_err(|_| SourceError::StateUnavailable)?;
+        }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500))
             .map_err(|_| SourceError::StateUnavailable)?;
         let directory = std::fs::OpenOptions::new()

@@ -76,14 +76,16 @@ The process opens itself, Git, the HTTPS remote helper, and any private CA
 without following a final symlink, hashes the exact bytes, copies them into
 anonymous memory-backed files, and applies write/grow/shrink/further-seal
 kernel seals before use. Git and askpass execute only those immutable snapshots;
-the CA is read only from its sealed snapshot. A private descriptor-bound
-`GIT_EXEC_PATH` exposes only the sealed HTTP/HTTPS helper, preventing ambient
-helper lookup. Original-path replacement or in-place mutation therefore cannot
-substitute bytes between verification and use. Credential material is also
-revalidated before every Git invocation. A caller must present the acquirer,
-Git, helper, and canonical-configuration hashes. Any implementation, Git,
-helper, repository, grant, policy, or generation substitution fails before Git
-or network access.
+the CA is read only from its sealed snapshot. A private descriptor-bound command
+directory is both `GIT_EXEC_PATH` and the sole `PATH`. It exposes the sealed Git
+snapshot as `git` and `git-upload-pack` and the sealed transport helper as
+`git-remote-http` and `git-remote-https`, preventing ambient lookup by Git's
+internal children as well as its transport. Original-path replacement or
+in-place mutation therefore cannot substitute bytes between verification and
+use. Credential material is also revalidated before every Git invocation. A
+caller must present the acquirer, Git, helper, and canonical-configuration
+hashes. Any implementation, Git, helper, repository, grant, policy, or
+generation substitution fails before Git or network access.
 
 ## Acquisition request
 

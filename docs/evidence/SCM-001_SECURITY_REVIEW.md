@@ -41,8 +41,9 @@ not substituted for a live source-acquisition denominator.
 - provider, repository, authenticated full ref, exact SHA-1 or SHA-256 commit,
   object format, source identity, trust class, fork policy, submodule graph,
   sparse roots, depth, tenant/build/attempt identities, expiry, and audit lineage;
-- sealed immutable Git, HTTPS-helper, askpass, and CA snapshots plus credential
-  revalidation before every Git invocation;
+- sealed immutable Git, HTTPS-helper, askpass, and CA snapshots, a private-only
+  Git child-command path, plus credential revalidation before every Git
+  invocation;
 - exact primary, fork, and submodule repository allowlists, including
   fail-closed untrusted-fork and repository-substitution denial;
 - smart-HTTP askpass delivery that preserves credential bytes exactly while
@@ -62,7 +63,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced seventeen actionable threads so far. The
+Independent review has produced eighteen actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -100,6 +101,17 @@ through a private descriptor-bound `GIT_EXEC_PATH`. The smart-HTTP proof mutates
 the configured helper inode in place after process readiness and still proves
 successful authenticated acquisition with no substituted-helper execution or
 credential disclosure.
+
+Review of that exact head found one remaining internal-child seam: Git can
+re-execute `git` and `git-upload-pack` through `PATH`, so its otherwise sealed
+top-level process could still hand credential-bearing environment variables to
+an ambient Git image. The replacement now uses the descriptor-bound private
+command directory as the sole `PATH`, exposes only the sealed Git snapshot as
+`git` and `git-upload-pack`, and verifies those links alongside the sealed
+HTTP/HTTPS helper links before every invocation. Both contained file transport
+and credentialed smart-HTTP now pass with no ambient command directory in
+`PATH`. The eighteenth thread remains open until the replacement exact head is
+independently reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
