@@ -1291,15 +1291,7 @@ impl Provisioner {
                     ambiguous_request_ids.insert(item.request.request_id);
                     continue;
                 }
-                let (terminal, outcome) = self.absence_terminal(item, now)?;
-                if !self.set_state_from_revision(
-                    item.request.request_id,
-                    item.state,
-                    item.state_revision,
-                    terminal,
-                    None,
-                    now,
-                )? {
+                let Some(outcome) = self.transition_absence_from_revision(item, now)? else {
                     let current = self
                         .load_stored_request(item.request.request_id)?
                         .ok_or(ProvisionerError::StateUnavailable)?;
@@ -1321,7 +1313,7 @@ impl Provisioner {
                         ambiguous_request_ids.insert(item.request.request_id);
                     }
                     continue;
-                }
+                };
                 self.append_lifecycle_receipt(
                     &item.request,
                     LifecycleEvidence {
@@ -1554,15 +1546,9 @@ impl Provisioner {
                 ambiguous_request_ids.insert(*request_id);
                 continue;
             }
-            let (terminal, outcome) = self.absence_terminal(stored, final_observed_at)?;
-            let receipt = if self.set_state_from_revision(
-                *request_id,
-                stored.state,
-                stored.state_revision,
-                terminal,
-                None,
-                final_observed_at,
-            )? {
+            let receipt = if let Some(outcome) =
+                self.transition_absence_from_revision(stored, final_observed_at)?
+            {
                 self.append_lifecycle_receipt(
                     &stored.request,
                     LifecycleEvidence {
@@ -1982,19 +1968,12 @@ impl Provisioner {
             }
             Ok(None) => {
                 let now = now_unix_ms()?;
-                let (terminal, outcome) = self.absence_terminal(&stored, now)?;
-                if !self.set_state_from(
-                    stored.request.request_id,
-                    stored.state,
-                    terminal,
-                    None,
-                    now,
-                )? {
+                let Some(outcome) = self.transition_absence_from_revision(&stored, now)? else {
                     let current = self
                         .load_stored_request(stored.request.request_id)?
                         .ok_or(ProvisionerError::StateUnavailable)?;
                     return Box::pin(self.recover_one(current, audit_lineage)).await;
-                }
+                };
                 self.append_lifecycle_receipt(
                     &stored.request,
                     LifecycleEvidence {
@@ -2059,11 +2038,11 @@ impl Provisioner {
             .min(self.config.provider_grant_expires_unix_ms))
     }
 
-    fn absence_terminal(
+    fn absence_disposition(
         &self,
         stored: &StoredRequest,
         observed_at_unix_ms: i64,
-    ) -> Result<(StoredState, LifecycleOutcome), ProvisionerError> {
+    ) -> Result<(StoredState, CleanupReason, LifecycleOutcome), ProvisionerError> {
         let (terminal, reason, default_outcome) = match stored.state {
             StoredState::Ready => (
                 StoredState::Deleted,
@@ -2096,9 +2075,69 @@ impl Provisioner {
                 }
             }
         };
-        let (_, outcome) =
-            self.record_cleanup_intent(stored.request.request_id, reason, default_outcome)?;
-        Ok((terminal, outcome))
+        Ok((terminal, reason, default_outcome))
+    }
+
+    fn transition_absence_from_revision(
+        &self,
+        stored: &StoredRequest,
+        observed_at_unix_ms: i64,
+    ) -> Result<Option<LifecycleOutcome>, ProvisionerError> {
+        let (terminal, reason, default_outcome) =
+            self.absence_disposition(stored, observed_at_unix_ms)?;
+        let expected_revision =
+            i64::try_from(stored.state_revision).map_err(|_| ProvisionerError::StateUnavailable)?;
+        let mut connection = open_database(&self.database_path)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        transaction
+            .execute(
+                "INSERT INTO cleanup_intents(request_id, reason_json, outcome_json)
+                 VALUES (?1, ?2, ?3) ON CONFLICT(request_id) DO NOTHING",
+                params![
+                    stored.request.request_id.to_string(),
+                    canonical_json(&reason)?,
+                    canonical_json(&default_outcome)?,
+                ],
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        let outcome_json: Vec<u8> = transaction
+            .query_row(
+                "SELECT outcome_json FROM cleanup_intents WHERE request_id = ?1",
+                [stored.request.request_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        let outcome = serde_json::from_slice(&outcome_json)
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        let changed = transaction
+            .execute(
+                "UPDATE requests SET state = ?4, instance_json = NULL,
+                                     updated_at_unix_ms = ?5,
+                                     state_revision = state_revision + 1
+                 WHERE request_id = ?1 AND state = ?2 AND state_revision = ?3
+                   AND state_revision < 9223372036854775807",
+                params![
+                    stored.request.request_id.to_string(),
+                    stored.state.as_str(),
+                    expected_revision,
+                    terminal.as_str(),
+                    observed_at_unix_ms,
+                ],
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        if changed != 1 {
+            transaction
+                .rollback()
+                .map_err(|_| ProvisionerError::StateUnavailable)?;
+            return Ok(None);
+        }
+        transaction
+            .commit()
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        sync_database_parent(&self.database_path)?;
+        Ok(Some(outcome))
     }
 
     async fn recover_create_admission_race(
@@ -2963,39 +3002,6 @@ impl Provisioner {
                 params![
                     request_id.to_string(),
                     expected.as_str(),
-                    state.as_str(),
-                    instance_json,
-                    now,
-                ],
-            )
-            .map_err(|_| ProvisionerError::StateUnavailable)?;
-        sync_database_parent(&self.database_path)?;
-        Ok(changed == 1)
-    }
-
-    fn set_state_from_revision(
-        &self,
-        request_id: Uuid,
-        expected_state: StoredState,
-        expected_revision: u64,
-        state: StoredState,
-        instance: Option<&ProviderInstance>,
-        now: i64,
-    ) -> Result<bool, ProvisionerError> {
-        let instance_json = instance.map(canonical_json).transpose()?;
-        let expected_revision =
-            i64::try_from(expected_revision).map_err(|_| ProvisionerError::StateUnavailable)?;
-        let connection = open_database(&self.database_path)?;
-        let changed = connection
-            .execute(
-                "UPDATE requests SET state = ?4, instance_json = ?5, updated_at_unix_ms = ?6,
-                                     state_revision = state_revision + 1
-                 WHERE request_id = ?1 AND state = ?2 AND state_revision = ?3
-                   AND state_revision < 9223372036854775807",
-                params![
-                    request_id.to_string(),
-                    expected_state.as_str(),
-                    expected_revision,
                     state.as_str(),
                     instance_json,
                     now,

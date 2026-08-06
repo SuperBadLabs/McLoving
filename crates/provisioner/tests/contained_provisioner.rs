@@ -2012,6 +2012,86 @@ async fn reconciliation_absence_yields_to_a_newer_same_instance_ready_observatio
 }
 
 #[tokio::test]
+async fn reconciliation_cas_loss_rolls_back_tentative_absence_intent() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("provision retained ready instance");
+    context
+        .fixture
+        .set_mode(FixtureMode::DelayedEmptyFinalInventoryOnce);
+
+    let reconcile_request = reconcile_request(&context.config, IMPLEMENTATION_SHA256);
+    let reconciliation = context.provisioner.reconcile(&reconcile_request);
+    let newer_legacy_refresh = async {
+        context.fixture.wait_for_inventory_start(2).await;
+        let database_path = context.config.state_dir.join("provisioner.sqlite3");
+        let request_id = request.request_id;
+        tokio::task::spawn_blocking(move || {
+            let database = rusqlite::Connection::open(database_path)
+                .expect("open ledger for concurrent legacy refresh");
+            database
+                .execute_batch("BEGIN IMMEDIATE")
+                .expect("hold revision write transaction");
+            database
+                .execute(
+                    "UPDATE requests SET state = state, instance_json = instance_json
+                     WHERE request_id = ?1",
+                    [request_id.to_string()],
+                )
+                .expect("refresh same concrete instance through legacy trigger");
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            database
+                .execute_batch("COMMIT")
+                .expect("publish newer concrete revision");
+        })
+        .await
+        .expect("join concurrent legacy refresh");
+    };
+    let (reconciled, ()) = tokio::join!(reconciliation, newer_legacy_refresh);
+    let reconciled = reconciled.expect("CAS loss is reported as ambiguous");
+    assert_eq!(reconciled.body.cleaned, 0);
+    assert_eq!(reconciled.body.ambiguous, 1);
+    assert!(
+        reconciled
+            .body
+            .ambiguous_request_ids
+            .contains(&request.request_id)
+    );
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let retained: (String, i64) = database
+        .query_row(
+            "SELECT state,
+                    (SELECT count(*) FROM cleanup_intents WHERE request_id = ?1)
+             FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read state and cleanup intent after CAS loss");
+    assert_eq!(retained, ("ready".to_owned(), 0));
+    drop(database);
+
+    let cancelled = context
+        .provisioner
+        .cancel(&cancel_request(
+            &context.config,
+            &request,
+            IMPLEMENTATION_SHA256,
+        ))
+        .await
+        .expect("later cancellation selects its own cleanup intent");
+    assert_eq!(cancelled.body.outcome, LifecycleOutcome::Cancelled);
+    assert!(cancelled.body.cleanup_confirmed);
+    assert_eq!(context.fixture.counts().1, 1);
+    assert_eq!(context.fixture.counts().3, 0);
+}
+
+#[tokio::test]
 async fn reconciliation_retains_a_ready_transition_after_its_initial_inventory_snapshot() {
     let context =
         Context::with_startup_timeout(FixtureMode::DelayedCreateAfterInitialSnapshot, 1_000).await;
