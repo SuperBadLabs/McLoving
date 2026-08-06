@@ -40,6 +40,7 @@ const MAX_AUTHORITY_BYTES: usize = 64 * 1_024;
 const MAX_MARKERS: usize = 256;
 const MAX_MARKER_BYTES: usize = 256 * 1_024;
 const FILTER_IGNORED_WARNING: &[u8] = b"warning: filtering not recognized by server, ignoring";
+const SYSTEM_PRELOAD_PATH: &[u8] = b"/etc/ld.so.preload\0";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -577,6 +578,7 @@ pub struct SourceAcquirer {
     git_remote_https_executable: VerifiedFile,
     askpass_executable: VerifiedFile,
     ca_bundle: Option<VerifiedFile>,
+    preload_file: VerifiedFile,
     runtime_closure: Vec<VerifiedRuntimeFile>,
     runtime_directory: RuntimeDirectory,
     git_exec_directory: GitExecDirectory,
@@ -638,7 +640,25 @@ impl SourceAcquirer {
             (None, None) => None,
             _ => return Err(SourceError::InvalidConfig),
         };
-        let runtime_closure = open_runtime_closure(&config.runtime_closure).await?;
+        let interpreter_paths = [
+            verified_elf_interpreter(&source_git_executable).await?,
+            verified_elf_interpreter(&source_git_remote_https_executable).await?,
+            verified_elf_interpreter(&source_askpass_executable).await?,
+        ]
+        .into_iter()
+        .map(std::fs::canonicalize)
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|_| SourceError::InvalidConfig)?;
+        let preload_file =
+            inherited_sealed_verified_file(b"", "mcloving-source-empty-loader-preload", 0o400)
+                .await?;
+        let preload_path = PathBuf::from(format!(
+            "/proc/self/fd/{}",
+            std::os::fd::AsRawFd::as_raw_fd(&preload_file.file)
+        ));
+        let runtime_closure =
+            open_runtime_closure(&config.runtime_closure, &interpreter_paths, &preload_path)
+                .await?;
         let git_interpreter =
             bound_runtime_interpreter(&source_git_executable, &runtime_closure).await?;
         let helper_interpreter =
@@ -701,6 +721,7 @@ impl SourceAcquirer {
             git_remote_https_executable,
             askpass_executable,
             ca_bundle,
+            preload_file,
             runtime_closure,
             runtime_directory,
             git_exec_directory,
@@ -1740,6 +1761,7 @@ impl SourceAcquirer {
         {
             return Err(SourceError::BindingMismatch);
         }
+        verify_inherited_sealed_file(&self.preload_file).await?;
         verify_runtime_closure_files(&self.runtime_closure).await?;
         self.runtime_directory.verify()?;
         Ok(())
@@ -2588,15 +2610,16 @@ pub async fn inspect_runtime_closure(
 
 async fn open_runtime_closure(
     bindings: &[RuntimeBinding],
+    interpreter_paths: &BTreeSet<PathBuf>,
+    preload_path: &Path,
 ) -> Result<Vec<VerifiedRuntimeFile>, SourceError> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = bindings;
+        let _ = (bindings, interpreter_paths, preload_path);
         Err(SourceError::InvalidConfig)
     }
     #[cfg(target_os = "linux")]
     {
-        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 
         let mut verified = Vec::with_capacity(bindings.len());
@@ -2628,9 +2651,13 @@ async fn open_runtime_closure(
             {
                 return Err(SourceError::InvalidConfig);
             }
-            let snapshot = sealed_verified_file(&bytes, "mcloving-source-runtime", 0o500).await?;
-            fcntl(&snapshot.file, FcntlArg::F_SETFD(FdFlag::empty()))
-                .map_err(|_| SourceError::InvalidConfig)?;
+            let bytes = if interpreter_paths.contains(&binding.path) {
+                bind_loader_system_preload(bytes, preload_path)?
+            } else {
+                bytes
+            };
+            let snapshot =
+                inherited_sealed_verified_file(&bytes, "mcloving-source-runtime", 0o500).await?;
             verified.push(VerifiedRuntimeFile {
                 binding: binding.clone(),
                 metadata: runtime_metadata(&metadata),
@@ -2649,7 +2676,7 @@ async fn verify_runtime_closure_files(runtime: &[VerifiedRuntimeFile]) -> Result
     }
     #[cfg(target_os = "linux")]
     {
-        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        use nix::fcntl::{FcntlArg, FdFlag, SealFlag, fcntl};
 
         let required_seals = SealFlag::F_SEAL_SEAL
             | SealFlag::F_SEAL_SHRINK
@@ -2670,6 +2697,11 @@ async fn verify_runtime_closure_files(runtime: &[VerifiedRuntimeFile]) -> Result
                     .map_err(|_| SourceError::BindingMismatch)?
                     & required_seals.bits()
                     != required_seals.bits()
+                || FdFlag::from_bits_truncate(
+                    fcntl(&entry.file, FcntlArg::F_GETFD)
+                        .map_err(|_| SourceError::BindingMismatch)?,
+                )
+                .contains(FdFlag::FD_CLOEXEC)
             {
                 return Err(SourceError::BindingMismatch);
             }
@@ -2878,6 +2910,56 @@ async fn sealed_verified_file(
     }
 }
 
+async fn inherited_sealed_verified_file(
+    bytes: &[u8],
+    snapshot_name: &str,
+    mode: u32,
+) -> Result<VerifiedFile, SourceError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (bytes, snapshot_name, mode);
+        Err(SourceError::InvalidConfig)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+
+        let snapshot = sealed_verified_file(bytes, snapshot_name, mode).await?;
+        fcntl(&snapshot.file, FcntlArg::F_SETFD(FdFlag::empty()))
+            .map_err(|_| SourceError::InvalidConfig)?;
+        Ok(snapshot)
+    }
+}
+
+async fn verify_inherited_sealed_file(file: &VerifiedFile) -> Result<(), SourceError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = file;
+        Err(SourceError::BindingMismatch)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use nix::fcntl::{FcntlArg, FdFlag, SealFlag, fcntl};
+
+        let required_seals = SealFlag::F_SEAL_SEAL
+            | SealFlag::F_SEAL_SHRINK
+            | SealFlag::F_SEAL_GROW
+            | SealFlag::F_SEAL_WRITE;
+        let descriptor_flags = FdFlag::from_bits_truncate(
+            fcntl(&file.file, FcntlArg::F_GETFD).map_err(|_| SourceError::BindingMismatch)?,
+        );
+        let seals =
+            fcntl(&file.file, FcntlArg::F_GET_SEALS).map_err(|_| SourceError::BindingMismatch)?;
+        if descriptor_flags.contains(FdFlag::FD_CLOEXEC)
+            || seals & required_seals.bits() != required_seals.bits()
+            || sha256_open_file(&file.file).await? != file.sha256
+        {
+            return Err(SourceError::BindingMismatch);
+        }
+        Ok(())
+    }
+}
+
 async fn snapshot_with_bound_interpreter(
     source: &VerifiedFile,
     expected_source_sha256: &str,
@@ -2970,6 +3052,36 @@ fn bind_elf_interpreter(mut bytes: Vec<u8>, interpreter: &Path) -> Result<Vec<u8
         return Err(SourceError::InvalidConfig);
     }
     bytes[offset..offset + length].fill(0);
+    bytes[offset..offset + replacement.len()].copy_from_slice(replacement);
+    Ok(bytes)
+}
+
+fn bind_loader_system_preload(
+    mut bytes: Vec<u8>,
+    preload_path: &Path,
+) -> Result<Vec<u8>, SourceError> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let replacement = preload_path.as_os_str().as_bytes();
+    if replacement.is_empty()
+        || replacement.contains(&0)
+        || replacement
+            .len()
+            .checked_add(1)
+            .is_none_or(|size| size > SYSTEM_PRELOAD_PATH.len())
+    {
+        return Err(SourceError::InvalidConfig);
+    }
+    let offsets = bytes
+        .windows(SYSTEM_PRELOAD_PATH.len())
+        .enumerate()
+        .filter_map(|(offset, window)| (window == SYSTEM_PRELOAD_PATH).then_some(offset))
+        .collect::<Vec<_>>();
+    if offsets.len() != 1 {
+        return Err(SourceError::InvalidConfig);
+    }
+    let offset = offsets[0];
+    bytes[offset..offset + SYSTEM_PRELOAD_PATH.len()].fill(0);
     bytes[offset..offset + replacement.len()].copy_from_slice(replacement);
     Ok(bytes)
 }
@@ -3843,6 +3955,49 @@ fn claim_path(root: &Path, acquisition_id: Uuid) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn loader_system_preload_is_bound_to_a_sealed_empty_descriptor() {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let executable = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let loader_path = std::fs::canonicalize(elf_interpreter(&executable).unwrap()).unwrap();
+        let loader = std::fs::read(loader_path).unwrap();
+        assert_eq!(
+            loader
+                .windows(SYSTEM_PRELOAD_PATH.len())
+                .filter(|window| *window == SYSTEM_PRELOAD_PATH)
+                .count(),
+            1
+        );
+
+        let preload =
+            inherited_sealed_verified_file(b"", "mcloving-source-test-empty-loader-preload", 0o400)
+                .await
+                .unwrap();
+        let preload_path = PathBuf::from(format!("/proc/self/fd/{}", preload.file.as_raw_fd()));
+        let patched = bind_loader_system_preload(loader, &preload_path).unwrap();
+        assert!(
+            !patched
+                .windows(SYSTEM_PRELOAD_PATH.len())
+                .any(|window| window == SYSTEM_PRELOAD_PATH)
+        );
+        let replacement = [preload_path.as_os_str().as_bytes(), b"\0"].concat();
+        assert_eq!(
+            patched
+                .windows(replacement.len())
+                .filter(|window| *window == replacement)
+                .count(),
+            1
+        );
+        verify_inherited_sealed_file(&preload).await.unwrap();
+        assert_eq!(
+            sha256_open_file(&preload.file).await.unwrap(),
+            sha256_hex(b"")
+        );
+    }
 
     #[tokio::test]
     async fn expired_final_publication_is_withdrawn_while_claim_remains() {

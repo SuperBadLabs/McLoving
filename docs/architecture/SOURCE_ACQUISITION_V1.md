@@ -96,9 +96,13 @@ change time. Git runs with immediate symbol binding and a private
 descriptor-backed library directory whose exact links target only inherited
 sealed descriptors. The sealed Git, helper, and askpass ELF images are
 deterministically rewritten to name the retained loader descriptor as their
-interpreter, so neither initial process startup nor internal children reopen an
-ambient loader or library path. Original-path metadata fingerprints, memory-file
-seals, and directory topology are reverified before every invocation. An atomic
+interpreter. Before sealing each retained loader, construction rewrites its sole
+system-wide preload-file pathname to an inherited, kernel-sealed empty file
+descriptor; the loader can therefore neither reopen `/etc/ld.so.preload` nor
+inject an ambient library named there. Neither initial process startup nor
+internal children reopen an ambient loader, library, or preload input.
+Original-path metadata fingerprints, memory-file seals, inherited-descriptor
+flags, and directory topology are reverified before every invocation. An atomic
 package replacement or in-place change therefore fails closed, while a change
 after verification cannot alter the sealed bytes used by the child. Missing,
 extra, reordered, substituted, mutable, or same-name closure entries fail

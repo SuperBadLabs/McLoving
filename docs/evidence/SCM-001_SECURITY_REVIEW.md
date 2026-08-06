@@ -7,8 +7,8 @@ Status: REOPENED. The earlier implementation candidate
 nineteen focused tests after ten findings were fixed, but later exact-head
 review correctly identified additional executable/helper binding,
 authority-snapshot immutability, credential-marker, retained-directory, and
-test-readiness gaps. The replacement implementation has twenty-two focused
-source-acquisition tests: one final-publication unit test, four protocol tests,
+test-readiness gaps. The replacement implementation has twenty-three focused
+source-acquisition tests: two boundary unit tests, four protocol tests,
 fifteen contained end-to-end tests, and two sealed-inventory tests. This receipt
 cannot return to PASS until its replacement exact head independently passes
 review and every protected check.
@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced thirty-one actionable threads so far. The
+Independent review has produced thirty-two actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -215,6 +215,18 @@ post-removal claim-recreation path. The thirtieth and thirty-first findings
 cannot contribute closure until the replacement exact head is independently
 reverified.
 
+Review of that exact head found one remaining dynamic-loader input outside the
+attested runtime image: glibc can read `/etc/ld.so.preload` independently of the
+descriptor-backed library directory. The replacement creates an inherited,
+kernel-sealed empty preload file before snapshotting the runtime, rewrites the
+retained loader's sole system-preload pathname to that descriptor, and verifies
+the descriptor's seals, content, and non-close-on-exec state before every Git
+command. A Linux unit proof applies the rewrite to the real loader image,
+verifies that the ambient pathname is absent and the exact empty descriptor is
+present, while every contained Git/helper/askpass proof executes through the
+patched loader. The thirty-second finding cannot contribute closure until the
+replacement exact head is independently reverified.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
@@ -222,7 +234,7 @@ fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
 suite, strict Clippy, formatting, and the rerun protected checks pass.
 
 The replacement implementation currently passes `git diff --check`, Rust
-formatting, strict source-acquirer Clippy, and all twenty-two focused
+formatting, strict source-acquirer Clippy, and all twenty-three focused
 source-acquisition tests plus the complete locked workspace suite on HeMan.
 Protected checks and independent exact-head verification remain required before
 closure.
