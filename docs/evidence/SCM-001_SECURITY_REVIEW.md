@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced thirty-five actionable threads so far. The
+Independent review has produced thirty-six actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -268,6 +268,16 @@ installed. No credential-bearing call infers its endpoint from Git argv or can
 silently omit `http.curloptResolve` for a hostname-backed admitted repository.
 The thirty-fifth finding cannot contribute closure until the replacement exact
 head is independently reverified.
+
+Review of that exact head found that a successful slow resolver consumed time
+without reducing the subsequent credential-bearing Git timeout. The replacement
+starts one monotonic command budget before resolution, subtracts all resolver
+time, fails with typed request expiry when that signed bound is exhausted, and
+passes only the remainder to Git's process-group monitor. Resolution and Git
+therefore cannot compose two independent timeout windows or extend credential
+authority past the admitted command/request deadline. The thirty-sixth finding
+cannot contribute closure until the replacement exact head is independently
+reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the

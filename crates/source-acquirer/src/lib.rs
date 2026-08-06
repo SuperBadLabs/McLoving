@@ -1575,14 +1575,25 @@ impl SourceAcquirer {
         } else {
             (Duration::from_millis(self.config.command_timeout_ms), false)
         };
-        let endpoint_resolutions = match (credential_bearing, repository_url) {
+        let command_started = tokio::time::Instant::now();
+        let endpoint_resolution = match (credential_bearing, repository_url) {
             (true, Some(repository_url)) => {
-                self.resolve_network_endpoint(repository_url, timeout)
-                    .await?
+                self.resolve_network_endpoint(repository_url, timeout).await
             }
-            (false, None) => Vec::new(),
+            (false, None) => Ok(Vec::new()),
             _ => return Err(SourceError::StateUnavailable),
         };
+        let timeout = timeout
+            .checked_sub(command_started.elapsed())
+            .unwrap_or(Duration::ZERO);
+        if timeout.is_zero() {
+            return Err(if deadline_limited {
+                SourceError::ExpiredRequest
+            } else {
+                SourceError::SourceUnavailable
+            });
+        }
+        let endpoint_resolutions = endpoint_resolution?;
         let mut command = Command::new(&self.git_executable.invocation_path);
         command
             .env_clear()

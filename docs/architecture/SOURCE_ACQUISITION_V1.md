@@ -83,8 +83,10 @@ dedicated resolver mode. That child receives only the URL's endpoint hostname
 and port in a cleared environment and
 refuses to run if any credential-file, credential-digest, signing-key, or
 secret-marker authority is present. Its numeric results and diagnostics are
-bounded, its process group is deadline-limited, and any malformed, empty,
-excessive, failed, or timed-out result fails source acquisition. The parent
+bounded, its process group and the following Git child share one monotonic
+command/request deadline, and any malformed, empty, excessive, failed, or
+timed-out result fails source acquisition. The parent rechecks that shared
+deadline before it installs credential authority and starts Git, then
 passes the resulting addresses to Git only through repeated
 `http.curloptResolve` entries while preserving the original HTTPS hostname for
 TLS verification. Because redirects and proxies are disabled, the
