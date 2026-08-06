@@ -937,15 +937,12 @@ impl SourceAcquirer {
         deadline: i64,
     ) -> Result<(), SourceError> {
         create_private_directory(git_dir).await?;
-        self.run_git(
-            vec![
-                OsString::from("init"),
-                OsString::from("--bare"),
-                git_dir.as_os_str().to_owned(),
-            ],
-            MAX_GIT_METADATA_BYTES,
-        )
-        .await?;
+        let mut init_arguments = vec![OsString::from("init"), OsString::from("--bare")];
+        if repository.exact_commit.len() == 64 {
+            init_arguments.push(OsString::from("--object-format=sha256"));
+        }
+        init_arguments.push(git_dir.as_os_str().to_owned());
+        self.run_git(init_arguments, MAX_GIT_METADATA_BYTES).await?;
         self.ensure_before_deadline(deadline)?;
         let mut arguments = vec![
             OsString::from("--git-dir"),

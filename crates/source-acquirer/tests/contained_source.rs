@@ -43,6 +43,29 @@ impl RepositoryFixture {
         Self { work, bare }
     }
 
+    fn new_sha256(root: &Path, name: &str) -> Self {
+        let work = root.join(format!("{name}-work"));
+        let bare = root.join(format!("{name}.git"));
+        run_git(
+            root,
+            ["init", "--bare", "--object-format=sha256", path_text(&bare)],
+        );
+        run_git(
+            root,
+            [
+                "init",
+                "-b",
+                "main",
+                "--object-format=sha256",
+                path_text(&work),
+            ],
+        );
+        run_git(&work, ["config", "user.email", "source@example.invalid"]);
+        run_git(&work, ["config", "user.name", "Contained Source"]);
+        run_git(&work, ["remote", "add", "origin", path_text(&bare)]);
+        Self { work, bare }
+    }
+
     fn write(&self, path: &str, bytes: &[u8]) {
         let destination = self.work.join(path);
         if let Some(parent) = destination.parent() {
@@ -255,6 +278,31 @@ async fn exact_revision_replay_later_commit_and_sparse_truth() {
         context.acquirer.acquire(&stale).await,
         Err(SourceError::RevisionMismatch)
     ));
+}
+
+#[tokio::test]
+async fn sha256_object_format_is_fetched_and_materialized_exactly() {
+    let repositories = tempfile::tempdir().expect("repositories tempdir");
+    let root = RepositoryFixture::new_sha256(repositories.path(), "sha256-root");
+    root.write("README.md", b"sha256 source\n");
+    let commit = root.commit("sha256 source");
+    assert_eq!(commit.len(), 64);
+    let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+    let request = context.request(&commit);
+    let receipt = context.acquirer.acquire(&request).await.unwrap();
+    assert_eq!(receipt.repository_trees[0].resolved_commit, commit);
+    assert_eq!(receipt.repository_trees[0].resolved_tree.len(), 64);
+    assert_eq!(
+        std::fs::read(
+            context
+                .config
+                .output_root
+                .join(receipt.output_relative_path)
+                .join("README.md")
+        )
+        .unwrap(),
+        b"sha256 source\n"
+    );
 }
 
 #[tokio::test]
