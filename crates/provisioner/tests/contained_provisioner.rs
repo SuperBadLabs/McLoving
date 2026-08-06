@@ -1652,9 +1652,13 @@ async fn lookup_only_cancel_retains_intent_when_create_wins_the_state_race() {
 
 #[tokio::test]
 async fn stale_pending_refresh_recovers_a_concurrent_ambiguous_winner() {
-    let context =
-        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 10_000)
-            .await;
+    let context = Context::with_limits(
+        FixtureMode::DelayedSnapshotPendingThenMalformed,
+        4,
+        5_000,
+        10_000,
+    )
+    .await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let concurrent_ambiguity = async {
@@ -1680,9 +1684,13 @@ async fn stale_pending_refresh_recovers_a_concurrent_ambiguous_winner() {
 
 #[tokio::test]
 async fn delayed_pending_refresh_cannot_reactivate_confirmed_cleanup() {
-    let context =
-        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 10_000)
-            .await;
+    let context = Context::with_limits(
+        FixtureMode::DelayedSnapshotPendingThenMalformed,
+        4,
+        5_000,
+        10_000,
+    )
+    .await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
@@ -1720,9 +1728,13 @@ async fn delayed_pending_refresh_cannot_reactivate_confirmed_cleanup() {
 
 #[tokio::test]
 async fn post_lookup_timeout_cannot_reactivate_confirmed_cleanup() {
-    let context =
-        Context::with_startup_timeout(FixtureMode::DelayedSnapshotPendingThenMalformed, 2_000)
-            .await;
+    let context = Context::with_limits(
+        FixtureMode::DelayedSnapshotPendingThenMalformed,
+        4,
+        5_000,
+        2_000,
+    )
+    .await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let cancel = async {
