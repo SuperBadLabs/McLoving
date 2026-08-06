@@ -54,6 +54,8 @@ enum FixtureMode {
     DelayedCreateAfterInitialSnapshot,
     DelayedCreateAfterFinalSnapshot,
     DelayedAbsence,
+    DelayedEmptyFinalInventoryOnce,
+    DelayedInitialInventoryResponse,
     DelayedSnapshotFinalInventory,
     SlowInitialInventory,
 }
@@ -433,18 +435,26 @@ async fn list_instances(
         inner.inventory_started += 1;
         let delayed_initial = inner.mode == FixtureMode::DelayedCreateAfterInitialSnapshot
             && inner.inventory_started == 1;
+        let delayed_initial_response = inner.mode == FixtureMode::DelayedInitialInventoryResponse
+            && inner.inventory_started == 1;
+        let delayed_empty_final = inner.mode == FixtureMode::DelayedEmptyFinalInventoryOnce
+            && inner.inventory_started == 2;
         let delayed_final = matches!(
             inner.mode,
             FixtureMode::DelayedSnapshotFinalInventory
                 | FixtureMode::DelayedCreateAfterFinalSnapshot
         ) && inner.inventory_started == 2;
-        if delayed_initial || delayed_final {
+        if delayed_initial || delayed_initial_response || delayed_empty_final || delayed_final {
             inner.inventory_reads += 1;
             Some(ProviderInventory {
                 provisioner_id: "contained-provisioner".to_owned(),
                 complete: true,
                 observed_at_unix_ms: now_ms(),
-                instances: inner.instances.values().cloned().collect(),
+                instances: if delayed_empty_final {
+                    Vec::new()
+                } else {
+                    inner.instances.values().cloned().collect()
+                },
             })
         } else {
             None
@@ -1785,6 +1795,120 @@ async fn reconciliation_rejects_an_admission_after_its_initial_ledger_snapshot()
         )
         .expect("count reconciliation evidence");
     assert_eq!(evidence, 0);
+}
+
+#[tokio::test]
+async fn reconciliation_uses_inventory_observation_for_the_create_peer_window() {
+    let context = Context::new(FixtureMode::MalformedCreateOnce).await;
+    let request = context.request();
+    let provisioned = context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("malformed create response is retained as ambiguous");
+    assert_eq!(provisioned.body.outcome, LifecycleOutcome::CreateAmbiguous);
+    context.fixture.remove_instance(request.request_id);
+    context
+        .fixture
+        .set_mode(FixtureMode::DelayedInitialInventoryResponse);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let created_at_unix_ms: i64 = database
+        .query_row(
+            "SELECT created_at_unix_ms FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read admission time");
+    drop(database);
+    let peer_deadline = created_at_unix_ms
+        + i64::try_from(context.config.provider_timeout_ms).expect("provider timeout")
+        + 1_000;
+    let start_at = peer_deadline - 100;
+    let delay_ms = start_at.saturating_sub(now_ms());
+    tokio::time::sleep(std::time::Duration::from_millis(
+        u64::try_from(delay_ms).expect("nonnegative delay"),
+    ))
+    .await;
+
+    let reconciled = context
+        .provisioner
+        .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+        .await
+        .expect("pre-deadline signed absence remains ambiguous");
+    assert!(now_ms() >= peer_deadline);
+    assert_eq!(reconciled.body.cleaned, 0);
+    assert_eq!(reconciled.body.ambiguous, 1);
+    assert!(
+        reconciled
+            .body
+            .ambiguous_request_ids
+            .contains(&request.request_id)
+    );
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("reopen retained ledger");
+    let state: String = database
+        .query_row(
+            "SELECT state FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read retained ambiguous state");
+    assert_eq!(state, "ambiguous");
+}
+
+#[tokio::test]
+async fn reconciliation_absence_yields_to_a_newer_same_instance_ready_observation() {
+    let context = Context::new(FixtureMode::Ready).await;
+    let request = context.request();
+    let provisioned = context
+        .provisioner
+        .provision(&request)
+        .await
+        .expect("provision retained ready instance");
+    assert_eq!(provisioned.body.outcome, LifecycleOutcome::Ready);
+    context
+        .fixture
+        .set_mode(FixtureMode::DelayedEmptyFinalInventoryOnce);
+
+    let stale_request = reconcile_request(&context.config, IMPLEMENTATION_SHA256);
+    let stale_reconciliation = context.provisioner.reconcile(&stale_request);
+    let newer_reconciliation = async {
+        context.fixture.wait_for_inventory_start(2).await;
+        context
+            .provisioner
+            .reconcile(&reconcile_request(&context.config, IMPLEMENTATION_SHA256))
+            .await
+    };
+    let (stale, newer) = tokio::join!(stale_reconciliation, newer_reconciliation);
+    let stale = stale.expect("stale absence is retained as ambiguous");
+    let newer = newer.expect("newer live observation converges");
+    assert_eq!(stale.body.active_ready, 0);
+    assert_eq!(stale.body.cleaned, 0);
+    assert_eq!(stale.body.ambiguous, 1);
+    assert!(
+        stale
+            .body
+            .ambiguous_request_ids
+            .contains(&request.request_id)
+    );
+    assert_eq!(newer.body.active_ready, 1);
+    assert_eq!(newer.body.ambiguous, 0);
+    assert_eq!(context.fixture.counts().1, 0);
+    assert_eq!(context.fixture.counts().3, 1);
+
+    let database = rusqlite::Connection::open(context.config.state_dir.join("provisioner.sqlite3"))
+        .expect("open retained ledger");
+    let state: String = database
+        .query_row(
+            "SELECT state FROM requests WHERE request_id = ?1",
+            [request.request_id.to_string()],
+            |row| row.get(0),
+        )
+        .expect("read retained ready state");
+    assert_eq!(state, "ready");
 }
 
 #[tokio::test]

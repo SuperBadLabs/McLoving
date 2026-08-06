@@ -721,6 +721,7 @@ struct StoredRequest {
     request: ProvisionRequest,
     request_sha256: String,
     state: StoredState,
+    state_revision: u64,
     instance: Option<ProviderInstance>,
     latest_receipt: Option<LifecycleReceipt>,
     created_at_unix_ms: i64,
@@ -1219,15 +1220,7 @@ impl Provisioner {
     ) -> Result<ReconcileReceipt, ProvisionerError> {
         let now = now_unix_ms()?;
         self.validate_reconcile_request(request, now)?;
-        let ready_before_initial_inventory = self
-            .load_active_requests()?
-            .into_iter()
-            .filter(|item| item.state == StoredState::Ready)
-            .filter_map(|item| {
-                item.instance
-                    .map(|instance| (item.request.request_id, instance.instance_id))
-            })
-            .collect::<HashMap<_, _>>();
+        let ready_before_initial_inventory = self.load_ready_revisions()?;
         let initial = self.provider_inventory().await?;
         if !initial.complete || initial.instances.len() > MAX_PROVIDER_INSTANCES {
             return Err(ProvisionerError::InvalidProviderResponse);
@@ -1235,6 +1228,7 @@ impl Provisioner {
         let now = now_unix_ms()?;
         self.validate_reconcile_request(request, now)?;
         let initial_inventory_sha256 = canonical_digest(&initial)?;
+        let initial_observed_at = initial.observed_at_unix_ms;
         let mut provider_by_request = HashMap::with_capacity(initial.instances.len());
         let mut provider_instance_ids = BTreeSet::new();
         for instance in initial.instances {
@@ -1261,13 +1255,15 @@ impl Provisioner {
             }
             known.insert(item.request.request_id);
             let Some(instance) = provider_by_request.get(&item.request.request_id) else {
-                let retained_instance_id =
-                    item.instance.as_ref().map(|instance| instance.instance_id);
+                let retained_ready_revision = item
+                    .instance
+                    .as_ref()
+                    .map(|instance| (instance.instance_id, item.state_revision));
                 if item.state == StoredState::Ready
                     && ready_before_initial_inventory
                         .get(&item.request.request_id)
                         .copied()
-                        != retained_instance_id
+                        != retained_ready_revision
                 {
                     ambiguous_request_ids.insert(item.request.request_id);
                     continue;
@@ -1285,7 +1281,7 @@ impl Provisioner {
                 let possibly_creating = item.state == StoredState::Intent
                     || item.state == StoredState::Pending
                     || (item.state == StoredState::Ambiguous && item.instance.is_none());
-                if possibly_creating && now < peer_deadline {
+                if possibly_creating && initial_observed_at < peer_deadline {
                     ambiguous = ambiguous
                         .checked_add(1)
                         .ok_or(ProvisionerError::StateUnavailable)?;
@@ -1293,7 +1289,14 @@ impl Provisioner {
                     continue;
                 }
                 let (terminal, outcome) = self.absence_terminal(item, now)?;
-                if !self.set_state_from(item.request.request_id, item.state, terminal, None, now)? {
+                if !self.set_state_from_revision(
+                    item.request.request_id,
+                    item.state,
+                    item.state_revision,
+                    terminal,
+                    None,
+                    now,
+                )? {
                     let current = self
                         .load_stored_request(item.request.request_id)?
                         .ok_or(ProvisionerError::StateUnavailable)?;
@@ -1473,6 +1476,7 @@ impl Provisioner {
             }
         }
 
+        let ready_before_final_inventory = self.load_ready_revisions()?;
         let final_inventory = self.provider_inventory().await?;
         if !final_inventory.complete || final_inventory.instances.len() > MAX_PROVIDER_INSTANCES {
             return Err(ProvisionerError::InvalidProviderResponse);
@@ -1531,18 +1535,25 @@ impl Provisioner {
             if final_request_ids.contains(request_id) {
                 continue;
             }
-            let retained_instance_id = stored
+            let retained_ready_revision = stored
                 .instance
                 .as_ref()
-                .map(|instance| instance.instance_id);
-            if ready_before_initial_inventory.get(request_id).copied() != retained_instance_id {
+                .map(|instance| (instance.instance_id, stored.state_revision));
+            let retained_instance_id = retained_ready_revision.map(|(instance_id, _)| instance_id);
+            let ready_before_initial = ready_before_initial_inventory
+                .get(request_id)
+                .map(|(instance_id, _)| *instance_id);
+            if ready_before_initial != retained_instance_id
+                || ready_before_final_inventory.get(request_id).copied() != retained_ready_revision
+            {
                 ambiguous_request_ids.insert(*request_id);
                 continue;
             }
             let (terminal, outcome) = self.absence_terminal(stored, final_observed_at)?;
-            let receipt = if self.set_state_from(
+            let receipt = if self.set_state_from_revision(
                 *request_id,
                 stored.state,
+                stored.state_revision,
                 terminal,
                 None,
                 final_observed_at,
@@ -2830,8 +2841,9 @@ impl Provisioner {
                     request_id, tenant_id, project_id, build_id, attempt_id, fence_token,
                     request_sha256, request_json, provisioner_config_sha256,
                     implementation_sha256, generation, state, instance_json,
-                    latest_receipt_json, created_at_unix_ms, updated_at_unix_ms
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'intent',NULL,NULL,?12,?12)",
+                    latest_receipt_json, created_at_unix_ms, updated_at_unix_ms,
+                    state_revision
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'intent',NULL,NULL,?12,?12,0)",
                 params![
                     request.request_id.to_string(),
                     request.tenant_id.to_string(),
@@ -2915,8 +2927,9 @@ impl Provisioner {
         let connection = open_database(&self.database_path)?;
         let changed = connection
             .execute(
-                "UPDATE requests SET state = ?2, instance_json = ?3, updated_at_unix_ms = ?4
-                 WHERE request_id = ?1",
+                "UPDATE requests SET state = ?2, instance_json = ?3, updated_at_unix_ms = ?4,
+                                     state_revision = state_revision + 1
+                 WHERE request_id = ?1 AND state_revision < 9223372036854775807",
                 params![request_id.to_string(), state.as_str(), instance_json, now],
             )
             .map_err(|_| ProvisionerError::StateUnavailable)?;
@@ -2938,11 +2951,46 @@ impl Provisioner {
         let connection = open_database(&self.database_path)?;
         let changed = connection
             .execute(
-                "UPDATE requests SET state = ?3, instance_json = ?4, updated_at_unix_ms = ?5
-                 WHERE request_id = ?1 AND state = ?2",
+                "UPDATE requests SET state = ?3, instance_json = ?4, updated_at_unix_ms = ?5,
+                                     state_revision = state_revision + 1
+                 WHERE request_id = ?1 AND state = ?2
+                   AND state_revision < 9223372036854775807",
                 params![
                     request_id.to_string(),
                     expected.as_str(),
+                    state.as_str(),
+                    instance_json,
+                    now,
+                ],
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+        sync_database_parent(&self.database_path)?;
+        Ok(changed == 1)
+    }
+
+    fn set_state_from_revision(
+        &self,
+        request_id: Uuid,
+        expected_state: StoredState,
+        expected_revision: u64,
+        state: StoredState,
+        instance: Option<&ProviderInstance>,
+        now: i64,
+    ) -> Result<bool, ProvisionerError> {
+        let instance_json = instance.map(canonical_json).transpose()?;
+        let expected_revision =
+            i64::try_from(expected_revision).map_err(|_| ProvisionerError::StateUnavailable)?;
+        let connection = open_database(&self.database_path)?;
+        let changed = connection
+            .execute(
+                "UPDATE requests SET state = ?4, instance_json = ?5, updated_at_unix_ms = ?6,
+                                     state_revision = state_revision + 1
+                 WHERE request_id = ?1 AND state = ?2 AND state_revision = ?3
+                   AND state_revision < 9223372036854775807",
+                params![
+                    request_id.to_string(),
+                    expected_state.as_str(),
+                    expected_revision,
                     state.as_str(),
                     instance_json,
                     now,
@@ -3029,7 +3077,7 @@ impl Provisioner {
         let mut statement = connection
             .prepare(
                 "SELECT request_json, request_sha256, state, instance_json, latest_receipt_json,
-                        created_at_unix_ms
+                        created_at_unix_ms, state_revision
                  FROM requests
                  WHERE state IN ('intent','ambiguous','pending','ready','deleting')
                  ORDER BY request_id",
@@ -3046,6 +3094,22 @@ impl Provisioner {
             }
         }
         Ok(stored)
+    }
+
+    fn load_ready_revisions(&self) -> Result<HashMap<Uuid, (Uuid, u64)>, ProvisionerError> {
+        Ok(self
+            .load_active_requests()?
+            .into_iter()
+            .filter(|item| item.state == StoredState::Ready)
+            .filter_map(|item| {
+                item.instance.map(|instance| {
+                    (
+                        item.request.request_id,
+                        (instance.instance_id, item.state_revision),
+                    )
+                })
+            })
+            .collect())
     }
 
     fn load_active_requests_with_admission_epoch(
@@ -3066,7 +3130,7 @@ impl Provisioner {
             let mut statement = transaction
                 .prepare(
                     "SELECT request_json, request_sha256, state, instance_json,
-                            latest_receipt_json, created_at_unix_ms
+                            latest_receipt_json, created_at_unix_ms, state_revision
                      FROM requests
                      WHERE state IN ('intent','ambiguous','pending','ready','deleting')
                      ORDER BY request_id",
@@ -3323,6 +3387,7 @@ fn initialize_database(
                  latest_receipt_json BLOB,
                  created_at_unix_ms INTEGER NOT NULL,
                  updated_at_unix_ms INTEGER NOT NULL,
+                 state_revision INTEGER NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
                  UNIQUE (tenant_id, project_id, build_id, attempt_id, fence_token)
              ) STRICT;
              CREATE INDEX IF NOT EXISTS requests_active_scope
@@ -3357,6 +3422,22 @@ fn initialize_database(
             .execute(
                 "ALTER TABLE metadata ADD COLUMN admission_epoch INTEGER NOT NULL DEFAULT 0
                  CHECK (admission_epoch >= 0)",
+                [],
+            )
+            .map_err(|_| ProvisionerError::StateUnavailable)?;
+    }
+    let has_state_revision: i64 = migration
+        .query_row(
+            "SELECT count(*) FROM pragma_table_info('requests') WHERE name = 'state_revision'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ProvisionerError::StateUnavailable)?;
+    if has_state_revision == 0 {
+        migration
+            .execute(
+                "ALTER TABLE requests ADD COLUMN state_revision INTEGER NOT NULL DEFAULT 0
+                 CHECK (state_revision >= 0)",
                 [],
             )
             .map_err(|_| ProvisionerError::StateUnavailable)?;
@@ -3461,7 +3542,7 @@ fn load_stored_request_connection(
     connection
         .query_row(
             "SELECT request_json, request_sha256, state, instance_json, latest_receipt_json,
-                    created_at_unix_ms
+                    created_at_unix_ms, state_revision
              FROM requests WHERE request_id = ?1",
             [request_id.to_string()],
             stored_request_from_row,
@@ -3478,7 +3559,7 @@ fn load_stored_request_tx(
     transaction
         .query_row(
             "SELECT request_json, request_sha256, state, instance_json, latest_receipt_json,
-                    created_at_unix_ms
+                    created_at_unix_ms, state_revision
              FROM requests WHERE request_id = ?1",
             [request_id.to_string()],
             stored_request_from_row,
@@ -3497,6 +3578,7 @@ fn stored_request_from_row(
     let instance_json: Option<Vec<u8>> = row.get(3)?;
     let receipt_json: Option<Vec<u8>> = row.get(4)?;
     let created_at_unix_ms: i64 = row.get(5)?;
+    let state_revision: i64 = row.get(6)?;
     Ok((|| {
         let request = serde_json::from_slice(&request_json)
             .map_err(|_| ProvisionerError::StateUnavailable)?;
@@ -3507,6 +3589,8 @@ fn stored_request_from_row(
             request,
             request_sha256,
             state: StoredState::parse(&state)?,
+            state_revision: u64::try_from(state_revision)
+                .map_err(|_| ProvisionerError::StateUnavailable)?,
             instance: instance_json
                 .as_deref()
                 .map(serde_json::from_slice)
