@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced forty-one actionable threads so far. The
+Independent review has produced forty-two actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -310,6 +310,19 @@ blocks credential emission across the deadline, and proves the kernel kills the
 sealed process before it can finish writing. The forty-first finding cannot
 contribute closure until the replacement exact head is independently reverified.
 
+Review of that exact head found that the askpass timer ended with askpass, so a
+credential already buffered into Git or its HTTPS helper could remain usable if
+the parent runtime was descheduled across expiry. The replacement starts a
+credential-free process-group reaper before credential-bearing Git, makes that
+reaper the group leader, and admits Git to the group only after the reaper has
+armed the same absolute monotonic deadline and emitted readiness. At expiry the
+reaper sends `SIGKILL` to its complete group, including itself, Git, helpers,
+and descendants; normal completion performs the same group kill before output
+is accepted. A Linux regression joins a blocking transport member to the armed
+group, deschedules the parent in `wait`, and proves both reaper and member die
+from `SIGKILL` at the deadline. The forty-second finding cannot contribute
+closure until the replacement exact head is independently reverified.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
@@ -317,7 +330,7 @@ fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
 suite, strict Clippy, formatting, and the rerun protected checks pass.
 
 The replacement implementation currently passes `git diff --check`, Rust
-formatting, strict source-acquirer Clippy, and all twenty-six focused
+formatting, strict source-acquirer Clippy, and all twenty-seven focused
 source-acquisition tests plus the complete locked workspace suite on HeMan.
 Protected checks and independent exact-head verification remain required before
 closure.

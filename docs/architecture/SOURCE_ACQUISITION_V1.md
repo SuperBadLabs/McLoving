@@ -192,8 +192,15 @@ writing any username or credential bytes. On Unix it first arms a POSIX
 `CLOCK_MONOTONIC` absolute timer whose kernel-delivered `SIGKILL` remains active
 through the complete output operation, making credential emission impossible
 after the deadline even if askpass is descheduled while its stdout pipe is
-blocked. A Git process delayed across startup therefore cannot obtain
-authentication after its admitted authority expires.
+blocked. Before credential-bearing Git starts, a credential-free reaper becomes
+the transport process-group leader, blocks and waits for a kernel-timer signal,
+and reports readiness only after arming that same absolute deadline. Git may
+join the group only after that receipt. At expiry the independently scheduled
+reaper sends `SIGKILL` to the complete group, including itself, Git, HTTPS
+helpers, and any other descendants; normal completion also kills and reaps the
+group before accepting output. A parent runtime descheduled after successful
+askpass emission therefore cannot let buffered credential authority continue
+past the admitted transport deadline.
 The Git child receives a cleared environment containing only fixed locale/path,
 askpass, CA, and protocol-control values. All stderr is bounded and reduced to
 typed errors after secret-marker scanning. Each credential-bearing fetch is

@@ -50,6 +50,7 @@ const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
 const CREDENTIAL_DEADLINE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS";
+const DEADLINE_REAPER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_DEADLINE_REAPER";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -1604,6 +1605,34 @@ impl SourceAcquirer {
             });
         }
         let endpoint_resolutions = endpoint_resolution?;
+        #[cfg(unix)]
+        let requires_deadline_reaper = credential_bearing
+            && repository_url
+                .and_then(|value| Url::parse(value).ok())
+                .is_some_and(|value| matches!(value.scheme(), "http" | "https"));
+        #[cfg(unix)]
+        let (mut deadline_reaper, deadline_process_group_id) = if requires_deadline_reaper {
+            let remaining = command_deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+            if remaining.is_zero() {
+                return Err(if deadline_limited {
+                    SourceError::ExpiredRequest
+                } else {
+                    SourceError::SourceUnavailable
+                });
+            }
+            let (reaper, process_group_id) = spawn_deadline_reaper(
+                &self.askpass_executable.invocation_path,
+                &self.runtime_directory.invocation_path,
+                credential_deadline_unix_ms,
+                remaining,
+            )
+            .await?;
+            (Some(reaper), Some(process_group_id))
+        } else {
+            (None, None)
+        };
         let mut command = Command::new(&self.git_executable.invocation_path);
         command
             .env_clear()
@@ -1687,34 +1716,57 @@ impl SourceAcquirer {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(unix)]
-        command.process_group(0);
+        command.process_group(deadline_process_group_id.unwrap_or(0));
         if command_deadline <= tokio::time::Instant::now() {
+            #[cfg(unix)]
+            stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
             return Err(if deadline_limited {
                 SourceError::ExpiredRequest
             } else {
                 SourceError::SourceUnavailable
             });
         }
-        let mut child = command
-            .spawn()
-            .map_err(|_| SourceError::SourceUnavailable)?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(_) => {
+                #[cfg(unix)]
+                stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
+                return Err(SourceError::SourceUnavailable);
+            }
+        };
         #[cfg(unix)]
-        let process_group_id = i32::try_from(child.id().ok_or(SourceError::SourceUnavailable)?)
-            .map_err(|_| SourceError::SourceUnavailable)?;
+        let process_group_id = if let Some(process_group_id) = deadline_process_group_id {
+            process_group_id
+        } else {
+            i32::try_from(child.id().ok_or(SourceError::SourceUnavailable)?)
+                .map_err(|_| SourceError::SourceUnavailable)?
+        };
         #[cfg(unix)]
         let process_group_id = Some(process_group_id);
         #[cfg(not(unix))]
         let process_group_id = None;
         if command_deadline <= tokio::time::Instant::now() {
             terminate_child(&mut child, process_group_id).await?;
+            #[cfg(unix)]
+            stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
             return Err(if deadline_limited {
                 SourceError::ExpiredRequest
             } else {
                 SourceError::SourceUnavailable
             });
         }
-        let stdout = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
-        let stderr = child.stderr.take().ok_or(SourceError::StateUnavailable)?;
+        let Some(stdout) = child.stdout.take() else {
+            terminate_child(&mut child, process_group_id).await?;
+            #[cfg(unix)]
+            stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
+            return Err(SourceError::StateUnavailable);
+        };
+        let Some(stderr) = child.stderr.take() else {
+            terminate_child(&mut child, process_group_id).await?;
+            #[cfg(unix)]
+            stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
+            return Err(SourceError::StateUnavailable);
+        };
         let stdout_task = tokio::spawn(read_bounded(stdout, max_stdout));
         let stderr_task = tokio::spawn(read_bounded(stderr, MAX_GIT_STDERR_BYTES));
         enum MonitorEvent {
@@ -1729,6 +1781,8 @@ impl SourceAcquirer {
                 .unwrap_or(Duration::ZERO);
             if remaining.is_zero() {
                 terminate_child(&mut child, process_group_id).await?;
+                #[cfg(unix)]
+                stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
                 stdout_task.abort();
                 stderr_task.abort();
                 let _ = stdout_task.await;
@@ -1756,6 +1810,10 @@ impl SourceAcquirer {
             match event {
                 MonitorEvent::Exited(status) => {
                     if command_deadline <= tokio::time::Instant::now() {
+                        terminate_child(&mut child, process_group_id).await?;
+                        #[cfg(unix)]
+                        stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id)
+                            .await?;
                         stdout_task.abort();
                         stderr_task.abort();
                         let _ = stdout_task.await;
@@ -1770,6 +1828,8 @@ impl SourceAcquirer {
                 }
                 MonitorEvent::Quota(Err(error)) => {
                     terminate_child(&mut child, process_group_id).await?;
+                    #[cfg(unix)]
+                    stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
                     stdout_task.abort();
                     stderr_task.abort();
                     let _ = stdout_task.await;
@@ -1794,6 +1854,13 @@ impl SourceAcquirer {
                     match event {
                         MonitorEvent::Exited(status) => {
                             if command_deadline <= tokio::time::Instant::now() {
+                                terminate_child(&mut child, process_group_id).await?;
+                                #[cfg(unix)]
+                                stop_deadline_reaper(
+                                    &mut deadline_reaper,
+                                    deadline_process_group_id,
+                                )
+                                .await?;
                                 stdout_task.abort();
                                 stderr_task.abort();
                                 let _ = stdout_task.await;
@@ -1815,6 +1882,8 @@ impl SourceAcquirer {
                 MonitorEvent::Poll => unreachable!(),
             }
             terminate_child(&mut child, process_group_id).await?;
+            #[cfg(unix)]
+            stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
             stdout_task.abort();
             stderr_task.abort();
             let _ = stdout_task.await;
@@ -1825,6 +1894,8 @@ impl SourceAcquirer {
                 SourceError::SourceUnavailable
             });
         };
+        #[cfg(unix)]
+        stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
         let stdout = stdout_task
             .await
             .map_err(|_| SourceError::StateUnavailable)?
@@ -2641,6 +2712,78 @@ fn now_unix_ms() -> Result<i64, SourceError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SourceError::StateUnavailable)?;
     i64::try_from(duration.as_millis()).map_err(|_| SourceError::StateUnavailable)
+}
+
+#[cfg(unix)]
+async fn spawn_deadline_reaper(
+    executable: &Path,
+    runtime_directory: &Path,
+    deadline_unix_ms: i64,
+    readiness_timeout: Duration,
+) -> Result<(tokio::process::Child, i32), SourceError> {
+    let mut command = Command::new(executable);
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("LD_BIND_NOW", "1")
+        .env("LD_LIBRARY_PATH", runtime_directory)
+        .env(DEADLINE_REAPER_MODE_ENV, "1")
+        .env(CREDENTIAL_DEADLINE_ENV, deadline_unix_ms.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .process_group(0);
+    let mut child = command
+        .spawn()
+        .map_err(|_| SourceError::SourceUnavailable)?;
+    let process_group_id = i32::try_from(child.id().ok_or(SourceError::SourceUnavailable)?)
+        .map_err(|_| SourceError::SourceUnavailable)?;
+    let mut readiness = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
+    let mut ready = [0_u8; 1];
+    let ready_result =
+        tokio::time::timeout(readiness_timeout, readiness.read_exact(&mut ready)).await;
+    if !matches!(ready_result, Ok(Ok(_))) || ready != [1] {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(process_group_id),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        return Err(SourceError::SourceUnavailable);
+    }
+    Ok((child, process_group_id))
+}
+
+#[cfg(unix)]
+async fn stop_deadline_reaper(
+    reaper: &mut Option<tokio::process::Child>,
+    process_group_id: Option<i32>,
+) -> Result<(), SourceError> {
+    let Some(mut reaper) = reaper.take() else {
+        return Ok(());
+    };
+    match nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(process_group_id.ok_or(SourceError::StateUnavailable)?),
+        nix::sys::signal::Signal::SIGKILL,
+    ) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+        Err(_) => return Err(SourceError::StateUnavailable),
+    }
+    if reaper
+        .try_wait()
+        .map_err(|_| SourceError::StateUnavailable)?
+        .is_none()
+    {
+        reaper
+            .start_kill()
+            .map_err(|_| SourceError::StateUnavailable)?;
+    }
+    tokio::time::timeout(Duration::from_secs(5), reaper.wait())
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?
+        .map_err(|_| SourceError::StateUnavailable)?;
+    Ok(())
 }
 
 async fn terminate_child(

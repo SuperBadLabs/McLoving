@@ -8,7 +8,7 @@ use mcloving_source_acquirer::{
     read_bounded_regular_file, read_private_bounded_regular_file, sha256_file,
 };
 #[cfg(unix)]
-use nix::sys::signal::{SigEvent, SigevNotify, Signal};
+use nix::sys::signal::{SigEvent, SigSet, SigevNotify, Signal};
 #[cfg(unix)]
 use nix::sys::timer::{Expiration, Timer, TimerSetTimeFlags};
 #[cfg(unix)]
@@ -27,6 +27,7 @@ const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
 const CREDENTIAL_DEADLINE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS";
+const DEADLINE_REAPER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_DEADLINE_REAPER";
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -42,18 +43,68 @@ enum Output {
     },
 }
 
-#[tokio::main]
-async fn main() {
-    let result = if std::env::var(RESOLVER_MODE_ENV).as_deref() == Ok("1") {
+fn main() {
+    if std::env::var(DEADLINE_REAPER_MODE_ENV).as_deref() == Ok("1") {
+        #[cfg(unix)]
+        let result = run_deadline_reaper();
+        #[cfg(not(unix))]
+        let result = Err(());
+        if result.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|_| std::process::exit(1));
+    let result = runtime.block_on(async_main());
+    if result.is_err() {
+        std::process::exit(1);
+    }
+}
+
+async fn async_main() -> Result<(), ()> {
+    if std::env::var(RESOLVER_MODE_ENV).as_deref() == Ok("1") {
         run_resolver().await
     } else if std::env::var("MCLOVING_SOURCE_ACQUIRER_ASKPASS").as_deref() == Ok("1") {
         run_askpass().await
     } else {
         run().await
-    };
-    if result.is_err() {
-        std::process::exit(1);
     }
+}
+
+#[cfg(unix)]
+fn run_deadline_reaper() -> Result<(), ()> {
+    use std::io::Write as _;
+
+    for credential_env in [
+        "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
+        "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME",
+        "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_SHA256",
+        "MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE",
+        "MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE",
+    ] {
+        if std::env::var_os(credential_env).is_some() {
+            return Err(());
+        }
+    }
+    let process_group_id = nix::unistd::getpgrp();
+    if process_group_id != nix::unistd::getpid() {
+        return Err(());
+    }
+    let mut signals = SigSet::empty();
+    signals.add(Signal::SIGALRM);
+    signals.thread_block().map_err(|_| ())?;
+    let _deadline_timer = arm_deadline(Signal::SIGALRM)?;
+    let mut output = std::io::stdout().lock();
+    output.write_all(&[1]).map_err(|_| ())?;
+    output.flush().map_err(|_| ())?;
+    if signals.wait().map_err(|_| ())? != Signal::SIGALRM {
+        return Err(());
+    }
+    nix::sys::signal::killpg(process_group_id, Signal::SIGKILL).map_err(|_| ())?;
+    Err(())
 }
 
 async fn run_resolver() -> Result<(), ()> {
@@ -105,7 +156,7 @@ async fn run_resolver() -> Result<(), ()> {
 
 async fn run_askpass() -> Result<(), ()> {
     #[cfg(unix)]
-    let _credential_deadline_timer = arm_credential_deadline()?;
+    let _credential_deadline_timer = arm_deadline(Signal::SIGKILL)?;
     ensure_before_credential_deadline()?;
     let prompt = std::env::args().nth(1).ok_or(())?;
     let value = if prompt.contains("Username") {
@@ -135,7 +186,7 @@ async fn run_askpass() -> Result<(), ()> {
 }
 
 #[cfg(unix)]
-fn arm_credential_deadline() -> Result<Timer, ()> {
+fn arm_deadline(signal: Signal) -> Result<Timer, ()> {
     let clock = ClockId::CLOCK_MONOTONIC;
     let monotonic_anchor = clock.now().map_err(|_| ())?;
     let deadline = credential_deadline_unix_ms()?;
@@ -148,7 +199,7 @@ fn arm_credential_deadline() -> Result<Timer, ()> {
     let absolute_deadline =
         monotonic_anchor + nix::sys::time::TimeSpec::from(Duration::from_millis(remaining));
     let event = SigEvent::new(SigevNotify::SigevSignal {
-        signal: Signal::SIGKILL,
+        signal,
         si_value: 0,
     });
     let mut timer = Timer::new(clock, event).map_err(|_| ())?;
