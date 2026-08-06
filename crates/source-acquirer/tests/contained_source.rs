@@ -383,55 +383,78 @@ fn sealed_askpass_kernel_timer_kills_blocked_emission_at_deadline() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn kernel_deadline_reaper_kills_entire_transport_process_group() {
+fn kernel_deadline_kills_the_complete_transport_pid_namespace() {
     use std::io::Read as _;
+    use std::io::Write as _;
     use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
     use std::process::Stdio;
 
     let binary = env!("CARGO_BIN_EXE_mcloving-source-acquirer");
+    let temporary = tempfile::tempdir().unwrap();
+    let survived_marker = temporary.path().join("transport-survived-deadline");
     let deadline = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis()
-        .saturating_add(500);
-    let mut reaper = Command::new(binary)
+        .saturating_add(1_000);
+    let mut launcher = Command::new(binary)
+        .args([
+            std::ffi::OsStr::new("-c"),
+            std::ffi::OsStr::new("(sleep 2; printf survived > \"$1\") & sleep 5"),
+            std::ffi::OsStr::new("transport"),
+            survived_marker.as_os_str(),
+        ])
         .env_clear()
-        .env("MCLOVING_SOURCE_ACQUIRER_DEADLINE_REAPER", "1")
+        .env("MCLOVING_SOURCE_ACQUIRER_TRANSPORT_LAUNCHER", "1")
+        .env("MCLOVING_SOURCE_ACQUIRER_TRANSPORT_EXECUTABLE", "/bin/sh")
         .env(
             "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS",
             deadline.to_string(),
         )
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
-        .expect("deadline reaper process");
-    let process_group_id = i32::try_from(reaper.id()).unwrap();
-    let mut ready = [0_u8; 1];
-    reaper
-        .stdout
-        .take()
-        .unwrap()
-        .read_exact(&mut ready)
-        .expect("deadline reaper readiness");
-    assert_eq!(ready, [1]);
+        .expect("transport launcher process");
+    let child_pid = launcher.id();
+    let mut output = launcher.stdout.take().unwrap();
+    let mut input = launcher.stdin.take().unwrap();
+    let mut stage = [0_u8; 1];
+    output.read_exact(&mut stage).expect("user namespace stage");
+    assert_eq!(stage, [1]);
+    match std::fs::write(format!("/proc/{child_pid}/setgroups"), "deny\n") {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("setgroups map: {error}"),
+    }
+    std::fs::write(
+        format!("/proc/{child_pid}/uid_map"),
+        format!("0 {} 1\n", nix::unistd::geteuid().as_raw()),
+    )
+    .expect("uid map");
+    std::fs::write(
+        format!("/proc/{child_pid}/gid_map"),
+        format!("0 {} 1\n", nix::unistd::getegid().as_raw()),
+    )
+    .expect("gid map");
+    input.write_all(&[1]).expect("mapping gate");
+    input.flush().expect("mapping gate flush");
+    output
+        .read_exact(&mut stage)
+        .expect("kernel deadline stage");
+    assert_eq!(stage, [2]);
+    let armed = Instant::now();
+    input.write_all(&[2]).expect("transport gate");
+    input.flush().expect("transport gate flush");
+    drop(input);
 
-    let started = Instant::now();
-    let mut transport_member = Command::new("/bin/sleep")
-        .arg("5")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(process_group_id)
-        .spawn()
-        .expect("transport process-group member");
-    let member_status = transport_member.wait().expect("transport member status");
-    let reaper_status = reaper.wait().expect("deadline reaper status");
-
-    assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(member_status.signal(), Some(nix::libc::SIGKILL));
-    assert_eq!(reaper_status.signal(), Some(nix::libc::SIGKILL));
+    let launcher_status = launcher.wait().expect("transport launcher status");
+    assert!(armed.elapsed() >= Duration::from_millis(400));
+    assert!(armed.elapsed() < Duration::from_secs(4));
+    assert_eq!(launcher_status.signal(), Some(nix::libc::SIGKILL));
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert!(!survived_marker.exists());
 }
 
 #[tokio::test]

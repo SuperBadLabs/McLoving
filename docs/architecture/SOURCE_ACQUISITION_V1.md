@@ -100,8 +100,14 @@ The process opens itself, Git, the HTTPS remote helper, and any private CA
 without following a final symlink, hashes the exact bytes, copies them into
 anonymous memory-backed files, and applies write/grow/shrink/further-seal
 kernel seals before use. Git and askpass execute only those immutable snapshots;
-the CA is read only from its sealed snapshot. A private descriptor-bound command
-directory is both `GIT_EXEC_PATH` and the sole `PATH`. It exposes the sealed Git
+the CA is read only from its sealed snapshot. The sealed executable, runtime,
+preload, and CA descriptors plus the read-only private-directory descriptors
+are intentionally inherited with close-on-exec disabled and are addressed only
+through `/proc/self/fd`. Namespace descendants therefore never reopen an
+ancestor process's descriptor links, while every inherited file remains
+kernel-sealed and every inherited directory topology is reverified. A private
+descriptor-bound command directory is both `GIT_EXEC_PATH` and the sole `PATH`.
+It exposes the sealed Git
 snapshot as `git` and `git-upload-pack` and the sealed transport helper as
 `git-remote-http` and `git-remote-https`, preventing ambient lookup by Git's
 internal children as well as its transport. Original-path replacement or
@@ -192,13 +198,19 @@ writing any username or credential bytes. On Unix it first arms a POSIX
 `CLOCK_MONOTONIC` absolute timer whose kernel-delivered `SIGKILL` remains active
 through the complete output operation, making credential emission impossible
 after the deadline even if askpass is descheduled while its stdout pipe is
-blocked. Before credential-bearing Git starts, a credential-free reaper becomes
-the transport process-group leader, blocks and waits for a kernel-timer signal,
-and reports readiness only after arming that same absolute deadline. Git may
-join the group only after that receipt. At expiry the independently scheduled
-reaper sends `SIGKILL` to the complete group, including itself, Git, HTTPS
-helpers, and any other descendants; normal completion also kills and reaps the
-group before accepting output. A parent runtime descheduled after successful
+blocked. Before credential-bearing Git starts, the sealed acquirer launcher
+creates a user and PID namespace under a named AppArmor profile that grants only
+`userns create`. Its parent owns the UID/GID mapping. After the mapping gate,
+the launcher arms a POSIX `CLOCK_MONOTONIC` timer that delivers `SIGKILL`
+directly to the launcher, then starts PID-namespace process 1. That init installs
+kernel `PDEATHSIG=SIGKILL` and reports readiness before Git can start. Only a
+second parent gate releases init to execute the sealed Git snapshot. At expiry,
+the kernel kills the launcher, the parent-death signal kills namespace init,
+and Linux destroys every remaining Git, HTTPS-helper, askpass, and descendant
+process in that PID namespace. No userspace signal handler or scheduled reaper
+is required after the timer is armed. Normal completion also destroys the
+namespace before output is accepted. A missing or unselected deployment profile
+fails closed before Git starts. A parent runtime descheduled after successful
 askpass emission therefore cannot let buffered credential authority continue
 past the admitted transport deadline.
 The Git child receives a cleared environment containing only fixed locale/path,

@@ -50,7 +50,8 @@ const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
 const CREDENTIAL_DEADLINE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS";
-const DEADLINE_REAPER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_DEADLINE_REAPER";
+const TRANSPORT_LAUNCHER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_LAUNCHER";
+const TRANSPORT_EXECUTABLE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_EXECUTABLE";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -94,6 +95,7 @@ impl RuntimeDirectory {
         }
         #[cfg(target_os = "linux")]
         {
+            use nix::fcntl::{FcntlArg, FdFlag, fcntl};
             use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
             let metadata = std::fs::metadata(&self.invocation_path)
@@ -101,6 +103,11 @@ impl RuntimeDirectory {
             if !metadata.file_type().is_dir()
                 || metadata.permissions().mode() & 0o7777 != 0o500
                 || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+                || FdFlag::from_bits_truncate(
+                    fcntl(&self._directory, FcntlArg::F_GETFD)
+                        .map_err(|_| SourceError::BindingMismatch)?,
+                )
+                .contains(FdFlag::FD_CLOEXEC)
             {
                 return Err(SourceError::BindingMismatch);
             }
@@ -166,6 +173,7 @@ impl GitExecDirectory {
         }
         #[cfg(target_os = "linux")]
         {
+            use nix::fcntl::{FcntlArg, FdFlag, fcntl};
             use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
             let metadata = std::fs::metadata(&self.invocation_path)
@@ -173,6 +181,11 @@ impl GitExecDirectory {
             if !metadata.file_type().is_dir()
                 || metadata.permissions().mode() & 0o7777 != 0o500
                 || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+                || FdFlag::from_bits_truncate(
+                    fcntl(&self._directory, FcntlArg::F_GETFD)
+                        .map_err(|_| SourceError::BindingMismatch)?,
+                )
+                .contains(FdFlag::FD_CLOEXEC)
             {
                 return Err(SourceError::BindingMismatch);
             }
@@ -645,7 +658,9 @@ impl SourceAcquirer {
         .await?;
         let ca_bundle = match (&config.ca_bundle_path, &config.ca_bundle_sha256) {
             (Some(path), Some(expected)) => {
-                Some(snapshot_verified_file(path, expected, "mcloving-source-ca", 0o400).await?)
+                let snapshot =
+                    snapshot_verified_file(path, expected, "mcloving-source-ca", 0o400).await?;
+                Some(inherit_verified_file(snapshot)?)
             }
             (None, None) => None,
             _ => return Err(SourceError::InvalidConfig),
@@ -1606,34 +1621,18 @@ impl SourceAcquirer {
         }
         let endpoint_resolutions = endpoint_resolution?;
         #[cfg(unix)]
-        let requires_deadline_reaper = credential_bearing
+        let requires_kernel_transport_deadline = credential_bearing
             && repository_url
                 .and_then(|value| Url::parse(value).ok())
                 .is_some_and(|value| matches!(value.scheme(), "http" | "https"));
-        #[cfg(unix)]
-        let (mut deadline_reaper, deadline_process_group_id) = if requires_deadline_reaper {
-            let remaining = command_deadline
-                .checked_duration_since(tokio::time::Instant::now())
-                .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                return Err(if deadline_limited {
-                    SourceError::ExpiredRequest
-                } else {
-                    SourceError::SourceUnavailable
-                });
-            }
-            let (reaper, process_group_id) = spawn_deadline_reaper(
-                &self.askpass_executable.invocation_path,
-                &self.runtime_directory.invocation_path,
-                credential_deadline_unix_ms,
-                remaining,
-            )
-            .await?;
-            (Some(reaper), Some(process_group_id))
+        #[cfg(not(unix))]
+        let requires_kernel_transport_deadline = false;
+        let command_executable = if requires_kernel_transport_deadline {
+            &self.askpass_executable.invocation_path
         } else {
-            (None, None)
+            &self.git_executable.invocation_path
         };
-        let mut command = Command::new(&self.git_executable.invocation_path);
+        let mut command = Command::new(command_executable);
         command
             .env_clear()
             .env("LANG", "C")
@@ -1700,6 +1699,12 @@ impl SourceAcquirer {
                     credential_deadline_unix_ms.to_string(),
                 );
         }
+        if requires_kernel_transport_deadline {
+            command.env(TRANSPORT_LAUNCHER_MODE_ENV, "1").env(
+                TRANSPORT_EXECUTABLE_ENV,
+                &self.git_executable.invocation_path,
+            );
+        }
         if self.config.test_allow_http_loopback {
             command.args(["-c", "protocol.http.allow=always"]);
         }
@@ -1711,15 +1716,17 @@ impl SourceAcquirer {
         }
         command
             .args(arguments)
-            .stdin(Stdio::null())
+            .stdin(if requires_kernel_transport_deadline {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         #[cfg(unix)]
-        command.process_group(deadline_process_group_id.unwrap_or(0));
+        command.process_group(0);
         if command_deadline <= tokio::time::Instant::now() {
-            #[cfg(unix)]
-            stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
             return Err(if deadline_limited {
                 SourceError::ExpiredRequest
             } else {
@@ -1729,26 +1736,22 @@ impl SourceAcquirer {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(_) => {
-                #[cfg(unix)]
-                stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
                 return Err(SourceError::SourceUnavailable);
             }
         };
         #[cfg(unix)]
-        let process_group_id = if let Some(process_group_id) = deadline_process_group_id {
-            process_group_id
-        } else {
-            i32::try_from(child.id().ok_or(SourceError::SourceUnavailable)?)
-                .map_err(|_| SourceError::SourceUnavailable)?
-        };
+        let process_group_id = i32::try_from(child.id().ok_or(SourceError::SourceUnavailable)?)
+            .map_err(|_| SourceError::SourceUnavailable)?;
         #[cfg(unix)]
         let process_group_id = Some(process_group_id);
         #[cfg(not(unix))]
         let process_group_id = None;
+        #[cfg(target_os = "linux")]
+        if requires_kernel_transport_deadline {
+            admit_transport_namespace(&mut child, command_deadline, process_group_id).await?;
+        }
         if command_deadline <= tokio::time::Instant::now() {
             terminate_child(&mut child, process_group_id).await?;
-            #[cfg(unix)]
-            stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
             return Err(if deadline_limited {
                 SourceError::ExpiredRequest
             } else {
@@ -1757,14 +1760,10 @@ impl SourceAcquirer {
         }
         let Some(stdout) = child.stdout.take() else {
             terminate_child(&mut child, process_group_id).await?;
-            #[cfg(unix)]
-            stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
             return Err(SourceError::StateUnavailable);
         };
         let Some(stderr) = child.stderr.take() else {
             terminate_child(&mut child, process_group_id).await?;
-            #[cfg(unix)]
-            stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
             return Err(SourceError::StateUnavailable);
         };
         let stdout_task = tokio::spawn(read_bounded(stdout, max_stdout));
@@ -1781,8 +1780,6 @@ impl SourceAcquirer {
                 .unwrap_or(Duration::ZERO);
             if remaining.is_zero() {
                 terminate_child(&mut child, process_group_id).await?;
-                #[cfg(unix)]
-                stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
                 stdout_task.abort();
                 stderr_task.abort();
                 let _ = stdout_task.await;
@@ -1811,9 +1808,6 @@ impl SourceAcquirer {
                 MonitorEvent::Exited(status) => {
                     if command_deadline <= tokio::time::Instant::now() {
                         terminate_child(&mut child, process_group_id).await?;
-                        #[cfg(unix)]
-                        stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id)
-                            .await?;
                         stdout_task.abort();
                         stderr_task.abort();
                         let _ = stdout_task.await;
@@ -1828,8 +1822,6 @@ impl SourceAcquirer {
                 }
                 MonitorEvent::Quota(Err(error)) => {
                     terminate_child(&mut child, process_group_id).await?;
-                    #[cfg(unix)]
-                    stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
                     stdout_task.abort();
                     stderr_task.abort();
                     let _ = stdout_task.await;
@@ -1855,12 +1847,6 @@ impl SourceAcquirer {
                         MonitorEvent::Exited(status) => {
                             if command_deadline <= tokio::time::Instant::now() {
                                 terminate_child(&mut child, process_group_id).await?;
-                                #[cfg(unix)]
-                                stop_deadline_reaper(
-                                    &mut deadline_reaper,
-                                    deadline_process_group_id,
-                                )
-                                .await?;
                                 stdout_task.abort();
                                 stderr_task.abort();
                                 let _ = stdout_task.await;
@@ -1882,8 +1868,6 @@ impl SourceAcquirer {
                 MonitorEvent::Poll => unreachable!(),
             }
             terminate_child(&mut child, process_group_id).await?;
-            #[cfg(unix)]
-            stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
             stdout_task.abort();
             stderr_task.abort();
             let _ = stdout_task.await;
@@ -1894,8 +1878,6 @@ impl SourceAcquirer {
                 SourceError::SourceUnavailable
             });
         };
-        #[cfg(unix)]
-        stop_deadline_reaper(&mut deadline_reaper, deadline_process_group_id).await?;
         let stdout = stdout_task
             .await
             .map_err(|_| SourceError::StateUnavailable)?
@@ -2714,75 +2696,83 @@ fn now_unix_ms() -> Result<i64, SourceError> {
     i64::try_from(duration.as_millis()).map_err(|_| SourceError::StateUnavailable)
 }
 
-#[cfg(unix)]
-async fn spawn_deadline_reaper(
-    executable: &Path,
-    runtime_directory: &Path,
-    deadline_unix_ms: i64,
-    readiness_timeout: Duration,
-) -> Result<(tokio::process::Child, i32), SourceError> {
-    let mut command = Command::new(executable);
-    command
-        .env_clear()
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env("LD_BIND_NOW", "1")
-        .env("LD_LIBRARY_PATH", runtime_directory)
-        .env(DEADLINE_REAPER_MODE_ENV, "1")
-        .env(CREDENTIAL_DEADLINE_ENV, deadline_unix_ms.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .process_group(0);
-    let mut child = command
-        .spawn()
-        .map_err(|_| SourceError::SourceUnavailable)?;
-    let process_group_id = i32::try_from(child.id().ok_or(SourceError::SourceUnavailable)?)
-        .map_err(|_| SourceError::SourceUnavailable)?;
-    let mut readiness = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
-    let mut ready = [0_u8; 1];
-    let ready_result =
-        tokio::time::timeout(readiness_timeout, readiness.read_exact(&mut ready)).await;
-    if !matches!(ready_result, Ok(Ok(_))) || ready != [1] {
-        let _ = nix::sys::signal::killpg(
-            nix::unistd::Pid::from_raw(process_group_id),
-            nix::sys::signal::Signal::SIGKILL,
-        );
-        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-        return Err(SourceError::SourceUnavailable);
-    }
-    Ok((child, process_group_id))
-}
-
-#[cfg(unix)]
-async fn stop_deadline_reaper(
-    reaper: &mut Option<tokio::process::Child>,
+#[cfg(target_os = "linux")]
+async fn admit_transport_namespace(
+    child: &mut tokio::process::Child,
+    deadline: tokio::time::Instant,
     process_group_id: Option<i32>,
 ) -> Result<(), SourceError> {
-    let Some(mut reaper) = reaper.take() else {
-        return Ok(());
-    };
-    match nix::sys::signal::killpg(
-        nix::unistd::Pid::from_raw(process_group_id.ok_or(SourceError::StateUnavailable)?),
-        nix::sys::signal::Signal::SIGKILL,
-    ) {
-        Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-        Err(_) => return Err(SourceError::StateUnavailable),
-    }
-    if reaper
-        .try_wait()
-        .map_err(|_| SourceError::StateUnavailable)?
-        .is_none()
-    {
-        reaper
-            .start_kill()
-            .map_err(|_| SourceError::StateUnavailable)?;
-    }
-    tokio::time::timeout(Duration::from_secs(5), reaper.wait())
+    let child_pid = child.id().ok_or(SourceError::SourceUnavailable)?;
+    let mut input = child.stdin.take().ok_or(SourceError::StateUnavailable)?;
+    let mut output = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
+    let result = async {
+        read_transport_stage(&mut output, 1, deadline).await?;
+        let setgroups = format!("/proc/{child_pid}/setgroups");
+        match tokio::fs::write(&setgroups, b"deny\n").await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(SourceError::SourceUnavailable),
+        }
+        tokio::fs::write(
+            format!("/proc/{child_pid}/uid_map"),
+            format!("0 {} 1\n", nix::unistd::geteuid().as_raw()),
+        )
         .await
-        .map_err(|_| SourceError::StateUnavailable)?
-        .map_err(|_| SourceError::StateUnavailable)?;
+        .map_err(|_| SourceError::SourceUnavailable)?;
+        tokio::fs::write(
+            format!("/proc/{child_pid}/gid_map"),
+            format!("0 {} 1\n", nix::unistd::getegid().as_raw()),
+        )
+        .await
+        .map_err(|_| SourceError::SourceUnavailable)?;
+        input
+            .write_all(&[1])
+            .await
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        input
+            .flush()
+            .await
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        read_transport_stage(&mut output, 2, deadline).await?;
+        input
+            .write_all(&[2])
+            .await
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        input
+            .shutdown()
+            .await
+            .map_err(|_| SourceError::SourceUnavailable)?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = terminate_child(child, process_group_id).await;
+        return Err(error);
+    }
+    child.stdout = Some(output);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+async fn read_transport_stage(
+    output: &mut tokio::process::ChildStdout,
+    expected: u8,
+    deadline: tokio::time::Instant,
+) -> Result<(), SourceError> {
+    let remaining = deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .unwrap_or(Duration::ZERO);
+    if remaining.is_zero() {
+        return Err(SourceError::SourceUnavailable);
+    }
+    let mut marker = [0_u8; 1];
+    tokio::time::timeout(remaining, output.read_exact(&mut marker))
+        .await
+        .map_err(|_| SourceError::SourceUnavailable)?
+        .map_err(|_| SourceError::SourceUnavailable)?;
+    if marker != [expected] {
+        return Err(SourceError::SourceUnavailable);
+    }
     Ok(())
 }
 
@@ -3260,13 +3250,21 @@ async fn inherited_sealed_verified_file(
     }
     #[cfg(target_os = "linux")]
     {
-        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-
         let snapshot = sealed_verified_file(bytes, snapshot_name, mode).await?;
-        fcntl(&snapshot.file, FcntlArg::F_SETFD(FdFlag::empty()))
-            .map_err(|_| SourceError::InvalidConfig)?;
-        Ok(snapshot)
+        inherit_verified_file(snapshot)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn inherit_verified_file(mut snapshot: VerifiedFile) -> Result<VerifiedFile, SourceError> {
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+    use std::os::fd::AsRawFd as _;
+
+    fcntl(&snapshot.file, FcntlArg::F_SETFD(FdFlag::empty()))
+        .map_err(|_| SourceError::InvalidConfig)?;
+    snapshot.invocation_path =
+        PathBuf::from(format!("/proc/self/fd/{}", snapshot.file.as_raw_fd()));
+    Ok(snapshot)
 }
 
 async fn verify_inherited_sealed_file(file: &VerifiedFile) -> Result<(), SourceError> {
@@ -3309,7 +3307,7 @@ async fn snapshot_with_bound_interpreter(
         return Err(SourceError::InvalidConfig);
     }
     let bytes = bind_elf_interpreter(bytes, interpreter)?;
-    sealed_verified_file(&bytes, snapshot_name, 0o500).await
+    inherited_sealed_verified_file(&bytes, snapshot_name, 0o500).await
 }
 
 async fn verified_elf_interpreter(source: &VerifiedFile) -> Result<PathBuf, SourceError> {
@@ -3543,6 +3541,7 @@ fn create_runtime_directory(
     }
     #[cfg(target_os = "linux")]
     {
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
         use std::os::fd::AsRawFd as _;
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
 
@@ -3569,14 +3568,12 @@ fn create_runtime_directory(
             .map_err(|_| SourceError::StateUnavailable)?;
         let directory = std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+            .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
             .open(&path)
             .map_err(|_| SourceError::StateUnavailable)?;
-        let invocation_path = PathBuf::from(format!(
-            "/proc/{}/fd/{}",
-            std::process::id(),
-            directory.as_raw_fd()
-        ));
+        fcntl(&directory, FcntlArg::F_SETFD(FdFlag::empty()))
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let invocation_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
         Ok(RuntimeDirectory {
             path,
             _directory: directory,
@@ -3598,6 +3595,7 @@ fn create_git_exec_directory(
     }
     #[cfg(target_os = "linux")]
     {
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
         use std::os::fd::AsRawFd as _;
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
 
@@ -3617,14 +3615,12 @@ fn create_git_exec_directory(
             .map_err(|_| SourceError::StateUnavailable)?;
         let directory = std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+            .custom_flags(nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
             .open(&path)
             .map_err(|_| SourceError::StateUnavailable)?;
-        let invocation_path = PathBuf::from(format!(
-            "/proc/{}/fd/{}",
-            std::process::id(),
-            directory.as_raw_fd()
-        ));
+        fcntl(&directory, FcntlArg::F_SETFD(FdFlag::empty()))
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let invocation_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
         Ok(GitExecDirectory {
             path,
             _directory: directory,

@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced forty-two actionable threads so far. The
+Independent review has produced forty-three actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -323,6 +323,20 @@ group, deschedules the parent in `wait`, and proves both reaper and member die
 from `SIGKILL` at the deadline. The forty-second finding cannot contribute
 closure until the replacement exact head is independently reverified.
 
+Review of that exact head found a final signal-delivery seam: the POSIX timer
+queued a blocked signal, so the complete transport group was not killed until
+the userspace reaper resumed and called `killpg`. The replacement puts Git and
+all descendants in a dedicated PID namespace. A kernel timer kills its setup
+parent directly; PID-namespace init installs `PDEATHSIG=SIGKILL` before a sealed
+readiness gate allows Git to start, and Linux kills the remaining namespace when
+init dies. The repository-owned, non-attaching AppArmor profile preserves the
+existing unconfined boundary and adds only `userns create`; deployment must opt
+in explicitly with `aa-exec`. A Linux regression waits through the absolute
+deadline and proves both that the launcher dies from kernel `SIGKILL` and that a
+delayed transport descendant never survives to publish its marker. The
+forty-third finding cannot contribute closure until the profile-backed
+replacement exact head is independently reverified.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
@@ -330,10 +344,13 @@ fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
 suite, strict Clippy, formatting, and the rerun protected checks pass.
 
 The replacement implementation currently passes `git diff --check`, Rust
-formatting, strict source-acquirer Clippy, and all twenty-seven focused
-source-acquisition tests plus the complete locked workspace suite on HeMan.
-Protected checks and independent exact-head verification remain required before
-closure.
+formatting, strict source-acquirer Clippy, all twenty-seven focused
+source-acquisition tests under the activated named AppArmor profile, and the
+remaining complete locked workspace suite outside that profile on HeMan. The
+focused evidence includes credentialed smart HTTP through sealed inherited
+descriptors and kernel destruction of a delayed namespace descendant at the
+absolute deadline. Protected checks and independent exact-head verification
+remain required before closure.
 
 ## Residual risk and authority boundary
 

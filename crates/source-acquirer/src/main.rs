@@ -8,7 +8,7 @@ use mcloving_source_acquirer::{
     read_bounded_regular_file, read_private_bounded_regular_file, sha256_file,
 };
 #[cfg(unix)]
-use nix::sys::signal::{SigEvent, SigSet, SigevNotify, Signal};
+use nix::sys::signal::{SigEvent, SigevNotify, Signal};
 #[cfg(unix)]
 use nix::sys::timer::{Expiration, Timer, TimerSetTimeFlags};
 #[cfg(unix)]
@@ -27,7 +27,11 @@ const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
 const CREDENTIAL_DEADLINE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS";
-const DEADLINE_REAPER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_DEADLINE_REAPER";
+const TRANSPORT_LAUNCHER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_LAUNCHER";
+const TRANSPORT_INIT_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_INIT";
+const TRANSPORT_EXECUTABLE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_EXECUTABLE";
+const TRANSPORT_READY_FD_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_READY_FD";
+const TRANSPORT_GATE_FD_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_GATE_FD";
 
 #[derive(Serialize)]
 #[serde(untagged)]
@@ -44,10 +48,20 @@ enum Output {
 }
 
 fn main() {
-    if std::env::var(DEADLINE_REAPER_MODE_ENV).as_deref() == Ok("1") {
-        #[cfg(unix)]
-        let result = run_deadline_reaper();
-        #[cfg(not(unix))]
+    if std::env::var(TRANSPORT_LAUNCHER_MODE_ENV).as_deref() == Ok("1") {
+        #[cfg(target_os = "linux")]
+        let result = run_transport_launcher();
+        #[cfg(not(target_os = "linux"))]
+        let result = Err(());
+        if result.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
+    if std::env::var(TRANSPORT_INIT_MODE_ENV).as_deref() == Ok("1") {
+        #[cfg(target_os = "linux")]
+        let result = run_transport_init();
+        #[cfg(not(target_os = "linux"))]
         let result = Err(());
         if result.is_err() {
             std::process::exit(1);
@@ -74,36 +88,116 @@ async fn async_main() -> Result<(), ()> {
     }
 }
 
-#[cfg(unix)]
-fn run_deadline_reaper() -> Result<(), ()> {
-    use std::io::Write as _;
+#[cfg(target_os = "linux")]
+fn run_transport_launcher() -> Result<(), ()> {
+    use std::io::{Read as _, Write as _};
+    use std::os::fd::AsRawFd as _;
 
-    for credential_env in [
-        "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
-        "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME",
-        "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_SHA256",
-        "MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE",
-        "MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE",
-    ] {
-        if std::env::var_os(credential_env).is_some() {
-            return Err(());
-        }
-    }
-    let process_group_id = nix::unistd::getpgrp();
-    if process_group_id != nix::unistd::getpid() {
+    nix::sched::unshare(
+        nix::sched::CloneFlags::CLONE_NEWUSER | nix::sched::CloneFlags::CLONE_NEWPID,
+    )
+    .map_err(|_| ())?;
+    let mut parent_output = std::io::stdout().lock();
+    let mut parent_input = std::io::stdin().lock();
+    parent_output.write_all(&[1]).map_err(|_| ())?;
+    parent_output.flush().map_err(|_| ())?;
+    let mut marker = [0_u8; 1];
+    parent_input.read_exact(&mut marker).map_err(|_| ())?;
+    if marker != [1] {
         return Err(());
     }
-    let mut signals = SigSet::empty();
-    signals.add(Signal::SIGALRM);
-    signals.thread_block().map_err(|_| ())?;
-    let _deadline_timer = arm_deadline(Signal::SIGALRM)?;
-    let mut output = std::io::stdout().lock();
-    output.write_all(&[1]).map_err(|_| ())?;
-    output.flush().map_err(|_| ())?;
-    if signals.wait().map_err(|_| ())? != Signal::SIGALRM {
+
+    let _transport_deadline_timer = arm_deadline(Signal::SIGKILL)?;
+    let (ready_read, ready_write) =
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(|_| ())?;
+    let (gate_read, gate_write) =
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(|_| ())?;
+    nix::fcntl::fcntl(
+        &ready_write,
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+    )
+    .map_err(|_| ())?;
+    nix::fcntl::fcntl(
+        &gate_read,
+        nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
+    )
+    .map_err(|_| ())?;
+    let executable = PathBuf::from("/proc/self/exe");
+    let mut child = std::process::Command::new(executable)
+        .args(std::env::args_os().skip(1))
+        .env_remove(TRANSPORT_LAUNCHER_MODE_ENV)
+        .env(TRANSPORT_INIT_MODE_ENV, "1")
+        .env(TRANSPORT_READY_FD_ENV, ready_write.as_raw_fd().to_string())
+        .env(TRANSPORT_GATE_FD_ENV, gate_read.as_raw_fd().to_string())
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|_| ())?;
+    drop(ready_write);
+    drop(gate_read);
+
+    let mut ready = std::fs::File::from(ready_read);
+    ready.read_exact(&mut marker).map_err(|_| ())?;
+    if marker != [1] {
         return Err(());
     }
-    nix::sys::signal::killpg(process_group_id, Signal::SIGKILL).map_err(|_| ())?;
+    parent_output.write_all(&[2]).map_err(|_| ())?;
+    parent_output.flush().map_err(|_| ())?;
+    parent_input.read_exact(&mut marker).map_err(|_| ())?;
+    if marker != [2] {
+        return Err(());
+    }
+    let mut gate = std::fs::File::from(gate_write);
+    gate.write_all(&[1]).map_err(|_| ())?;
+    gate.flush().map_err(|_| ())?;
+
+    let status = child.wait().map_err(|_| ())?;
+    if status.success() { Ok(()) } else { Err(()) }
+}
+
+#[cfg(target_os = "linux")]
+fn run_transport_init() -> Result<(), ()> {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::process::CommandExt as _;
+
+    if nix::unistd::getpid().as_raw() != 1 {
+        return Err(());
+    }
+    let ready_fd = required_fd(TRANSPORT_READY_FD_ENV)?;
+    let gate_fd = required_fd(TRANSPORT_GATE_FD_ENV)?;
+    let mut ready = std::fs::OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/self/fd/{ready_fd}"))
+        .map_err(|_| ())?;
+    let mut gate = std::fs::OpenOptions::new()
+        .read(true)
+        .open(format!("/proc/self/fd/{gate_fd}"))
+        .map_err(|_| ())?;
+    nix::unistd::close(ready_fd).map_err(|_| ())?;
+    nix::unistd::close(gate_fd).map_err(|_| ())?;
+    nix::sys::prctl::set_pdeathsig(Signal::SIGKILL).map_err(|_| ())?;
+    ready.write_all(&[1]).map_err(|_| ())?;
+    ready.flush().map_err(|_| ())?;
+    let mut marker = [0_u8; 1];
+    gate.read_exact(&mut marker).map_err(|_| ())?;
+    if marker != [1] {
+        return Err(());
+    }
+
+    let executable = required_path(TRANSPORT_EXECUTABLE_ENV)?;
+    let error = std::process::Command::new(executable)
+        .args(std::env::args_os().skip(1))
+        .env_remove(TRANSPORT_LAUNCHER_MODE_ENV)
+        .env_remove(TRANSPORT_INIT_MODE_ENV)
+        .env_remove(TRANSPORT_EXECUTABLE_ENV)
+        .env_remove(TRANSPORT_READY_FD_ENV)
+        .env_remove(TRANSPORT_GATE_FD_ENV)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .exec();
+    let _ = error;
     Err(())
 }
 
@@ -382,6 +476,16 @@ async fn write_output(output: &mut tokio::io::Stdout, response: &Output) -> Resu
 
 fn required_path(name: &str) -> Result<PathBuf, ()> {
     std::env::var_os(name).map(PathBuf::from).ok_or(())
+}
+
+#[cfg(target_os = "linux")]
+fn required_fd(name: &str) -> Result<i32, ()> {
+    std::env::var(name)
+        .map_err(|_| ())?
+        .parse::<i32>()
+        .ok()
+        .filter(|value| *value >= 0)
+        .ok_or(())
 }
 
 #[cfg(test)]
