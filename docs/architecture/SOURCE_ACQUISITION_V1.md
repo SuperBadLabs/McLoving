@@ -72,9 +72,12 @@ and recursive submodule commands are disabled. Cleartext loopback or local
 `MCLOVING_SOURCE_ACQUIRER_TEST_MODE=1`.
 
 The process hashes itself and the configured Git executable before accepting a
-request. A caller must present both hashes and the exact canonical configuration
-digest. Any implementation, Git, repository, grant, policy, or generation
-substitution fails before Git or network access.
+request, retains the resolved executable path as the askpass identity, and
+re-hashes Git plus credential and CA material before every Git invocation. The
+askpass implementation is additionally re-hashed before every
+credential-bearing fetch. A caller must present both executable hashes and the
+exact canonical configuration digest. Any implementation, Git, repository,
+grant, policy, or generation substitution fails before Git or network access.
 
 ## Acquisition request
 
@@ -85,7 +88,7 @@ Every request binds:
 - expected acquirer/Git/configuration hashes, protocol/schema, and generation;
 - provider and repository identities, authenticated full ref, and exact commit;
 - trusted-source identity and explicit trusted/untrusted-fork disposition;
-- requested shallow depth and canonical sparse roots;
+- positive requested shallow depth and canonical sparse roots;
 - the complete expected recursive submodule path/repository/commit graph;
 - request/expiry times and optional rollback-from generation.
 
@@ -105,12 +108,15 @@ request's full commit before any source is published. A later movement of the
 same ref is delivered only by a new request naming the later exact commit; a
 stale request cannot silently receive it.
 
-The credential reaches Git byte-for-byte only through the acquirer's bounded
-askpass mode; non-UTF-8 or newline-bearing grants are ineligible. It never
-appears in argv, configuration, receipt, diagnostics, or the output tree.
+The credential reaches Git byte-for-byte only through the acquirer's bounded,
+implementation-hash-revalidated askpass mode; non-UTF-8 or newline-bearing
+grants are ineligible. It never appears in argv, configuration, receipt,
+diagnostics, or the output tree.
 The Git child receives a cleared environment containing only fixed locale/path,
 askpass, CA, and protocol-control values. All stderr is bounded and reduced to
-typed errors after secret-marker scanning.
+typed errors after secret-marker scanning. Each credential-bearing fetch is
+terminated at the earlier of the configured command timeout or the request,
+grant, and publication deadline.
 
 Fork admission is fail closed. A trusted request must name the configured
 repository identity. An untrusted-fork request is rejected unless the immutable
@@ -130,8 +136,10 @@ symlinks (`120000`), and expected submodule gitlinks (`160000`) are admitted.
 Paths must be canonical UTF-8 relative paths, remain below the snapshot root,
 contain no `.git` component, and satisfy configured path/count/byte limits.
 Symlink targets must be relative and resolve within the same snapshot. Special
-files, unsafe symlinks, duplicate/colliding paths, case-fold collisions, and
-unexpected gitlinks fail closed before publication.
+files, unsafe symlinks, duplicate/colliding paths, case-fold collisions at any
+ancestor or leaf, and unexpected gitlinks fail closed before publication. The
+global materialized-file count includes every admitted gitlink even when sparse
+selection omits all of that submodule's child files.
 
 Sparse roots select complete path components, not string prefixes. The receipt
 records both the full repository tree identity and the exact materialized

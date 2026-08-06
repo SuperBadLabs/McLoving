@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -117,7 +117,10 @@ impl Context {
             git_executable_path.parent().expect("git parent"),
             ["--version"],
         );
-        let implementation_sha256 = content_sha256(b"contained-source-acquirer-implementation");
+        let implementation_sha256 =
+            sha256_file(&std::env::current_exe().expect("contained source test executable"))
+                .await
+                .expect("contained source implementation digest");
         let config = SourceConfig {
             protocol_version: PROTOCOL_VERSION.to_owned(),
             schema_version: "source-acquisition-v1".to_owned(),
@@ -203,7 +206,7 @@ impl Context {
             exact_commit: commit.to_owned(),
             source_identity: "trusted/main".to_owned(),
             trust_class: TrustClass::Trusted,
-            depth: 0,
+            depth: 1,
             sparse_roots: Vec::new(),
             submodules: Vec::new(),
             requested_at_unix_ms: now_ms() - 1_000,
@@ -337,6 +340,21 @@ async fn untrusted_fork_is_denied_before_source_access() {
             .exists()
     );
 
+    let mut zero_depth = context.request(&commit);
+    zero_depth.depth = 0;
+    assert!(matches!(
+        context.acquirer.acquire(&zero_depth).await,
+        Err(SourceError::BindingMismatch)
+    ));
+
+    let mut expired = context.request(&commit);
+    expired.requested_at_unix_ms = now_ms() - 2_000;
+    expired.expires_at_unix_ms = now_ms() - 1_000;
+    assert!(matches!(
+        context.acquirer.acquire(&expired).await,
+        Err(SourceError::ExpiredRequest)
+    ));
+
     let mut malformed_sparse = context.request(&commit);
     malformed_sparse.sparse_roots = vec!["../src".to_owned()];
     assert!(matches!(
@@ -412,6 +430,17 @@ async fn exact_submodule_graph_is_materialized_without_submodule_commands() {
             "deps/child",
         ],
     );
+    run_git(
+        &root.work,
+        [
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            &child.url(),
+            "deps/child-copy",
+        ],
+    );
     let root_commit = root.commit("root with child");
     let child_binding = RepositoryBinding {
         provider_identity: "contained-git".to_owned(),
@@ -422,6 +451,14 @@ async fn exact_submodule_graph_is_materialized_without_submodule_commands() {
     let mut request = context.request(&root_commit);
     request.submodules.push(SubmoduleRequest {
         path: "deps/child".to_owned(),
+        provider_identity: child_binding.provider_identity.clone(),
+        repository_identity: child_binding.repository_identity.clone(),
+        repository_url: child_binding.repository_url.clone(),
+        authenticated_ref: "refs/heads/main".to_owned(),
+        exact_commit: child_commit.clone(),
+    });
+    request.submodules.push(SubmoduleRequest {
+        path: "deps/child-copy".to_owned(),
         provider_identity: child_binding.provider_identity,
         repository_identity: child_binding.repository_identity,
         repository_url: child_binding.repository_url,
@@ -433,7 +470,7 @@ async fn exact_submodule_graph_is_materialized_without_submodule_commands() {
         .acquire(&request)
         .await
         .expect("submodule acquisition");
-    assert_eq!(receipt.repository_trees.len(), 2);
+    assert_eq!(receipt.repository_trees.len(), 3);
     assert!(
         receipt
             .repository_trees
@@ -448,6 +485,32 @@ async fn exact_submodule_graph_is_materialized_without_submodule_commands() {
         std::fs::read(output.join("deps/child/child.txt")).unwrap(),
         b"child source\n"
     );
+    assert_eq!(
+        std::fs::read(output.join("deps/child-copy/child.txt")).unwrap(),
+        b"child source\n"
+    );
+
+    let mut limited_config = context.config.clone();
+    limited_config.generation += 1;
+    limited_config.max_files = 1;
+    limited_config.output_root = context
+        .credential_path
+        .parent()
+        .unwrap()
+        .join("gitlink-count-output");
+    let limited = context.acquirer_for(limited_config.clone()).await;
+    let mut gitlinks_only = request.clone();
+    gitlinks_only.acquisition_id = Uuid::new_v4();
+    gitlinks_only.expected_generation = limited_config.generation;
+    gitlinks_only.expected_config_sha256 = limited.config_sha256().to_owned();
+    gitlinks_only.sparse_roots = vec![
+        "deps/child/missing".to_owned(),
+        "deps/child-copy/missing".to_owned(),
+    ];
+    assert!(matches!(
+        limited.acquire(&gitlinks_only).await,
+        Err(SourceError::LimitExceeded)
+    ));
 
     let mut substituted = context.request(&root_commit);
     let mut wrong = request.submodules[0].clone();
@@ -478,6 +541,28 @@ async fn unsafe_symlink_fails_closed_and_retains_ambiguity_claim() {
         context.acquirer.acquire(&request).await,
         Err(SourceError::AmbiguousClaim)
     ));
+}
+
+#[tokio::test]
+async fn case_folded_ancestor_collisions_fail_before_publication() {
+    let repositories = tempfile::tempdir().expect("repositories tempdir");
+    let root = RepositoryFixture::new(repositories.path(), "root");
+    root.write("Dir/a.txt", b"upper ancestor\n");
+    root.write("dir/b.txt", b"lower ancestor\n");
+    let commit = root.commit("case-folded ancestors");
+    let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+    let request = context.request(&commit);
+    assert!(matches!(
+        context.acquirer.acquire(&request).await,
+        Err(SourceError::UnsafeTree)
+    ));
+    assert!(
+        !context
+            .config
+            .output_root
+            .join(request.acquisition_id.to_string())
+            .exists()
+    );
 }
 
 #[tokio::test]
@@ -590,6 +675,20 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
     root.write("small.txt", b"four");
     let commit = root.commit("bounded");
     let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+
+    let substituted_implementation = SourceAcquirer::new(
+        context.config.clone(),
+        content_sha256(b"substituted-source-acquirer"),
+        context.credential_path.clone(),
+        CREDENTIAL,
+        SIGNING_KEY.to_vec(),
+        vec![CREDENTIAL.to_vec()],
+    )
+    .await;
+    assert!(matches!(
+        substituted_implementation,
+        Err(SourceError::InvalidConfig)
+    ));
 
     let mut limited_config = context.config.clone();
     limited_config.generation += 1;
@@ -950,7 +1049,6 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         .await
         .unwrap();
     let timeout_output = timed_out.wait_with_output().await.unwrap();
-    server.abort();
     assert!(timeout_output.status.success());
     assert!(!contains(&timeout_output.stdout, CREDENTIAL));
     assert!(!contains(&timeout_output.stderr, CREDENTIAL));
@@ -972,6 +1070,67 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
             .iter()
             .any(|name| name.starts_with(".stage-"))
     );
+
+    config.command_timeout_ms = 30_000;
+    config.output_root = temporary.path().join("deadline-output");
+    request.acquisition_id = Uuid::new_v4();
+    request.expected_config_sha256 = config.canonical_digest().unwrap();
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    response_delay_ms.store(10_000, Ordering::SeqCst);
+    let mut deadline_bounded = tokio::process::Command::new(&binary)
+        .env_clear()
+        .env("MCLOVING_SOURCE_ACQUIRER_CONFIG", &config_path)
+        .env("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE", &credential_path)
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE",
+            &signing_key_path,
+        )
+        .env("MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE", &marker_path)
+        .env("MCLOVING_SOURCE_ACQUIRER_TEST_MODE", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("deadline-bounded standalone source acquirer");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    request.requested_at_unix_ms = now_ms() - 100;
+    request.expires_at_unix_ms = now_ms() + 750;
+    let started = Instant::now();
+    deadline_bounded
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&request).unwrap())
+        .await
+        .unwrap();
+    let deadline_output = deadline_bounded.wait_with_output().await.unwrap();
+    let deadline_elapsed = started.elapsed();
+    assert!(
+        deadline_elapsed < std::time::Duration::from_secs(5),
+        "deadline-bounded acquisition took {deadline_elapsed:?}"
+    );
+    assert!(deadline_output.status.success());
+    assert!(!contains(&deadline_output.stdout, CREDENTIAL));
+    assert!(!contains(&deadline_output.stderr, CREDENTIAL));
+    let deadline_response: serde_json::Value =
+        serde_json::from_slice(&deadline_output.stdout).unwrap();
+    assert_eq!(deadline_response["ok"], false);
+    assert_eq!(deadline_response["code"], "expired_request");
+    let deadline_names = std::fs::read_dir(&config.output_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        deadline_names
+            .iter()
+            .any(|name| name.ends_with(".claim.json"))
+    );
+    assert!(
+        !deadline_names
+            .iter()
+            .any(|name| name.starts_with(".stage-"))
+    );
+    server.abort();
 }
 
 #[derive(Clone)]

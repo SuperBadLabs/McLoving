@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -391,6 +391,7 @@ pub struct SourceAcquirer {
     config: SourceConfig,
     config_sha256: String,
     implementation_sha256: String,
+    askpass_executable_path: PathBuf,
     credential_path: PathBuf,
     signing_key: Vec<u8>,
     secret_marker_matcher: AhoCorasick,
@@ -421,6 +422,11 @@ impl SourceAcquirer {
         if sha256_file(&config.git_executable_path).await? != config.git_executable_sha256 {
             return Err(SourceError::InvalidConfig);
         }
+        let askpass_executable_path =
+            std::env::current_exe().map_err(|_| SourceError::InvalidConfig)?;
+        if sha256_file(&askpass_executable_path).await? != implementation_sha256 {
+            return Err(SourceError::InvalidConfig);
+        }
         if let (Some(path), Some(expected)) = (&config.ca_bundle_path, &config.ca_bundle_sha256)
             && sha256_file(path).await? != *expected
         {
@@ -434,6 +440,7 @@ impl SourceAcquirer {
             config,
             config_sha256,
             implementation_sha256,
+            askpass_executable_path,
             credential_path,
             signing_key,
             secret_marker_matcher,
@@ -471,7 +478,7 @@ impl SourceAcquirer {
         if claim_path(&self.config.output_root, request.acquisition_id).exists() {
             return Err(SourceError::AmbiguousClaim);
         }
-        self.verify_runtime_authority().await?;
+        self.verify_runtime_authority(true).await?;
         let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
         self.store_claim(
             request.acquisition_id,
@@ -539,7 +546,7 @@ impl SourceAcquirer {
         let mut repository_trees = Vec::new();
         let mut manifest = Vec::new();
         let mut exact_paths = HashSet::new();
-        let mut folded_paths = HashSet::new();
+        let mut folded_paths = HashMap::new();
         let mut materialized_bytes = 0_u64;
 
         while let Some(repository) = work.pop_front() {
@@ -639,6 +646,9 @@ impl SourceAcquirer {
                             bytes: 0,
                             sha256: sha256_hex(entry.object_id.as_bytes()),
                         });
+                        if manifest.len() > self.config.max_files {
+                            return Err(SourceError::LimitExceeded);
+                        }
                     }
                     continue;
                 }
@@ -837,8 +847,8 @@ impl SourceAcquirer {
                 .rollback_from_generation
                 .is_some_and(|generation| generation >= self.config.generation)
             || request.requested_at_unix_ms > now
-            || request.expires_at_unix_ms <= now
             || request.expires_at_unix_ms <= request.requested_at_unix_ms
+            || request.depth == 0
             || request.depth > self.config.max_depth
             || request.submodules.len() > self.config.max_submodules
             || !repository_admitted
@@ -847,6 +857,9 @@ impl SourceAcquirer {
             || !is_object_id(&request.exact_commit)
         {
             return Err(SourceError::BindingMismatch);
+        }
+        if request.expires_at_unix_ms <= now {
+            return Err(SourceError::ExpiredRequest);
         }
         if self.config.grant_expires_unix_ms <= now {
             return Err(SourceError::ExpiredGrant);
@@ -948,7 +961,8 @@ impl SourceAcquirer {
             init_arguments.push(OsString::from("--object-format=sha256"));
         }
         init_arguments.push(git_dir.as_os_str().to_owned());
-        self.run_git(init_arguments, MAX_GIT_METADATA_BYTES).await?;
+        self.run_git_until(init_arguments, MAX_GIT_METADATA_BYTES, deadline)
+            .await?;
         self.ensure_before_deadline(deadline)?;
         let mut arguments = vec![
             OsString::from("--git-dir"),
@@ -957,15 +971,14 @@ impl SourceAcquirer {
             OsString::from("--no-tags"),
             OsString::from("--force"),
         ];
-        if depth > 0 {
-            arguments.push(OsString::from(format!("--depth={depth}")));
-        }
+        arguments.push(OsString::from(format!("--depth={depth}")));
         arguments.extend([
             OsString::from("--"),
             OsString::from(&repository.binding.repository_url),
             OsString::from(&repository.authenticated_ref),
         ]);
-        self.run_git(arguments, MAX_GIT_METADATA_BYTES).await?;
+        self.run_credential_git_until(arguments, MAX_GIT_METADATA_BYTES, deadline)
+            .await?;
         self.ensure_before_deadline(deadline)?;
         let resolved = self
             .git_text(
@@ -1056,13 +1069,33 @@ impl SourceAcquirer {
         &self,
         path: &str,
         exact_paths: &mut HashSet<String>,
-        folded_paths: &mut HashSet<String>,
+        folded_paths: &mut HashMap<String, String>,
     ) -> Result<(), SourceError> {
         validate_relative_path(path, self.config.max_path_bytes)?;
-        let folded = path.to_lowercase();
-        if !exact_paths.insert(path.to_owned()) || !folded_paths.insert(folded) {
+        if exact_paths.contains(path)
+            || exact_paths
+                .iter()
+                .any(|reserved| reserved.starts_with(&format!("{path}/")))
+        {
             return Err(SourceError::UnsafeTree);
         }
+        let mut prefix = String::new();
+        let components = path.split('/').collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
+            if index > 0 {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            let folded = prefix.to_lowercase();
+            if folded_paths
+                .get(&folded)
+                .is_some_and(|reserved| reserved != &prefix)
+            {
+                return Err(SourceError::UnsafeTree);
+            }
+            folded_paths.entry(folded).or_insert_with(|| prefix.clone());
+        }
+        exact_paths.insert(path.to_owned());
         Ok(())
     }
 
@@ -1094,7 +1127,53 @@ impl SourceAcquirer {
         arguments: Vec<OsString>,
         max_stdout: usize,
     ) -> Result<Vec<u8>, SourceError> {
-        self.verify_runtime_authority().await?;
+        self.run_git_with_deadline(arguments, max_stdout, None, false)
+            .await
+    }
+
+    async fn run_git_until(
+        &self,
+        arguments: Vec<OsString>,
+        max_stdout: usize,
+        deadline_unix_ms: i64,
+    ) -> Result<Vec<u8>, SourceError> {
+        self.run_git_with_deadline(arguments, max_stdout, Some(deadline_unix_ms), false)
+            .await
+    }
+
+    async fn run_credential_git_until(
+        &self,
+        arguments: Vec<OsString>,
+        max_stdout: usize,
+        deadline_unix_ms: i64,
+    ) -> Result<Vec<u8>, SourceError> {
+        self.run_git_with_deadline(arguments, max_stdout, Some(deadline_unix_ms), true)
+            .await
+    }
+
+    async fn run_git_with_deadline(
+        &self,
+        arguments: Vec<OsString>,
+        max_stdout: usize,
+        deadline_unix_ms: Option<i64>,
+        credential_bearing: bool,
+    ) -> Result<Vec<u8>, SourceError> {
+        self.verify_runtime_authority(credential_bearing).await?;
+        let (timeout, deadline_limited) = if let Some(deadline) = deadline_unix_ms {
+            let remaining = deadline
+                .checked_sub(now_unix_ms()?)
+                .ok_or(SourceError::ExpiredRequest)?;
+            if remaining <= 0 {
+                return Err(SourceError::ExpiredRequest);
+            }
+            let remaining = u64::try_from(remaining).map_err(|_| SourceError::ExpiredRequest)?;
+            (
+                Duration::from_millis(self.config.command_timeout_ms.min(remaining)),
+                remaining <= self.config.command_timeout_ms,
+            )
+        } else {
+            (Duration::from_millis(self.config.command_timeout_ms), false)
+        };
         let mut command = Command::new(&self.config.git_executable_path);
         command
             .env_clear()
@@ -1106,19 +1185,6 @@ impl SourceAcquirer {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_OPTIONAL_LOCKS", "0")
-            .env(
-                "GIT_ASKPASS",
-                std::env::current_exe().map_err(|_| SourceError::InvalidConfig)?,
-            )
-            .env("MCLOVING_SOURCE_ACQUIRER_ASKPASS", "1")
-            .env(
-                "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
-                &self.credential_path,
-            )
-            .env(
-                "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME",
-                &self.config.credential_username,
-            )
             .env("NO_PROXY", "*")
             .args([
                 "-c",
@@ -1144,6 +1210,19 @@ impl SourceAcquirer {
                 "-c",
                 "protocol.https.allow=always",
             ]);
+        if credential_bearing {
+            command
+                .env("GIT_ASKPASS", &self.askpass_executable_path)
+                .env("MCLOVING_SOURCE_ACQUIRER_ASKPASS", "1")
+                .env(
+                    "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
+                    &self.credential_path,
+                )
+                .env(
+                    "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME",
+                    &self.config.credential_username,
+                );
+        }
         if self.config.test_allow_http_loopback {
             command.args(["-c", "protocol.http.allow=always"]);
         }
@@ -1159,22 +1238,56 @@ impl SourceAcquirer {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
         let mut child = command
             .spawn()
             .map_err(|_| SourceError::SourceUnavailable)?;
+        #[cfg(unix)]
+        let process_group_id = i32::try_from(child.id().ok_or(SourceError::SourceUnavailable)?)
+            .map_err(|_| SourceError::SourceUnavailable)?;
         let stdout = child.stdout.take().ok_or(SourceError::StateUnavailable)?;
         let stderr = child.stderr.take().ok_or(SourceError::StateUnavailable)?;
-        let timeout = Duration::from_millis(self.config.command_timeout_ms);
-        let completed = tokio::time::timeout(timeout, async move {
-            let status = child.wait();
-            let stdout = read_bounded(stdout, max_stdout);
-            let stderr = read_bounded(stderr, MAX_GIT_STDERR_BYTES);
-            tokio::try_join!(status, stdout, stderr)
-        })
-        .await
-        .map_err(|_| SourceError::SourceUnavailable)?
-        .map_err(|_| SourceError::LimitExceeded)?;
-        let (status, stdout, stderr) = completed;
+        let stdout_task = tokio::spawn(read_bounded(stdout, max_stdout));
+        let stderr_task = tokio::spawn(read_bounded(stderr, MAX_GIT_STDERR_BYTES));
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(status) => status.map_err(|_| SourceError::SourceUnavailable)?,
+            Err(_) => {
+                #[cfg(unix)]
+                match nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(process_group_id),
+                    nix::sys::signal::Signal::SIGKILL,
+                ) {
+                    Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
+                    Err(_) => return Err(SourceError::StateUnavailable),
+                }
+                #[cfg(not(unix))]
+                child
+                    .start_kill()
+                    .map_err(|_| SourceError::StateUnavailable)?;
+                tokio::time::timeout(Duration::from_secs(5), child.wait())
+                    .await
+                    .map_err(|_| SourceError::StateUnavailable)?
+                    .map_err(|_| SourceError::StateUnavailable)?;
+                stdout_task.abort();
+                stderr_task.abort();
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                return Err(if deadline_limited {
+                    SourceError::ExpiredRequest
+                } else {
+                    SourceError::SourceUnavailable
+                });
+            }
+        };
+        let stdout = stdout_task
+            .await
+            .map_err(|_| SourceError::StateUnavailable)?
+            .map_err(|_| SourceError::LimitExceeded)?;
+        let stderr = stderr_task
+            .await
+            .map_err(|_| SourceError::StateUnavailable)?
+            .map_err(|_| SourceError::LimitExceeded)?;
         self.reject_secret_markers(&stdout)?;
         self.reject_secret_markers(&stderr)?;
         if !status.success() {
@@ -1183,12 +1296,14 @@ impl SourceAcquirer {
         Ok(stdout)
     }
 
-    async fn verify_runtime_authority(&self) -> Result<(), SourceError> {
+    async fn verify_runtime_authority(&self, verify_askpass: bool) -> Result<(), SourceError> {
         let credential =
             read_private_bounded_regular_file(&self.credential_path, MAX_AUTHORITY_BYTES).await?;
         if sha256_hex(&credential) != self.config.credential_sha256
             || sha256_file(&self.config.git_executable_path).await?
                 != self.config.git_executable_sha256
+            || verify_askpass
+                && sha256_file(&self.askpass_executable_path).await? != self.implementation_sha256
         {
             return Err(SourceError::BindingMismatch);
         }

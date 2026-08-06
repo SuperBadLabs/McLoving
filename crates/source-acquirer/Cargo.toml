@@ -32,7 +32,7 @@ serde-saphyr = "=1.0.0-rc.2"
 tempfile = "=3.27.0"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "=0.31.3", features = ["fs", "user"] }
+nix = { version = "=0.31.3", features = ["fs", "process", "signal", "user"] }
 
 [lints]
 workspace = true
