@@ -114,6 +114,10 @@ impl Context {
         write_private(&signing_key_path, SIGNING_KEY);
         let git_executable_path = git_executable();
         let git_sha256 = sha256_file(&git_executable_path).await.expect("git digest");
+        let git_remote_https_executable_path = git_remote_https_executable(&git_executable_path);
+        let git_remote_https_sha256 = sha256_file(&git_remote_https_executable_path)
+            .await
+            .expect("Git HTTPS helper digest");
         let git_version = git_output(
             git_executable_path.parent().expect("git parent"),
             ["--version"],
@@ -141,6 +145,8 @@ impl Context {
             allowed_sparse_roots: vec!["src".to_owned(), "deps".to_owned()],
             git_executable_path,
             git_executable_sha256: git_sha256,
+            git_remote_https_executable_path,
+            git_remote_https_executable_sha256: git_remote_https_sha256,
             git_version,
             grant_id: "contained-grant".to_owned(),
             grant_version: "grant-v1".to_owned(),
@@ -195,6 +201,10 @@ impl Context {
             acquirer_id: self.config.acquirer_id.clone(),
             expected_implementation_sha256: self.implementation_sha256.clone(),
             expected_git_sha256: self.config.git_executable_sha256.clone(),
+            expected_git_remote_https_sha256: self
+                .config
+                .git_remote_https_executable_sha256
+                .clone(),
             expected_config_sha256: self.acquirer.config_sha256().to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
             schema_version: self.config.schema_version.clone(),
@@ -942,6 +952,8 @@ async fn extra_retained_output_is_rejected_on_replay() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let temporary = tempfile::tempdir().expect("standalone tempdir");
     let repository = RepositoryFixture::new(temporary.path(), "private");
     repository.write("source.txt", b"credentialed source\n");
@@ -979,6 +991,16 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
 
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_mcloving-source-acquirer"));
     let git = git_executable();
+    let git_remote_https = git_remote_https_executable(&git);
+    let bound_git_remote_https = temporary.path().join("bound-git-remote-https");
+    std::fs::copy(&git_remote_https, &bound_git_remote_https).unwrap();
+    std::fs::set_permissions(
+        &bound_git_remote_https,
+        std::fs::Permissions::from_mode(0o500),
+    )
+    .unwrap();
+    let helper_ready_path = temporary.path().join("helper-ready");
+    let replacement_helper_marker = temporary.path().join("replacement-helper-executed");
     let signing_key_path = temporary.path().join("signing-key");
     let marker_path = temporary.path().join("markers");
     let config_path = temporary.path().join("config.json");
@@ -1005,6 +1027,8 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         allowed_sparse_roots: Vec::new(),
         git_executable_path: git.clone(),
         git_executable_sha256: sha256_file(&git).await.unwrap(),
+        git_remote_https_executable_path: bound_git_remote_https.clone(),
+        git_remote_https_executable_sha256: sha256_file(&bound_git_remote_https).await.unwrap(),
         git_version: git_output(git.parent().unwrap(), ["--version"]),
         grant_id: "contained-http-grant".to_owned(),
         grant_version: "grant-v1".to_owned(),
@@ -1040,6 +1064,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         acquirer_id: config.acquirer_id.clone(),
         expected_implementation_sha256: implementation_sha256,
         expected_git_sha256: config.git_executable_sha256.clone(),
+        expected_git_remote_https_sha256: config.git_remote_https_executable_sha256.clone(),
         expected_config_sha256: config.canonical_digest().unwrap(),
         protocol_version: PROTOCOL_VERSION.to_owned(),
         schema_version: config.schema_version.clone(),
@@ -1070,11 +1095,40 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         )
         .env("MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE", &marker_path)
         .env("MCLOVING_SOURCE_ACQUIRER_TEST_MODE", "1")
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_TEST_READY_FILE",
+            &helper_ready_path,
+        )
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("standalone source acquirer");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !helper_ready_path.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sealed helper source acquirer readiness");
+    std::fs::set_permissions(
+        &bound_git_remote_https,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(
+        &bound_git_remote_https,
+        format!(
+            "#!/bin/sh\nprintf compromised > '{}'\nexit 97\n",
+            replacement_helper_marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &bound_git_remote_https,
+        std::fs::Permissions::from_mode(0o500),
+    )
+    .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let request_bytes = serde_json::to_vec(&request).unwrap();
     stdin.write_all(&request_bytes).await.unwrap();
@@ -1089,8 +1143,21 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         response["receipt"]["repository_trees"][0]["resolved_commit"],
         request.exact_commit
     );
+    assert!(!replacement_helper_marker.exists());
     assert!(authorized_requests.load(Ordering::SeqCst) >= 2);
     assert!(unauthorized_requests.load(Ordering::SeqCst) >= 1);
+
+    std::fs::set_permissions(
+        &bound_git_remote_https,
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::copy(&git_remote_https, &bound_git_remote_https).unwrap();
+    std::fs::set_permissions(
+        &bound_git_remote_https,
+        std::fs::Permissions::from_mode(0o500),
+    )
+    .unwrap();
 
     config.output_root = temporary.path().join("rotated-after-verification-output");
     request.acquisition_id = Uuid::new_v4();
@@ -1473,6 +1540,20 @@ where
         .expect("fixture Git UTF-8")
         .trim()
         .to_owned()
+}
+
+fn git_remote_https_executable(git: &Path) -> PathBuf {
+    let output = Command::new(git)
+        .arg("--exec-path")
+        .output()
+        .expect("Git exec path");
+    assert!(output.status.success(), "Git exec-path lookup failed");
+    let exec_path = String::from_utf8(output.stdout)
+        .expect("Git exec path UTF-8")
+        .trim()
+        .to_owned();
+    std::fs::canonicalize(Path::new(&exec_path).join("git-remote-https"))
+        .expect("canonical Git HTTPS helper")
 }
 
 fn path_text(path: &Path) -> &str {

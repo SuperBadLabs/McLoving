@@ -24,8 +24,8 @@ to:
 
 - read one immutable JSON configuration, one short-lived source credential,
   one receipt-signing key, and one secret-marker set;
-- execute the exact content-hashed Git binary named by configuration with a
-  cleared and allowlisted environment;
+- execute exact content-hashed Git and HTTPS-transport-helper binaries named by
+  configuration with a cleared and allowlisted environment;
 - contact only the configured repository endpoint, fetch one authenticated ref,
   and resolve it to the request's exact commit;
 - materialize a bounded immutable source snapshot below its private output root
@@ -38,7 +38,7 @@ credential, unrelated secret, dependency resolver, cache, trigger, connector,
 observer, or effect authority. Pipeline runners never receive the source
 credential and cannot ask the acquirer to run an arbitrary Git command.
 
-V1 is admitted only on Unix hosts. The output root must be absolute, canonical,
+V1 is admitted only on Linux hosts with sealed-memory-file support. The output root must be absolute, canonical,
 owned by the effective UID, non-symlink, and mode `0700`. Configuration,
 credential, signing-key, marker, executable, claim, receipt, and retained
 manifest reads are bounded and reject non-regular or final-component symlink
@@ -55,7 +55,8 @@ The canonical configuration digest binds:
 - protocol and schema versions;
 - acquirer, deployment, operator, and monotonic generation identities;
 - provider identity, exact normalized repository URL/identity, and fork policy;
-- exact Git executable path, executable SHA-256, and admitted Git version;
+- exact Git executable path/SHA-256/version and exact HTTPS remote-helper
+  executable path/SHA-256;
 - grant identity/version/scope/expiry and credential SHA-256;
 - receipt-key identity/content digest and secret-marker-set digest;
 - allowed ref prefixes, submodule repositories, sparse roots, and maximum depth;
@@ -71,15 +72,18 @@ and recursive submodule commands are disabled. Cleartext loopback or local
 `file` fixtures require both the configuration flag and
 `MCLOVING_SOURCE_ACQUIRER_TEST_MODE=1`.
 
-The process opens itself and the configured Git executable without following a
-final symlink, hashes those exact open files before accepting a request, and
-executes only those retained file descriptors. Git, askpass, and any private CA
-bundle are re-hashed and consumed through the same open handles, so replacing a
-configured path cannot substitute bytes between verification and use. Credential
-material is also revalidated before every Git invocation. A caller must
-present both executable hashes and the exact canonical configuration digest.
-Any implementation, Git, repository, grant, policy, or generation substitution
-fails before Git or network access.
+The process opens itself, Git, the HTTPS remote helper, and any private CA
+without following a final symlink, hashes the exact bytes, copies them into
+anonymous memory-backed files, and applies write/grow/shrink/further-seal
+kernel seals before use. Git and askpass execute only those immutable snapshots;
+the CA is read only from its sealed snapshot. A private descriptor-bound
+`GIT_EXEC_PATH` exposes only the sealed HTTP/HTTPS helper, preventing ambient
+helper lookup. Original-path replacement or in-place mutation therefore cannot
+substitute bytes between verification and use. Credential material is also
+revalidated before every Git invocation. A caller must present the acquirer,
+Git, helper, and canonical-configuration hashes. Any implementation, Git,
+helper, repository, grant, policy, or generation substitution fails before Git
+or network access.
 
 ## Acquisition request
 

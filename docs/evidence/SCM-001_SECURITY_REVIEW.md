@@ -5,8 +5,9 @@ Date: 2026-08-05
 Status: REOPENED. The earlier implementation candidate
 `d1bfbfab6fea9261090e74f441ebbb1a0d7e7a93` passed all nine protected checks and
 nineteen focused tests after ten findings were fixed, but later exact-head
-review correctly identified additional executable-binding, credential-marker,
-retained-directory, and test-readiness gaps. The replacement implementation has
+review correctly identified additional executable/helper binding,
+authority-snapshot immutability, credential-marker, retained-directory, and
+test-readiness gaps. The replacement implementation has
 twenty focused source-acquisition tests: four protocol tests, fourteen contained
 end-to-end tests, and two sealed-inventory tests. This receipt cannot return to
 PASS until its replacement exact head independently passes review and every
@@ -40,8 +41,8 @@ not substituted for a live source-acquisition denominator.
 - provider, repository, authenticated full ref, exact SHA-1 or SHA-256 commit,
   object format, source identity, trust class, fork policy, submodule graph,
   sparse roots, depth, tenant/build/attempt identities, expiry, and audit lineage;
-- verified-open Git, askpass, and CA consumption plus credential revalidation
-  before every Git invocation;
+- sealed immutable Git, HTTPS-helper, askpass, and CA snapshots plus credential
+  revalidation before every Git invocation;
 - exact primary, fork, and submodule repository allowlists, including
   fail-closed untrusted-fork and repository-substitution denial;
 - smart-HTTP askpass delivery that preserves credential bytes exactly while
@@ -61,7 +62,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced fifteen actionable threads so far. The
+Independent review has produced seventeen actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -83,12 +84,22 @@ credential itself, Git was still spawned by a separately verified pathname,
 replay did not validate every nested-directory mode, and the short deadline
 test synchronized before process initialization was complete. Its fifth thread
 correctly kept SCM-001 open while those root findings remained. The replacement
-requires the exact credential in the marker set, consumes Git, askpass, and CA
-through verified open handles, validates owner and mode for every retained
-directory, and emits a test-only readiness event only after standalone process
-initialization. The new open-inode substitution proof and extended marker,
-directory, and deadline proofs pass locally; their threads remain unresolved
-until the pushed replacement exact head is independently verified.
+requires the exact credential in the marker set, validates owner and mode for
+every retained directory, and emits a test-only readiness event only after
+standalone process initialization. The open-inode substitution proof and
+extended marker, directory, and deadline proofs passed at `da3ca2805bcd56f2811adc550d5d5e7dd7c0c2ae`;
+all five threads were replied to and resolved only after that head was pushed.
+
+The next exact-head review found that Git's separately executed HTTPS remote
+helper remained ambient and that an ordinary retained descriptor did not stop
+same-inode writes after verification. The replacement now binds the helper path
+and digest in configuration, request, and receipt; copies Git, helper, askpass,
+and CA bytes into anonymous memory-backed files; applies kernel write, grow,
+shrink, and further-seal locks; and exposes only the sealed HTTP/HTTPS helper
+through a private descriptor-bound `GIT_EXEC_PATH`. The smart-HTTP proof mutates
+the configured helper inode in place after process readiness and still proves
+successful authenticated acquisition with no substituted-helper execution or
+credential disclosure.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the

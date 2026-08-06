@@ -43,6 +43,58 @@ struct VerifiedFile {
     invocation_path: PathBuf,
 }
 
+struct GitExecDirectory {
+    path: PathBuf,
+    _directory: std::fs::File,
+    invocation_path: PathBuf,
+}
+
+impl GitExecDirectory {
+    fn verify(&self, remote_helper: &Path) -> Result<(), SourceError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = remote_helper;
+            Err(SourceError::InvalidConfig)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+            let metadata = std::fs::metadata(&self.invocation_path)
+                .map_err(|_| SourceError::BindingMismatch)?;
+            if !metadata.file_type().is_dir()
+                || metadata.permissions().mode() & 0o7777 != 0o500
+                || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+            {
+                return Err(SourceError::BindingMismatch);
+            }
+            for name in ["git-remote-http", "git-remote-https"] {
+                if std::fs::read_link(self.invocation_path.join(name))
+                    .map_err(|_| SourceError::BindingMismatch)?
+                    != remote_helper
+                {
+                    return Err(SourceError::BindingMismatch);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+impl Drop for GitExecDirectory {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o700));
+            let _ = std::fs::remove_file(self.path.join("git-remote-http"));
+            let _ = std::fs::remove_file(self.path.join("git-remote-https"));
+            let _ = std::fs::remove_dir(&self.path);
+        }
+    }
+}
+
 struct DuplicateRejectingSeed;
 
 impl<'de> DeserializeSeed<'de> for DuplicateRejectingSeed {
@@ -169,6 +221,8 @@ pub struct SourceConfig {
     pub allowed_sparse_roots: Vec<String>,
     pub git_executable_path: PathBuf,
     pub git_executable_sha256: String,
+    pub git_remote_https_executable_path: PathBuf,
+    pub git_remote_https_executable_sha256: String,
     pub git_version: String,
     pub grant_id: String,
     pub grant_version: String,
@@ -227,6 +281,7 @@ pub struct AcquisitionRequest {
     pub acquirer_id: String,
     pub expected_implementation_sha256: String,
     pub expected_git_sha256: String,
+    pub expected_git_remote_https_sha256: String,
     pub expected_config_sha256: String,
     pub protocol_version: String,
     pub schema_version: String,
@@ -285,6 +340,7 @@ pub struct AcquisitionReceipt {
     pub acquirer_id: String,
     pub acquirer_implementation_sha256: String,
     pub git_implementation_sha256: String,
+    pub git_remote_https_implementation_sha256: String,
     pub git_version: String,
     pub acquirer_config_sha256: String,
     pub deployment_identity: String,
@@ -398,8 +454,10 @@ pub struct SourceAcquirer {
     config_sha256: String,
     implementation_sha256: String,
     git_executable: VerifiedFile,
+    git_remote_https_executable: VerifiedFile,
     askpass_executable: VerifiedFile,
     ca_bundle: Option<VerifiedFile>,
+    git_exec_directory: GitExecDirectory,
     credential_path: PathBuf,
     signing_key: Vec<u8>,
     secret_marker_matcher: AhoCorasick,
@@ -427,18 +485,41 @@ impl SourceAcquirer {
         if credential_on_disk != credential {
             return Err(SourceError::InvalidConfig);
         }
-        let git_executable =
-            open_verified_file(&config.git_executable_path, &config.git_executable_sha256).await?;
+        ensure_private_output_root(&config.output_root).await?;
+        let git_executable = snapshot_verified_file(
+            &config.git_executable_path,
+            &config.git_executable_sha256,
+            "mcloving-git",
+            0o500,
+        )
+        .await?;
+        let git_remote_https_executable = snapshot_verified_file(
+            &config.git_remote_https_executable_path,
+            &config.git_remote_https_executable_sha256,
+            "mcloving-git-remote-https",
+            0o500,
+        )
+        .await?;
         let askpass_executable_path =
             std::env::current_exe().map_err(|_| SourceError::InvalidConfig)?;
-        let askpass_executable =
-            open_verified_file(&askpass_executable_path, &implementation_sha256).await?;
+        let askpass_executable = snapshot_verified_file(
+            &askpass_executable_path,
+            &implementation_sha256,
+            "mcloving-source-askpass",
+            0o500,
+        )
+        .await?;
         let ca_bundle = match (&config.ca_bundle_path, &config.ca_bundle_sha256) {
-            (Some(path), Some(expected)) => Some(open_verified_file(path, expected).await?),
+            (Some(path), Some(expected)) => {
+                Some(snapshot_verified_file(path, expected, "mcloving-source-ca", 0o400).await?)
+            }
             (None, None) => None,
             _ => return Err(SourceError::InvalidConfig),
         };
-        ensure_private_output_root(&config.output_root).await?;
+        let git_exec_directory = create_git_exec_directory(
+            &config.output_root,
+            &git_remote_https_executable.invocation_path,
+        )?;
         let config_sha256 = config.canonical_digest()?;
         let secret_marker_matcher =
             AhoCorasick::new(&secret_markers).map_err(|_| SourceError::InvalidConfig)?;
@@ -447,8 +528,10 @@ impl SourceAcquirer {
             config_sha256,
             implementation_sha256,
             git_executable,
+            git_remote_https_executable,
             askpass_executable,
             ca_bundle,
+            git_exec_directory,
             credential_path,
             signing_key,
             secret_marker_matcher,
@@ -766,6 +849,10 @@ impl SourceAcquirer {
             acquirer_id: self.config.acquirer_id.clone(),
             acquirer_implementation_sha256: self.implementation_sha256.clone(),
             git_implementation_sha256: self.config.git_executable_sha256.clone(),
+            git_remote_https_implementation_sha256: self
+                .config
+                .git_remote_https_executable_sha256
+                .clone(),
             git_version: self.config.git_version.clone(),
             acquirer_config_sha256: self.config_sha256.clone(),
             deployment_identity: self.config.deployment_identity.clone(),
@@ -848,6 +935,8 @@ impl SourceAcquirer {
             || request.acquirer_id != self.config.acquirer_id
             || request.expected_implementation_sha256 != self.implementation_sha256
             || request.expected_git_sha256 != self.config.git_executable_sha256
+            || request.expected_git_remote_https_sha256
+                != self.config.git_remote_https_executable_sha256
             || request.expected_config_sha256 != self.config_sha256
             || request.protocol_version != PROTOCOL_VERSION
             || request.schema_version != self.config.schema_version
@@ -1168,6 +1257,8 @@ impl SourceAcquirer {
         credential_bearing: bool,
     ) -> Result<Vec<u8>, SourceError> {
         self.verify_runtime_authority(credential_bearing).await?;
+        self.git_exec_directory
+            .verify(&self.git_remote_https_executable.invocation_path)?;
         let (timeout, deadline_limited) = if let Some(deadline) = deadline_unix_ms {
             let remaining = deadline
                 .checked_sub(now_unix_ms()?)
@@ -1192,6 +1283,7 @@ impl SourceAcquirer {
             .env("HOME", "/nonexistent")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_EXEC_PATH", &self.git_exec_directory.invocation_path)
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_OPTIONAL_LOCKS", "0")
             .env("NO_PROXY", "*")
@@ -1315,6 +1407,8 @@ impl SourceAcquirer {
         if sha256_hex(&credential) != self.config.credential_sha256
             || sha256_open_file(&self.git_executable.file).await?
                 != self.config.git_executable_sha256
+            || sha256_open_file(&self.git_remote_https_executable.file).await?
+                != self.config.git_remote_https_executable_sha256
             || verify_askpass
                 && sha256_open_file(&self.askpass_executable.file).await?
                     != self.implementation_sha256
@@ -1353,6 +1447,8 @@ impl SourceAcquirer {
             || receipt.acquirer_id != self.config.acquirer_id
             || receipt.acquirer_implementation_sha256 != self.implementation_sha256
             || receipt.git_implementation_sha256 != self.config.git_executable_sha256
+            || receipt.git_remote_https_implementation_sha256
+                != self.config.git_remote_https_executable_sha256
             || receipt.git_version != self.config.git_version
             || receipt.acquirer_config_sha256 != self.config_sha256
             || receipt.deployment_identity != self.config.deployment_identity
@@ -1575,8 +1671,10 @@ fn validate_config(
         || config.generation == 0
         || !config.output_root.is_absolute()
         || !config.git_executable_path.is_absolute()
+        || !config.git_remote_https_executable_path.is_absolute()
         || !is_sha256_hex(implementation_sha256)
         || !is_sha256_hex(&config.git_executable_sha256)
+        || !is_sha256_hex(&config.git_remote_https_executable_sha256)
         || !is_sha256_hex(&config.credential_sha256)
         || !is_sha256_hex(&config.receipt_signing_key_sha256)
         || !is_sha256_hex(&config.secret_marker_set_sha256)
@@ -2086,46 +2184,115 @@ pub async fn sha256_file(path: &Path) -> Result<String, SourceError> {
     Ok(sha256_hex(&bytes))
 }
 
-async fn open_verified_file(
+async fn snapshot_verified_file(
     path: &Path,
     expected_sha256: &str,
+    snapshot_name: &str,
+    mode: u32,
 ) -> Result<VerifiedFile, SourceError> {
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     {
-        let _ = (path, expected_sha256);
+        let _ = (path, expected_sha256, snapshot_name, mode);
         Err(SourceError::InvalidConfig)
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
+        use nix::fcntl::{FcntlArg, SealFlag, fcntl};
+        use nix::sys::memfd::{MFdFlags, memfd_create};
+        use nix::sys::stat::{Mode, fchmod};
+        use std::io::Write as _;
         use std::os::fd::AsRawFd as _;
+        use std::os::fd::OwnedFd;
         use std::os::unix::fs::OpenOptionsExt as _;
 
-        let file = std::fs::OpenOptions::new()
+        let source = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW)
             .open(path)
             .map_err(|_| SourceError::InvalidConfig)?;
-        let metadata = file.metadata().map_err(|_| SourceError::InvalidConfig)?;
+        let metadata = source.metadata().map_err(|_| SourceError::InvalidConfig)?;
         if !metadata.file_type().is_file() || metadata.len() > MAX_EXECUTABLE_BYTES {
             return Err(SourceError::InvalidConfig);
         }
-        if sha256_open_file(&file).await? != expected_sha256 {
+        let bytes = read_bounded(
+            tokio::fs::File::from_std(source.try_clone().map_err(|_| SourceError::InvalidConfig)?),
+            usize::try_from(MAX_EXECUTABLE_BYTES).unwrap_or(usize::MAX),
+        )
+        .await
+        .map_err(|_| SourceError::InvalidConfig)?;
+        if sha256_hex(&bytes) != expected_sha256 {
+            return Err(SourceError::InvalidConfig);
+        }
+        let descriptor: OwnedFd = memfd_create(
+            snapshot_name,
+            MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING,
+        )
+        .map_err(|_| SourceError::InvalidConfig)?;
+        let mut file = std::fs::File::from(descriptor);
+        file.write_all(&bytes)
+            .map_err(|_| SourceError::InvalidConfig)?;
+        file.sync_all().map_err(|_| SourceError::InvalidConfig)?;
+        fchmod(&file, Mode::from_bits_truncate(mode)).map_err(|_| SourceError::InvalidConfig)?;
+        let required_seals = SealFlag::F_SEAL_SEAL
+            | SealFlag::F_SEAL_SHRINK
+            | SealFlag::F_SEAL_GROW
+            | SealFlag::F_SEAL_WRITE;
+        fcntl(&file, FcntlArg::F_ADD_SEALS(required_seals))
+            .map_err(|_| SourceError::InvalidConfig)?;
+        let observed_seals =
+            fcntl(&file, FcntlArg::F_GET_SEALS).map_err(|_| SourceError::InvalidConfig)?;
+        if observed_seals & required_seals.bits() != required_seals.bits()
+            || sha256_open_file(&file).await? != expected_sha256
+        {
             return Err(SourceError::InvalidConfig);
         }
         let descriptor = file.as_raw_fd();
-        #[cfg(target_os = "linux")]
         let invocation_path =
             PathBuf::from(format!("/proc/{}/fd/{descriptor}", std::process::id()));
-        #[cfg(all(unix, not(target_os = "linux")))]
-        let invocation_path = {
-            use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-
-            fcntl(&file, FcntlArg::F_SETFD(FdFlag::empty()))
-                .map_err(|_| SourceError::InvalidConfig)?;
-            PathBuf::from(format!("/dev/fd/{descriptor}"))
-        };
         Ok(VerifiedFile {
             file,
+            invocation_path,
+        })
+    }
+}
+
+fn create_git_exec_directory(
+    output_root: &Path,
+    remote_helper: &Path,
+) -> Result<GitExecDirectory, SourceError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (output_root, remote_helper);
+        Err(SourceError::InvalidConfig)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _, symlink};
+
+        let path = output_root.join(format!(".git-exec-{}", Uuid::new_v4()));
+        std::fs::create_dir(&path).map_err(|_| SourceError::StateUnavailable)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| SourceError::StateUnavailable)?;
+        symlink(remote_helper, path.join("git-remote-http"))
+            .map_err(|_| SourceError::StateUnavailable)?;
+        symlink(remote_helper, path.join("git-remote-https"))
+            .map_err(|_| SourceError::StateUnavailable)?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500))
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let invocation_path = PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            directory.as_raw_fd()
+        ));
+        Ok(GitExecDirectory {
+            path,
+            _directory: directory,
             invocation_path,
         })
     }
