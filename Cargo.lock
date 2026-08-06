@@ -1595,6 +1595,7 @@ dependencies = [
 name = "mcloving-source-acquirer"
 version = "0.0.0"
 dependencies = [
+ "aho-corasick",
  "axum",
  "base64",
  "hmac",

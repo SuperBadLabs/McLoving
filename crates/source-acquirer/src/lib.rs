@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aho_corasick::AhoCorasick;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac as _};
@@ -32,7 +33,7 @@ const MAX_CONFIGURED_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
 const MAX_LOCAL_PUBLICATION_MS: u64 = 2 * 60 * 1_000;
 const MAX_AUTHORITY_BYTES: usize = 64 * 1_024;
 const MAX_MARKERS: usize = 256;
-const MAX_MARKER_WORK: u128 = 512 * 1_024 * 1_024;
+const MAX_MARKER_BYTES: usize = 256 * 1_024;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -392,7 +393,7 @@ pub struct SourceAcquirer {
     implementation_sha256: String,
     credential_path: PathBuf,
     signing_key: Vec<u8>,
-    secret_markers: Vec<Vec<u8>>,
+    secret_marker_matcher: AhoCorasick,
     admission: Mutex<()>,
 }
 
@@ -427,13 +428,15 @@ impl SourceAcquirer {
         }
         ensure_private_output_root(&config.output_root).await?;
         let config_sha256 = config.canonical_digest()?;
+        let secret_marker_matcher =
+            AhoCorasick::new(&secret_markers).map_err(|_| SourceError::InvalidConfig)?;
         let acquirer = Self {
             config,
             config_sha256,
             implementation_sha256,
             credential_path,
             signing_key,
-            secret_markers,
+            secret_marker_matcher,
             admission: Mutex::new(()),
         };
         let version = acquirer
@@ -1196,11 +1199,7 @@ impl SourceAcquirer {
     }
 
     fn reject_secret_markers(&self, bytes: &[u8]) -> Result<(), SourceError> {
-        if self
-            .secret_markers
-            .iter()
-            .any(|marker| contains_bytes(bytes, marker))
-        {
+        if self.secret_marker_matcher.is_match(bytes) {
             Err(SourceError::Unauthorized)
         } else {
             Ok(())
@@ -1478,13 +1477,10 @@ fn validate_config(
     {
         return Err(SourceError::InvalidConfig);
     }
-    let marker_bytes = markers.iter().try_fold(0_u128, |total, marker| {
-        total.checked_add(u128::try_from(marker.len()).unwrap_or(u128::MAX))
-    });
-    if marker_bytes
-        .and_then(|bytes| bytes.checked_mul(u128::from(config.max_total_bytes)))
-        .is_none_or(|work| work > MAX_MARKER_WORK)
-    {
+    let marker_bytes = markers
+        .iter()
+        .try_fold(0_usize, |total, marker| total.checked_add(marker.len()));
+    if marker_bytes.is_none_or(|bytes| bytes > MAX_MARKER_BYTES) {
         return Err(SourceError::InvalidConfig);
     }
     let mut unique_markers = markers.to_vec();
@@ -1840,12 +1836,6 @@ fn now_unix_ms() -> Result<i64, SourceError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| SourceError::StateUnavailable)?;
     i64::try_from(duration.as_millis()).map_err(|_| SourceError::StateUnavailable)
-}
-
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|candidate| candidate == needle)
 }
 
 async fn read_bounded<R>(reader: R, max_bytes: usize) -> Result<Vec<u8>, std::io::Error>

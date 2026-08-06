@@ -333,6 +333,26 @@ async fn untrusted_fork_is_denied_before_source_access() {
 }
 
 #[tokio::test]
+async fn source_secret_marker_is_denied_without_publication_or_disclosure() {
+    let repositories = tempfile::tempdir().expect("repositories tempdir");
+    let root = RepositoryFixture::new(repositories.path(), "root");
+    root.write("leaked.txt", CREDENTIAL);
+    let commit = root.commit("secret marker");
+    let context = Context::new(&root, Vec::new(), Vec::new(), false).await;
+    let request = context.request(&commit);
+    let error = context.acquirer.acquire(&request).await.unwrap_err();
+    assert!(matches!(error, SourceError::Unauthorized));
+    assert!(!error.to_string().contains("contained-source-credential"));
+    assert!(
+        !context
+            .config
+            .output_root
+            .join(request.acquisition_id.to_string())
+            .exists()
+    );
+}
+
+#[tokio::test]
 async fn exact_submodule_graph_is_materialized_without_submodule_commands() {
     let repositories = tempfile::tempdir().expect("repositories tempdir");
     let child = RepositoryFixture::new(repositories.path(), "child");
