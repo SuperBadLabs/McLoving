@@ -868,15 +868,18 @@ impl SourceAcquirer {
             &request.sparse_roots,
             &self.config.allowed_sparse_roots,
             self.config.max_path_bytes,
-        )?;
+        )
+        .map_err(|_| SourceError::BindingMismatch)?;
         let mut submodule_paths = BTreeSet::new();
         for submodule in &request.submodules {
             validate_repository_url(
                 &submodule.repository_url,
                 self.config.test_allow_file_repositories,
                 self.config.test_allow_http_loopback,
-            )?;
-            validate_relative_path(&submodule.path, self.config.max_path_bytes)?;
+            )
+            .map_err(|_| SourceError::SubmoduleMismatch)?;
+            validate_relative_path(&submodule.path, self.config.max_path_bytes)
+                .map_err(|_| SourceError::SubmoduleMismatch)?;
             if !submodule_paths.insert(submodule.path.clone())
                 || !is_object_id(&submodule.exact_commit)
                 || !valid_ref(&submodule.authenticated_ref)
@@ -1518,7 +1521,8 @@ fn validate_config(
         &config.allowed_sparse_roots,
         &config.allowed_sparse_roots,
         config.max_path_bytes,
-    )?;
+    )
+    .map_err(|_| SourceError::InvalidConfig)?;
     if config.ca_bundle_path.is_some() != config.ca_bundle_sha256.is_some()
         || config
             .ca_bundle_path

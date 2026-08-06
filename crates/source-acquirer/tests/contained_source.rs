@@ -334,6 +334,41 @@ async fn untrusted_fork_is_denied_before_source_access() {
             .join(format!("{}.claim.json", request.acquisition_id))
             .exists()
     );
+
+    let mut malformed_sparse = context.request(&commit);
+    malformed_sparse.sparse_roots = vec!["../src".to_owned()];
+    assert!(matches!(
+        context.acquirer.acquire(&malformed_sparse).await,
+        Err(SourceError::BindingMismatch)
+    ));
+
+    let mut malformed_submodule = context.request(&commit);
+    malformed_submodule.submodules.push(SubmoduleRequest {
+        path: "../deps/child".to_owned(),
+        provider_identity: "contained-git".to_owned(),
+        repository_identity: "repository/child".to_owned(),
+        repository_url: "https://user:secret@example.invalid/child.git".to_owned(),
+        authenticated_ref: "refs/heads/main".to_owned(),
+        exact_commit: commit.clone(),
+    });
+    assert!(matches!(
+        context.acquirer.acquire(&malformed_submodule).await,
+        Err(SourceError::SubmoduleMismatch)
+    ));
+
+    let mut malformed_submodule_path = context.request(&commit);
+    malformed_submodule_path.submodules.push(SubmoduleRequest {
+        path: "../deps/child".to_owned(),
+        provider_identity: "contained-git".to_owned(),
+        repository_identity: "repository/child".to_owned(),
+        repository_url: root.url(),
+        authenticated_ref: "refs/heads/main".to_owned(),
+        exact_commit: commit,
+    });
+    assert!(matches!(
+        context.acquirer.acquire(&malformed_submodule_path).await,
+        Err(SourceError::SubmoduleMismatch)
+    ));
 }
 
 #[tokio::test]
