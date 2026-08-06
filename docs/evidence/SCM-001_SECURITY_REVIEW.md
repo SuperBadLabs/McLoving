@@ -185,6 +185,19 @@ expired case and verifies that neither a public nor quarantine path remains.
 The twenty-seventh through twenty-ninth findings cannot contribute closure
 until this replacement exact head is independently reverified.
 
+The first protected run of that replacement exposed test-load amplification,
+not an authority bypass: re-hashing the complete runtime closure before every
+Git command made three parallel contained fixtures cross their test-only
+readiness or request windows on the slower hosted runner. Construction still
+hashes every configured runtime file. Per-command verification now compares the
+retained and canonical-path device, inode, size, mode, owner, modification time,
+and kernel-maintained change time plus the exact private directory topology;
+atomic replacement and in-place mutation still fail closed without repeatedly
+reading every library byte. Contained tests cache identical closure discovery
+and use ten-minute fixture authority windows plus a one-minute readiness bound;
+the production request, grant, command, and publication bounds are unchanged.
+The complete focused and locked workspace gates pass with that repair on HeMan.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to

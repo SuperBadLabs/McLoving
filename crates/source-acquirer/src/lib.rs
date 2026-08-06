@@ -51,8 +51,20 @@ struct VerifiedFile {
 struct VerifiedRuntimeFile {
     binding: RuntimeBinding,
     file: std::fs::File,
+    metadata: RuntimeMetadata,
+}
+
+#[derive(Eq, PartialEq)]
+struct RuntimeMetadata {
     device: u64,
     inode: u64,
+    bytes: u64,
+    mode: u32,
+    uid: u32,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
 }
 
 struct RuntimeDirectory {
@@ -2577,8 +2589,7 @@ async fn open_runtime_closure(
             }
             verified.push(VerifiedRuntimeFile {
                 binding: binding.clone(),
-                device: metadata.dev(),
-                inode: metadata.ino(),
+                metadata: runtime_metadata(&metadata),
                 file,
             });
         }
@@ -2594,22 +2605,39 @@ async fn verify_runtime_closure_files(runtime: &[VerifiedRuntimeFile]) -> Result
     }
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
         for entry in runtime {
-            let metadata =
+            let path_metadata =
                 std::fs::metadata(&entry.binding.path).map_err(|_| SourceError::BindingMismatch)?;
-            if !metadata.file_type().is_file()
-                || metadata.dev() != entry.device
-                || metadata.ino() != entry.inode
-                || metadata.uid() != 0
-                || metadata.permissions().mode() & 0o022 != 0
-                || sha256_open_file(&entry.file).await? != entry.binding.sha256
+            let descriptor_metadata = entry
+                .file
+                .metadata()
+                .map_err(|_| SourceError::BindingMismatch)?;
+            if !path_metadata.file_type().is_file()
+                || !descriptor_metadata.file_type().is_file()
+                || runtime_metadata(&path_metadata) != entry.metadata
+                || runtime_metadata(&descriptor_metadata) != entry.metadata
             {
                 return Err(SourceError::BindingMismatch);
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn runtime_metadata(metadata: &std::fs::Metadata) -> RuntimeMetadata {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    RuntimeMetadata {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        bytes: metadata.len(),
+        mode: metadata.permissions().mode() & 0o7777,
+        uid: metadata.uid(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
     }
 }
 

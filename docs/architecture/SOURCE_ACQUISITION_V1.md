@@ -89,12 +89,15 @@ use. At initialization the process resolves the dynamic loader and shared
 libraries for the sealed Git, helper, and askpass images, requires that exact
 set to equal the configured runtime closure, and opens every closure file by
 descriptor. Runtime files must be root-owned regular files with no group/world
-write permission and retain the configured inode and content digest. Git runs
-with immediate symbol binding and a private descriptor-backed library directory
-whose exact symlink inventory names only those closure files; both the retained
-files and directory topology are reverified before every invocation. Missing,
-extra, reordered, substituted, mutable, or same-name closure entries fail
-closed. Credential material is also revalidated before every Git invocation. A
+write permission; construction verifies their complete content digests and
+retains their device, inode, size, mode, owner, modification time, and
+unforgeable change time. Git runs with immediate symbol binding and a private
+descriptor-backed library directory whose exact symlink inventory names only
+those closure files. Both retained/path metadata fingerprints and directory
+topology are reverified before every invocation, so an atomic package replacement
+or in-place change fails closed without repeatedly hashing the complete closure.
+Missing, extra, reordered, substituted, mutable, or same-name closure entries
+fail closed. Credential material is also revalidated before every Git invocation. A
 caller must present the acquirer, Git, helper, and canonical-configuration
 hashes. Any implementation, runtime closure, Git, helper, repository, grant,
 policy, or generation substitution fails before Git or network access.

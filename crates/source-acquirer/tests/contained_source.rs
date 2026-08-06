@@ -15,9 +15,9 @@ use axum::routing::any;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use mcloving_source_acquirer::{
-    AcquisitionRequest, PROTOCOL_VERSION, RepositoryBinding, SourceAcquirer, SourceConfig,
-    SourceError, SubmoduleRequest, TrustClass, content_sha256, inspect_runtime_closure,
-    marker_set_digest, runtime_closure_digest, sha256_file,
+    AcquisitionRequest, PROTOCOL_VERSION, RepositoryBinding, RuntimeBinding, SourceAcquirer,
+    SourceConfig, SourceError, SubmoduleRequest, TrustClass, content_sha256,
+    inspect_runtime_closure, marker_set_digest, runtime_closure_digest, sha256_file,
 };
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt as _;
@@ -27,6 +27,7 @@ use uuid::Uuid;
 const CREDENTIAL: &[u8] = b"contained-source-credential-marker-00000001";
 const ROTATED_CREDENTIAL: &[u8] = b"rotated-source-credential-marker-000000001";
 const SIGNING_KEY: &[u8] = b"contained-source-receipt-signing-key-00000000000000000001";
+const FIXTURE_AUTHORITY_WINDOW_MS: i64 = 10 * 60 * 1_000;
 
 struct RepositoryFixture {
     work: PathBuf,
@@ -132,13 +133,12 @@ impl Context {
         let implementation_sha256 = sha256_file(&implementation_path)
             .await
             .expect("contained source implementation digest");
-        let runtime_closure = inspect_runtime_closure(&[
+        let runtime_closure = contained_runtime_closure(&[
             git_executable_path.clone(),
             git_remote_https_executable_path.clone(),
             implementation_path,
         ])
-        .await
-        .expect("contained runtime closure");
+        .await;
         let runtime_closure_sha256 =
             runtime_closure_digest(&runtime_closure).expect("runtime closure digest");
         let config = SourceConfig {
@@ -168,7 +168,7 @@ impl Context {
             grant_id: "contained-grant".to_owned(),
             grant_version: "grant-v1".to_owned(),
             grant_scope: "repository:read".to_owned(),
-            grant_expires_unix_ms: now_ms() + 120_000,
+            grant_expires_unix_ms: now_ms() + FIXTURE_AUTHORITY_WINDOW_MS,
             credential_username: "git".to_owned(),
             credential_sha256: content_sha256(CREDENTIAL),
             receipt_signing_key_id: "contained-signing-key".to_owned(),
@@ -239,7 +239,7 @@ impl Context {
             sparse_roots: Vec::new(),
             submodules: Vec::new(),
             requested_at_unix_ms: now_ms() - 1_000,
-            expires_at_unix_ms: now_ms() + 60_000,
+            expires_at_unix_ms: now_ms() + FIXTURE_AUTHORITY_WINDOW_MS,
             audit_lineage: "audit/source/contained".to_owned(),
         }
     }
@@ -260,6 +260,20 @@ impl Context {
         .await
         .expect("second source acquirer")
     }
+}
+
+async fn contained_runtime_closure(executables: &[PathBuf]) -> Vec<RuntimeBinding> {
+    static RUNTIME_CLOSURE: tokio::sync::OnceCell<Vec<RuntimeBinding>> =
+        tokio::sync::OnceCell::const_new();
+
+    RUNTIME_CLOSURE
+        .get_or_init(|| async {
+            inspect_runtime_closure(executables)
+                .await
+                .expect("contained runtime closure")
+        })
+        .await
+        .clone()
 }
 
 #[tokio::test]
@@ -1247,7 +1261,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         grant_id: "contained-http-grant".to_owned(),
         grant_version: "grant-v1".to_owned(),
         grant_scope: "repository/private:read".to_owned(),
-        grant_expires_unix_ms: now_ms() + 120_000,
+        grant_expires_unix_ms: now_ms() + FIXTURE_AUTHORITY_WINDOW_MS,
         credential_username: "git".to_owned(),
         credential_sha256: content_sha256(CREDENTIAL),
         receipt_signing_key_id: "contained-http-signing-key".to_owned(),
@@ -1296,7 +1310,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         sparse_roots: Vec::new(),
         submodules: Vec::new(),
         requested_at_unix_ms: now_ms() - 1_000,
-        expires_at_unix_ms: now_ms() + 60_000,
+        expires_at_unix_ms: now_ms() + FIXTURE_AUTHORITY_WINDOW_MS,
         audit_lineage: "audit/source/http-contained".to_owned(),
     };
     std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
@@ -1319,7 +1333,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("standalone source acquirer");
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
         while !helper_ready_path.exists() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -1383,7 +1397,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     request.acquisition_id = Uuid::new_v4();
     request.expected_config_sha256 = config.canonical_digest().unwrap();
     request.requested_at_unix_ms = now_ms() - 1_000;
-    request.expires_at_unix_ms = now_ms() + 60_000;
+    request.expires_at_unix_ms = now_ms() + FIXTURE_AUTHORITY_WINDOW_MS;
     std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
     rotate_credential_on_unauthorized.store(true, Ordering::SeqCst);
     let authorized_before_rotation = authorized_requests.load(Ordering::SeqCst);
@@ -1434,7 +1448,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     request.acquisition_id = Uuid::new_v4();
     request.expected_config_sha256 = config.canonical_digest().unwrap();
     request.requested_at_unix_ms = now_ms() - 1_000;
-    request.expires_at_unix_ms = now_ms() + 60_000;
+    request.expires_at_unix_ms = now_ms() + FIXTURE_AUTHORITY_WINDOW_MS;
     std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
     let mut denied = tokio::process::Command::new(&binary)
         .env_clear()
@@ -1475,7 +1489,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
     request.acquisition_id = Uuid::new_v4();
     request.expected_config_sha256 = config.canonical_digest().unwrap();
     request.requested_at_unix_ms = now_ms() - 1_000;
-    request.expires_at_unix_ms = now_ms() + 60_000;
+    request.expires_at_unix_ms = now_ms() + FIXTURE_AUTHORITY_WINDOW_MS;
     std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
     response_delay_ms.store(250, Ordering::SeqCst);
     let mut timed_out = tokio::process::Command::new(&binary)
@@ -1546,7 +1560,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("deadline-bounded standalone source acquirer");
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
         while !ready_path.exists() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
