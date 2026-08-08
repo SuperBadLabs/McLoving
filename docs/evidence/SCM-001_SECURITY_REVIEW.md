@@ -377,6 +377,25 @@ is expired.
 The forty-sixth finding cannot contribute closure until this replacement exact
 head is independently reverified.
 
+Review of that head found that a complete directory traversal plus a
+one-millisecond polling interval still could not observe a temporary pack that
+was created, filled past the configured aggregate ceiling, and removed between
+two scans. The replacement moves every private bare repository to a dedicated
+configuration-bound Linux mount whose total block capacity exactly equals
+`max_transport_bytes`; the mount must be canonical, private, acquirer-owned, a
+mount point on a different device from the publication root, exclusively
+locked, and empty of residual acquisition state before a claim is written. The
+kernel now refuses transient allocation beyond the ceiling even when no poll
+observes the file, while the live scan remains an early-kill and post-command
+integrity check. The existing selected-blob proof now runs against a 512-KiB
+tmpfs, requests an incompressible four-MiB blob, receives typed limit denial
+from the deterministic C-locale `ENOSPC` result, proves stage cleanup, and proves
+the transport mount retains only its coordination lock. The same proof rejects
+a 512-KiB configuration paired with the 16-MiB mount and rejects a synthetic
+residual transport entry before creating an acquisition claim. The
+forty-seventh finding cannot contribute closure until this replacement exact
+head is independently reverified.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to

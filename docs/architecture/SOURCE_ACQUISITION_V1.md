@@ -172,24 +172,32 @@ NDJSON frame is capped at 64 KiB.
 
 ## Exact-ref and repository policy
 
-The acquirer initializes a private bare partial-clone repository, installs no
+The acquirer initializes a private bare partial-clone repository on a dedicated
+configuration-bound transport filesystem, installs no
 working-tree hooks, and fetches exactly the configured URL and requested full
 ref with `blob:none`, no tag-following, and the configured depth. Git object
-storage is monitored while every credential-bearing Git command runs and is
-measured again after every command against the configuration-bound
-transport-staging quota. The complete Git process group is killed when the live
-monitor observes a breach. Child exit and the exact command/request deadline
-remain concurrent with every allocation traversal. A file or directory that
-disappears during measurement invalidates the complete snapshot and restarts
-measurement from the repository root; three failed restarts fail closed and
-terminate the process group. Only selected blobs and required `.gitmodules`
-content are fetched lazily, and a quota breach fails before publication. An
+storage is still monitored while every credential-bearing Git command runs and
+is measured after every command, but polling is not the enforcing quota. The
+configured transport root must be a canonical, private `0700`, acquirer-owned
+Linux mount point on a different device from both its parent and the publication
+root; its total block capacity must equal `max_transport_bytes`. An exclusive
+filesystem-root lock serializes every cooperating acquirer, and any residual
+entry other than that lock fails closed before a claim is created. The kernel
+therefore refuses even a temporary pack allocation beyond the bound, including
+files created and removed between scans. A C-locale `ENOSPC` Git failure maps to
+the typed limit outcome. The live traversal remains an early-kill mechanism:
+the complete Git process group is killed when it observes a breach, child exit
+and the exact command/request deadline remain concurrent with every traversal,
+and a disappearing entry restarts measurement from the repository root before
+three failed restarts fail closed. Only selected blobs and required
+`.gitmodules` content are fetched lazily, and a quota breach fails before
+publication. An
 admitted repository endpoint must support filtered fetch and exact reachable
 promisor-object wants. A successful server response that warns it ignored
 `blob:none` is treated as refusal and is a typed source-unavailable failure;
 the acquirer never accepts an unfiltered fallback. The private volume must
-reserve the configured transport plus
-materialization ceilings.
+reserve the materialization ceiling separately from the dedicated transport
+mount.
 `FETCH_HEAD^{commit}` must equal the
 request's full commit before any source is published. A later movement of the
 same ref is delivered only by a new request naming the later exact commit; a

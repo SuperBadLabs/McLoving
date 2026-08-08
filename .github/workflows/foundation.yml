@@ -35,8 +35,9 @@ jobs:
         run: cargo +1.97.1 metadata --locked --no-deps --format-version 1 >/dev/null
       - name: Run Clippy
         run: cargo +1.97.1 clippy --locked --workspace --all-targets -- -D warnings
-      - name: Validate and activate source-acquirer AppArmor policy
+      - name: Prepare and activate source-acquirer isolation
         run: |
+          bash scripts/prepare-source-transport-test-filesystems.sh
           bash scripts/validate-source-acquirer-apparmor.sh
           sudo apparmor_parser --replace --skip-cache \
             deploy/apparmor/mcloving-source-acquirer

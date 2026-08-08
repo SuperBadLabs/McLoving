@@ -41,6 +41,8 @@ const MAX_CONFIGURED_TIMEOUT_MS: u64 = 15 * 60 * 1_000;
 const MAX_LOCAL_PUBLICATION_MS: u64 = 2 * 60 * 1_000;
 const TRANSPORT_QUOTA_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const MAX_TRANSPORT_QUOTA_SCAN_RESTARTS: usize = 3;
+const TRANSPORT_QUOTA_EXHAUSTED: &[u8] = b"No space left on device";
+const COORDINATION_LOCK_FILE: &str = ".coordination-v1.lock";
 const MAX_AUTHORITY_BYTES: usize = 64 * 1_024;
 const MAX_MARKERS: usize = 256;
 const MAX_MARKER_BYTES: usize = 256 * 1_024;
@@ -389,6 +391,7 @@ pub struct SourceConfig {
     pub max_path_bytes: usize,
     pub max_submodules: usize,
     pub command_timeout_ms: u64,
+    pub transport_root: PathBuf,
     pub output_root: PathBuf,
     #[serde(default)]
     pub ca_bundle_path: Option<PathBuf>,
@@ -640,6 +643,11 @@ impl SourceAcquirer {
             return Err(SourceError::InvalidConfig);
         }
         ensure_private_output_root(&config.output_root).await?;
+        validate_transport_filesystem(
+            &config.transport_root,
+            &config.output_root,
+            config.max_transport_bytes,
+        )?;
         let source_git_executable = snapshot_verified_file(
             &config.git_executable_path,
             &config.git_executable_sha256,
@@ -794,6 +802,13 @@ impl SourceAcquirer {
             self.verify_receipt(&receipt).await?;
             return Ok(receipt);
         }
+        let _transport_lock = lock_output_root(&self.config.transport_root).await?;
+        validate_transport_filesystem(
+            &self.config.transport_root,
+            &self.config.output_root,
+            self.config.max_transport_bytes,
+        )?;
+        ensure_clean_transport_root(&self.config.transport_root).await?;
         self.verify_runtime_authority(true).await?;
         let publication_deadline_unix_ms = self.publication_deadline(request, now)?;
         self.store_claim(
@@ -812,17 +827,29 @@ impl SourceAcquirer {
             Uuid::new_v4()
         ));
         create_private_directory(&stage).await?;
+        let repositories_dir = self.config.transport_root.join(format!(
+            ".transport-{}-{}",
+            request.acquisition_id,
+            Uuid::new_v4()
+        ));
+        if let Err(error) = create_private_directory(&repositories_dir).await {
+            let _ = tokio::fs::remove_dir_all(&stage).await;
+            return Err(error);
+        }
         let result = self
             .acquire_into_stage(
                 request,
                 &request_sha256,
                 publication_deadline_unix_ms,
                 &stage,
+                &repositories_dir,
             )
             .await;
         if result.is_err() {
             let _ = make_tree_owner_writable(&stage).await;
             let _ = tokio::fs::remove_dir_all(&stage).await;
+            let _ = make_tree_owner_writable(&repositories_dir).await;
+            let _ = tokio::fs::remove_dir_all(&repositories_dir).await;
         }
         result
     }
@@ -833,11 +860,10 @@ impl SourceAcquirer {
         request_sha256: &str,
         publication_deadline_unix_ms: i64,
         stage: &Path,
+        repositories_dir: &Path,
     ) -> Result<AcquisitionReceipt, SourceError> {
         self.ensure_before_deadline(publication_deadline_unix_ms)?;
-        let repositories_dir = stage.join("repositories");
         let tree_dir = stage.join("tree");
-        create_private_directory(&repositories_dir).await?;
         create_private_directory(&tree_dir).await?;
 
         let expected_submodules = request
@@ -875,7 +901,7 @@ impl SourceAcquirer {
                 request.depth,
                 &git_dir,
                 publication_deadline_unix_ms,
-                &repositories_dir,
+                repositories_dir,
             )
             .await?;
             let resolved_tree = self
@@ -900,7 +926,7 @@ impl SourceAcquirer {
                     &entries,
                     &repository.binding.repository_url,
                     publication_deadline_unix_ms,
-                    &repositories_dir,
+                    repositories_dir,
                 )
                 .await?;
             let mut observed_local_gitlinks = BTreeSet::new();
@@ -1003,10 +1029,10 @@ impl SourceAcquirer {
                             .min(usize::MAX - 1),
                         &repository.binding.repository_url,
                         publication_deadline_unix_ms,
-                        &repositories_dir,
+                        repositories_dir,
                     )
                     .await;
-                self.ensure_transport_quota(&repositories_dir).await?;
+                self.ensure_transport_quota(repositories_dir).await?;
                 let blob = blob_result?;
                 let blob_bytes =
                     u64::try_from(blob.len()).map_err(|_| SourceError::LimitExceeded)?;
@@ -1067,7 +1093,7 @@ impl SourceAcquirer {
         let manifest_bytes =
             serde_json::to_vec(&manifest).map_err(|_| SourceError::StateUnavailable)?;
         let manifest_sha256 = sha256_hex(&manifest_bytes);
-        let transport_bytes = self.ensure_transport_quota(&repositories_dir).await?;
+        let transport_bytes = self.ensure_transport_quota(repositories_dir).await?;
         write_new_file(&stage.join("manifest.json"), &manifest_bytes, 0o600).await?;
         sync_tree(&tree_dir).await?;
         make_tree_read_only(&tree_dir).await?;
@@ -1126,7 +1152,7 @@ impl SourceAcquirer {
         let receipt_bytes =
             serde_json::to_vec(&receipt).map_err(|_| SourceError::StateUnavailable)?;
         write_new_file(&stage.join("receipt.json"), &receipt_bytes, 0o600).await?;
-        tokio::fs::remove_dir_all(&repositories_dir)
+        tokio::fs::remove_dir_all(repositories_dir)
             .await
             .map_err(|_| SourceError::StateUnavailable)?;
         set_file_mode_and_sync(&stage.join("manifest.json"), 0o400).await?;
@@ -1908,6 +1934,10 @@ impl SourceAcquirer {
             .map_err(|_| SourceError::LimitExceeded)?;
         self.reject_secret_markers(&stdout)?;
         self.reject_secret_markers(&stderr)?;
+        let transport_quota_exhausted = transport_root.is_some()
+            && stderr
+                .windows(TRANSPORT_QUOTA_EXHAUSTED.len())
+                .any(|window| window == TRANSPORT_QUOTA_EXHAUSTED);
         if credential_bearing
             && stderr
                 .windows(FILTER_IGNORED_WARNING.len())
@@ -1916,7 +1946,11 @@ impl SourceAcquirer {
             return Err(SourceError::SourceUnavailable);
         }
         if !status.success() {
-            return Err(SourceError::SourceUnavailable);
+            return Err(if transport_quota_exhausted {
+                SourceError::LimitExceeded
+            } else {
+                SourceError::SourceUnavailable
+            });
         }
         Ok(stdout)
     }
@@ -2347,6 +2381,7 @@ fn validate_config(
         || config.max_depth > MAX_CONFIGURED_DEPTH
         || config.command_timeout_ms == 0
         || config.command_timeout_ms > MAX_CONFIGURED_TIMEOUT_MS
+        || !config.transport_root.is_absolute()
         || config.allowed_ref_prefixes.is_empty()
         || config.runtime_closure.is_empty()
         || config.runtime_closure.iter().any(|binding| {
@@ -3696,6 +3731,75 @@ async fn sha256_open_file(file: &std::fs::File) -> Result<String, SourceError> {
     Ok(sha256_hex(&bytes))
 }
 
+fn validate_transport_filesystem(
+    root: &Path,
+    output_root: &Path,
+    expected_capacity: u64,
+) -> Result<(), SourceError> {
+    #[cfg(target_os = "linux")]
+    {
+        use nix::sys::statvfs::statvfs;
+        use nix::unistd::Uid;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let canonical = std::fs::canonicalize(root).map_err(|_| SourceError::InvalidConfig)?;
+        let parent = root.parent().ok_or(SourceError::InvalidConfig)?;
+        let root_metadata =
+            std::fs::symlink_metadata(root).map_err(|_| SourceError::InvalidConfig)?;
+        let parent_metadata = std::fs::metadata(parent).map_err(|_| SourceError::InvalidConfig)?;
+        let output_metadata =
+            std::fs::metadata(output_root).map_err(|_| SourceError::InvalidConfig)?;
+        let filesystem = statvfs(root).map_err(|_| SourceError::InvalidConfig)?;
+        let capacity = filesystem
+            .blocks()
+            .checked_mul(filesystem.fragment_size())
+            .ok_or(SourceError::InvalidConfig)?;
+        if canonical != root
+            || !root_metadata.file_type().is_dir()
+            || root_metadata.uid() != Uid::effective().as_raw()
+            || root_metadata.permissions().mode() & 0o777 != 0o700
+            || root_metadata.dev() == parent_metadata.dev()
+            || root_metadata.dev() == output_metadata.dev()
+            || capacity != expected_capacity
+        {
+            return Err(SourceError::InvalidConfig);
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (root, output_root, expected_capacity);
+        Err(SourceError::InvalidConfig)
+    }
+}
+
+async fn ensure_clean_transport_root(root: &Path) -> Result<(), SourceError> {
+    let mut entries = tokio::fs::read_dir(root)
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?;
+    let mut lock_seen = false;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|_| SourceError::StateUnavailable)?
+    {
+        if entry.file_name() != COORDINATION_LOCK_FILE || lock_seen {
+            return Err(SourceError::StateUnavailable);
+        }
+        let metadata = tokio::fs::symlink_metadata(entry.path())
+            .await
+            .map_err(|_| SourceError::StateUnavailable)?;
+        if !metadata.file_type().is_file() {
+            return Err(SourceError::StateUnavailable);
+        }
+        lock_seen = true;
+    }
+    if !lock_seen {
+        return Err(SourceError::StateUnavailable);
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 type OutputRootLock = nix::fcntl::Flock<std::fs::File>;
 
@@ -3708,7 +3812,7 @@ async fn lock_output_root(root: &Path) -> Result<OutputRootLock, SourceError> {
         use nix::fcntl::{Flock, FlockArg};
         use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
-        let path = root.join(".coordination-v1.lock");
+        let path = root.join(COORDINATION_LOCK_FILE);
         tokio::task::spawn_blocking(move || {
             let file = std::fs::OpenOptions::new()
                 .read(true)

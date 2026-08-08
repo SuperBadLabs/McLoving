@@ -29,6 +29,26 @@ const ROTATED_CREDENTIAL: &[u8] = b"rotated-source-credential-marker-000000001";
 const SIGNING_KEY: &[u8] = b"contained-source-receipt-signing-key-00000000000000000001";
 const FIXTURE_AUTHORITY_WINDOW_MS: i64 = 10 * 60 * 1_000;
 const HOSTED_SMART_HTTP_COMMAND_TIMEOUT_MS: u64 = 2 * 60 * 1_000;
+const TRANSPORT_CAPACITY_16M: u64 = 16 * 1_024 * 1_024;
+const TRANSPORT_CAPACITY_512K: u64 = 512 * 1_024;
+const TRANSPORT_ROOT_16M: &str = "/tmp/mcloving-source-transport-16m";
+const TRANSPORT_ROOT_512K: &str = "/tmp/mcloving-source-transport-512k";
+
+fn bounded_transport_root(capacity: u64) -> PathBuf {
+    match capacity {
+        TRANSPORT_CAPACITY_16M => PathBuf::from(TRANSPORT_ROOT_16M),
+        TRANSPORT_CAPACITY_512K => PathBuf::from(TRANSPORT_ROOT_512K),
+        _ => panic!("unsupported contained transport capacity: {capacity}"),
+    }
+}
+
+fn transport_root_is_clean(root: &Path) -> bool {
+    std::fs::read_dir(root).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .all(|entry| entry.file_name() == ".coordination-v1.lock")
+    })
+}
 
 fn monotonic_deadline_after(duration: Duration) -> i64 {
     use nix::sys::time::TimeValLike as _;
@@ -190,10 +210,11 @@ impl Context {
             max_files: 1_000,
             max_total_bytes: 2 * 1_024 * 1_024,
             max_file_bytes: 1024 * 1_024,
-            max_transport_bytes: 16 * 1_024 * 1_024,
+            max_transport_bytes: TRANSPORT_CAPACITY_16M,
             max_path_bytes: 512,
             max_submodules: 16,
             command_timeout_ms: 30_000,
+            transport_root: bounded_transport_root(TRANSPORT_CAPACITY_16M),
             output_root: temporary.path().join("output"),
             ca_bundle_path: None,
             ca_bundle_sha256: None,
@@ -1156,6 +1177,28 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
         Err(SourceError::InvalidConfig)
     ));
 
+    let mut mismatched_transport_config = context.config.clone();
+    mismatched_transport_config.generation += 1;
+    mismatched_transport_config.max_transport_bytes = TRANSPORT_CAPACITY_512K;
+    mismatched_transport_config.output_root = context
+        .credential_path
+        .parent()
+        .unwrap()
+        .join("mismatched-transport-output");
+    let mismatched_transport = SourceAcquirer::new(
+        mismatched_transport_config,
+        context.implementation_sha256.clone(),
+        context.credential_path.clone(),
+        CREDENTIAL,
+        SIGNING_KEY.to_vec(),
+        vec![CREDENTIAL.to_vec()],
+    )
+    .await;
+    assert!(matches!(
+        mismatched_transport,
+        Err(SourceError::InvalidConfig)
+    ));
+
     let mut limited_config = context.config.clone();
     limited_config.generation += 1;
     limited_config.max_file_bytes = 4;
@@ -1266,7 +1309,8 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
     filtered_config.generation += 1;
     filtered_config.allowed_sparse_roots =
         vec!["selected.txt".to_owned(), "omitted.bin".to_owned()];
-    filtered_config.max_transport_bytes = 512 * 1_024;
+    filtered_config.max_transport_bytes = TRANSPORT_CAPACITY_512K;
+    filtered_config.transport_root = bounded_transport_root(TRANSPORT_CAPACITY_512K);
     filtered_config.output_root = transport_context
         .credential_path
         .parent()
@@ -1312,6 +1356,27 @@ async fn file_bound_failure_cleans_stage_and_runtime_credential_drift_precedes_c
                 .to_string_lossy()
                 .starts_with(".stage-"))
     );
+    assert!(transport_root_is_clean(
+        &transport_limited_config.transport_root
+    ));
+
+    let residual_transport_entry = transport_limited_config.transport_root.join("residual");
+    std::fs::write(&residual_transport_entry, b"stale transport state").unwrap();
+    let mut residual_request = transport_context.request(&transport_commit);
+    residual_request.expected_generation = transport_limited_config.generation;
+    residual_request.expected_config_sha256 = transport_limited.config_sha256().to_owned();
+    residual_request.sparse_roots = vec!["selected.txt".to_owned()];
+    assert!(matches!(
+        transport_limited.acquire(&residual_request).await,
+        Err(SourceError::StateUnavailable)
+    ));
+    assert!(
+        !transport_limited_config
+            .output_root
+            .join(format!("{}.claim.json", residual_request.acquisition_id))
+            .exists()
+    );
+    std::fs::remove_file(residual_transport_entry).unwrap();
 
     let mut rename_failure_config = context.config.clone();
     rename_failure_config.generation += 5;
@@ -1485,10 +1550,11 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         max_files: 100,
         max_total_bytes: 1024 * 1024,
         max_file_bytes: 1024 * 1024,
-        max_transport_bytes: 16 * 1024 * 1024,
+        max_transport_bytes: TRANSPORT_CAPACITY_16M,
         max_path_bytes: 512,
         max_submodules: 0,
         command_timeout_ms: HOSTED_SMART_HTTP_COMMAND_TIMEOUT_MS,
+        transport_root: bounded_transport_root(TRANSPORT_CAPACITY_16M),
         output_root: temporary.path().join("standalone-output"),
         ca_bundle_path: None,
         ca_bundle_sha256: None,
