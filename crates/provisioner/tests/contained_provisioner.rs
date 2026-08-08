@@ -2186,8 +2186,13 @@ async fn reconciliation_cas_loss_rolls_back_tentative_absence_intent() {
 
 #[tokio::test]
 async fn reconciliation_retains_a_ready_transition_after_its_initial_inventory_snapshot() {
-    let context =
-        Context::with_startup_timeout(FixtureMode::DelayedCreateAfterInitialSnapshot, 1_000).await;
+    let context = Context::with_limits(
+        FixtureMode::DelayedCreateAfterInitialSnapshot,
+        4,
+        1_000,
+        1_000,
+    )
+    .await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let reconcile = async {
@@ -2222,8 +2227,13 @@ async fn reconciliation_retains_a_ready_transition_after_its_initial_inventory_s
 
 #[tokio::test]
 async fn reconciliation_retains_a_ready_transition_after_its_final_inventory_snapshot() {
-    let context =
-        Context::with_startup_timeout(FixtureMode::DelayedCreateAfterFinalSnapshot, 1_000).await;
+    let context = Context::with_limits(
+        FixtureMode::DelayedCreateAfterFinalSnapshot,
+        4,
+        1_000,
+        1_000,
+    )
+    .await;
     let request = context.request();
     let provision = context.provisioner.provision(&request);
     let reconcile = async {
