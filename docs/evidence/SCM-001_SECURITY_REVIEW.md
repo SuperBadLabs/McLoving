@@ -2,21 +2,19 @@
 
 Date: 2026-08-08
 
-Status: REOPENED. The earlier implementation candidate
-`d1bfbfab6fea9261090e74f441ebbb1a0d7e7a93` passed all nine protected checks and
-nineteen focused tests after ten findings were fixed, but later exact-head
-review correctly identified additional executable/helper binding,
-authority-snapshot immutability, credential-marker, retained-directory, and
-test-readiness gaps. The replacement implementation has thirty focused
-source-acquisition tests: five boundary unit tests, four protocol tests,
-nineteen contained end-to-end tests, and two sealed-inventory tests. This receipt
-cannot return to PASS until its replacement exact head independently passes
-review and every protected check.
+Verdict: PASS for the implementation gate at exact implementation head
+`02f0d09a273abc5bd21039d3a7d0b8de069b0bd6`. All nine protected checks passed
+across [Foundation run 31282771758](https://github.com/SuperBadLabs/McLoving/actions/runs/31282771758)
+and [Windows Agent run 31282771755](https://github.com/SuperBadLabs/McLoving/actions/runs/31282771755).
+The focused gate passed thirty source-acquisition tests: five boundary unit
+tests, four protocol tests, nineteen contained end-to-end tests, and two
+sealed-inventory tests. [Independent exact-head review](https://github.com/SuperBadLabs/McLoving/pull/34#issuecomment-5228600153)
+found no major issue after forty-seven actionable implementation findings were
+fixed and every review thread was resolved.
 
-PR #34 now keeps SCM-001 active and DEP-001 blocked while the reopened findings
-are verified. A later closure-only head may restore the execution-board
-transition only after the replacement implementation head passes protected
-checks and independent review. The final squash-merge commit is
+The later PR #34 closure candidate adds only this receipt and the execution-board
+transition from SCM-001 to DEP-001. Its exact head must independently pass the
+protected checks and review before merge. The final squash-merge commit is
 necessarily unknowable from inside its own pre-merge contents; the immutable PR
 #34 exact-head checks plus post-merge protected-main verification are the final
 closure attestation.
@@ -65,7 +63,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced forty-five actionable threads so far. The
+Independent review produced forty-seven actionable threads. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -418,14 +416,15 @@ Git/libcurl contract. A focused unit proof binds the exact mixed-family format,
 and the existing credentialed smart-HTTP proof passes inside the complete
 serialized suite.
 
-The replacement implementation currently passes `git diff --check`, Rust
-formatting, strict source-acquirer Clippy, all twenty-nine focused
-source-acquisition tests under the activated named AppArmor profile, and the
-remaining complete locked workspace suite outside that profile on HeMan. The
-focused evidence includes credentialed smart HTTP through sealed inherited
-descriptors and kernel destruction of a delayed namespace descendant at the
-absolute deadline. Protected checks and independent exact-head verification
-remain required before closure.
+The exact implementation head passes `git diff --check`, Rust formatting,
+strict source-acquirer Clippy, all thirty focused source-acquisition tests under
+the activated named AppArmor profile, and the remaining complete locked
+workspace suite outside that profile on HeMan. The focused evidence includes
+credentialed smart HTTP through sealed inherited descriptors, kernel destruction
+of a delayed namespace descendant at the absolute deadline, and kernel-enforced
+transport allocation bounds. Protected Foundation run `31282771758` and Windows
+Agent run `31282771755` passed, independent exact-head review found no major
+issue, and all forty-seven actionable review threads are resolved.
 
 ## Residual risk and authority boundary
 
