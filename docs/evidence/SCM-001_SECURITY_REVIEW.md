@@ -1,15 +1,15 @@
 # SCM-001 security and implementation closure
 
-Date: 2026-08-05
+Date: 2026-08-08
 
 Status: REOPENED. The earlier implementation candidate
 `d1bfbfab6fea9261090e74f441ebbb1a0d7e7a93` passed all nine protected checks and
 nineteen focused tests after ten findings were fixed, but later exact-head
 review correctly identified additional executable/helper binding,
 authority-snapshot immutability, credential-marker, retained-directory, and
-test-readiness gaps. The replacement implementation has twenty-six focused
-source-acquisition tests: two boundary unit tests, four protocol tests,
-eighteen contained end-to-end tests, and two sealed-inventory tests. This receipt
+test-readiness gaps. The replacement implementation has twenty-eight focused
+source-acquisition tests: three boundary unit tests, four protocol tests,
+nineteen contained end-to-end tests, and two sealed-inventory tests. This receipt
 cannot return to PASS until its replacement exact head independently passes
 review and every protected check.
 
@@ -343,8 +343,24 @@ fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
 `refs/heads/main`; the previously failing submodule proof, full locked workspace
 suite, strict Clippy, formatting, and the rerun protected checks pass.
 
+After GitHub Actions recovered and the lost pull-request event was replayed, two
+exact-head protected runs exposed additional hosted-runner defects without
+weakening production bounds. Parallel execution first exhausted test-only
+fixture windows, so the AppArmor-confined package now runs serially. The next
+run showed that a positive smart-HTTP Git command can exceed the former
+thirty-second fixture budget; that single fixture now allows two minutes while
+its explicit fifty-millisecond command-timeout and two-second request-deadline
+denial proofs remain unchanged. Investigation of the remaining failure then
+identified a real dual-stack endpoint binding defect: separately emitted
+`http.curloptResolve` rules could replace or destabilize one another for the
+same host and port. The acquirer now emits one
+rule containing the complete bounded, sorted IPv4/IPv6 address set, matching the
+Git/libcurl contract. A focused unit proof binds the exact mixed-family format,
+and the existing credentialed smart-HTTP proof passes inside the complete
+serialized suite.
+
 The replacement implementation currently passes `git diff --check`, Rust
-formatting, strict source-acquirer Clippy, all twenty-seven focused
+formatting, strict source-acquirer Clippy, all twenty-eight focused
 source-acquisition tests under the activated named AppArmor profile, and the
 remaining complete locked workspace suite outside that profile on HeMan. The
 focused evidence includes credentialed smart HTTP through sealed inherited

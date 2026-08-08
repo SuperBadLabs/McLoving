@@ -89,9 +89,10 @@ timed-out result fails source acquisition. The parent captures the monotonic
 anchor before sampling wall-clock expiry, rechecks the resulting absolute
 deadline before and immediately after Git startup, checks it again before
 accepting either exit path, and never restarts a relative duration. The parent
-passes the resulting addresses to Git only through repeated
-`http.curloptResolve` entries while preserving the original HTTPS hostname for
-TLS verification. Because redirects and proxies are disabled, the
+passes the complete bounded address set to Git through one
+`http.curloptResolve` rule for the endpoint, encoding every numeric IPv4 and
+IPv6 address in that single host/port entry while preserving the original HTTPS
+hostname for TLS verification. Because redirects and proxies are disabled, the
 credential-bearing Git/HTTPS-helper chain does not invoke ambient NSS service
 modules for the admitted repository endpoint. Literal IP endpoints require no
 resolver child.

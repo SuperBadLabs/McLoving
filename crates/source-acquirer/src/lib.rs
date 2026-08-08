@@ -1982,13 +1982,7 @@ impl SourceAcquirer {
         if addresses.is_empty() || addresses.len() > MAX_RESOLVER_ADDRESSES {
             return Err(SourceError::SourceUnavailable);
         }
-        Ok(addresses
-            .into_iter()
-            .map(|address| match address {
-                IpAddr::V4(address) => format!("{host}:{port}:{address}"),
-                IpAddr::V6(address) => format!("{host}:{port}:[{address}]"),
-            })
-            .collect())
+        Ok(vec![curl_resolve_entry(host, port, &addresses)])
     }
 
     async fn verify_runtime_authority(&self, verify_askpass: bool) -> Result<(), SourceError> {
@@ -4286,9 +4280,33 @@ fn claim_path(root: &Path, acquisition_id: Uuid) -> PathBuf {
     root.join(format!("{acquisition_id}.claim.json"))
 }
 
+fn curl_resolve_entry(host: &str, port: u16, addresses: &BTreeSet<IpAddr>) -> String {
+    let addresses = addresses
+        .iter()
+        .map(|address| match address {
+            IpAddr::V4(address) => address.to_string(),
+            IpAddr::V6(address) => format!("[{address}]"),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{host}:{port}:{addresses}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn curl_resolve_entry_keeps_all_addresses_in_one_host_rule() {
+        let addresses = BTreeSet::from([
+            "192.0.2.10".parse::<IpAddr>().unwrap(),
+            "2001:db8::10".parse::<IpAddr>().unwrap(),
+        ]);
+        assert_eq!(
+            curl_resolve_entry("repository.example", 443, &addresses),
+            "repository.example:443:192.0.2.10,[2001:db8::10]"
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
