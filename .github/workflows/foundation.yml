@@ -48,6 +48,7 @@ jobs:
         run: >-
           aa-exec -p mcloving-source-acquirer --
           cargo +1.97.1 test --locked -p mcloving-source-acquirer
+          -- --test-threads=1
 
   dependencies:
     name: Dependencies and licenses
