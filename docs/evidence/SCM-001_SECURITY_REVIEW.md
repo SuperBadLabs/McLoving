@@ -10,7 +10,7 @@ The focused gate passed thirty source-acquisition tests: five boundary unit
 tests, four protocol tests, nineteen contained end-to-end tests, and two
 sealed-inventory tests. [Independent exact-head review](https://github.com/SuperBadLabs/McLoving/pull/34#issuecomment-5228600153)
 found no major issue after forty-seven actionable implementation findings were
-fixed and every review thread was resolved.
+fixed and every implementation review thread was resolved.
 
 The later PR #34 closure candidate adds only this receipt and the execution-board
 transition from SCM-001 to DEP-001. Its exact head must independently pass the
@@ -424,7 +424,8 @@ credentialed smart HTTP through sealed inherited descriptors, kernel destruction
 of a delayed namespace descendant at the absolute deadline, and kernel-enforced
 transport allocation bounds. Protected Foundation run `31282771758` and Windows
 Agent run `31282771755` passed, independent exact-head review found no major
-issue, and all forty-seven actionable review threads are resolved.
+issue, and all forty-seven actionable implementation review threads are
+resolved.
 
 ## Residual risk and authority boundary
 
