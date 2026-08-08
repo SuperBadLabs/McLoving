@@ -30,6 +30,17 @@ const SIGNING_KEY: &[u8] = b"contained-source-receipt-signing-key-00000000000000
 const FIXTURE_AUTHORITY_WINDOW_MS: i64 = 10 * 60 * 1_000;
 const HOSTED_SMART_HTTP_COMMAND_TIMEOUT_MS: u64 = 2 * 60 * 1_000;
 
+fn monotonic_deadline_after(duration: Duration) -> i64 {
+    use nix::sys::time::TimeValLike as _;
+
+    nix::time::ClockId::CLOCK_MONOTONIC
+        .now()
+        .expect("monotonic clock")
+        .num_nanoseconds()
+        .checked_add(i64::try_from(duration.as_nanos()).expect("bounded deadline duration"))
+        .expect("bounded monotonic deadline")
+}
+
 struct RepositoryFixture {
     work: PathBuf,
     bare: PathBuf,
@@ -317,7 +328,14 @@ fn sealed_askpass_refuses_credential_release_after_deadline() {
         .arg("Password for https://localhost")
         .env_clear()
         .env("MCLOVING_SOURCE_ACQUIRER_ASKPASS", "1")
-        .env("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS", "1")
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_MONOTONIC_NS",
+            "1",
+        )
+        .env(
+            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS",
+            i64::MAX.to_string(),
+        )
         .env(
             "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_FILE",
             "/credential/must-not-open-after-deadline",
@@ -341,18 +359,14 @@ fn sealed_askpass_kernel_timer_kills_blocked_emission_at_deadline() {
     use std::process::Stdio;
 
     let binary = env!("CARGO_BIN_EXE_mcloving-source-acquirer");
-    let deadline = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
-        .saturating_add(250);
+    let deadline = monotonic_deadline_after(Duration::from_millis(250));
     let username = "u".repeat(100 * 1_024);
     let mut child = Command::new(binary)
         .arg("Username for https://localhost")
         .env_clear()
         .env("MCLOVING_SOURCE_ACQUIRER_ASKPASS", "1")
         .env(
-            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS",
+            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_MONOTONIC_NS",
             deadline.to_string(),
         )
         .env("MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME", &username)
@@ -393,11 +407,7 @@ fn kernel_deadline_kills_the_complete_transport_pid_namespace() {
     let binary = env!("CARGO_BIN_EXE_mcloving-source-acquirer");
     let temporary = tempfile::tempdir().unwrap();
     let survived_marker = temporary.path().join("transport-survived-deadline");
-    let deadline = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis()
-        .saturating_add(1_000);
+    let deadline = monotonic_deadline_after(Duration::from_millis(1_000));
     let mut launcher = Command::new(binary)
         .args([
             std::ffi::OsStr::new("-c"),
@@ -409,7 +419,7 @@ fn kernel_deadline_kills_the_complete_transport_pid_namespace() {
         .env("MCLOVING_SOURCE_ACQUIRER_TRANSPORT_LAUNCHER", "1")
         .env("MCLOVING_SOURCE_ACQUIRER_TRANSPORT_EXECUTABLE", "/bin/sh")
         .env(
-            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS",
+            "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_MONOTONIC_NS",
             deadline.to_string(),
         )
         .stdin(Stdio::piped())

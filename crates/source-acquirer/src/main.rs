@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(not(unix))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use mcloving_source_acquirer::{
     AcquisitionRequest, SourceAcquirer, SourceConfig, content_sha256, parse_json_no_duplicates,
@@ -9,6 +10,8 @@ use mcloving_source_acquirer::{
 };
 #[cfg(unix)]
 use nix::sys::signal::{SigEvent, SigevNotify, Signal};
+#[cfg(unix)]
+use nix::sys::time::{TimeSpec, TimeValLike as _};
 #[cfg(unix)]
 use nix::sys::timer::{Expiration, Timer, TimerSetTimeFlags};
 #[cfg(unix)]
@@ -27,6 +30,8 @@ const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
 const CREDENTIAL_DEADLINE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS";
+const CREDENTIAL_MONOTONIC_DEADLINE_ENV: &str =
+    "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_MONOTONIC_NS";
 const TRANSPORT_LAUNCHER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_LAUNCHER";
 const TRANSPORT_INIT_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_INIT";
 const TRANSPORT_EXECUTABLE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_EXECUTABLE";
@@ -207,6 +212,7 @@ async fn run_resolver() -> Result<(), ()> {
         "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_USERNAME",
         "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_SHA256",
         CREDENTIAL_DEADLINE_ENV,
+        CREDENTIAL_MONOTONIC_DEADLINE_ENV,
         "MCLOVING_SOURCE_ACQUIRER_SIGNING_KEY_FILE",
         "MCLOVING_SOURCE_ACQUIRER_SECRET_MARKERS_FILE",
     ] {
@@ -282,16 +288,10 @@ async fn run_askpass() -> Result<(), ()> {
 #[cfg(unix)]
 fn arm_deadline(signal: Signal) -> Result<Timer, ()> {
     let clock = ClockId::CLOCK_MONOTONIC;
-    let monotonic_anchor = clock.now().map_err(|_| ())?;
-    let deadline = credential_deadline_unix_ms()?;
-    let wall_anchor = unix_time_ms()?;
-    let remaining = deadline
-        .checked_sub(wall_anchor)
-        .filter(|value| *value > 0)
-        .ok_or(())?;
-    let remaining = u64::try_from(remaining).map_err(|_| ())?;
-    let absolute_deadline =
-        monotonic_anchor + nix::sys::time::TimeSpec::from(Duration::from_millis(remaining));
+    let absolute_deadline = credential_deadline_monotonic()?;
+    if clock.now().map_err(|_| ())? >= absolute_deadline {
+        return Err(());
+    }
     let event = SigEvent::new(SigevNotify::SigevSignal {
         signal,
         si_value: 0,
@@ -306,6 +306,28 @@ fn arm_deadline(signal: Signal) -> Result<Timer, ()> {
     Ok(timer)
 }
 
+#[cfg(unix)]
+fn ensure_before_credential_deadline() -> Result<(), ()> {
+    if ClockId::CLOCK_MONOTONIC.now().map_err(|_| ())? >= credential_deadline_monotonic()? {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn credential_deadline_monotonic() -> Result<TimeSpec, ()> {
+    let nanoseconds = std::env::var(CREDENTIAL_MONOTONIC_DEADLINE_ENV)
+        .map_err(|_| ())?
+        .parse::<i64>()
+        .map_err(|_| ())?;
+    if nanoseconds <= 0 {
+        return Err(());
+    }
+    Ok(TimeSpec::nanoseconds(nanoseconds))
+}
+
+#[cfg(not(unix))]
 fn ensure_before_credential_deadline() -> Result<(), ()> {
     if unix_time_ms()? >= credential_deadline_unix_ms()? {
         Err(())
@@ -314,6 +336,7 @@ fn ensure_before_credential_deadline() -> Result<(), ()> {
     }
 }
 
+#[cfg(not(unix))]
 fn credential_deadline_unix_ms() -> Result<i64, ()> {
     std::env::var(CREDENTIAL_DEADLINE_ENV)
         .map_err(|_| ())?
@@ -321,6 +344,7 @@ fn credential_deadline_unix_ms() -> Result<i64, ()> {
         .map_err(|_| ())
 }
 
+#[cfg(not(unix))]
 fn unix_time_ms() -> Result<i64, ()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

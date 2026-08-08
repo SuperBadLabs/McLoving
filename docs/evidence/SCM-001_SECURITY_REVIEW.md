@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced forty-three actionable threads so far. The
+Independent review has produced forty-four actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -335,6 +335,20 @@ in explicitly with `aa-exec`. A Linux regression waits through the absolute
 deadline and proves both that the launcher dies from kernel `SIGKILL` and that a
 delayed transport descendant never survives to publish its marker. The
 forty-third finding cannot contribute closure until the profile-backed
+replacement exact head is independently reverified.
+
+Review of the next exact head found that child modes still reconstructed their
+kernel timer from a Unix wall-clock deadline. A backward wall-clock step after
+the parent established its command deadline could therefore extend credential
+authority when the launcher or askpass re-anchored that value to a later
+monotonic instant. The replacement captures the absolute `CLOCK_MONOTONIC`
+deadline before wall-clock admission, passes its nanoseconds unchanged to every
+Unix credential-bearing child, and makes both POSIX timers and askpass checks
+consume that exact bound without wall-clock conversion. The direct askpass
+proof supplies an absurdly future Unix deadline together with an expired
+monotonic deadline and still proves credential denial and empty output; the
+blocked-emission and complete PID-namespace teardown proofs use future absolute
+monotonic bounds. The forty-fourth finding cannot contribute closure until this
 replacement exact head is independently reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child

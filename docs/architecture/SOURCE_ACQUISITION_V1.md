@@ -88,7 +88,10 @@ command/request deadline, and any malformed, empty, excessive, failed, or
 timed-out result fails source acquisition. The parent captures the monotonic
 anchor before sampling wall-clock expiry, rechecks the resulting absolute
 deadline before and immediately after Git startup, checks it again before
-accepting either exit path, and never restarts a relative duration. The parent
+accepting either exit path, and never restarts a relative duration. On Unix the
+parent also passes that original absolute `CLOCK_MONOTONIC` deadline to the
+transport launcher and askpass as nanoseconds; those child modes arm and check
+the same bound directly and never reconstruct it through wall time. The parent
 passes the complete bounded address set to Git through one
 `http.curloptResolve` rule for the endpoint, encoding every numeric IPv4 and
 IPv6 address in that single host/port entry while preserving the original HTTPS

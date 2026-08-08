@@ -11,6 +11,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use caseless::Caseless as _;
 use hmac::{Hmac, Mac as _};
+#[cfg(unix)]
+use nix::sys::time::TimeValLike as _;
+#[cfg(unix)]
+use nix::time::ClockId;
 use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -50,6 +54,9 @@ const RESOLVER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER";
 const RESOLVER_HOST_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_HOST";
 const RESOLVER_PORT_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_RESOLVER_PORT";
 const CREDENTIAL_DEADLINE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_UNIX_MS";
+#[cfg(unix)]
+const CREDENTIAL_MONOTONIC_DEADLINE_ENV: &str =
+    "MCLOVING_SOURCE_ACQUIRER_CREDENTIAL_DEADLINE_MONOTONIC_NS";
 const TRANSPORT_LAUNCHER_MODE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_LAUNCHER";
 const TRANSPORT_EXECUTABLE_ENV: &str = "MCLOVING_SOURCE_ACQUIRER_TRANSPORT_EXECUTABLE";
 
@@ -1577,6 +1584,10 @@ impl SourceAcquirer {
             &self.git_executable.invocation_path,
             &self.git_remote_https_executable.invocation_path,
         )?;
+        #[cfg(unix)]
+        let credential_monotonic_anchor = ClockId::CLOCK_MONOTONIC
+            .now()
+            .map_err(|_| SourceError::StateUnavailable)?;
         let command_anchor = tokio::time::Instant::now();
         let wall_anchor = now_unix_ms()?;
         let (timeout, deadline_limited) = if let Some(deadline) = deadline_unix_ms {
@@ -1598,6 +1609,13 @@ impl SourceAcquirer {
             i64::try_from(timeout.as_millis()).map_err(|_| SourceError::StateUnavailable)?;
         let credential_deadline_unix_ms = wall_anchor
             .checked_add(timeout_milliseconds)
+            .ok_or(SourceError::StateUnavailable)?;
+        #[cfg(unix)]
+        let credential_deadline_monotonic_ns = credential_monotonic_anchor
+            .num_nanoseconds()
+            .checked_add(
+                i64::try_from(timeout.as_nanos()).map_err(|_| SourceError::StateUnavailable)?,
+            )
             .ok_or(SourceError::StateUnavailable)?;
         let command_deadline = command_anchor
             .checked_add(timeout)
@@ -1698,6 +1716,11 @@ impl SourceAcquirer {
                     CREDENTIAL_DEADLINE_ENV,
                     credential_deadline_unix_ms.to_string(),
                 );
+            #[cfg(unix)]
+            command.env(
+                CREDENTIAL_MONOTONIC_DEADLINE_ENV,
+                credential_deadline_monotonic_ns.to_string(),
+            );
         }
         if requires_kernel_transport_deadline {
             command.env(TRANSPORT_LAUNCHER_MODE_ENV, "1").env(
