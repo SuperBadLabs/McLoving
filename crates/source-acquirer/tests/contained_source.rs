@@ -28,6 +28,7 @@ const CREDENTIAL: &[u8] = b"contained-source-credential-marker-00000001";
 const ROTATED_CREDENTIAL: &[u8] = b"rotated-source-credential-marker-000000001";
 const SIGNING_KEY: &[u8] = b"contained-source-receipt-signing-key-00000000000000000001";
 const FIXTURE_AUTHORITY_WINDOW_MS: i64 = 10 * 60 * 1_000;
+const HOSTED_SMART_HTTP_COMMAND_TIMEOUT_MS: u64 = 2 * 60 * 1_000;
 
 struct RepositoryFixture {
     work: PathBuf,
@@ -1477,7 +1478,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
         max_transport_bytes: 16 * 1024 * 1024,
         max_path_bytes: 512,
         max_submodules: 0,
-        command_timeout_ms: 30_000,
+        command_timeout_ms: HOSTED_SMART_HTTP_COMMAND_TIMEOUT_MS,
         output_root: temporary.path().join("standalone-output"),
         ca_bundle_path: None,
         ca_bundle_sha256: None,
@@ -1740,7 +1741,7 @@ async fn standalone_binary_uses_askpass_without_disclosing_the_credential() {
             .any(|name| name.starts_with(".stage-"))
     );
 
-    config.command_timeout_ms = 30_000;
+    config.command_timeout_ms = HOSTED_SMART_HTTP_COMMAND_TIMEOUT_MS;
     config.output_root = temporary.path().join("deadline-output");
     let ready_path = temporary.path().join("deadline-ready");
     request.acquisition_id = Uuid::new_v4();
