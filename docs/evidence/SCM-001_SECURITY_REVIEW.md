@@ -7,8 +7,8 @@ Status: REOPENED. The earlier implementation candidate
 nineteen focused tests after ten findings were fixed, but later exact-head
 review correctly identified additional executable/helper binding,
 authority-snapshot immutability, credential-marker, retained-directory, and
-test-readiness gaps. The replacement implementation has twenty-eight focused
-source-acquisition tests: three boundary unit tests, four protocol tests,
+test-readiness gaps. The replacement implementation has twenty-nine focused
+source-acquisition tests: four boundary unit tests, four protocol tests,
 nineteen contained end-to-end tests, and two sealed-inventory tests. This receipt
 cannot return to PASS until its replacement exact head independently passes
 review and every protected check.
@@ -65,7 +65,7 @@ The governing contract is `docs/architecture/SOURCE_ACQUISITION_V1.md`.
 
 ## Review and executable evidence
 
-Independent review has produced forty-four actionable threads so far. The
+Independent review has produced forty-five actionable threads so far. The
 first two found that request sparse-path and submodule URL/path validation
 returned configuration-oriented codes instead of typed request mismatch codes.
 Later exact-head review found that zero depth admitted unbounded history, a
@@ -351,6 +351,17 @@ blocked-emission and complete PID-namespace teardown proofs use future absolute
 monotonic bounds. The forty-fourth finding cannot contribute closure until this
 replacement exact head is independently reverified.
 
+Review of that head found that the parent derived its remaining monotonic
+interval from a wall-clock sample already truncated to whole milliseconds. In
+the final fractional millisecond before a signed deadline, that subtraction
+could round remaining authority up to a full millisecond. The replacement
+samples realtime at full `SystemTime` resolution, subtracts it directly from the
+signed millisecond boundary, and uses the exact positive remainder for both the
+parent and child monotonic deadlines. A unit proof preserves a one-nanosecond
+remainder immediately before the boundary and rejects equality at the boundary.
+The forty-fifth finding cannot contribute closure until this replacement exact
+head is independently reverified.
+
 The first Ubuntu protected run exposed a portable-test defect: the bare child
 repository's symbolic `HEAD` inherited the runner's default branch while the
 fixture pushed `main`. The fixture now sets the bare `HEAD` explicitly to
@@ -374,7 +385,7 @@ and the existing credentialed smart-HTTP proof passes inside the complete
 serialized suite.
 
 The replacement implementation currently passes `git diff --check`, Rust
-formatting, strict source-acquirer Clippy, all twenty-eight focused
+formatting, strict source-acquirer Clippy, all twenty-nine focused
 source-acquisition tests under the activated named AppArmor profile, and the
 remaining complete locked workspace suite outside that profile on HeMan. The
 focused evidence includes credentialed smart HTTP through sealed inherited

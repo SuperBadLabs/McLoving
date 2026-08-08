@@ -86,8 +86,10 @@ secret-marker authority is present. Its numeric results and diagnostics are
 bounded, its process group and the following Git child share one monotonic
 command/request deadline, and any malformed, empty, excessive, failed, or
 timed-out result fails source acquisition. The parent captures the monotonic
-anchor before sampling wall-clock expiry, rechecks the resulting absolute
-deadline before and immediately after Git startup, checks it again before
+anchor before sampling wall-clock expiry at full realtime resolution; it
+subtracts that sample from the signed millisecond deadline without rounding the
+remaining interval up. It rechecks the resulting absolute deadline before and
+immediately after Git startup, checks it again before
 accepting either exit path, and never restarts a relative duration. On Unix the
 parent also passes that original absolute `CLOCK_MONOTONIC` deadline to the
 transport launcher and askpass as nanoseconds; those child modes arm and check

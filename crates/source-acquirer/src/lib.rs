@@ -1589,25 +1589,21 @@ impl SourceAcquirer {
             .now()
             .map_err(|_| SourceError::StateUnavailable)?;
         let command_anchor = tokio::time::Instant::now();
-        let wall_anchor = now_unix_ms()?;
+        let wall_anchor = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| SourceError::StateUnavailable)?;
+        let wall_anchor_unix_ms =
+            i64::try_from(wall_anchor.as_millis()).map_err(|_| SourceError::StateUnavailable)?;
+        let command_timeout = Duration::from_millis(self.config.command_timeout_ms);
         let (timeout, deadline_limited) = if let Some(deadline) = deadline_unix_ms {
-            let remaining = deadline
-                .checked_sub(wall_anchor)
-                .ok_or(SourceError::ExpiredRequest)?;
-            if remaining <= 0 {
-                return Err(SourceError::ExpiredRequest);
-            }
-            let remaining = u64::try_from(remaining).map_err(|_| SourceError::ExpiredRequest)?;
-            (
-                Duration::from_millis(self.config.command_timeout_ms.min(remaining)),
-                remaining <= self.config.command_timeout_ms,
-            )
+            let remaining = duration_until_unix_deadline(deadline, wall_anchor)?;
+            (command_timeout.min(remaining), remaining <= command_timeout)
         } else {
-            (Duration::from_millis(self.config.command_timeout_ms), false)
+            (command_timeout, false)
         };
         let timeout_milliseconds =
             i64::try_from(timeout.as_millis()).map_err(|_| SourceError::StateUnavailable)?;
-        let credential_deadline_unix_ms = wall_anchor
+        let credential_deadline_unix_ms = wall_anchor_unix_ms
             .checked_add(timeout_milliseconds)
             .ok_or(SourceError::StateUnavailable)?;
         #[cfg(unix)]
@@ -4315,6 +4311,18 @@ fn curl_resolve_entry(host: &str, port: u16, addresses: &BTreeSet<IpAddr>) -> St
     format!("{host}:{port}:{addresses}")
 }
 
+fn duration_until_unix_deadline(
+    deadline_unix_ms: i64,
+    wall_now: Duration,
+) -> Result<Duration, SourceError> {
+    let deadline_unix_ms =
+        u64::try_from(deadline_unix_ms).map_err(|_| SourceError::ExpiredRequest)?;
+    Duration::from_millis(deadline_unix_ms)
+        .checked_sub(wall_now)
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(SourceError::ExpiredRequest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4329,6 +4337,18 @@ mod tests {
             curl_resolve_entry("repository.example", 443, &addresses),
             "repository.example:443:192.0.2.10,[2001:db8::10]"
         );
+    }
+
+    #[test]
+    fn unix_deadline_remaining_preserves_submillisecond_remainder() {
+        assert_eq!(
+            duration_until_unix_deadline(1_000, Duration::from_nanos(999_999_999)).unwrap(),
+            Duration::from_nanos(1)
+        );
+        assert!(matches!(
+            duration_until_unix_deadline(1_000, Duration::from_millis(1_000)),
+            Err(SourceError::ExpiredRequest)
+        ));
     }
 
     #[cfg(target_os = "linux")]
