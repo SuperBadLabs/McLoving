@@ -85,7 +85,13 @@ refuses to run if any credential-file, credential-digest, signing-key, or
 secret-marker authority is present. Its numeric results and diagnostics are
 bounded, its process group and the following Git child share one monotonic
 command/request deadline, and any malformed, empty, excessive, failed, or
-timed-out result fails source acquisition. The parent captures the monotonic
+timed-out result fails source acquisition. The resolver receives that absolute
+deadline rather than a relative duration: its own ten-second cap is intersected
+with the shared deadline before URL parsing and command construction, the bound
+is checked before spawn, and the remaining interval is recomputed after spawn
+and pipe setup before the parent waits. The deadline is checked again before a
+successful child status is accepted. Expiry at any check fails closed and
+terminates the resolver process group. The parent captures the monotonic
 anchor before sampling wall-clock expiry at full realtime resolution; it
 subtracts that sample from the signed millisecond deadline without rounding the
 remaining interval up. It rechecks the resulting absolute deadline before and

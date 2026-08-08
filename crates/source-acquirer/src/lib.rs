@@ -1618,7 +1618,8 @@ impl SourceAcquirer {
             .ok_or(SourceError::StateUnavailable)?;
         let endpoint_resolution = match (credential_bearing, repository_url) {
             (true, Some(repository_url)) => {
-                self.resolve_network_endpoint(repository_url, timeout).await
+                self.resolve_network_endpoint(repository_url, command_deadline)
+                    .await
             }
             (false, None) => Ok(Vec::new()),
             _ => return Err(SourceError::StateUnavailable),
@@ -1923,8 +1924,13 @@ impl SourceAcquirer {
     async fn resolve_network_endpoint(
         &self,
         repository_url: &str,
-        command_timeout: Duration,
+        command_deadline: tokio::time::Instant,
     ) -> Result<Vec<String>, SourceError> {
+        let resolver_deadline = command_deadline.min(
+            tokio::time::Instant::now()
+                .checked_add(RESOLVER_TIMEOUT)
+                .ok_or(SourceError::StateUnavailable)?,
+        );
         let endpoint = Url::parse(repository_url).map_err(|_| SourceError::SourceUnavailable)?;
         if endpoint.scheme() != "https"
             && !(self.config.test_allow_http_loopback && endpoint.scheme() == "http")
@@ -1955,6 +1961,11 @@ impl SourceAcquirer {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
+        if duration_until_monotonic_deadline(resolver_deadline, tokio::time::Instant::now())
+            .is_none()
+        {
+            return Err(SourceError::SourceUnavailable);
+        }
         let mut child = command
             .spawn()
             .map_err(|_| SourceError::SourceUnavailable)?;
@@ -1970,9 +1981,20 @@ impl SourceAcquirer {
         let stdout_task = tokio::spawn(read_bounded(stdout, MAX_RESOLVER_OUTPUT_BYTES));
         let stderr_task = tokio::spawn(read_bounded(stderr, MAX_RESOLVER_STDERR_BYTES));
         let status =
-            match tokio::time::timeout(command_timeout.min(RESOLVER_TIMEOUT), child.wait()).await {
-                Ok(status) => status.map_err(|_| SourceError::SourceUnavailable)?,
-                Err(_) => {
+            match duration_until_monotonic_deadline(resolver_deadline, tokio::time::Instant::now())
+            {
+                Some(remaining) => match tokio::time::timeout(remaining, child.wait()).await {
+                    Ok(status) => status.map_err(|_| SourceError::SourceUnavailable)?,
+                    Err(_) => {
+                        terminate_child(&mut child, process_group_id).await?;
+                        stdout_task.abort();
+                        stderr_task.abort();
+                        let _ = stdout_task.await;
+                        let _ = stderr_task.await;
+                        return Err(SourceError::SourceUnavailable);
+                    }
+                },
+                None => {
                     terminate_child(&mut child, process_group_id).await?;
                     stdout_task.abort();
                     stderr_task.abort();
@@ -1981,6 +2003,16 @@ impl SourceAcquirer {
                     return Err(SourceError::SourceUnavailable);
                 }
             };
+        if duration_until_monotonic_deadline(resolver_deadline, tokio::time::Instant::now())
+            .is_none()
+        {
+            terminate_child(&mut child, process_group_id).await?;
+            stdout_task.abort();
+            stderr_task.abort();
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            return Err(SourceError::SourceUnavailable);
+        }
         let stdout = stdout_task
             .await
             .map_err(|_| SourceError::SourceUnavailable)?
@@ -4323,6 +4355,15 @@ fn duration_until_unix_deadline(
         .ok_or(SourceError::ExpiredRequest)
 }
 
+fn duration_until_monotonic_deadline(
+    deadline: tokio::time::Instant,
+    now: tokio::time::Instant,
+) -> Option<Duration> {
+    deadline
+        .checked_duration_since(now)
+        .filter(|remaining| !remaining.is_zero())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4349,6 +4390,17 @@ mod tests {
             duration_until_unix_deadline(1_000, Duration::from_millis(1_000)),
             Err(SourceError::ExpiredRequest)
         ));
+    }
+
+    #[test]
+    fn monotonic_deadline_remaining_does_not_restart_after_delay() {
+        let anchor = tokio::time::Instant::now();
+        let deadline = anchor + Duration::from_millis(10);
+        assert_eq!(
+            duration_until_monotonic_deadline(deadline, anchor + Duration::from_millis(7)),
+            Some(Duration::from_millis(3))
+        );
+        assert_eq!(duration_until_monotonic_deadline(deadline, deadline), None);
     }
 
     #[cfg(target_os = "linux")]

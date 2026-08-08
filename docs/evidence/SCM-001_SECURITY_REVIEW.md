@@ -7,8 +7,8 @@ Status: REOPENED. The earlier implementation candidate
 nineteen focused tests after ten findings were fixed, but later exact-head
 review correctly identified additional executable/helper binding,
 authority-snapshot immutability, credential-marker, retained-directory, and
-test-readiness gaps. The replacement implementation has twenty-nine focused
-source-acquisition tests: four boundary unit tests, four protocol tests,
+test-readiness gaps. The replacement implementation has thirty focused
+source-acquisition tests: five boundary unit tests, four protocol tests,
 nineteen contained end-to-end tests, and two sealed-inventory tests. This receipt
 cannot return to PASS until its replacement exact head independently passes
 review and every protected check.
@@ -360,6 +360,21 @@ signed millisecond boundary, and uses the exact positive remainder for both the
 parent and child monotonic deadlines. A unit proof preserves a one-nanosecond
 remainder immediately before the boundary and rejects equality at the boundary.
 The forty-fifth finding cannot contribute closure until this replacement exact
+head is independently reverified.
+
+Review of that exact head found that resolver monitoring still started a fresh
+relative timeout only after URL parsing, command construction, child spawn, and
+pipe setup. Parent descheduling in those steps could therefore let the
+credential-free resolver retain DNS/network authority beyond the signed request
+or publication deadline. The replacement passes the original absolute
+monotonic command deadline into endpoint resolution, intersects it with the
+resolver's own ten-second cap at entry, checks it before spawn, and recomputes
+the exact remainder after spawn and pipe setup. It checks the same deadline
+again before accepting successful child status. An expired remainder terminates
+the resolver process group without accepting output, and a unit proof shows
+that elapsed startup time is subtracted rather than restarted and that equality
+is expired.
+The forty-sixth finding cannot contribute closure until this replacement exact
 head is independently reverified.
 
 The first Ubuntu protected run exposed a portable-test defect: the bare child
