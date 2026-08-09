@@ -18,11 +18,13 @@ recertification](https://github.com/SuperBadLabs/McLoving/pull/35#discussion_r37
 Every actionable thread remains a merge gate until its exact fix evidence is
 pushed and independently checked.
 
-The closure commits after exact implementation head
-`5bce6f6f9370a37082775292ceb54ac473566888` change only this receipt and the
-execution-board transition from DEP-001 to CACHE-001. The complete PR #35 diff
-against protected `main` includes the resolver implementation, tests, protected
-workflow change, architecture documentation, receipt, and board transition. The
+The DEP-001-to-CACHE-001 execution-board transition entered PR #35 at
+`02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at exact
+implementation head `5bce6f6f9370a37082775292ceb54ac473566888`. The later
+closure commits update this receipt and recertify those existing board rows; they
+do not introduce the transition. The complete PR #35 diff against protected
+`main` includes the resolver implementation, tests, protected workflow change,
+architecture documentation, receipt, board transition, and recertification. The
 complete exact PR head must independently pass protected checks and review before
 merge. The final squash-merge commit is necessarily unknowable from inside its
 own pre-merge contents; immutable complete-PR exact-head checks plus post-merge
@@ -138,7 +140,7 @@ journey, and the AppArmor-confined source suite.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired fifty-three
+Pre-closure review and repeated contained execution exposed and repaired fifty-four
 important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -310,6 +312,11 @@ important seams:
     using the complete PR head as its attestation boundary. It now distinguishes
     the documentation-only closure commits from PR #35's complete diff against
     protected `main`, and requires review and checks over that complete exact head.
+54. That distinction still attributed the DEP-001-to-CACHE-001 transition to the
+    post-implementation closure commits even though the transition entered the PR
+    earlier and was already present at the implementation head. The receipt now
+    identifies the transition commit and describes later board changes as
+    recertification only.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -341,8 +348,11 @@ findings: embedded secret authority across roles and stale receipt/board
 certification after that repair. All forty-seven findings were addressed before
 merge. A final closure review added one actionable scope-description finding: the
 receipt conflated documentation-only closure commits with the complete PR diff.
-All forty-eight findings were addressed before merge. Each fix was pushed,
-replied to with exact-head evidence, and its thread was resolved before closure.
+A later exact-head review added one actionable history finding: the board
+transition preceded the post-implementation closure commits, which only
+recertified the existing rows. All forty-nine findings were addressed before
+merge. Each fix was pushed, replied to with exact-head evidence, and its thread
+was resolved before closure.
 
 One additional review thread predicted that exact-capacity transport pressure
 would return an I/O error rather than the asserted content-mismatch result. The
