@@ -140,7 +140,7 @@ journey, and the AppArmor-confined source suite.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired fifty-four
+Pre-closure review and repeated contained execution exposed and repaired fifty-five
 important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -317,6 +317,10 @@ important seams:
     earlier and was already present at the implementation head. The receipt now
     identifies the transition commit and describes later board changes as
     recertification only.
+55. The execution board's separate Dependencies lane still certified the
+    pre-containment implementation head and its obsolete test, finding, and seam
+    totals after the authoritative ticket row was recertified. Both board views
+    now bind the same post-repair implementation evidence.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -351,8 +355,10 @@ receipt conflated documentation-only closure commits with the complete PR diff.
 A later exact-head review added one actionable history finding: the board
 transition preceded the post-implementation closure commits, which only
 recertified the existing rows. All forty-nine findings were addressed before
-merge. Each fix was pushed, replied to with exact-head evidence, and its thread
-was resolved before closure.
+merge. Final review found one additional actionable drift: the duplicate
+Dependencies lane still carried the pre-repair certification. All fifty findings
+were addressed before merge. Each fix was pushed, replied to with exact-head
+evidence, and its thread was resolved before closure.
 
 One additional review thread predicted that exact-capacity transport pressure
 would return an I/O error rather than the asserted content-mismatch result. The
