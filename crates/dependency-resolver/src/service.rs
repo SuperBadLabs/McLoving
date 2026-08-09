@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -66,6 +67,7 @@ pub struct DependencyResolver {
     transport: HttpTransport,
     publication_worker: PathBuf,
     publication_serial: tokio::sync::Mutex<()>,
+    publication_poisoned: AtomicBool,
 }
 
 impl DependencyResolver {
@@ -115,6 +117,7 @@ impl DependencyResolver {
             transport,
             publication_worker,
             publication_serial: tokio::sync::Mutex::new(()),
+            publication_poisoned: AtomicBool::new(false),
         })
     }
 
@@ -122,6 +125,11 @@ impl DependencyResolver {
         &self,
         frame: ResolutionFrame,
     ) -> Result<ResolutionReceipt, ResolverError> {
+        if self.publication_poisoned.load(Ordering::Acquire) {
+            return Err(ResolverError::denied(
+                "DEP_STORE_PUBLICATION_RESTART_REQUIRED",
+            ));
+        }
         let started_at = Instant::now();
         let wall_now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -218,6 +226,11 @@ impl DependencyResolver {
         )
         .await
         .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_QUEUE_DEADLINE"))?;
+        if self.publication_poisoned.load(Ordering::Acquire) {
+            return Err(ResolverError::denied(
+                "DEP_STORE_PUBLICATION_RESTART_REQUIRED",
+            ));
+        }
         let worker_request = PublicationWorkerRequest {
             config: self.config.clone(),
             claim: claim.clone(),
@@ -234,20 +247,26 @@ impl DependencyResolver {
                 "DEP_STORE_PUBLICATION_WORKER_FRAME_INVALID",
             ));
         }
+        let inherited_lock = self
+            .store
+            .publication_lock_file()
+            .map_err(|error| ResolverError::denied(error.code))?;
         let mut command = Command::new(&self.publication_worker);
         command
             .arg("--publication-worker")
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::from(inherited_lock));
         if self.config.loopback_fixture
             && std::env::var_os("MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE").as_deref()
                 == Some(std::ffi::OsStr::new("1"))
         {
             command.env("MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE", "1");
         }
-        let output = supervise_publication_worker(command, payload, deadline).await?;
+        let output =
+            supervise_publication_worker(command, payload, deadline, &self.publication_poisoned)
+                .await?;
         if !output.status.success() || output.stdout.len() > 512 {
             return Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"));
         }
@@ -388,6 +407,7 @@ async fn supervise_publication_worker(
     mut command: Command,
     payload: Vec<u8>,
     deadline: Instant,
+    publication_poisoned: &AtomicBool,
 ) -> Result<Output, ResolverError> {
     command.kill_on_drop(true);
     let mut child = command
@@ -403,10 +423,15 @@ async fn supervise_publication_worker(
         drop(stdin);
         child.wait_with_output().await
     };
-    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation)
-        .await
-        .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_DEADLINE"))?
-        .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation).await {
+        Ok(result) => {
+            result.map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))
+        }
+        Err(_) => {
+            publication_poisoned.store(true, Ordering::Release);
+            Err(ResolverError::denied("DEP_STORE_PUBLICATION_DEADLINE"))
+        }
+    }
 }
 
 fn monotonic_deadline_ns(deadline: Instant) -> Result<u64, ResolverError> {
@@ -480,7 +505,7 @@ fn worker_error_code(code: &str) -> &'static str {
         "DEP_STORE_STATE_INVALID" => "DEP_STORE_STATE_INVALID",
         "DEP_STORE_STATE_UNAVAILABLE" => "DEP_STORE_STATE_UNAVAILABLE",
         "DEP_STORE_TRANSIENT_PATH_MISMATCH" => "DEP_STORE_TRANSIENT_PATH_MISMATCH",
-        "DEP_STORE_WORKER_PARENT_LOCK_MISSING" => "DEP_STORE_WORKER_PARENT_LOCK_MISSING",
+        "DEP_STORE_WORKER_PARENT_LOCK_INVALID" => "DEP_STORE_WORKER_PARENT_LOCK_INVALID",
         _ => "DEP_STORE_PUBLICATION_WORKER_FAILED",
     }
 }
@@ -527,14 +552,17 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         let started = Instant::now();
+        let poisoned = AtomicBool::new(false);
         let error = supervise_publication_worker(
             command,
             b"bounded worker input".to_vec(),
             started + Duration::from_millis(25),
+            &poisoned,
         )
         .await
         .expect_err("stalled publication worker deadline");
         assert_eq!(error.code, "DEP_STORE_PUBLICATION_DEADLINE");
+        assert!(poisoned.load(Ordering::Acquire));
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 

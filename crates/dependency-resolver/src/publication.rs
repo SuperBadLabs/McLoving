@@ -120,7 +120,12 @@ struct StoreInner {
     max_artifact_bytes: u64,
     max_total_artifact_bytes: u64,
     active: Mutex<BTreeSet<Uuid>>,
-    _lock: Option<OutputLock>,
+    _lock: OutputLockGuard,
+}
+
+enum OutputLockGuard {
+    Owner(OutputLock),
+    Inherited { _file: File },
 }
 
 #[derive(Clone)]
@@ -161,7 +166,12 @@ impl ResolutionStore {
     ) -> Result<Self, StoreError> {
         let root = PathBuf::from(&config.output_root);
         let lock = acquire_output_lock(&root)?;
-        Self::open_inner_with_lock(config, receipt_key, marker_set, Some(lock))
+        Self::open_inner_with_lock(
+            config,
+            receipt_key,
+            marker_set,
+            OutputLockGuard::Owner(lock),
+        )
     }
 
     pub(crate) fn open_worker(
@@ -170,7 +180,7 @@ impl ResolutionStore {
     ) -> Result<Self, StoreError> {
         crate::validate_config(config)
             .map_err(|error| StoreError::new(error.code, error.message))?;
-        verify_parent_output_lock(&PathBuf::from(&config.output_root))?;
+        let inherited_lock = verify_inherited_output_lock(&PathBuf::from(&config.output_root))?;
         Self::open_inner_with_lock(
             config,
             authorities.receipt_key(),
@@ -178,7 +188,9 @@ impl ResolutionStore {
                 .markers()
                 .map(|marker| marker.to_vec())
                 .collect(),
-            None,
+            OutputLockGuard::Inherited {
+                _file: inherited_lock,
+            },
         )
     }
 
@@ -186,7 +198,7 @@ impl ResolutionStore {
         config: &CertifiedConfig,
         receipt_key: &[u8],
         marker_set: Vec<Vec<u8>>,
-        lock: Option<OutputLock>,
+        lock: OutputLockGuard,
     ) -> Result<Self, StoreError> {
         if receipt_key.is_empty() {
             return Err(StoreError::new(
@@ -553,6 +565,16 @@ impl ResolutionStore {
         self.deactivate(claim.resolution_id);
     }
 
+    pub(crate) fn publication_lock_file(&self) -> Result<File, StoreError> {
+        match &self.inner._lock {
+            OutputLockGuard::Owner(lock) => lock.try_clone().map_err(|_| state_error()),
+            OutputLockGuard::Inherited { .. } => Err(StoreError::new(
+                "DEP_STORE_WORKER_PARENT_LOCK_INVALID",
+                "only the resolver parent may delegate its output lock",
+            )),
+        }
+    }
+
     fn stage_publication(
         &self,
         stage: &Path,
@@ -867,29 +889,46 @@ fn acquire_output_lock(root: &Path) -> Result<OutputLock, StoreError> {
 }
 
 #[cfg(target_os = "linux")]
-fn verify_parent_output_lock(root: &Path) -> Result<(), StoreError> {
-    use nix::errno::Errno;
+fn verify_inherited_output_lock(root: &Path) -> Result<File, StoreError> {
     use nix::fcntl::{Flock, FlockArg};
-    use std::os::unix::fs::OpenOptionsExt as _;
+    use nix::unistd::Uid;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits())
-        .open(root.join(LOCK_FILE))
+    let inherited = nix::unistd::dup(std::io::stderr())
+        .map(File::from)
         .map_err(|_| state_error())?;
-    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
-        Ok(_) => Err(StoreError::new(
-            "DEP_STORE_WORKER_PARENT_LOCK_MISSING",
-            "publication worker requires the live parent output lock",
+    let inherited_metadata = inherited.metadata().map_err(|_| state_error())?;
+    let path_metadata =
+        std::fs::symlink_metadata(root.join(LOCK_FILE)).map_err(|_| state_error())?;
+    if !inherited_metadata.is_file()
+        || !path_metadata.file_type().is_file()
+        || inherited_metadata.uid() != Uid::effective().as_raw()
+        || path_metadata.uid() != Uid::effective().as_raw()
+        || inherited_metadata.permissions().mode() & 0o777 != 0o600
+        || path_metadata.permissions().mode() & 0o777 != 0o600
+        || inherited_metadata.dev() != path_metadata.dev()
+        || inherited_metadata.ino() != path_metadata.ino()
+    {
+        return Err(StoreError::new(
+            "DEP_STORE_WORKER_PARENT_LOCK_INVALID",
+            "publication worker did not inherit the exact private parent output lock",
+        ));
+    }
+    match Flock::lock(inherited, FlockArg::LockExclusiveNonblock) {
+        Ok(lock) => {
+            let retained = lock.try_clone().map_err(|_| state_error())?;
+            std::mem::forget(lock);
+            Ok(retained)
+        }
+        Err(_) => Err(StoreError::new(
+            "DEP_STORE_WORKER_PARENT_LOCK_INVALID",
+            "publication worker did not inherit the locked parent file description",
         )),
-        Err((_file, errno)) if errno == Errno::EWOULDBLOCK || errno == Errno::EAGAIN => Ok(()),
-        Err(_) => Err(state_error()),
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn verify_parent_output_lock(_root: &Path) -> Result<(), StoreError> {
+fn verify_inherited_output_lock(_root: &Path) -> Result<File, StoreError> {
     Err(StoreError::new(
         "DEP_STORE_PLATFORM_UNSUPPORTED",
         "publication worker parent-lock proof requires Linux flock semantics",
@@ -1643,15 +1682,22 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn publication_worker_requires_the_live_parent_output_lock() {
+    fn publication_parent_delegates_the_exact_locked_file() {
+        use std::os::unix::fs::MetadataExt as _;
+
         let fixture = Fixture::new();
         let store = fixture.store();
-        verify_parent_output_lock(&PathBuf::from(&fixture.config.output_root))
-            .expect("live parent lock");
-        drop(store);
-        let error = verify_parent_output_lock(&PathBuf::from(&fixture.config.output_root))
-            .expect_err("missing parent lock");
-        assert_eq!(error.code, "DEP_STORE_WORKER_PARENT_LOCK_MISSING");
+        let delegated = store
+            .publication_lock_file()
+            .expect("delegated parent lock");
+        let expected =
+            std::fs::metadata(PathBuf::from(&fixture.config.output_root).join(LOCK_FILE))
+                .expect("output lock metadata");
+        let actual = delegated.metadata().expect("delegated lock metadata");
+        assert_eq!(
+            (actual.dev(), actual.ino()),
+            (expected.dev(), expected.ino())
+        );
     }
 
     #[test]
