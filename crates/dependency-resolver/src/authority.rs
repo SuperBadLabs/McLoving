@@ -222,12 +222,48 @@ fn validate_secret_authority_separation(
 }
 
 fn secret_values_overlap(left: &[u8], right: &[u8]) -> bool {
-    canonical_secret_representations(left)
+    let left_views = structured_secret_views(left);
+    let right_views = structured_secret_views(right);
+    left_views.iter().any(|left_view| {
+        right_views.iter().any(|right_view| {
+            canonical_secret_representations(left_view)
+                .iter()
+                .any(|candidate| contains_subslice(right_view, candidate))
+                || canonical_secret_representations(right_view)
+                    .iter()
+                    .any(|candidate| contains_subslice(left_view, candidate))
+        })
+    })
+}
+
+fn structured_secret_views(value: &[u8]) -> Vec<Vec<u8>> {
+    let mut views = vec![value.to_vec()];
+    if let Some(decoded) = decode_basic_credential(value) {
+        views.push(decoded);
+    }
+    views
+}
+
+fn decode_basic_credential(value: &[u8]) -> Option<Vec<u8>> {
+    let separator = value.iter().position(|byte| byte.is_ascii_whitespace())?;
+    if !value[..separator].eq_ignore_ascii_case(b"basic") {
+        return None;
+    }
+    let payload = &value[separator..];
+    let start = payload
         .iter()
-        .any(|candidate| contains_subslice(right, candidate))
-        || canonical_secret_representations(right)
-            .iter()
-            .any(|candidate| contains_subslice(left, candidate))
+        .position(|byte| !byte.is_ascii_whitespace())?;
+    let end = payload
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())?;
+    let token = &payload[start..=end];
+    if token.iter().any(|byte| byte.is_ascii_whitespace()) {
+        return None;
+    }
+    STANDARD
+        .decode(token)
+        .or_else(|_| STANDARD_NO_PAD.decode(token))
+        .ok()
 }
 
 fn canonical_secret_representations(value: &[u8]) -> Vec<Vec<u8>> {
@@ -266,12 +302,9 @@ fn validate_mutable_identity_separation(
     let mut visited_entries = 0_usize;
     for root in [&config.output_root, &config.transport_root] {
         let resolved = std::fs::canonicalize(root).map_err(|_| mutable_identity_scan_error())?;
-        let mut pending = vec![resolved];
+        let mut pending = Vec::new();
+        queue_mutable_tree_entry(&mut pending, &mut visited_entries, resolved)?;
         while let Some(path) = pending.pop() {
-            visited_entries = visited_entries
-                .checked_add(1)
-                .filter(|count| *count <= MAX_MUTABLE_TREE_ENTRIES)
-                .ok_or_else(mutable_identity_scan_error)?;
             let metadata =
                 std::fs::symlink_metadata(&path).map_err(|_| mutable_identity_scan_error())?;
             let identity = authority_identity(&metadata)?;
@@ -285,11 +318,27 @@ fn validate_mutable_identity_separation(
                 let entries =
                     std::fs::read_dir(&path).map_err(|_| mutable_identity_scan_error())?;
                 for entry in entries {
-                    pending.push(entry.map_err(|_| mutable_identity_scan_error())?.path());
+                    let entry = entry.map_err(|_| mutable_identity_scan_error())?;
+                    queue_mutable_tree_entry(&mut pending, &mut visited_entries, entry.path())?;
                 }
             }
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn queue_mutable_tree_entry(
+    pending: &mut Vec<std::path::PathBuf>,
+    visited_entries: &mut usize,
+    path: std::path::PathBuf,
+) -> Result<(), AuthorityError> {
+    let admitted = visited_entries
+        .checked_add(1)
+        .filter(|count| *count <= MAX_MUTABLE_TREE_ENTRIES)
+        .ok_or_else(mutable_identity_scan_error)?;
+    *visited_entries = admitted;
+    pending.push(path);
     Ok(())
 }
 
@@ -566,5 +615,21 @@ mod tests {
         );
         let error = parse_markers(document.as_bytes()).expect_err("oversized individual marker");
         assert_eq!(error.code, "DEP_AUTHORITY_MARKER_SET_INVALID");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutable_tree_entry_is_rejected_before_worklist_allocation() {
+        let mut pending = Vec::new();
+        let mut visited_entries = MAX_MUTABLE_TREE_ENTRIES;
+        let error = queue_mutable_tree_entry(
+            &mut pending,
+            &mut visited_entries,
+            std::path::PathBuf::from("/not-admitted"),
+        )
+        .expect_err("entry beyond mutable-tree bound");
+        assert_eq!(error.code, "DEP_AUTHORITY_MUTABLE_IDENTITY_SCAN_FAILED");
+        assert_eq!(visited_entries, MAX_MUTABLE_TREE_ENTRIES);
+        assert!(pending.is_empty());
     }
 }
