@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::adapter::{
     AdapterBindings, AdapterError, assemble_plan, validate_local_key, validate_lock_size,
 };
-use crate::plan::{Ecosystem, PackageNode, canonical_node_id};
+use crate::plan::{Ecosystem, PackageNode, canonical_node_id, validate_exact_version};
 use crate::strict_json;
 
 #[derive(Debug, Deserialize)]
@@ -193,21 +193,7 @@ fn validate_package_name(value: &str) -> Result<(), AdapterError> {
 }
 
 fn validate_exact_npm_version(value: &str) -> Result<(), AdapterError> {
-    if value.is_empty()
-        || !value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_digit())
-        || value
-            .bytes()
-            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+')))
-    {
-        return Err(AdapterError::new(
-            "DEP_VERSION_MUTABLE",
-            "npm version is not an exact canonical version",
-        ));
-    }
-    Ok(())
+    validate_exact_version(Ecosystem::Npm, value).map_err(Into::into)
 }
 
 fn validate_integrity(integrity: Option<&str>, sha256: &str) -> Result<(), AdapterError> {

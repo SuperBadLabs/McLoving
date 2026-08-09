@@ -76,6 +76,18 @@ impl LoadedAuthorities {
             &config.secret_marker_set_sha256,
         )?;
         let marker_set = parse_markers(&marker_bytes)?;
+        if receipt_key.len() < 32 {
+            return Err(AuthorityError::new(
+                "DEP_AUTHORITY_RECEIPT_KEY_INVALID",
+                "receipt key must contain at least 256 bits of key material",
+            ));
+        }
+        if !marker_set.iter().any(|marker| marker == &receipt_key) {
+            return Err(AuthorityError::new(
+                "DEP_AUTHORITY_RECEIPT_MARKER_MISSING",
+                "receipt key is absent from the independent marker set",
+            ));
+        }
 
         let mut repositories = BTreeMap::new();
         for repository in &config.repositories {

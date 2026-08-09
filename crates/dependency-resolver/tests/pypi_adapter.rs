@@ -75,3 +75,23 @@ fn pypi_hash_metadata_edges_and_line_encoding_fail_closed() {
     let error = parse_pypi_requirements(crlf.as_bytes(), &bindings()).expect_err("CRLF");
     assert_eq!(error.code, "DEP_PYPI_LOCK_INVALID");
 }
+
+#[test]
+fn pypi_versions_must_be_canonical_pep440_text() {
+    for invalid in [
+        "01.0.0",
+        "1_0_0",
+        "V1.0.0",
+        "1..0",
+        "1.0.0garbage",
+        "1.0.0-rc1",
+    ] {
+        let requirements = valid_requirements().replace("1.0.0", invalid);
+        let error = parse_pypi_requirements(requirements.as_bytes(), &bindings())
+            .expect_err("noncanonical PyPI version");
+        assert_eq!(error.code, "DEP_VERSION_MUTABLE", "version {invalid}");
+    }
+
+    let canonical = valid_requirements().replace("1.0.0", "1!1.0.0rc1.post2.dev3+linux.1");
+    parse_pypi_requirements(canonical.as_bytes(), &bindings()).expect("canonical PEP 440 version");
+}

@@ -108,6 +108,7 @@ struct OutputLock;
 
 struct StoreInner {
     root: PathBuf,
+    transport_root: PathBuf,
     configuration_sha256: String,
     generation: u64,
     executable_sha256: String,
@@ -150,6 +151,7 @@ impl ResolutionStore {
         Ok(Self {
             inner: Arc::new(StoreInner {
                 root,
+                transport_root: PathBuf::from(&config.transport_root),
                 configuration_sha256,
                 generation: config.generation,
                 executable_sha256: config.executable_sha256.clone(),
@@ -441,6 +443,17 @@ impl ResolutionStore {
                 return Err(StoreError::new(
                     "DEP_STORE_ARTIFACT_BINDING_MISMATCH",
                     "verified artifact metadata changed before publication",
+                ));
+            }
+            let expected_transient = self
+                .inner
+                .transport_root
+                .join(claim.resolution_id.to_string())
+                .join(format!("{}.part", node.node_id));
+            if fetched.transient_path != expected_transient {
+                return Err(StoreError::new(
+                    "DEP_STORE_TRANSIENT_PATH_MISMATCH",
+                    "verified artifact is not bound to its dedicated transport path",
                 ));
             }
             verify_file(
@@ -928,8 +941,20 @@ fn write_new_json<T: Serialize>(path: &Path, value: &T, final_mode: u32) -> Resu
     if bytes.len() as u64 > MAX_STATE_BYTES {
         return Err(state_error());
     }
-    write_new_file(path, &bytes)?;
-    set_mode_and_sync(path, final_mode)
+    let parent = path.parent().ok_or_else(state_error)?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(state_error)?;
+    let temporary = parent.join(format!(".{name}.{}.tmp", Uuid::new_v4()));
+    write_new_file(&temporary, &bytes)?;
+    if let Err(error) =
+        set_mode_and_sync(&temporary, final_mode).and_then(|()| rename_no_replace(&temporary, path))
+    {
+        let _ = remove_private_file(&temporary);
+        return Err(error);
+    }
+    sync_directory(parent)
 }
 
 #[cfg(unix)]
@@ -1202,10 +1227,6 @@ mod tests {
             std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o700))
                 .expect("private output root");
             let body = b"contained published artifact";
-            let transient = root.path().join("artifact.part");
-            std::fs::write(&transient, body).expect("transient artifact");
-            std::fs::set_permissions(&transient, std::fs::Permissions::from_mode(0o600))
-                .expect("private transient artifact");
             let artifact_sha256 = format!("{:x}", Sha256::digest(body));
             let mut node = PackageNode {
                 node_id: String::new(),
@@ -1219,6 +1240,14 @@ mod tests {
                 dependencies: Vec::new(),
             };
             node.node_id = canonical_node_id(Ecosystem::Maven, &node).expect("node id");
+            let resolution_id = Uuid::new_v4();
+            let transport = root.path().join("transport");
+            let resolution_transport = transport.join(resolution_id.to_string());
+            std::fs::create_dir_all(&resolution_transport).expect("transport resolution root");
+            let transient = resolution_transport.join(format!("{}.part", node.node_id));
+            std::fs::write(&transient, body).expect("transient artifact");
+            std::fs::set_permissions(&transient, std::fs::Permissions::from_mode(0o600))
+                .expect("private transient artifact");
             let mut plan = CanonicalPlan {
                 schema_version: "mcloving.dependency-plan/v1".to_owned(),
                 ecosystem: Ecosystem::Maven,
@@ -1287,7 +1316,7 @@ mod tests {
                 secret_marker_set_path: "/authority/markers.json".to_owned(),
                 secret_marker_set_sha256: "6".repeat(64),
                 output_root: output.to_str().expect("output path").to_owned(),
-                transport_root: "/dedicated/transport".to_owned(),
+                transport_root: transport.to_str().expect("transport path").to_owned(),
                 limits: ResolverLimits {
                     max_frame_bytes: 1_048_576,
                     max_lock_bytes: 262_144,
@@ -1308,7 +1337,7 @@ mod tests {
             let mut request = ResolutionRequest {
                 schema_version: "mcloving.dependency-request/v1".to_owned(),
                 protocol_version: config.protocol_version.clone(),
-                resolution_id: Uuid::new_v4().to_string(),
+                resolution_id: resolution_id.to_string(),
                 tenant_id: "tenant-a".to_owned(),
                 project_id: "project-a".to_owned(),
                 pipeline_id: "pipeline-a".to_owned(),
@@ -1359,7 +1388,7 @@ mod tests {
                 admitted,
                 plan,
                 fetched,
-                receipt_key: b"contained-receipt-key-material".to_vec(),
+                receipt_key: b"contained-receipt-key-material-v1".to_vec(),
             }
         }
 
@@ -1495,5 +1524,108 @@ mod tests {
         assert_eq!(error.code, "DEP_STORE_PUBLICATION_LATE");
         assert!(!late_store.bundle_path(late_claim.resolution_id).exists());
         late_store.release_incomplete_claim(&late_claim);
+    }
+
+    #[test]
+    fn publication_rejects_artifacts_outside_the_bound_transport_slot() {
+        let mut fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        fixture.fetched[0].transient_path = fixture._root.path().join("forged.part");
+        std::fs::write(
+            &fixture.fetched[0].transient_path,
+            b"contained published artifact",
+        )
+        .expect("forged transient");
+        std::fs::set_permissions(
+            &fixture.fetched[0].transient_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("forged transient mode");
+        let error = store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+            )
+            .expect_err("foreign transient path");
+        assert_eq!(error.code, "DEP_STORE_TRANSIENT_PATH_MISMATCH");
+        store.release_incomplete_claim(&claim);
+    }
+
+    #[test]
+    fn generation_cutover_and_explicit_rollback_lineage_are_exact() {
+        let mut fixture = Fixture::new();
+        let generation_seven = publish_fixture(&fixture);
+        assert_eq!(generation_seven.generation, 7);
+
+        rotate_generation(&mut fixture, 8, None);
+        let generation_eight = publish_fixture(&fixture);
+        assert_eq!(generation_eight.generation, 8);
+        assert_eq!(generation_eight.rollback_from_generation, None);
+        assert_ne!(
+            generation_seven.configuration_sha256,
+            generation_eight.configuration_sha256
+        );
+
+        rotate_generation(&mut fixture, 9, Some(8));
+        let rollback = publish_fixture(&fixture);
+        assert_eq!(rollback.generation, 9);
+        assert_eq!(rollback.rollback_from_generation, Some(8));
+        assert_ne!(generation_eight.request_sha256, rollback.request_sha256);
+    }
+
+    fn publish_fixture(fixture: &Fixture) -> ResolutionReceipt {
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("generation claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected generation outcome: {other:?}"),
+        };
+        store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+            )
+            .expect("generation publication")
+    }
+
+    fn rotate_generation(fixture: &mut Fixture, generation: u64, rollback_from: Option<u64>) {
+        let previous_transient = fixture.fetched[0].transient_path.clone();
+        fixture.config.generation = generation;
+        fixture.request.resolution_id = Uuid::new_v4().to_string();
+        fixture.request.build_id = Uuid::new_v4().to_string();
+        fixture.request.attempt_id = Uuid::new_v4().to_string();
+        fixture.request.expected_generation = generation;
+        fixture.request.rollback_from_generation = rollback_from;
+        fixture.request.expected_configuration_sha256 =
+            configuration_sha256(&fixture.config).expect("rotated config digest");
+        fixture.admitted.configuration_sha256 =
+            fixture.request.expected_configuration_sha256.clone();
+        fixture.admitted.request_sha256 =
+            request_sha256(&fixture.request).expect("rotated request digest");
+        fixture.admitted.absolute_expiry_unix_ms = fixture.request.expires_at_unix_ms;
+        fixture.fetched[0].publication_generation = generation;
+        let next_root =
+            PathBuf::from(&fixture.config.transport_root).join(&fixture.request.resolution_id);
+        std::fs::create_dir(&next_root).expect("rotated transport root");
+        let next_transient = next_root.join(format!("{}.part", fixture.fetched[0].node_id));
+        std::fs::copy(previous_transient, &next_transient).expect("rotated transient artifact");
+        std::fs::set_permissions(&next_transient, std::fs::Permissions::from_mode(0o600))
+            .expect("rotated transient mode");
+        fixture.fetched[0].transient_path = next_transient;
     }
 }

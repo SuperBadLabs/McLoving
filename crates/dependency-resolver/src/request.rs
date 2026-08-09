@@ -158,12 +158,18 @@ fn validate_request_shape(
         &request.build_id,
         &request.attempt_id,
     ] {
-        Uuid::parse_str(value).map_err(|_| {
+        let parsed = Uuid::parse_str(value).map_err(|_| {
             RequestError::new(
                 "DEP_REQUEST_UUID_INVALID",
                 "resolution, build, and attempt identities must be UUIDs",
             )
         })?;
+        if parsed.to_string() != *value {
+            return Err(RequestError::new(
+                "DEP_REQUEST_UUID_INVALID",
+                "resolution, build, and attempt identities must use canonical lowercase UUID text",
+            ));
+        }
     }
     for (name, value) in [
         ("tenant", request.tenant_id.as_str()),
@@ -420,6 +426,7 @@ fn validate_logical_lock_path(value: &str) -> Result<(), RequestError> {
         || value.len() > 4_096
         || value.starts_with('/')
         || value.contains('\\')
+        || value.contains('%')
         || value
             .split('/')
             .any(|component| component.is_empty() || matches!(component, "." | ".."))

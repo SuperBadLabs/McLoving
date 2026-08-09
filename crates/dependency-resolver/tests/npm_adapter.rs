@@ -105,3 +105,13 @@ fn npm_integrity_layout_and_version_substitution_are_denied() {
         parse_npm_package_lock(substitution.as_bytes(), &bindings()).expect_err("substitution");
     assert_eq!(error.code, "DEP_NPM_VERSION_SUBSTITUTION");
 }
+
+#[test]
+fn npm_versions_must_be_canonical_semver() {
+    for invalid in ["2", "02.1.0", "2.1.0-01", "2.1.0-"] {
+        let lock = valid_lock().replace("2.1.0", invalid);
+        let error = parse_npm_package_lock(lock.as_bytes(), &bindings())
+            .expect_err("noncanonical npm version");
+        assert_eq!(error.code, "DEP_VERSION_MUTABLE", "version {invalid}");
+    }
+}

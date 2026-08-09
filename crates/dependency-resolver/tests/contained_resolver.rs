@@ -1,11 +1,12 @@
 #![cfg(target_os = "linux")]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::Body;
@@ -15,10 +16,10 @@ use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use mcloving_dependency_resolver::{
-    AdapterBindings, AdapterConfig, CertifiedConfig, Ecosystem, GrantUse, PackageNode,
-    RepositoryBinding, RepositoryConfig, RepositoryGrant, ResolutionFrame, ResolutionRequest,
-    ResolverLimits, SourceTrustClass, canonical_attestation_message, configuration_sha256,
-    parse_maven_lock,
+    AdapterBindings, AdapterConfig, CertifiedConfig, DependencyResolver, Ecosystem, GrantUse,
+    PackageNode, RepositoryBinding, RepositoryConfig, RepositoryGrant, ResolutionFrame,
+    ResolutionRequest, ResolverLimits, SourceTrustClass, canonical_attestation_message,
+    configuration_sha256, parse_maven_lock,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use sha2::{Digest, Sha256};
@@ -29,15 +30,21 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 struct RepositoryState {
-    node: PackageNode,
-    body: Vec<u8>,
+    artifacts: Arc<BTreeMap<String, RepositoryArtifact>>,
     key: Arc<Ed25519KeyPair>,
     credential: Vec<u8>,
     requests: Arc<AtomicUsize>,
 }
 
+#[derive(Clone)]
+struct RepositoryArtifact {
+    node: PackageNode,
+    body: Vec<u8>,
+}
+
 async fn artifact(State(state): State<RepositoryState>, request: Request<Body>) -> Response<Body> {
     state.requests.fetch_add(1, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(50)).await;
     if request
         .headers()
         .get("authorization")
@@ -49,16 +56,25 @@ async fn artifact(State(state): State<RepositoryState>, request: Request<Body>) 
             .body(Body::empty())
             .expect("unauthorized response");
     }
-    let message = canonical_attestation_message(&state.node, "contained-key", 7, b"maven");
+    let artifact = match state.artifacts.get(request.uri().path()) {
+        Some(artifact) => artifact,
+        None => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .expect("missing response");
+        }
+    };
+    let message = canonical_attestation_message(&artifact.node, "contained-key", 7, b"maven");
     let signature = BASE64.encode(state.key.sign(&message).as_ref());
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "application/octet-stream")
-        .header("content-length", state.body.len().to_string())
+        .header("content-length", artifact.body.len().to_string())
         .header("x-mcloving-repository-id", "contained-maven")
         .header("x-mcloving-publication-generation", "7")
         .header("x-mcloving-attestation", signature)
-        .body(Body::from(state.body))
+        .body(Body::from(artifact.body.clone()))
         .expect("artifact response")
 }
 
@@ -76,22 +92,18 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     let output_root = fixture.path().join("output");
     create_private_directory(&output_root);
     let credential = b"Bearer contained-dependency-credential".to_vec();
-    let receipt_key = b"contained-dependency-receipt-key".to_vec();
+    let receipt_key = b"contained-dependency-receipt-key-material-v1".to_vec();
     let key =
         Arc::new(Ed25519KeyPair::from_seed_unchecked(&[11_u8; 32]).expect("contained Ed25519 key"));
     let attestation_key = key.public_key().as_ref().to_vec();
-    let marker_document = format!(
-        r#"{{"schema_version":"mcloving.secret-markers/v1","markers_hex":["{}"]}}"#,
-        hex(&credential)
-    )
-    .into_bytes();
+    let marker_document = marker_document(&[&credential, &receipt_key]);
     let credential_path = private_file(fixture.path(), "repository.credential", &credential);
     let attestation_path = private_file(fixture.path(), "repository.pub", &attestation_key);
     let receipt_path = private_file(fixture.path(), "receipt.key", &receipt_key);
     let markers_path = private_file(fixture.path(), "markers.json", &marker_document);
 
     let body = b"standalone contained dependency artifact".to_vec();
-    let lock = maven_lock(&body);
+    let lock = maven_lock(&body, "app", "com/example/app/1.0.0/app.jar");
     let preliminary_plan = parse_maven_lock(
         &lock,
         &AdapterBindings {
@@ -110,12 +122,46 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     )
     .expect("contained plan");
     let node = preliminary_plan.nodes[0].clone();
+    let full_body =
+        vec![b'x'; usize::try_from(transport_capacity).expect("transport capacity fits memory")];
+    let full_lock = maven_lock(&full_body, "full", "com/example/full/1.0.0/full.jar");
+    let full_plan = parse_maven_lock(
+        &full_lock,
+        &AdapterBindings {
+            adapter_id: "maven-v1".to_owned(),
+            adapter_sha256: "a".repeat(64),
+            source_tree_sha256: "b".repeat(64),
+            resolver_toolchain_id: "contained-toolchain".to_owned(),
+            resolver_toolchain_sha256: "d".repeat(64),
+            source_trust_class: SourceTrustClass::Trusted,
+            repositories: vec![RepositoryBinding {
+                repository_id: "contained-maven".to_owned(),
+                credentialed: true,
+                permits_untrusted_source: false,
+            }],
+        },
+    )
+    .expect("disk-full plan");
+    let full_node = full_plan.nodes[0].clone();
+    let artifacts = BTreeMap::from([
+        (
+            "/repository/com/example/app/1.0.0/app.jar".to_owned(),
+            RepositoryArtifact { node, body },
+        ),
+        (
+            "/repository/com/example/full/1.0.0/full.jar".to_owned(),
+            RepositoryArtifact {
+                node: full_node,
+                body: full_body,
+            },
+        ),
+    ]);
     let requests = Arc::new(AtomicUsize::new(0));
     let app = Router::new()
         .route("/repository/com/example/app/1.0.0/app.jar", get(artifact))
+        .route("/repository/com/example/full/1.0.0/full.jar", get(artifact))
         .with_state(RepositoryState {
-            node,
-            body,
+            artifacts: Arc::new(artifacts),
             key,
             credential: credential.clone(),
             requests: Arc::clone(&requests),
@@ -191,7 +237,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
             max_nodes: 100,
             max_edges: 1_000,
             max_artifacts: 100,
-            max_artifact_bytes: 1_048_576,
+            max_artifact_bytes: transport_capacity,
             max_total_artifact_bytes: transport_capacity,
             transport_capacity_bytes: transport_capacity,
             max_path_bytes: 4_096,
@@ -247,16 +293,143 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         &serde_json::to_vec(&config).expect("serialized config"),
     );
     let input = serde_json::to_vec(&frame).expect("serialized frame");
-    let first = run_resolver(&resolver_binary, &config_path, &input).await;
-    assert_eq!(first["status"], "ok", "first resolver response: {first}");
+    let concurrent_output = fixture.path().join("concurrent-output");
+    create_private_directory(&concurrent_output);
+    let mut concurrent_config = config.clone();
+    concurrent_config.configuration_id = "contained-concurrent".to_owned();
+    concurrent_config.output_root = path_string(&concurrent_output);
+    let mut concurrent_frame = frame.clone();
+    concurrent_frame.request.resolution_id = Uuid::new_v4().to_string();
+    concurrent_frame.request.build_id = Uuid::new_v4().to_string();
+    concurrent_frame.request.attempt_id = Uuid::new_v4().to_string();
+    concurrent_frame.request.expected_configuration_sha256 =
+        configuration_sha256(&concurrent_config).expect("concurrent config digest");
+    let resolver = Arc::new(
+        DependencyResolver::new(concurrent_config).expect("concurrent contained resolver"),
+    );
+    let left_resolver = Arc::clone(&resolver);
+    let left_frame = concurrent_frame.clone();
+    let right_resolver = Arc::clone(&resolver);
+    let right_frame = concurrent_frame;
+    let (left, right) = tokio::join!(
+        async move { left_resolver.resolve_frame(left_frame).await },
+        async move { right_resolver.resolve_frame(right_frame).await }
+    );
+    let left = left.expect("left concurrent receipt");
+    let right = right.expect("right concurrent receipt");
+    assert_eq!(left, right);
     assert_eq!(requests.load(Ordering::SeqCst), 1);
+    drop(resolver);
+
+    let mut disk_full = frame.clone();
+    disk_full.request.resolution_id = Uuid::new_v4().to_string();
+    disk_full.request.logical_lock_path = "dependency-locks/full-maven.json".to_owned();
+    disk_full.request.expected_lock_sha256 = full_plan.lock_sha256;
+    disk_full.request.expected_graph_sha256 = full_plan.graph_sha256;
+    disk_full.lock_base64 = BASE64.encode(&full_lock);
+    let denied = run_resolver(
+        &resolver_binary,
+        &config_path,
+        &serde_json::to_vec(&disk_full).expect("disk-full frame"),
+        &credential,
+        &receipt_key,
+    )
+    .await;
+    assert_eq!(denied["status"], "error");
+    assert_eq!(denied["code"], "DEP_TRANSPORT_CONTENT_MISMATCH");
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+
+    let mut wrong_graph = frame.clone();
+    wrong_graph.request.expected_graph_sha256 = "f".repeat(64);
+    let denied = run_resolver(
+        &resolver_binary,
+        &config_path,
+        &serde_json::to_vec(&wrong_graph).expect("wrong graph frame"),
+        &credential,
+        &receipt_key,
+    )
+    .await;
+    assert_eq!(denied["status"], "error");
+    assert_eq!(denied["code"], "DEP_REQUEST_PLAN_BINDING_MISMATCH");
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+
+    let mut untrusted = frame.clone();
+    untrusted.request.resolution_id = Uuid::new_v4().to_string();
+    untrusted.request.source_trust_class = SourceTrustClass::Untrusted;
+    let denied = run_resolver(
+        &resolver_binary,
+        &config_path,
+        &serde_json::to_vec(&untrusted).expect("untrusted frame"),
+        &credential,
+        &receipt_key,
+    )
+    .await;
+    assert_eq!(denied["status"], "error");
+    assert_eq!(denied["code"], "DEP_UNTRUSTED_REPOSITORY_DENIED");
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+
+    let first = run_resolver(
+        &resolver_binary,
+        &config_path,
+        &input,
+        &credential,
+        &receipt_key,
+    )
+    .await;
+    assert_eq!(first["status"], "ok", "first resolver response: {first}");
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
     server.abort();
-    let second = run_resolver(&resolver_binary, &config_path, &input).await;
+
+    let later_lock = String::from_utf8(lock.clone())
+        .expect("UTF-8 lock")
+        .replace("1.0.0", "2.0.0")
+        .into_bytes();
+    let later_plan = parse_maven_lock(
+        &later_lock,
+        &AdapterBindings {
+            adapter_id: "maven-v1".to_owned(),
+            adapter_sha256: "a".repeat(64),
+            source_tree_sha256: "b".repeat(64),
+            resolver_toolchain_id: "contained-toolchain".to_owned(),
+            resolver_toolchain_sha256: "d".repeat(64),
+            source_trust_class: SourceTrustClass::Trusted,
+            repositories: vec![RepositoryBinding {
+                repository_id: "contained-maven".to_owned(),
+                credentialed: true,
+                permits_untrusted_source: false,
+            }],
+        },
+    )
+    .expect("later exact plan");
+    let mut later = frame.clone();
+    later.lock_base64 = BASE64.encode(&later_lock);
+    later.request.expected_lock_sha256 = later_plan.lock_sha256;
+    later.request.expected_graph_sha256 = later_plan.graph_sha256;
+    let denied = run_resolver(
+        &resolver_binary,
+        &config_path,
+        &serde_json::to_vec(&later).expect("later frame"),
+        &credential,
+        &receipt_key,
+    )
+    .await;
+    assert_eq!(denied["status"], "error");
+    assert_eq!(denied["code"], "DEP_STORE_RECEIPT_INVALID");
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
+
+    let second = run_resolver(
+        &resolver_binary,
+        &config_path,
+        &input,
+        &credential,
+        &receipt_key,
+    )
+    .await;
     assert_eq!(
         second, first,
         "offline restart replay must be byte-equivalent JSON"
     );
-    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
     assert!(!contains_bytes(
         serde_json::to_vec(&second)
             .expect("response bytes")
@@ -265,7 +438,13 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     ));
 }
 
-async fn run_resolver(binary: &Path, config: &Path, input: &[u8]) -> serde_json::Value {
+async fn run_resolver(
+    binary: &Path,
+    config: &Path,
+    input: &[u8],
+    credential: &[u8],
+    receipt_key: &[u8],
+) -> serde_json::Value {
     let mut child = Command::new(binary)
         .arg("--config")
         .arg(config)
@@ -285,6 +464,10 @@ async fn run_resolver(binary: &Path, config: &Path, input: &[u8]) -> serde_json:
         "resolver failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(!contains_bytes(&output.stdout, credential));
+    assert!(!contains_bytes(&output.stderr, credential));
+    assert!(!contains_bytes(&output.stdout, receipt_key));
+    assert!(!contains_bytes(&output.stderr, receipt_key));
     let mut lines = output
         .stdout
         .split(|byte| *byte == b'\n')
@@ -294,9 +477,9 @@ async fn run_resolver(binary: &Path, config: &Path, input: &[u8]) -> serde_json:
     serde_json::from_slice(response).expect("resolver JSON response")
 }
 
-fn maven_lock(body: &[u8]) -> Vec<u8> {
+fn maven_lock(body: &[u8], artifact: &str, artifact_path: &str) -> Vec<u8> {
     format!(
-        r#"{{"schema_version":"mcloving.maven-lock/v1","nodes":[{{"key":"app","group":"com.example","artifact":"app","artifact_type":"jar","classifier":null,"version":"1.0.0","repository_id":"contained-maven","artifact_path":"com/example/app/1.0.0/app.jar","declared_size":{},"sha256":"{}","attestation_key_id":"contained-key","dependencies":[]}}],"roots":["app"]}}"#,
+        r#"{{"schema_version":"mcloving.maven-lock/v1","nodes":[{{"key":"{artifact}","group":"com.example","artifact":"{artifact}","artifact_type":"jar","classifier":null,"version":"1.0.0","repository_id":"contained-maven","artifact_path":"{artifact_path}","declared_size":{},"sha256":"{}","attestation_key_id":"contained-key","dependencies":[]}}],"roots":["{artifact}"]}}"#,
         body.len(),
         sha256(body)
     )
@@ -325,6 +508,20 @@ fn sha256(bytes: &[u8]) -> String {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn marker_document(markers: &[&[u8]]) -> Vec<u8> {
+    let mut markers = markers.iter().map(|value| hex(value)).collect::<Vec<_>>();
+    markers.sort();
+    format!(
+        r#"{{"schema_version":"mcloving.secret-markers/v1","markers_hex":[{}]}}"#,
+        markers
+            .iter()
+            .map(|value| format!(r#""{value}""#))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+    .into_bytes()
 }
 
 fn path_string(path: &Path) -> String {

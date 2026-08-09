@@ -437,7 +437,7 @@ fn validate_coordinate(value: &str) -> Result<(), PlanError> {
     Ok(())
 }
 
-fn validate_exact_version(ecosystem: Ecosystem, value: &str) -> Result<(), PlanError> {
+pub(crate) fn validate_exact_version(ecosystem: Ecosystem, value: &str) -> Result<(), PlanError> {
     let lower = value.to_ascii_lowercase();
     let invalid_common = value.is_empty()
         || value.len() > MAX_VERSION_BYTES
@@ -454,26 +454,17 @@ fn validate_exact_version(ecosystem: Ecosystem, value: &str) -> Result<(), PlanE
         Ecosystem::Maven => {
             lower.contains("snapshot")
                 || lower == "release"
+                || value.contains('$')
+                || value.contains('{')
+                || value.contains('}')
                 || value.contains('[')
                 || value.contains(']')
                 || value.contains('(')
                 || value.contains(')')
                 || value.contains(',')
         }
-        Ecosystem::Npm => {
-            !value
-                .bytes()
-                .next()
-                .is_some_and(|byte| byte.is_ascii_digit())
-                || value.starts_with('v')
-                || value.contains("||")
-        }
-        Ecosystem::Pypi => {
-            value.starts_with('=')
-                || !value.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'!' | b'+' | b'-' | b'_')
-                })
-        }
+        Ecosystem::Npm => !is_canonical_npm_version(value),
+        Ecosystem::Pypi => !is_canonical_pypi_version(value),
     };
     if invalid_common || invalid_ecosystem {
         return Err(PlanError::new(
@@ -482,6 +473,120 @@ fn validate_exact_version(ecosystem: Ecosystem, value: &str) -> Result<(), PlanE
         ));
     }
     Ok(())
+}
+
+fn is_canonical_npm_version(value: &str) -> bool {
+    let (without_build, build) = value
+        .split_once('+')
+        .map_or((value, None), |(left, right)| (left, Some(right)));
+    if build.is_some_and(|part| !valid_identifiers(part, false))
+        || without_build.matches('+').count() != 0
+    {
+        return false;
+    }
+    let (core, prerelease) = without_build
+        .split_once('-')
+        .map_or((without_build, None), |(left, right)| (left, Some(right)));
+    if prerelease.is_some_and(|part| !valid_identifiers(part, true)) {
+        return false;
+    }
+    let mut parts = core.split('.');
+    let valid = parts.by_ref().take(3).all(canonical_numeric);
+    valid && parts.next().is_none() && core.matches('.').count() == 2
+}
+
+fn valid_identifiers(value: &str, reject_numeric_leading_zero: bool) -> bool {
+    !value.is_empty()
+        && value.split('.').all(|identifier| {
+            !identifier.is_empty()
+                && identifier
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && (!reject_numeric_leading_zero
+                    || !identifier.bytes().all(|byte| byte.is_ascii_digit())
+                    || canonical_numeric(identifier))
+        })
+}
+
+fn canonical_numeric(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
+fn is_canonical_pypi_version(value: &str) -> bool {
+    if value != value.to_ascii_lowercase()
+        || value.starts_with('v')
+        || value.starts_with('=')
+        || value.contains('_')
+        || value.contains('-')
+        || value.contains("..")
+        || value.ends_with(['.', '!', '+'])
+        || value.matches('!').count() > 1
+        || value.matches('+').count() > 1
+    {
+        return false;
+    }
+    let (public, local) = value
+        .split_once('+')
+        .map_or((value, None), |(left, right)| (left, Some(right)));
+    if local.is_some_and(|part| {
+        part.is_empty()
+            || !part.split('.').all(|identifier| {
+                !identifier.is_empty()
+                    && identifier.bytes().all(|byte| byte.is_ascii_alphanumeric())
+                    && (!identifier.bytes().all(|byte| byte.is_ascii_digit())
+                        || canonical_numeric(identifier))
+            })
+    }) {
+        return false;
+    }
+    let release = match public.split_once('!') {
+        Some((epoch, rest)) if canonical_numeric(epoch) => rest,
+        Some(_) => return false,
+        None => public,
+    };
+    let release_end = release
+        .find(|character: char| !character.is_ascii_digit() && character != '.')
+        .unwrap_or(release.len());
+    let release_number = &release[..release_end];
+    if release_number.is_empty()
+        || release_number.ends_with('.')
+        || !release_number.split('.').all(canonical_numeric)
+    {
+        return false;
+    }
+    let mut suffix = &release[release_end..];
+    let prerelease = suffix
+        .strip_prefix("rc")
+        .or_else(|| suffix.strip_prefix('a'))
+        .or_else(|| suffix.strip_prefix('b'));
+    if let Some(rest) = prerelease {
+        let Some(rest) = consume_numeric_suffix(rest) else {
+            return false;
+        };
+        suffix = rest;
+    }
+    if let Some(rest) = suffix.strip_prefix(".post") {
+        let Some(rest) = consume_numeric_suffix(rest) else {
+            return false;
+        };
+        suffix = rest;
+    }
+    if let Some(rest) = suffix.strip_prefix(".dev") {
+        let Some(rest) = consume_numeric_suffix(rest) else {
+            return false;
+        };
+        suffix = rest;
+    }
+    suffix.is_empty()
+}
+
+fn consume_numeric_suffix(value: &str) -> Option<&str> {
+    let end = value
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(value.len());
+    canonical_numeric(&value[..end]).then_some(&value[end..])
 }
 
 fn validate_artifact_path(value: &str) -> Result<(), PlanError> {
@@ -493,6 +598,7 @@ fn validate_artifact_path(value: &str) -> Result<(), PlanError> {
         || value.contains('\\')
         || value.contains('?')
         || value.contains('#')
+        || value.contains('%')
         || value.contains("://")
         || value.chars().any(|character| character.is_control())
         || value

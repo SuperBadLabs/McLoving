@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::adapter::{
     AdapterBindings, AdapterError, assemble_plan, validate_local_key, validate_lock_size,
 };
-use crate::plan::{Ecosystem, PackageNode, canonical_node_id};
+use crate::plan::{Ecosystem, PackageNode, canonical_node_id, validate_exact_version};
 
 #[derive(Debug)]
 struct Requirement {
@@ -243,17 +243,7 @@ fn validate_normalized_name(value: &str) -> Result<(), AdapterError> {
 }
 
 fn validate_exact_pypi_version(value: &str) -> Result<(), AdapterError> {
-    if value.is_empty()
-        || value.bytes().any(|byte| {
-            !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'!' | b'+' | b'-' | b'_'))
-        })
-    {
-        return Err(AdapterError::new(
-            "DEP_VERSION_MUTABLE",
-            "PyPI version is not an exact canonical version",
-        ));
-    }
-    Ok(())
+    validate_exact_version(Ecosystem::Pypi, value).map_err(Into::into)
 }
 
 fn requirement_key(name: &str, version: &str) -> String {

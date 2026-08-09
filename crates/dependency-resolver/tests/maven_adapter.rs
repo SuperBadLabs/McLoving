@@ -110,6 +110,11 @@ fn snapshots_missing_edges_and_traversal_fail_closed() {
         valid_lock().replacen("com/example/app/1.0.0/app-1.0.0.jar", "../app-1.0.0.jar", 1);
     let error = parse_maven_lock(traversal.as_bytes(), &bindings()).expect_err("traversal");
     assert_eq!(error.code, "DEP_ARTIFACT_PATH_INVALID");
+
+    let placeholder =
+        valid_lock().replacen(r#""version":"1.0.0""#, r#""version":"${revision}""#, 1);
+    let error = parse_maven_lock(placeholder.as_bytes(), &bindings()).expect_err("placeholder");
+    assert_eq!(error.code, "DEP_VERSION_MUTABLE");
 }
 
 #[test]

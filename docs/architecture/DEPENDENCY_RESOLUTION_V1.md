@@ -162,9 +162,11 @@ limit before creating a claim or contacting a repository.
 
 `mcloving.secret-markers/v1` is closed JSON with one strictly sorted,
 duplicate-free `markers_hex` array. Entries are lowercase even-length hex for
-at least eight bytes. Every configured credential must occur as one exact
-decoded entry; repository headers and streamed bodies are checked against all
-decoded markers, including matches spanning response chunks.
+at least eight bytes. Every configured credential and the receipt HMAC key must
+occur as exact decoded entries; the receipt key must contain at least 256 bits
+of key material. Repository headers, streamed bodies, stdout, stderr, and
+durable receipts are checked against all decoded markers, including matches
+spanning response chunks.
 
 ## Resolution request
 

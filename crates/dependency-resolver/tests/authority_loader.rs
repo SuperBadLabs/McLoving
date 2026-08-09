@@ -28,12 +28,8 @@ impl Fixture {
         let credential = b"contained-repository-credential".to_vec();
         let attestation = vec![7_u8; 32];
         let ca = b"contained-private-ca".to_vec();
-        let receipt = b"contained-receipt-key".to_vec();
-        let marker = format!(
-            r#"{{"schema_version":"mcloving.secret-markers/v1","markers_hex":["{}"]}}"#,
-            hex(&credential)
-        )
-        .into_bytes();
+        let receipt = b"contained-receipt-key-material-v1".to_vec();
+        let marker = marker_document(&[&credential, &receipt]);
         let credential_path = authority_file(root.path(), "repository.credential", &credential);
         let attestation_path = authority_file(root.path(), "repository.pub", &attestation);
         let ca_path = authority_file(root.path(), "repository.ca", &ca);
@@ -139,7 +135,7 @@ fn exact_private_authorities_are_loaded_without_exposure() {
         loaded.repository_private_ca("contained-maven"),
         Some(fixture.ca.as_slice())
     );
-    assert_eq!(loaded.markers().count(), 1);
+    assert_eq!(loaded.markers().count(), 2);
 }
 
 #[test]
@@ -157,14 +153,34 @@ fn permissive_mode_symlink_and_missing_credential_marker_fail_closed() {
     let error = LoadedAuthorities::load(&fixture.config).expect_err("symlink");
     assert_eq!(error.code, "DEP_AUTHORITY_READ_FAILED");
 
-    let alternate_marker =
-        br#"{"schema_version":"mcloving.secret-markers/v1","markers_hex":["aaaaaaaaaaaaaaaa"]}"#;
-    write_private(&fixture.marker_path, alternate_marker);
-    fixture.config.secret_marker_set_sha256 = sha256(alternate_marker);
+    let alternate_marker = marker_document(&[&fixture.receipt]);
+    write_private(&fixture.marker_path, &alternate_marker);
+    fixture.config.secret_marker_set_sha256 = sha256(&alternate_marker);
     fs::remove_file(&fixture.credential_path).expect("remove symlink");
     fs::rename(target, &fixture.credential_path).expect("restore credential");
     let error = LoadedAuthorities::load(&fixture.config).expect_err("missing marker");
     assert_eq!(error.code, "DEP_AUTHORITY_CREDENTIAL_MARKER_MISSING");
+}
+
+#[test]
+fn receipt_key_strength_and_marker_membership_fail_closed() {
+    let mut fixture = Fixture::new();
+    let missing = marker_document(&[&fixture.credential]);
+    write_private(&fixture.marker_path, &missing);
+    fixture.config.secret_marker_set_sha256 = sha256(&missing);
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("missing receipt marker");
+    assert_eq!(error.code, "DEP_AUTHORITY_RECEIPT_MARKER_MISSING");
+
+    let mut fixture = Fixture::new();
+    let weak = b"weak-receipt-key";
+    let receipt_path = PathBuf::from(&fixture.config.receipt_key_path);
+    write_private(&receipt_path, weak);
+    fixture.config.receipt_key_sha256 = sha256(weak);
+    let markers = marker_document(&[&fixture.credential, weak]);
+    write_private(&fixture.marker_path, &markers);
+    fixture.config.secret_marker_set_sha256 = sha256(&markers);
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("weak receipt key");
+    assert_eq!(error.code, "DEP_AUTHORITY_RECEIPT_KEY_INVALID");
 }
 
 fn authority_file(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
@@ -184,6 +200,20 @@ fn sha256(bytes: &[u8]) -> String {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn marker_document(markers: &[&[u8]]) -> Vec<u8> {
+    let mut markers = markers.iter().map(|value| hex(value)).collect::<Vec<_>>();
+    markers.sort();
+    format!(
+        r#"{{"schema_version":"mcloving.secret-markers/v1","markers_hex":[{}]}}"#,
+        markers
+            .iter()
+            .map(|value| format!(r#""{value}""#))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+    .into_bytes()
 }
 
 fn path_string(path: &Path) -> String {

@@ -17,6 +17,7 @@ use crate::{CanonicalPlan, CertifiedConfig, LoadedAuthorities, PackageNode};
 const REPOSITORY_HEADER: &str = "x-mcloving-repository-id";
 const ATTESTATION_HEADER: &str = "x-mcloving-attestation";
 const GENERATION_HEADER: &str = "x-mcloving-publication-generation";
+const TRANSPORT_LOCK_CONTENT: &[u8] = b"mcloving-dependency-transport-lock/v1\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FetchedArtifact {
@@ -55,6 +56,7 @@ struct RepositoryRuntime {
 pub struct HttpTransport {
     generation: u64,
     max_header_bytes: u64,
+    max_artifact_bytes: u64,
     max_total_artifact_bytes: u64,
     transport_root: PathBuf,
     markers: Vec<Vec<u8>>,
@@ -147,6 +149,7 @@ impl HttpTransport {
         Ok(Self {
             generation: config.generation,
             max_header_bytes: config.limits.max_header_bytes,
+            max_artifact_bytes: config.limits.max_artifact_bytes,
             max_total_artifact_bytes: config.limits.max_total_artifact_bytes,
             transport_root: PathBuf::from(&config.transport_root),
             markers,
@@ -161,6 +164,21 @@ impl HttpTransport {
         plan: &CanonicalPlan,
         deadline: Instant,
     ) -> Result<Vec<FetchedArtifact>, TransportError> {
+        crate::validate_plan(plan)
+            .map_err(|error| TransportError::new(error.code, error.message))?;
+        let total = plan.nodes.iter().try_fold(0_u64, |total, node| {
+            if node.declared_size > self.max_artifact_bytes {
+                None
+            } else {
+                total.checked_add(node.declared_size)
+            }
+        });
+        if total.is_none_or(|total| total > self.max_total_artifact_bytes) {
+            return Err(TransportError::new(
+                "DEP_TRANSPORT_AGGREGATE_LIMIT",
+                "artifact plan exceeds a certified per-artifact or aggregate bound",
+            ));
+        }
         let resolution_root = self.transport_root.join(resolution_id.to_string());
         create_private_resolution_root(&resolution_root).await?;
         let result = self.fetch_plan_into(plan, deadline, &resolution_root).await;
@@ -331,6 +349,7 @@ impl HttpTransport {
         }
         run_before_deadline(deadline, file.sync_all()).await?;
         drop(file);
+        verify_transient_file(&transient_path, node.declared_size, &node.sha256, deadline).await?;
         Ok(FetchedArtifact {
             node_id: node.node_id.clone(),
             transient_path,
@@ -340,6 +359,76 @@ impl HttpTransport {
             publication_generation: self.generation,
         })
     }
+}
+
+#[cfg(unix)]
+async fn verify_transient_file(
+    path: &Path,
+    expected_size: u64,
+    expected_sha256: &str,
+    deadline: Instant,
+) -> Result<(), TransportError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use tokio::io::AsyncReadExt as _;
+
+    let mut options = tokio::fs::OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits());
+    let mut file = run_before_deadline(deadline, options.open(path)).await?;
+    let metadata = run_before_deadline(deadline, file.metadata()).await?;
+    if !metadata.is_file()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o777 != 0o600
+        || metadata.len() != expected_size
+    {
+        return Err(TransportError::new(
+            "DEP_TRANSPORT_CONTENT_MISMATCH",
+            "persisted transient artifact size, type, owner, or mode changed",
+        ));
+    }
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 65_536];
+    loop {
+        let read = run_before_deadline(deadline, file.read(&mut buffer)).await?;
+        if read == 0 {
+            break;
+        }
+        total = total.checked_add(read as u64).ok_or_else(|| {
+            TransportError::new(
+                "DEP_TRANSPORT_CONTENT_MISMATCH",
+                "persisted artifact size overflowed",
+            )
+        })?;
+        if total > expected_size {
+            return Err(TransportError::new(
+                "DEP_TRANSPORT_CONTENT_MISMATCH",
+                "persisted artifact exceeds its admitted size",
+            ));
+        }
+        hasher.update(&buffer[..read]);
+    }
+    if total != expected_size || format!("{:x}", hasher.finalize()) != expected_sha256 {
+        return Err(TransportError::new(
+            "DEP_TRANSPORT_CONTENT_MISMATCH",
+            "persisted transient artifact bytes changed after synchronization",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn verify_transient_file(
+    _path: &Path,
+    _expected_size: u64,
+    _expected_sha256: &str,
+    _deadline: Instant,
+) -> Result<(), TransportError> {
+    Err(TransportError::new(
+        "DEP_TRANSPORT_PLATFORM_UNSUPPORTED",
+        "transient verification requires Unix file semantics",
+    ))
 }
 
 fn validate_headers(
@@ -471,6 +560,7 @@ impl TransportLease {
         use nix::fcntl::{Flock, FlockArg};
         use nix::sys::statvfs::statvfs;
         use nix::unistd::Uid;
+        use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 
         let root = Path::new(&config.transport_root);
@@ -497,7 +587,7 @@ impl TransportLease {
         }
 
         let lock_path = root.join(".mcloving-dependency-resolver.lock");
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -507,6 +597,16 @@ impl TransportLease {
             )
             .open(lock_path)
             .map_err(|_| root_state_error())?;
+        let mut existing = Vec::new();
+        file.read_to_end(&mut existing)
+            .map_err(|_| root_state_error())?;
+        if existing.is_empty() {
+            file.seek(SeekFrom::Start(0))
+                .and_then(|_| file.write_all(TRANSPORT_LOCK_CONTENT))
+                .map_err(|_| root_state_error())?;
+        } else if existing != TRANSPORT_LOCK_CONTENT {
+            return Err(root_state_error());
+        }
         let metadata = file.metadata().map_err(|_| root_state_error())?;
         if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
             return Err(root_state_error());
@@ -658,12 +758,14 @@ mod tests {
         repository_header: String,
         generation: u64,
         corrupt_signature: bool,
+        delay: Duration,
     }
 
     async fn artifact(
         State(state): State<RepositoryState>,
         request: Request<Body>,
     ) -> Response<Body> {
+        tokio::time::sleep(state.delay).await;
         if request
             .headers()
             .get(AUTHORIZATION)
@@ -710,6 +812,27 @@ mod tests {
             repository_header: &str,
             corrupt_signature: bool,
         ) -> Self {
+            Self::with_response(
+                body.clone(),
+                body,
+                markers,
+                repository_header,
+                corrupt_signature,
+                Duration::ZERO,
+                7,
+            )
+            .await
+        }
+
+        async fn with_response(
+            expected_body: Vec<u8>,
+            response_body: Vec<u8>,
+            markers: Vec<Vec<u8>>,
+            repository_header: &str,
+            corrupt_signature: bool,
+            delay: Duration,
+            generation: u64,
+        ) -> Self {
             let key = Arc::new(
                 Ed25519KeyPair::from_seed_unchecked(&[9_u8; 32]).expect("contained Ed25519 key"),
             );
@@ -719,20 +842,21 @@ mod tests {
                 exact_version: "1.0.0".to_owned(),
                 repository_id: "contained-maven".to_owned(),
                 artifact_path: "com/example/app/1.0.0/app.jar".to_owned(),
-                declared_size: body.len() as u64,
-                sha256: format!("{:x}", Sha256::digest(&body)),
+                declared_size: expected_body.len() as u64,
+                sha256: format!("{:x}", Sha256::digest(&expected_body)),
                 attestation_key_id: Some("contained-key".to_owned()),
                 dependencies: Vec::new(),
             };
             node.node_id = canonical_node_id(Ecosystem::Maven, &node).expect("node id");
             let state = RepositoryState {
                 node: node.clone(),
-                body,
+                body: response_body,
                 key: Arc::clone(&key),
                 authorization: b"Bearer contained-credential".to_vec(),
                 repository_header: repository_header.to_owned(),
-                generation: 7,
+                generation,
                 corrupt_signature,
+                delay,
             };
             let app = Router::new()
                 .route("/repository/com/example/app/1.0.0/app.jar", get(artifact))
@@ -762,6 +886,7 @@ mod tests {
             let transport = HttpTransport {
                 generation: 7,
                 max_header_bytes: 16_384,
+                max_artifact_bytes: 1_048_576,
                 max_total_artifact_bytes: 1_048_576,
                 transport_root: root.path().to_path_buf(),
                 markers,
@@ -887,6 +1012,163 @@ mod tests {
             .await
             .expect_err("secret marker");
         assert_eq!(error.code, "DEP_TRANSPORT_SECRET_MARKER");
+    }
+
+    #[tokio::test]
+    async fn wrong_content_size_generation_key_missing_offline_and_timeout_fail_closed() {
+        let wrong_content = TransportFixture::with_response(
+            b"artifact".to_vec(),
+            b"artifacx".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+            Duration::ZERO,
+            7,
+        )
+        .await;
+        let error = wrong_content
+            .transport
+            .fetch_plan(
+                Uuid::new_v4(),
+                &wrong_content.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("content substitution");
+        assert_eq!(error.code, "DEP_TRANSPORT_CONTENT_MISMATCH");
+
+        let wrong_size = TransportFixture::with_response(
+            b"artifact".to_vec(),
+            b"artifact-extra".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+            Duration::ZERO,
+            7,
+        )
+        .await;
+        let error = wrong_size
+            .transport
+            .fetch_plan(
+                Uuid::new_v4(),
+                &wrong_size.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("size substitution");
+        assert_eq!(error.code, "DEP_TRANSPORT_HEADER_DENIED");
+
+        let stale = TransportFixture::with_response(
+            b"artifact".to_vec(),
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+            Duration::ZERO,
+            6,
+        )
+        .await;
+        let error = stale
+            .transport
+            .fetch_plan(
+                Uuid::new_v4(),
+                &stale.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("stale publication generation");
+        assert_eq!(error.code, "DEP_TRANSPORT_HEADER_DENIED");
+
+        let mut wrong_key = TransportFixture::new(
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+        )
+        .await;
+        wrong_key
+            .transport
+            .repositories
+            .get_mut("contained-maven")
+            .expect("repository runtime")
+            .attestation_key = Ed25519KeyPair::from_seed_unchecked(&[12_u8; 32])
+            .expect("wrong key")
+            .public_key()
+            .as_ref()
+            .to_vec();
+        let error = wrong_key
+            .transport
+            .fetch_plan(
+                Uuid::new_v4(),
+                &wrong_key.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("wrong attestation key");
+        assert_eq!(error.code, "DEP_TRANSPORT_ATTESTATION_INVALID");
+
+        let mut missing = TransportFixture::new(
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+        )
+        .await;
+        missing.plan.nodes[0].artifact_path = "missing/artifact.jar".to_owned();
+        missing.plan.nodes[0].node_id =
+            canonical_node_id(Ecosystem::Maven, &missing.plan.nodes[0]).expect("missing node id");
+        missing.plan.roots = vec![missing.plan.nodes[0].node_id.clone()];
+        missing.plan.graph_sha256 = canonical_graph_sha256(&missing.plan).expect("missing graph");
+        let error = missing
+            .transport
+            .fetch_plan(
+                Uuid::new_v4(),
+                &missing.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("missing artifact");
+        assert_eq!(error.code, "DEP_TRANSPORT_RESPONSE_DENIED");
+
+        let offline = TransportFixture::new(
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+        )
+        .await;
+        offline.server.abort();
+        let error = offline
+            .transport
+            .fetch_plan(
+                Uuid::new_v4(),
+                &offline.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("offline repository");
+        assert_eq!(error.code, "DEP_TRANSPORT_IO_FAILED");
+
+        let timeout = TransportFixture::with_response(
+            b"artifact".to_vec(),
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+            Duration::from_millis(100),
+            7,
+        )
+        .await;
+        let error = timeout
+            .transport
+            .fetch_plan(
+                Uuid::new_v4(),
+                &timeout.plan,
+                Instant::now() + Duration::from_millis(5),
+            )
+            .await
+            .expect_err("absolute timeout");
+        assert_eq!(error.code, "DEP_TRANSPORT_DEADLINE");
     }
 
     #[test]

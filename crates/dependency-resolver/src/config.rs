@@ -282,7 +282,8 @@ fn validate_repository_url(
             "repository base URL is invalid",
         )
     })?;
-    if !url.username().is_empty()
+    if url.as_str() != repository.base_url
+        || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
@@ -344,8 +345,10 @@ fn validate_prefixes(prefixes: &[String]) -> Result<(), ConfigError> {
 
 fn validate_private_root(name: &str, value: &str) -> Result<(), ConfigError> {
     let path = Path::new(value);
+    let normalized = path.components().collect::<std::path::PathBuf>();
     if value.len() > 4_096
         || !path.is_absolute()
+        || normalized.to_str() != Some(value)
         || path
             .components()
             .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
@@ -360,8 +363,10 @@ fn validate_private_root(name: &str, value: &str) -> Result<(), ConfigError> {
 
 fn validate_authority_path(name: &str, value: &str) -> Result<(), ConfigError> {
     let path = Path::new(value);
+    let normalized = path.components().collect::<std::path::PathBuf>();
     if value.len() > 4_096
         || !path.is_absolute()
+        || normalized.to_str() != Some(value)
         || value.ends_with('/')
         || path
             .components()

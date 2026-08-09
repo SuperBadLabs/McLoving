@@ -117,6 +117,15 @@ fn mutable_or_traversing_nodes_are_denied() {
         validate_plan(&plan).expect_err("traversal must fail").code,
         "DEP_ARTIFACT_PATH_INVALID"
     );
+
+    let mut plan = valid_plan();
+    plan.nodes[0].artifact_path = "%2e%2e/outside.jar".to_owned();
+    assert_eq!(
+        validate_plan(&plan)
+            .expect_err("encoded traversal must fail")
+            .code,
+        "DEP_ARTIFACT_PATH_INVALID"
+    );
 }
 
 #[test]
