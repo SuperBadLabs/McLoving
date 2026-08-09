@@ -693,6 +693,10 @@ impl ResolutionStore {
         self.deactivate(claim.resolution_id);
     }
 
+    pub(crate) fn release_completed_delivery(&self, resolution_id: Uuid) {
+        self.deactivate(resolution_id);
+    }
+
     fn finish_claim_directory_sync(
         &self,
         resolution_id: Uuid,
@@ -744,6 +748,21 @@ impl ResolutionStore {
         }
         remove_private_file(&path)?;
         sync_directory(&self.inner.root.join("ambiguities"))
+    }
+
+    pub(crate) fn acknowledge_receipt_delivery(
+        &self,
+        receipt: &ResolutionReceipt,
+    ) -> Result<(), StoreError> {
+        self.acknowledge_delivery(&ResolutionClaim {
+            schema_version: CLAIM_SCHEMA.to_owned(),
+            resolution_id: receipt.resolution_id,
+            request_sha256: receipt.request_sha256.clone(),
+            configuration_sha256: receipt.configuration_sha256.clone(),
+            graph_sha256: receipt.plan.graph_sha256.clone(),
+            generation: receipt.generation,
+            publication_deadline_unix_ms: receipt.publication_deadline_unix_ms,
+        })
     }
 
     fn ensure_exact_claim(&self, claim: &ResolutionClaim) -> Result<(), StoreError> {
@@ -800,6 +819,14 @@ impl ResolutionStore {
                 "only the resolver parent may delegate its output lock",
             )),
         }
+    }
+
+    pub(crate) fn serialized_output_is_marker_safe(&self, bytes: &[u8]) -> bool {
+        !self
+            .inner
+            .marker_set
+            .iter()
+            .any(|marker| contains_bytes(bytes, marker))
     }
 
     fn stage_publication(
@@ -2127,6 +2154,18 @@ mod tests {
             .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
             .expect_err("raw semantic secret marker");
         assert_eq!(error.code, "DEP_STORE_SECRET_MARKER_DETECTED");
+    }
+
+    #[test]
+    fn complete_serialized_error_envelope_is_marker_scanned() {
+        let fixture = Fixture::new();
+        let store =
+            fixture.store_with_markers(vec![fixture.receipt_key.clone(), b"dependency".to_vec()]);
+        let response = br#"{"status":"error","code":"DEP_REQUEST_INVALID","message":"dependency resolution was denied"}\n"#;
+        assert!(!store.serialized_output_is_marker_safe(response));
+        assert!(store.serialized_output_is_marker_safe(
+            br#"{"status":"error","code":"DEP_REQUEST_INVALID","message":"request denied"}\n"#
+        ));
     }
 
     #[test]

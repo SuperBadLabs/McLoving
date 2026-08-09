@@ -15,7 +15,7 @@ async fn main() {
         std::panic::set_hook(Box::new(|_| {}));
     }
     if let Err((code, message)) = run().await {
-        if !publication_worker {
+        if !publication_worker && code != "DEP_RESPONSE_SECRET_MARKER_DETECTED" {
             eprintln!("{code}: {message}");
         }
         std::process::exit(1);
@@ -63,6 +63,7 @@ async fn run() -> Result<(), (&'static str, &'static str)> {
             Err(FrameReadError::Oversized) => {
                 write_response(
                     &mut output,
+                    &resolver,
                     ResolverResponse::Error {
                         code: "DEP_REQUEST_FRAME_OVERSIZED",
                         message: "dependency resolution was denied",
@@ -79,13 +80,13 @@ async fn run() -> Result<(), (&'static str, &'static str)> {
             }
         };
         let response = match parse_resolution_frame(&frame) {
-            Ok(frame) => ResolverResponse::from(resolver.resolve_frame(frame).await),
+            Ok(frame) => ResolverResponse::from(resolver.resolve_frame_for_output(frame).await),
             Err(error) => ResolverResponse::Error {
                 code: error.code,
                 message: error.message,
             },
         };
-        write_response(&mut output, response, max_frame)?;
+        write_response(&mut output, &resolver, response, max_frame)?;
     }
     Ok(())
 }
@@ -119,6 +120,7 @@ fn run_worker() -> Result<(), (&'static str, &'static str)> {
 
 fn write_response<W: Write>(
     output: &mut W,
+    resolver: &DependencyResolver,
     response: ResolverResponse,
     max_frame: usize,
 ) -> Result<(), (&'static str, &'static str)> {
@@ -128,7 +130,8 @@ fn write_response<W: Write>(
             "dependency resolution was denied",
         )
     })?;
-    if bytes.len() > max_frame {
+    let oversized = bytes.len() > max_frame;
+    if oversized {
         bytes = serde_json::to_vec(&ResolverResponse::Error {
             code: "DEP_RESPONSE_FRAME_OVERSIZED",
             message: "dependency resolution was denied",
@@ -141,6 +144,9 @@ fn write_response<W: Write>(
         })?;
     }
     bytes.push(b'\n');
+    if !resolver.serialized_output_is_marker_safe(&bytes) {
+        return Err(("DEP_RESPONSE_SECRET_MARKER_DETECTED", "response suppressed"));
+    }
     output
         .write_all(&bytes)
         .and_then(|()| output.flush())
@@ -149,5 +155,9 @@ fn write_response<W: Write>(
                 "DEP_RESPONSE_STREAM_FAILED",
                 "dependency resolution was denied",
             )
-        })
+        })?;
+    if !oversized && let ResolverResponse::Ok { receipt } = &response {
+        resolver.acknowledge_response_delivery(receipt);
+    }
+    Ok(())
 }

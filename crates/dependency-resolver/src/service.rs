@@ -130,6 +130,15 @@ impl DependencyResolver {
         &self,
         frame: ResolutionFrame,
     ) -> Result<ResolutionReceipt, ResolverError> {
+        let receipt = self.resolve_frame_for_output(frame).await?;
+        self.acknowledge_response_delivery(&receipt);
+        Ok(receipt)
+    }
+
+    pub async fn resolve_frame_for_output(
+        &self,
+        frame: ResolutionFrame,
+    ) -> Result<ResolutionReceipt, ResolverError> {
         if self.store_poisoned.load(Ordering::Acquire) {
             return Err(ResolverError::denied(
                 "DEP_STORE_PARENT_IO_RESTART_REQUIRED",
@@ -231,6 +240,10 @@ impl DependencyResolver {
         }
     }
 
+    pub fn serialized_output_is_marker_safe(&self, bytes: &[u8]) -> bool {
+        self.store.serialized_output_is_marker_safe(bytes)
+    }
+
     async fn publish_supervised(
         &self,
         claim: &crate::ResolutionClaim,
@@ -321,8 +334,6 @@ impl DependencyResolver {
                 if receipt.resolution_id == claim.resolution_id
                     && receipt.request_sha256 == admitted.request_sha256 =>
             {
-                self.store.release_incomplete_claim(claim);
-                self.acknowledge_committed_delivery(claim, deadline).await;
                 Ok(*receipt)
             }
             PublicationWorkerResponse::Ok { .. } => {
@@ -341,20 +352,11 @@ impl DependencyResolver {
         self.transport.preserve_cleanup_ambiguity();
     }
 
-    async fn acknowledge_committed_delivery(
-        &self,
-        claim: &crate::ResolutionClaim,
-        deadline: Instant,
-    ) {
-        let store = self.store.clone();
-        let claim = claim.clone();
-        let task = tokio::task::spawn_blocking(move || store.acknowledge_delivery(&claim));
-        let acknowledged = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task)
-            .await
-            .is_ok_and(|result| result.is_ok_and(|result| result.is_ok()));
-        if !acknowledged {
+    pub fn acknowledge_response_delivery(&self, receipt: &ResolutionReceipt) {
+        if self.store.acknowledge_receipt_delivery(receipt).is_err() {
             self.store_poisoned.store(true, Ordering::Release);
         }
+        self.store.release_completed_delivery(receipt.resolution_id);
     }
 
     async fn run_store_operation<T, F>(

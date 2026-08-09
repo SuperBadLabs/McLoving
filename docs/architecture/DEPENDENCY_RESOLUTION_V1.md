@@ -171,7 +171,12 @@ at least eight bytes. Every configured credential and the receipt HMAC key must
 occur as exact decoded entries; the receipt key must contain at least 256 bits
 of key material. Repository headers, streamed bodies, stdout, stderr, and
 durable receipts are checked against all decoded markers, including matches
-spanning response chunks.
+spanning response chunks. Immediately before each external frame is written,
+the complete serialized success or error object plus its line terminator is
+scanned again so fixed protocol keys, status values, error codes, messages, and
+JSON punctuation cannot collide with a configured marker. A collision emits
+neither that frame nor a colliding stderr diagnostic and terminates the process
+fail-closed.
 
 ## Resolution request
 
@@ -288,12 +293,14 @@ receipt/completion pair and the absence of both a claim and a durable ambiguity
 record. A claim or ambiguity record always takes precedence as incomplete
 state. Every worker publication creates that ambiguity record before claim
 removal and retains it while the already verified bounded receipt is serialized,
-transmitted, and accepted by the parent. The parent then acknowledges delivery
-by removing and synchronizing the record; if acknowledgement is late or fails,
-it still returns the receipt already in hand, poisons further parent-store use,
-and leaves replay either safely completed or explicitly ambiguous rather than
-reporting a failure that can later replay as success. The parent performs no
-second fallible receipt read. A deadline crossing before completion withdraws
+transmitted to the parent, wrapped in the external response, scanned against
+every marker, and successfully flushed to stdout. Only after that external
+delivery does the parent acknowledge it by removing and synchronizing the
+record. If acknowledgement fails, the already delivered success remains the
+client truth, further parent-store use is poisoned, and replay remains either
+safely completed or explicitly ambiguous. If serialization, final marker
+scanning, or output fails, the record remains and blocks restart replay. The
+parent performs no second fallible receipt read. A deadline crossing before completion withdraws
 the receipt and bundle and retains or restores the durable claim for explicit
 reconciliation. If the final claim-directory sync is uncertain, the already
 synchronized ambiguity record remains while claim restoration and completion
