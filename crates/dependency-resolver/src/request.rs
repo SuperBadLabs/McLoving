@@ -313,6 +313,7 @@ fn validate_repository_binding(
                 )
             })?;
         if repository.ecosystem != plan.ecosystem
+            || node.attestation_key_id.as_deref() != Some(repository.attestation_key_id.as_str())
             || plan
                 .repositories
                 .iter()

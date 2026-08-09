@@ -6,6 +6,7 @@ mod plan;
 mod pypi_adapter;
 mod request;
 mod strict_json;
+mod transport;
 
 pub use adapter::{AdapterBindings, AdapterError, parse_maven_lock};
 pub use authority::{AuthorityError, LoadedAuthorities};
@@ -23,6 +24,7 @@ pub use pypi_adapter::parse_pypi_requirements;
 pub use request::{
     AdmittedRequest, GrantUse, RequestError, ResolutionRequest, admit_request, request_sha256,
 };
+pub use transport::{FetchedArtifact, HttpTransport, TransportError};
 
 pub const PROTOCOL_VERSION: &str = "mcloving.dependency-resolver/v1";
 pub const PLAN_SCHEMA_VERSION: &str = "mcloving.dependency-plan/v1";
