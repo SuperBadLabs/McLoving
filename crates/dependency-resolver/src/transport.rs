@@ -630,7 +630,7 @@ impl TransportLease {
         use nix::fcntl::{Flock, FlockArg};
         use nix::sys::statvfs::statvfs;
         use nix::unistd::Uid;
-        use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+        use std::io::{Seek as _, SeekFrom, Write as _};
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 
         let root = Path::new(&config.transport_root);
@@ -667,9 +667,7 @@ impl TransportLease {
             )
             .open(lock_path)
             .map_err(|_| root_state_error())?;
-        let mut existing = Vec::new();
-        file.read_to_end(&mut existing)
-            .map_err(|_| root_state_error())?;
+        let existing = read_transport_lock_bounded(&mut file)?;
         if existing.is_empty() {
             file.seek(SeekFrom::Start(0))
                 .and_then(|_| file.write_all(TRANSPORT_LOCK_CONTENT))
@@ -678,7 +676,10 @@ impl TransportLease {
             return Err(root_state_error());
         }
         let metadata = file.metadata().map_err(|_| root_state_error())?;
-        if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 {
+        if !metadata.is_file()
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.len() != TRANSPORT_LOCK_CONTENT.len() as u64
+        {
             return Err(root_state_error());
         }
         file.sync_all().map_err(|_| root_state_error())?;
@@ -712,6 +713,27 @@ impl TransportLease {
             "dedicated transport filesystem enforcement requires Linux",
         ))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_transport_lock_bounded(file: &mut std::fs::File) -> Result<Vec<u8>, TransportError> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+
+    let expected_len = TRANSPORT_LOCK_CONTENT.len();
+    let metadata = file.metadata().map_err(|_| root_state_error())?;
+    if metadata.len() > expected_len as u64 {
+        return Err(root_state_error());
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| root_state_error())?;
+    let mut existing = Vec::with_capacity(expected_len + 1);
+    file.take((expected_len + 1) as u64)
+        .read_to_end(&mut existing)
+        .map_err(|_| root_state_error())?;
+    if existing.len() > expected_len {
+        return Err(root_state_error());
+    }
+    Ok(existing)
 }
 
 fn root_policy_error() -> TransportError {
@@ -845,6 +867,27 @@ mod tests {
         CanonicalPlan, Ecosystem, PackageNode, RepositoryBinding, SourceTrustClass,
         canonical_graph_sha256, canonical_node_id,
     };
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sparse_transport_lock_is_rejected_before_unbounded_allocation() {
+        use std::io::Write as _;
+
+        let root = TempDir::new().expect("transport lock root");
+        let lock_path = root.path().join("transport.lock");
+        let mut lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(lock_path)
+            .expect("transport lock");
+        lock.write_all(TRANSPORT_LOCK_CONTENT)
+            .expect("valid transport lock");
+        lock.set_len(1_u64 << 40).expect("sparse transport lock");
+
+        let error = read_transport_lock_bounded(&mut lock).expect_err("oversized sparse lock");
+        assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
+    }
 
     #[derive(Clone)]
     struct RepositoryState {
