@@ -259,7 +259,7 @@ bytes. The verifier re-hashes the retained tree and refuses substituted,
 missing, extra, mutable, or late content.
 
 The private output layout contains `.mcloving-dependency-output.lock` plus
-mutable `claims/`, `receipts/`, and `bundles/` directories. Claims are durable
+mutable `claims/`, `receipts/`, `completions/`, and `bundles/` directories. Claims are durable
 mode-`0600` `mcloving.dependency-claim/v1` JSON. A unique mode-`0700` stage is
 populated with content-addressed artifacts, files are synchronized and sealed
 to `0400`, the artifacts directory is sealed to `0500`, and the stage is
@@ -267,9 +267,14 @@ renamed beneath `bundles/<resolution-id>`. The bundle root is sealed to `0500`
 before its parent entry is synchronized. `mcloving.dependency-manifest/v1`
 binds the exact node-to-content mapping. The retained-tree digest covers every
 relative path, mode, size, and content digest. Only then is a mode-`0400`
-`mcloving.dependency-receipt/v1` written and HMAC-SHA-256 signed. A deadline
-crossing withdraws the receipt and bundle and retains or restores the durable
-claim for explicit reconciliation.
+`mcloving.dependency-receipt/v1` written and HMAC-SHA-256 signed. A successful
+claim removal is followed by a mode-`0400`
+`mcloving.dependency-completion/v1` record binding the request and receipt HMAC.
+Replay requires an exact receipt/completion pair and the absence of a claim; a
+claim always takes precedence as incomplete state. A deadline crossing withdraws
+the receipt and bundle and retains or restores the durable claim for explicit
+reconciliation. If restoration fails, the absent completion record preserves
+the ambiguity instead of admitting replay.
 
 ## Required executable evidence
 

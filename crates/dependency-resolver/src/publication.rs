@@ -18,6 +18,7 @@ use crate::{
 
 type HmacSha256 = Hmac<Sha256>;
 const CLAIM_SCHEMA: &str = "mcloving.dependency-claim/v1";
+const COMPLETION_SCHEMA: &str = "mcloving.dependency-completion/v1";
 const MANIFEST_SCHEMA: &str = "mcloving.dependency-manifest/v1";
 const RECEIPT_SCHEMA: &str = "mcloving.dependency-receipt/v1";
 const MAX_STATE_BYTES: u64 = 16 * 1_048_576;
@@ -33,6 +34,15 @@ pub struct ResolutionClaim {
     pub graph_sha256: String,
     pub generation: u64,
     pub publication_deadline_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResolutionCompletion {
+    schema_version: String,
+    resolution_id: Uuid,
+    request_sha256: String,
+    receipt_hmac_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -288,10 +298,6 @@ impl ResolutionStore {
             }
             return Ok(ClaimOutcome::Concurrent(expected));
         }
-        if let Some(receipt) = self.load_receipt(resolution_id)? {
-            self.verify_replay(&receipt, &admitted.request_sha256)?;
-            return Ok(ClaimOutcome::Replay(Box::new(receipt)));
-        }
         if path_exists(&claim_path)? {
             let existing: ResolutionClaim = read_json(&claim_path, 0o600)?;
             if existing != expected {
@@ -304,6 +310,10 @@ impl ResolutionStore {
                 "DEP_STORE_AMBIGUOUS_CLAIM",
                 "matching incomplete claim requires explicit reconciliation",
             ));
+        }
+        if let Some(receipt) = self.load_receipt(resolution_id)? {
+            self.verify_replay(&receipt, &admitted.request_sha256)?;
+            return Ok(ClaimOutcome::Replay(Box::new(receipt)));
         }
         {
             let mut active = self.inner.active.lock().map_err(|_| state_error())?;
@@ -393,6 +403,9 @@ impl ResolutionStore {
             .contains(&resolution_id)
         {
             return Ok(ConcurrentClaimState::Active);
+        }
+        if path_exists(&self.claim_path(resolution_id))? {
+            return Ok(ConcurrentClaimState::InactiveIncomplete);
         }
         match self.load_receipt(resolution_id)? {
             Some(receipt) => {
@@ -640,6 +653,13 @@ impl ResolutionStore {
                 "late completion was withdrawn and its durable claim restored",
             ));
         }
+        let completion = ResolutionCompletion {
+            schema_version: COMPLETION_SCHEMA.to_owned(),
+            resolution_id,
+            request_sha256: receipt.request_sha256.clone(),
+            receipt_hmac_sha256: receipt.hmac_sha256.clone(),
+        };
+        write_new_json(&self.completion_path(resolution_id), &completion, 0o400)?;
         self.deactivate(resolution_id);
         self.verify_replay(&receipt, &admitted.request_sha256)?;
         Ok(receipt)
@@ -832,11 +852,38 @@ impl ResolutionStore {
     }
 
     fn load_receipt(&self, resolution_id: Uuid) -> Result<Option<ResolutionReceipt>, StoreError> {
-        let path = self.receipt_path(resolution_id);
-        if !path_exists(&path)? {
+        if path_exists(&self.claim_path(resolution_id))? {
+            return Err(StoreError::new(
+                "DEP_STORE_AMBIGUOUS_CLAIM",
+                "durable claim takes precedence over any apparent completion",
+            ));
+        }
+        let receipt_path = self.receipt_path(resolution_id);
+        let completion_path = self.completion_path(resolution_id);
+        let receipt_exists = path_exists(&receipt_path)?;
+        let completion_exists = path_exists(&completion_path)?;
+        if !receipt_exists && !completion_exists {
             return Ok(None);
         }
-        read_json(&path, 0o400).map(Some)
+        if !receipt_exists || !completion_exists {
+            return Err(StoreError::new(
+                "DEP_STORE_AMBIGUOUS_COMPLETION",
+                "receipt and durable completion record must exist together",
+            ));
+        }
+        let receipt: ResolutionReceipt = read_json(&receipt_path, 0o400)?;
+        let completion: ResolutionCompletion = read_json(&completion_path, 0o400)?;
+        if completion.schema_version != COMPLETION_SCHEMA
+            || completion.resolution_id != resolution_id
+            || completion.request_sha256 != receipt.request_sha256
+            || completion.receipt_hmac_sha256 != receipt.hmac_sha256
+        {
+            return Err(StoreError::new(
+                "DEP_STORE_RECEIPT_INVALID",
+                "durable completion record does not bind the exact receipt",
+            ));
+        }
+        Ok(Some(receipt))
     }
 
     fn claim_path(&self, resolution_id: Uuid) -> PathBuf {
@@ -850,6 +897,13 @@ impl ResolutionStore {
         self.inner
             .root
             .join("receipts")
+            .join(format!("{resolution_id}.json"))
+    }
+
+    fn completion_path(&self, resolution_id: Uuid) -> PathBuf {
+        self.inner
+            .root
+            .join("completions")
             .join(format!("{resolution_id}.json"))
     }
 
@@ -871,20 +925,35 @@ impl ResolutionStore {
         first: &T,
         second: &U,
     ) -> Result<(), StoreError> {
-        let first = serde_json::to_vec(first).map_err(|_| state_error())?;
-        let second = serde_json::to_vec(second).map_err(|_| state_error())?;
-        if self
-            .inner
-            .marker_set
-            .iter()
-            .any(|marker| contains_bytes(&first, marker) || contains_bytes(&second, marker))
-        {
+        let first_semantic = serde_json::to_value(first).map_err(|_| state_error())?;
+        let second_semantic = serde_json::to_value(second).map_err(|_| state_error())?;
+        let first = serde_json::to_vec(&first_semantic).map_err(|_| state_error())?;
+        let second = serde_json::to_vec(&second_semantic).map_err(|_| state_error())?;
+        if self.inner.marker_set.iter().any(|marker| {
+            contains_bytes(&first, marker)
+                || contains_bytes(&second, marker)
+                || semantic_value_contains_marker(&first_semantic, marker)
+                || semantic_value_contains_marker(&second_semantic, marker)
+        }) {
             return Err(StoreError::new(
                 "DEP_STORE_SECRET_MARKER_DETECTED",
                 "dependency resolution state contains a configured secret marker",
             ));
         }
         Ok(())
+    }
+}
+
+fn semantic_value_contains_marker(value: &serde_json::Value, marker: &[u8]) -> bool {
+    match value {
+        serde_json::Value::String(value) => contains_bytes(value.as_bytes(), marker),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| semantic_value_contains_marker(value, marker)),
+        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+            contains_bytes(key.as_bytes(), marker) || semantic_value_contains_marker(value, marker)
+        }),
+        _ => false,
     }
 }
 
@@ -1056,9 +1125,10 @@ fn prepare_layout(root: &Path) -> Result<(), StoreError> {
         LOCK_FILE.to_owned(),
         "bundles".to_owned(),
         "claims".to_owned(),
+        "completions".to_owned(),
         "receipts".to_owned(),
     ]);
-    for name in ["bundles", "claims", "receipts"] {
+    for name in ["bundles", "claims", "completions", "receipts"] {
         let path = root.join(name);
         if path_exists(&path)? {
             validate_directory(&path, 0o700)?;
@@ -1787,12 +1857,12 @@ mod tests {
         }
 
         fn store(&self) -> ResolutionStore {
-            ResolutionStore::open_inner(
-                &self.config,
-                &self.receipt_key,
-                vec![self.receipt_key.clone()],
-            )
-            .expect("resolution store")
+            self.store_with_markers(vec![self.receipt_key.clone()])
+        }
+
+        fn store_with_markers(&self, markers: Vec<Vec<u8>>) -> ResolutionStore {
+            ResolutionStore::open_inner(&self.config, &self.receipt_key, markers)
+                .expect("resolution store")
         }
     }
 
@@ -1839,6 +1909,7 @@ mod tests {
             )
             .expect("published receipt");
         assert!(!store.claim_path(claim.resolution_id).exists());
+        assert!(store.completion_path(claim.resolution_id).exists());
         let replay = store
             .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
             .expect("offline replay");
@@ -1913,6 +1984,61 @@ mod tests {
                 .is_none(),
             "secret-bearing request must not create a durable claim"
         );
+    }
+
+    #[test]
+    fn json_sensitive_secret_marker_is_denied_before_escaping() {
+        let mut fixture = Fixture::new();
+        let marker = b"contained-\"secret\\marker".to_vec();
+        fixture.request.audit_lineage =
+            String::from_utf8(marker.clone()).expect("UTF-8 semantic marker");
+        fixture.admitted.request_sha256 =
+            request_sha256(&fixture.request).expect("marked request digest");
+        let store = fixture.store_with_markers(vec![fixture.receipt_key.clone(), marker]);
+        let error = store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect_err("raw semantic secret marker");
+        assert_eq!(error.code, "DEP_STORE_SECRET_MARKER_DETECTED");
+    }
+
+    #[test]
+    fn claim_precedes_completion_and_completion_marker_is_required() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("completed publication");
+
+        write_new_json(&store.claim_path(claim.resolution_id), &claim, 0o600)
+            .expect("restored durable claim");
+        let error = store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect_err("claim must dominate completion");
+        assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_CLAIM");
+        remove_private_file(&store.claim_path(claim.resolution_id)).expect("remove test claim");
+        sync_directory(&store.inner.root.join("claims")).expect("sync test claim removal");
+
+        remove_private_file(&store.completion_path(claim.resolution_id))
+            .expect("remove completion record");
+        sync_directory(&store.inner.root.join("completions")).expect("sync completion removal");
+        let error = store
+            .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
+            .expect_err("receipt without completion");
+        assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_COMPLETION");
     }
 
     #[test]
