@@ -3,18 +3,20 @@
 Date: 2026-08-09
 
 Verdict: PASS for the implementation gate at exact implementation head
-`2503817be566259d9fc8d930418d5d608313094b`. All required protected workflows
+`5bce6f6f9370a37082775292ceb54ac473566888`. All required protected workflows
 completed cleanly
-across [Foundation run 31304691820](https://github.com/SuperBadLabs/McLoving/actions/runs/31304691820)
-and [Windows Agent run 31304691816](https://github.com/SuperBadLabs/McLoving/actions/runs/31304691816).
+across [Foundation run 31307845346](https://github.com/SuperBadLabs/McLoving/actions/runs/31307845346)
+and [Windows Agent run 31307845332](https://github.com/SuperBadLabs/McLoving/actions/runs/31307845332).
 The Windows impact classifier passed and intentionally skipped the Windows-agent
 job because the resolver diff did not enter the agent dependency closure. The
-focused gate passed seventy-one dependency-resolution tests: thirty-five unit
-tests, thirty-five ordinary integration tests, and one real exact-capacity
-tmpfs/HTTP/standalone-process test. Clean at [independent exact-head
-review](https://github.com/SuperBadLabs/McLoving/pull/35#issuecomment-5230710842),
-and every actionable implementation review thread was resolved only after its
-fix was pushed.
+focused gate passed seventy-two dependency-resolution tests: thirty-five unit
+tests, thirty-six ordinary integration tests, and one real exact-capacity
+tmpfs/HTTP/standalone-process test. Independent exact-head review found no
+further implementation defect after the embedded-authority repair and required
+this exact [receipt and board
+recertification](https://github.com/SuperBadLabs/McLoving/pull/35#discussion_r3743436969).
+Every actionable thread remains a merge gate until its exact fix evidence is
+pushed and independently checked.
 
 The later PR #35 closure candidate adds only this receipt and the execution-board
 transition from DEP-001 to CACHE-001. Its exact head must independently pass the
@@ -54,7 +56,9 @@ provenance evidence and is not substituted for live dependency authority.
 - componentwise no-follow authority loading that requires resolved, single-link
   regular files outside every mutable resolver root and a unique device/inode
   for each receipt key, marker set, repository credential, attestation key, and
-  private CA role, plus unique verified content digests across all roles;
+  private CA role, plus unique verified content digests across all roles and
+  bidirectional byte-containment separation across the receipt key and every
+  repository credential;
 - exact-path GET transport with redirects, ambient proxies, decompression,
   retries, credential helpers, and alternate origins disabled;
 - bounded response headers and streaming bodies verified for status, type,
@@ -97,8 +101,8 @@ The ordinary focused suite proves:
   attestation, and request-time binding;
 - private authority owner/mode/no-follow/digest policy, resolved separation from
   mutable roots, single-link, cross-role device/inode and content-digest
-  uniqueness, minimum receipt-key strength, and exact credential/receipt-key
-  marker membership;
+  uniqueness, secret-bearing-role content-overlap denial, minimum receipt-key
+  strength, and exact credential/receipt-key marker membership;
 - correct transport plus wrong mirror, content, size, signature, key, repository,
   generation, missing, offline, timeout, and cross-chunk marker denial;
 - claim-first concurrency, request substitution, restart ambiguity, exact replay,
@@ -131,7 +135,7 @@ journey, and the AppArmor-confined source suite.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired fifty
+Pre-closure review and repeated contained execution exposed and repaired fifty-two
 important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -290,6 +294,15 @@ important seams:
     one secret value to serve multiple roles despite different inodes. Authority
     loading now rejects reused verified content digests across every authority
     role, with a copied receipt-key-as-credential regression.
+51. A distinct repository credential could embed the receipt key while retaining
+    a different whole-file digest, allowing the repository to extract receipt
+    signing authority. Authority loading now rejects byte containment in either
+    direction across the receipt key and every credential, with an exact
+    `Bearer <receipt-key>` regression.
+52. The receipt and execution board still certified the implementation head from
+    before the embedded-authority repair. Both now bind the new implementation
+    head, its seventy-two focused tests, protected workflow runs, review evidence,
+    and complete hardening chronology.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -316,8 +329,11 @@ Closure review added four actionable findings: newline-inclusive response-frame
 admission, accurate fixed acknowledgement-timeout wording, and explicit
 classifier-pass/Windows-agent-skip evidence, plus copied authority values across
 roles. All forty-five actionable findings were addressed before merge.
-Each fix was pushed, replied to with
-exact-head evidence, and its thread was resolved before closure.
+The final implementation and closure review added two further actionable
+findings: embedded secret authority across roles and stale receipt/board
+certification after that repair. All forty-seven findings were addressed before
+merge. Each fix was pushed, replied to with exact-head evidence, and its thread
+was resolved before closure.
 
 One additional review thread predicted that exact-capacity transport pressure
 would return an I/O error rather than the asserted content-mismatch result. The
