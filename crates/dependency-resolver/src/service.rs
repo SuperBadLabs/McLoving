@@ -19,6 +19,7 @@ use crate::{
 };
 
 pub const MAX_PUBLICATION_WORKER_BYTES: usize = 16 * 1_048_576;
+const DELIVERY_ACK_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -131,7 +132,7 @@ impl DependencyResolver {
         frame: ResolutionFrame,
     ) -> Result<ResolutionReceipt, ResolverError> {
         let receipt = self.resolve_frame_for_output(frame).await?;
-        self.acknowledge_response_delivery(&receipt);
+        self.acknowledge_response_delivery(&receipt).await;
         Ok(receipt)
     }
 
@@ -352,11 +353,22 @@ impl DependencyResolver {
         self.transport.preserve_cleanup_ambiguity();
     }
 
-    pub fn acknowledge_response_delivery(&self, receipt: &ResolutionReceipt) {
-        if self.store.acknowledge_receipt_delivery(receipt).is_err() {
+    pub async fn acknowledge_response_delivery(&self, receipt: &ResolutionReceipt) {
+        if !self.store.delivery_ack_pending(receipt.resolution_id) {
+            return;
+        }
+        let resolution_id = receipt.resolution_id;
+        let store = self.store.clone();
+        let receipt = receipt.clone();
+        let task =
+            tokio::task::spawn_blocking(move || store.acknowledge_receipt_delivery(&receipt));
+        let acknowledged = tokio::time::timeout(DELIVERY_ACK_TIMEOUT, task)
+            .await
+            .is_ok_and(|result| result.is_ok_and(|result| result.is_ok()));
+        if !acknowledged {
             self.store_poisoned.store(true, Ordering::Release);
         }
-        self.store.release_completed_delivery(receipt.resolution_id);
+        self.store.release_completed_delivery(resolution_id);
     }
 
     async fn run_store_operation<T, F>(

@@ -175,8 +175,9 @@ spanning response chunks. Immediately before each external frame is written,
 the complete serialized success or error object plus its line terminator is
 scanned again so fixed protocol keys, status values, error codes, messages, and
 JSON punctuation cannot collide with a configured marker. A collision emits
-neither that frame nor a colliding stderr diagnostic and terminates the process
-fail-closed.
+neither that frame nor a stderr diagnostic and terminates the process
+fail-closed. Startup and fatal process errors are silent because no successfully
+loaded marker boundary is necessarily available to certify a diagnostic.
 
 ## Resolution request
 
@@ -300,7 +301,11 @@ record. If acknowledgement fails, the already delivered success remains the
 client truth, further parent-store use is poisoned, and replay remains either
 safely completed or explicitly ambiguous. If serialization, final marker
 scanning, or output fails, the record remains and blocks restart replay. The
-parent performs no second fallible receipt read. A deadline crossing before completion withdraws
+post-flush acknowledgement runs in a bounded blocking supervisor; timeout or
+failure poisons further parent-store use and retains explicit ambiguity. Replay
+and concurrent responses carry no active delivery ownership and therefore do
+not attempt to remove a blocker. The parent performs no second fallible receipt
+read. A deadline crossing before completion withdraws
 the receipt and bundle and retains or restores the durable claim for explicit
 reconciliation. If the final claim-directory sync is uncertain, the already
 synchronized ambiguity record remains while claim restoration and completion

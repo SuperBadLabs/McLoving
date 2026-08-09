@@ -14,10 +14,7 @@ async fn main() {
     if publication_worker {
         std::panic::set_hook(Box::new(|_| {}));
     }
-    if let Err((code, message)) = run().await {
-        if !publication_worker && code != "DEP_RESPONSE_SECRET_MARKER_DETECTED" {
-            eprintln!("{code}: {message}");
-        }
+    if run().await.is_err() {
         std::process::exit(1);
     }
 }
@@ -69,7 +66,8 @@ async fn run() -> Result<(), (&'static str, &'static str)> {
                         message: "dependency resolution was denied",
                     },
                     max_frame,
-                )?;
+                )
+                .await?;
                 continue;
             }
             Err(FrameReadError::Io) => {
@@ -86,7 +84,7 @@ async fn run() -> Result<(), (&'static str, &'static str)> {
                 message: error.message,
             },
         };
-        write_response(&mut output, &resolver, response, max_frame)?;
+        write_response(&mut output, &resolver, response, max_frame).await?;
     }
     Ok(())
 }
@@ -118,7 +116,7 @@ fn run_worker() -> Result<(), (&'static str, &'static str)> {
     })
 }
 
-fn write_response<W: Write>(
+async fn write_response<W: Write>(
     output: &mut W,
     resolver: &DependencyResolver,
     response: ResolverResponse,
@@ -157,7 +155,7 @@ fn write_response<W: Write>(
             )
         })?;
     if !oversized && let ResolverResponse::Ok { receipt } = &response {
-        resolver.acknowledge_response_delivery(receipt);
+        resolver.acknowledge_response_delivery(receipt).await;
     }
     Ok(())
 }

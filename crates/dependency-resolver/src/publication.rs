@@ -697,6 +697,13 @@ impl ResolutionStore {
         self.deactivate(resolution_id);
     }
 
+    pub(crate) fn delivery_ack_pending(&self, resolution_id: Uuid) -> bool {
+        self.inner
+            .active
+            .lock()
+            .is_ok_and(|active| active.contains(&resolution_id))
+    }
+
     fn finish_claim_directory_sync(
         &self,
         resolution_id: Uuid,
