@@ -721,7 +721,7 @@ fn read_transport_lock_bounded(file: &mut std::fs::File) -> Result<Vec<u8>, Tran
 
     let expected_len = TRANSPORT_LOCK_CONTENT.len();
     let metadata = file.metadata().map_err(|_| root_state_error())?;
-    if metadata.len() > expected_len as u64 {
+    if !metadata.is_file() || metadata.len() > expected_len as u64 {
         return Err(root_state_error());
     }
     file.seek(SeekFrom::Start(0))
@@ -887,6 +887,27 @@ mod tests {
 
         let error = read_transport_lock_bounded(&mut lock).expect_err("oversized sparse lock");
         assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fifo_transport_lock_is_rejected_before_blocking_read() {
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+
+        let root = TempDir::new().expect("transport lock root");
+        let lock_path = root.path().join("transport.lock");
+        mkfifo(&lock_path, Mode::S_IRUSR | Mode::S_IWUSR).expect("transport lock fifo");
+        let mut lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .expect("open transport lock fifo");
+
+        let started = Instant::now();
+        let error = read_transport_lock_bounded(&mut lock).expect_err("non-regular lock");
+        assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[derive(Clone)]
