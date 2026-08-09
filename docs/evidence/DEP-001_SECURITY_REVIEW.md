@@ -3,25 +3,27 @@
 Date: 2026-08-09
 
 Verdict: PASS for the implementation gate at exact implementation head
-`957db9d72718964b13dc9ace04210092f8b9f65f`. All required protected workflows
+`111df309ed6e850fdffc182010346f0344035f24`. All required protected workflows
 completed cleanly
-across [Foundation run 31315698436](https://github.com/SuperBadLabs/McLoving/actions/runs/31315698436)
-and [Windows Agent run 31315698439](https://github.com/SuperBadLabs/McLoving/actions/runs/31315698439).
+across [Foundation run 31321189124](https://github.com/SuperBadLabs/McLoving/actions/runs/31321189124)
+and [Windows Agent run 31321189123](https://github.com/SuperBadLabs/McLoving/actions/runs/31321189123).
 The Windows impact classifier passed and intentionally skipped the Windows-agent
 job because the resolver diff did not enter the agent dependency closure. The
-focused gate passed seventy-three dependency-resolution tests: thirty-six unit
-tests, thirty-six ordinary integration tests, and one real exact-capacity
+focused gate passed seventy-six dependency-resolution tests: thirty-eight unit
+tests, thirty-seven ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Independent exact-head review found no
-further implementation defect after the structured-credential, mixed-case hex,
-bounded-enumeration, and path-distinct bind-topology repairs and required the
-architecture contract to state the final [mixed-case hexadecimal
-boundary](https://github.com/SuperBadLabs/McLoving/pull/35#discussion_r3743942717).
+further implementation defect after implicit protocol-NACK retry denial, exact
+repository-use binding, bounded iterative retained-tree traversal, and iterative
+maximum-size graph validation; its only remaining finding required this exact
+implementation-head documentation recertification. The recertification thread
+remains a merge gate until this closure commit passes protected checks and a
+fresh complete-PR review.
 Every actionable thread remains a merge gate until its exact fix evidence is
 pushed and independently checked.
 
 The DEP-001-to-CACHE-001 execution-board transition entered PR #35 at
 `02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at exact
-implementation head `957db9d72718964b13dc9ace04210092f8b9f65f`. Closure
+implementation head `111df309ed6e850fdffc182010346f0344035f24`. Closure
 commits update this receipt and recertify those existing board rows; they
 do not introduce the transition. The complete PR #35 diff against protected
 `main` includes the resolver implementation, tests, protected workflow change,
@@ -71,7 +73,8 @@ provenance evidence and is not substituted for live dependency authority.
   and decoded views, matches hexadecimal ASCII-case-insensitively, and checks
   exact standard/URL-safe Base64 forms;
 - exact-path GET transport with redirects, ambient proxies, decompression,
-  retries, credential helpers, and alternate origins disabled;
+  credential helpers, alternate origins, and every explicit or client-library
+  implicit retry disabled, including HTTP/2 protocol-NACK retries;
 - bounded response headers and streaming bodies verified for status, type,
   repository, generation, length, SHA-256, Ed25519 attestation, and every
   independently configured credential or receipt-key marker;
@@ -89,6 +92,9 @@ provenance evidence and is not substituted for live dependency authority.
   constant-time verification, direct delivery of the worker-verified committed
   receipt, and durable ambiguity when rollback or post-commit delivery cannot
   be proven;
+- exact equality between the repository identities used by graph nodes and the
+  request repository/grant bindings, so unused repository or credential
+  authority cannot enter a signed resolution receipt;
 - exact offline replay that revalidates receipt HMAC, request and runtime
   bindings, manifest, owner/mode/type/size, content digests, ancestor topology,
   and the complete retained-tree digest without repository access; and
@@ -126,7 +132,11 @@ The ordinary focused suite proves:
 - standalone config mode/symlink/schema, bounded frame, static response, and
   sealed Mario zero-authority behavior, including stateful cross-frame marker
   denial, replay/convergence acknowledgement ownership, and silent startup,
-  fatal, and pre-runtime panic paths.
+  fatal, and pre-runtime panic paths;
+- retained-tree entry/depth limits checked before worklist insertion or descent,
+  including path-distinct traversal without recursive stack growth; and
+- a fully admitted 100,000-node linear graph using iterative reachability and
+  cycle validation without recursive stack growth.
 
 The protected contained journey uses the real standalone executable, a live
 credentialed HTTP Maven repository, Ed25519 attestations, and a disposable
@@ -379,6 +389,27 @@ important seams:
 67. The architecture contract described only canonical lower/uppercase hex after
     the implementation accepted arbitrary per-digit mixtures. It now states that
     hexadecimal containment is ASCII-case-insensitive for every mixed-case form.
+68. Reqwest's implicit HTTP/2 protocol-NACK retry policy remained enabled even
+    though explicit application retries were absent. Both production and
+    contained repository clients now install `reqwest::retry::never()` so one
+    credential-bearing request maps to at most one transport attempt.
+69. A request could bind a configured and granted repository that no graph node
+    used, placing unnecessary credential authority into the signed receipt. Plan
+    admission now requires exact set equality between distinct node repository
+    identities and request repository bindings before grant validation.
+70. Retained-tree verification could recurse without a depth ceiling and queue
+    more work than its entry limit before denial. It now uses a path-distinct
+    iterative FIFO, counts the one-millionth-entry boundary before insertion,
+    and enforces depth 4,096 before descent.
+71. Graph reachability and cycle validation recursed once per node even though
+    the signed node ceiling is 100,000. It now uses an iterative enter/exit color
+    worklist, with a full 100,000-node linear-graph regression.
+72. The receipt, architecture contract, and both board views still certified the
+    pre-repair implementation head and its obsolete test, run, finding, and seam
+    totals. They now bind exact implementation head
+    `111df309ed6e850fdffc182010346f0344035f24`, seventy-six focused tests, the
+    current protected runs, sixty-seven actionable findings, and seventy-two
+    important seams.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -428,8 +459,15 @@ explicit Basic-decoding architecture contract. A further review added arbitrary
 mixed-case hexadecimal matching and path-distinct bind-topology traversal. Final
 exact-head implementation review found no further implementation defect and
 required the architecture to state the mixed-case guarantee. All sixty-two
-actionable findings were addressed before merge. Each fix was pushed, replied to
-with exact-head evidence, and its thread was resolved before closure.
+actionable findings were addressed. A final thread-aware audit then recovered two
+older unresolved implementation findings: client-library protocol-NACK retries
+and unused repository/grant authority. The next exact-head review found unbounded
+recursive retained-tree and graph validation. After those four repairs, fresh
+exact-head review found no implementation defect and required only documentation
+recertification. This recertification is the sixty-seventh actionable finding
+across seventy-two important reviewed seams; every fixed thread must be replied
+to and resolved only after the complete closure head passes protected checks and
+fresh review.
 
 One additional review thread predicted that exact-capacity transport pressure
 would return an I/O error rather than the asserted content-mismatch result. The

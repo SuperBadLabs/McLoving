@@ -90,6 +90,12 @@ noncanonical order, graph limits, traversal, absolute paths, URL syntax in an
 artifact path, and mutable versions are denied before credential or network
 access.
 
+Reachability and cycle validation use an iterative enter/exit color worklist,
+not process-stack recursion, and are proven at the signed 100,000-node maximum.
+The distinct repository identities named by graph nodes must exactly equal the
+request repository bindings; an unused repository or grant is denied before
+claim creation or network access.
+
 The canonical graph is the stable compatibility seam. Ecosystem-specific
 source syntax does not leak into transport or receipt verification.
 
@@ -151,7 +157,9 @@ The canonical configuration digest binds:
 Production repositories require HTTPS, no URL user information, query, or
 fragment, and a content-pinned private CA. Redirects, ambient proxies, host
 credential helpers, `.netrc`, alternate registries, content decompression,
-and client-library retries are disabled. Cleartext loopback fixtures require
+and client-library retries are disabled. Credential-bearing repository clients
+explicitly install `reqwest::retry::never()`, including for implicit HTTP/2
+protocol-NACK handling. Cleartext loopback fixtures require
 both configuration admission and `MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE=1`.
 
 Configuration, credential, signing-key, marker, public-key, CA, lock, claim,
@@ -167,9 +175,11 @@ compared with a non-symlink-following walk of the canonical output and transport
 trees. Every encountered directory mount path is enumerated independently
 through a FIFO worklist, without device/inode path collapsing, and each entry is
 counted before worklist insertion. That combined walk is bounded at one million
-entries and fails closed on an unreadable entry or exceeded bound, preventing an
-authority file, ancestor, or path-distinct child mount from reappearing through
-a hard link or bind mount beneath either mutable root. The receipt key and every
+entries, enforces depth 4,096 before descent, uses no recursive process-stack
+traversal, and fails closed on an unreadable entry or exceeded bound. This
+prevents an authority file, ancestor, or path-distinct child mount from
+reappearing through a hard link or bind mount beneath either mutable root. The
+receipt key and every
 repository credential are also separated by first trimming HTTP optional
 whitespace and expanding a case-insensitive `Basic` authorization value through
 padded or unpadded standard-Base64 decoding. Bidirectional containment then
@@ -211,7 +221,9 @@ Frames are capped at 1 MiB before JSON allocation. Unknown fields, recursively
 duplicate JSON members, control-bearing identities, invalid UUIDs/digests,
 untrusted-source use of a private or credentialed repository, expired grants,
 stale/future generations, and a rollback that is not strictly older fail before
-claim creation or network access.
+claim creation or network access. The repository identities bound by the request
+must exactly equal the distinct repository identities used by graph nodes; no
+unused repository or associated grant may enter a claim or receipt.
 
 ## Repository and credential policy
 
