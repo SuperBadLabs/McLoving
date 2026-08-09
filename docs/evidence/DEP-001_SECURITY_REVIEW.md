@@ -3,25 +3,27 @@
 Date: 2026-08-09
 
 Verdict: PASS for the implementation gate at exact implementation head
-`5bce6f6f9370a37082775292ceb54ac473566888`. All required protected workflows
+`f346fd68c0b2161fa335c3630b808d8243f78c88`. All required protected workflows
 completed cleanly
-across [Foundation run 31307845346](https://github.com/SuperBadLabs/McLoving/actions/runs/31307845346)
-and [Windows Agent run 31307845332](https://github.com/SuperBadLabs/McLoving/actions/runs/31307845332).
+across [Foundation run 31313080381](https://github.com/SuperBadLabs/McLoving/actions/runs/31313080381)
+and [Windows Agent run 31313080376](https://github.com/SuperBadLabs/McLoving/actions/runs/31313080376).
 The Windows impact classifier passed and intentionally skipped the Windows-agent
 job because the resolver diff did not enter the agent dependency closure. The
 focused gate passed seventy-two dependency-resolution tests: thirty-five unit
 tests, thirty-six ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Independent exact-head review found no
-further implementation defect after the embedded-authority repair and required
-this exact [receipt and board
-recertification](https://github.com/SuperBadLabs/McLoving/pull/35#discussion_r3743436969).
+further implementation defect after the encoded-authority and bind-mount repairs
+and required this exact [receipt and board
+recertification](https://github.com/SuperBadLabs/McLoving/pull/35#discussion_r3743772208)
+plus an accurate [architecture-boundary
+description](https://github.com/SuperBadLabs/McLoving/pull/35#discussion_r3743772212).
 Every actionable thread remains a merge gate until its exact fix evidence is
 pushed and independently checked.
 
 The DEP-001-to-CACHE-001 execution-board transition entered PR #35 at
 `02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at exact
-implementation head `5bce6f6f9370a37082775292ceb54ac473566888`. The later
-closure commits update this receipt and recertify those existing board rows; they
+implementation head `f346fd68c0b2161fa335c3630b808d8243f78c88`. Closure
+commits update this receipt and recertify those existing board rows; they
 do not introduce the transition. The complete PR #35 diff against protected
 `main` includes the resolver implementation, tests, protected workflow change,
 architecture documentation, receipt, board transition, and recertification. The
@@ -61,9 +63,11 @@ provenance evidence and is not substituted for live dependency authority.
 - componentwise no-follow authority loading that requires resolved, single-link
   regular files outside every mutable resolver root and a unique device/inode
   for each receipt key, marker set, repository credential, attestation key, and
-  private CA role, plus unique verified content digests across all roles and
-  bidirectional byte-containment separation across the receipt key and every
-  repository credential;
+  private CA role, plus unique verified content digests across all roles; every
+  opened authority-path component identity is compared with bounded,
+  non-symlink-following scans of the mutable roots, and bidirectional
+  secret-role containment checks cover raw receipt-key/credential bytes plus
+  canonical lower/uppercase hex and standard/URL-safe Base64 forms;
 - exact-path GET transport with redirects, ambient proxies, decompression,
   retries, credential helpers, and alternate origins disabled;
 - bounded response headers and streaming bodies verified for status, type,
@@ -106,8 +110,9 @@ The ordinary focused suite proves:
   attestation, and request-time binding;
 - private authority owner/mode/no-follow/digest policy, resolved separation from
   mutable roots, single-link, cross-role device/inode and content-digest
-  uniqueness, secret-bearing-role content-overlap denial, minimum receipt-key
-  strength, and exact credential/receipt-key marker membership;
+  uniqueness, raw and encoded secret-bearing-role content-overlap denial,
+  minimum receipt-key strength, and exact credential/receipt-key marker
+  membership;
 - correct transport plus wrong mirror, content, size, signature, key, repository,
   generation, missing, offline, timeout, and cross-chunk marker denial;
 - claim-first concurrency, request substitution, restart ambiguity, exact replay,
@@ -124,12 +129,13 @@ The ordinary focused suite proves:
 The protected contained journey uses the real standalone executable, a live
 credentialed HTTP Maven repository, Ed25519 attestations, and a disposable
 `nosuid,nodev,noexec` tmpfs whose measured capacity is written into the certified
-configuration. It proves two concurrent identical requests converge on one GET;
-an exact-capacity artifact fails closed and cleans up; wrong-graph and untrusted
-requests cause zero GETs; a valid request publishes; a later exact version under
-the same resolution identity is denied offline; restart with the repository
-offline returns byte-equivalent JSON; and neither the repository credential nor
-receipt key appears in stdout, stderr, or the receipt.
+configuration. It proves a real bind-mounted alias from the mutable receipt tree
+is rejected by filesystem identity; two concurrent identical requests converge
+on one GET; an exact-capacity artifact fails closed and cleans up; wrong-graph
+and untrusted requests cause zero GETs; a valid request publishes; a later exact
+version under the same resolution identity is denied offline; restart with the
+repository offline returns byte-equivalent JSON; and neither the repository
+credential nor receipt key appears in stdout, stderr, or the receipt.
 
 The exact implementation head also passes strict resolver Clippy, formatting,
 `git diff --check`, the complete locked non-source workspace, and the complete
@@ -140,7 +146,7 @@ journey, and the AppArmor-confined source suite.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired fifty-five
+Pre-closure review and repeated contained execution exposed and repaired fifty-nine
 important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -321,6 +327,24 @@ important seams:
     pre-containment implementation head and its obsolete test, finding, and seam
     totals after the authoritative ticket row was recertified. Both board views
     now bind the same post-repair implementation evidence.
+56. A repository credential could losslessly encode the receipt key as hex or
+    Base64 and evade raw-byte containment, allowing the repository to recover
+    receipt-signing authority. Secret-role separation now denies canonical
+    lower/uppercase hex and standard/URL-safe Base64 forms, padded and unpadded,
+    in both containment directions.
+57. An alternate bind mount could place an authority filesystem identity beneath
+    a mutable resolver root while preserving an apparently separate canonical
+    pathname and single link. Every opened authority-path component identity is
+    now compared with bounded, non-symlink-following scans of both mutable trees,
+    and a real bind-mount regression requires fail-closed denial.
+58. The receipt and both execution-board views still certified the implementation
+    head from before the encoded-authority and bind-mount repairs. All three now
+    bind the repaired exact head, its focused tests, protected runs, review
+    evidence, and complete finding chronology.
+59. The architecture contract attributed mutable-root identity separation solely
+    to the single-link invariant, which cannot exclude bind mounts. It now records
+    the opened-path identity comparison, both mutable-tree scans, their combined
+    one-million-entry bound, and fail-closed scan behavior.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -357,8 +381,14 @@ transition preceded the post-implementation closure commits, which only
 recertified the existing rows. All forty-nine findings were addressed before
 merge. Final review found one additional actionable drift: the duplicate
 Dependencies lane still carried the pre-repair certification. All fifty findings
-were addressed before merge. Each fix was pushed, replied to with exact-head
-evidence, and its thread was resolved before closure.
+were addressed before merge. A subsequent exact-head review added two
+implementation findings: reversible encoded receipt-key forms and bind-mounted
+mutable-root aliases. Both were repaired and independently re-reviewed without a
+further implementation defect. That review added two documentation closure
+findings: re-certification of the new implementation evidence and an accurate
+architecture description of the identity scan. All fifty-four actionable
+findings were addressed before merge. Each fix was pushed, replied to with
+exact-head evidence, and its thread was resolved before closure.
 
 One additional review thread predicted that exact-capacity transport pressure
 would return an I/O error rather than the asserted content-mismatch result. The
