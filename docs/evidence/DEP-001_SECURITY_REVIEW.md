@@ -3,18 +3,19 @@
 Date: 2026-08-09
 
 Verdict: PASS for the implementation gate at exact implementation head
-`60fd72f8bb6c0c4f737dbb080660741c33f651e8`. All required protected workflows
+`d0901a1dfe987321d2088ab4d4897e156262fa57`. All required protected workflows
 completed cleanly
-across [Foundation run 31323895327](https://github.com/SuperBadLabs/McLoving/actions/runs/31323895327)
-and [Windows Agent run 31323895329](https://github.com/SuperBadLabs/McLoving/actions/runs/31323895329).
+across [Foundation run 31327583362](https://github.com/SuperBadLabs/McLoving/actions/runs/31327583362)
+and [Windows Agent run 31327583365](https://github.com/SuperBadLabs/McLoving/actions/runs/31327583365).
 The Windows impact classifier passed and intentionally skipped the Windows-agent
 job because the resolver diff did not enter the agent dependency closure. The
-focused gate passed seventy-eight dependency-resolution tests: forty unit
-tests, thirty-seven ordinary integration tests, and one real exact-capacity
+focused gate passed eighty-three dependency-resolution tests: forty-one unit
+tests, forty-one ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Independent exact-head review found no
-further implementation defect after bounded sparse transport-lock inspection
-and pre-read non-regular-file denial; its only remaining finding required this
-exact implementation-head documentation recertification. The recertification
+further implementation defect after authenticated source-provenance admission
+and path-only/nonblocking configuration, authority, and transport-lock
+inspection; its sole new finding required this exact implementation-head
+documentation recertification. The recertification
 threads remain merge gates until this closure commit passes protected checks and
 a fresh complete-PR review.
 Every actionable thread remains a merge gate until its exact fix evidence is
@@ -22,7 +23,7 @@ pushed and independently checked.
 
 The DEP-001-to-CACHE-001 execution-board transition entered PR #35 at
 `02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at exact
-implementation head `60fd72f8bb6c0c4f737dbb080660741c33f651e8`. Closure
+implementation head `d0901a1dfe987321d2088ab4d4897e156262fa57`. Closure
 commits update this receipt and recertify those existing board rows; they
 do not introduce the transition. The complete PR #35 diff against protected
 `main` includes the resolver implementation, tests, protected workflow change,
@@ -60,11 +61,22 @@ provenance evidence and is not substituted for live dependency authority.
   credential grants, private CA and Ed25519 key digests, generation/rollback
   lineage, resource ceilings, and one absolute nanosecond-preserving monotonic
   request/publication deadline;
+- a dedicated Ed25519 source-provenance authority whose certified identity,
+  path, and content digest are loaded through the same private no-follow
+  boundary as every other authority; its canonical signature covers the
+  complete request, including trust class, acquisition receipt, source tree,
+  lock path/digest, scope, graph, repositories, configuration/generation, and
+  lifetime, before a claim or credentialed repository policy can be reached;
 - componentwise no-follow authority loading that requires resolved, single-link
   regular files outside every mutable resolver root and a unique device/inode
   for each receipt key, marker set, repository credential, attestation key, and
   private CA role, plus unique verified content digests across all roles; every
-  opened authority-path component identity is compared with bounded,
+  final authority path is pinned with `O_PATH|O_NOFOLLOW`, rejected unless
+  regular before data open, reopened only from `/proc/self/fd` with
+  `O_NONBLOCK`, and device/inode rechecked; certified configuration and
+  executable reads use the same pinned-inode pattern, with single-link policy
+  also enforced for configuration; every opened authority-path component
+  identity is compared with bounded,
   non-symlink-following, path-distinct FIFO scans of the mutable roots whose
   entries are counted before worklist insertion; bidirectional secret-role
   containment trims HTTP optional whitespace, expands case-insensitive Basic
@@ -80,11 +92,14 @@ provenance evidence and is not substituted for live dependency authority.
 - a canonical private resolver-owned Linux transport mount whose exact block
   capacity equals the aggregate ceiling, differs from parent/output devices,
   is exclusively locked, and denies residual state before claims or requests;
-  lock inspection requires a regular descriptor before seeking or reading,
-  rejects logical metadata length beyond the exact constant before allocation,
-  caps the read at that length plus one, and rechecks exact post-write length so
-  sparse files, FIFOs, devices, growth races, and other substituted state fail
-  closed without blocking or unbounded allocation;
+  existing lock inspection first pins the path with `O_PATH|O_NOFOLLOW`, rejects
+  non-regular type, owner, link, or mode before device open behavior, reopens
+  only the pinned inode through `/proc/self/fd` with `O_NONBLOCK`, and rechecks
+  identity; logical metadata length is rejected beyond the exact constant
+  before allocation, reads are capped at that length plus one, and owner, link,
+  mode, length, and directory-entry identity are rechecked after initialization
+  so sparse files, FIFOs, devices, replacements, growth races, and other
+  substituted state fail closed without blocking or unbounded allocation;
 - durable first-writer claims, in-process concurrent convergence, explicit
   restart ambiguity, transport-path-bound verified inputs, private staging,
   synchronized read-only content, atomic no-overwrite publication, and
@@ -120,15 +135,22 @@ The ordinary focused suite proves:
 - exact configuration, UUID, lock, source, adapter, toolchain, repository,
   coordinate prefix, trust, credential grant, generation, rollback, graph,
   attestation, and request-time binding;
+- canonical source-provenance signature, public-key digest, authority identity,
+  lifetime, trust-class, acquisition-receipt, source-tree, lock, and tenant
+  scope binding before repository policy;
 - private authority owner/mode/no-follow/digest policy, resolved separation from
   mutable roots, single-link, cross-role device/inode and content-digest
   uniqueness, raw, structured-Basic, mixed-case-hex, and Base64
   secret-bearing-role content-overlap denial, minimum receipt-key strength, and
   exact credential/receipt-key marker membership;
+- prompt real-FIFO and device denial before data-open behavior for certified
+  configuration and every authority role, including pinned-inode identity
+  revalidation;
 - correct transport plus wrong mirror, content, size, signature, key, repository,
   generation, missing, offline, timeout, and cross-chunk marker denial;
-- sparse oversized and FIFO transport-lock denial before unbounded allocation or
-  blocking reads, plus exact lock-length verification after initialization;
+- sparse oversized, FIFO, and real-device transport-lock denial before
+  unbounded allocation, blocking reads, or device open behavior, plus exact
+  lock-length and identity verification after initialization;
 - claim-first concurrency, request substitution, restart ambiguity, exact replay,
   generation cutover, explicit rollback lineage, late withdrawal, foreign
   transient-path denial, retained-tree substitution, receipt-HMAC tampering,
@@ -139,6 +161,7 @@ The ordinary focused suite proves:
   sealed Mario zero-authority behavior, including stateful cross-frame marker
   denial, replay/convergence acknowledgement ownership, and silent startup,
   fatal, and pre-runtime panic paths;
+- standalone configuration FIFO/device denial before blocking startup open;
 - retained-tree entry/depth limits checked before worklist insertion or descent,
   including path-distinct traversal without recursive stack growth; and
 - a focused 100,000-node linear-graph regression that directly exercises
@@ -151,6 +174,8 @@ configuration. It proves a real bind-mounted alias from the mutable receipt tree
 is rejected by filesystem identity; a self-bind of the mutable root with an
 authority directory mounted only beneath that alias is independently traversed
 and rejected; two concurrent identical requests converge on one GET; an
+untrusted request signed by the source authority and then forged to `Trusted`
+is denied by provenance verification with zero repository GETs; an
 exact-capacity artifact fails closed and cleans up; wrong-graph and untrusted
 requests cause zero GETs; a valid request publishes; a later exact version under
 the same resolution identity is denied offline; restart with the repository
@@ -164,10 +189,17 @@ AppArmor profile on HeMan. Foundation CI independently repeats strict workspace
 Clippy, the complete non-source workspace, the real dependency contained
 journey, and the AppArmor-confined source suite.
 
+Foundation run 31327583362 completed on unchanged-head attempt 2. Attempt 1's
+only failures were three unrelated provisioner timing assertions under shared
+runner load; the exact three tests immediately passed individually on HeMan in
+0.15, 0.07, and 0.31 seconds, and the unchanged rerun then passed the complete
+provisioner and Foundation gates. No DEP-001 code or evidence claim changed in
+response to that runner-only failure.
+
 ## Review-driven hardening
 
 Pre-closure review and repeated contained execution exposed and repaired
-seventy-four actionable findings across seventy-nine important seams:
+seventy-nine actionable findings across eighty-four important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
    read-only mode. JSON state now becomes visible only through a fully written,
@@ -449,6 +481,36 @@ seventy-four actionable findings across seventy-nine important seams:
     `60fd72f8bb6c0c4f737dbb080660741c33f651e8`, seventy-eight focused tests,
     current protected runs, seventy-four actionable findings, and seventy-nine
     important seams.
+80. A caller-controlled `source_trust_class` was copied into the canonical plan,
+    while the acquisition receipt was only syntax-checked. A forged `Trusted`
+    request could therefore reach credentialed repository policy. A dedicated,
+    digest-pinned Ed25519 source-provenance authority now signs the complete
+    request and admission verifies the key digest and signature before claim or
+    credentialed policy; field-substitution tests and the contained zero-GET
+    regression cover the full trust/source/receipt/lock/scope binding.
+81. Transport lock type validation still followed an ordinary potentially
+    blocking `open(2)`, so a substituted device could block before the regular
+    file check outside the request deadline. Existing paths are now inspected
+    through `O_PATH|O_NOFOLLOW`, reopened only from the pinned regular inode with
+    `O_NONBLOCK`, and identity-rechecked; real FIFO and `/dev/null` regressions
+    prove prompt denial.
+82. Authority final components still used blocking `O_RDONLY` before regular
+    file validation, so a substituted FIFO or device could stall synchronous
+    startup. Componentwise ancestor traversal remains no-follow, while the final
+    component is now path-only pinned, type-checked, reopened nonblocking from
+    its pinned identity, and device/inode rechecked; full-loader FIFO/device
+    regressions prove prompt denial.
+83. Certified configuration loading had the same ordinary-open-before-type-check
+    gap. Configuration and executable reads now share a path-only/no-follow,
+    nonblocking pinned-inode helper with identity revalidation, configuration
+    additionally requires one link, and real FIFO/device configuration tests
+    prove prompt startup denial.
+84. After the authority/configuration startup repairs, the receipt and both board
+    rows still deliberately certified predecessor `60fd72f8...` while exact-head
+    gates and review ran. They now bind implementation head
+    `d0901a1dfe987321d2088ab4d4897e156262fa57`, eighty-three focused tests, the
+    current protected runs, and the complete seventy-nine-finding/eighty-four-seam
+    chronology.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -514,6 +576,15 @@ first bounded repair exposed a pre-read FIFO type gap and a deliberately deferre
 recertification; fresh review of the FIFO-safe head found no implementation
 defect and required only final recertification. Those four findings bring the
 audit to seventy-four actionable findings across seventy-nine important seams;
+complete-PR review of that recertification then found the unauthenticated source
+trust assertion and potentially blocking device open. Their exact-head repairs
+bring the audit to seventy-six actionable findings across eighty-one important
+seams; fresh review then found the same open-before-type-check pattern in
+authority and configuration loading. Their pinned-inode repairs bring the audit
+to seventy-eight actionable findings across eighty-three important seams; the
+only subsequent finding was this exact-head receipt and board recertification,
+bringing the closure audit to seventy-nine actionable findings across
+eighty-four important seams;
 every fixed thread must be replied to and resolved only after the complete
 closure head passes protected checks and fresh review.
 
@@ -526,7 +597,8 @@ execution evidence rather than an unsupported code change.
 
 ## Residual risk and authority boundary
 
-The repository operator, grant issuer, resolver operator and host, private CA,
+The source-provenance signer that verifies SCM acquisition evidence, repository
+operator, grant issuer, resolver operator and host, private CA, repository
 attestation signer, configuration authority, secret-marker collector, and
 receipt-signing key remain trusted within their declared scopes. The resolver
 and receipt verifier share signing authority, so their collusion can forge
