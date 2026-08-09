@@ -175,11 +175,10 @@ compared with a non-symlink-following walk of the canonical output and transport
 trees. Every encountered directory mount path is enumerated independently
 through a FIFO worklist, without device/inode path collapsing, and each entry is
 counted before worklist insertion. That combined walk is bounded at one million
-entries, enforces depth 4,096 before descent, uses no recursive process-stack
-traversal, and fails closed on an unreadable entry or exceeded bound. This
-prevents an authority file, ancestor, or path-distinct child mount from
-reappearing through a hard link or bind mount beneath either mutable root. The
-receipt key and every
+entries, uses no recursive process-stack traversal, and fails closed on an
+unreadable entry or exceeded bound. This prevents an authority file, ancestor,
+or path-distinct child mount from reappearing through a hard link or bind mount
+beneath either mutable root. The receipt key and every
 repository credential are also separated by first trimming HTTP optional
 whitespace and expanding a case-insensitive `Basic` authorization value through
 padded or unpadded standard-Base64 decoding. Bidirectional containment then
@@ -283,6 +282,9 @@ Verified artifacts are copied from transport into a unique private staging
 directory using content-addressed filenames, synchronized, made immutable, and
 published by atomic no-overwrite rename below the output root. The complete
 retained tree and every ancestor mode/owner/inode are verified before success.
+That retained-tree verification uses an iterative path-distinct FIFO, enforces
+its one-million-entry bound before worklist insertion, and enforces depth 4,096
+before descent; it does not recurse on the process stack.
 Late publication is withdrawn. Ambiguous cleanup or publication state is
 retained and reported rather than guessed.
 

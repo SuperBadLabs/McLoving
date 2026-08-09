@@ -135,8 +135,8 @@ The ordinary focused suite proves:
   fatal, and pre-runtime panic paths;
 - retained-tree entry/depth limits checked before worklist insertion or descent,
   including path-distinct traversal without recursive stack growth; and
-- a fully admitted 100,000-node linear graph using iterative reachability and
-  cycle validation without recursive stack growth.
+- a focused 100,000-node linear-graph regression that directly exercises
+  iterative reachability and cycle validation without recursive stack growth.
 
 The protected contained journey uses the real standalone executable, a live
 credentialed HTTP Maven repository, Ed25519 attestations, and a disposable
@@ -160,8 +160,8 @@ journey, and the AppArmor-confined source suite.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired sixty-seven
-important seams:
+Pre-closure review and repeated contained execution exposed and repaired seventy
+actionable findings across seventy-five important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
    read-only mode. JSON state now becomes visible only through a fully written,
@@ -406,10 +406,22 @@ important seams:
     worklist, with a full 100,000-node linear-graph regression.
 72. The receipt, architecture contract, and both board views still certified the
     pre-repair implementation head and its obsolete test, run, finding, and seam
-    totals. They now bind exact implementation head
+    totals. The first closure head bound exact implementation head
     `111df309ed6e850fdffc182010346f0344035f24`, seventy-six focused tests, the
     current protected runs, sixty-seven actionable findings, and seventy-two
-    important seams.
+    important seams; exact closure review then exposed the three documentation
+    defects below.
+73. The receipt called the 100,000-node linear-graph regression fully admitted,
+    but the test directly exercises only the private iterative reachability and
+    cycle validator. The evidence now states that focused scope without implying
+    full plan or request admission.
+74. The hardening heading still claimed sixty-seven seams while the numbered
+    chronology already ended at seventy-two. It now distinguishes seventy
+    actionable findings across the complete seventy-five-seam chronology.
+75. The architecture contract attributed depth 4,096 to the mutable-root
+    authority scan, which is bounded by entries but does not track depth. The
+    depth guarantee now appears only on the iterative retained-tree verifier
+    that enforces it before descent.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -465,9 +477,12 @@ and unused repository/grant authority. The next exact-head review found unbounde
 recursive retained-tree and graph validation. After those four repairs, fresh
 exact-head review found no implementation defect and required only documentation
 recertification. This recertification is the sixty-seventh actionable finding
-across seventy-two important reviewed seams; every fixed thread must be replied
-to and resolved only after the complete closure head passes protected checks and
-fresh review.
+across seventy-two important reviewed seams. Exact closure review then corrected
+the maximum-graph test scope, the chronology heading, and the location of the
+retained-tree depth guarantee. Those three documentation findings bring the
+final audit to seventy actionable findings across seventy-five important seams;
+every fixed thread must be replied to and resolved only after the complete
+closure head passes protected checks and fresh review.
 
 One additional review thread predicted that exact-capacity transport pressure
 would return an I/O error rather than the asserted content-mismatch result. The
