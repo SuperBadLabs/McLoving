@@ -3,13 +3,16 @@
 Date: 2026-08-09
 
 Verdict: PASS for the implementation gate at exact implementation head
-`2809377a5132cdd385b87a647bec02848ee01305`. All nine protected checks passed
-across [Foundation run 31299617628](https://github.com/SuperBadLabs/McLoving/actions/runs/31299617628)
-and [Windows Agent run 31299617591](https://github.com/SuperBadLabs/McLoving/actions/runs/31299617591).
-The focused gate passed sixty-nine dependency-resolution tests: thirty-four unit
-tests, thirty-four ordinary integration tests, and one real exact-capacity
+`2503817be566259d9fc8d930418d5d608313094b`. All required protected workflows
+completed cleanly
+across [Foundation run 31304691820](https://github.com/SuperBadLabs/McLoving/actions/runs/31304691820)
+and [Windows Agent run 31304691816](https://github.com/SuperBadLabs/McLoving/actions/runs/31304691816).
+The Windows impact classifier passed and intentionally skipped the Windows-agent
+job because the resolver diff did not enter the agent dependency closure. The
+focused gate passed seventy-one dependency-resolution tests: thirty-five unit
+tests, thirty-five ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Clean at [independent exact-head
-review](https://github.com/SuperBadLabs/McLoving/pull/35#issuecomment-5230243150),
+review](https://github.com/SuperBadLabs/McLoving/pull/35#issuecomment-5230710842),
 and every actionable implementation review thread was resolved only after its
 fix was pushed.
 
@@ -51,7 +54,7 @@ provenance evidence and is not substituted for live dependency authority.
 - componentwise no-follow authority loading that requires resolved, single-link
   regular files outside every mutable resolver root and a unique device/inode
   for each receipt key, marker set, repository credential, attestation key, and
-  private CA role;
+  private CA role, plus unique verified content digests across all roles;
 - exact-path GET transport with redirects, ambient proxies, decompression,
   retries, credential helpers, and alternate origins disabled;
 - bounded response headers and streaming bodies verified for status, type,
@@ -93,8 +96,9 @@ The ordinary focused suite proves:
   coordinate prefix, trust, credential grant, generation, rollback, graph,
   attestation, and request-time binding;
 - private authority owner/mode/no-follow/digest policy, resolved separation from
-  mutable roots, single-link and cross-role device/inode uniqueness, minimum
-  receipt-key strength, and exact credential/receipt-key marker membership;
+  mutable roots, single-link, cross-role device/inode and content-digest
+  uniqueness, minimum receipt-key strength, and exact credential/receipt-key
+  marker membership;
 - correct transport plus wrong mirror, content, size, signature, key, repository,
   generation, missing, offline, timeout, and cross-chunk marker denial;
 - claim-first concurrency, request substitution, restart ambiguity, exact replay,
@@ -127,7 +131,7 @@ journey, and the AppArmor-confined source suite.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired forty-eight
+Pre-closure review and repeated contained execution exposed and repaired fifty
 important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -264,8 +268,8 @@ important seams:
     earlier request. Only the request that creates new completion may clear its
     delivery blocker after a successful flush.
 43. Post-flush acknowledgement could block the NDJSON loop without a deadline.
-    Acknowledgement is now bounded by the request deadline and poisons parent-store
-    service on uncertainty.
+    Acknowledgement is now bounded by a fixed one-second timeout and poisons
+    parent-store service on uncertainty.
 44. Startup or fatal diagnostics could disclose a configured marker on stderr.
     The standalone process now fails those paths silently.
 45. Distinct authority roles could alias one underlying inode despite different
@@ -279,6 +283,13 @@ important seams:
     frame against the preceding emitted stream, and it advances that suffix only
     after a frame is admitted so rejected bytes never perturb the emitted-stream
     model.
+49. Response admission bounded the serialized JSON object but emitted its newline
+    afterward. Both conservative pre-claim sizing and final output admission now
+    include the line terminator, with an exact-boundary regression.
+50. Distinct single-link authority files could contain identical bytes, allowing
+    one secret value to serve multiple roles despite different inodes. Authority
+    loading now rejects reused verified content digests across every authority
+    role, with a copied receipt-key-as-credential regression.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -301,6 +312,10 @@ ownership, bounded post-flush acknowledgement, silent startup and fatal
 diagnostics, cross-role authority inode-alias denial, parent panic silence,
 pre-runtime panic silence, and cross-frame marker state. Together the forty-one
 findings were fixed and independently re-reviewed at exact implementation heads.
+Closure review added four actionable findings: newline-inclusive response-frame
+admission, accurate fixed acknowledgement-timeout wording, and explicit
+classifier-pass/Windows-agent-skip evidence, plus copied authority values across
+roles. All forty-five actionable findings were addressed before merge.
 Each fix was pushed, replied to with
 exact-head evidence, and its thread was resolved before closure.
 
