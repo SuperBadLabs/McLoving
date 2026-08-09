@@ -286,6 +286,15 @@ fn one_secret_authority_cannot_be_embedded_in_another_role() {
                 ))
                 .as_bytes(),
         ),
+        prefixed(
+            b" \tBasic ",
+            STANDARD
+                .encode(prefixed(
+                    b"repository-user:",
+                    b"contained-receipt-key-material-v1",
+                ))
+                .as_bytes(),
+        ),
     ] {
         let mut fixture = Fixture::new();
         write_private(&fixture.credential_path, &embedded_receipt);

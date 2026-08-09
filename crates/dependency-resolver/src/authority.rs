@@ -245,6 +245,7 @@ fn structured_secret_views(value: &[u8]) -> Vec<Vec<u8>> {
 }
 
 fn decode_basic_credential(value: &[u8]) -> Option<Vec<u8>> {
+    let value = trim_http_ows(value);
     let separator = value.iter().position(|byte| byte.is_ascii_whitespace())?;
     if !value[..separator].eq_ignore_ascii_case(b"basic") {
         return None;
@@ -264,6 +265,18 @@ fn decode_basic_credential(value: &[u8]) -> Option<Vec<u8>> {
         .decode(token)
         .or_else(|_| STANDARD_NO_PAD.decode(token))
         .ok()
+}
+
+fn trim_http_ows(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t'))
+        .map_or(start, |index| index + 1);
+    &value[start..end]
 }
 
 fn canonical_secret_representations(value: &[u8]) -> Vec<Vec<u8>> {
