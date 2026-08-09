@@ -1229,7 +1229,7 @@ fn hex_nibble(value: u8) -> Option<u8> {
 fn acquire_output_lock(root: &Path) -> Result<OutputLock, StoreError> {
     use nix::fcntl::{Flock, FlockArg};
     use nix::unistd::Uid;
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
     let canonical = std::fs::canonicalize(root).map_err(|_| state_error())?;
     let metadata = std::fs::symlink_metadata(root).map_err(|_| state_error())?;
@@ -1243,14 +1243,7 @@ fn acquire_output_lock(root: &Path) -> Result<OutputLock, StoreError> {
             "output root must be canonical, private, resolver-owned, and non-symlink",
         ));
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .mode(0o600)
-        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits())
-        .open(root.join(LOCK_FILE))
-        .map_err(|_| state_error())?;
+    let file = open_output_lock(&root.join(LOCK_FILE))?;
     file.sync_all().map_err(|_| state_error())?;
     sync_directory(root)?;
     Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|_| {
@@ -1259,6 +1252,79 @@ fn acquire_output_lock(root: &Path) -> Result<OutputLock, StoreError> {
             "another resolver owns the output root",
         )
     })
+}
+
+#[cfg(target_os = "linux")]
+fn open_output_lock(path: &Path) -> Result<File, StoreError> {
+    use nix::fcntl::OFlag;
+    use std::io::ErrorKind;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            // Inspect the directory entry without invoking a FIFO or device
+            // driver's potentially blocking read-write open operation.
+            let inspection = OpenOptions::new()
+                .read(true)
+                .custom_flags((OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW).bits())
+                .open(path)
+                .map_err(|_| state_error())?;
+            let inspected = inspection.metadata().map_err(|_| state_error())?;
+            if !private_output_lock_metadata(&inspected) {
+                return Err(state_error());
+            }
+
+            // Reopen the exact inspected inode, retaining O_NONBLOCK as a
+            // second boundary, rather than reopening the mutable pathname.
+            let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+                .open(pinned_path)
+                .map_err(|_| state_error())?;
+            let opened = file.metadata().map_err(|_| state_error())?;
+            if !private_output_lock_metadata(&opened)
+                || opened.dev() != inspected.dev()
+                || opened.ino() != inspected.ino()
+            {
+                return Err(state_error());
+            }
+            file
+        }
+        Err(_) => return Err(state_error()),
+    };
+
+    let opened = file.metadata().map_err(|_| state_error())?;
+    let linked = std::fs::symlink_metadata(path).map_err(|_| state_error())?;
+    if !private_output_lock_metadata(&opened)
+        || !private_output_lock_metadata(&linked)
+        || opened.dev() != linked.dev()
+        || opened.ino() != linked.ino()
+    {
+        return Err(state_error());
+    }
+    Ok(file)
+}
+
+#[cfg(target_os = "linux")]
+fn private_output_lock_metadata(metadata: &std::fs::Metadata) -> bool {
+    use nix::unistd::Uid;
+    use std::os::unix::fs::MetadataExt as _;
+
+    metadata.is_file()
+        && metadata.uid() == Uid::effective().as_raw()
+        && metadata.nlink() == 1
+        && metadata.mode() & 0o777 == 0o600
 }
 
 #[cfg(target_os = "linux")]
@@ -2127,6 +2193,29 @@ mod tests {
             (actual.dev(), actual.ino()),
             (expected.dev(), expected.ino())
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fifo_output_lock_is_rejected_before_blocking_open() {
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+        use std::time::Duration;
+
+        let fixture = Fixture::new();
+        let lock_path = PathBuf::from(&fixture.config.output_root).join(LOCK_FILE);
+        mkfifo(&lock_path, Mode::S_IRUSR | Mode::S_IWUSR).expect("output lock fifo");
+        let started = Instant::now();
+        let error = match ResolutionStore::open_inner(
+            &fixture.config,
+            &fixture.receipt_key,
+            vec![fixture.receipt_key.clone()],
+        ) {
+            Ok(_) => panic!("non-regular output lock was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "DEP_STORE_STATE_UNAVAILABLE");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

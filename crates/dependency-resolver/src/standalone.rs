@@ -58,10 +58,11 @@ pub fn load_certified_config(path: &Path) -> Result<CertifiedConfig, ResolverErr
 }
 
 pub fn verify_running_executable(config: &CertifiedConfig) -> Result<(), ResolverError> {
-    let path = std::env::current_exe()
-        .and_then(std::fs::canonicalize)
-        .map_err(|_| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?;
-    verify_executable_path(config, &path)
+    let digest = hash_running_executable(MAX_EXECUTABLE_BYTES)?;
+    if digest != config.executable_sha256 {
+        return Err(ResolverError::denied("DEP_EXECUTABLE_IDENTITY_MISMATCH"));
+    }
+    Ok(())
 }
 
 pub(crate) fn verify_executable_path(
@@ -145,31 +146,56 @@ fn read_private_config(_path: &Path) -> Result<Vec<u8>, ResolverError> {
 
 #[cfg(target_os = "linux")]
 fn hash_regular_file(path: &Path, max_bytes: u64) -> Result<String, ResolverError> {
-    let mut file = open_pinned_regular(path, "DEP_EXECUTABLE_IDENTITY_INVALID")?;
-    let metadata = file
-        .metadata()
+    let file = open_pinned_regular(path, "DEP_EXECUTABLE_IDENTITY_INVALID")?;
+    hash_open_regular(file, max_bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn hash_running_executable(max_bytes: u64) -> Result<String, ResolverError> {
+    use nix::fcntl::OFlag;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    // /proc/self/exe is a kernel-owned reference to the executable inode that
+    // created this process. Opening it directly keeps that inode pinned even
+    // if the deployment pathname is atomically replaced while we are running.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+        .open("/proc/self/exe")
         .map_err(|_| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?;
+    hash_open_regular(file, max_bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn hash_open_regular(mut file: File, max_bytes: u64) -> Result<String, ResolverError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let denied = || ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID");
+    let metadata = file.metadata().map_err(|_| denied())?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > max_bytes {
-        return Err(ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"));
+        return Err(denied());
     }
     let mut hasher = Sha256::new();
     let mut total = 0_u64;
     let mut buffer = [0_u8; 65_536];
     loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|_| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?;
+        let read = file.read(&mut buffer).map_err(|_| denied())?;
         if read == 0 {
             break;
         }
         total = total
             .checked_add(read as u64)
             .filter(|total| *total <= max_bytes)
-            .ok_or_else(|| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?;
+            .ok_or_else(&denied)?;
         hasher.update(&buffer[..read]);
     }
-    if total != metadata.len() {
-        return Err(ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"));
+    let after = file.metadata().map_err(|_| denied())?;
+    if total != metadata.len()
+        || after.dev() != metadata.dev()
+        || after.ino() != metadata.ino()
+        || after.len() != metadata.len()
+    {
+        return Err(denied());
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
@@ -208,6 +234,11 @@ fn hash_regular_file(_path: &Path, _max_bytes: u64) -> Result<String, ResolverEr
     Err(ResolverError::denied("DEP_CONFIG_PLATFORM_UNSUPPORTED"))
 }
 
+#[cfg(not(target_os = "linux"))]
+fn hash_running_executable(_max_bytes: u64) -> Result<String, ResolverError> {
+    Err(ResolverError::denied("DEP_CONFIG_PLATFORM_UNSUPPORTED"))
+}
+
 fn read_bounded(file: File, max_bytes: u64) -> Result<Vec<u8>, ResolverError> {
     let metadata = file
         .metadata()
@@ -227,6 +258,25 @@ mod tests {
     use std::io::Cursor;
 
     use super::{FrameReadError, read_bounded_frame, serialized_response_fits_frame};
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn running_executable_hash_is_bound_to_the_proc_inode() {
+        use super::{MAX_EXECUTABLE_BYTES, hash_open_regular, hash_running_executable};
+        use nix::fcntl::OFlag;
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let proc_inode = OpenOptions::new()
+            .read(true)
+            .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+            .open("/proc/self/exe")
+            .expect("running executable inode");
+        assert_eq!(
+            hash_running_executable(MAX_EXECUTABLE_BYTES).expect("running executable digest"),
+            hash_open_regular(proc_inode, MAX_EXECUTABLE_BYTES).expect("pinned inode digest")
+        );
+    }
 
     #[test]
     fn frame_cap_is_enforced_before_unbounded_allocation_and_reader_recovers() {
