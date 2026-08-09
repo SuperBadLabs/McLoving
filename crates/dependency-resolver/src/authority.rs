@@ -326,13 +326,14 @@ fn validate_metadata(metadata: &std::fs::Metadata, max_bytes: u64) -> Result<(),
 
     if !metadata.file_type().is_file()
         || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.nlink() != 1
         || metadata.mode() & 0o077 != 0
         || metadata.len() == 0
         || metadata.len() > max_bytes
     {
         return Err(AuthorityError::new(
             "DEP_AUTHORITY_FILE_POLICY_DENIED",
-            "authority file type, owner, mode, or size violates policy",
+            "authority file type, owner, link count, mode, or size violates policy",
         ));
     }
     Ok(())

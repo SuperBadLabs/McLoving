@@ -159,9 +159,11 @@ receipt, and retained-manifest reads are bounded regular-file reads. Authority
 paths are resolved against the actual output and transport roots, and authority
 files are opened component by component relative to already opened directory
 descriptors so neither an ancestor nor final symlink is followed. Authority
-files must be owned by the effective resolver UID with no group or other
-permission bits. Construction validates every authority and limit before
-creating a claim or contacting a repository.
+files must be owned by the effective resolver UID, have exactly one filesystem
+link, and have no group or other permission bits. The single-link invariant
+prevents the same authority inode from also appearing inside a mutable resolver
+root. Construction validates every authority and limit before creating a claim
+or contacting a repository.
 
 `mcloving.secret-markers/v1` is closed JSON with one strictly sorted,
 duplicate-free `markers_hex` array. Entries are lowercase even-length hex for

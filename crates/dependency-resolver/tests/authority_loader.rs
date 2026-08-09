@@ -199,6 +199,21 @@ fn authority_ancestor_symlink_into_mutable_root_fails_closed() {
     assert_eq!(error.code, "DEP_CONFIG_AUTHORITY_ROOT_OVERLAP");
 }
 
+#[test]
+fn authority_hard_link_inside_mutable_root_fails_closed() {
+    let fixture = Fixture::new();
+    let mutable_receipts = PathBuf::from(&fixture.config.output_root).join("receipts");
+    fs::create_dir(&mutable_receipts).expect("mutable receipts directory");
+    fs::hard_link(
+        &fixture.config.receipt_key_path,
+        mutable_receipts.join("exposed-receipt.key"),
+    )
+    .expect("hard-linked authority alias");
+
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("multi-linked authority");
+    assert_eq!(error.code, "DEP_AUTHORITY_FILE_POLICY_DENIED");
+}
+
 fn authority_file(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let path = root.join(name);
     write_private(&path, bytes);
