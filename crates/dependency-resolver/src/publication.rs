@@ -315,7 +315,10 @@ impl ResolutionStore {
             self.deactivate(resolution_id);
             return Err(error);
         }
-        sync_directory(&self.inner.root.join("claims"))?;
+        self.finish_claim_directory_sync(
+            resolution_id,
+            sync_directory(&self.inner.root.join("claims")),
+        )?;
         Ok(ClaimOutcome::New(expected))
     }
 
@@ -613,8 +616,7 @@ impl ResolutionStore {
         self.deny_secret_markers(&receipt, &())?;
         let receipt_path = self.receipt_path(resolution_id);
         if let Err(error) = write_new_json(&receipt_path, &receipt, 0o400) {
-            remove_private_tree(&bundle_path)?;
-            sync_directory(&self.inner.root.join("bundles"))?;
+            self.withdraw_failed_receipt_publication(&receipt_path, &bundle_path)?;
             return Err(error);
         }
         sync_directory(&self.inner.root.join("receipts"))?;
@@ -650,6 +652,30 @@ impl ResolutionStore {
 
     pub fn release_incomplete_claim(&self, claim: &ResolutionClaim) {
         self.deactivate(claim.resolution_id);
+    }
+
+    fn finish_claim_directory_sync(
+        &self,
+        resolution_id: Uuid,
+        result: Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        if result.is_err() {
+            self.deactivate(resolution_id);
+        }
+        result
+    }
+
+    fn withdraw_failed_receipt_publication(
+        &self,
+        receipt_path: &Path,
+        bundle_path: &Path,
+    ) -> Result<(), StoreError> {
+        if receipt_path.exists() {
+            remove_private_file(receipt_path)?;
+            sync_directory(&self.inner.root.join("receipts"))?;
+        }
+        remove_private_tree(bundle_path)?;
+        sync_directory(&self.inner.root.join("bundles"))
     }
 
     pub(crate) fn publication_lock_file(&self) -> Result<File, StoreError> {
@@ -1901,6 +1927,59 @@ mod tests {
         assert_eq!(error.code, "DEP_RESPONSE_FRAME_OVERSIZED");
         let resolution_id = Uuid::parse_str(&fixture.request.resolution_id).expect("resolution ID");
         assert!(!store.claim_path(resolution_id).exists());
+    }
+
+    #[test]
+    fn final_claim_sync_error_deactivates_the_owner() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let error = store
+            .finish_claim_directory_sync(claim.resolution_id, Err(state_error()))
+            .expect_err("final claim sync error");
+        assert_eq!(error.code, "DEP_STORE_STATE_UNAVAILABLE");
+        assert!(matches!(
+            store
+                .concurrent_claim_state(claim.resolution_id, &fixture.admitted.request_sha256)
+                .expect("inactive incomplete claim"),
+            ConcurrentClaimState::InactiveIncomplete
+        ));
+    }
+
+    #[test]
+    fn receipt_is_removed_before_a_failed_publication_bundle() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("published receipt");
+        let receipt_path = store.receipt_path(claim.resolution_id);
+        let bundle_path = store.bundle_path(claim.resolution_id);
+        store
+            .withdraw_failed_receipt_publication(&receipt_path, &bundle_path)
+            .expect("paired withdrawal");
+        assert!(!receipt_path.exists());
+        assert!(!bundle_path.exists());
     }
 
     #[test]
