@@ -264,6 +264,13 @@ lock and residual-state denial occur before claim creation. Kernel `ENOSPC`
 therefore prevents transient allocation beyond the signed ceiling even if a
 temporary artifact appears and disappears between scans.
 
+The root-lock descriptor must be a regular file before any seek or read. Its
+logical metadata length must not exceed the exact versioned lock content before
+allocation; the subsequent read is limited to that length plus one byte so
+concurrent growth also fails closed. Initialization rechecks the exact final
+length. Sparse oversized files, FIFOs, devices, malformed content, and other
+substituted lock state are denied without blocking or unbounded allocation.
+
 One absolute monotonic deadline is established before lock parsing and shared
 by admission, every transport future, body streaming, verification, and
 publication. No component reconstructs a relative window after descheduling.

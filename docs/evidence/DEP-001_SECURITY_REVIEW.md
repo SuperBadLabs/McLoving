@@ -3,27 +3,26 @@
 Date: 2026-08-09
 
 Verdict: PASS for the implementation gate at exact implementation head
-`111df309ed6e850fdffc182010346f0344035f24`. All required protected workflows
+`60fd72f8bb6c0c4f737dbb080660741c33f651e8`. All required protected workflows
 completed cleanly
-across [Foundation run 31321189124](https://github.com/SuperBadLabs/McLoving/actions/runs/31321189124)
-and [Windows Agent run 31321189123](https://github.com/SuperBadLabs/McLoving/actions/runs/31321189123).
+across [Foundation run 31323895327](https://github.com/SuperBadLabs/McLoving/actions/runs/31323895327)
+and [Windows Agent run 31323895329](https://github.com/SuperBadLabs/McLoving/actions/runs/31323895329).
 The Windows impact classifier passed and intentionally skipped the Windows-agent
 job because the resolver diff did not enter the agent dependency closure. The
-focused gate passed seventy-six dependency-resolution tests: thirty-eight unit
+focused gate passed seventy-eight dependency-resolution tests: forty unit
 tests, thirty-seven ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Independent exact-head review found no
-further implementation defect after implicit protocol-NACK retry denial, exact
-repository-use binding, bounded iterative retained-tree traversal, and iterative
-maximum-size graph validation; its only remaining finding required this exact
-implementation-head documentation recertification. The recertification thread
-remains a merge gate until this closure commit passes protected checks and a
-fresh complete-PR review.
+further implementation defect after bounded sparse transport-lock inspection
+and pre-read non-regular-file denial; its only remaining finding required this
+exact implementation-head documentation recertification. The recertification
+threads remain merge gates until this closure commit passes protected checks and
+a fresh complete-PR review.
 Every actionable thread remains a merge gate until its exact fix evidence is
 pushed and independently checked.
 
 The DEP-001-to-CACHE-001 execution-board transition entered PR #35 at
 `02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at exact
-implementation head `111df309ed6e850fdffc182010346f0344035f24`. Closure
+implementation head `60fd72f8bb6c0c4f737dbb080660741c33f651e8`. Closure
 commits update this receipt and recertify those existing board rows; they
 do not introduce the transition. The complete PR #35 diff against protected
 `main` includes the resolver implementation, tests, protected workflow change,
@@ -81,6 +80,11 @@ provenance evidence and is not substituted for live dependency authority.
 - a canonical private resolver-owned Linux transport mount whose exact block
   capacity equals the aggregate ceiling, differs from parent/output devices,
   is exclusively locked, and denies residual state before claims or requests;
+  lock inspection requires a regular descriptor before seeking or reading,
+  rejects logical metadata length beyond the exact constant before allocation,
+  caps the read at that length plus one, and rechecks exact post-write length so
+  sparse files, FIFOs, devices, growth races, and other substituted state fail
+  closed without blocking or unbounded allocation;
 - durable first-writer claims, in-process concurrent convergence, explicit
   restart ambiguity, transport-path-bound verified inputs, private staging,
   synchronized read-only content, atomic no-overwrite publication, and
@@ -123,6 +127,8 @@ The ordinary focused suite proves:
   exact credential/receipt-key marker membership;
 - correct transport plus wrong mirror, content, size, signature, key, repository,
   generation, missing, offline, timeout, and cross-chunk marker denial;
+- sparse oversized and FIFO transport-lock denial before unbounded allocation or
+  blocking reads, plus exact lock-length verification after initialization;
 - claim-first concurrency, request substitution, restart ambiguity, exact replay,
   generation cutover, explicit rollback lineage, late withdrawal, foreign
   transient-path denial, retained-tree substitution, receipt-HMAC tampering,
@@ -160,8 +166,8 @@ journey, and the AppArmor-confined source suite.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired seventy
-actionable findings across seventy-five important seams:
+Pre-closure review and repeated contained execution exposed and repaired
+seventy-four actionable findings across seventy-nine important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
    read-only mode. JSON state now becomes visible only through a fully written,
@@ -422,6 +428,27 @@ actionable findings across seventy-five important seams:
     authority scan, which is bounded by entries but does not track depth. The
     depth guarantee now appears only on the iterative retained-tree verifier
     that enforces it before descent.
+76. Transport-root lock inspection used unbounded `read_to_end` before checking
+    content. A malicious sparse file could therefore advertise huge logical
+    length without consuming the signed filesystem capacity and exhaust memory
+    before denial. Inspection now rejects oversized metadata before allocation,
+    caps the read at the exact content length plus one, and rechecks exact length
+    after initialization; a sparse 1 TiB regression fails closed.
+77. The bounded lock reader still checked regular-file type only after reading.
+    An existing FIFO opened read/write could keep the resolver's own writer alive
+    and block forever outside the request deadline. Descriptor type is now
+    required to be regular before any seek or read, with a real FIFO regression
+    proving prompt denial.
+78. The receipt and both board views still certified implementation head
+    `111df309ed6e850fdffc182010346f0344035f24` after the sparse-lock repair at
+    `77af5e0db13364ebb9625bfee1ff3470411d4ecc`. Review correctly required a new
+    exact-head recertification, which remained deferred while the FIFO defect was
+    repaired rather than certifying another superseded head.
+79. After the FIFO repair, the receipt and board still necessarily described the
+    predecessor pending exact-head gates. They now bind implementation head
+    `60fd72f8bb6c0c4f737dbb080660741c33f651e8`, seventy-eight focused tests,
+    current protected runs, seventy-four actionable findings, and seventy-nine
+    important seams.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -479,8 +506,14 @@ exact-head review found no implementation defect and required only documentation
 recertification. This recertification is the sixty-seventh actionable finding
 across seventy-two important reviewed seams. Exact closure review then corrected
 the maximum-graph test scope, the chronology heading, and the location of the
-retained-tree depth guarantee. Those three documentation findings bring the
-final audit to seventy actionable findings across seventy-five important seams;
+retained-tree depth guarantee. Those three documentation findings brought the
+then-current audit to seventy actionable findings across seventy-five important
+seams;
+exact closure review then found unbounded sparse transport-lock inspection. The
+first bounded repair exposed a pre-read FIFO type gap and a deliberately deferred
+recertification; fresh review of the FIFO-safe head found no implementation
+defect and required only final recertification. Those four findings bring the
+audit to seventy-four actionable findings across seventy-nine important seams;
 every fixed thread must be replied to and resolved only after the complete
 closure head passes protected checks and fresh review.
 
