@@ -65,6 +65,7 @@ pub struct DependencyResolver {
     store: ResolutionStore,
     transport: HttpTransport,
     publication_worker: PathBuf,
+    publication_serial: tokio::sync::Mutex<()>,
 }
 
 impl DependencyResolver {
@@ -81,6 +82,12 @@ impl DependencyResolver {
         config: CertifiedConfig,
         publication_worker: PathBuf,
     ) -> Result<Self, ResolverError> {
+        if !config.loopback_fixture
+            || std::env::var_os("MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE").as_deref()
+                != Some(std::ffi::OsStr::new("1"))
+        {
+            return Err(ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"));
+        }
         Self::new_inner(config, publication_worker, true)
     }
 
@@ -107,6 +114,7 @@ impl DependencyResolver {
             store,
             transport,
             publication_worker,
+            publication_serial: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -180,6 +188,12 @@ impl DependencyResolver {
         {
             Ok(receipt) => receipt,
             Err(error) => {
+                if error.code == "DEP_STORE_PUBLICATION_QUEUE_DEADLINE" {
+                    let cleanup = self.transport.cleanup_resolution(resolution_id).await;
+                    self.store.release_incomplete_claim(&claim);
+                    cleanup.map_err(|cleanup_error| ResolverError::denied(cleanup_error.code))?;
+                    return Err(error);
+                }
                 // A killed publication worker may still be leaving a blocked
                 // kernel syscall. Preserve the durable claim and transient
                 // allocation as explicit restart ambiguity instead of racing
@@ -204,6 +218,12 @@ impl DependencyResolver {
         fetched: Vec<crate::FetchedArtifact>,
         deadline: Instant,
     ) -> Result<ResolutionReceipt, ResolverError> {
+        let _publication_guard = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.publication_serial.lock(),
+        )
+        .await
+        .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_QUEUE_DEADLINE"))?;
         let worker_request = PublicationWorkerRequest {
             config: self.config.clone(),
             claim: claim.clone(),
@@ -466,6 +486,7 @@ fn worker_error_code(code: &str) -> &'static str {
         "DEP_STORE_STATE_INVALID" => "DEP_STORE_STATE_INVALID",
         "DEP_STORE_STATE_UNAVAILABLE" => "DEP_STORE_STATE_UNAVAILABLE",
         "DEP_STORE_TRANSIENT_PATH_MISMATCH" => "DEP_STORE_TRANSIENT_PATH_MISMATCH",
+        "DEP_STORE_WORKER_PARENT_LOCK_MISSING" => "DEP_STORE_WORKER_PARENT_LOCK_MISSING",
         _ => "DEP_STORE_PUBLICATION_WORKER_FAILED",
     }
 }

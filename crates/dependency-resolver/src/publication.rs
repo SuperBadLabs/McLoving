@@ -170,6 +170,7 @@ impl ResolutionStore {
     ) -> Result<Self, StoreError> {
         crate::validate_config(config)
             .map_err(|error| StoreError::new(error.code, error.message))?;
+        verify_parent_output_lock(&PathBuf::from(&config.output_root))?;
         Self::open_inner_with_lock(
             config,
             authorities.receipt_key(),
@@ -863,6 +864,36 @@ fn acquire_output_lock(root: &Path) -> Result<OutputLock, StoreError> {
             "another resolver owns the output root",
         )
     })
+}
+
+#[cfg(target_os = "linux")]
+fn verify_parent_output_lock(root: &Path) -> Result<(), StoreError> {
+    use nix::errno::Errno;
+    use nix::fcntl::{Flock, FlockArg};
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits())
+        .open(root.join(LOCK_FILE))
+        .map_err(|_| state_error())?;
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(_) => Err(StoreError::new(
+            "DEP_STORE_WORKER_PARENT_LOCK_MISSING",
+            "publication worker requires the live parent output lock",
+        )),
+        Err((_file, errno)) if errno == Errno::EWOULDBLOCK || errno == Errno::EAGAIN => Ok(()),
+        Err(_) => Err(state_error()),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_parent_output_lock(_root: &Path) -> Result<(), StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "publication worker parent-lock proof requires Linux flock semantics",
+    ))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1608,6 +1639,19 @@ mod tests {
             )
             .expect("resolution store")
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publication_worker_requires_the_live_parent_output_lock() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        verify_parent_output_lock(&PathBuf::from(&fixture.config.output_root))
+            .expect("live parent lock");
+        drop(store);
+        let error = verify_parent_output_lock(&PathBuf::from(&fixture.config.output_root))
+            .expect_err("missing parent lock");
+        assert_eq!(error.code, "DEP_STORE_WORKER_PARENT_LOCK_MISSING");
     }
 
     #[test]
