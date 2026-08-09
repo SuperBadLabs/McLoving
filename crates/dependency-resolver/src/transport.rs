@@ -181,11 +181,13 @@ impl HttpTransport {
         }
         let resolution_root = self.transport_root.join(resolution_id.to_string());
         create_private_resolution_root(&resolution_root).await?;
-        let result = self.fetch_plan_into(plan, deadline, &resolution_root).await;
-        if result.is_err() {
-            let _ = tokio::fs::remove_dir_all(&resolution_root).await;
+        match self.fetch_plan_into(plan, deadline, &resolution_root).await {
+            Ok(fetched) => Ok(fetched),
+            Err(error) => {
+                self.cleanup_resolution(resolution_id).await?;
+                Err(error)
+            }
         }
-        result
     }
 
     pub async fn cleanup_resolution(&self, resolution_id: Uuid) -> Result<(), TransportError> {

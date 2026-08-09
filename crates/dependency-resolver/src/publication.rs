@@ -335,7 +335,7 @@ impl ResolutionStore {
         let artifacts = match publication {
             Ok(value) => value,
             Err(error) => {
-                let _ = remove_private_tree(&stage);
+                remove_private_tree(&stage)?;
                 return Err(error);
             }
         };
