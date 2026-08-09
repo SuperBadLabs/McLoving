@@ -1466,6 +1466,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "url",
+ "uuid",
 ]
 
 [[package]]
