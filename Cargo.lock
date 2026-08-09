@@ -1461,10 +1461,12 @@ dependencies = [
 name = "mcloving-dependency-resolver"
 version = "0.0.0"
 dependencies = [
+ "nix",
  "serde",
  "serde-saphyr",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "url",
  "uuid",

@@ -1,4 +1,5 @@
 mod adapter;
+mod authority;
 mod config;
 mod npm_adapter;
 mod plan;
@@ -7,6 +8,7 @@ mod request;
 mod strict_json;
 
 pub use adapter::{AdapterBindings, AdapterError, parse_maven_lock};
+pub use authority::{AuthorityError, LoadedAuthorities};
 pub use config::{
     AdapterConfig, CertifiedConfig, ConfigError, RepositoryConfig, RepositoryGrant, ResolverLimits,
     configuration_sha256, validate_config,

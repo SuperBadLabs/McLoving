@@ -1,0 +1,191 @@
+#![cfg(unix)]
+
+use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
+
+use mcloving_dependency_resolver::{
+    AdapterConfig, CertifiedConfig, Ecosystem, LoadedAuthorities, RepositoryConfig,
+    RepositoryGrant, ResolverLimits,
+};
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
+
+struct Fixture {
+    _root: TempDir,
+    config: CertifiedConfig,
+    credential_path: PathBuf,
+    marker_path: PathBuf,
+    credential: Vec<u8>,
+    attestation: Vec<u8>,
+    ca: Vec<u8>,
+    receipt: Vec<u8>,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let root = TempDir::new().expect("temporary authority root");
+        let credential = b"contained-repository-credential".to_vec();
+        let attestation = vec![7_u8; 32];
+        let ca = b"contained-private-ca".to_vec();
+        let receipt = b"contained-receipt-key".to_vec();
+        let marker = format!(
+            r#"{{"schema_version":"mcloving.secret-markers/v1","markers_hex":["{}"]}}"#,
+            hex(&credential)
+        )
+        .into_bytes();
+        let credential_path = authority_file(root.path(), "repository.credential", &credential);
+        let attestation_path = authority_file(root.path(), "repository.pub", &attestation);
+        let ca_path = authority_file(root.path(), "repository.ca", &ca);
+        let receipt_path = authority_file(root.path(), "receipt.key", &receipt);
+        let marker_path = authority_file(root.path(), "markers.json", &marker);
+        let config = CertifiedConfig {
+            schema_version: "mcloving.dependency-config/v1".to_owned(),
+            protocol_version: "mcloving.dependency-resolver/v1".to_owned(),
+            configuration_id: "authority-test".to_owned(),
+            deployment_id: "contained".to_owned(),
+            operator_id: "test-operator".to_owned(),
+            generation: 1,
+            executable_sha256: "a".repeat(64),
+            resolver_toolchain_id: "contained-toolchain".to_owned(),
+            resolver_toolchain_sha256: "b".repeat(64),
+            adapters: vec![
+                AdapterConfig {
+                    ecosystem: Ecosystem::Maven,
+                    adapter_id: "maven-v1".to_owned(),
+                    implementation_sha256: "c".repeat(64),
+                },
+                AdapterConfig {
+                    ecosystem: Ecosystem::Npm,
+                    adapter_id: "npm-v1".to_owned(),
+                    implementation_sha256: "d".repeat(64),
+                },
+                AdapterConfig {
+                    ecosystem: Ecosystem::Pypi,
+                    adapter_id: "pypi-v1".to_owned(),
+                    implementation_sha256: "e".repeat(64),
+                },
+            ],
+            repositories: vec![RepositoryConfig {
+                repository_id: "contained-maven".to_owned(),
+                ecosystem: Ecosystem::Maven,
+                base_url: "https://127.0.0.1:18443/repository/".to_owned(),
+                coordinate_prefixes: vec!["com.example:".to_owned()],
+                credential_path: Some(path_string(&credential_path)),
+                credential_sha256: Some(sha256(&credential)),
+                permits_untrusted_source: false,
+                attestation_key_id: "contained-key".to_owned(),
+                attestation_key_path: path_string(&attestation_path),
+                attestation_key_sha256: sha256(&attestation),
+                private_ca_path: Some(path_string(&ca_path)),
+                private_ca_sha256: Some(sha256(&ca)),
+                grant: Some(RepositoryGrant {
+                    grant_id: "contained-grant".to_owned(),
+                    version: 1,
+                    scope: "read:com.example".to_owned(),
+                    expires_at_unix_ms: 100,
+                }),
+            }],
+            receipt_key_id: "receipt-v1".to_owned(),
+            receipt_key_path: path_string(&receipt_path),
+            receipt_key_sha256: sha256(&receipt),
+            secret_marker_set_path: path_string(&marker_path),
+            secret_marker_set_sha256: sha256(&marker),
+            output_root: path_string(&root.path().join("output")),
+            transport_root: path_string(&root.path().join("transport")),
+            limits: ResolverLimits {
+                max_frame_bytes: 1_048_576,
+                max_lock_bytes: 262_144,
+                max_repositories: 4,
+                max_nodes: 100,
+                max_edges: 1_000,
+                max_artifacts: 100,
+                max_artifact_bytes: 1_024,
+                max_total_artifact_bytes: 4_096,
+                transport_capacity_bytes: 4_096,
+                max_path_bytes: 4_096,
+                max_header_bytes: 16_384,
+                max_request_lifetime_ms: 10_000,
+            },
+            loopback_fixture: false,
+        };
+        Self {
+            _root: root,
+            config,
+            credential_path,
+            marker_path,
+            credential,
+            attestation,
+            ca,
+            receipt,
+        }
+    }
+}
+
+#[test]
+fn exact_private_authorities_are_loaded_without_exposure() {
+    let fixture = Fixture::new();
+    let loaded = LoadedAuthorities::load(&fixture.config).expect("authority load");
+    assert_eq!(loaded.receipt_key(), fixture.receipt);
+    assert_eq!(
+        loaded.repository_credential("contained-maven"),
+        Some(fixture.credential.as_slice())
+    );
+    assert_eq!(
+        loaded.repository_attestation_key("contained-maven"),
+        Some(fixture.attestation.as_slice())
+    );
+    assert_eq!(
+        loaded.repository_private_ca("contained-maven"),
+        Some(fixture.ca.as_slice())
+    );
+    assert_eq!(loaded.markers().count(), 1);
+}
+
+#[test]
+fn permissive_mode_symlink_and_missing_credential_marker_fail_closed() {
+    let fixture = Fixture::new();
+    fs::set_permissions(&fixture.credential_path, fs::Permissions::from_mode(0o640))
+        .expect("relax credential mode");
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("permissive mode");
+    assert_eq!(error.code, "DEP_AUTHORITY_FILE_POLICY_DENIED");
+
+    let mut fixture = Fixture::new();
+    let target = fixture.credential_path.with_extension("target");
+    fs::rename(&fixture.credential_path, &target).expect("move credential target");
+    symlink(&target, &fixture.credential_path).expect("credential symlink");
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("symlink");
+    assert_eq!(error.code, "DEP_AUTHORITY_READ_FAILED");
+
+    let alternate_marker =
+        br#"{"schema_version":"mcloving.secret-markers/v1","markers_hex":["aaaaaaaaaaaaaaaa"]}"#;
+    write_private(&fixture.marker_path, alternate_marker);
+    fixture.config.secret_marker_set_sha256 = sha256(alternate_marker);
+    fs::remove_file(&fixture.credential_path).expect("remove symlink");
+    fs::rename(target, &fixture.credential_path).expect("restore credential");
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("missing marker");
+    assert_eq!(error.code, "DEP_AUTHORITY_CREDENTIAL_MARKER_MISSING");
+}
+
+fn authority_file(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = root.join(name);
+    write_private(&path, bytes);
+    path
+}
+
+fn write_private(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).expect("write authority fixture");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private authority mode");
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn path_string(path: &Path) -> String {
+    path.to_str().expect("UTF-8 test path").to_owned()
+}

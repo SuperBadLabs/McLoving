@@ -13,8 +13,12 @@ thiserror = "=2.0.17"
 url = "=2.5.8"
 uuid = { version = "=1.18.1", features = ["serde"] }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "=0.31.3", features = ["fs", "user"] }
+
 [dev-dependencies]
 serde-saphyr = "=1.0.0-rc.2"
+tempfile = "=3.27.0"
 
 [lints]
 workspace = true
