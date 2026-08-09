@@ -277,7 +277,7 @@ impl ResolutionStore {
             .map_err(|_| state_error())?
             .contains(&resolution_id);
         if active {
-            if claim_path.exists() {
+            if path_exists(&claim_path)? {
                 let existing: ResolutionClaim = read_json(&claim_path, 0o600)?;
                 if existing != expected {
                     return Err(StoreError::new(
@@ -292,7 +292,7 @@ impl ResolutionStore {
             self.verify_replay(&receipt, &admitted.request_sha256)?;
             return Ok(ClaimOutcome::Replay(Box::new(receipt)));
         }
-        if claim_path.exists() {
+        if path_exists(&claim_path)? {
             let existing: ResolutionClaim = read_json(&claim_path, 0o600)?;
             if existing != expected {
                 return Err(StoreError::new(
@@ -555,7 +555,7 @@ impl ResolutionStore {
             }
         };
         let bundle_path = self.bundle_path(resolution_id);
-        if bundle_path.exists() {
+        if path_exists(&bundle_path)? {
             remove_private_tree(&stage)?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_CONFLICT",
@@ -616,15 +616,12 @@ impl ResolutionStore {
         self.deny_secret_markers(&receipt, &())?;
         let receipt_path = self.receipt_path(resolution_id);
         if let Err(error) = write_new_json(&receipt_path, &receipt, 0o400) {
-            self.withdraw_failed_receipt_publication(&receipt_path, &bundle_path)?;
+            self.withdraw_publication(&receipt_path, &bundle_path)?;
             return Err(error);
         }
         sync_directory(&self.inner.root.join("receipts"))?;
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
-            remove_private_file(&receipt_path)?;
-            remove_private_tree(&bundle_path)?;
-            sync_directory(&self.inner.root.join("receipts"))?;
-            sync_directory(&self.inner.root.join("bundles"))?;
+            self.withdraw_publication(&receipt_path, &bundle_path)?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
                 "late receipt publication was withdrawn",
@@ -635,11 +632,9 @@ impl ResolutionStore {
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
             write_new_json(&self.claim_path(resolution_id), claim, 0o600)?;
             sync_directory(&self.inner.root.join("claims"))?;
-            remove_private_file(&receipt_path)?;
-            remove_private_tree(&bundle_path)?;
-            sync_directory(&self.inner.root.join("receipts"))?;
-            sync_directory(&self.inner.root.join("bundles"))?;
+            let withdrawal = self.withdraw_publication(&receipt_path, &bundle_path);
             self.deactivate(resolution_id);
+            withdrawal?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
                 "late completion was withdrawn and its durable claim restored",
@@ -665,12 +660,12 @@ impl ResolutionStore {
         result
     }
 
-    fn withdraw_failed_receipt_publication(
+    fn withdraw_publication(
         &self,
         receipt_path: &Path,
         bundle_path: &Path,
     ) -> Result<(), StoreError> {
-        if receipt_path.exists() {
+        if path_exists(receipt_path)? {
             remove_private_file(receipt_path)?;
             sync_directory(&self.inner.root.join("receipts"))?;
         }
@@ -838,7 +833,7 @@ impl ResolutionStore {
 
     fn load_receipt(&self, resolution_id: Uuid) -> Result<Option<ResolutionReceipt>, StoreError> {
         let path = self.receipt_path(resolution_id);
-        if !path.exists() {
+        if !path_exists(&path)? {
             return Ok(None);
         }
         read_json(&path, 0o400).map(Some)
@@ -1065,7 +1060,7 @@ fn prepare_layout(root: &Path) -> Result<(), StoreError> {
     ]);
     for name in ["bundles", "claims", "receipts"] {
         let path = root.join(name);
-        if path.exists() {
+        if path_exists(&path)? {
             validate_directory(&path, 0o700)?;
         } else {
             create_directory(&path, 0o700)?;
@@ -1506,11 +1501,19 @@ fn rename_no_replace(_source: &Path, _destination: &Path) -> Result<(), StoreErr
 }
 
 fn remove_private_tree(path: &Path) -> Result<(), StoreError> {
-    if !path.exists() {
+    if !path_exists(path)? {
         return Ok(());
     }
     make_tree_writable(path)?;
     std::fs::remove_dir_all(path).map_err(|_| state_error())
+}
+
+fn path_exists(path: &Path) -> Result<bool, StoreError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(state_error()),
+    }
 }
 
 #[cfg(unix)]
@@ -1953,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn receipt_is_removed_before_a_failed_publication_bundle() {
+    fn receipt_is_durably_removed_before_a_publication_bundle() {
         let fixture = Fixture::new();
         let store = fixture.store();
         let claim = match store
@@ -1976,10 +1979,27 @@ mod tests {
         let receipt_path = store.receipt_path(claim.resolution_id);
         let bundle_path = store.bundle_path(claim.resolution_id);
         store
-            .withdraw_failed_receipt_publication(&receipt_path, &bundle_path)
+            .withdraw_publication(&receipt_path, &bundle_path)
             .expect("paired withdrawal");
         assert!(!receipt_path.exists());
         assert!(!bundle_path.exists());
+    }
+
+    #[test]
+    fn uncertain_receipt_lookup_retains_the_publication_bundle() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let blocker = store.inner.root.join("receipt-lookup-blocker");
+        std::fs::write(&blocker, b"not a directory").expect("lookup blocker");
+        let receipt_path = blocker.join("receipt.json");
+        let bundle_path = store.inner.root.join("bundles/uncertain");
+        create_directory(&bundle_path, 0o700).expect("test bundle");
+
+        let error = store
+            .withdraw_publication(&receipt_path, &bundle_path)
+            .expect_err("uncertain receipt lookup");
+        assert_eq!(error.code, "DEP_STORE_STATE_UNAVAILABLE");
+        assert!(bundle_path.exists(), "uncertainty must retain the bundle");
     }
 
     #[test]
