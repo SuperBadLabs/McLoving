@@ -188,12 +188,6 @@ impl DependencyResolver {
         {
             Ok(receipt) => receipt,
             Err(error) => {
-                if error.code == "DEP_STORE_PUBLICATION_QUEUE_DEADLINE" {
-                    let cleanup = self.transport.cleanup_resolution(resolution_id).await;
-                    self.store.release_incomplete_claim(&claim);
-                    cleanup.map_err(|cleanup_error| ResolverError::denied(cleanup_error.code))?;
-                    return Err(error);
-                }
                 // A killed publication worker may still be leaving a blocked
                 // kernel syscall. Preserve the durable claim and transient
                 // allocation as explicit restart ambiguity instead of racing
