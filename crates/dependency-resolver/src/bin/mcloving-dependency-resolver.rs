@@ -9,11 +9,7 @@ use mcloving_dependency_resolver::{
 
 #[tokio::main]
 async fn main() {
-    let publication_worker =
-        std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--publication-worker"));
-    if publication_worker {
-        std::panic::set_hook(Box::new(|_| {}));
-    }
+    std::panic::set_hook(Box::new(|_| {}));
     if run().await.is_err() {
         std::process::exit(1);
     }

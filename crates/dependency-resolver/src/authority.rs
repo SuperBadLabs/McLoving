@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Take};
 use std::path::{Component, Path};
@@ -68,15 +68,18 @@ impl LoadedAuthorities {
                 "loopback fixture configuration requires explicit resolver test mode",
             ));
         }
+        let mut authority_identities = BTreeSet::new();
         let receipt_key = read_authority(
             Path::new(&config.receipt_key_path),
             MAX_SECRET_BYTES,
             &config.receipt_key_sha256,
+            &mut authority_identities,
         )?;
         let marker_bytes = read_authority(
             Path::new(&config.secret_marker_set_path),
             MAX_MARKER_SET_BYTES,
             &config.secret_marker_set_sha256,
+            &mut authority_identities,
         )?;
         let marker_set = parse_markers(&marker_bytes)?;
         if receipt_key.len() < 32 {
@@ -99,7 +102,12 @@ impl LoadedAuthorities {
                 repository.credential_sha256.as_deref(),
             ) {
                 (Some(path), Some(digest)) => {
-                    let bytes = read_authority(Path::new(path), MAX_SECRET_BYTES, digest)?;
+                    let bytes = read_authority(
+                        Path::new(path),
+                        MAX_SECRET_BYTES,
+                        digest,
+                        &mut authority_identities,
+                    )?;
                     if !marker_set.iter().any(|marker| marker == &bytes) {
                         return Err(AuthorityError::new(
                             "DEP_AUTHORITY_CREDENTIAL_MARKER_MISSING",
@@ -115,14 +123,18 @@ impl LoadedAuthorities {
                 Path::new(&repository.attestation_key_path),
                 MAX_PUBLIC_KEY_BYTES,
                 &repository.attestation_key_sha256,
+                &mut authority_identities,
             )?;
             let private_ca = match (
                 repository.private_ca_path.as_deref(),
                 repository.private_ca_sha256.as_deref(),
             ) {
-                (Some(path), Some(digest)) => {
-                    Some(read_authority(Path::new(path), MAX_CA_BYTES, digest)?)
-                }
+                (Some(path), Some(digest)) => Some(read_authority(
+                    Path::new(path),
+                    MAX_CA_BYTES,
+                    digest,
+                    &mut authority_identities,
+                )?),
                 (None, None) => None,
                 _ => unreachable!("configuration validation binds CA path and digest"),
             };
@@ -265,10 +277,22 @@ fn hex_nibble(value: u8) -> Option<u8> {
     }
 }
 
-fn read_authority(path: &Path, max_bytes: u64, expected: &str) -> Result<Vec<u8>, AuthorityError> {
+fn read_authority(
+    path: &Path,
+    max_bytes: u64,
+    expected: &str,
+    authority_identities: &mut BTreeSet<(u64, u64)>,
+) -> Result<Vec<u8>, AuthorityError> {
     let file = open_nofollow(path)?;
     let metadata = file.metadata().map_err(|_| authority_read_error())?;
     validate_metadata(&metadata, max_bytes)?;
+    let identity = authority_identity(&metadata)?;
+    if !authority_identities.insert(identity) {
+        return Err(AuthorityError::new(
+            "DEP_AUTHORITY_ROLE_ALIAS_DENIED",
+            "one authority inode cannot serve multiple authority roles",
+        ));
+    }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     let mut bounded: Take<File> = file.take(max_bytes + 1);
     bounded
@@ -281,6 +305,21 @@ fn read_authority(path: &Path, max_bytes: u64, expected: &str) -> Result<Vec<u8>
         ));
     }
     Ok(bytes)
+}
+
+#[cfg(unix)]
+fn authority_identity(metadata: &std::fs::Metadata) -> Result<(u64, u64), AuthorityError> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn authority_identity(_metadata: &std::fs::Metadata) -> Result<(u64, u64), AuthorityError> {
+    Err(AuthorityError::new(
+        "DEP_AUTHORITY_PLATFORM_UNSUPPORTED",
+        "authority loading requires Unix device and inode checks",
+    ))
 }
 
 #[cfg(unix)]

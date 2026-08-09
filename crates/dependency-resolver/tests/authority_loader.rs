@@ -214,6 +214,17 @@ fn authority_hard_link_inside_mutable_root_fails_closed() {
     assert_eq!(error.code, "DEP_AUTHORITY_FILE_POLICY_DENIED");
 }
 
+#[test]
+fn one_authority_inode_cannot_serve_receipt_and_credential_roles() {
+    let mut fixture = Fixture::new();
+    fixture.config.repositories[0].credential_path = Some(fixture.config.receipt_key_path.clone());
+    fixture.config.repositories[0].credential_sha256 =
+        Some(fixture.config.receipt_key_sha256.clone());
+
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("cross-role inode alias");
+    assert_eq!(error.code, "DEP_AUTHORITY_ROLE_ALIAS_DENIED");
+}
+
 fn authority_file(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let path = root.join(name);
     write_private(&path, bytes);
