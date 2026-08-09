@@ -1,4 +1,8 @@
+mod adapter;
 mod plan;
+mod strict_json;
+
+pub use adapter::{AdapterBindings, AdapterError, parse_maven_lock};
 
 pub use plan::{
     CanonicalPlan, Ecosystem, PackageNode, PlanError, RepositoryBinding, SourceTrustClass,
