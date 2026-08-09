@@ -7,10 +7,13 @@ use mcloving_dependency_resolver::{
     verify_running_executable,
 };
 
-#[tokio::main]
-async fn main() {
+fn main() {
     std::panic::set_hook(Box::new(|_| {}));
-    if run().await.is_err() {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(_) => std::process::exit(1),
+    };
+    if runtime.block_on(run()).is_err() {
         std::process::exit(1);
     }
 }
