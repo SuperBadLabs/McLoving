@@ -103,7 +103,11 @@ impl DependencyResolver {
         publication_worker: PathBuf,
         canonicalize_worker: bool,
     ) -> Result<Self, ResolverError> {
-        crate::standalone::verify_executable_path(&config, &publication_worker)?;
+        if canonicalize_worker {
+            crate::standalone::verify_executable_path(&config, &publication_worker)?;
+        } else {
+            crate::standalone::verify_running_executable(&config)?;
+        }
         let publication_worker = if canonicalize_worker {
             std::fs::canonicalize(publication_worker)
                 .map_err(|_| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?

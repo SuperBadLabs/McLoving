@@ -8,8 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use mcloving_dependency_resolver::{
-    AdapterConfig, CertifiedConfig, Ecosystem, RepositoryConfig, ResolverLimits,
-    load_certified_config, verify_running_executable,
+    AdapterConfig, CertifiedConfig, DependencyResolver, Ecosystem, RepositoryConfig,
+    ResolverLimits, load_certified_config, verify_running_executable,
 };
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -80,6 +80,18 @@ fn public_verifier_keeps_the_running_inode_after_path_replacement() {
         wait_for_path(&root.join("continue"));
         verify_running_executable(&config)
             .expect("public verifier must retain the running executable inode");
+        let constructor_error = match DependencyResolver::new(config) {
+            Ok(_) => panic!("invalid authority fixture unexpectedly constructed a resolver"),
+            Err(error) => error,
+        };
+        assert_ne!(
+            constructor_error.code, "DEP_EXECUTABLE_IDENTITY_INVALID",
+            "production construction must retain the running executable inode"
+        );
+        assert_ne!(
+            constructor_error.code, "DEP_EXECUTABLE_IDENTITY_MISMATCH",
+            "production construction must verify the running inode, not its replaced pathname"
+        );
         return;
     }
 
