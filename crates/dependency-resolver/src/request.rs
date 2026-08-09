@@ -314,6 +314,22 @@ fn validate_repository_binding(
             "request repository set does not exactly match the canonical plan",
         ));
     }
+    let graph_repositories = plan
+        .nodes
+        .iter()
+        .map(|node| node.repository_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if graph_repositories.len() != plan.repositories.len()
+        || plan
+            .repositories
+            .iter()
+            .any(|binding| !graph_repositories.contains(binding.repository_id.as_str()))
+    {
+        return Err(RequestError::new(
+            "DEP_REQUEST_REPOSITORY_SET_MISMATCH",
+            "canonical repository bindings do not exactly match repositories used by graph nodes",
+        ));
+    }
     for node in &plan.nodes {
         let repository = repositories
             .get(node.repository_id.as_str())

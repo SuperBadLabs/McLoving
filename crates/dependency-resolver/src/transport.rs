@@ -86,6 +86,7 @@ impl HttpTransport {
             })?;
             let mut builder = Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .no_proxy()
                 .no_gzip()
                 .no_brotli()
@@ -972,6 +973,7 @@ mod tests {
                     .expect("repository URL"),
                 client: Client::builder()
                     .redirect(reqwest::redirect::Policy::none())
+                    .retry(reqwest::retry::never())
                     .no_proxy()
                     .build()
                     .expect("contained client"),

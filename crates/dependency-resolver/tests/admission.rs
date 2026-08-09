@@ -277,6 +277,52 @@ fn runtime_lock_plan_and_repository_substitution_are_denied() {
 }
 
 #[test]
+fn repository_and_grant_bindings_unused_by_the_graph_are_denied() {
+    let (mut config, lock, mut plan, mut request) = fixture();
+    let mut unused = config.repositories[0].clone();
+    unused.repository_id = "unused-maven".to_owned();
+    unused.base_url = "http://127.0.0.1:18444/unused/".to_owned();
+    unused.credential_path = Some("/etc/mcloving/dependency/unused.credential".to_owned());
+    unused.credential_sha256 = Some("8".repeat(64));
+    unused.attestation_key_id = "unused-key".to_owned();
+    unused.attestation_key_path = "/etc/mcloving/dependency/unused-attestation.pub".to_owned();
+    unused.attestation_key_sha256 = "9".repeat(64);
+    unused.grant = Some(RepositoryGrant {
+        grant_id: "unused-grant".to_owned(),
+        version: 1,
+        scope: "read:unused".to_owned(),
+        expires_at_unix_ms: 2_000,
+    });
+    config.repositories.push(unused);
+
+    plan.repositories.push(RepositoryBinding {
+        repository_id: "unused-maven".to_owned(),
+        credentialed: true,
+        permits_untrusted_source: false,
+    });
+    plan.graph_sha256 = mcloving_dependency_resolver::canonical_graph_sha256(&plan)
+        .expect("graph with unused repository binding");
+
+    request.expected_configuration_sha256 =
+        configuration_sha256(&config).expect("configuration with unused repository");
+    request.expected_graph_sha256 = plan.graph_sha256.clone();
+    request.repository_ids.push("unused-maven".to_owned());
+    request.grants.push(GrantUse {
+        repository_id: "unused-maven".to_owned(),
+        grant_id: "unused-grant".to_owned(),
+        version: 1,
+        scope: "read:unused".to_owned(),
+    });
+
+    assert_eq!(
+        admit_request(&config, &request, &plan, &lock, NOW)
+            .expect_err("unused repository binding")
+            .code,
+        "DEP_REQUEST_REPOSITORY_SET_MISMATCH"
+    );
+}
+
+#[test]
 fn grants_expiry_rollback_and_resource_bounds_are_denied() {
     let (config, lock, plan, mut request) = fixture();
     request.grants.clear();
