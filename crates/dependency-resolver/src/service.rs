@@ -214,11 +214,11 @@ impl DependencyResolver {
             self.store.release_incomplete_claim(&claim);
             return Err(ResolverError::denied("DEP_TRANSPORT_DEADLINE"));
         }
-        let receipt = match self
+        match self
             .publish_supervised(&claim, frame.request, &admitted, plan, fetched, deadline)
             .await
         {
-            Ok(receipt) => receipt,
+            Ok(receipt) => Ok(receipt),
             Err(error) => {
                 // A killed publication worker may still be leaving a blocked
                 // kernel syscall. Preserve the durable claim and transient
@@ -226,14 +226,9 @@ impl DependencyResolver {
                 // cleanup against an incompletely terminated worker.
                 self.preserve_publication_ambiguity();
                 self.store.release_incomplete_claim(&claim);
-                return Err(error);
+                Err(error)
             }
-        };
-        self.transport
-            .cleanup_resolution_before_deadline(resolution_id, deadline)
-            .await
-            .map_err(|error| ResolverError::denied(error.code))?;
-        Ok(receipt)
+        }
     }
 
     async fn publish_supervised(

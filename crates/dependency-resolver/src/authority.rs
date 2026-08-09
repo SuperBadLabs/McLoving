@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Take};
-use std::path::Path;
+use std::path::{Component, Path};
 
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -58,6 +58,7 @@ impl AuthorityError {
 impl LoadedAuthorities {
     pub fn load(config: &CertifiedConfig) -> Result<Self, AuthorityError> {
         validate_config(config).map_err(|error| AuthorityError::new(error.code, error.message))?;
+        validate_resolved_separation(config)?;
         if config.loopback_fixture
             && std::env::var_os("MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE").as_deref()
                 != Some(std::ffi::OsStr::new("1"))
@@ -168,6 +169,37 @@ impl LoadedAuthorities {
     }
 }
 
+fn validate_resolved_separation(config: &CertifiedConfig) -> Result<(), AuthorityError> {
+    let output = std::fs::canonicalize(&config.output_root).map_err(|_| authority_read_error())?;
+    let transport =
+        std::fs::canonicalize(&config.transport_root).map_err(|_| authority_read_error())?;
+    if output.starts_with(&transport) || transport.starts_with(&output) {
+        return Err(AuthorityError::new(
+            "DEP_CONFIG_ROOT_OVERLAP",
+            "resolved output and transport roots cannot contain one another",
+        ));
+    }
+    let mut authorities = vec![
+        config.receipt_key_path.as_str(),
+        config.secret_marker_set_path.as_str(),
+    ];
+    for repository in &config.repositories {
+        authorities.push(repository.attestation_key_path.as_str());
+        authorities.extend(repository.credential_path.as_deref());
+        authorities.extend(repository.private_ca_path.as_deref());
+    }
+    for authority in authorities {
+        let resolved = std::fs::canonicalize(authority).map_err(|_| authority_read_error())?;
+        if resolved.starts_with(&output) || resolved.starts_with(&transport) {
+            return Err(AuthorityError::new(
+                "DEP_CONFIG_AUTHORITY_ROOT_OVERLAP",
+                "resolved authority files cannot be contained by mutable resolver roots",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn parse_markers(bytes: &[u8]) -> Result<Vec<Vec<u8>>, AuthorityError> {
     let document: MarkerDocument = strict_json::from_slice(bytes).map_err(|_| {
         AuthorityError::new(
@@ -253,13 +285,31 @@ fn read_authority(path: &Path, max_bytes: u64, expected: &str) -> Result<Vec<u8>
 
 #[cfg(unix)]
 fn open_nofollow(path: &Path) -> Result<File, AuthorityError> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
 
-    std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits())
-        .open(path)
-        .map_err(|_| authority_read_error())
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !path.is_absolute() || components.is_empty() {
+        return Err(authority_read_error());
+    }
+    let mut directory = File::open("/").map_err(|_| authority_read_error())?;
+    for (index, component) in components.iter().enumerate() {
+        let final_component = index + 1 == components.len();
+        let mut flags = OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
+        if !final_component {
+            flags |= OFlag::O_DIRECTORY;
+        }
+        let opened = openat(&directory, *component, flags, Mode::empty())
+            .map_err(|_| authority_read_error())?;
+        directory = File::from(opened);
+    }
+    Ok(directory)
 }
 
 #[cfg(not(unix))]

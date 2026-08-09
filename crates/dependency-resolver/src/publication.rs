@@ -404,7 +404,9 @@ impl ResolutionStore {
         {
             return Ok(ConcurrentClaimState::Active);
         }
-        if path_exists(&self.claim_path(resolution_id))? {
+        if path_exists(&self.claim_path(resolution_id))?
+            || path_exists(&self.ambiguity_path(resolution_id))?
+        {
             return Ok(ConcurrentClaimState::InactiveIncomplete);
         }
         match self.load_receipt(resolution_id)? {
@@ -640,6 +642,15 @@ impl ResolutionStore {
                 "late receipt publication was withdrawn",
             ));
         }
+        self.verify_replay(&receipt, &admitted.request_sha256)?;
+        self.cleanup_transient_resolution(resolution_id)?;
+        if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
+            self.withdraw_publication(&receipt_path, &bundle_path)?;
+            return Err(StoreError::new(
+                "DEP_STORE_PUBLICATION_LATE",
+                "late verified publication was withdrawn while its durable claim remained",
+            ));
+        }
         let completion = ResolutionCompletion {
             schema_version: COMPLETION_SCHEMA.to_owned(),
             resolution_id,
@@ -672,7 +683,6 @@ impl ResolutionStore {
             ));
         }
         self.deactivate(resolution_id);
-        self.verify_replay(&receipt, &admitted.request_sha256)?;
         Ok(receipt)
     }
 
@@ -696,12 +706,28 @@ impl ResolutionStore {
         claim: &ResolutionClaim,
         completion_path: &Path,
     ) -> Result<(), StoreError> {
+        let ambiguity_result = self.record_ambiguity(claim);
         let claim_result = self.ensure_exact_claim(claim);
         let completion_result = self.remove_completion(completion_path);
-        match (claim_result, completion_result) {
-            (Ok(()), _) | (_, Ok(())) => Ok(()),
-            (Err(error), Err(_)) => Err(error),
+        match (ambiguity_result, claim_result, completion_result) {
+            (Ok(()), _, _) | (_, Ok(()), _) | (_, _, Ok(())) => Ok(()),
+            (Err(error), Err(_), Err(_)) => Err(error),
         }
+    }
+
+    fn record_ambiguity(&self, claim: &ResolutionClaim) -> Result<(), StoreError> {
+        let path = self.ambiguity_path(claim.resolution_id);
+        if !path_exists(&path)? {
+            write_new_json(&path, claim, 0o600)?;
+        }
+        let recorded: ResolutionClaim = read_json(&path, 0o600)?;
+        if recorded != *claim {
+            return Err(StoreError::new(
+                "DEP_STORE_REPLAY_SUBSTITUTION",
+                "durable ambiguity record does not match the publication claim",
+            ));
+        }
+        sync_directory(&self.inner.root.join("ambiguities"))
     }
 
     fn ensure_exact_claim(&self, claim: &ResolutionClaim) -> Result<(), StoreError> {
@@ -741,6 +767,13 @@ impl ResolutionStore {
         }
         remove_private_tree(bundle_path)?;
         sync_directory(&self.inner.root.join("bundles"))
+    }
+
+    fn cleanup_transient_resolution(&self, resolution_id: Uuid) -> Result<(), StoreError> {
+        let resolution_root = self.inner.transport_root.join(resolution_id.to_string());
+        validate_directory(&resolution_root, 0o700)?;
+        remove_private_tree(&resolution_root)?;
+        sync_directory(&self.inner.transport_root)
     }
 
     pub(crate) fn publication_lock_file(&self) -> Result<File, StoreError> {
@@ -902,7 +935,9 @@ impl ResolutionStore {
     }
 
     fn load_receipt(&self, resolution_id: Uuid) -> Result<Option<ResolutionReceipt>, StoreError> {
-        if path_exists(&self.claim_path(resolution_id))? {
+        if path_exists(&self.claim_path(resolution_id))?
+            || path_exists(&self.ambiguity_path(resolution_id))?
+        {
             return Err(StoreError::new(
                 "DEP_STORE_AMBIGUOUS_CLAIM",
                 "durable claim takes precedence over any apparent completion",
@@ -954,6 +989,13 @@ impl ResolutionStore {
         self.inner
             .root
             .join("completions")
+            .join(format!("{resolution_id}.json"))
+    }
+
+    fn ambiguity_path(&self, resolution_id: Uuid) -> PathBuf {
+        self.inner
+            .root
+            .join("ambiguities")
             .join(format!("{resolution_id}.json"))
     }
 
@@ -1173,12 +1215,19 @@ fn acquire_output_lock(_root: &Path) -> Result<OutputLock, StoreError> {
 fn prepare_layout(root: &Path) -> Result<(), StoreError> {
     let expected = BTreeSet::from([
         LOCK_FILE.to_owned(),
+        "ambiguities".to_owned(),
         "bundles".to_owned(),
         "claims".to_owned(),
         "completions".to_owned(),
         "receipts".to_owned(),
     ]);
-    for name in ["bundles", "claims", "completions", "receipts"] {
+    for name in [
+        "ambiguities",
+        "bundles",
+        "claims",
+        "completions",
+        "receipts",
+    ] {
         let path = root.join(name);
         if path_exists(&path)? {
             validate_directory(&path, 0o700)?;
@@ -1758,6 +1807,13 @@ mod tests {
             let transport = root.path().join("transport");
             let resolution_transport = transport.join(resolution_id.to_string());
             std::fs::create_dir_all(&resolution_transport).expect("transport resolution root");
+            std::fs::set_permissions(&transport, std::fs::Permissions::from_mode(0o700))
+                .expect("private transport root");
+            std::fs::set_permissions(
+                &resolution_transport,
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .expect("private transport resolution root");
             let transient = resolution_transport.join(format!("{}.part", node.node_id));
             std::fs::write(&transient, body).expect("transient artifact");
             std::fs::set_permissions(&transient, std::fs::Permissions::from_mode(0o600))
@@ -1960,6 +2016,12 @@ mod tests {
             .expect("published receipt");
         assert!(!store.claim_path(claim.resolution_id).exists());
         assert!(store.completion_path(claim.resolution_id).exists());
+        assert!(
+            !PathBuf::from(&fixture.config.transport_root)
+                .join(claim.resolution_id.to_string())
+                .exists(),
+            "verified transient state must be gone before completion is replayable"
+        );
         let replay = store
             .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
             .expect("offline replay");
@@ -2131,6 +2193,35 @@ mod tests {
         let error = store
             .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
             .expect_err("durable claim after completion failure");
+        assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_CLAIM");
+    }
+
+    #[test]
+    fn durable_ambiguity_record_blocks_an_apparent_completion() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("completed publication");
+        store.record_ambiguity(&claim).expect("durable ambiguity");
+
+        let error = store
+            .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
+            .expect_err("ambiguity must dominate exact completion");
         assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_CLAIM");
     }
 
@@ -2426,7 +2517,11 @@ mod tests {
     }
 
     fn rotate_generation(fixture: &mut Fixture, generation: u64, rollback_from: Option<u64>) {
-        let previous_transient = fixture.fetched[0].transient_path.clone();
+        let previous_bundle_artifact = PathBuf::from(&fixture.config.output_root)
+            .join("bundles")
+            .join(&fixture.request.resolution_id)
+            .join("artifacts")
+            .join(&fixture.plan.nodes[0].sha256);
         fixture.config.generation = generation;
         fixture.request.resolution_id = Uuid::new_v4().to_string();
         fixture.request.build_id = Uuid::new_v4().to_string();
@@ -2444,8 +2539,11 @@ mod tests {
         let next_root =
             PathBuf::from(&fixture.config.transport_root).join(&fixture.request.resolution_id);
         std::fs::create_dir(&next_root).expect("rotated transport root");
+        std::fs::set_permissions(&next_root, std::fs::Permissions::from_mode(0o700))
+            .expect("private rotated transport root");
         let next_transient = next_root.join(format!("{}.part", fixture.fetched[0].node_id));
-        std::fs::copy(previous_transient, &next_transient).expect("rotated transient artifact");
+        std::fs::copy(previous_bundle_artifact, &next_transient)
+            .expect("rotated transient artifact");
         std::fs::set_permissions(&next_transient, std::fs::Permissions::from_mode(0o600))
             .expect("rotated transient mode");
         fixture.fetched[0].transient_path = next_transient;

@@ -155,10 +155,13 @@ and client-library retries are disabled. Cleartext loopback fixtures require
 both configuration admission and `MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE=1`.
 
 Configuration, credential, signing-key, marker, public-key, CA, lock, claim,
-receipt, and retained-manifest reads are bounded regular-file reads that deny a
-final symlink. Authority files must be owned by the effective resolver UID with
-no group or other permission bits. Construction validates every authority and
-limit before creating a claim or contacting a repository.
+receipt, and retained-manifest reads are bounded regular-file reads. Authority
+paths are resolved against the actual output and transport roots, and authority
+files are opened component by component relative to already opened directory
+descriptors so neither an ancestor nor final symlink is followed. Authority
+files must be owned by the effective resolver UID with no group or other
+permission bits. Construction validates every authority and limit before
+creating a claim or contacting a repository.
 
 `mcloving.secret-markers/v1` is closed JSON with one strictly sorted,
 duplicate-free `markers_hex` array. Entries are lowercase even-length hex for
@@ -258,11 +261,13 @@ deadline, and rollback lineage fields. HMAC-SHA-256 covers canonical receipt
 bytes. The verifier re-hashes the retained tree and refuses substituted,
 missing, extra, mutable, or late content.
 
-Authority files are canonical absolute paths outside both mutable resolver roots.
-The output and transport roots are disjoint: neither may contain the other.
+Authority files are canonical absolute paths outside both mutable resolver
+roots both lexically and after filesystem resolution. The output and transport
+roots are disjoint before and after resolution: neither may contain the other.
 
 The private output layout contains `.mcloving-dependency-output.lock` plus
-mutable `claims/`, `receipts/`, `completions/`, and `bundles/` directories.
+mutable `claims/`, `ambiguities/`, `receipts/`, `completions/`, and `bundles/`
+directories.
 Claims are durable mode-`0600` `mcloving.dependency-claim/v1` JSON. A unique mode-`0700` stage is
 populated with content-addressed artifacts, files are synchronized and sealed
 to `0400`, the artifacts directory is sealed to `0500`, and the stage is
@@ -270,15 +275,20 @@ renamed beneath `bundles/<resolution-id>`. The bundle root is sealed to `0500`
 before its parent entry is synchronized. `mcloving.dependency-manifest/v1`
 binds the exact node-to-content mapping. The retained-tree digest covers every
 relative path, mode, size, and content digest. Only then is a mode-`0400`
-`mcloving.dependency-receipt/v1` written and HMAC-SHA-256 signed. A
-mode-`0400` `mcloving.dependency-completion/v1` record binding the request and
-receipt HMAC is synchronized while the durable claim still exists. Only after
-that confirmation may the claim be removed and synchronized to expose replay.
-Replay requires an exact receipt/completion pair and the absence of a claim; a
-claim always takes precedence as incomplete state. A deadline crossing withdraws
-the receipt and bundle and retains or restores the durable claim for explicit
-reconciliation. If restoration fails, the absent completion record preserves
-the ambiguity instead of admitting replay.
+`mcloving.dependency-receipt/v1` written and HMAC-SHA-256 signed. While the
+durable claim still blocks replay, the worker revalidates that signed receipt
+against the complete retained tree, durably removes the exact private transport
+resolution, and rechecks the deadline. Only then is a mode-`0400`
+`mcloving.dependency-completion/v1` record binding the request and receipt HMAC
+synchronized. The claim is removed and synchronized only after all fallible
+verification and transient cleanup are complete. Replay requires an exact
+receipt/completion pair and the absence of both a claim and a durable ambiguity
+record. A claim or ambiguity record always takes precedence as incomplete
+state. A deadline crossing withdraws the receipt and bundle and retains or
+restores the durable claim for explicit reconciliation. If the final claim
+directory sync is uncertain, a separately synchronized mode-`0600` ambiguity
+record is attempted alongside claim restoration and completion removal; any
+successful path permanently blocks replay pending explicit reconciliation.
 
 ## Required executable evidence
 

@@ -35,6 +35,8 @@ impl Fixture {
         let ca_path = authority_file(root.path(), "repository.ca", &ca);
         let receipt_path = authority_file(root.path(), "receipt.key", &receipt);
         let marker_path = authority_file(root.path(), "markers.json", &marker);
+        fs::create_dir(root.path().join("output")).expect("output root");
+        fs::create_dir(root.path().join("transport")).expect("transport root");
         let config = CertifiedConfig {
             schema_version: "mcloving.dependency-config/v1".to_owned(),
             protocol_version: "mcloving.dependency-resolver/v1".to_owned(),
@@ -181,6 +183,20 @@ fn receipt_key_strength_and_marker_membership_fail_closed() {
     fixture.config.secret_marker_set_sha256 = sha256(&markers);
     let error = LoadedAuthorities::load(&fixture.config).expect_err("weak receipt key");
     assert_eq!(error.code, "DEP_AUTHORITY_RECEIPT_KEY_INVALID");
+}
+
+#[test]
+fn authority_ancestor_symlink_into_mutable_root_fails_closed() {
+    let mut fixture = Fixture::new();
+    let output = PathBuf::from(&fixture.config.output_root);
+    let aliased_receipt = output.join("aliased-receipt.key");
+    write_private(&aliased_receipt, &fixture.receipt);
+    let alias = fixture._root.path().join("authority-alias");
+    symlink(&output, &alias).expect("authority ancestor alias");
+    fixture.config.receipt_key_path = path_string(&alias.join("aliased-receipt.key"));
+
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("resolved mutable authority");
+    assert_eq!(error.code, "DEP_CONFIG_AUTHORITY_ROOT_OVERLAP");
 }
 
 fn authority_file(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
