@@ -116,6 +116,7 @@ struct StoreInner {
     secret_marker_set_sha256: String,
     receipt_key_id: String,
     receipt_key: Vec<u8>,
+    marker_set: Vec<Vec<u8>>,
     max_artifact_bytes: u64,
     max_total_artifact_bytes: u64,
     active: Mutex<BTreeSet<Uuid>>,
@@ -134,10 +135,21 @@ impl ResolutionStore {
     ) -> Result<Self, StoreError> {
         crate::validate_config(config)
             .map_err(|error| StoreError::new(error.code, error.message))?;
-        Self::open_inner(config, authorities.receipt_key())
+        Self::open_inner(
+            config,
+            authorities.receipt_key(),
+            authorities
+                .markers()
+                .map(|marker| marker.to_vec())
+                .collect(),
+        )
     }
 
-    fn open_inner(config: &CertifiedConfig, receipt_key: &[u8]) -> Result<Self, StoreError> {
+    fn open_inner(
+        config: &CertifiedConfig,
+        receipt_key: &[u8],
+        marker_set: Vec<Vec<u8>>,
+    ) -> Result<Self, StoreError> {
         if receipt_key.is_empty() {
             return Err(StoreError::new(
                 "DEP_STORE_RECEIPT_KEY_INVALID",
@@ -159,6 +171,7 @@ impl ResolutionStore {
                 secret_marker_set_sha256: config.secret_marker_set_sha256.clone(),
                 receipt_key_id: config.receipt_key_id.clone(),
                 receipt_key: receipt_key.to_vec(),
+                marker_set,
                 max_artifact_bytes: config.limits.max_artifact_bytes,
                 max_total_artifact_bytes: config.limits.max_total_artifact_bytes,
                 active: Mutex::new(BTreeSet::new()),
@@ -185,6 +198,7 @@ impl ResolutionStore {
                 "claim request, configuration, or canonical plan is not exact",
             ));
         }
+        self.deny_secret_markers(request, plan)?;
         let resolution_id = Uuid::parse_str(&request.resolution_id).map_err(|_| {
             StoreError::new(
                 "DEP_STORE_RESOLUTION_ID_INVALID",
@@ -384,6 +398,7 @@ impl ResolutionStore {
             hmac_sha256: String::new(),
         };
         receipt.hmac_sha256 = sign_receipt(&receipt, &self.inner.receipt_key)?;
+        self.deny_secret_markers(&receipt, &())?;
         let receipt_path = self.receipt_path(resolution_id);
         if let Err(error) = write_new_json(&receipt_path, &receipt, 0o400) {
             remove_private_tree(&bundle_path)?;
@@ -606,6 +621,35 @@ impl ResolutionStore {
             active.remove(&resolution_id);
         }
     }
+
+    fn deny_secret_markers<T: Serialize, U: Serialize>(
+        &self,
+        first: &T,
+        second: &U,
+    ) -> Result<(), StoreError> {
+        let first = serde_json::to_vec(first).map_err(|_| state_error())?;
+        let second = serde_json::to_vec(second).map_err(|_| state_error())?;
+        if self
+            .inner
+            .marker_set
+            .iter()
+            .any(|marker| contains_bytes(&first, marker) || contains_bytes(&second, marker))
+        {
+            return Err(StoreError::new(
+                "DEP_STORE_SECRET_MARKER_DETECTED",
+                "dependency resolution state contains a configured secret marker",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 fn sign_receipt(receipt: &ResolutionReceipt, key: &[u8]) -> Result<String, StoreError> {
@@ -1396,7 +1440,12 @@ mod tests {
         }
 
         fn store(&self) -> ResolutionStore {
-            ResolutionStore::open_inner(&self.config, &self.receipt_key).expect("resolution store")
+            ResolutionStore::open_inner(
+                &self.config,
+                &self.receipt_key,
+                vec![self.receipt_key.clone()],
+            )
+            .expect("resolution store")
         }
     }
 
@@ -1470,6 +1519,27 @@ mod tests {
             .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
             .expect_err("restart ambiguity");
         assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_CLAIM");
+    }
+
+    #[test]
+    fn request_secret_markers_are_denied_before_claim() {
+        let mut fixture = Fixture::new();
+        fixture.request.audit_lineage =
+            String::from_utf8(fixture.receipt_key.clone()).expect("UTF-8 receipt-key fixture");
+        fixture.admitted.request_sha256 =
+            request_sha256(&fixture.request).expect("marked request digest");
+        let store = fixture.store();
+        let error = store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect_err("request secret marker");
+        assert_eq!(error.code, "DEP_STORE_SECRET_MARKER_DETECTED");
+        assert!(
+            std::fs::read_dir(store.inner.root.join("claims"))
+                .expect("claims directory")
+                .next()
+                .is_none(),
+            "secret-bearing request must not create a durable claim"
+        );
     }
 
     #[test]
