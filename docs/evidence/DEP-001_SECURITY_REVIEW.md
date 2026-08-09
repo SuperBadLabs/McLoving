@@ -3,19 +3,19 @@
 Date: 2026-08-09
 
 Verdict: PASS for the implementation gate at exact implementation head
-`d0901a1dfe987321d2088ab4d4897e156262fa57`. All required protected workflows
+`4bd16451762bb4018dbaa187e0ee1a433a7f0d1c`. All required protected workflows
 completed cleanly
-across [Foundation run 31327583362](https://github.com/SuperBadLabs/McLoving/actions/runs/31327583362)
-and [Windows Agent run 31327583365](https://github.com/SuperBadLabs/McLoving/actions/runs/31327583365).
+across [Foundation run 31331554285](https://github.com/SuperBadLabs/McLoving/actions/runs/31331554285)
+and [Windows Agent run 31331554219](https://github.com/SuperBadLabs/McLoving/actions/runs/31331554219).
 The Windows impact classifier passed and intentionally skipped the Windows-agent
 job because the resolver diff did not enter the agent dependency closure. The
-focused gate passed eighty-three dependency-resolution tests: forty-one unit
-tests, forty-one ordinary integration tests, and one real exact-capacity
-tmpfs/HTTP/standalone-process test. Independent exact-head review found no
-further implementation defect after authenticated source-provenance admission
-and path-only/nonblocking configuration, authority, and transport-lock
-inspection; its sole new finding required this exact implementation-head
-documentation recertification. The recertification
+focused gate passed eighty-five dependency-resolution tests: forty-one unit
+tests, forty-three ordinary integration tests, and one real exact-capacity
+tmpfs/HTTP/standalone-process test. Ready-transition review found an
+ecosystem-crossed typed adapter error and a redundant Mario zero-authority
+counter; both were repaired, their focused regressions pass, and fresh
+independent review of the exact repair head found no further issue. The
+recertification
 threads remain merge gates until this closure commit passes protected checks and
 a fresh complete-PR review.
 Every actionable thread remains a merge gate until its exact fix evidence is
@@ -23,7 +23,7 @@ pushed and independently checked.
 
 The DEP-001-to-CACHE-001 execution-board transition entered PR #35 at
 `02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at exact
-implementation head `d0901a1dfe987321d2088ab4d4897e156262fa57`. Closure
+implementation head `4bd16451762bb4018dbaa187e0ee1a433a7f0d1c`. Closure
 commits update this receipt and recertify those existing board rows; they
 do not introduce the transition. The complete PR #35 diff against protected
 `main` includes the resolver implementation, tests, protected workflow change,
@@ -199,7 +199,7 @@ response to that runner-only failure.
 ## Review-driven hardening
 
 Pre-closure review and repeated contained execution exposed and repaired
-seventy-nine actionable findings across eighty-four important seams:
+eighty-one actionable findings across eighty-six important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
    read-only mode. JSON state now becomes visible only through a fully written,
@@ -511,6 +511,15 @@ seventy-nine actionable findings across eighty-four important seams:
     `d0901a1dfe987321d2088ab4d4897e156262fa57`, eighty-three focused tests, the
     current protected runs, and the complete seventy-nine-finding/eighty-four-seam
     chronology.
+85. A shared local-key validator returned Maven-specific code and prose when npm
+    or PyPI invoked it. The shared function is now a pure bounded-key predicate;
+    each ecosystem owns its typed error surface, and focused npm/PyPI regressions
+    prove that invalid local identifiers cannot leak a Maven classification.
+86. The Mario zero-dependency test incremented a workload counter immediately
+    before directly requiring every dependency record to be `controller-global`,
+    making the later zero assertion redundant. The counter is removed while the
+    stronger per-record kind, identity, disposition, and absent-credential
+    assertions remain.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -584,7 +593,10 @@ authority and configuration loading. Their pinned-inode repairs bring the audit
 to seventy-eight actionable findings across eighty-three important seams; the
 only subsequent finding was this exact-head receipt and board recertification,
 bringing the closure audit to seventy-nine actionable findings across
-eighty-four important seams;
+eighty-four important seams; ready-transition Copilot review then found the
+ecosystem-crossed adapter error and redundant Mario counter. Their exact-head
+repairs and focused regressions bring the final audit to eighty-one actionable
+findings across eighty-six important seams;
 every fixed thread must be replied to and resolved only after the complete
 closure head passes protected checks and fresh review.
 
