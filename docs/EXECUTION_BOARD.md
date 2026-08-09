@@ -773,6 +773,22 @@ dependency-ready.
 | UX-002 | DONE | API-002 | Complete Rust CLI journeys for validate/plan/submit/watch/explain/cancel/retry/approve, logs, artifacts, tests, and audit; support machine-stable JSON plus human output, resumable watch, explicit uncertain states, shell completion, and API-only end-to-end tests |
 | UI-001 | DONE | API-002 | Ship a content-security-policy-locked static web UI that uses only the public API for dashboard, pipeline/build graph, live logs, approvals, artifacts, tests, audit, and explainability; no privileged backend path, embedded secret, or client-side authorization claim is allowed, with accessibility and browser journey gates |
 
+## External differential bench findings (games round 1, 2026-08)
+
+Findings from the owner-run cross-engine bench on luigi (2026-08-06/09) against
+protected-main `b75165d`, production remote-agent lane over mTLS. Evidence
+bundle: luigi `~/games-round1-receipts.tgz` (environment fingerprint, heat
+logs, controller/agent logs, and the preserved agent journal). The bench also
+measured ~500 ms wall per single-step stage with both controller and agent
+polls at 10 ms — cause never isolated; that observation belongs to `PERF-001`
+and is recorded here only so it is not lost.
+
+| Ticket | Status | Depends on | Objective and acceptance |
+|---|---|---|---|
+| EXEC-001 | PENDING | — | Fail closed end-to-end on unsupported execution specifications. Measured: a strict-YAML pipeline with 100 process steps in ONE stage passed `validate` and admission, scheduled, and was refused at claim time by the execution spine (`spec.steps.len() != 1`); the agent treated the permanent refusal as transient and retried the claim in an infinite session loop while the build reported `running` indefinitely (1,460+ build events accumulated before manual cancellation). A permanent condition presenting as progress is the silent worst outcome this board exists to prevent. Acceptance: validate/admission reject — or plan into per-attempt units — every spec the spine cannot execute, so validate-accepted implies runnable; an unsupported-spec refusal at claim time is terminal and fail-closed with a named code, never retried; a regression gate submits the 100-step single-stage pipeline and asserts a terminal state within one lease, never unbounded running |
+| EXEC-002 | PENDING | — | Capability vocabulary parity for the embedded worker. Measured: the controller-embedded worker configured with `MCLOVING_AGENT_CAPABILITIES=linux` never claimed any work — submissions default to requiring `platform:linux`, so every build queued indefinitely; `explain` correctly named the missing capability (the diagnostic worked; the configuration surface lied silently at startup). Acceptance: one documented capability vocabulary; embedded-worker startup fails closed with a named error when its declared capabilities cannot match the default submission requirement; a gate proves embedded-only execution of a default `--platform linux` submission end to end |
+| EXEC-003 | PENDING | — | Name the identity collision and give the operator a resolution verb. Measured: two executors (embedded worker + remote agent) misconfigured with one agent identity and one journal broke a work-delivery session mid-build; the attempt was journaled recovered, the agent fail-closed refused all further work (correct), the build parked in `reconciliation_required` (correct), and CLI cancel was refused (defensible) — but no diagnostic named the collision, and no documented operator path existed to discharge the orphaned recovered attempt short of journal replacement. Fail-closed held; explainability did not. Acceptance: a gate reproduces the shared-identity collision and asserts a named diagnostic on both agent and controller; a documented, implemented operator resolution for an orphaned recovered attempt; the cancel refusal states its reason. Evidence: preserved journal in the bench archive |
+
 ## Migration campaign tickets
 
 | Ticket | Status | Depends on | Objective and acceptance |
