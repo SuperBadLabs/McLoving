@@ -95,6 +95,45 @@ pub enum ClaimOutcome {
     Concurrent(ResolutionClaim),
 }
 
+pub struct SerializedOutputGuard {
+    marker_set: Vec<Vec<u8>>,
+    suffix: Vec<u8>,
+    suffix_limit: usize,
+}
+
+impl SerializedOutputGuard {
+    fn new(marker_set: &[Vec<u8>]) -> Self {
+        Self {
+            marker_set: marker_set.to_vec(),
+            suffix: Vec::new(),
+            suffix_limit: marker_set
+                .iter()
+                .map(Vec::len)
+                .max()
+                .unwrap_or_default()
+                .saturating_sub(1),
+        }
+    }
+
+    pub fn admit(&mut self, bytes: &[u8]) -> bool {
+        let mut candidate = Vec::with_capacity(self.suffix.len() + bytes.len());
+        candidate.extend_from_slice(&self.suffix);
+        candidate.extend_from_slice(bytes);
+        if self
+            .marker_set
+            .iter()
+            .any(|marker| contains_bytes(&candidate, marker))
+        {
+            return false;
+        }
+        let retained = self.suffix_limit.min(candidate.len());
+        self.suffix.clear();
+        self.suffix
+            .extend_from_slice(&candidate[candidate.len() - retained..]);
+        true
+    }
+}
+
 pub(crate) enum ConcurrentClaimState {
     Active,
     Completed(Box<ResolutionReceipt>),
@@ -828,12 +867,8 @@ impl ResolutionStore {
         }
     }
 
-    pub(crate) fn serialized_output_is_marker_safe(&self, bytes: &[u8]) -> bool {
-        !self
-            .inner
-            .marker_set
-            .iter()
-            .any(|marker| contains_bytes(bytes, marker))
+    pub(crate) fn serialized_output_guard(&self) -> SerializedOutputGuard {
+        SerializedOutputGuard::new(&self.inner.marker_set)
     }
 
     fn stage_publication(
@@ -2169,10 +2204,27 @@ mod tests {
         let store =
             fixture.store_with_markers(vec![fixture.receipt_key.clone(), b"dependency".to_vec()]);
         let response = br#"{"status":"error","code":"DEP_REQUEST_INVALID","message":"dependency resolution was denied"}\n"#;
-        assert!(!store.serialized_output_is_marker_safe(response));
-        assert!(store.serialized_output_is_marker_safe(
+        let mut guard = store.serialized_output_guard();
+        assert!(!guard.admit(response));
+        let mut guard = store.serialized_output_guard();
+        assert!(guard.admit(
             br#"{"status":"error","code":"DEP_REQUEST_INVALID","message":"request denied"}\n"#
         ));
+    }
+
+    #[test]
+    fn serialized_output_guard_blocks_a_marker_spanning_frames() {
+        let fixture = Fixture::new();
+        let marker = b"tail\"}\n{\"status".to_vec();
+        let store = fixture.store_with_markers(vec![fixture.receipt_key.clone(), marker]);
+        let first = b"{\"message\":\"safe-tail\"}\n";
+        let second = b"{\"status\":\"error\"}\n";
+        assert!(!contains_bytes(first, b"tail\"}\n{\"status"));
+        assert!(!contains_bytes(second, b"tail\"}\n{\"status"));
+
+        let mut guard = store.serialized_output_guard();
+        assert!(guard.admit(first));
+        assert!(!guard.admit(second));
     }
 
     #[test]

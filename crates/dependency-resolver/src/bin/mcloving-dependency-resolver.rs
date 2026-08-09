@@ -3,8 +3,8 @@ use std::path::Path;
 
 use mcloving_dependency_resolver::{
     DependencyResolver, FrameReadError, MAX_PUBLICATION_WORKER_BYTES, ResolverResponse,
-    load_certified_config, parse_resolution_frame, read_bounded_frame, run_publication_worker,
-    verify_running_executable,
+    SerializedOutputGuard, load_certified_config, parse_resolution_frame, read_bounded_frame,
+    run_publication_worker, verify_running_executable,
 };
 
 fn main() {
@@ -52,6 +52,7 @@ async fn run() -> Result<(), (&'static str, &'static str)> {
     let stdout = std::io::stdout();
     let mut input = BufReader::new(stdin.lock());
     let mut output = BufWriter::new(stdout.lock());
+    let mut output_guard = resolver.serialized_output_guard();
     loop {
         let frame = match read_bounded_frame(&mut input, max_frame) {
             Ok(Some(frame)) => frame,
@@ -60,6 +61,7 @@ async fn run() -> Result<(), (&'static str, &'static str)> {
                 write_response(
                     &mut output,
                     &resolver,
+                    &mut output_guard,
                     ResolverResponse::Error {
                         code: "DEP_REQUEST_FRAME_OVERSIZED",
                         message: "dependency resolution was denied",
@@ -83,7 +85,14 @@ async fn run() -> Result<(), (&'static str, &'static str)> {
                 message: error.message,
             },
         };
-        write_response(&mut output, &resolver, response, max_frame).await?;
+        write_response(
+            &mut output,
+            &resolver,
+            &mut output_guard,
+            response,
+            max_frame,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -118,6 +127,7 @@ fn run_worker() -> Result<(), (&'static str, &'static str)> {
 async fn write_response<W: Write>(
     output: &mut W,
     resolver: &DependencyResolver,
+    output_guard: &mut SerializedOutputGuard,
     response: ResolverResponse,
     max_frame: usize,
 ) -> Result<(), (&'static str, &'static str)> {
@@ -141,7 +151,7 @@ async fn write_response<W: Write>(
         })?;
     }
     bytes.push(b'\n');
-    if !resolver.serialized_output_is_marker_safe(&bytes) {
+    if !output_guard.admit(&bytes) {
         return Err(("DEP_RESPONSE_SECRET_MARKER_DETECTED", "response suppressed"));
     }
     output

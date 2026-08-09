@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::publication::ConcurrentClaimState;
+use crate::publication::{ConcurrentClaimState, SerializedOutputGuard};
 use crate::{
     AdapterBindings, CanonicalPlan, CertifiedConfig, ClaimOutcome, Ecosystem, HttpTransport,
     LoadedAuthorities, RepositoryBinding, ResolutionReceipt, ResolutionRequest, ResolutionStore,
@@ -241,8 +241,8 @@ impl DependencyResolver {
         }
     }
 
-    pub fn serialized_output_is_marker_safe(&self, bytes: &[u8]) -> bool {
-        self.store.serialized_output_is_marker_safe(bytes)
+    pub fn serialized_output_guard(&self) -> SerializedOutputGuard {
+        self.store.serialized_output_guard()
     }
 
     async fn publish_supervised(

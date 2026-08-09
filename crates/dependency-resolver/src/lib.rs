@@ -24,7 +24,8 @@ pub use plan::{
     canonical_graph_sha256, canonical_node_id, validate_plan,
 };
 pub use publication::{
-    ClaimOutcome, ResolutionClaim, ResolutionReceipt, ResolutionStore, RetainedArtifact, StoreError,
+    ClaimOutcome, ResolutionClaim, ResolutionReceipt, ResolutionStore, RetainedArtifact,
+    SerializedOutputGuard, StoreError,
 };
 pub use pypi_adapter::parse_pypi_requirements;
 pub use request::{
