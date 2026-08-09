@@ -305,7 +305,8 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     concurrent_frame.request.expected_configuration_sha256 =
         configuration_sha256(&concurrent_config).expect("concurrent config digest");
     let resolver = Arc::new(
-        DependencyResolver::new(concurrent_config).expect("concurrent contained resolver"),
+        DependencyResolver::new_with_publication_worker(concurrent_config, resolver_binary.clone())
+            .expect("concurrent contained resolver"),
     );
     let left_resolver = Arc::clone(&resolver);
     let left_frame = concurrent_frame.clone();

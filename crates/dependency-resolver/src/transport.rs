@@ -19,7 +19,8 @@ const ATTESTATION_HEADER: &str = "x-mcloving-attestation";
 const GENERATION_HEADER: &str = "x-mcloving-publication-generation";
 const TRANSPORT_LOCK_CONTENT: &[u8] = b"mcloving-dependency-transport-lock/v1\n";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FetchedArtifact {
     pub node_id: String,
     pub transient_path: PathBuf,
@@ -446,9 +447,10 @@ fn validate_headers(
             .and_then(|value_total| value_total.checked_add(value.as_bytes().len() as u64))
     });
     if total.is_none_or(|total| total > max_header_bytes)
-        || headers
-            .values()
-            .any(|value| contains_marker(value.as_bytes(), markers))
+        || headers.iter().any(|(name, value)| {
+            contains_marker(name.as_str().as_bytes(), markers)
+                || contains_marker(value.as_bytes(), markers)
+        })
     {
         return Err(TransportError::new(
             "DEP_TRANSPORT_HEADER_DENIED",
@@ -1171,6 +1173,46 @@ mod tests {
             .await
             .expect_err("absolute timeout");
         assert_eq!(error.code, "DEP_TRANSPORT_DEADLINE");
+    }
+
+    #[test]
+    fn configured_secret_marker_in_header_name_is_denied() {
+        let node = PackageNode {
+            node_id: "node".to_owned(),
+            coordinate: "com.example:app:jar".to_owned(),
+            exact_version: "1.0.0".to_owned(),
+            repository_id: "contained-maven".to_owned(),
+            artifact_path: "com/example/app/1.0.0/app.jar".to_owned(),
+            declared_size: 8,
+            sha256: "a".repeat(64),
+            attestation_key_id: Some("contained-key".to_owned()),
+            dependencies: Vec::new(),
+        };
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("8"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        headers.insert(
+            REPOSITORY_HEADER,
+            HeaderValue::from_static("contained-maven"),
+        );
+        headers.insert(GENERATION_HEADER, HeaderValue::from_static("7"));
+        headers.insert(ATTESTATION_HEADER, HeaderValue::from_static("AA=="));
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-contained-secret-marker"),
+            HeaderValue::from_static("safe"),
+        );
+        let error = validate_headers(
+            &headers,
+            &node,
+            7,
+            16_384,
+            &[b"contained-secret-marker".to_vec()],
+        )
+        .expect_err("secret marker in header name");
+        assert_eq!(error.code, "DEP_TRANSPORT_HEADER_DENIED");
     }
 
     #[test]

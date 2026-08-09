@@ -1,9 +1,13 @@
+use std::path::PathBuf;
+use std::process::{Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::io::AsyncWriteExt as _;
+use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::{
@@ -12,11 +16,32 @@ use crate::{
     parse_maven_lock, parse_npm_package_lock, parse_pypi_requirements,
 };
 
+pub const MAX_PUBLICATION_WORKER_BYTES: usize = 16 * 1_048_576;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolutionFrame {
     pub request: ResolutionRequest,
     pub lock_base64: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationWorkerRequest {
+    config: CertifiedConfig,
+    claim: crate::ResolutionClaim,
+    request: ResolutionRequest,
+    admitted: crate::AdmittedRequest,
+    plan: CanonicalPlan,
+    fetched: Vec<crate::FetchedArtifact>,
+    deadline_monotonic_ns: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PublicationWorkerResponse {
+    Ok,
+    Error { code: String },
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -39,10 +64,38 @@ pub struct DependencyResolver {
     config: CertifiedConfig,
     store: ResolutionStore,
     transport: HttpTransport,
+    publication_worker: PathBuf,
 }
 
 impl DependencyResolver {
     pub fn new(config: CertifiedConfig) -> Result<Self, ResolverError> {
+        #[cfg(target_os = "linux")]
+        let publication_worker = PathBuf::from("/proc/self/exe");
+        #[cfg(not(target_os = "linux"))]
+        let publication_worker = std::env::current_exe()
+            .map_err(|_| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?;
+        Self::new_inner(config, publication_worker, false)
+    }
+
+    pub fn new_with_publication_worker(
+        config: CertifiedConfig,
+        publication_worker: PathBuf,
+    ) -> Result<Self, ResolverError> {
+        Self::new_inner(config, publication_worker, true)
+    }
+
+    fn new_inner(
+        config: CertifiedConfig,
+        publication_worker: PathBuf,
+        canonicalize_worker: bool,
+    ) -> Result<Self, ResolverError> {
+        crate::standalone::verify_executable_path(&config, &publication_worker)?;
+        let publication_worker = if canonicalize_worker {
+            std::fs::canonicalize(publication_worker)
+                .map_err(|_| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?
+        } else {
+            publication_worker
+        };
         let authorities =
             LoadedAuthorities::load(&config).map_err(|error| ResolverError::denied(error.code))?;
         let store = ResolutionStore::open(&config, &authorities)
@@ -53,6 +106,7 @@ impl DependencyResolver {
             config,
             store,
             transport,
+            publication_worker,
         })
     }
 
@@ -120,35 +174,18 @@ impl DependencyResolver {
             cleanup.map_err(|error| ResolverError::denied(error.code))?;
             return Err(ResolverError::denied("DEP_TRANSPORT_DEADLINE"));
         }
-        let store = self.store.clone();
-        let publish_claim = claim.clone();
-        let publish_request = frame.request;
-        let publish_admitted = admitted.clone();
-        let publish_plan = plan;
-        let receipt = match tokio::task::spawn_blocking(move || {
-            store.publish(
-                &publish_claim,
-                publish_request,
-                &publish_admitted,
-                publish_plan,
-                &fetched,
-                deadline,
-            )
-        })
-        .await
+        let receipt = match self
+            .publish_supervised(&claim, frame.request, &admitted, plan, fetched, deadline)
+            .await
         {
-            Ok(Ok(receipt)) => receipt,
-            Ok(Err(error)) => {
-                let cleanup = self.transport.cleanup_resolution(resolution_id).await;
+            Ok(receipt) => receipt,
+            Err(error) => {
+                // A killed publication worker may still be leaving a blocked
+                // kernel syscall. Preserve the durable claim and transient
+                // allocation as explicit restart ambiguity instead of racing
+                // cleanup against an incompletely terminated worker.
                 self.store.release_incomplete_claim(&claim);
-                cleanup.map_err(|cleanup_error| ResolverError::denied(cleanup_error.code))?;
-                return Err(ResolverError::denied(error.code));
-            }
-            Err(_) => {
-                let cleanup = self.transport.cleanup_resolution(resolution_id).await;
-                self.store.release_incomplete_claim(&claim);
-                cleanup.map_err(|error| ResolverError::denied(error.code))?;
-                return Err(ResolverError::denied("DEP_STORE_PUBLICATION_TASK_FAILED"));
+                return Err(error);
             }
         };
         self.transport
@@ -156,6 +193,64 @@ impl DependencyResolver {
             .await
             .map_err(|error| ResolverError::denied(error.code))?;
         Ok(receipt)
+    }
+
+    async fn publish_supervised(
+        &self,
+        claim: &crate::ResolutionClaim,
+        request: ResolutionRequest,
+        admitted: &crate::AdmittedRequest,
+        plan: CanonicalPlan,
+        fetched: Vec<crate::FetchedArtifact>,
+        deadline: Instant,
+    ) -> Result<ResolutionReceipt, ResolverError> {
+        let worker_request = PublicationWorkerRequest {
+            config: self.config.clone(),
+            claim: claim.clone(),
+            request,
+            admitted: admitted.clone(),
+            plan,
+            fetched,
+            deadline_monotonic_ns: monotonic_deadline_ns(deadline)?,
+        };
+        let payload = serde_json::to_vec(&worker_request)
+            .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))?;
+        if payload.len() > MAX_PUBLICATION_WORKER_BYTES {
+            return Err(ResolverError::denied(
+                "DEP_STORE_PUBLICATION_WORKER_FRAME_INVALID",
+            ));
+        }
+        let mut command = Command::new(&self.publication_worker);
+        command
+            .arg("--publication-worker")
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if self.config.loopback_fixture
+            && std::env::var_os("MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE").as_deref()
+                == Some(std::ffi::OsStr::new("1"))
+        {
+            command.env("MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE", "1");
+        }
+        let output = supervise_publication_worker(command, payload, deadline).await?;
+        if !output.status.success() || output.stdout.len() > 512 {
+            return Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"));
+        }
+        let response: PublicationWorkerResponse = crate::strict_json::from_slice(&output.stdout)
+            .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))?;
+        match response {
+            PublicationWorkerResponse::Ok => {
+                self.store.release_incomplete_claim(claim);
+                self.store
+                    .load_completed(claim.resolution_id, &admitted.request_sha256)
+                    .map_err(|error| ResolverError::denied(error.code))?
+                    .ok_or_else(|| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))
+            }
+            PublicationWorkerResponse::Error { code } => {
+                Err(ResolverError::denied(worker_error_code(&code)))
+            }
+        }
     }
 
     fn adapter_bindings(
@@ -217,6 +312,164 @@ impl DependencyResolver {
     }
 }
 
+pub fn run_publication_worker(input: &[u8]) -> PublicationWorkerResponse {
+    if input.len() > MAX_PUBLICATION_WORKER_BYTES {
+        return PublicationWorkerResponse::Error {
+            code: "DEP_STORE_PUBLICATION_WORKER_FRAME_INVALID".to_owned(),
+        };
+    }
+    let request: PublicationWorkerRequest = match crate::strict_json::from_slice(input) {
+        Ok(request) => request,
+        Err(_) => {
+            return PublicationWorkerResponse::Error {
+                code: "DEP_STORE_PUBLICATION_WORKER_FRAME_INVALID".to_owned(),
+            };
+        }
+    };
+    let deadline = match instant_from_monotonic_deadline(request.deadline_monotonic_ns) {
+        Ok(deadline) => deadline,
+        Err(error) => {
+            return PublicationWorkerResponse::Error {
+                code: error.code.to_owned(),
+            };
+        }
+    };
+    if let Err(error) = crate::standalone::verify_running_executable(&request.config) {
+        return PublicationWorkerResponse::Error {
+            code: error.code.to_owned(),
+        };
+    }
+    let authorities = match LoadedAuthorities::load(&request.config) {
+        Ok(authorities) => authorities,
+        Err(error) => {
+            return PublicationWorkerResponse::Error {
+                code: error.code.to_owned(),
+            };
+        }
+    };
+    let store = match ResolutionStore::open_worker(&request.config, &authorities) {
+        Ok(store) => store,
+        Err(error) => {
+            return PublicationWorkerResponse::Error {
+                code: error.code.to_owned(),
+            };
+        }
+    };
+    match store.publish_worker(
+        &request.claim,
+        request.request,
+        &request.admitted,
+        request.plan,
+        &request.fetched,
+        deadline,
+    ) {
+        Ok(_) => PublicationWorkerResponse::Ok,
+        Err(error) => PublicationWorkerResponse::Error {
+            code: error.code.to_owned(),
+        },
+    }
+}
+
+async fn supervise_publication_worker(
+    mut command: Command,
+    payload: Vec<u8>,
+    deadline: Instant,
+) -> Result<Output, ResolverError> {
+    command.kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))?;
+    let operation = async move {
+        stdin.write_all(&payload).await?;
+        stdin.shutdown().await?;
+        drop(stdin);
+        child.wait_with_output().await
+    };
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation)
+        .await
+        .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_DEADLINE"))?
+        .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))
+}
+
+fn monotonic_deadline_ns(deadline: Instant) -> Result<u64, ResolverError> {
+    let clock_now = monotonic_ns()?;
+    let instant_now = Instant::now();
+    let remaining = deadline
+        .checked_duration_since(instant_now)
+        .ok_or_else(|| ResolverError::denied("DEP_STORE_PUBLICATION_DEADLINE"))?;
+    let remaining_ns = u64::try_from(remaining.as_nanos())
+        .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_DEADLINE"))?;
+    clock_now
+        .checked_add(remaining_ns)
+        .ok_or_else(|| ResolverError::denied("DEP_STORE_PUBLICATION_DEADLINE"))
+}
+
+fn instant_from_monotonic_deadline(deadline_ns: u64) -> Result<Instant, ResolverError> {
+    let instant_now = Instant::now();
+    let clock_now = monotonic_ns()?;
+    let remaining_ns = deadline_ns
+        .checked_sub(clock_now)
+        .filter(|remaining| *remaining > 0)
+        .ok_or_else(|| ResolverError::denied("DEP_STORE_PUBLICATION_DEADLINE"))?;
+    instant_now
+        .checked_add(Duration::from_nanos(remaining_ns))
+        .ok_or_else(|| ResolverError::denied("DEP_STORE_PUBLICATION_DEADLINE"))
+}
+
+#[cfg(unix)]
+fn monotonic_ns() -> Result<u64, ResolverError> {
+    use nix::sys::time::TimeValLike as _;
+
+    let value = nix::time::clock_gettime(nix::time::ClockId::CLOCK_MONOTONIC)
+        .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_CLOCK_INVALID"))?
+        .num_nanoseconds();
+    u64::try_from(value).map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_CLOCK_INVALID"))
+}
+
+#[cfg(not(unix))]
+fn monotonic_ns() -> Result<u64, ResolverError> {
+    Err(ResolverError::denied(
+        "DEP_STORE_PUBLICATION_PLATFORM_UNSUPPORTED",
+    ))
+}
+
+fn worker_error_code(code: &str) -> &'static str {
+    match code {
+        "DEP_EXECUTABLE_IDENTITY_INVALID" => "DEP_EXECUTABLE_IDENTITY_INVALID",
+        "DEP_EXECUTABLE_IDENTITY_MISMATCH" => "DEP_EXECUTABLE_IDENTITY_MISMATCH",
+        "DEP_STORE_ARTIFACT_BINDING_MISMATCH" => "DEP_STORE_ARTIFACT_BINDING_MISMATCH",
+        "DEP_STORE_ARTIFACT_CONTENT_MISMATCH" => "DEP_STORE_ARTIFACT_CONTENT_MISMATCH",
+        "DEP_STORE_ARTIFACT_SET_MISMATCH" => "DEP_STORE_ARTIFACT_SET_MISMATCH",
+        "DEP_STORE_CLAIM_NOT_ACTIVE" => "DEP_STORE_CLAIM_NOT_ACTIVE",
+        "DEP_STORE_DIRECTORY_POLICY_DENIED" => "DEP_STORE_DIRECTORY_POLICY_DENIED",
+        "DEP_STORE_FILE_POLICY_DENIED" => "DEP_STORE_FILE_POLICY_DENIED",
+        "DEP_STORE_PLATFORM_UNSUPPORTED" => "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "DEP_STORE_PUBLICATION_BINDING_INVALID" => "DEP_STORE_PUBLICATION_BINDING_INVALID",
+        "DEP_STORE_PUBLICATION_CLOCK_INVALID" => "DEP_STORE_PUBLICATION_CLOCK_INVALID",
+        "DEP_STORE_PUBLICATION_CONFLICT" => "DEP_STORE_PUBLICATION_CONFLICT",
+        "DEP_STORE_PUBLICATION_DEADLINE" => "DEP_STORE_PUBLICATION_DEADLINE",
+        "DEP_STORE_PUBLICATION_LATE" => "DEP_STORE_PUBLICATION_LATE",
+        "DEP_STORE_PUBLICATION_PLATFORM_UNSUPPORTED" => {
+            "DEP_STORE_PUBLICATION_PLATFORM_UNSUPPORTED"
+        }
+        "DEP_STORE_PUBLICATION_WORKER_FRAME_INVALID" => {
+            "DEP_STORE_PUBLICATION_WORKER_FRAME_INVALID"
+        }
+        "DEP_STORE_RECEIPT_INVALID" => "DEP_STORE_RECEIPT_INVALID",
+        "DEP_STORE_RECEIPT_KEY_INVALID" => "DEP_STORE_RECEIPT_KEY_INVALID",
+        "DEP_STORE_RETAINED_TREE_MISMATCH" => "DEP_STORE_RETAINED_TREE_MISMATCH",
+        "DEP_STORE_SECRET_MARKER_DETECTED" => "DEP_STORE_SECRET_MARKER_DETECTED",
+        "DEP_STORE_STATE_INVALID" => "DEP_STORE_STATE_INVALID",
+        "DEP_STORE_STATE_UNAVAILABLE" => "DEP_STORE_STATE_UNAVAILABLE",
+        "DEP_STORE_TRANSIENT_PATH_MISMATCH" => "DEP_STORE_TRANSIENT_PATH_MISMATCH",
+        _ => "DEP_STORE_PUBLICATION_WORKER_FAILED",
+    }
+}
+
 pub fn parse_resolution_frame(bytes: &[u8]) -> Result<ResolutionFrame, ResolverError> {
     crate::strict_json::from_slice(bytes)
         .map_err(|_| ResolverError::denied("DEP_REQUEST_FRAME_INVALID"))
@@ -248,6 +501,27 @@ fn duration_until_unix_deadline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn publication_worker_is_killed_at_the_absolute_deadline() {
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("60")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let started = Instant::now();
+        let error = supervise_publication_worker(
+            command,
+            b"bounded worker input".to_vec(),
+            started + Duration::from_millis(25),
+        )
+        .await
+        .expect_err("stalled publication worker deadline");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_DEADLINE");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     #[test]
     fn deadline_derivation_preserves_submillisecond_remainder() {

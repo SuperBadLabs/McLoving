@@ -1,9 +1,10 @@
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use mcloving_dependency_resolver::{
-    DependencyResolver, FrameReadError, ResolverResponse, load_certified_config,
-    parse_resolution_frame, read_bounded_frame, verify_running_executable,
+    DependencyResolver, FrameReadError, MAX_PUBLICATION_WORKER_BYTES, ResolverResponse,
+    load_certified_config, parse_resolution_frame, read_bounded_frame, run_publication_worker,
+    verify_running_executable,
 };
 
 #[tokio::main]
@@ -16,7 +17,16 @@ async fn main() {
 
 async fn run() -> Result<(), (&'static str, &'static str)> {
     let mut arguments = std::env::args_os().skip(1);
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--config")) {
+    let mode = arguments
+        .next()
+        .ok_or(("DEP_CLI_USAGE", "resolver requires --config <path>"))?;
+    if mode == std::ffi::OsStr::new("--publication-worker") {
+        if arguments.next().is_some() {
+            return Err(("DEP_CLI_USAGE", "publication worker accepts no arguments"));
+        }
+        return run_worker();
+    }
+    if mode != std::ffi::OsStr::new("--config") {
         return Err(("DEP_CLI_USAGE", "resolver requires --config <path>"));
     }
     let config_path = arguments
@@ -71,6 +81,33 @@ async fn run() -> Result<(), (&'static str, &'static str)> {
         write_response(&mut output, response, max_frame)?;
     }
     Ok(())
+}
+
+fn run_worker() -> Result<(), (&'static str, &'static str)> {
+    let mut input = Vec::new();
+    std::io::stdin()
+        .take((MAX_PUBLICATION_WORKER_BYTES + 1) as u64)
+        .read_to_end(&mut input)
+        .map_err(|_| {
+            (
+                "DEP_STORE_PUBLICATION_WORKER_FRAME_INVALID",
+                "dependency resolution was denied",
+            )
+        })?;
+    let response = run_publication_worker(&input);
+    let mut output = BufWriter::new(std::io::stdout().lock());
+    serde_json::to_writer(&mut output, &response).map_err(|_| {
+        (
+            "DEP_STORE_PUBLICATION_WORKER_FAILED",
+            "dependency resolution was denied",
+        )
+    })?;
+    output.flush().map_err(|_| {
+        (
+            "DEP_STORE_PUBLICATION_WORKER_FAILED",
+            "dependency resolution was denied",
+        )
+    })
 }
 
 fn write_response<W: Write>(

@@ -120,12 +120,21 @@ struct StoreInner {
     max_artifact_bytes: u64,
     max_total_artifact_bytes: u64,
     active: Mutex<BTreeSet<Uuid>>,
-    _lock: OutputLock,
+    _lock: Option<OutputLock>,
 }
 
 #[derive(Clone)]
 pub struct ResolutionStore {
     inner: Arc<StoreInner>,
+}
+
+struct PublicationInput<'a> {
+    claim: &'a ResolutionClaim,
+    request: ResolutionRequest,
+    admitted: &'a AdmittedRequest,
+    plan: CanonicalPlan,
+    fetched: &'a [FetchedArtifact],
+    deadline: Instant,
 }
 
 impl ResolutionStore {
@@ -150,6 +159,34 @@ impl ResolutionStore {
         receipt_key: &[u8],
         marker_set: Vec<Vec<u8>>,
     ) -> Result<Self, StoreError> {
+        let root = PathBuf::from(&config.output_root);
+        let lock = acquire_output_lock(&root)?;
+        Self::open_inner_with_lock(config, receipt_key, marker_set, Some(lock))
+    }
+
+    pub(crate) fn open_worker(
+        config: &CertifiedConfig,
+        authorities: &LoadedAuthorities,
+    ) -> Result<Self, StoreError> {
+        crate::validate_config(config)
+            .map_err(|error| StoreError::new(error.code, error.message))?;
+        Self::open_inner_with_lock(
+            config,
+            authorities.receipt_key(),
+            authorities
+                .markers()
+                .map(|marker| marker.to_vec())
+                .collect(),
+            None,
+        )
+    }
+
+    fn open_inner_with_lock(
+        config: &CertifiedConfig,
+        receipt_key: &[u8],
+        marker_set: Vec<Vec<u8>>,
+        lock: Option<OutputLock>,
+    ) -> Result<Self, StoreError> {
         if receipt_key.is_empty() {
             return Err(StoreError::new(
                 "DEP_STORE_RECEIPT_KEY_INVALID",
@@ -157,7 +194,6 @@ impl ResolutionStore {
             ));
         }
         let root = PathBuf::from(&config.output_root);
-        let lock = acquire_output_lock(&root)?;
         prepare_layout(&root)?;
         let configuration_sha256 = crate::configuration_sha256(config)
             .map_err(|error| StoreError::new(error.code, error.message))?;
@@ -205,10 +241,6 @@ impl ResolutionStore {
                 "resolution identity is not a UUID",
             )
         })?;
-        if let Some(receipt) = self.load_receipt(resolution_id)? {
-            self.verify_replay(&receipt, &admitted.request_sha256)?;
-            return Ok(ClaimOutcome::Replay(Box::new(receipt)));
-        }
         let expected = ResolutionClaim {
             schema_version: CLAIM_SCHEMA.to_owned(),
             resolution_id,
@@ -219,6 +251,28 @@ impl ResolutionStore {
             publication_deadline_unix_ms: admitted.absolute_expiry_unix_ms,
         };
         let claim_path = self.claim_path(resolution_id);
+        let active = self
+            .inner
+            .active
+            .lock()
+            .map_err(|_| state_error())?
+            .contains(&resolution_id);
+        if active {
+            if claim_path.exists() {
+                let existing: ResolutionClaim = read_json(&claim_path, 0o600)?;
+                if existing != expected {
+                    return Err(StoreError::new(
+                        "DEP_STORE_REPLAY_SUBSTITUTION",
+                        "resolution identity is already bound to different claim content",
+                    ));
+                }
+            }
+            return Ok(ClaimOutcome::Concurrent(expected));
+        }
+        if let Some(receipt) = self.load_receipt(resolution_id)? {
+            self.verify_replay(&receipt, &admitted.request_sha256)?;
+            return Ok(ClaimOutcome::Replay(Box::new(receipt)));
+        }
         if claim_path.exists() {
             let existing: ResolutionClaim = read_json(&claim_path, 0o600)?;
             if existing != expected {
@@ -226,15 +280,6 @@ impl ResolutionStore {
                     "DEP_STORE_REPLAY_SUBSTITUTION",
                     "resolution identity is already bound to different claim content",
                 ));
-            }
-            let active = self
-                .inner
-                .active
-                .lock()
-                .map_err(|_| state_error())?
-                .contains(&resolution_id);
-            if active {
-                return Ok(ClaimOutcome::Concurrent(existing));
             }
             return Err(StoreError::new(
                 "DEP_STORE_AMBIGUOUS_CLAIM",
@@ -260,6 +305,15 @@ impl ResolutionStore {
         resolution_id: Uuid,
         expected_request_sha256: &str,
     ) -> Result<Option<ResolutionReceipt>, StoreError> {
+        if self
+            .inner
+            .active
+            .lock()
+            .map_err(|_| state_error())?
+            .contains(&resolution_id)
+        {
+            return Ok(None);
+        }
         let receipt = self.load_receipt(resolution_id)?;
         if let Some(receipt) = &receipt {
             self.verify_replay(receipt, expected_request_sha256)?;
@@ -276,6 +330,54 @@ impl ResolutionStore {
         fetched: &[FetchedArtifact],
         deadline: Instant,
     ) -> Result<ResolutionReceipt, StoreError> {
+        self.publish_inner(
+            PublicationInput {
+                claim,
+                request,
+                admitted,
+                plan,
+                fetched,
+                deadline,
+            },
+            true,
+        )
+    }
+
+    pub(crate) fn publish_worker(
+        &self,
+        claim: &ResolutionClaim,
+        request: ResolutionRequest,
+        admitted: &AdmittedRequest,
+        plan: CanonicalPlan,
+        fetched: &[FetchedArtifact],
+        deadline: Instant,
+    ) -> Result<ResolutionReceipt, StoreError> {
+        self.publish_inner(
+            PublicationInput {
+                claim,
+                request,
+                admitted,
+                plan,
+                fetched,
+                deadline,
+            },
+            false,
+        )
+    }
+
+    fn publish_inner(
+        &self,
+        input: PublicationInput<'_>,
+        require_in_process_claim: bool,
+    ) -> Result<ResolutionReceipt, StoreError> {
+        let PublicationInput {
+            claim,
+            request,
+            admitted,
+            plan,
+            fetched,
+            deadline,
+        } = input;
         let now_unix_ms = current_unix_ms()?;
         if Instant::now() >= deadline || now_unix_ms >= claim.publication_deadline_unix_ms {
             return Err(StoreError::new(
@@ -295,17 +397,27 @@ impl ResolutionStore {
             ));
         }
         let resolution_id = claim.resolution_id;
-        if !self
-            .inner
-            .active
-            .lock()
-            .map_err(|_| state_error())?
-            .contains(&resolution_id)
+        if require_in_process_claim
+            && !self
+                .inner
+                .active
+                .lock()
+                .map_err(|_| state_error())?
+                .contains(&resolution_id)
         {
             return Err(StoreError::new(
                 "DEP_STORE_CLAIM_NOT_ACTIVE",
                 "publication requires the active in-process claim owner",
             ));
+        }
+        if !require_in_process_claim {
+            let durable_claim: ResolutionClaim = read_json(&self.claim_path(resolution_id), 0o600)?;
+            if durable_claim != *claim {
+                return Err(StoreError::new(
+                    "DEP_STORE_CLAIM_NOT_ACTIVE",
+                    "publication worker requires the exact durable parent claim",
+                ));
+            }
         }
         let artifact_by_node = fetched
             .iter()

@@ -30,7 +30,10 @@ pub use pypi_adapter::parse_pypi_requirements;
 pub use request::{
     AdmittedRequest, GrantUse, RequestError, ResolutionRequest, admit_request, request_sha256,
 };
-pub use service::{DependencyResolver, ResolutionFrame, ResolverError, parse_resolution_frame};
+pub use service::{
+    DependencyResolver, MAX_PUBLICATION_WORKER_BYTES, PublicationWorkerResponse, ResolutionFrame,
+    ResolverError, parse_resolution_frame, run_publication_worker,
+};
 pub use standalone::{
     FrameReadError, ResolverResponse, load_certified_config, read_bounded_frame,
     verify_running_executable,

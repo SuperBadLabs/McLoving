@@ -54,6 +54,15 @@ pub fn verify_running_executable(config: &CertifiedConfig) -> Result<(), Resolve
     let path = std::env::current_exe()
         .and_then(std::fs::canonicalize)
         .map_err(|_| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?;
+    verify_executable_path(config, &path)
+}
+
+pub(crate) fn verify_executable_path(
+    config: &CertifiedConfig,
+    path: &Path,
+) -> Result<(), ResolverError> {
+    let path = std::fs::canonicalize(path)
+        .map_err(|_| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?;
     let digest = hash_regular_file(&path, MAX_EXECUTABLE_BYTES)?;
     if digest != config.executable_sha256 {
         return Err(ResolverError::denied("DEP_EXECUTABLE_IDENTITY_MISMATCH"));

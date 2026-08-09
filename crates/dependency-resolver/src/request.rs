@@ -53,7 +53,8 @@ pub struct ResolutionRequest {
     pub rollback_from_generation: Option<u64>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdmittedRequest {
     pub configuration_sha256: String,
     pub request_sha256: String,
