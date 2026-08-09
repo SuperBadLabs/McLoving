@@ -19,6 +19,7 @@ members = [
   "crates/object-store",
   "crates/pipeline-ir",
   "crates/provisioner",
+  "crates/source-acquirer",
   "crates/state-machine",
   "crates/state-transfer",
   "crates/windows-job",

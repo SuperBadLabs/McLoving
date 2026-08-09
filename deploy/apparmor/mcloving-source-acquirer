@@ -1,0 +1,10 @@
+# The source acquirer already runs in the host's unconfined domain. This named
+# profile preserves that boundary while granting only the operation that Ubuntu
+# removes from unprivileged unconfined processes: creating a user namespace.
+# It has no path attachment; deployment must opt in with aa-exec.
+abi <abi/4.0>,
+#include <tunables/global>
+
+profile mcloving-source-acquirer flags=(unconfined) {
+  userns create,
+}
