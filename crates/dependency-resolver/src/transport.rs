@@ -201,7 +201,8 @@ impl HttpTransport {
         }
         let resolution_root = self.transport_root.join(resolution_id.to_string());
         run_transport_before_deadline(deadline, create_private_resolution_root(&resolution_root))
-            .await?;
+            .await
+            .map_err(|error| preserve_transport_setup_error(&self.cleanup_poisoned, error))?;
         match self.fetch_plan_into(plan, deadline, &resolution_root).await {
             Ok(fetched) => Ok(fetched),
             Err(error) => {
@@ -771,6 +772,16 @@ where
         })?
 }
 
+fn preserve_transport_setup_error(
+    cleanup_poisoned: &AtomicBool,
+    error: TransportError,
+) -> TransportError {
+    if error.code == "DEP_TRANSPORT_DEADLINE" {
+        cleanup_poisoned.store(true, Ordering::Release);
+    }
+    error
+}
+
 #[cfg(unix)]
 async fn create_private_resolution_root(path: &Path) -> Result<(), TransportError> {
     let mut builder = tokio::fs::DirBuilder::new();
@@ -1332,13 +1343,16 @@ mod tests {
     #[tokio::test]
     async fn transient_creation_future_is_bounded_by_the_deadline() {
         let started = Instant::now();
+        let poisoned = AtomicBool::new(false);
         let error = run_transport_before_deadline(
             started + Duration::from_millis(5),
             std::future::pending::<Result<(), TransportError>>(),
         )
         .await
+        .map_err(|error| preserve_transport_setup_error(&poisoned, error))
         .expect_err("stalled transient creation");
         assert_eq!(error.code, "DEP_TRANSPORT_DEADLINE");
         assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(poisoned.load(Ordering::Acquire));
     }
 }

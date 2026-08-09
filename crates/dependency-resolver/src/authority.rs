@@ -10,11 +10,12 @@ use thiserror::Error;
 use crate::config::{CertifiedConfig, validate_config};
 use crate::strict_json;
 
-const MAX_SECRET_BYTES: u64 = 65_536;
+const MAX_SECRET_BYTES: u64 = 4_096;
 const MAX_PUBLIC_KEY_BYTES: u64 = 4_096;
 const MAX_CA_BYTES: u64 = 1_048_576;
 const MAX_MARKER_SET_BYTES: u64 = 1_048_576;
 const MAX_SECRET_MARKERS: usize = 256;
+const MAX_SECRET_MARKER_BYTES: usize = 4_096;
 const MARKER_SCHEMA_VERSION: &str = "mcloving.secret-markers/v1";
 
 #[derive(Debug)]
@@ -187,6 +188,7 @@ fn parse_markers(bytes: &[u8]) -> Result<Vec<Vec<u8>>, AuthorityError> {
     let mut markers = Vec::with_capacity(document.markers_hex.len());
     for marker in &document.markers_hex {
         if marker.len() < 16
+            || marker.len() > MAX_SECRET_MARKER_BYTES * 2
             || marker.len() % 2 != 0
             || !marker
                 .bytes()
@@ -195,7 +197,7 @@ fn parse_markers(bytes: &[u8]) -> Result<Vec<Vec<u8>>, AuthorityError> {
         {
             return Err(AuthorityError::new(
                 "DEP_AUTHORITY_MARKER_SET_INVALID",
-                "secret markers must be sufficiently long, lowercase hex, sorted, and unique",
+                "secret markers must have bounded length, be lowercase hex, sorted, and unique",
             ));
         }
         previous = Some(marker.as_str());
@@ -319,6 +321,16 @@ mod tests {
             "{{\"schema_version\":\"{MARKER_SCHEMA_VERSION}\",\"markers_hex\":[\"{markers}\"]}}"
         );
         let error = parse_markers(document.as_bytes()).expect_err("oversized marker count");
+        assert_eq!(error.code, "DEP_AUTHORITY_MARKER_SET_INVALID");
+    }
+
+    #[test]
+    fn oversized_individual_marker_is_rejected_before_scanning() {
+        let marker = "ab".repeat(MAX_SECRET_MARKER_BYTES + 1);
+        let document = format!(
+            "{{\"schema_version\":\"{MARKER_SCHEMA_VERSION}\",\"markers_hex\":[\"{marker}\"]}}"
+        );
+        let error = parse_markers(document.as_bytes()).expect_err("oversized individual marker");
         assert_eq!(error.code, "DEP_AUTHORITY_MARKER_SET_INVALID");
     }
 }
