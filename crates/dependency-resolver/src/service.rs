@@ -11,6 +11,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::publication::ConcurrentClaimState;
 use crate::{
     AdapterBindings, CanonicalPlan, CertifiedConfig, ClaimOutcome, Ecosystem, HttpTransport,
     LoadedAuthorities, RepositoryBinding, ResolutionReceipt, ResolutionRequest, ResolutionStore,
@@ -162,6 +163,17 @@ impl DependencyResolver {
             now_unix_ms,
         )
         .map_err(|error| ResolverError::denied(error.code))?;
+        self.store
+            .ensure_receipt_response_capacity(
+                &frame.request,
+                &admitted,
+                &plan,
+                self.config.limits.max_frame_bytes,
+            )
+            .map_err(|error| ResolverError::denied(error.code))?;
+        if Instant::now() >= deadline {
+            return Err(ResolverError::denied("DEP_REQUEST_TIME_INVALID"));
+        }
         let claim = match self
             .store
             .claim_or_replay(&frame.request, &admitted, &plan)
@@ -332,12 +344,16 @@ impl DependencyResolver {
         deadline: Instant,
     ) -> Result<ResolutionReceipt, ResolverError> {
         loop {
-            if let Some(receipt) = self
+            match self
                 .store
-                .load_completed(resolution_id, expected_request_sha256)
+                .concurrent_claim_state(resolution_id, expected_request_sha256)
                 .map_err(|error| ResolverError::denied(error.code))?
             {
-                return Ok(receipt);
+                ConcurrentClaimState::Completed(receipt) => return Ok(*receipt),
+                ConcurrentClaimState::InactiveIncomplete => {
+                    return Err(ResolverError::denied("DEP_STORE_AMBIGUOUS_CLAIM"));
+                }
+                ConcurrentClaimState::Active => {}
             }
             let remaining = deadline
                 .checked_duration_since(Instant::now())

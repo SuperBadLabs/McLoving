@@ -85,6 +85,12 @@ pub enum ClaimOutcome {
     Concurrent(ResolutionClaim),
 }
 
+pub(crate) enum ConcurrentClaimState {
+    Active,
+    Completed(Box<ResolutionReceipt>),
+    InactiveIncomplete,
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{code}: {message}")]
 pub struct StoreError {
@@ -311,6 +317,87 @@ impl ResolutionStore {
         }
         sync_directory(&self.inner.root.join("claims"))?;
         Ok(ClaimOutcome::New(expected))
+    }
+
+    pub(crate) fn ensure_receipt_response_capacity(
+        &self,
+        request: &ResolutionRequest,
+        admitted: &AdmittedRequest,
+        plan: &CanonicalPlan,
+        max_frame_bytes: u64,
+    ) -> Result<(), StoreError> {
+        let resolution_id = Uuid::parse_str(&request.resolution_id).map_err(|_| {
+            StoreError::new(
+                "DEP_STORE_RESOLUTION_ID_INVALID",
+                "resolution identity is not a UUID",
+            )
+        })?;
+        let mut artifacts = plan
+            .nodes
+            .iter()
+            .map(|node| RetainedArtifact {
+                node_id: node.node_id.clone(),
+                relative_path: format!("artifacts/{}", node.sha256),
+                size: node.declared_size,
+                sha256: node.sha256.clone(),
+                attestation_sha256: "f".repeat(64),
+                publication_generation: self.inner.generation,
+            })
+            .collect::<Vec<_>>();
+        artifacts.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        let receipt = ResolutionReceipt {
+            schema_version: RECEIPT_SCHEMA.to_owned(),
+            protocol_version: request.protocol_version.clone(),
+            resolution_id,
+            request_sha256: admitted.request_sha256.clone(),
+            configuration_sha256: admitted.configuration_sha256.clone(),
+            executable_sha256: self.inner.executable_sha256.clone(),
+            secret_marker_set_sha256: self.inner.secret_marker_set_sha256.clone(),
+            request: request.clone(),
+            plan: plan.clone(),
+            artifacts,
+            retained_tree_sha256: "f".repeat(64),
+            generation: self.inner.generation,
+            rollback_from_generation: request.rollback_from_generation,
+            publication_deadline_unix_ms: admitted.absolute_expiry_unix_ms,
+            published_at_unix_ms: u64::MAX,
+            receipt_key_id: self.inner.receipt_key_id.clone(),
+            hmac_sha256: "f".repeat(64),
+        };
+        let response = crate::standalone::ResolverResponse::Ok {
+            receipt: Box::new(receipt),
+        };
+        let response_bytes = serde_json::to_vec(&response).map_err(|_| state_error())?;
+        if response_bytes.len() as u64 > max_frame_bytes {
+            return Err(StoreError::new(
+                "DEP_RESPONSE_FRAME_OVERSIZED",
+                "successful dependency receipt exceeds the certified response frame",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn concurrent_claim_state(
+        &self,
+        resolution_id: Uuid,
+        expected_request_sha256: &str,
+    ) -> Result<ConcurrentClaimState, StoreError> {
+        if self
+            .inner
+            .active
+            .lock()
+            .map_err(|_| state_error())?
+            .contains(&resolution_id)
+        {
+            return Ok(ConcurrentClaimState::Active);
+        }
+        match self.load_receipt(resolution_id)? {
+            Some(receipt) => {
+                self.verify_replay(&receipt, expected_request_sha256)?;
+                Ok(ConcurrentClaimState::Completed(Box::new(receipt)))
+            }
+            None => Ok(ConcurrentClaimState::InactiveIncomplete),
+        }
     }
 
     pub fn load_completed(
@@ -1764,6 +1851,12 @@ mod tests {
         fixture.request = original_request;
         fixture.admitted = original_admitted;
         store.release_incomplete_claim(&claim);
+        assert!(matches!(
+            store
+                .concurrent_claim_state(claim.resolution_id, &fixture.admitted.request_sha256)
+                .expect("released concurrent state"),
+            ConcurrentClaimState::InactiveIncomplete
+        ));
         drop(store);
         let reopened = fixture.store();
         let error = reopened
@@ -1791,6 +1884,23 @@ mod tests {
                 .is_none(),
             "secret-bearing request must not create a durable claim"
         );
+    }
+
+    #[test]
+    fn oversized_success_response_is_denied_before_claim() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let error = store
+            .ensure_receipt_response_capacity(
+                &fixture.request,
+                &fixture.admitted,
+                &fixture.plan,
+                128,
+            )
+            .expect_err("oversized success response");
+        assert_eq!(error.code, "DEP_RESPONSE_FRAME_OVERSIZED");
+        let resolution_id = Uuid::parse_str(&fixture.request.resolution_id).expect("resolution ID");
+        assert!(!store.claim_path(resolution_id).exists());
     }
 
     #[test]
