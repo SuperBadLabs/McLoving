@@ -240,6 +240,21 @@ fn one_authority_value_cannot_serve_receipt_and_credential_roles() {
     assert_eq!(error.code, "DEP_AUTHORITY_ROLE_CONTENT_ALIAS_DENIED");
 }
 
+#[test]
+fn one_secret_authority_cannot_be_embedded_in_another_role() {
+    let mut fixture = Fixture::new();
+    let mut embedded_receipt = b"Bearer ".to_vec();
+    embedded_receipt.extend_from_slice(&fixture.receipt);
+    write_private(&fixture.credential_path, &embedded_receipt);
+    fixture.config.repositories[0].credential_sha256 = Some(sha256(&embedded_receipt));
+    let markers = marker_document(&[&embedded_receipt, &fixture.receipt]);
+    write_private(&fixture.marker_path, &markers);
+    fixture.config.secret_marker_set_sha256 = sha256(&markers);
+
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("cross-role content overlap");
+    assert_eq!(error.code, "DEP_AUTHORITY_ROLE_CONTENT_OVERLAP_DENIED");
+}
+
 fn authority_file(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     let path = root.join(name);
     write_private(&path, bytes);

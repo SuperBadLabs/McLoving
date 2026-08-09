@@ -153,6 +153,7 @@ impl LoadedAuthorities {
                 },
             );
         }
+        validate_secret_authority_separation(&receipt_key, &repositories)?;
         Ok(Self {
             receipt_key,
             marker_set,
@@ -185,6 +186,35 @@ impl LoadedAuthorities {
             .get(repository_id)
             .and_then(|authority| authority.private_ca.as_deref())
     }
+}
+
+fn validate_secret_authority_separation(
+    receipt_key: &[u8],
+    repositories: &BTreeMap<String, LoadedRepositoryAuthority>,
+) -> Result<(), AuthorityError> {
+    let mut secret_values = vec![receipt_key];
+    for credential in repositories
+        .values()
+        .filter_map(|authority| authority.credential.as_deref())
+    {
+        if secret_values.iter().any(|existing| {
+            contains_subslice(existing, credential) || contains_subslice(credential, existing)
+        }) {
+            return Err(AuthorityError::new(
+                "DEP_AUTHORITY_ROLE_CONTENT_OVERLAP_DENIED",
+                "authority values cannot contain one another across secret-bearing roles",
+            ));
+        }
+        secret_values.push(credential);
+    }
+    Ok(())
+}
+
+fn contains_subslice(container: &[u8], candidate: &[u8]) -> bool {
+    !candidate.is_empty()
+        && container
+            .windows(candidate.len())
+            .any(|window| window == candidate)
 }
 
 fn validate_resolved_separation(config: &CertifiedConfig) -> Result<(), AuthorityError> {
