@@ -242,43 +242,43 @@ important seams:
 34. Lexically safe authority paths could traverse symlinked ancestors. Authority
     loading now resolves each ancestor component through no-follow descriptors
     and binds the resulting canonical target before reading it.
-35. A second failure while rolling back an incomplete completion transition could
-    erase the distinction between absent and committed state. That double failure
-    now retains a durable ambiguity blocker that requires reconciliation.
-36. A worker could commit completion without rechecking the exact retained tree
+35. A worker could commit completion without rechecking the exact retained tree
     that the receipt binds. It now verifies the complete retained tree immediately
     before completion publication.
-37. Transient cleanup could occur after completion became visible. Every successful
+36. Transient cleanup could occur after completion became visible. Every successful
     path now removes and verifies transient state before publishing completion.
-38. A committed receipt could be delivered through an unproven second store read
-    or lost after the worker returned. The worker now returns its verified committed
-    receipt directly, and the parent retains a durable delivery-ambiguity blocker
-    until safe response transmission is acknowledged.
-39. Two authority paths could hard-link the same mutable inode. Every authority
+37. A second failure while rolling back an incomplete completion transition could
+    erase the distinction between absent and committed state. That double failure
+    now retains a durable ambiguity blocker that requires reconciliation.
+38. A committed receipt could be delivered through an unproven second store read.
+    The worker now returns its verified committed receipt directly.
+39. A receipt could be lost after the worker committed it but before the parent
+    safely transmitted it. The parent now retains a durable delivery-ambiguity
+    blocker until safe response transmission is acknowledged.
+40. Two authority paths could hard-link the same underlying inode. Every authority
     file must now be a single-link regular file.
-40. A configured marker could enter the serialized response rather than its source
+41. A configured marker could enter the serialized response rather than its source
     values. The complete encoded response frame is now scanned before any byte is
     written, and a collision fails silently.
-41. Replay and concurrent convergence could acknowledge completion owned by an
+42. Replay and concurrent convergence could acknowledge completion owned by an
     earlier request. Only the request that creates new completion may clear its
     delivery blocker after a successful flush.
-42. Post-flush acknowledgement could block the NDJSON loop without a deadline.
+43. Post-flush acknowledgement could block the NDJSON loop without a deadline.
     Acknowledgement is now bounded by the request deadline and poisons parent-store
     service on uncertainty.
-43. Startup or fatal diagnostics could disclose a configured marker on stderr.
+44. Startup or fatal diagnostics could disclose a configured marker on stderr.
     The standalone process now fails those paths silently.
-44. Distinct authority roles could alias one underlying inode despite different
+45. Distinct authority roles could alias one underlying inode despite different
     paths. Admission now rejects device/inode reuse across all authority roles.
-45. A panic in the parent path could bypass the worker's silent error protocol.
+46. A panic in the parent path could bypass the worker's silent error protocol.
     The parent installs a silent panic hook.
-46. Tokio runtime construction itself could panic before an async-installed hook
+47. Tokio runtime construction itself could panic before an async-installed hook
     existed. Synchronous `main` now installs the hook before runtime construction.
-47. A marker split at a stdout response boundary could evade per-frame scanning.
+48. A marker split at a stdout response boundary could evade per-frame scanning.
     One stateful guard now retains the bounded suffix needed to scan every admitted
-    frame against the preceding emitted stream.
-48. A frame rejected by the stateful stdout guard could still perturb later scan
-    state. The guard advances its retained suffix only after a frame is admitted,
-    preserving the exact emitted-stream model.
+    frame against the preceding emitted stream, and it advances that suffix only
+    after a frame is admitted so rejected bytes never perturb the emitted-stream
+    model.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
