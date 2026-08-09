@@ -18,12 +18,15 @@ recertification](https://github.com/SuperBadLabs/McLoving/pull/35#discussion_r37
 Every actionable thread remains a merge gate until its exact fix evidence is
 pushed and independently checked.
 
-The later PR #35 closure candidate adds only this receipt and the execution-board
-transition from DEP-001 to CACHE-001. Its exact head must independently pass the
-protected checks and review before merge. The final squash-merge commit is
-necessarily unknowable from inside its own pre-merge contents; the immutable PR
-#35 exact-head checks plus post-merge protected-main verification are the final
-closure attestation.
+The closure commits after exact implementation head
+`5bce6f6f9370a37082775292ceb54ac473566888` change only this receipt and the
+execution-board transition from DEP-001 to CACHE-001. The complete PR #35 diff
+against protected `main` includes the resolver implementation, tests, protected
+workflow change, architecture documentation, receipt, and board transition. The
+complete exact PR head must independently pass protected checks and review before
+merge. The final squash-merge commit is necessarily unknowable from inside its
+own pre-merge contents; immutable complete-PR exact-head checks plus post-merge
+protected-main verification are the final closure attestation.
 
 This receipt does not claim a Mario production dependency repository,
 credential, resolution, cache, canary, cutover, rollback, or Jenkins
@@ -135,7 +138,7 @@ journey, and the AppArmor-confined source suite.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired fifty-two
+Pre-closure review and repeated contained execution exposed and repaired fifty-three
 important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -303,6 +306,10 @@ important seams:
     before the embedded-authority repair. Both now bind the new implementation
     head, its seventy-two focused tests, protected workflow runs, review evidence,
     and complete hardening chronology.
+53. The receipt described the closure candidate as receipt-and-board-only while
+    using the complete PR head as its attestation boundary. It now distinguishes
+    the documentation-only closure commits from PR #35's complete diff against
+    protected `main`, and requires review and checks over that complete exact head.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -332,8 +339,10 @@ roles. All forty-five actionable findings were addressed before merge.
 The final implementation and closure review added two further actionable
 findings: embedded secret authority across roles and stale receipt/board
 certification after that repair. All forty-seven findings were addressed before
-merge. Each fix was pushed, replied to with exact-head evidence, and its thread
-was resolved before closure.
+merge. A final closure review added one actionable scope-description finding: the
+receipt conflated documentation-only closure commits with the complete PR diff.
+All forty-eight findings were addressed before merge. Each fix was pushed,
+replied to with exact-head evidence, and its thread was resolved before closure.
 
 One additional review thread predicted that exact-capacity transport pressure
 would return an I/O error rather than the asserted content-mismatch result. The
