@@ -1,6 +1,6 @@
 # McLoving execution board
 
-Updated: 2026-08-08
+Updated: 2026-08-09
 
 Status values: `PENDING`, `ACTIVE`, `BLOCKED`, `DONE`, `DEFERRED`.
 
@@ -671,10 +671,10 @@ boundary is too large or authority-sensitive to share a pull request safely.
 | Effects | `EXT-001` | PARALLEL | Ready | Standalone effect-authority connector PR |
 | Observation | `OBS-001` | PARALLEL | Ready | Must remain a separate deployment, identity, credential path, branch, PR, and evidence set from `EXT-001` |
 | Release provenance | `REL-001` | PARALLEL | Ready | Standalone builder, SBOM, signing, and verification PR |
-| Cache | `CACHE-001` | PARALLEL | Ready | Standalone tenant/trust-class cache boundary PR |
+| Cache | `CACHE-001` | PARALLEL | Ready | Standalone tenant/trust-class cache boundary PR; next post-DEP implementation slot |
 | Secret mapping | `SECRET-001` | SERIAL | `SCM-001`, `EXT-001` | Starts only after both consumer receipt protocols are merged; no speculative adapter contract |
 | Discovery | `DISC-001` | SERIAL | `TRIG-001`, `SCM-001`, `AUTHZ-001` | Integrates only the exact merged ingress, source, and policy contracts |
-| Dependencies | `DEP-001` | SERIAL | `SCM-001` | Builds on the merged source-acquisition trust policy |
+| Dependencies | `DEP-001` | DONE | `SCM-001` is done | The isolated exact-lock Maven/npm/PyPI resolver boundary is complete at exact implementation head `2809377a5132cdd385b87a647bec02848ee01305` after sixty-nine focused tests, all nine protected checks, clean independent exact-head review, and resolution of forty-one actionable implementation findings across forty-eight important seams; Mario's sealed denominator still grants zero workload dependency or repository authority, so cache, production dependency, and later authority-transfer gates remain separate |
 | External clients | `ADMIN-001` | DONE | `CONSUMER-001` is done | The sealed client's higher-authority administrative write contract and implementation gate are complete; production cutover remains separately gated |
 
 ### Certification, authority, and proof lanes
@@ -697,14 +697,14 @@ boundary is too large or authority-sensitive to share a pull request safely.
 
 The current three implementation slots are:
 
-For PR #34 only, the `SCM-001` `DONE` and `DEP-001` `ACTIVE` entries declare
-the post-merge board state. They do not authorize dependency work while the PR
-is unmerged; `DEP-001` may begin only after this closure head is merged and the
+For PR #35 only, the `DEP-001` `DONE` and `CACHE-001` `ACTIVE` entries declare
+the post-merge board state. They do not authorize cache work while the PR is
+unmerged; `CACHE-001` may begin only after this closure head is merged and the
 exact protected-main head passes its required checks.
 
-1. `DEP-001` — implement policy-bound workload dependency resolution on the
-   completed source-acquisition trust policy; keep mutable coordinates and
-   unverified repository or package substitutions ineligible.
+1. `CACHE-001` — implement the separate tenant/project/pipeline/trust-class
+   cache boundary on the completed dependency resolver; keep mutable,
+   cross-tenant, cross-trust, corrupt, stale, or unproven cache state ineligible.
 2. `JOBSTATE-001` — independent operational-state fence and prerequisite for
    `TRIG-001` plus the state/policy differential.
 3. `EXT-001` — independent effect-authority connector and prerequisite for
@@ -817,8 +817,8 @@ dependency-ready.
 | SECRET-001 | PENDING | SEC-003, AUDIT-001, SCM-001, EXT-001 | Inventory every Jenkins-managed runtime credential reference and classify its exact consumer and taint path without copying secret material into migration packages. `connector-only` and `source-acquisition-only` mappings bind an owner-approved McLoving secret provider and versioned identity, keep credential bytes out of both pipeline runners, and use the exact `EXT-001` outcome-replay or `SCM-001` content/provenance receipt so the deny-authority shadow receives only bounded confidentiality-safe truth. A `workload-visible` credential delivered through `withCredentials`, environment, file, stdin, argument, or equivalent is ineligible for canary and cutover whenever its bytes can affect a branch, condition, process/effect argument, filename, public output, artifact, test, cache key, or other compared behavior; redaction alone cannot waive this boundary. Any future surrogate/replay mapping requires separate owner approval, a bounded typed protocol that reveals no secret-derived discriminator, deterministic equivalence proof for every admitted use, permission-negative tests, and explicit versioned provenance before reclassification. Bind tenant/project/environment/build/attempt/action scope, provider version, rotation generation, expiry, and revocation state to fenced short-lived grants. Prove missing/stale/replayed/cross-tenant/cross-attempt denial, rotation and emergency revocation, consumer/taint misclassification denial, supported-sink redaction, non-disclosure in logs/artifacts/audit, and least-authority integration before any credential-dependent canary or cutover. |
 | IDP-001 | DONE | SEC-002, API-002, AUDIT-001 | Implement production authentication and identity lifecycle before Jenkins principal mapping. For humans, validate issuer-bound OIDC authorization-code/PKCE sessions with exact issuer, audience, nonce/state, signature/JWKS generation, subject, group and claim mapping, expiry, refresh, logout, and session revocation; for automation, use separately revocable scoped service identities with rotation and no shared bearer-token table. Bind external subject/service identity to one immutable McLoving principal and tenant, preserve provider/configuration and group-generation digests, and retain a reviewed provenance edge back to the exact MIG-000 Jenkins security realm plus immutable source user/group identity, alias/rename history, membership generation, and lifecycle state represented by each mapped ACL principal. Audit authentication and lifecycle changes, and deny unknown, disabled, deleted, stale, replayed, cross-issuer, cross-tenant, group-removed, name-colliding, renamed-without-proof, or source-identity-reused actors immediately. Prove key rotation, provider outage, clock skew, session fixation, token/claim/issuer substitution, group membership addition/removal, user rename and same-name collision, deleted-name reuse, user disable/delete, service credential rotation/revocation, privilege-negative API/UI/CLI behavior, active-active consistency, and rollback restoration against real contained source-realm and target identity-provider fixtures before any production canary or cutover. Closure: `docs/evidence/IDP-001_SECURITY_REVIEW.md`. |
 | AUTHZ-001 | DONE | IDP-001, SEC-002, API-002 | Map each inventory job's effective Jenkins folder/matrix/job authorization policy and principals into least-authority McLoving organization/project roles without broadening view, trigger, cancel, configure, approval, artifact, test, log, or audit access. Every reviewed mapping binds the MIG-000 source security-realm implementation/configuration digest, immutable source user/group identifier, alias and rename provenance, membership generation, lifecycle state, exact ACL entry and scope, target issuer/subject or service identity, immutable McLoving principal, target group generation, resulting role, reviewer, and policy digest; mutable names alone are never mapping keys. Prove positive and negative decisions, rename and same-name collision, deleted-name reuse, disabled/deleted principal handling, live group-membership changes, service-identity rotation/revocation, source-realm/configuration substitution, cross-issuer and cross-tenant denial, session invalidation, and rollback restoration before any migrated-job canary or cutover. Closure: `docs/evidence/AUTHZ-001_SECURITY_REVIEW.md`; the independent exact-implementation-head security review is clean. Tenant-wide audit and scheduler actions remain explicitly non-mappable rather than broadened. |
-| DEP-001 | ACTIVE | SCM-001, SEC-003 | Implement policy-bound workload dependency resolution for Maven/npm/PyPI and other admitted ecosystems. Bind repository identity and trust policy, package coordinate, exact version, lockfile, transitive graph, content and signature/attestation digests, resolver/toolchain, credential grant, and audit provenance; mutable or unresolved coordinates are ineligible. Prove missing, repository/package/graph substitution, compromised mirror, untrusted-source, credential leak, offline/replay, and later-resolution denial before any dependency-resolving canary or cutover. |
-| CACHE-001 | PENDING | SEC-002, OPS-003 | Implement tenant/project/pipeline/trust-class-isolated dependency and build caches with canonical keys, immutable generation/content digests, explicit read/write policy, bounded size/expiry, atomic publication, and auditable provenance. Prove cold and valid-hit behavior, corruption and key/generation substitution rejection, untrusted-write/trusted-read denial, concurrent publication, rotation, eviction, cleanup, and restored-state behavior before any cache-dependent canary or cutover. |
+| DEP-001 | DONE | SCM-001, SEC-003 | Implement policy-bound workload dependency resolution for Maven/npm/PyPI and other admitted ecosystems. Bind repository identity and trust policy, package coordinate, exact version, lockfile, transitive graph, content and signature/attestation digests, resolver/toolchain, credential grant, and audit provenance; mutable or unresolved coordinates are ineligible. Prove missing, repository/package/graph substitution, compromised mirror, untrusted-source, credential leak, offline/replay, and later-resolution denial before any dependency-resolving canary or cutover. Closure: `docs/evidence/DEP-001_SECURITY_REVIEW.md`; exact implementation head `2809377a5132cdd385b87a647bec02848ee01305` passed sixty-nine focused tests, all nine protected checks, and clean independent exact-head review after forty-one actionable implementation findings across forty-eight important seams were fixed and every implementation thread was resolved. Mario's sealed denominator contains zero admitted workload dependencies, so production dependency resolution, canary, cutover, rollback, and decommission authority remain separately gated. |
+| CACHE-001 | ACTIVE | SEC-002, OPS-003 | Implement tenant/project/pipeline/trust-class-isolated dependency and build caches with canonical keys, immutable generation/content digests, explicit read/write policy, bounded size/expiry, atomic publication, and auditable provenance. Prove cold and valid-hit behavior, corruption and key/generation substitution rejection, untrusted-write/trusted-read denial, concurrent publication, rotation, eviction, cleanup, and restored-state behavior before any cache-dependent canary or cutover. |
 | REL-001 | PENDING | OPS-002, AUDIT-001 | Produce trusted McLoving release provenance from reviewed protected-branch source through an isolated pinned builder. Bind source/tree, toolchain and builder image, dependency lock and SBOM, tests and policy gates, archive/component digests, version/profile, signer identity, and transparency/audit evidence; sign the immutable release and verify it before deployment. Prove source, dependency, builder, artifact, signature, and rollback-target substitution denial before any production canary or cutover. |
 | CONSUMER-001 | DONE | API-002, AUTHZ-001 | Inventory and migrate every external read-side consumer of Jenkins build status, graph, logs, tests, artifacts, queue, and job metadata to a versioned authenticated McLoving API/CLI or bounded compatibility adapter. Bind caller identity, tenant/project scope, endpoint/query and pagination contract, retention/URL semantics, rate limits, and audit provenance. Prove positive/negative authorization, historical and live data equivalence, artifact retrieval, pagination/stream resume, error and outage behavior, caller cutover, rollback restoration, and zero residual Jenkins reads before the corresponding job enters authoritative cutover or its endpoint is retired. Closure: `docs/evidence/CONSUMER-001_SECURITY_REVIEW.md`; exact implementation head `6c3157adbe04e1166bae7ef6753718d5198793dc` passed all nine protected checks and independent review with no major issues. Mario intentionally remains Jenkins-source-authoritative until the real caller supplies a later zero-read cutover receipt. |
 | ADMIN-001 | DONE | API-002, AUTHZ-001, AUDIT-001, CONSUMER-001 | Inventory and migrate every authenticated Jenkins administrative/write-side client, including Jenkins Job Builder, JCasC/Terraform automation, seed services, CLI clients, and REST clients that create, reconfigure, disable, delete, or otherwise mutate jobs, folders, nodes, credential references, or controller-global settings. Replace each admitted operation with a versioned authenticated McLoving API/CLI, declarative controller configuration path, or bounded compatibility adapter; bind caller identity, tenant/project or controller scope, exact operation/schema, desired-state and precondition digests, idempotency and optimistic-concurrency contract, authorization decision, and audit provenance. Prove create/update/delete convergence, duplicate/reordered/stale request handling, partial failure and retry, conflict and privilege denial, caller cutover, rollback restoration, and zero residual Jenkins writes before an affected job enters authoritative cutover or the corresponding Jenkins scope or endpoint is retired; unsupported operations require explicit owner-approved retirement before that cutover or decommissioning. Closure: `docs/evidence/ADMIN-001_SECURITY_REVIEW.md`; exact implementation head `8d342d98969d3a3f67282b45f577cdc8e1110f3d` passed all nine protected checks and independent review with no major issues. Mario intentionally remains Jenkins-write-authoritative until the real client supplies a later zero-write cutover receipt. |
@@ -847,20 +847,21 @@ this section intentionally does not pin the moving protected-main commit.
 Protected `main` includes the completed compiler, shared-library, state-transfer,
 core differential, identity lifecycle, authorization mapping, external-client
 read/write migration gates, isolated external-input adapter, scoped dynamic-agent
-provisioner boundary, and persistent-Windows work. PR #34 carries the
-source-acquisition closure candidate after its exact implementation head passed
-protected checks and independent review; protected-main inclusion remains gated
-on the closure-only head's checks, review, and merge. Mario's sealed inventories contain no
-admitted dynamic provisioner and grant no live SCM or credential authority;
-production provisioning, source acquisition, canary, cutover, rollback, and
-decommission authority remain separately gated. The persistent-Windows campaign
-is closed. The `SCM-001`/`DEP-001` transition below is the post-merge state of
-this closure candidate, not authority to begin `DEP-001` before the merge and
-exact protected-main verification succeed.
+provisioner, source-acquisition boundary, and persistent-Windows work. PR #35
+carries the dependency-resolution closure candidate after its exact implementation
+head passed protected checks and independent review; protected-main inclusion
+remains gated on the closure-only head's checks, review, and merge. Mario's sealed
+inventories contain no admitted dynamic provisioner or workload dependency and
+grant no live SCM, dependency repository, or credential authority; production
+provisioning, source acquisition, dependency resolution, cache, canary, cutover,
+rollback, and decommission authority remain separately gated. The
+persistent-Windows campaign is closed. The `DEP-001`/`CACHE-001` transition below
+is the post-merge state of this closure candidate, not authority to begin
+`CACHE-001` before the merge and exact protected-main verification succeed.
 
 | Slot | Current ticket | Status | Dependency-critical successors |
 |---:|---|---|---|
-| 1 | `DEP-001` | ACTIVE | `DIFF-003` and dependency-resolving qualification |
+| 1 | `CACHE-001` | ACTIVE | `DIFF-003` and cache-dependent qualification |
 | 2 | `JOBSTATE-001` | PENDING | `TRIG-001` and `DIFF-002` |
 | 3 | `EXT-001` | PENDING | `SECRET-001`, `DIFF-003`, and effect qualification |
 
