@@ -42,7 +42,7 @@ struct PublicationWorkerRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PublicationWorkerResponse {
-    Ok,
+    Ok { receipt: Box<ResolutionReceipt> },
     Error { code: String },
 }
 
@@ -302,7 +302,9 @@ impl DependencyResolver {
                 return Err(error);
             }
         };
-        if !output.status.success() || output.stdout.len() > 512 {
+        if !output.status.success()
+            || output.stdout.len() as u64 > self.config.limits.max_frame_bytes
+        {
             self.preserve_publication_ambiguity();
             return Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"));
         }
@@ -315,16 +317,16 @@ impl DependencyResolver {
                 }
             };
         match response {
-            PublicationWorkerResponse::Ok => {
+            PublicationWorkerResponse::Ok { receipt }
+                if receipt.resolution_id == claim.resolution_id
+                    && receipt.request_sha256 == admitted.request_sha256 =>
+            {
                 self.store.release_incomplete_claim(claim);
-                let store = self.store.clone();
-                let resolution_id = claim.resolution_id;
-                let request_sha256 = admitted.request_sha256.clone();
-                self.run_store_operation(deadline, move || {
-                    store.load_completed(resolution_id, &request_sha256)
-                })
-                .await?
-                .ok_or_else(|| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))
+                Ok(*receipt)
+            }
+            PublicationWorkerResponse::Ok { .. } => {
+                self.preserve_publication_ambiguity();
+                Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))
             }
             PublicationWorkerResponse::Error { code } => {
                 self.preserve_publication_ambiguity();
@@ -509,7 +511,9 @@ pub fn run_publication_worker(input: &[u8]) -> PublicationWorkerResponse {
         &request.fetched,
         deadline,
     ) {
-        Ok(_) => PublicationWorkerResponse::Ok,
+        Ok(receipt) => PublicationWorkerResponse::Ok {
+            receipt: Box::new(receipt),
+        },
         Err(error) => PublicationWorkerResponse::Error {
             code: error.code.to_owned(),
         },

@@ -284,7 +284,9 @@ synchronized. The claim is removed and synchronized only after all fallible
 verification and transient cleanup are complete. Replay requires an exact
 receipt/completion pair and the absence of both a claim and a durable ambiguity
 record. A claim or ambiguity record always takes precedence as incomplete
-state. A deadline crossing withdraws the receipt and bundle and retains or
+state. The exact worker returns that already verified bounded receipt directly;
+the parent does not reinterpret a committed success through a second fallible
+filesystem read. A deadline crossing withdraws the receipt and bundle and retains or
 restores the durable claim for explicit reconciliation. If the final claim
 directory sync is uncertain, a separately synchronized mode-`0600` ambiguity
 record is attempted alongside claim restoration and completion removal; any
