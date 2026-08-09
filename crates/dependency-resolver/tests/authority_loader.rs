@@ -4,6 +4,8 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use mcloving_dependency_resolver::{
     AdapterConfig, CertifiedConfig, Ecosystem, LoadedAuthorities, RepositoryConfig,
     RepositoryGrant, ResolverLimits,
@@ -242,17 +244,50 @@ fn one_authority_value_cannot_serve_receipt_and_credential_roles() {
 
 #[test]
 fn one_secret_authority_cannot_be_embedded_in_another_role() {
-    let mut fixture = Fixture::new();
-    let mut embedded_receipt = b"Bearer ".to_vec();
-    embedded_receipt.extend_from_slice(&fixture.receipt);
-    write_private(&fixture.credential_path, &embedded_receipt);
-    fixture.config.repositories[0].credential_sha256 = Some(sha256(&embedded_receipt));
-    let markers = marker_document(&[&embedded_receipt, &fixture.receipt]);
-    write_private(&fixture.marker_path, &markers);
-    fixture.config.secret_marker_set_sha256 = sha256(&markers);
+    for embedded_receipt in [
+        prefixed(b"Bearer ", b"contained-receipt-key-material-v1"),
+        prefixed(
+            b"Bearer ",
+            hex_bytes(b"contained-receipt-key-material-v1").as_bytes(),
+        ),
+        prefixed(
+            b"Bearer ",
+            hex_bytes(b"contained-receipt-key-material-v1")
+                .to_uppercase()
+                .as_bytes(),
+        ),
+        prefixed(
+            b"Basic ",
+            STANDARD
+                .encode(b"contained-receipt-key-material-v1")
+                .as_bytes(),
+        ),
+        prefixed(
+            b"Basic ",
+            STANDARD_NO_PAD
+                .encode(b"contained-receipt-key-material-v1")
+                .as_bytes(),
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        write_private(&fixture.credential_path, &embedded_receipt);
+        fixture.config.repositories[0].credential_sha256 = Some(sha256(&embedded_receipt));
+        let markers = marker_document(&[&embedded_receipt, &fixture.receipt]);
+        write_private(&fixture.marker_path, &markers);
+        fixture.config.secret_marker_set_sha256 = sha256(&markers);
 
-    let error = LoadedAuthorities::load(&fixture.config).expect_err("cross-role content overlap");
-    assert_eq!(error.code, "DEP_AUTHORITY_ROLE_CONTENT_OVERLAP_DENIED");
+        let error =
+            LoadedAuthorities::load(&fixture.config).expect_err("cross-role content overlap");
+        assert_eq!(error.code, "DEP_AUTHORITY_ROLE_CONTENT_OVERLAP_DENIED");
+    }
+}
+
+fn prefixed(prefix: &[u8], value: &[u8]) -> Vec<u8> {
+    [prefix, value].concat()
+}
+
+fn hex_bytes(value: &[u8]) -> String {
+    value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn authority_file(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {

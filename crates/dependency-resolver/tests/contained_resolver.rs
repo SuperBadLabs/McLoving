@@ -17,9 +17,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use mcloving_dependency_resolver::{
     AdapterBindings, AdapterConfig, CertifiedConfig, DependencyResolver, Ecosystem, GrantUse,
-    PackageNode, RepositoryBinding, RepositoryConfig, RepositoryGrant, ResolutionFrame,
-    ResolutionRequest, ResolverLimits, SourceTrustClass, canonical_attestation_message,
-    configuration_sha256, parse_maven_lock,
+    LoadedAuthorities, PackageNode, RepositoryBinding, RepositoryConfig, RepositoryGrant,
+    ResolutionFrame, ResolutionRequest, ResolverLimits, SourceTrustClass,
+    canonical_attestation_message, configuration_sha256, parse_maven_lock,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use sha2::{Digest, Sha256};
@@ -246,6 +246,38 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         },
         loopback_fixture: true,
     };
+    let mutable_receipts = output_root.join("receipts");
+    create_private_directory(&mutable_receipts);
+    let mutable_receipt = private_file(&mutable_receipts, "mutable.key", &receipt_key);
+    let receipt_alias = private_file(fixture.path(), "bind-receipt.key", b"mount target");
+    let mount_status = Command::new("sudo")
+        .arg("mount")
+        .arg("--bind")
+        .arg(&mutable_receipt)
+        .arg(&receipt_alias)
+        .status()
+        .await
+        .expect("bind authority alias");
+    assert!(mount_status.success(), "bind authority alias");
+    let mut bind_alias_config = config.clone();
+    bind_alias_config.receipt_key_path = path_string(&receipt_alias);
+    let bind_alias_result = LoadedAuthorities::load(&bind_alias_config);
+    let unmount_status = Command::new("sudo")
+        .arg("umount")
+        .arg(&receipt_alias)
+        .status()
+        .await
+        .expect("unmount authority alias");
+    assert!(unmount_status.success(), "unmount authority alias");
+    fs::remove_file(&receipt_alias).expect("remove bind target");
+    fs::remove_file(&mutable_receipt).expect("remove mutable receipt source");
+    fs::remove_dir(&mutable_receipts).expect("remove mutable receipt directory");
+    let bind_alias_error = bind_alias_result.expect_err("bind-mounted mutable authority alias");
+    assert_eq!(
+        bind_alias_error.code,
+        "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
+    );
+
     let config_digest = configuration_sha256(&config).expect("configuration digest");
     let request = ResolutionRequest {
         schema_version: "mcloving.dependency-request/v1".to_owned(),

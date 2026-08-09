@@ -3,6 +3,8 @@ use std::fs::File;
 use std::io::{Read, Take};
 use std::path::{Component, Path};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -16,6 +18,7 @@ const MAX_CA_BYTES: u64 = 1_048_576;
 const MAX_MARKER_SET_BYTES: u64 = 1_048_576;
 const MAX_SECRET_MARKERS: usize = 256;
 const MAX_SECRET_MARKER_BYTES: usize = 4_096;
+const MAX_MUTABLE_TREE_ENTRIES: usize = 1_000_000;
 const MARKER_SCHEMA_VERSION: &str = "mcloving.secret-markers/v1";
 
 #[derive(Debug)]
@@ -69,12 +72,14 @@ impl LoadedAuthorities {
             ));
         }
         let mut authority_identities = BTreeSet::new();
+        let mut authority_path_identities = BTreeSet::new();
         let mut authority_digests = BTreeSet::new();
         let receipt_key = read_authority(
             Path::new(&config.receipt_key_path),
             MAX_SECRET_BYTES,
             &config.receipt_key_sha256,
             &mut authority_identities,
+            &mut authority_path_identities,
             &mut authority_digests,
         )?;
         let marker_bytes = read_authority(
@@ -82,6 +87,7 @@ impl LoadedAuthorities {
             MAX_MARKER_SET_BYTES,
             &config.secret_marker_set_sha256,
             &mut authority_identities,
+            &mut authority_path_identities,
             &mut authority_digests,
         )?;
         let marker_set = parse_markers(&marker_bytes)?;
@@ -110,6 +116,7 @@ impl LoadedAuthorities {
                         MAX_SECRET_BYTES,
                         digest,
                         &mut authority_identities,
+                        &mut authority_path_identities,
                         &mut authority_digests,
                     )?;
                     if !marker_set.iter().any(|marker| marker == &bytes) {
@@ -128,6 +135,7 @@ impl LoadedAuthorities {
                 MAX_PUBLIC_KEY_BYTES,
                 &repository.attestation_key_sha256,
                 &mut authority_identities,
+                &mut authority_path_identities,
                 &mut authority_digests,
             )?;
             let private_ca = match (
@@ -139,6 +147,7 @@ impl LoadedAuthorities {
                     MAX_CA_BYTES,
                     digest,
                     &mut authority_identities,
+                    &mut authority_path_identities,
                     &mut authority_digests,
                 )?),
                 (None, None) => None,
@@ -154,6 +163,7 @@ impl LoadedAuthorities {
             );
         }
         validate_secret_authority_separation(&receipt_key, &repositories)?;
+        validate_mutable_identity_separation(config, &authority_path_identities)?;
         Ok(Self {
             receipt_key,
             marker_set,
@@ -197,9 +207,10 @@ fn validate_secret_authority_separation(
         .values()
         .filter_map(|authority| authority.credential.as_deref())
     {
-        if secret_values.iter().any(|existing| {
-            contains_subslice(existing, credential) || contains_subslice(credential, existing)
-        }) {
+        if secret_values
+            .iter()
+            .any(|existing| secret_values_overlap(existing, credential))
+        {
             return Err(AuthorityError::new(
                 "DEP_AUTHORITY_ROLE_CONTENT_OVERLAP_DENIED",
                 "authority values cannot contain one another across secret-bearing roles",
@@ -210,11 +221,94 @@ fn validate_secret_authority_separation(
     Ok(())
 }
 
+fn secret_values_overlap(left: &[u8], right: &[u8]) -> bool {
+    canonical_secret_representations(left)
+        .iter()
+        .any(|candidate| contains_subslice(right, candidate))
+        || canonical_secret_representations(right)
+            .iter()
+            .any(|candidate| contains_subslice(left, candidate))
+}
+
+fn canonical_secret_representations(value: &[u8]) -> Vec<Vec<u8>> {
+    vec![
+        value.to_vec(),
+        value
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+            .into_bytes(),
+        value
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<String>()
+            .into_bytes(),
+        STANDARD.encode(value).into_bytes(),
+        STANDARD_NO_PAD.encode(value).into_bytes(),
+        URL_SAFE.encode(value).into_bytes(),
+        URL_SAFE_NO_PAD.encode(value).into_bytes(),
+    ]
+}
+
 fn contains_subslice(container: &[u8], candidate: &[u8]) -> bool {
     !candidate.is_empty()
         && container
             .windows(candidate.len())
             .any(|window| window == candidate)
+}
+
+#[cfg(unix)]
+fn validate_mutable_identity_separation(
+    config: &CertifiedConfig,
+    authority_identities: &BTreeSet<(u64, u64)>,
+) -> Result<(), AuthorityError> {
+    let mut visited_directories = BTreeSet::new();
+    let mut visited_entries = 0_usize;
+    for root in [&config.output_root, &config.transport_root] {
+        let resolved = std::fs::canonicalize(root).map_err(|_| mutable_identity_scan_error())?;
+        let mut pending = vec![resolved];
+        while let Some(path) = pending.pop() {
+            visited_entries = visited_entries
+                .checked_add(1)
+                .filter(|count| *count <= MAX_MUTABLE_TREE_ENTRIES)
+                .ok_or_else(mutable_identity_scan_error)?;
+            let metadata =
+                std::fs::symlink_metadata(&path).map_err(|_| mutable_identity_scan_error())?;
+            let identity = authority_identity(&metadata)?;
+            if authority_identities.contains(&identity) {
+                return Err(AuthorityError::new(
+                    "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED",
+                    "authority filesystem identity cannot appear beneath a mutable resolver root",
+                ));
+            }
+            if metadata.file_type().is_dir() && visited_directories.insert(identity) {
+                let entries =
+                    std::fs::read_dir(&path).map_err(|_| mutable_identity_scan_error())?;
+                for entry in entries {
+                    pending.push(entry.map_err(|_| mutable_identity_scan_error())?.path());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_mutable_identity_separation(
+    _config: &CertifiedConfig,
+    _authority_identities: &BTreeSet<(u64, u64)>,
+) -> Result<(), AuthorityError> {
+    Err(AuthorityError::new(
+        "DEP_AUTHORITY_PLATFORM_UNSUPPORTED",
+        "authority loading requires Unix filesystem identity checks",
+    ))
+}
+
+fn mutable_identity_scan_error() -> AuthorityError {
+    AuthorityError::new(
+        "DEP_AUTHORITY_MUTABLE_IDENTITY_SCAN_FAILED",
+        "mutable resolver roots could not be scanned within the identity bound",
+    )
 }
 
 fn validate_resolved_separation(config: &CertifiedConfig) -> Result<(), AuthorityError> {
@@ -318,9 +412,11 @@ fn read_authority(
     max_bytes: u64,
     expected: &str,
     authority_identities: &mut BTreeSet<(u64, u64)>,
+    authority_path_identities: &mut BTreeSet<(u64, u64)>,
     authority_digests: &mut BTreeSet<String>,
 ) -> Result<Vec<u8>, AuthorityError> {
-    let file = open_nofollow(path)?;
+    let (file, opened_path_identities) = open_nofollow(path)?;
+    authority_path_identities.extend(opened_path_identities);
     let metadata = file.metadata().map_err(|_| authority_read_error())?;
     validate_metadata(&metadata, max_bytes)?;
     let identity = authority_identity(&metadata)?;
@@ -367,7 +463,7 @@ fn authority_identity(_metadata: &std::fs::Metadata) -> Result<(u64, u64), Autho
 }
 
 #[cfg(unix)]
-fn open_nofollow(path: &Path) -> Result<File, AuthorityError> {
+fn open_nofollow(path: &Path) -> Result<(File, Vec<(u64, u64)>), AuthorityError> {
     use nix::fcntl::{OFlag, openat};
     use nix::sys::stat::Mode;
 
@@ -382,6 +478,7 @@ fn open_nofollow(path: &Path) -> Result<File, AuthorityError> {
         return Err(authority_read_error());
     }
     let mut directory = File::open("/").map_err(|_| authority_read_error())?;
+    let mut opened_path_identities = Vec::with_capacity(components.len());
     for (index, component) in components.iter().enumerate() {
         let final_component = index + 1 == components.len();
         let mut flags = OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
@@ -391,12 +488,15 @@ fn open_nofollow(path: &Path) -> Result<File, AuthorityError> {
         let opened = openat(&directory, *component, flags, Mode::empty())
             .map_err(|_| authority_read_error())?;
         directory = File::from(opened);
+        opened_path_identities.push(authority_identity(
+            &directory.metadata().map_err(|_| authority_read_error())?,
+        )?);
     }
-    Ok(directory)
+    Ok((directory, opened_path_identities))
 }
 
 #[cfg(not(unix))]
-fn open_nofollow(_path: &Path) -> Result<File, AuthorityError> {
+fn open_nofollow(_path: &Path) -> Result<(File, Vec<(u64, u64)>), AuthorityError> {
     Err(AuthorityError::new(
         "DEP_AUTHORITY_PLATFORM_UNSUPPORTED",
         "authority loading requires a Unix no-follow file boundary",
