@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -22,7 +22,26 @@ const COMPLETION_SCHEMA: &str = "mcloving.dependency-completion/v1";
 const MANIFEST_SCHEMA: &str = "mcloving.dependency-manifest/v1";
 const RECEIPT_SCHEMA: &str = "mcloving.dependency-receipt/v1";
 const MAX_STATE_BYTES: u64 = 16 * 1_048_576;
+const MAX_RETAINED_TREE_ENTRIES: usize = 1_000_000;
+const MAX_RETAINED_TREE_DEPTH: usize = 4_096;
 const LOCK_FILE: &str = ".mcloving-dependency-output.lock";
+
+#[derive(Clone, Copy)]
+struct RetainedTreeLimits {
+    max_entries: usize,
+    max_depth: usize,
+}
+
+const CERTIFIED_RETAINED_TREE_LIMITS: RetainedTreeLimits = RetainedTreeLimits {
+    max_entries: MAX_RETAINED_TREE_ENTRIES,
+    max_depth: MAX_RETAINED_TREE_DEPTH,
+};
+
+struct RetainedTreeRecords<'a> {
+    total: &'a mut u64,
+    directories: &'a mut Vec<(String, u32, u32, u64, u64)>,
+    files: &'a mut Vec<(String, u32, u64, String)>,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1346,14 +1365,18 @@ fn retained_tree_sha256(
         directory_record("@bundles-root", &output_root.join("bundles"), 0o700)?,
     ];
     let mut total = 0_u64;
+    let mut records = RetainedTreeRecords {
+        total: &mut total,
+        directories: &mut directories,
+        files: &mut files,
+    };
     collect_tree(
         root,
         root,
         max_file_bytes,
         max_total_bytes,
-        &mut total,
-        &mut directories,
-        &mut files,
+        CERTIFIED_RETAINED_TREE_LIMITS,
+        &mut records,
     )?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
     let mut hasher = Sha256::new();
@@ -1382,66 +1405,85 @@ fn collect_tree(
     directory: &Path,
     max_file_bytes: u64,
     max_total_bytes: u64,
-    total: &mut u64,
-    directories: &mut Vec<(String, u32, u32, u64, u64)>,
-    files: &mut Vec<(String, u32, u64, String)>,
+    limits: RetainedTreeLimits,
+    records: &mut RetainedTreeRecords<'_>,
 ) -> Result<(), StoreError> {
-    validate_directory(directory, 0o500)?;
-    let relative_directory = if directory == root {
-        ".".to_owned()
-    } else {
-        directory
-            .strip_prefix(root)
-            .map_err(|_| state_error())?
-            .to_str()
-            .ok_or_else(state_error)?
-            .to_owned()
-    };
-    directories.push(directory_record(&relative_directory, directory, 0o500)?);
-    for entry in std::fs::read_dir(directory).map_err(|_| state_error())? {
-        let entry = entry.map_err(|_| state_error())?;
-        let path = entry.path();
-        let metadata = std::fs::symlink_metadata(&path).map_err(|_| state_error())?;
-        if metadata.file_type().is_symlink() {
-            return Err(StoreError::new(
-                "DEP_STORE_RETAINED_TREE_MISMATCH",
-                "retained bundle contains a symlink",
-            ));
-        }
-        if metadata.is_dir() {
-            collect_tree(
-                root,
-                &path,
-                max_file_bytes,
-                max_total_bytes,
-                total,
-                directories,
-                files,
-            )?;
-        } else if metadata.is_file() {
-            let relative = path
+    let mut entry_count = 0_usize;
+    admit_retained_tree_entry(&mut entry_count, limits.max_entries)?;
+    let mut pending = VecDeque::from([(directory.to_path_buf(), 0_usize)]);
+
+    while let Some((directory, depth)) = pending.pop_front() {
+        validate_directory(&directory, 0o500)?;
+        let relative_directory = if directory == root {
+            ".".to_owned()
+        } else {
+            directory
                 .strip_prefix(root)
                 .map_err(|_| state_error())?
                 .to_str()
                 .ok_or_else(state_error)?
-                .to_owned();
-            let (size, digest) = hash_bounded_file(&path, max_file_bytes, 0o400)?;
-            *total = total.checked_add(size).ok_or_else(state_error)?;
-            if *total > max_total_bytes {
+                .to_owned()
+        };
+        records
+            .directories
+            .push(directory_record(&relative_directory, &directory, 0o500)?);
+        for entry in std::fs::read_dir(&directory).map_err(|_| state_error())? {
+            let entry = entry.map_err(|_| state_error())?;
+            admit_retained_tree_entry(&mut entry_count, limits.max_entries)?;
+            let child_depth = depth.checked_add(1).ok_or_else(retained_tree_bound_error)?;
+            if child_depth > limits.max_depth {
+                return Err(retained_tree_bound_error());
+            }
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|_| state_error())?;
+            if metadata.file_type().is_symlink() {
                 return Err(StoreError::new(
                     "DEP_STORE_RETAINED_TREE_MISMATCH",
-                    "retained dependency tree exceeds its signed total bound",
+                    "retained bundle contains a symlink",
                 ));
             }
-            files.push((relative, 0o400, size, digest));
-        } else {
-            return Err(StoreError::new(
-                "DEP_STORE_RETAINED_TREE_MISMATCH",
-                "retained bundle contains an unsupported file type",
-            ));
+            if metadata.is_dir() {
+                pending.push_back((path, child_depth));
+            } else if metadata.is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|_| state_error())?
+                    .to_str()
+                    .ok_or_else(state_error)?
+                    .to_owned();
+                let (size, digest) = hash_bounded_file(&path, max_file_bytes, 0o400)?;
+                *records.total = records.total.checked_add(size).ok_or_else(state_error)?;
+                if *records.total > max_total_bytes {
+                    return Err(StoreError::new(
+                        "DEP_STORE_RETAINED_TREE_MISMATCH",
+                        "retained dependency tree exceeds its signed total bound",
+                    ));
+                }
+                records.files.push((relative, 0o400, size, digest));
+            } else {
+                return Err(StoreError::new(
+                    "DEP_STORE_RETAINED_TREE_MISMATCH",
+                    "retained bundle contains an unsupported file type",
+                ));
+            }
         }
     }
     Ok(())
+}
+
+fn admit_retained_tree_entry(count: &mut usize, max_entries: usize) -> Result<(), StoreError> {
+    *count = count.checked_add(1).ok_or_else(retained_tree_bound_error)?;
+    if *count > max_entries {
+        return Err(retained_tree_bound_error());
+    }
+    Ok(())
+}
+
+fn retained_tree_bound_error() -> StoreError {
+    StoreError::new(
+        "DEP_STORE_RETAINED_TREE_MISMATCH",
+        "retained dependency tree exceeds its certified entry or depth bound",
+    )
 }
 
 #[cfg(unix)]
@@ -2586,6 +2628,48 @@ mod tests {
                 .exists()
         );
         monotonic_store.release_incomplete_claim(&monotonic_claim);
+    }
+
+    #[test]
+    fn retained_tree_scan_bounds_entries_and_depth_before_descending() {
+        let root = TempDir::new().expect("retained tree root");
+        let tree = root.path().join("tree");
+        let first = tree.join("first");
+        let nested = first.join("nested");
+        let second = tree.join("second");
+        std::fs::create_dir(&tree).expect("tree");
+        std::fs::create_dir(&first).expect("first");
+        std::fs::create_dir(&nested).expect("nested");
+        std::fs::create_dir(&second).expect("second");
+        for directory in [&tree, &first, &nested, &second] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o500))
+                .expect("seal retained directory");
+        }
+
+        let scan = |limits| {
+            let mut total = 0;
+            let mut directories = Vec::new();
+            let mut files = Vec::new();
+            let mut records = RetainedTreeRecords {
+                total: &mut total,
+                directories: &mut directories,
+                files: &mut files,
+            };
+            collect_tree(&tree, &tree, 1, 1, limits, &mut records)
+        };
+        let entry_error = scan(RetainedTreeLimits {
+            max_entries: 2,
+            max_depth: 8,
+        })
+        .expect_err("entry cap");
+        assert_eq!(entry_error.code, "DEP_STORE_RETAINED_TREE_MISMATCH");
+
+        let depth_error = scan(RetainedTreeLimits {
+            max_entries: 8,
+            max_depth: 1,
+        })
+        .expect_err("depth cap");
+        assert_eq!(depth_error.code, "DEP_STORE_RETAINED_TREE_MISMATCH");
     }
 
     #[test]

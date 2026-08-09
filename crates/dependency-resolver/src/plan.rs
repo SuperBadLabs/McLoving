@@ -287,46 +287,60 @@ fn validate_graph_reachability(
     plan: &CanonicalPlan,
     nodes: &BTreeMap<&str, &PackageNode>,
 ) -> Result<(), PlanError> {
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    for root in &plan.roots {
-        visit_node(root, nodes, &mut visiting, &mut visited)?;
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum VisitState {
+        Visiting,
+        Visited,
     }
-    if visited.len() != nodes.len() {
+
+    #[derive(Clone, Copy)]
+    enum VisitFrame<'a> {
+        Enter(&'a str),
+        Exit(&'a str),
+    }
+
+    let mut states = BTreeMap::new();
+    for root in &plan.roots {
+        let mut pending = vec![VisitFrame::Enter(root)];
+        while let Some(frame) = pending.pop() {
+            match frame {
+                VisitFrame::Enter(node_id) => match states.get(node_id) {
+                    Some(VisitState::Visited) => continue,
+                    Some(VisitState::Visiting) => {
+                        return Err(PlanError::new(
+                            "DEP_GRAPH_CYCLE",
+                            "the dependency graph contains a cycle",
+                        ));
+                    }
+                    None => {
+                        let node = nodes.get(node_id).ok_or_else(|| {
+                            PlanError::new(
+                                "DEP_GRAPH_NODE_MISSING",
+                                "a dependency edge references a missing package node",
+                            )
+                        })?;
+                        states.insert(node_id, VisitState::Visiting);
+                        pending.push(VisitFrame::Exit(node_id));
+                        pending.extend(
+                            node.dependencies
+                                .iter()
+                                .rev()
+                                .map(|dependency| VisitFrame::Enter(dependency)),
+                        );
+                    }
+                },
+                VisitFrame::Exit(node_id) => {
+                    states.insert(node_id, VisitState::Visited);
+                }
+            }
+        }
+    }
+    if states.len() != nodes.len() {
         return Err(PlanError::new(
             "DEP_GRAPH_UNREACHABLE_NODE",
             "the dependency graph contains a node unreachable from every root",
         ));
     }
-    Ok(())
-}
-
-fn visit_node<'a>(
-    node_id: &'a str,
-    nodes: &BTreeMap<&'a str, &'a PackageNode>,
-    visiting: &mut BTreeSet<&'a str>,
-    visited: &mut BTreeSet<&'a str>,
-) -> Result<(), PlanError> {
-    if visited.contains(node_id) {
-        return Ok(());
-    }
-    if !visiting.insert(node_id) {
-        return Err(PlanError::new(
-            "DEP_GRAPH_CYCLE",
-            "the dependency graph contains a cycle",
-        ));
-    }
-    let node = nodes.get(node_id).ok_or_else(|| {
-        PlanError::new(
-            "DEP_GRAPH_NODE_MISSING",
-            "a dependency edge references a missing package node",
-        )
-    })?;
-    for dependency in &node.dependencies {
-        visit_node(dependency, nodes, visiting, visited)?;
-    }
-    visiting.remove(node_id);
-    visited.insert(node_id);
     Ok(())
 }
 
@@ -626,4 +640,54 @@ fn validate_sorted_digests(name: &str, values: &[String]) -> Result<(), PlanErro
         previous = Some(value.as_str());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maximum_linear_graph_is_validated_without_native_stack_recursion() {
+        let mut owned_nodes = Vec::with_capacity(MAX_NODES);
+        for index in 0..MAX_NODES {
+            let node_id = format!("{index:064x}");
+            let dependencies = if index + 1 < MAX_NODES {
+                vec![format!("{:064x}", index + 1)]
+            } else {
+                Vec::new()
+            };
+            owned_nodes.push(PackageNode {
+                node_id,
+                coordinate: String::new(),
+                exact_version: String::new(),
+                repository_id: String::new(),
+                artifact_path: String::new(),
+                declared_size: 0,
+                sha256: String::new(),
+                attestation_key_id: None,
+                dependencies,
+            });
+        }
+        let nodes = owned_nodes
+            .iter()
+            .map(|node| (node.node_id.as_str(), node))
+            .collect();
+        let plan = CanonicalPlan {
+            schema_version: String::new(),
+            ecosystem: Ecosystem::Maven,
+            adapter_id: String::new(),
+            adapter_sha256: String::new(),
+            source_tree_sha256: String::new(),
+            lock_sha256: String::new(),
+            resolver_toolchain_id: String::new(),
+            resolver_toolchain_sha256: String::new(),
+            source_trust_class: SourceTrustClass::Trusted,
+            repositories: Vec::new(),
+            nodes: Vec::new(),
+            roots: vec![owned_nodes[0].node_id.clone()],
+            graph_sha256: String::new(),
+        };
+
+        validate_graph_reachability(&plan, &nodes).expect("maximum linear graph");
+    }
 }
