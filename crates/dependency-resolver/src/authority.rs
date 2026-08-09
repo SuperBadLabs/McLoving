@@ -551,10 +551,12 @@ fn authority_identity(_metadata: &std::fs::Metadata) -> Result<(u64, u64), Autho
     ))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn open_nofollow(path: &Path) -> Result<(File, Vec<(u64, u64)>), AuthorityError> {
     use nix::fcntl::{OFlag, openat};
     use nix::sys::stat::Mode;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
 
     let components = path
         .components()
@@ -570,21 +572,50 @@ fn open_nofollow(path: &Path) -> Result<(File, Vec<(u64, u64)>), AuthorityError>
     let mut opened_path_identities = Vec::with_capacity(components.len());
     for (index, component) in components.iter().enumerate() {
         let final_component = index + 1 == components.len();
-        let mut flags = OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
-        if !final_component {
-            flags |= OFlag::O_DIRECTORY;
-        }
-        let opened = openat(&directory, *component, flags, Mode::empty())
+        if final_component {
+            let inspected = openat(
+                &directory,
+                *component,
+                OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+                Mode::empty(),
+            )
             .map_err(|_| authority_read_error())?;
+            let inspection = File::from(inspected);
+            let inspected_metadata = inspection.metadata().map_err(|_| authority_read_error())?;
+            let inspected_identity = authority_identity(&inspected_metadata)?;
+            opened_path_identities.push(inspected_identity);
+            if !inspected_metadata.is_file() {
+                return Err(authority_read_error());
+            }
+            let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+            let opened = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+                .open(pinned_path)
+                .map_err(|_| authority_read_error())?;
+            if authority_identity(&opened.metadata().map_err(|_| authority_read_error())?)?
+                != inspected_identity
+            {
+                return Err(authority_read_error());
+            }
+            return Ok((opened, opened_path_identities));
+        }
+        let opened = openat(
+            &directory,
+            *component,
+            OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_DIRECTORY,
+            Mode::empty(),
+        )
+        .map_err(|_| authority_read_error())?;
         directory = File::from(opened);
         opened_path_identities.push(authority_identity(
             &directory.metadata().map_err(|_| authority_read_error())?,
         )?);
     }
-    Ok((directory, opened_path_identities))
+    Err(authority_read_error())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 fn open_nofollow(_path: &Path) -> Result<(File, Vec<(u64, u64)>), AuthorityError> {
     Err(AuthorityError::new(
         "DEP_AUTHORITY_PLATFORM_UNSUPPORTED",

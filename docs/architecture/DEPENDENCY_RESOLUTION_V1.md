@@ -166,10 +166,17 @@ protocol-NACK handling. Cleartext loopback fixtures require
 both configuration admission and `MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE=1`.
 
 Configuration, credential, signing-key, marker, public-key, CA, lock, claim,
-receipt, and retained-manifest reads are bounded regular-file reads. Authority
-paths are resolved against the actual output and transport roots, and authority
-files are opened component by component relative to already opened directory
-descriptors so neither an ancestor nor final symlink is followed. Authority
+receipt, and retained-manifest reads are bounded regular-file reads. Certified
+configuration and executable paths are first pinned with
+`O_PATH|O_NOFOLLOW`, rejected unless regular, and reopened only through the
+pinned `/proc/self/fd` identity with `O_NONBLOCK`; device/inode equality is
+rechecked before reading. Authority paths are resolved against the actual output
+and transport roots, and authority files are opened component by component
+relative to already opened directory descriptors so neither an ancestor nor
+final symlink is followed. The final authority component is likewise pinned
+with `O_PATH|O_NOFOLLOW`, type-checked without invoking FIFO or device open
+behavior, reopened nonblocking through its pinned identity, and device/inode
+rechecked before content validation. Authority
 files must be owned by the effective resolver UID, have exactly one filesystem
 link, and have no group or other permission bits. Every authority role must have
 a unique device/inode and verified content digest. In addition to the resolved

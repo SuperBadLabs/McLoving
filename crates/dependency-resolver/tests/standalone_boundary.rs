@@ -3,6 +3,7 @@
 use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use mcloving_dependency_resolver::{
     AdapterConfig, CertifiedConfig, Ecosystem, RepositoryConfig, ResolverLimits,
@@ -62,6 +63,34 @@ fn config_mode_symlink_duplicate_members_and_executable_substitution_fail_closed
     let executable = std::env::current_exe().expect("test executable");
     config.executable_sha256 = sha256(&fs::read(executable).expect("test executable bytes"));
     verify_running_executable(&config).expect("exact running executable");
+}
+
+#[test]
+fn config_fifo_and_device_are_rejected_before_blocking_open() {
+    use nix::sys::stat::Mode;
+    use nix::unistd::mkfifo;
+
+    let root = TempDir::new().expect("standalone boundary root");
+    let fifo = root.path().join("resolver-fifo.json");
+    mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).expect("configuration fifo");
+
+    let started = Instant::now();
+    assert_eq!(
+        load_certified_config(&fifo)
+            .expect_err("configuration fifo")
+            .code,
+        "DEP_CONFIG_FILE_POLICY_DENIED"
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    let started = Instant::now();
+    assert_eq!(
+        load_certified_config(Path::new("/dev/null"))
+            .expect_err("configuration device")
+            .code,
+        "DEP_CONFIG_FILE_POLICY_DENIED"
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 fn config() -> CertifiedConfig {

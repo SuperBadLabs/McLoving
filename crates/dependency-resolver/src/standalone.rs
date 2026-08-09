@@ -120,18 +120,15 @@ pub fn read_bounded_frame<R: BufRead>(
 #[cfg(target_os = "linux")]
 fn read_private_config(path: &Path) -> Result<Vec<u8>, ResolverError> {
     use nix::unistd::Uid;
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits())
-        .open(path)
-        .map_err(|_| ResolverError::denied("DEP_CONFIG_FILE_POLICY_DENIED"))?;
+    let file = open_pinned_regular(path, "DEP_CONFIG_FILE_POLICY_DENIED")?;
     let metadata = file
         .metadata()
         .map_err(|_| ResolverError::denied("DEP_CONFIG_FILE_POLICY_DENIED"))?;
     if !metadata.is_file()
         || metadata.uid() != Uid::effective().as_raw()
+        || metadata.nlink() != 1
         || metadata.permissions().mode() & 0o077 != 0
         || metadata.len() == 0
         || metadata.len() > MAX_CONFIG_BYTES
@@ -148,13 +145,7 @@ fn read_private_config(_path: &Path) -> Result<Vec<u8>, ResolverError> {
 
 #[cfg(target_os = "linux")]
 fn hash_regular_file(path: &Path, max_bytes: u64) -> Result<String, ResolverError> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits())
-        .open(path)
-        .map_err(|_| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?;
+    let mut file = open_pinned_regular(path, "DEP_EXECUTABLE_IDENTITY_INVALID")?;
     let metadata = file
         .metadata()
         .map_err(|_| ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"))?;
@@ -181,6 +172,35 @@ fn hash_regular_file(path: &Path, max_bytes: u64) -> Result<String, ResolverErro
         return Err(ResolverError::denied("DEP_EXECUTABLE_IDENTITY_INVALID"));
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(target_os = "linux")]
+fn open_pinned_regular(path: &Path, code: &'static str) -> Result<File, ResolverError> {
+    use nix::fcntl::OFlag;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let denied = || ResolverError::denied(code);
+    let inspection = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW).bits())
+        .open(path)
+        .map_err(|_| denied())?;
+    let inspected = inspection.metadata().map_err(|_| denied())?;
+    if !inspected.is_file() {
+        return Err(denied());
+    }
+    let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+        .open(pinned_path)
+        .map_err(|_| denied())?;
+    let opened = file.metadata().map_err(|_| denied())?;
+    if !opened.is_file() || opened.dev() != inspected.dev() || opened.ino() != inspected.ino() {
+        return Err(denied());
+    }
+    Ok(file)
 }
 
 #[cfg(not(target_os = "linux"))]

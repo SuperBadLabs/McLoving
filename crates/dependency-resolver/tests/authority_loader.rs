@@ -3,6 +3,7 @@
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -149,6 +150,29 @@ fn exact_private_authorities_are_loaded_without_exposure() {
         Some(fixture.ca.as_slice())
     );
     assert_eq!(loaded.markers().count(), 2);
+}
+
+#[test]
+fn authority_fifo_and_device_are_rejected_before_blocking_open() {
+    use nix::sys::stat::Mode;
+    use nix::unistd::mkfifo;
+
+    let mut fixture = Fixture::new();
+    let fifo = fixture._root.path().join("source-attestation.fifo");
+    mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).expect("authority fifo");
+    fixture.config.source_attestation_key_path = path_string(&fifo);
+
+    let started = Instant::now();
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("authority fifo");
+    assert_eq!(error.code, "DEP_AUTHORITY_READ_FAILED");
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    let mut fixture = Fixture::new();
+    fixture.config.source_attestation_key_path = "/dev/null".to_owned();
+    let started = Instant::now();
+    let error = LoadedAuthorities::load(&fixture.config).expect_err("authority device");
+    assert_eq!(error.code, "DEP_AUTHORITY_READ_FAILED");
+    assert!(started.elapsed() < Duration::from_secs(1));
 }
 
 #[test]
