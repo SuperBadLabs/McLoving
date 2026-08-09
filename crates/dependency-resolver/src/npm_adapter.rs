@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 
 use crate::adapter::{
-    AdapterBindings, AdapterError, assemble_plan, validate_local_key, validate_lock_size,
+    AdapterBindings, AdapterError, assemble_plan, local_key_is_valid, validate_lock_size,
 };
 use crate::plan::{Ecosystem, PackageNode, canonical_node_id, validate_exact_version};
 use crate::strict_json;
@@ -167,7 +167,12 @@ fn translate_dependencies(
 }
 
 fn validate_package_name(value: &str) -> Result<(), AdapterError> {
-    validate_local_key(value)?;
+    if !local_key_is_valid(value) {
+        return Err(AdapterError::new(
+            "DEP_NPM_PACKAGE_NAME_INVALID",
+            "npm package name is empty, oversized, whitespace-bearing, or control-bearing",
+        ));
+    }
     let valid_unscoped = |name: &str| {
         !name.is_empty()
             && name.bytes().all(|byte| {

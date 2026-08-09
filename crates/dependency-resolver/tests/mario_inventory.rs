@@ -53,11 +53,9 @@ fn sealed_mario_inventory_grants_no_workload_dependency_authority() {
     );
     assert_eq!(inventory.jobs.len(), 230);
 
-    let mut workload_dependencies = 0usize;
     for job in inventory.jobs {
         assert_eq!(job.dependencies.len(), 1, "job {}", job.job_id);
         for dependency in job.dependencies {
-            workload_dependencies += usize::from(dependency.kind == "workload-dependency");
             assert_eq!(dependency.id, "opaque-cps-runtime", "job {}", job.job_id);
             assert_eq!(dependency.kind, "controller-global", "job {}", job.job_id);
             assert_eq!(dependency.disposition, "scripted", "job {}", job.job_id);
@@ -68,7 +66,6 @@ fn sealed_mario_inventory_grants_no_workload_dependency_authority() {
             );
         }
     }
-    assert_eq!(workload_dependencies, 0);
 }
 
 fn inventory_root() -> PathBuf {

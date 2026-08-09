@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::adapter::{
-    AdapterBindings, AdapterError, assemble_plan, validate_local_key, validate_lock_size,
+    AdapterBindings, AdapterError, assemble_plan, local_key_is_valid, validate_lock_size,
 };
 use crate::plan::{Ecosystem, PackageNode, canonical_node_id, validate_exact_version};
 
@@ -144,7 +144,11 @@ fn parse_requirement_line(line: &str) -> Result<Requirement, AdapterError> {
         }
     }
     let repository_id = required_option(&options, "--repository")?;
-    validate_local_key(repository_id)?;
+    if !local_key_is_valid(repository_id) {
+        return Err(unsupported(
+            "PyPI repository identity is empty, oversized, whitespace-bearing, or control-bearing",
+        ));
+    }
     let artifact_path = required_option(&options, "--artifact")?;
     let declared_size = required_option(&options, "--size")?
         .parse::<u64>()
@@ -165,8 +169,13 @@ fn parse_requirement_line(line: &str) -> Result<Requirement, AdapterError> {
     let attestation_key_id = options
         .get("--attestation")
         .map(|value| (*value).to_owned());
-    if let Some(value) = &attestation_key_id {
-        validate_local_key(value)?;
+    if attestation_key_id
+        .as_deref()
+        .is_some_and(|value| !local_key_is_valid(value))
+    {
+        return Err(unsupported(
+            "PyPI attestation identity is empty, oversized, whitespace-bearing, or control-bearing",
+        ));
     }
     let dependencies = options
         .get("--depends")
@@ -228,8 +237,8 @@ fn required_option<'a>(
 }
 
 fn validate_normalized_name(value: &str) -> Result<(), AdapterError> {
-    validate_local_key(value)?;
-    if value.starts_with('-')
+    if !local_key_is_valid(value)
+        || value.starts_with('-')
         || value.ends_with('-')
         || !value
             .bytes()

@@ -104,7 +104,7 @@ pub fn parse_maven_lock(
 
     let mut raw_by_key = BTreeMap::new();
     for node in &lock.nodes {
-        validate_local_key(&node.key)?;
+        validate_maven_local_key(&node.key)?;
         if raw_by_key.insert(node.key.as_str(), node).is_some() {
             return Err(AdapterError::new(
                 "DEP_MAVEN_KEY_DUPLICATE",
@@ -206,13 +206,16 @@ fn validate_maven_coordinate_part(name: &str, value: &str) -> Result<(), Adapter
     Ok(())
 }
 
-pub(crate) fn validate_local_key(value: &str) -> Result<(), AdapterError> {
-    if value.is_empty()
-        || value.len() > MAX_LOCAL_KEY_BYTES
-        || value
+pub(crate) fn local_key_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_LOCAL_KEY_BYTES
+        && !value
             .chars()
             .any(|character| character.is_control() || character.is_whitespace())
-    {
+}
+
+fn validate_maven_local_key(value: &str) -> Result<(), AdapterError> {
+    if !local_key_is_valid(value) {
         return Err(AdapterError::new(
             "DEP_MAVEN_KEY_INVALID",
             "Maven lock key is empty, oversized, or control-bearing",
@@ -224,7 +227,7 @@ pub(crate) fn validate_local_key(value: &str) -> Result<(), AdapterError> {
 fn validate_sorted_unique_keys(values: &[String], name: &str) -> Result<(), AdapterError> {
     let mut previous = None;
     for value in values {
-        validate_local_key(value)?;
+        validate_maven_local_key(value)?;
         if previous.is_some_and(|prior: &str| prior >= value.as_str()) {
             return Err(AdapterError::new(
                 "DEP_MAVEN_GRAPH_NONCANONICAL",

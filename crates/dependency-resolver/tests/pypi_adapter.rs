@@ -95,3 +95,12 @@ fn pypi_versions_must_be_canonical_pep440_text() {
     let canonical = valid_requirements().replace("1.0.0", "1!1.0.0rc1.post2.dev3+linux.1");
     parse_pypi_requirements(canonical.as_bytes(), &bindings()).expect("canonical PEP 440 version");
 }
+
+#[test]
+fn invalid_pypi_local_identifiers_never_report_maven_errors() {
+    let requirements = valid_requirements().replace("contained-pypi", &"x".repeat(1_025));
+    let error = parse_pypi_requirements(requirements.as_bytes(), &bindings())
+        .expect_err("oversized PyPI repository identity");
+    assert_eq!(error.code, "DEP_PYPI_SYNTAX_UNSUPPORTED");
+    assert!(!error.message.contains("Maven"));
+}

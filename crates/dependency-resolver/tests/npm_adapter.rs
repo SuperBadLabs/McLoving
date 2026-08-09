@@ -115,3 +115,12 @@ fn npm_versions_must_be_canonical_semver() {
         assert_eq!(error.code, "DEP_VERSION_MUTABLE", "version {invalid}");
     }
 }
+
+#[test]
+fn invalid_npm_package_names_never_report_maven_errors() {
+    let lock = valid_lock().replace("tiny-lib", "tiny lib");
+    let error = parse_npm_package_lock(lock.as_bytes(), &bindings())
+        .expect_err("whitespace-bearing npm package name");
+    assert_eq!(error.code, "DEP_NPM_PACKAGE_NAME_INVALID");
+    assert!(!error.message.contains("Maven"));
+}
