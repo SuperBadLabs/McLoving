@@ -226,6 +226,24 @@ fn configuration_tls_trust_and_limits_fail_closed() {
             .code,
         "DEP_CONFIG_LIMITS_INVALID"
     );
+
+    let mut invalid = config();
+    invalid.transport_root = format!("{}/bundles", invalid.output_root);
+    assert_eq!(
+        validate_config(&invalid)
+            .expect_err("nested transport and output roots")
+            .code,
+        "DEP_CONFIG_ROOT_OVERLAP"
+    );
+
+    let mut invalid = config();
+    invalid.receipt_key_path = format!("{}/receipts/raw-key", invalid.output_root);
+    assert_eq!(
+        validate_config(&invalid)
+            .expect_err("authority beneath mutable output")
+            .code,
+        "DEP_CONFIG_AUTHORITY_ROOT_OVERLAP"
+    );
 }
 
 #[test]

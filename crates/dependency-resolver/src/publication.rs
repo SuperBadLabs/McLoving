@@ -640,11 +640,29 @@ impl ResolutionStore {
                 "late receipt publication was withdrawn",
             ));
         }
-        std::fs::remove_file(self.claim_path(resolution_id)).map_err(|_| state_error())?;
-        sync_directory(&self.inner.root.join("claims"))?;
+        let completion = ResolutionCompletion {
+            schema_version: COMPLETION_SCHEMA.to_owned(),
+            resolution_id,
+            request_sha256: receipt.request_sha256.clone(),
+            receipt_hmac_sha256: receipt.hmac_sha256.clone(),
+        };
+        let completion_path = self.completion_path(resolution_id);
+        write_new_json(&completion_path, &completion, 0o400)?;
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
-            write_new_json(&self.claim_path(resolution_id), claim, 0o600)?;
-            sync_directory(&self.inner.root.join("claims"))?;
+            self.remove_completion(&completion_path)?;
+            self.withdraw_publication(&receipt_path, &bundle_path)?;
+            return Err(StoreError::new(
+                "DEP_STORE_PUBLICATION_LATE",
+                "late completion record was withdrawn while its durable claim remained",
+            ));
+        }
+        std::fs::remove_file(self.claim_path(resolution_id)).map_err(|_| state_error())?;
+        if let Err(error) = sync_directory(&self.inner.root.join("claims")) {
+            self.rollback_completion(claim, &completion_path)?;
+            return Err(error);
+        }
+        if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
+            self.rollback_completion(claim, &completion_path)?;
             let withdrawal = self.withdraw_publication(&receipt_path, &bundle_path);
             self.deactivate(resolution_id);
             withdrawal?;
@@ -653,13 +671,6 @@ impl ResolutionStore {
                 "late completion was withdrawn and its durable claim restored",
             ));
         }
-        let completion = ResolutionCompletion {
-            schema_version: COMPLETION_SCHEMA.to_owned(),
-            resolution_id,
-            request_sha256: receipt.request_sha256.clone(),
-            receipt_hmac_sha256: receipt.hmac_sha256.clone(),
-        };
-        write_new_json(&self.completion_path(resolution_id), &completion, 0o400)?;
         self.deactivate(resolution_id);
         self.verify_replay(&receipt, &admitted.request_sha256)?;
         Ok(receipt)
@@ -678,6 +689,45 @@ impl ResolutionStore {
             self.deactivate(resolution_id);
         }
         result
+    }
+
+    fn rollback_completion(
+        &self,
+        claim: &ResolutionClaim,
+        completion_path: &Path,
+    ) -> Result<(), StoreError> {
+        let claim_result = self.ensure_exact_claim(claim);
+        let completion_result = self.remove_completion(completion_path);
+        match (claim_result, completion_result) {
+            (Ok(()), _) | (_, Ok(())) => Ok(()),
+            (Err(error), Err(_)) => Err(error),
+        }
+    }
+
+    fn ensure_exact_claim(&self, claim: &ResolutionClaim) -> Result<(), StoreError> {
+        let path = self.claim_path(claim.resolution_id);
+        if !path_exists(&path)?
+            && write_new_json(&path, claim, 0o600).is_err()
+            && !path_exists(&path)?
+        {
+            return Err(state_error());
+        }
+        let restored: ResolutionClaim = read_json(&path, 0o600)?;
+        if restored != *claim {
+            return Err(StoreError::new(
+                "DEP_STORE_REPLAY_SUBSTITUTION",
+                "restored durable claim does not match the publication claim",
+            ));
+        }
+        sync_directory(&self.inner.root.join("claims"))
+    }
+
+    fn remove_completion(&self, path: &Path) -> Result<(), StoreError> {
+        if path_exists(path)? {
+            remove_private_file(path)?;
+            sync_directory(&self.inner.root.join("completions"))?;
+        }
+        Ok(())
     }
 
     fn withdraw_publication(
@@ -2039,6 +2089,49 @@ mod tests {
             .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
             .expect_err("receipt without completion");
         assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_COMPLETION");
+    }
+
+    #[test]
+    fn completion_write_failure_keeps_the_durable_claim() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let conflicting_completion = ResolutionCompletion {
+            schema_version: COMPLETION_SCHEMA.to_owned(),
+            resolution_id: claim.resolution_id,
+            request_sha256: claim.request_sha256.clone(),
+            receipt_hmac_sha256: "0".repeat(64),
+        };
+        write_new_json(
+            &store.completion_path(claim.resolution_id),
+            &conflicting_completion,
+            0o400,
+        )
+        .expect("conflicting completion fixture");
+
+        let error = store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect_err("completion write conflict");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_CONFLICT");
+        assert!(store.claim_path(claim.resolution_id).exists());
+        store.release_incomplete_claim(&claim);
+        let error = store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect_err("durable claim after completion failure");
+        assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_CLAIM");
     }
 
     #[test]

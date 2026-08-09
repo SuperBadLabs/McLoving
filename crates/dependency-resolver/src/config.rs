@@ -160,7 +160,38 @@ pub fn validate_config(config: &CertifiedConfig) -> Result<(), ConfigError> {
             "output and transport roots must be different",
         ));
     }
+    validate_path_separation(config)?;
     validate_limits(&config.limits)?;
+    Ok(())
+}
+
+fn validate_path_separation(config: &CertifiedConfig) -> Result<(), ConfigError> {
+    let output = Path::new(&config.output_root);
+    let transport = Path::new(&config.transport_root);
+    if output.starts_with(transport) || transport.starts_with(output) {
+        return Err(ConfigError::new(
+            "DEP_CONFIG_ROOT_OVERLAP",
+            "output and transport roots cannot contain one another",
+        ));
+    }
+    let mut authority_paths = vec![
+        config.receipt_key_path.as_str(),
+        config.secret_marker_set_path.as_str(),
+    ];
+    for repository in &config.repositories {
+        authority_paths.push(repository.attestation_key_path.as_str());
+        authority_paths.extend(repository.credential_path.as_deref());
+        authority_paths.extend(repository.private_ca_path.as_deref());
+    }
+    if authority_paths.iter().any(|authority| {
+        let authority = Path::new(authority);
+        authority.starts_with(output) || authority.starts_with(transport)
+    }) {
+        return Err(ConfigError::new(
+            "DEP_CONFIG_AUTHORITY_ROOT_OVERLAP",
+            "authority files cannot be contained by mutable resolver roots",
+        ));
+    }
     Ok(())
 }
 
