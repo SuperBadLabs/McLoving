@@ -3,26 +3,25 @@
 Date: 2026-08-09
 
 Verdict: PASS for the implementation gate at exact implementation head
-`f346fd68c0b2161fa335c3630b808d8243f78c88`. All required protected workflows
+`957db9d72718964b13dc9ace04210092f8b9f65f`. All required protected workflows
 completed cleanly
-across [Foundation run 31313080381](https://github.com/SuperBadLabs/McLoving/actions/runs/31313080381)
-and [Windows Agent run 31313080376](https://github.com/SuperBadLabs/McLoving/actions/runs/31313080376).
+across [Foundation run 31315698436](https://github.com/SuperBadLabs/McLoving/actions/runs/31315698436)
+and [Windows Agent run 31315698439](https://github.com/SuperBadLabs/McLoving/actions/runs/31315698439).
 The Windows impact classifier passed and intentionally skipped the Windows-agent
 job because the resolver diff did not enter the agent dependency closure. The
-focused gate passed seventy-two dependency-resolution tests: thirty-five unit
+focused gate passed seventy-three dependency-resolution tests: thirty-six unit
 tests, thirty-six ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Independent exact-head review found no
-further implementation defect after the encoded-authority and bind-mount repairs
-and required this exact [receipt and board
-recertification](https://github.com/SuperBadLabs/McLoving/pull/35#discussion_r3743772208)
-plus an accurate [architecture-boundary
-description](https://github.com/SuperBadLabs/McLoving/pull/35#discussion_r3743772212).
+further implementation defect after the structured-credential, mixed-case hex,
+bounded-enumeration, and path-distinct bind-topology repairs and required the
+architecture contract to state the final [mixed-case hexadecimal
+boundary](https://github.com/SuperBadLabs/McLoving/pull/35#discussion_r3743942717).
 Every actionable thread remains a merge gate until its exact fix evidence is
 pushed and independently checked.
 
 The DEP-001-to-CACHE-001 execution-board transition entered PR #35 at
 `02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at exact
-implementation head `f346fd68c0b2161fa335c3630b808d8243f78c88`. Closure
+implementation head `957db9d72718964b13dc9ace04210092f8b9f65f`. Closure
 commits update this receipt and recertify those existing board rows; they
 do not introduce the transition. The complete PR #35 diff against protected
 `main` includes the resolver implementation, tests, protected workflow change,
@@ -65,9 +64,12 @@ provenance evidence and is not substituted for live dependency authority.
   for each receipt key, marker set, repository credential, attestation key, and
   private CA role, plus unique verified content digests across all roles; every
   opened authority-path component identity is compared with bounded,
-  non-symlink-following scans of the mutable roots, and bidirectional
-  secret-role containment checks cover raw receipt-key/credential bytes plus
-  canonical lower/uppercase hex and standard/URL-safe Base64 forms;
+  non-symlink-following, path-distinct FIFO scans of the mutable roots whose
+  entries are counted before worklist insertion; bidirectional secret-role
+  containment trims HTTP optional whitespace, expands case-insensitive Basic
+  credentials through padded/unpadded standard-Base64 decoding, compares raw
+  and decoded views, matches hexadecimal ASCII-case-insensitively, and checks
+  exact standard/URL-safe Base64 forms;
 - exact-path GET transport with redirects, ambient proxies, decompression,
   retries, credential helpers, and alternate origins disabled;
 - bounded response headers and streaming bodies verified for status, type,
@@ -110,9 +112,9 @@ The ordinary focused suite proves:
   attestation, and request-time binding;
 - private authority owner/mode/no-follow/digest policy, resolved separation from
   mutable roots, single-link, cross-role device/inode and content-digest
-  uniqueness, raw and encoded secret-bearing-role content-overlap denial,
-  minimum receipt-key strength, and exact credential/receipt-key marker
-  membership;
+  uniqueness, raw, structured-Basic, mixed-case-hex, and Base64
+  secret-bearing-role content-overlap denial, minimum receipt-key strength, and
+  exact credential/receipt-key marker membership;
 - correct transport plus wrong mirror, content, size, signature, key, repository,
   generation, missing, offline, timeout, and cross-chunk marker denial;
 - claim-first concurrency, request substitution, restart ambiguity, exact replay,
@@ -130,12 +132,14 @@ The protected contained journey uses the real standalone executable, a live
 credentialed HTTP Maven repository, Ed25519 attestations, and a disposable
 `nosuid,nodev,noexec` tmpfs whose measured capacity is written into the certified
 configuration. It proves a real bind-mounted alias from the mutable receipt tree
-is rejected by filesystem identity; two concurrent identical requests converge
-on one GET; an exact-capacity artifact fails closed and cleans up; wrong-graph
-and untrusted requests cause zero GETs; a valid request publishes; a later exact
-version under the same resolution identity is denied offline; restart with the
-repository offline returns byte-equivalent JSON; and neither the repository
-credential nor receipt key appears in stdout, stderr, or the receipt.
+is rejected by filesystem identity; a self-bind of the mutable root with an
+authority directory mounted only beneath that alias is independently traversed
+and rejected; two concurrent identical requests converge on one GET; an
+exact-capacity artifact fails closed and cleans up; wrong-graph and untrusted
+requests cause zero GETs; a valid request publishes; a later exact version under
+the same resolution identity is denied offline; restart with the repository
+offline returns byte-equivalent JSON; and neither the repository credential nor
+receipt key appears in stdout, stderr, or the receipt.
 
 The exact implementation head also passes strict resolver Clippy, formatting,
 `git diff --check`, the complete locked non-source workspace, and the complete
@@ -146,7 +150,7 @@ journey, and the AppArmor-confined source suite.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired fifty-nine
+Pre-closure review and repeated contained execution exposed and repaired sixty-seven
 important seams:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -345,6 +349,36 @@ important seams:
     to the single-link invariant, which cannot exclude bind mounts. It now records
     the opened-path identity comparison, both mutable-tree scans, their combined
     one-million-entry bound, and fail-closed scan behavior.
+60. A Basic credential could wrap a username prefix plus the receipt key in one
+    Base64 payload, changing block alignment and evading whole-secret candidates.
+    Case-insensitive Basic credentials are now decoded in padded or unpadded
+    standard Base64 before the bidirectional representation checks.
+61. A directory with more than one million children could allocate every child
+    path before the mutable-tree bound was checked. Entries are now counted and
+    rejected during directory enumeration before worklist insertion, with a unit
+    regression proving an over-cap path is not queued.
+62. Leading HTTP optional whitespace could hide a valid Basic scheme from the
+    structured decoder even though a recipient strips that whitespace. Space and
+    horizontal tab are now trimmed before scheme recognition, with an exact
+    wrapped-secret regression.
+63. The receipt and board still certified the implementation head preceding the
+    Basic decoder and enumeration-bound repair. They now bind the final exact
+    implementation head, seventy-three focused tests, protected runs, and the
+    complete hardening chronology.
+64. The architecture contract omitted structured Basic expansion. It now records
+    optional-whitespace normalization, case-insensitive scheme recognition, and
+    padded/unpadded standard-Base64 decoding before cross-role comparison.
+65. Hexadecimal separation generated only all-lowercase and all-uppercase
+    candidates, so an arbitrary per-digit case mixture could evade matching.
+    Hex runs are now compared ASCII-case-insensitively, with an alternating-case
+    regression.
+66. Device/inode directory deduplication could skip a second bind path whose child
+    mount topology differed from the first. Every encountered mount path is now
+    traversed independently through the bounded FIFO worklist, and a real
+    self-bind/nested-authority-mount regression requires denial.
+67. The architecture contract described only canonical lower/uppercase hex after
+    the implementation accepted arbitrary per-digit mixtures. It now states that
+    hexadecimal containment is ASCII-case-insensitive for every mixed-case form.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -387,8 +421,15 @@ mutable-root aliases. Both were repaired and independently re-reviewed without a
 further implementation defect. That review added two documentation closure
 findings: re-certification of the new implementation evidence and an accurate
 architecture description of the identity scan. All fifty-four actionable
-findings were addressed before merge. Each fix was pushed, replied to with
-exact-head evidence, and its thread was resolved before closure.
+findings were addressed before merge. The next closure review added Basic-wrapped
+credential decoding and pre-allocation mutable-entry counting. Exact-head review
+then added leading-OWS normalization plus receipt/board recertification and an
+explicit Basic-decoding architecture contract. A further review added arbitrary
+mixed-case hexadecimal matching and path-distinct bind-topology traversal. Final
+exact-head implementation review found no further implementation defect and
+required the architecture to state the mixed-case guarantee. All sixty-two
+actionable findings were addressed before merge. Each fix was pushed, replied to
+with exact-head evidence, and its thread was resolved before closure.
 
 One additional review thread predicted that exact-capacity transport pressure
 would return an I/O error rather than the asserted content-mismatch result. The

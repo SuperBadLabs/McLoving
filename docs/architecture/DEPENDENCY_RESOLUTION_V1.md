@@ -164,14 +164,19 @@ link, and have no group or other permission bits. Every authority role must have
 a unique device/inode and verified content digest. In addition to the resolved
 path separation, every filesystem identity opened along an authority path is
 compared with a non-symlink-following walk of the canonical output and transport
-trees. That combined walk is bounded at one million entries and fails closed on
-an unreadable entry or exceeded bound, preventing an authority file or ancestor
-from reappearing through a hard link or bind mount beneath either mutable root.
-The receipt key and every repository credential are also separated by denying
-bidirectional containment of their raw bytes and canonical lower/uppercase hex,
-standard Base64, and URL-safe Base64 representations, with padded and unpadded
-forms checked where applicable. Construction validates every authority and
-limit before creating a claim or contacting a repository.
+trees. Every encountered directory mount path is enumerated independently
+through a FIFO worklist, without device/inode path collapsing, and each entry is
+counted before worklist insertion. That combined walk is bounded at one million
+entries and fails closed on an unreadable entry or exceeded bound, preventing an
+authority file, ancestor, or path-distinct child mount from reappearing through
+a hard link or bind mount beneath either mutable root. The receipt key and every
+repository credential are also separated by first trimming HTTP optional
+whitespace and expanding a case-insensitive `Basic` authorization value through
+padded or unpadded standard-Base64 decoding. Bidirectional containment then
+checks the raw and decoded views, hexadecimal ASCII-case-insensitively for every
+per-digit case mixture, and standard or URL-safe Base64 in padded and unpadded
+forms. Construction validates every authority and limit before creating a claim
+or contacting a repository.
 
 `mcloving.secret-markers/v1` is closed JSON with one strictly sorted,
 duplicate-free `markers_hex` array. Entries are lowercase even-length hex for
