@@ -448,7 +448,7 @@ impl ResolutionStore {
         fetched: &[FetchedArtifact],
         deadline: Instant,
     ) -> Result<ResolutionReceipt, StoreError> {
-        self.publish_inner(
+        let receipt = self.publish_inner(
             PublicationInput {
                 claim,
                 request,
@@ -458,7 +458,9 @@ impl ResolutionStore {
                 deadline,
             },
             true,
-        )
+        )?;
+        let _ = self.acknowledge_delivery(claim);
+        Ok(receipt)
     }
 
     pub(crate) fn publish_worker(
@@ -667,6 +669,7 @@ impl ResolutionStore {
                 "late completion record was withdrawn while its durable claim remained",
             ));
         }
+        self.record_ambiguity(claim)?;
         std::fs::remove_file(self.claim_path(resolution_id)).map_err(|_| state_error())?;
         if let Err(error) = sync_directory(&self.inner.root.join("claims")) {
             self.rollback_completion(claim, &completion_path)?;
@@ -727,6 +730,19 @@ impl ResolutionStore {
                 "durable ambiguity record does not match the publication claim",
             ));
         }
+        sync_directory(&self.inner.root.join("ambiguities"))
+    }
+
+    pub(crate) fn acknowledge_delivery(&self, claim: &ResolutionClaim) -> Result<(), StoreError> {
+        let path = self.ambiguity_path(claim.resolution_id);
+        let recorded: ResolutionClaim = read_json(&path, 0o600)?;
+        if recorded != *claim {
+            return Err(StoreError::new(
+                "DEP_STORE_REPLAY_SUBSTITUTION",
+                "delivery acknowledgement does not match the publication claim",
+            ));
+        }
+        remove_private_file(&path)?;
         sync_directory(&self.inner.root.join("ambiguities"))
     }
 
@@ -2223,6 +2239,43 @@ mod tests {
             .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
             .expect_err("ambiguity must dominate exact completion");
         assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_CLAIM");
+    }
+
+    #[test]
+    fn worker_completion_remains_blocked_until_receipt_delivery_is_acknowledged() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let receipt = store
+            .publish_worker(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("worker publication");
+        let error = store
+            .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
+            .expect_err("unacknowledged delivery must remain ambiguous");
+        assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_CLAIM");
+
+        store
+            .acknowledge_delivery(&claim)
+            .expect("receipt delivery acknowledgement");
+        assert_eq!(
+            store
+                .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
+                .expect("acknowledged completion"),
+            Some(receipt)
+        );
     }
 
     #[test]

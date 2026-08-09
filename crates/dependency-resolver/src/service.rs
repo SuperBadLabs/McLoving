@@ -322,6 +322,7 @@ impl DependencyResolver {
                     && receipt.request_sha256 == admitted.request_sha256 =>
             {
                 self.store.release_incomplete_claim(claim);
+                self.acknowledge_committed_delivery(claim, deadline).await;
                 Ok(*receipt)
             }
             PublicationWorkerResponse::Ok { .. } => {
@@ -338,6 +339,22 @@ impl DependencyResolver {
     fn preserve_publication_ambiguity(&self) {
         self.publication_poisoned.store(true, Ordering::Release);
         self.transport.preserve_cleanup_ambiguity();
+    }
+
+    async fn acknowledge_committed_delivery(
+        &self,
+        claim: &crate::ResolutionClaim,
+        deadline: Instant,
+    ) {
+        let store = self.store.clone();
+        let claim = claim.clone();
+        let task = tokio::task::spawn_blocking(move || store.acknowledge_delivery(&claim));
+        let acknowledged = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task)
+            .await
+            .is_ok_and(|result| result.is_ok_and(|result| result.is_ok()));
+        if !acknowledged {
+            self.store_poisoned.store(true, Ordering::Release);
+        }
     }
 
     async fn run_store_operation<T, F>(

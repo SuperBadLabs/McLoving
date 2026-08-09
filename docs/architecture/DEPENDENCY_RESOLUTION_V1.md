@@ -284,13 +284,19 @@ synchronized. The claim is removed and synchronized only after all fallible
 verification and transient cleanup are complete. Replay requires an exact
 receipt/completion pair and the absence of both a claim and a durable ambiguity
 record. A claim or ambiguity record always takes precedence as incomplete
-state. The exact worker returns that already verified bounded receipt directly;
-the parent does not reinterpret a committed success through a second fallible
-filesystem read. A deadline crossing withdraws the receipt and bundle and retains or
-restores the durable claim for explicit reconciliation. If the final claim
-directory sync is uncertain, a separately synchronized mode-`0600` ambiguity
-record is attempted alongside claim restoration and completion removal; any
-successful path permanently blocks replay pending explicit reconciliation.
+state. Every worker publication creates that ambiguity record before claim
+removal and retains it while the already verified bounded receipt is serialized,
+transmitted, and accepted by the parent. The parent then acknowledges delivery
+by removing and synchronizing the record; if acknowledgement is late or fails,
+it still returns the receipt already in hand, poisons further parent-store use,
+and leaves replay either safely completed or explicitly ambiguous rather than
+reporting a failure that can later replay as success. The parent performs no
+second fallible receipt read. A deadline crossing before completion withdraws
+the receipt and bundle and retains or restores the durable claim for explicit
+reconciliation. If the final claim-directory sync is uncertain, the already
+synchronized ambiguity record remains while claim restoration and completion
+removal are attempted; any successful path blocks replay pending explicit
+reconciliation.
 
 ## Required executable evidence
 
