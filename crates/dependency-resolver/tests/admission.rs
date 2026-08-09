@@ -207,6 +207,25 @@ fn configuration_tls_trust_and_limits_fail_closed() {
             .code,
         "DEP_CONFIG_LIMITS_INVALID"
     );
+
+    let mut invalid = config();
+    invalid.limits.max_frame_bytes = 1;
+    invalid.limits.max_lock_bytes = 1;
+    assert_eq!(
+        validate_config(&invalid)
+            .expect_err("frame too small for a bounded error")
+            .code,
+        "DEP_CONFIG_LIMITS_INVALID"
+    );
+
+    let mut invalid = config();
+    invalid.limits.max_path_bytes = 4_097;
+    assert_eq!(
+        validate_config(&invalid)
+            .expect_err("path limit exceeds protocol ceiling")
+            .code,
+        "DEP_CONFIG_LIMITS_INVALID"
+    );
 }
 
 #[test]
@@ -265,6 +284,27 @@ fn grants_expiry_rollback_and_resource_bounds_are_denied() {
     assert_eq!(
         admit_request(&config, &request, &plan, &lock, NOW)
             .expect_err("artifact bound")
+            .code,
+        "DEP_REQUEST_RESOURCE_LIMIT_EXCEEDED"
+    );
+
+    let (mut config, lock, plan, mut request) = fixture();
+    config.limits.max_path_bytes = 10;
+    request.expected_configuration_sha256 = configuration_sha256(&config).expect("new digest");
+    assert_eq!(
+        admit_request(&config, &request, &plan, &lock, NOW)
+            .expect_err("logical lock path bound")
+            .code,
+        "DEP_REQUEST_LOCK_PATH_INVALID"
+    );
+
+    let (mut config, lock, plan, mut request) = fixture();
+    config.limits.max_path_bytes = 10;
+    request.logical_lock_path = "lock.json".to_owned();
+    request.expected_configuration_sha256 = configuration_sha256(&config).expect("new digest");
+    assert_eq!(
+        admit_request(&config, &request, &plan, &lock, NOW)
+            .expect_err("artifact path bound")
             .code,
         "DEP_REQUEST_RESOURCE_LIMIT_EXCEEDED"
     );

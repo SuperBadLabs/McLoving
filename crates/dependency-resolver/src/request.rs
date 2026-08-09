@@ -205,7 +205,7 @@ fn validate_request_shape(
     ] {
         validate_digest(name, value)?;
     }
-    validate_logical_lock_path(&request.logical_lock_path)?;
+    validate_logical_lock_path(&request.logical_lock_path, config.limits.max_path_bytes)?;
     let lifetime = request
         .expires_at_unix_ms
         .checked_sub(request.requested_at_unix_ms)
@@ -272,6 +272,10 @@ fn validate_plan_binding(
             .map(|node| node.dependencies.len() as u64)
             .sum::<u64>()
             > config.limits.max_edges
+        || plan
+            .nodes
+            .iter()
+            .any(|node| node.artifact_path.len() as u64 > config.limits.max_path_bytes)
         || plan
             .nodes
             .iter()
@@ -421,9 +425,9 @@ fn validate_sorted_bindings(values: &[String], name: &str) -> Result<(), Request
     Ok(())
 }
 
-fn validate_logical_lock_path(value: &str) -> Result<(), RequestError> {
+fn validate_logical_lock_path(value: &str, max_path_bytes: u64) -> Result<(), RequestError> {
     if value.is_empty()
-        || value.len() > 4_096
+        || value.len() as u64 > max_path_bytes
         || value.starts_with('/')
         || value.contains('\\')
         || value.contains('%')

@@ -9,6 +9,8 @@ use url::{Host, Url};
 use crate::{CONFIG_SCHEMA_VERSION, Ecosystem, PROTOCOL_VERSION};
 
 const MAX_BINDING_BYTES: usize = 1_024;
+const MIN_FRAME_BYTES: u64 = 128;
+const MAX_PATH_BYTES: u64 = 4_096;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -396,11 +398,13 @@ fn validate_limits(limits: &ResolverLimits) -> Result<(), ConfigError> {
         limits.max_request_lifetime_ms,
     ];
     if values.contains(&0)
+        || limits.max_frame_bytes < MIN_FRAME_BYTES
         || limits.max_frame_bytes > 1_048_576
         || limits.max_lock_bytes > limits.max_frame_bytes
         || limits.max_artifacts > limits.max_nodes
         || limits.max_artifact_bytes > limits.max_total_artifact_bytes
         || limits.max_total_artifact_bytes > limits.transport_capacity_bytes
+        || limits.max_path_bytes > MAX_PATH_BYTES
     {
         return Err(ConfigError::new(
             "DEP_CONFIG_LIMITS_INVALID",
