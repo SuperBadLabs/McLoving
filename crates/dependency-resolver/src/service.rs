@@ -37,6 +37,8 @@ struct PublicationWorkerRequest {
     admitted: crate::AdmittedRequest,
     plan: CanonicalPlan,
     fetched: Vec<crate::FetchedArtifact>,
+    output_root_identity: crate::transport::TransportRootIdentity,
+    transport_root_identity: crate::transport::TransportRootIdentity,
     deadline_monotonic_ns: u64,
 }
 
@@ -68,6 +70,7 @@ pub struct DependencyResolver {
     source_attestation_key: Vec<u8>,
     store: ResolutionStore,
     transport: HttpTransport,
+    output_root_identity: crate::transport::TransportRootIdentity,
     publication_worker: PathBuf,
     store_serial: tokio::sync::Mutex<()>,
     store_poisoned: AtomicBool,
@@ -118,14 +121,23 @@ impl DependencyResolver {
             LoadedAuthorities::load(&config).map_err(|error| ResolverError::denied(error.code))?;
         let store = ResolutionStore::open(&config, &authorities)
             .map_err(|error| ResolverError::denied(error.code))?;
-        let transport = HttpTransport::new(&config, &authorities)
+        let (output_root_identity, transport_root_identity) = store
+            .bound_root_identities()
             .map_err(|error| ResolverError::denied(error.code))?;
+        let transport = HttpTransport::new_with_bound_roots(
+            &config,
+            &authorities,
+            output_root_identity.device,
+            transport_root_identity,
+        )
+        .map_err(|error| ResolverError::denied(error.code))?;
         let source_attestation_key = authorities.source_attestation_key().to_vec();
         Ok(Self {
             config,
             source_attestation_key,
             store,
             transport,
+            output_root_identity,
             publication_worker,
             store_serial: tokio::sync::Mutex::new(()),
             store_poisoned: AtomicBool::new(false),
@@ -284,6 +296,11 @@ impl DependencyResolver {
             admitted: admitted.clone(),
             plan,
             fetched,
+            output_root_identity: self.output_root_identity,
+            transport_root_identity: self
+                .transport
+                .root_identity()
+                .map_err(|error| ResolverError::denied(error.code))?,
             deadline_monotonic_ns: monotonic_deadline_ns(deadline)?,
         };
         let payload = serde_json::to_vec(&worker_request)
@@ -534,7 +551,12 @@ pub fn run_publication_worker(input: &[u8]) -> PublicationWorkerResponse {
             };
         }
     };
-    let store = match ResolutionStore::open_worker(&request.config, &authorities) {
+    let store = match ResolutionStore::open_worker(
+        &request.config,
+        &authorities,
+        request.output_root_identity,
+        request.transport_root_identity,
+    ) {
         Ok(store) => store,
         Err(error) => {
             return PublicationWorkerResponse::Error {

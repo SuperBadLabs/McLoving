@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -24,6 +24,7 @@ const RECEIPT_SCHEMA: &str = "mcloving.dependency-receipt/v1";
 const MAX_STATE_BYTES: u64 = 16 * 1_048_576;
 const MAX_RETAINED_TREE_ENTRIES: usize = 1_000_000;
 const MAX_RETAINED_TREE_DEPTH: usize = 4_096;
+const MAX_CLEANUP_DEPTH: usize = 64;
 const LOCK_FILE: &str = ".mcloving-dependency-output.lock";
 
 #[derive(Clone, Copy)]
@@ -41,6 +42,53 @@ struct RetainedTreeRecords<'a> {
     total: &'a mut u64,
     directories: &'a mut Vec<(String, u32, u32, u64, u64)>,
     files: &'a mut Vec<(String, u32, u64, String)>,
+}
+
+#[derive(Debug)]
+struct RetainedTreeEvidence {
+    sha256: String,
+    directories: BTreeSet<String>,
+    files: BTreeMap<String, (u64, String)>,
+    manifest_bytes: Vec<u8>,
+}
+
+struct PinnedPublicationDirectory {
+    directory: File,
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+struct PendingRetainedDirectory {
+    directory: Arc<File>,
+    relative: String,
+    depth: usize,
+    parent: Arc<File>,
+    name: std::ffi::CString,
+    identity: RetainedLinkIdentity,
+}
+
+#[cfg(target_os = "linux")]
+struct RetainedTreeLink {
+    parent: Arc<File>,
+    name: std::ffi::CString,
+    identity: RetainedLinkIdentity,
+    directory: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetainedLinkIdentity {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    uid: u32,
+    links: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -178,12 +226,29 @@ impl StoreError {
 #[cfg(target_os = "linux")]
 type OutputLock = nix::fcntl::Flock<File>;
 
+#[cfg(target_os = "linux")]
+type ReceiptAdmissionLock = nix::fcntl::Flock<File>;
+
+#[cfg(not(target_os = "linux"))]
+struct ReceiptAdmissionLock;
+
 #[cfg(not(target_os = "linux"))]
 struct OutputLock;
 
 struct StoreInner {
-    root: PathBuf,
+    root_directory: File,
+    ambiguities_root: PathBuf,
+    ambiguities_directory: File,
+    bundles_root: PathBuf,
+    bundles_directory: File,
+    claims_root: PathBuf,
+    claims_directory: File,
+    completions_root: PathBuf,
+    completions_directory: File,
+    receipts_root: PathBuf,
+    receipts_directory: File,
     transport_root: PathBuf,
+    transport_directory: File,
     configuration_sha256: String,
     generation: u64,
     executable_sha256: String,
@@ -195,6 +260,19 @@ struct StoreInner {
     max_total_artifact_bytes: u64,
     active: Mutex<BTreeSet<Uuid>>,
     _lock: OutputLockGuard,
+}
+
+struct StoreDirectories {
+    ambiguities_root: PathBuf,
+    ambiguities_directory: File,
+    bundles_root: PathBuf,
+    bundles_directory: File,
+    claims_root: PathBuf,
+    claims_directory: File,
+    completions_root: PathBuf,
+    completions_directory: File,
+    receipts_root: PathBuf,
+    receipts_directory: File,
 }
 
 enum OutputLockGuard {
@@ -216,6 +294,14 @@ struct PublicationInput<'a> {
     deadline: Instant,
 }
 
+struct LoadedReceipt {
+    receipt: ResolutionReceipt,
+    admission_lock: ReceiptAdmissionLock,
+    receipt_identity: RetainedLinkIdentity,
+    completion_file: File,
+    completion_identity: RetainedLinkIdentity,
+}
+
 impl ResolutionStore {
     pub fn open(
         config: &CertifiedConfig,
@@ -230,6 +316,7 @@ impl ResolutionStore {
                 .markers()
                 .map(|marker| marker.to_vec())
                 .collect(),
+            None,
         )
     }
 
@@ -237,13 +324,18 @@ impl ResolutionStore {
         config: &CertifiedConfig,
         receipt_key: &[u8],
         marker_set: Vec<Vec<u8>>,
+        transport_root_identity: Option<crate::transport::TransportRootIdentity>,
     ) -> Result<Self, StoreError> {
-        let root = PathBuf::from(&config.output_root);
-        let lock = acquire_output_lock(&root)?;
+        let root_directory = open_pinned_cleanup_root(Path::new(&config.output_root))?;
+        let root = pinned_directory_path(&root_directory);
+        let lock = acquire_output_lock(&root_directory, &root)?;
         Self::open_inner_with_lock(
             config,
             receipt_key,
             marker_set,
+            root,
+            root_directory,
+            transport_root_identity,
             OutputLockGuard::Owner(lock),
         )
     }
@@ -251,10 +343,25 @@ impl ResolutionStore {
     pub(crate) fn open_worker(
         config: &CertifiedConfig,
         authorities: &LoadedAuthorities,
+        output_root_identity: crate::transport::TransportRootIdentity,
+        transport_root_identity: crate::transport::TransportRootIdentity,
     ) -> Result<Self, StoreError> {
         crate::validate_config(config)
             .map_err(|error| StoreError::new(error.code, error.message))?;
-        let inherited_lock = verify_inherited_output_lock(&PathBuf::from(&config.output_root))?;
+        let root_directory = open_pinned_cleanup_root(Path::new(&config.output_root))?;
+        validate_private_directory(
+            &root_directory,
+            "DEP_STORE_ROOT_POLICY_DENIED",
+            "output root must remain private and resolver-owned",
+        )?;
+        require_directory_identity(
+            &root_directory,
+            output_root_identity,
+            "DEP_STORE_WORKER_PARENT_ROOT_INVALID",
+            "publication worker output root does not match the pinned parent root",
+        )?;
+        let root = pinned_directory_path(&root_directory);
+        let inherited_lock = verify_inherited_output_lock(&root_directory)?;
         Self::open_inner_with_lock(
             config,
             authorities.receipt_key(),
@@ -262,6 +369,9 @@ impl ResolutionStore {
                 .markers()
                 .map(|marker| marker.to_vec())
                 .collect(),
+            root,
+            root_directory,
+            Some(transport_root_identity),
             OutputLockGuard::Inherited {
                 _file: inherited_lock,
             },
@@ -272,6 +382,9 @@ impl ResolutionStore {
         config: &CertifiedConfig,
         receipt_key: &[u8],
         marker_set: Vec<Vec<u8>>,
+        root: PathBuf,
+        root_directory: File,
+        expected_transport_root_identity: Option<crate::transport::TransportRootIdentity>,
         lock: OutputLockGuard,
     ) -> Result<Self, StoreError> {
         if receipt_key.is_empty() {
@@ -280,14 +393,39 @@ impl ResolutionStore {
                 "receipt key cannot be empty",
             ));
         }
-        let root = PathBuf::from(&config.output_root);
-        prepare_layout(&root)?;
+        let directories = prepare_layout(&root_directory, &root)?;
+        let transport_directory = open_pinned_cleanup_root(Path::new(&config.transport_root))?;
+        validate_private_directory(
+            &transport_directory,
+            "DEP_STORE_TRANSIENT_PATH_MISMATCH",
+            "publication transport root must remain private and resolver-owned",
+        )?;
+        let transport_root = pinned_directory_path(&transport_directory);
+        if let Some(expected) = expected_transport_root_identity
+            && directory_device_inode(&transport_directory)? != (expected.device, expected.inode)
+        {
+            return Err(StoreError::new(
+                "DEP_STORE_TRANSIENT_PATH_MISMATCH",
+                "publication transport root does not match the held transport lease",
+            ));
+        }
         let configuration_sha256 = crate::configuration_sha256(config)
             .map_err(|error| StoreError::new(error.code, error.message))?;
         Ok(Self {
             inner: Arc::new(StoreInner {
-                root,
-                transport_root: PathBuf::from(&config.transport_root),
+                root_directory,
+                ambiguities_root: directories.ambiguities_root,
+                ambiguities_directory: directories.ambiguities_directory,
+                bundles_root: directories.bundles_root,
+                bundles_directory: directories.bundles_directory,
+                claims_root: directories.claims_root,
+                claims_directory: directories.claims_directory,
+                completions_root: directories.completions_root,
+                completions_directory: directories.completions_directory,
+                receipts_root: directories.receipts_root,
+                receipts_directory: directories.receipts_directory,
+                transport_root,
+                transport_directory,
                 configuration_sha256,
                 generation: config.generation,
                 executable_sha256: config.executable_sha256.clone(),
@@ -369,8 +507,8 @@ impl ResolutionStore {
                 "matching incomplete claim requires explicit reconciliation",
             ));
         }
-        if let Some(receipt) = self.load_receipt(resolution_id)? {
-            self.verify_replay(&receipt, &admitted.request_sha256)?;
+        if let Some(loaded) = self.load_receipt(resolution_id)? {
+            let receipt = self.admit_loaded_receipt(loaded, &admitted.request_sha256)?;
             return Ok(ClaimOutcome::Replay(Box::new(receipt)));
         }
         {
@@ -383,10 +521,7 @@ impl ResolutionStore {
             self.deactivate(resolution_id);
             return Err(error);
         }
-        self.finish_claim_directory_sync(
-            resolution_id,
-            sync_directory(&self.inner.root.join("claims")),
-        )?;
+        self.finish_claim_directory_sync(resolution_id, sync_directory(&self.inner.claims_root))?;
         Ok(ClaimOutcome::New(expected))
     }
 
@@ -468,8 +603,8 @@ impl ResolutionStore {
             return Ok(ConcurrentClaimState::InactiveIncomplete);
         }
         match self.load_receipt(resolution_id)? {
-            Some(receipt) => {
-                self.verify_replay(&receipt, expected_request_sha256)?;
+            Some(loaded) => {
+                let receipt = self.admit_loaded_receipt(loaded, expected_request_sha256)?;
                 Ok(ConcurrentClaimState::Completed(Box::new(receipt)))
             }
             None => Ok(ConcurrentClaimState::InactiveIncomplete),
@@ -490,11 +625,9 @@ impl ResolutionStore {
         {
             return Ok(None);
         }
-        let receipt = self.load_receipt(resolution_id)?;
-        if let Some(receipt) = &receipt {
-            self.verify_replay(receipt, expected_request_sha256)?;
-        }
-        Ok(receipt)
+        self.load_receipt(resolution_id)?
+            .map(|loaded| self.admit_loaded_receipt(loaded, expected_request_sha256))
+            .transpose()
     }
 
     pub fn publish(
@@ -613,55 +746,221 @@ impl ResolutionStore {
             ));
         }
 
-        let stage = self
-            .inner
-            .root
-            .join(format!(".{}.{}.stage", resolution_id, Uuid::new_v4()));
+        let transient_identity = fetched
+            .first()
+            .map(|artifact| {
+                (
+                    artifact.transient_root_device,
+                    artifact.transient_root_inode,
+                )
+            })
+            .ok_or_else(|| {
+                StoreError::new(
+                    "DEP_STORE_ARTIFACT_SET_MISMATCH",
+                    "verified artifact set must identify its dedicated transport directory",
+                )
+            })?;
+        if transient_identity.0 == 0
+            || transient_identity.1 == 0
+            || fetched.iter().any(|artifact| {
+                (
+                    artifact.transient_root_device,
+                    artifact.transient_root_inode,
+                ) != transient_identity
+            })
+        {
+            return Err(StoreError::new(
+                "DEP_STORE_TRANSIENT_ROOT_MISMATCH",
+                "verified artifacts do not share one exact transport directory identity",
+            ));
+        }
+        let resolution_name = resolution_id.to_string();
+        let transient_root = pin_private_directory_at(
+            &self.inner.transport_directory,
+            &resolution_name,
+            0o700,
+            Some(transient_identity),
+        )?;
+
+        let stage_name = format!(".{}.{}.stage", resolution_id, Uuid::new_v4());
+        let stage = self.inner.bundles_root.join(&stage_name);
         create_directory(&stage, 0o700)?;
-        let artifacts_root = stage.join("artifacts");
-        create_directory(&artifacts_root, 0o700)?;
-        let publication =
-            self.stage_publication(&stage, &artifacts_root, claim, &plan, &artifact_by_node);
+        let pinned_stage =
+            match pin_private_directory_at(&self.inner.bundles_directory, &stage_name, 0o700, None)
+            {
+                Ok(directory) => directory,
+                Err(_) => {
+                    return Err(StoreError::new(
+                        "DEP_STORE_PUBLICATION_AMBIGUOUS",
+                        "new publication stage could not be bound to its exact directory",
+                    ));
+                }
+            };
+        let artifacts_root = pinned_stage.path.join("artifacts");
+        if let Err(error) = create_directory(&artifacts_root, 0o700) {
+            remove_private_tree_exact(
+                &self.inner.bundles_directory,
+                &self.inner.bundles_root,
+                &stage,
+                pinned_stage.device,
+                pinned_stage.inode,
+            )?;
+            return Err(error);
+        }
+        let pinned_artifacts = match pin_private_directory_at(
+            &pinned_stage.directory,
+            "artifacts",
+            0o700,
+            Some((pinned_stage.device, 0)),
+        ) {
+            Ok(directory) => directory,
+            Err(error) => {
+                remove_private_tree_exact(
+                    &self.inner.bundles_directory,
+                    &self.inner.bundles_root,
+                    &stage,
+                    pinned_stage.device,
+                    pinned_stage.inode,
+                )?;
+                return Err(error);
+            }
+        };
+        let publication = self.stage_publication(
+            &pinned_stage,
+            &pinned_artifacts,
+            &transient_root,
+            claim,
+            &plan,
+            &artifact_by_node,
+        );
         let artifacts = match publication {
             Ok(value) => value,
             Err(error) => {
-                remove_private_tree(&stage)?;
+                remove_private_tree_exact(
+                    &self.inner.bundles_directory,
+                    &self.inner.bundles_root,
+                    &stage,
+                    pinned_stage.device,
+                    pinned_stage.inode,
+                )?;
                 return Err(error);
             }
         };
         let bundle_path = self.bundle_path(resolution_id);
         if path_exists(&bundle_path)? {
-            remove_private_tree(&stage)?;
+            remove_private_tree_exact(
+                &self.inner.bundles_directory,
+                &self.inner.bundles_root,
+                &stage,
+                pinned_stage.device,
+                pinned_stage.inode,
+            )?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_CONFLICT",
                 "resolution bundle already exists",
             ));
         }
-        rename_no_replace(&stage, &bundle_path)?;
-        set_mode_and_sync(&bundle_path, 0o500)?;
-        sync_directory(&self.inner.root.join("bundles"))?;
+        if let Err(error) = revalidate_private_directory_link(
+            &self.inner.bundles_directory,
+            &stage_name,
+            &pinned_stage,
+            0o500,
+        ) {
+            remove_private_tree_exact(
+                &self.inner.bundles_directory,
+                &self.inner.bundles_root,
+                &stage,
+                pinned_stage.device,
+                pinned_stage.inode,
+            )?;
+            return Err(error);
+        }
+        if let Err(error) = rename_no_replace(&stage, &bundle_path) {
+            remove_private_tree_exact(
+                &self.inner.bundles_directory,
+                &self.inner.bundles_root,
+                &stage,
+                pinned_stage.device,
+                pinned_stage.inode,
+            )?;
+            return Err(error);
+        }
+        if let Err(error) = revalidate_private_directory_link(
+            &self.inner.bundles_directory,
+            &resolution_name,
+            &pinned_stage,
+            0o500,
+        ) {
+            remove_private_tree_exact(
+                &self.inner.bundles_directory,
+                &self.inner.bundles_root,
+                &bundle_path,
+                pinned_stage.device,
+                pinned_stage.inode,
+            )?;
+            return Err(error);
+        }
+        sync_directory(&self.inner.bundles_root)?;
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
-            remove_private_tree(&bundle_path)?;
-            sync_directory(&self.inner.root.join("bundles"))?;
+            remove_private_tree_exact(
+                &self.inner.bundles_directory,
+                &self.inner.bundles_root,
+                &bundle_path,
+                pinned_stage.device,
+                pinned_stage.inode,
+            )?;
+            sync_directory(&self.inner.bundles_root)?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
                 "late bundle publication was withdrawn",
             ));
         }
-        let retained_tree_sha256 = retained_tree_sha256(
-            &bundle_path,
-            &self.inner.root,
+        let expected_manifest = ResolutionManifest {
+            schema_version: MANIFEST_SCHEMA.to_owned(),
+            resolution_id,
+            request_sha256: claim.request_sha256.clone(),
+            graph_sha256: claim.graph_sha256.clone(),
+            artifacts: artifacts.clone(),
+        };
+        let retained_tree = match retained_tree_evidence(
+            &self.inner.root_directory,
+            &self.inner.bundles_directory,
+            &resolution_name,
             self.inner.max_artifact_bytes.max(MAX_STATE_BYTES),
             self.inner
                 .max_total_artifact_bytes
                 .checked_add(MAX_STATE_BYTES)
                 .ok_or_else(state_error)?,
-        )?;
+        )
+        .and_then(|evidence| {
+            validate_retained_bundle(&evidence, &expected_manifest)?;
+            Ok(evidence)
+        }) {
+            Ok(evidence) => evidence,
+            Err(error) => {
+                remove_private_tree_exact(
+                    &self.inner.bundles_directory,
+                    &self.inner.bundles_root,
+                    &bundle_path,
+                    pinned_stage.device,
+                    pinned_stage.inode,
+                )?;
+                sync_directory(&self.inner.bundles_root)?;
+                return Err(error);
+            }
+        };
+        let retained_tree_sha256 = retained_tree.sha256;
         let published_at_unix_ms = current_unix_ms()?;
         if Instant::now() >= deadline || published_at_unix_ms >= claim.publication_deadline_unix_ms
         {
-            remove_private_tree(&bundle_path)?;
-            sync_directory(&self.inner.root.join("bundles"))?;
+            remove_private_tree_exact(
+                &self.inner.bundles_directory,
+                &self.inner.bundles_root,
+                &bundle_path,
+                pinned_stage.device,
+                pinned_stage.inode,
+            )?;
+            sync_directory(&self.inner.bundles_root)?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
                 "late verified bundle publication was withdrawn",
@@ -690,22 +989,41 @@ impl ResolutionStore {
         receipt.hmac_sha256 = sign_receipt(&receipt, &self.inner.receipt_key)?;
         self.deny_secret_markers(&receipt, &())?;
         let receipt_path = self.receipt_path(resolution_id);
-        if let Err(error) = write_new_json(&receipt_path, &receipt, 0o400) {
-            self.withdraw_publication(&receipt_path, &bundle_path)?;
-            return Err(error);
-        }
-        sync_directory(&self.inner.root.join("receipts"))?;
+        let receipt_file = match write_new_json(&receipt_path, &receipt, 0o400) {
+            Ok(file) => file,
+            Err(error) => {
+                self.withdraw_publication_exact(
+                    &receipt_path,
+                    &bundle_path,
+                    None,
+                    (pinned_stage.device, pinned_stage.inode),
+                )?;
+                return Err(error);
+            }
+        };
+        let receipt_identity = directory_device_inode(&receipt_file)?;
+        sync_directory(&self.inner.receipts_root)?;
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
-            self.withdraw_publication(&receipt_path, &bundle_path)?;
+            self.withdraw_publication_exact(
+                &receipt_path,
+                &bundle_path,
+                Some(receipt_identity),
+                (pinned_stage.device, pinned_stage.inode),
+            )?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
                 "late receipt publication was withdrawn",
             ));
         }
         self.verify_replay(&receipt, &admitted.request_sha256)?;
-        self.cleanup_transient_resolution(resolution_id)?;
+        self.cleanup_transient_resolution(resolution_id, transient_identity)?;
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
-            self.withdraw_publication(&receipt_path, &bundle_path)?;
+            self.withdraw_publication_exact(
+                &receipt_path,
+                &bundle_path,
+                Some(receipt_identity),
+                (pinned_stage.device, pinned_stage.inode),
+            )?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
                 "late verified publication was withdrawn while its durable claim remained",
@@ -718,24 +1036,39 @@ impl ResolutionStore {
             receipt_hmac_sha256: receipt.hmac_sha256.clone(),
         };
         let completion_path = self.completion_path(resolution_id);
-        write_new_json(&completion_path, &completion, 0o400)?;
+        let completion_file = write_new_json(&completion_path, &completion, 0o400)?;
+        let completion_identity = directory_device_inode(&completion_file)?;
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
-            self.remove_completion(&completion_path)?;
-            self.withdraw_publication(&receipt_path, &bundle_path)?;
+            self.remove_completion_exact(&completion_path, completion_identity)?;
+            self.withdraw_publication_exact(
+                &receipt_path,
+                &bundle_path,
+                Some(receipt_identity),
+                (pinned_stage.device, pinned_stage.inode),
+            )?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
                 "late completion record was withdrawn while its durable claim remained",
             ));
         }
         self.record_ambiguity(claim)?;
-        std::fs::remove_file(self.claim_path(resolution_id)).map_err(|_| state_error())?;
-        if let Err(error) = sync_directory(&self.inner.root.join("claims")) {
-            self.rollback_completion(claim, &completion_path)?;
+        remove_private_file(
+            &self.inner.claims_directory,
+            &self.inner.claims_root,
+            &self.claim_path(resolution_id),
+        )?;
+        if let Err(error) = sync_directory(&self.inner.claims_root) {
+            self.rollback_completion(claim, &completion_path, completion_identity)?;
             return Err(error);
         }
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
-            self.rollback_completion(claim, &completion_path)?;
-            let withdrawal = self.withdraw_publication(&receipt_path, &bundle_path);
+            self.rollback_completion(claim, &completion_path, completion_identity)?;
+            let withdrawal = self.withdraw_publication_exact(
+                &receipt_path,
+                &bundle_path,
+                Some(receipt_identity),
+                (pinned_stage.device, pinned_stage.inode),
+            );
             self.deactivate(resolution_id);
             withdrawal?;
             return Err(StoreError::new(
@@ -777,10 +1110,11 @@ impl ResolutionStore {
         &self,
         claim: &ResolutionClaim,
         completion_path: &Path,
+        completion_identity: (u64, u64),
     ) -> Result<(), StoreError> {
         let ambiguity_result = self.record_ambiguity(claim);
         let claim_result = self.ensure_exact_claim(claim);
-        let completion_result = self.remove_completion(completion_path);
+        let completion_result = self.remove_completion_exact(completion_path, completion_identity);
         match (ambiguity_result, claim_result, completion_result) {
             (Ok(()), _, _) | (_, Ok(()), _) | (_, _, Ok(())) => Ok(()),
             (Err(error), Err(_), Err(_)) => Err(error),
@@ -788,6 +1122,7 @@ impl ResolutionStore {
     }
 
     fn record_ambiguity(&self, claim: &ResolutionClaim) -> Result<(), StoreError> {
+        let _admission_lock = self.lock_existing_receipt(claim.resolution_id)?;
         let path = self.ambiguity_path(claim.resolution_id);
         if !path_exists(&path)? {
             write_new_json(&path, claim, 0o600)?;
@@ -799,10 +1134,11 @@ impl ResolutionStore {
                 "durable ambiguity record does not match the publication claim",
             ));
         }
-        sync_directory(&self.inner.root.join("ambiguities"))
+        sync_directory(&self.inner.ambiguities_root)
     }
 
     pub(crate) fn acknowledge_delivery(&self, claim: &ResolutionClaim) -> Result<(), StoreError> {
+        let _admission_lock = self.lock_existing_receipt(claim.resolution_id)?;
         let path = self.ambiguity_path(claim.resolution_id);
         let recorded: ResolutionClaim = read_json(&path, 0o600)?;
         if recorded != *claim {
@@ -811,8 +1147,12 @@ impl ResolutionStore {
                 "delivery acknowledgement does not match the publication claim",
             ));
         }
-        remove_private_file(&path)?;
-        sync_directory(&self.inner.root.join("ambiguities"))
+        remove_private_file(
+            &self.inner.ambiguities_directory,
+            &self.inner.ambiguities_root,
+            &path,
+        )?;
+        sync_directory(&self.inner.ambiguities_root)
     }
 
     pub(crate) fn acknowledge_receipt_delivery(
@@ -831,6 +1171,7 @@ impl ResolutionStore {
     }
 
     fn ensure_exact_claim(&self, claim: &ResolutionClaim) -> Result<(), StoreError> {
+        let _admission_lock = self.lock_existing_receipt(claim.resolution_id)?;
         let path = self.claim_path(claim.resolution_id);
         if !path_exists(&path)?
             && write_new_json(&path, claim, 0o600).is_err()
@@ -845,34 +1186,97 @@ impl ResolutionStore {
                 "restored durable claim does not match the publication claim",
             ));
         }
-        sync_directory(&self.inner.root.join("claims"))
-    }
-
-    fn remove_completion(&self, path: &Path) -> Result<(), StoreError> {
-        if path_exists(path)? {
-            remove_private_file(path)?;
-            sync_directory(&self.inner.root.join("completions"))?;
-        }
+        sync_directory(&self.inner.claims_root)?;
+        trace_replay_namespace(claim.resolution_id, "blocker-created");
         Ok(())
     }
 
+    fn remove_completion_exact(&self, path: &Path, identity: (u64, u64)) -> Result<(), StoreError> {
+        if !path_exists(path)? {
+            return Err(cleanup_exact_mismatch());
+        }
+        remove_private_file_exact(
+            &self.inner.completions_directory,
+            &self.inner.completions_root,
+            path,
+            identity.0,
+            identity.1,
+        )?;
+        sync_directory(&self.inner.completions_root)
+    }
+
+    #[cfg(test)]
     fn withdraw_publication(
         &self,
         receipt_path: &Path,
         bundle_path: &Path,
     ) -> Result<(), StoreError> {
         if path_exists(receipt_path)? {
-            remove_private_file(receipt_path)?;
-            sync_directory(&self.inner.root.join("receipts"))?;
+            remove_private_file(
+                &self.inner.receipts_directory,
+                &self.inner.receipts_root,
+                receipt_path,
+            )?;
+            sync_directory(&self.inner.receipts_root)?;
         }
-        remove_private_tree(bundle_path)?;
-        sync_directory(&self.inner.root.join("bundles"))
+        remove_private_tree(
+            &self.inner.bundles_directory,
+            &self.inner.bundles_root,
+            bundle_path,
+        )?;
+        sync_directory(&self.inner.bundles_root)
     }
 
-    fn cleanup_transient_resolution(&self, resolution_id: Uuid) -> Result<(), StoreError> {
+    fn withdraw_publication_exact(
+        &self,
+        receipt_path: &Path,
+        bundle_path: &Path,
+        receipt_identity: Option<(u64, u64)>,
+        bundle_identity: (u64, u64),
+    ) -> Result<(), StoreError> {
+        match (path_exists(receipt_path)?, receipt_identity) {
+            (true, Some(identity)) => {
+                remove_private_file_exact(
+                    &self.inner.receipts_directory,
+                    &self.inner.receipts_root,
+                    receipt_path,
+                    identity.0,
+                    identity.1,
+                )?;
+                sync_directory(&self.inner.receipts_root)?;
+            }
+            (true, None) => {
+                return Err(StoreError::new(
+                    "DEP_STORE_PUBLICATION_AMBIGUOUS",
+                    "receipt publication became visible without a retained inode identity",
+                ));
+            }
+            (false, Some(_)) => return Err(cleanup_exact_mismatch()),
+            (false, None) => {}
+        }
+        remove_private_tree_exact(
+            &self.inner.bundles_directory,
+            &self.inner.bundles_root,
+            bundle_path,
+            bundle_identity.0,
+            bundle_identity.1,
+        )?;
+        sync_directory(&self.inner.bundles_root)
+    }
+
+    fn cleanup_transient_resolution(
+        &self,
+        resolution_id: Uuid,
+        identity: (u64, u64),
+    ) -> Result<(), StoreError> {
         let resolution_root = self.inner.transport_root.join(resolution_id.to_string());
-        validate_directory(&resolution_root, 0o700)?;
-        remove_private_tree(&resolution_root)?;
+        remove_private_tree_exact(
+            &self.inner.transport_directory,
+            &self.inner.transport_root,
+            &resolution_root,
+            identity.0,
+            identity.1,
+        )?;
         sync_directory(&self.inner.transport_root)
     }
 
@@ -886,14 +1290,35 @@ impl ResolutionStore {
         }
     }
 
+    pub(crate) fn bound_root_identities(
+        &self,
+    ) -> Result<
+        (
+            crate::transport::TransportRootIdentity,
+            crate::transport::TransportRootIdentity,
+        ),
+        StoreError,
+    > {
+        let (output_device, output_inode) = directory_device_inode(&self.inner.root_directory)?;
+        let (device, inode) = directory_device_inode(&self.inner.transport_directory)?;
+        Ok((
+            crate::transport::TransportRootIdentity {
+                device: output_device,
+                inode: output_inode,
+            },
+            crate::transport::TransportRootIdentity { device, inode },
+        ))
+    }
+
     pub(crate) fn serialized_output_guard(&self) -> SerializedOutputGuard {
         SerializedOutputGuard::new(&self.inner.marker_set)
     }
 
     fn stage_publication(
         &self,
-        stage: &Path,
-        artifacts_root: &Path,
+        stage: &PinnedPublicationDirectory,
+        artifacts_root: &PinnedPublicationDirectory,
+        transient_root: &PinnedPublicationDirectory,
         claim: &ResolutionClaim,
         plan: &CanonicalPlan,
         artifact_by_node: &BTreeMap<&str, &FetchedArtifact>,
@@ -913,10 +1338,7 @@ impl ResolutionStore {
                     "verified artifact metadata changed before publication",
                 ));
             }
-            let expected_transient = self
-                .inner
-                .transport_root
-                .join(claim.resolution_id.to_string())
+            let expected_transient = PathBuf::from(claim.resolution_id.to_string())
                 .join(format!("{}.part", node.node_id));
             if fetched.transient_path != expected_transient {
                 return Err(StoreError::new(
@@ -924,21 +1346,39 @@ impl ResolutionStore {
                     "verified artifact is not bound to its dedicated transport path",
                 ));
             }
-            verify_file(
-                &fetched.transient_path,
+            if (fetched.transient_root_device, fetched.transient_root_inode)
+                != (transient_root.device, transient_root.inode)
+            {
+                return Err(StoreError::new(
+                    "DEP_STORE_TRANSIENT_ROOT_MISMATCH",
+                    "verified artifact transport directory changed before publication",
+                ));
+            }
+            let transient_name = fetched
+                .transient_path
+                .file_name()
+                .map(PathBuf::from)
+                .ok_or_else(state_error)?;
+            verify_file_at(
+                &transient_root.directory,
+                &transient_name,
                 0o600,
                 node.declared_size,
                 &node.sha256,
             )?;
             let relative_path = format!("artifacts/{}", node.sha256);
-            let destination = stage.join(&relative_path);
+            let destination = artifacts_root.path.join(&node.sha256);
             if let Some(existing) = content_paths.get(&node.sha256) {
                 if existing != &relative_path {
                     return Err(state_error());
                 }
             } else {
-                copy_new_file(&fetched.transient_path, &destination, node.declared_size)?;
-                set_mode_and_sync(&destination, 0o400)?;
+                copy_new_file_at(
+                    &transient_root.directory,
+                    &transient_name,
+                    &destination,
+                    node.declared_size,
+                )?;
                 content_paths.insert(node.sha256.clone(), relative_path.clone());
             }
             retained.push(RetainedArtifact {
@@ -958,10 +1398,10 @@ impl ResolutionStore {
             graph_sha256: claim.graph_sha256.clone(),
             artifacts: retained.clone(),
         };
-        write_new_json(&stage.join("manifest.json"), &manifest, 0o400)?;
-        set_mode_and_sync(artifacts_root, 0o500)?;
-        sync_directory(artifacts_root)?;
-        sync_directory(stage)?;
+        write_new_json(&stage.path.join("manifest.json"), &manifest, 0o400)?;
+        seal_directory(&artifacts_root.directory, 0o500)?;
+        revalidate_private_directory_link(&stage.directory, "artifacts", artifacts_root, 0o500)?;
+        seal_directory(&stage.directory, 0o500)?;
         Ok(retained)
     }
 
@@ -1000,53 +1440,45 @@ impl ResolutionStore {
                 "stored receipt request, plan, generation, rollback, or deadline binding is invalid",
             ));
         }
-        let bundle = self.bundle_path(receipt.resolution_id);
-        if retained_tree_sha256(
-            &bundle,
-            &self.inner.root,
+        let retained = retained_tree_evidence(
+            &self.inner.root_directory,
+            &self.inner.bundles_directory,
+            &receipt.resolution_id.to_string(),
             self.inner.max_artifact_bytes.max(MAX_STATE_BYTES),
             self.inner
                 .max_total_artifact_bytes
                 .checked_add(MAX_STATE_BYTES)
                 .ok_or_else(state_error)?,
-        )? != receipt.retained_tree_sha256
-        {
+        )?;
+        if retained.sha256 != receipt.retained_tree_sha256 {
             return Err(StoreError::new(
                 "DEP_STORE_RETAINED_TREE_MISMATCH",
                 "retained dependency bundle has been substituted",
             ));
         }
-        let manifest: ResolutionManifest = read_json(&bundle.join("manifest.json"), 0o400)?;
-        if manifest.resolution_id != receipt.resolution_id
-            || manifest.request_sha256 != receipt.request_sha256
-            || manifest.graph_sha256 != receipt.plan.graph_sha256
-            || manifest.artifacts != receipt.artifacts
-        {
-            return Err(StoreError::new(
-                "DEP_STORE_MANIFEST_MISMATCH",
-                "retained manifest does not match the signed receipt",
-            ));
-        }
+        let expected_manifest = ResolutionManifest {
+            schema_version: MANIFEST_SCHEMA.to_owned(),
+            resolution_id: receipt.resolution_id,
+            request_sha256: receipt.request_sha256.clone(),
+            graph_sha256: receipt.plan.graph_sha256.clone(),
+            artifacts: receipt.artifacts.clone(),
+        };
+        validate_retained_bundle(&retained, &expected_manifest)?;
         for artifact in &receipt.artifacts {
-            verify_file(
-                &bundle.join(&artifact.relative_path),
-                0o400,
-                artifact.size,
-                &artifact.sha256,
-            )?;
+            if retained.files.get(&artifact.relative_path)
+                != Some(&(artifact.size, artifact.sha256.clone()))
+            {
+                return Err(StoreError::new(
+                    "DEP_STORE_ARTIFACT_CONTENT_MISMATCH",
+                    "artifact content changed before or after publication",
+                ));
+            }
         }
         Ok(())
     }
 
-    fn load_receipt(&self, resolution_id: Uuid) -> Result<Option<ResolutionReceipt>, StoreError> {
-        if path_exists(&self.claim_path(resolution_id))?
-            || path_exists(&self.ambiguity_path(resolution_id))?
-        {
-            return Err(StoreError::new(
-                "DEP_STORE_AMBIGUOUS_CLAIM",
-                "durable claim takes precedence over any apparent completion",
-            ));
-        }
+    fn load_receipt(&self, resolution_id: Uuid) -> Result<Option<LoadedReceipt>, StoreError> {
+        self.require_no_replay_blocker(resolution_id)?;
         let receipt_path = self.receipt_path(resolution_id);
         let completion_path = self.completion_path(resolution_id);
         let receipt_exists = path_exists(&receipt_path)?;
@@ -1060,8 +1492,34 @@ impl ResolutionStore {
                 "receipt and durable completion record must exist together",
             ));
         }
-        let receipt: ResolutionReceipt = read_json(&receipt_path, 0o400)?;
-        let completion: ResolutionCompletion = read_json(&completion_path, 0o400)?;
+
+        // The immutable receipt inode is the per-resolution admission lock.
+        // Every production path that can create or remove a durable blocker
+        // takes this same lock. Holding it across receipt/tree verification and
+        // the final blocker check gives replay admission one linearization
+        // point instead of a check-then-verify race.
+        let mut admission_lock = lock_receipt_admission(&receipt_path)?;
+        self.require_no_replay_blocker(resolution_id)?;
+        if !path_exists(&receipt_path)? || !path_exists(&completion_path)? {
+            return Err(StoreError::new(
+                "DEP_STORE_AMBIGUOUS_COMPLETION",
+                "receipt and durable completion record must remain linked together",
+            ));
+        }
+        let receipt_identity = verified_file_fingerprint(&admission_lock, MAX_STATE_BYTES, 0o400)?;
+        let receipt: ResolutionReceipt = read_json_from_file(&mut admission_lock)?;
+        if verified_file_fingerprint(&admission_lock, MAX_STATE_BYTES, 0o400)? != receipt_identity {
+            return Err(receipt_pair_changed());
+        }
+        let mut completion_file = open_verified_file(&completion_path, MAX_STATE_BYTES, 0o400)?;
+        let completion_identity =
+            verified_file_fingerprint(&completion_file, MAX_STATE_BYTES, 0o400)?;
+        let completion: ResolutionCompletion = read_json_from_file(&mut completion_file)?;
+        if verified_file_fingerprint(&completion_file, MAX_STATE_BYTES, 0o400)?
+            != completion_identity
+        {
+            return Err(receipt_pair_changed());
+        }
         if completion.schema_version != COMPLETION_SCHEMA
             || completion.resolution_id != resolution_id
             || completion.request_sha256 != receipt.request_sha256
@@ -1072,42 +1530,78 @@ impl ResolutionStore {
                 "durable completion record does not bind the exact receipt",
             ));
         }
-        Ok(Some(receipt))
+        Ok(Some(LoadedReceipt {
+            receipt,
+            admission_lock,
+            receipt_identity,
+            completion_file,
+            completion_identity,
+        }))
+    }
+
+    fn admit_loaded_receipt(
+        &self,
+        loaded: LoadedReceipt,
+        expected_request_sha256: &str,
+    ) -> Result<ResolutionReceipt, StoreError> {
+        self.verify_replay(&loaded.receipt, expected_request_sha256)?;
+        self.require_no_replay_blocker(loaded.receipt.resolution_id)?;
+        revalidate_loaded_receipt_pair(
+            &loaded,
+            &self.receipt_path(loaded.receipt.resolution_id),
+            &self.completion_path(loaded.receipt.resolution_id),
+        )?;
+        trace_replay_namespace(loaded.receipt.resolution_id, "replay-admitted");
+        Ok(loaded.receipt)
+    }
+
+    fn require_no_replay_blocker(&self, resolution_id: Uuid) -> Result<(), StoreError> {
+        if path_exists(&self.claim_path(resolution_id))?
+            || path_exists(&self.ambiguity_path(resolution_id))?
+        {
+            return Err(StoreError::new(
+                "DEP_STORE_AMBIGUOUS_CLAIM",
+                "durable claim takes precedence over any apparent completion",
+            ));
+        }
+        Ok(())
+    }
+
+    fn lock_existing_receipt(
+        &self,
+        resolution_id: Uuid,
+    ) -> Result<Option<ReceiptAdmissionLock>, StoreError> {
+        let path = self.receipt_path(resolution_id);
+        if path_exists(&path)? {
+            return lock_receipt_admission(&path).map(Some);
+        }
+        Ok(None)
     }
 
     fn claim_path(&self, resolution_id: Uuid) -> PathBuf {
-        self.inner
-            .root
-            .join("claims")
-            .join(format!("{resolution_id}.json"))
+        self.inner.claims_root.join(format!("{resolution_id}.json"))
     }
 
     fn receipt_path(&self, resolution_id: Uuid) -> PathBuf {
         self.inner
-            .root
-            .join("receipts")
+            .receipts_root
             .join(format!("{resolution_id}.json"))
     }
 
     fn completion_path(&self, resolution_id: Uuid) -> PathBuf {
         self.inner
-            .root
-            .join("completions")
+            .completions_root
             .join(format!("{resolution_id}.json"))
     }
 
     fn ambiguity_path(&self, resolution_id: Uuid) -> PathBuf {
         self.inner
-            .root
-            .join("ambiguities")
+            .ambiguities_root
             .join(format!("{resolution_id}.json"))
     }
 
     fn bundle_path(&self, resolution_id: Uuid) -> PathBuf {
-        self.inner
-            .root
-            .join("bundles")
-            .join(resolution_id.to_string())
+        self.inner.bundles_root.join(resolution_id.to_string())
     }
 
     fn deactivate(&self, resolution_id: Uuid) {
@@ -1226,15 +1720,13 @@ fn hex_nibble(value: u8) -> Option<u8> {
 }
 
 #[cfg(target_os = "linux")]
-fn acquire_output_lock(root: &Path) -> Result<OutputLock, StoreError> {
+fn acquire_output_lock(root_directory: &File, root: &Path) -> Result<OutputLock, StoreError> {
     use nix::fcntl::{Flock, FlockArg};
     use nix::unistd::Uid;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-    let canonical = std::fs::canonicalize(root).map_err(|_| state_error())?;
-    let metadata = std::fs::symlink_metadata(root).map_err(|_| state_error())?;
-    if canonical != root
-        || !metadata.file_type().is_dir()
+    let metadata = root_directory.metadata().map_err(|_| state_error())?;
+    if !metadata.file_type().is_dir()
         || metadata.uid() != Uid::effective().as_raw()
         || metadata.permissions().mode() & 0o777 != 0o700
     {
@@ -1243,10 +1735,11 @@ fn acquire_output_lock(root: &Path) -> Result<OutputLock, StoreError> {
             "output root must be canonical, private, resolver-owned, and non-symlink",
         ));
     }
-    let file = open_output_lock(&root.join(LOCK_FILE))?;
-    file.sync_all().map_err(|_| state_error())?;
+    let sentinel = open_output_lock(&root.join(LOCK_FILE))?;
+    sentinel.sync_all().map_err(|_| state_error())?;
     sync_directory(root)?;
-    Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|_| {
+    let lock_target = root_directory.try_clone().map_err(|_| state_error())?;
+    Flock::lock(lock_target, FlockArg::LockExclusiveNonblock).map_err(|_| {
         StoreError::new(
             "DEP_STORE_ROOT_LOCKED",
             "another resolver owns the output root",
@@ -1325,6 +1818,50 @@ thread_local! {
     };
 }
 
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static RETAINED_TREE_PRE_SCAN_INJECTION_TEST_HOOK: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+thread_local! {
+    static VERIFIED_FILE_OPEN_TRACE: std::cell::RefCell<Vec<(PathBuf, &'static str)>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(test)]
+static REPLAY_NAMESPACE_TRACE: std::sync::LazyLock<Mutex<Vec<(Uuid, &'static str)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
+
+#[cfg(test)]
+type ReceiptLockTestHook = Option<(PathBuf, std::sync::mpsc::Sender<&'static str>)>;
+
+#[cfg(test)]
+static RECEIPT_LOCK_TEST_HOOK: std::sync::LazyLock<Mutex<ReceiptLockTestHook>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+thread_local! {
+    static CLEANUP_SWAP_TEST_HOOK: std::cell::RefCell<Option<(PathBuf, PathBuf, PathBuf)>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static CLEANUP_PRE_INSPECTION_SWAP_TEST_HOOK: std::cell::RefCell<Option<(PathBuf, PathBuf, PathBuf)>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static CLEANUP_FINAL_SWAP_TEST_HOOK: std::cell::RefCell<Option<(PathBuf, PathBuf, PathBuf)>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static CLEANUP_PRE_UNLINK_SWAP_TEST_HOOK: std::cell::RefCell<Option<(PathBuf, PathBuf, PathBuf)>> = const {
+        std::cell::RefCell::new(None)
+    };
+    static RETAINED_TREE_SWAP_TEST_HOOK: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 #[cfg(test)]
 fn trace_output_lock_open(event: &'static str) {
     OUTPUT_LOCK_OPEN_TRACE.with(|trace| trace.borrow_mut().push(event));
@@ -1332,6 +1869,200 @@ fn trace_output_lock_open(event: &'static str) {
 
 #[cfg(not(test))]
 fn trace_output_lock_open(_event: &'static str) {}
+
+#[cfg(test)]
+fn trace_verified_file_open(path: &Path, event: &'static str) {
+    VERIFIED_FILE_OPEN_TRACE.with(|trace| {
+        trace.borrow_mut().push((path.to_path_buf(), event));
+    });
+}
+
+#[cfg(not(test))]
+fn trace_verified_file_open(_path: &Path, _event: &'static str) {}
+
+#[cfg(test)]
+fn trace_replay_namespace(resolution_id: Uuid, event: &'static str) {
+    if let Ok(mut trace) = REPLAY_NAMESPACE_TRACE.lock() {
+        trace.push((resolution_id, event));
+    }
+}
+
+#[cfg(not(test))]
+fn trace_replay_namespace(_resolution_id: Uuid, _event: &'static str) {}
+
+#[cfg(test)]
+fn trace_receipt_admission_lock(path: &Path, event: &'static str) {
+    if let Ok(mut hook) = RECEIPT_LOCK_TEST_HOOK.lock()
+        && let Some((target, sender)) = hook.as_ref()
+        && target == path
+    {
+        let _ = sender.send(event);
+        if event == "acquired" {
+            *hook = None;
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn trace_receipt_admission_lock(_path: &Path, _event: &'static str) {}
+
+#[cfg(test)]
+fn run_cleanup_swap_hook(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::symlink;
+
+    let swap = CLEANUP_SWAP_TEST_HOOK.with(|hook| {
+        let mut hook = hook.borrow_mut();
+        if hook.as_ref().is_some_and(|(target, _, _)| target == path) {
+            return hook.take();
+        }
+        None
+    });
+    if let Some((target, replacement, backup)) = swap {
+        std::fs::rename(&target, backup).map_err(|_| state_error())?;
+        symlink(replacement, target).map_err(|_| state_error())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_cleanup_pre_inspection_swap_hook(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::symlink;
+
+    let swap = CLEANUP_PRE_INSPECTION_SWAP_TEST_HOOK.with(|hook| {
+        let mut hook = hook.borrow_mut();
+        if hook.as_ref().is_some_and(|(target, _, _)| target == path) {
+            return hook.take();
+        }
+        None
+    });
+    if let Some((target, replacement, backup)) = swap {
+        std::fs::rename(&target, backup).map_err(|_| state_error())?;
+        symlink(replacement, target).map_err(|_| state_error())?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_cleanup_final_swap_hook(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::symlink;
+
+    let swap = CLEANUP_FINAL_SWAP_TEST_HOOK.with(|hook| {
+        let mut hook = hook.borrow_mut();
+        if hook.as_ref().is_some_and(|(target, _, _)| target == path) {
+            return hook.take();
+        }
+        None
+    });
+    if let Some((target, replacement, backup)) = swap {
+        std::fs::rename(&target, backup).map_err(|_| state_error())?;
+        symlink(replacement, target).map_err(|_| state_error())?;
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn run_cleanup_pre_unlink_swap_hook<Fd: std::os::fd::AsFd>(
+    parent: &Fd,
+    name: &std::ffi::CStr,
+    display_path: &Path,
+) -> Result<(), StoreError> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::symlink;
+
+    let swap = CLEANUP_PRE_UNLINK_SWAP_TEST_HOOK.with(|hook| {
+        let mut hook = hook.borrow_mut();
+        if hook
+            .as_ref()
+            .is_some_and(|(target, _, _)| target == display_path)
+        {
+            return hook.take();
+        }
+        None
+    });
+    if let Some((_, replacement, backup)) = swap {
+        let selected = PathBuf::from(format!("/proc/self/fd/{}", parent.as_fd().as_raw_fd()))
+            .join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+        std::fs::rename(&selected, backup).map_err(|_| state_error())?;
+        if replacement.is_file() {
+            std::fs::hard_link(replacement, selected).map_err(|_| state_error())?;
+        } else {
+            symlink(replacement, selected).map_err(|_| state_error())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn run_cleanup_swap_hook(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn run_cleanup_pre_inspection_swap_hook(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn run_cleanup_final_swap_hook(_path: &Path) -> Result<(), StoreError> {
+    Ok(())
+}
+
+#[cfg(any(not(test), not(target_os = "linux")))]
+fn run_cleanup_pre_unlink_swap_hook<Fd: std::os::fd::AsFd>(
+    _parent: &Fd,
+    _name: &std::ffi::CStr,
+    _display_path: &Path,
+) -> Result<(), StoreError> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn run_retained_tree_swap_hook() -> Result<(), StoreError> {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    let swap = RETAINED_TREE_SWAP_TEST_HOOK.with(|hook| hook.borrow_mut().take());
+    if let Some((target, backup)) = swap {
+        let parent = target.parent().expect("retained swap parent");
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .expect("make retained swap parent writable");
+        std::fs::rename(&target, &backup).expect("move traversed retained directory");
+        symlink(&backup, &target).expect("relink traversed retained directory");
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500))
+            .expect("reseal retained swap parent");
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn run_retained_tree_pre_scan_injection_hook(bundle: &File) -> Result<(), StoreError> {
+    use nix::sys::stat::{Mode, fchmod};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if !RETAINED_TREE_PRE_SCAN_INJECTION_TEST_HOOK.with(|hook| hook.replace(false)) {
+        return Ok(());
+    }
+    fchmod(bundle, Mode::from_bits_truncate(0o700)).map_err(|_| retained_tree_mismatch())?;
+    let injected = pinned_directory_path(bundle).join("@output-root");
+    std::fs::create_dir(&injected).map_err(|_| retained_tree_mismatch())?;
+    let payload = injected.join("payload");
+    std::fs::write(&payload, b"unverified bytes").map_err(|_| retained_tree_mismatch())?;
+    std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o400))
+        .map_err(|_| retained_tree_mismatch())?;
+    std::fs::set_permissions(&injected, std::fs::Permissions::from_mode(0o500))
+        .map_err(|_| retained_tree_mismatch())?;
+    fchmod(bundle, Mode::from_bits_truncate(0o500)).map_err(|_| retained_tree_mismatch())
+}
+
+#[cfg(any(not(test), not(target_os = "linux")))]
+fn run_retained_tree_pre_scan_injection_hook(_bundle: &File) -> Result<(), StoreError> {
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn run_retained_tree_swap_hook() -> Result<(), StoreError> {
+    Ok(())
+}
 
 #[cfg(target_os = "linux")]
 fn private_output_lock_metadata(metadata: &std::fs::Metadata) -> bool {
@@ -1345,7 +2076,7 @@ fn private_output_lock_metadata(metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn verify_inherited_output_lock(root: &Path) -> Result<File, StoreError> {
+fn verify_inherited_output_lock(root_directory: &File) -> Result<File, StoreError> {
     use nix::fcntl::{Flock, FlockArg};
     use nix::unistd::Uid;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -1354,16 +2085,15 @@ fn verify_inherited_output_lock(root: &Path) -> Result<File, StoreError> {
         .map(File::from)
         .map_err(|_| state_error())?;
     let inherited_metadata = inherited.metadata().map_err(|_| state_error())?;
-    let path_metadata =
-        std::fs::symlink_metadata(root.join(LOCK_FILE)).map_err(|_| state_error())?;
-    if !inherited_metadata.is_file()
-        || !path_metadata.file_type().is_file()
+    let root_metadata = root_directory.metadata().map_err(|_| state_error())?;
+    if !inherited_metadata.is_dir()
+        || !root_metadata.is_dir()
         || inherited_metadata.uid() != Uid::effective().as_raw()
-        || path_metadata.uid() != Uid::effective().as_raw()
-        || inherited_metadata.permissions().mode() & 0o777 != 0o600
-        || path_metadata.permissions().mode() & 0o777 != 0o600
-        || inherited_metadata.dev() != path_metadata.dev()
-        || inherited_metadata.ino() != path_metadata.ino()
+        || root_metadata.uid() != Uid::effective().as_raw()
+        || inherited_metadata.permissions().mode() & 0o777 != 0o700
+        || root_metadata.permissions().mode() & 0o777 != 0o700
+        || inherited_metadata.dev() != root_metadata.dev()
+        || inherited_metadata.ino() != root_metadata.ino()
     {
         return Err(StoreError::new(
             "DEP_STORE_WORKER_PARENT_LOCK_INVALID",
@@ -1384,7 +2114,7 @@ fn verify_inherited_output_lock(root: &Path) -> Result<File, StoreError> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn verify_inherited_output_lock(_root: &Path) -> Result<File, StoreError> {
+fn verify_inherited_output_lock(_root_directory: &File) -> Result<File, StoreError> {
     Err(StoreError::new(
         "DEP_STORE_PLATFORM_UNSUPPORTED",
         "publication worker parent-lock proof requires Linux flock semantics",
@@ -1392,14 +2122,14 @@ fn verify_inherited_output_lock(_root: &Path) -> Result<File, StoreError> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn acquire_output_lock(_root: &Path) -> Result<OutputLock, StoreError> {
+fn acquire_output_lock(_root_directory: &File, _root: &Path) -> Result<OutputLock, StoreError> {
     Err(StoreError::new(
         "DEP_STORE_PLATFORM_UNSUPPORTED",
         "durable dependency publication requires Linux file semantics",
     ))
 }
 
-fn prepare_layout(root: &Path) -> Result<(), StoreError> {
+fn prepare_layout(root_directory: &File, root: &Path) -> Result<StoreDirectories, StoreError> {
     let expected = BTreeSet::from([
         LOCK_FILE.to_owned(),
         "ambiguities".to_owned(),
@@ -1422,6 +2152,11 @@ fn prepare_layout(root: &Path) -> Result<(), StoreError> {
             create_directory(&path, 0o700)?;
         }
     }
+    let ambiguities_directory = open_store_directory(root_directory, "ambiguities")?;
+    let bundles_directory = open_store_directory(root_directory, "bundles")?;
+    let claims_directory = open_store_directory(root_directory, "claims")?;
+    let completions_directory = open_store_directory(root_directory, "completions")?;
+    let receipts_directory = open_store_directory(root_directory, "receipts")?;
     for entry in std::fs::read_dir(root).map_err(|_| state_error())? {
         let entry = entry.map_err(|_| state_error())?;
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -1432,39 +2167,437 @@ fn prepare_layout(root: &Path) -> Result<(), StoreError> {
             ));
         }
     }
-    sync_directory(root)
+    root_directory.sync_all().map_err(|_| state_error())?;
+    for (name, directory) in [
+        ("ambiguities", &ambiguities_directory),
+        ("bundles", &bundles_directory),
+        ("claims", &claims_directory),
+        ("completions", &completions_directory),
+        ("receipts", &receipts_directory),
+    ] {
+        revalidate_store_directory_link(root_directory, name, directory)?;
+    }
+    Ok(StoreDirectories {
+        ambiguities_root: pinned_directory_path(&ambiguities_directory),
+        ambiguities_directory,
+        bundles_root: pinned_directory_path(&bundles_directory),
+        bundles_directory,
+        claims_root: pinned_directory_path(&claims_directory),
+        claims_directory,
+        completions_root: pinned_directory_path(&completions_directory),
+        completions_directory,
+        receipts_root: pinned_directory_path(&receipts_directory),
+        receipts_directory,
+    })
 }
 
-fn retained_tree_sha256(
-    root: &Path,
-    output_root: &Path,
+#[cfg(target_os = "linux")]
+fn open_store_directory(root_directory: &File, name: &str) -> Result<File, StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let directory = File::from(
+        openat(
+            root_directory,
+            name,
+            OFlag::O_RDONLY
+                | OFlag::O_DIRECTORY
+                | OFlag::O_NOFOLLOW
+                | OFlag::O_CLOEXEC
+                | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|_| state_error())?,
+    );
+    let metadata = directory.metadata().map_err(|_| state_error())?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(state_error());
+    }
+    Ok(directory)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_store_directory(_root_directory: &File, _name: &str) -> Result<File, StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "pinned store directories require Linux file semantics",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn revalidate_store_directory_link(
+    root_directory: &File,
+    name: &str,
+    expected: &File,
+) -> Result<(), StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let linked = File::from(
+        openat(
+            root_directory,
+            name,
+            OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| state_error())?,
+    );
+    let linked = linked.metadata().map_err(|_| state_error())?;
+    let expected = expected.metadata().map_err(|_| state_error())?;
+    if !linked.is_dir()
+        || linked.uid() != nix::unistd::Uid::effective().as_raw()
+        || linked.permissions().mode() & 0o777 != 0o700
+        || linked.dev() != expected.dev()
+        || linked.ino() != expected.ino()
+    {
+        return Err(StoreError::new(
+            "DEP_STORE_FIXED_DIRECTORY_AMBIGUOUS",
+            "fixed output directory link changed after it was pinned",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn revalidate_store_directory_link(
+    _root_directory: &File,
+    _name: &str,
+    _expected: &File,
+) -> Result<(), StoreError> {
+    Err(state_error())
+}
+
+fn validate_retained_bundle(
+    retained: &RetainedTreeEvidence,
+    expected_manifest: &ResolutionManifest,
+) -> Result<(), StoreError> {
+    let manifest: ResolutionManifest = crate::strict_json::from_slice(&retained.manifest_bytes)
+        .map_err(|_| {
+            StoreError::new(
+                "DEP_STORE_STATE_INVALID",
+                "stored state is malformed or not closed JSON",
+            )
+        })?;
+    if &manifest != expected_manifest {
+        return Err(StoreError::new(
+            "DEP_STORE_MANIFEST_MISMATCH",
+            "retained manifest does not match the exact publication receipt",
+        ));
+    }
+
+    let expected_directories = BTreeSet::from([".".to_owned(), "artifacts".to_owned()]);
+    let expected_files = std::iter::once("manifest.json".to_owned())
+        .chain(
+            expected_manifest
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.relative_path.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    let actual_files = retained.files.keys().cloned().collect::<BTreeSet<_>>();
+    if retained.directories != expected_directories || actual_files != expected_files {
+        return Err(StoreError::new(
+            "DEP_STORE_RETAINED_TREE_MISMATCH",
+            "retained dependency bundle contains a path not closed by its manifest",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn retained_tree_evidence(
+    output_directory: &File,
+    bundles_directory: &File,
+    resolution_id: &str,
     max_file_bytes: u64,
     max_total_bytes: u64,
-) -> Result<String, StoreError> {
-    validate_directory(root, 0o500)?;
+) -> Result<RetainedTreeEvidence, StoreError> {
+    retained_tree_evidence_with_limits(
+        output_directory,
+        bundles_directory,
+        resolution_id,
+        max_file_bytes,
+        max_total_bytes,
+        CERTIFIED_RETAINED_TREE_LIMITS,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn retained_tree_evidence(
+    _output_directory: &File,
+    _bundles_directory: &File,
+    _resolution_id: &str,
+    _max_file_bytes: u64,
+    _max_total_bytes: u64,
+) -> Result<RetainedTreeEvidence, StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "retained tree verification requires Linux descriptor semantics",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn retained_tree_evidence_with_limits(
+    output_directory: &File,
+    bundles_directory: &File,
+    resolution_id: &str,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+    limits: RetainedTreeLimits,
+) -> Result<RetainedTreeEvidence, StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    if Path::new(resolution_id).components().count() != 1
+        || !matches!(
+            Path::new(resolution_id).components().next(),
+            Some(Component::Normal(_))
+        )
+    {
+        return Err(state_error());
+    }
+    let bundles_metadata = bundles_directory
+        .metadata()
+        .map_err(|_| retained_tree_mismatch())?;
+    validate_retained_directory_metadata(&bundles_metadata, 0o700)?;
+    let mut links = vec![RetainedTreeLink {
+        parent: Arc::new(output_directory.try_clone().map_err(|_| state_error())?),
+        name: std::ffi::CString::new("bundles").expect("fixed store directory name"),
+        identity: retained_link_identity(&bundles_metadata),
+        directory: true,
+    }];
+    revalidate_retained_link(&links[0])?;
+    let bundle_name =
+        std::ffi::CString::new(resolution_id.as_bytes()).map_err(|_| state_error())?;
+    let bundle_inspection = File::from(
+        openat(
+            bundles_directory,
+            bundle_name.as_c_str(),
+            OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| retained_tree_mismatch())?,
+    );
+    let bundle_inspected = bundle_inspection
+        .metadata()
+        .map_err(|_| retained_tree_mismatch())?;
+    validate_retained_directory_metadata(&bundle_inspected, 0o500)?;
+    let bundle_directory = Arc::new(File::from(
+        openat(
+            bundles_directory,
+            bundle_name.as_c_str(),
+            OFlag::O_RDONLY
+                | OFlag::O_DIRECTORY
+                | OFlag::O_NOFOLLOW
+                | OFlag::O_CLOEXEC
+                | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|_| retained_tree_mismatch())?,
+    ));
+    let bundle_opened = bundle_directory
+        .metadata()
+        .map_err(|_| retained_tree_mismatch())?;
+    if bundle_opened.dev() != bundle_inspected.dev()
+        || bundle_opened.ino() != bundle_inspected.ino()
+    {
+        return Err(retained_tree_mismatch());
+    }
+    run_retained_tree_pre_scan_injection_hook(&bundle_directory)?;
+    let bundle_inspected = bundle_inspection
+        .metadata()
+        .map_err(|_| retained_tree_mismatch())?;
+    validate_retained_directory_metadata(&bundle_inspected, 0o500)?;
+    let bundle_opened = bundle_directory
+        .metadata()
+        .map_err(|_| retained_tree_mismatch())?;
+    if bundle_opened.dev() != bundle_inspected.dev()
+        || bundle_opened.ino() != bundle_inspected.ino()
+    {
+        return Err(retained_tree_mismatch());
+    }
+
     let mut files = Vec::new();
     let mut directories = vec![
-        directory_record("@output-root", output_root, 0o700)?,
-        directory_record("@bundles-root", &output_root.join("bundles"), 0o700)?,
+        directory_record_from_file("@output-root", output_directory, 0o700)?,
+        directory_record_from_file("@bundles-root", bundles_directory, 0o700)?,
     ];
     let mut total = 0_u64;
-    let mut records = RetainedTreeRecords {
+    let records = RetainedTreeRecords {
         total: &mut total,
         directories: &mut directories,
         files: &mut files,
     };
-    collect_tree(
-        root,
-        root,
-        max_file_bytes,
-        max_total_bytes,
-        CERTIFIED_RETAINED_TREE_LIMITS,
-        &mut records,
-    )?;
+    let bundles_parent = Arc::new(bundles_directory.try_clone().map_err(|_| state_error())?);
+    let mut pending = VecDeque::from([PendingRetainedDirectory {
+        directory: bundle_directory,
+        relative: ".".to_owned(),
+        depth: 0,
+        parent: bundles_parent,
+        name: bundle_name,
+        identity: retained_link_identity(&bundle_inspected),
+    }]);
+    let mut entry_count = 0_usize;
+    admit_retained_tree_entry(&mut entry_count, limits.max_entries)?;
+    let mut manifest_bytes = None;
+    let mut retained_directories = BTreeSet::new();
+
+    while let Some(pending_directory) = pending.pop_front() {
+        if !retained_directories.insert(pending_directory.relative.clone()) {
+            return Err(retained_tree_mismatch());
+        }
+        records.directories.push(directory_record_from_file(
+            &pending_directory.relative,
+            &pending_directory.directory,
+            0o500,
+        )?);
+        links.push(RetainedTreeLink {
+            parent: Arc::clone(&pending_directory.parent),
+            name: pending_directory.name,
+            identity: pending_directory.identity,
+            directory: true,
+        });
+
+        let directory_path = pinned_directory_path(&pending_directory.directory);
+        for entry in std::fs::read_dir(&directory_path).map_err(|_| retained_tree_mismatch())? {
+            let entry = entry.map_err(|_| retained_tree_mismatch())?;
+            admit_retained_tree_entry(&mut entry_count, limits.max_entries)?;
+            let child_depth = pending_directory
+                .depth
+                .checked_add(1)
+                .ok_or_else(retained_tree_bound_error)?;
+            if child_depth > limits.max_depth {
+                return Err(retained_tree_bound_error());
+            }
+            let child_os_name = entry.file_name();
+            let child_name = std::ffi::CString::new(child_os_name.as_bytes())
+                .map_err(|_| retained_tree_mismatch())?;
+            let child_text = child_os_name.to_str().ok_or_else(retained_tree_mismatch)?;
+            let relative = if pending_directory.relative == "." {
+                child_text.to_owned()
+            } else {
+                format!("{}/{}", pending_directory.relative, child_text)
+            };
+            let inspection = File::from(
+                openat(
+                    &*pending_directory.directory,
+                    child_name.as_c_str(),
+                    OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|_| retained_tree_mismatch())?,
+            );
+            let inspected = inspection
+                .metadata()
+                .map_err(|_| retained_tree_mismatch())?;
+            if inspected.is_dir() {
+                validate_retained_directory_metadata(&inspected, 0o500)?;
+                let directory = Arc::new(File::from(
+                    openat(
+                        &*pending_directory.directory,
+                        child_name.as_c_str(),
+                        OFlag::O_RDONLY
+                            | OFlag::O_DIRECTORY
+                            | OFlag::O_NOFOLLOW
+                            | OFlag::O_CLOEXEC
+                            | OFlag::O_NONBLOCK,
+                        Mode::empty(),
+                    )
+                    .map_err(|_| retained_tree_mismatch())?,
+                ));
+                let opened = directory.metadata().map_err(|_| retained_tree_mismatch())?;
+                if opened.dev() != inspected.dev() || opened.ino() != inspected.ino() {
+                    return Err(retained_tree_mismatch());
+                }
+                pending.push_back(PendingRetainedDirectory {
+                    directory,
+                    relative,
+                    depth: child_depth,
+                    parent: Arc::clone(&pending_directory.directory),
+                    name: child_name,
+                    identity: retained_link_identity(&inspected),
+                });
+            } else if inspected.is_file() {
+                let mut file = open_verified_inspected_file(
+                    &pending_directory.directory,
+                    child_name.as_c_str(),
+                    &inspection,
+                    max_file_bytes,
+                    0o400,
+                )?;
+                let mut bytes = Vec::new();
+                let mut hasher = Sha256::new();
+                let mut size = 0_u64;
+                let mut buffer = [0_u8; 65_536];
+                loop {
+                    let read = file.read(&mut buffer).map_err(|_| state_error())?;
+                    if read == 0 {
+                        break;
+                    }
+                    size = size.checked_add(read as u64).ok_or_else(state_error)?;
+                    if size > max_file_bytes {
+                        return Err(retained_tree_mismatch());
+                    }
+                    hasher.update(&buffer[..read]);
+                    if relative == "manifest.json" {
+                        if size > MAX_STATE_BYTES {
+                            return Err(retained_tree_mismatch());
+                        }
+                        bytes.extend_from_slice(&buffer[..read]);
+                    }
+                }
+                *records.total = records.total.checked_add(size).ok_or_else(state_error)?;
+                if *records.total > max_total_bytes {
+                    return Err(StoreError::new(
+                        "DEP_STORE_RETAINED_TREE_MISMATCH",
+                        "retained dependency tree exceeds its signed total bound",
+                    ));
+                }
+                let digest = format!("{:x}", hasher.finalize());
+                records.files.push((relative.clone(), 0o400, size, digest));
+                if relative == "manifest.json" {
+                    manifest_bytes = Some(bytes);
+                }
+                links.push(RetainedTreeLink {
+                    parent: Arc::clone(&pending_directory.directory),
+                    name: child_name,
+                    identity: retained_link_identity(&inspected),
+                    directory: false,
+                });
+            } else {
+                return Err(StoreError::new(
+                    "DEP_STORE_RETAINED_TREE_MISMATCH",
+                    "retained bundle contains a symlink or unsupported file type",
+                ));
+            }
+        }
+    }
+
+    run_retained_tree_swap_hook()?;
+    for link in links.iter().rev() {
+        revalidate_retained_link(link)?;
+    }
+    let manifest_bytes = manifest_bytes.ok_or_else(|| {
+        StoreError::new(
+            "DEP_STORE_MANIFEST_MISMATCH",
+            "retained dependency bundle has no manifest",
+        )
+    })?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
+    let file_evidence = files
+        .iter()
+        .map(|(relative, _, size, digest)| (relative.clone(), (*size, digest.clone())))
+        .collect();
+    directories.sort_by(|left, right| left.0.cmp(&right.0));
     let mut hasher = Sha256::new();
     update_segment(&mut hasher, b"mcloving-dependency-retained-tree-v1");
-    directories.sort_by(|left, right| left.0.cmp(&right.0));
     for (relative, mode, uid, device, inode) in directories {
         update_segment(&mut hasher, b"directory");
         update_segment(&mut hasher, relative.as_bytes());
@@ -1480,78 +2613,99 @@ fn retained_tree_sha256(
         update_segment(&mut hasher, &size.to_be_bytes());
         update_segment(&mut hasher, digest.as_bytes());
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(RetainedTreeEvidence {
+        sha256: format!("{:x}", hasher.finalize()),
+        directories: retained_directories,
+        files: file_evidence,
+        manifest_bytes,
+    })
 }
 
-fn collect_tree(
-    root: &Path,
-    directory: &Path,
-    max_file_bytes: u64,
-    max_total_bytes: u64,
-    limits: RetainedTreeLimits,
-    records: &mut RetainedTreeRecords<'_>,
-) -> Result<(), StoreError> {
-    let mut entry_count = 0_usize;
-    admit_retained_tree_entry(&mut entry_count, limits.max_entries)?;
-    let mut pending = VecDeque::from([(directory.to_path_buf(), 0_usize)]);
+#[cfg(target_os = "linux")]
+fn revalidate_retained_link(link: &RetainedTreeLink) -> Result<(), StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
 
-    while let Some((directory, depth)) = pending.pop_front() {
-        validate_directory(&directory, 0o500)?;
-        let relative_directory = if directory == root {
-            ".".to_owned()
-        } else {
-            directory
-                .strip_prefix(root)
-                .map_err(|_| state_error())?
-                .to_str()
-                .ok_or_else(state_error)?
-                .to_owned()
-        };
-        records
-            .directories
-            .push(directory_record(&relative_directory, &directory, 0o500)?);
-        for entry in std::fs::read_dir(&directory).map_err(|_| state_error())? {
-            let entry = entry.map_err(|_| state_error())?;
-            admit_retained_tree_entry(&mut entry_count, limits.max_entries)?;
-            let child_depth = depth.checked_add(1).ok_or_else(retained_tree_bound_error)?;
-            if child_depth > limits.max_depth {
-                return Err(retained_tree_bound_error());
-            }
-            let path = entry.path();
-            let metadata = std::fs::symlink_metadata(&path).map_err(|_| state_error())?;
-            if metadata.file_type().is_symlink() {
-                return Err(StoreError::new(
-                    "DEP_STORE_RETAINED_TREE_MISMATCH",
-                    "retained bundle contains a symlink",
-                ));
-            }
-            if metadata.is_dir() {
-                pending.push_back((path, child_depth));
-            } else if metadata.is_file() {
-                let relative = path
-                    .strip_prefix(root)
-                    .map_err(|_| state_error())?
-                    .to_str()
-                    .ok_or_else(state_error)?
-                    .to_owned();
-                let (size, digest) = hash_bounded_file(&path, max_file_bytes, 0o400)?;
-                *records.total = records.total.checked_add(size).ok_or_else(state_error)?;
-                if *records.total > max_total_bytes {
-                    return Err(StoreError::new(
-                        "DEP_STORE_RETAINED_TREE_MISMATCH",
-                        "retained dependency tree exceeds its signed total bound",
-                    ));
-                }
-                records.files.push((relative, 0o400, size, digest));
-            } else {
-                return Err(StoreError::new(
-                    "DEP_STORE_RETAINED_TREE_MISMATCH",
-                    "retained bundle contains an unsupported file type",
-                ));
-            }
-        }
+    let linked = File::from(
+        openat(
+            &*link.parent,
+            link.name.as_c_str(),
+            OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| retained_tree_mismatch())?,
+    );
+    let metadata = linked.metadata().map_err(|_| retained_tree_mismatch())?;
+    if retained_link_identity(&metadata) != link.identity
+        || metadata.is_dir() != link.directory
+        || metadata.is_file() == link.directory
+    {
+        return Err(retained_tree_mismatch());
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn retained_link_identity(metadata: &std::fs::Metadata) -> RetainedLinkIdentity {
+    use std::os::unix::fs::MetadataExt as _;
+
+    RetainedLinkIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        mode: metadata.mode(),
+        uid: metadata.uid(),
+        links: metadata.nlink(),
+        size: metadata.size(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_retained_directory_metadata(
+    metadata: &std::fs::Metadata,
+    expected_mode: u32,
+) -> Result<(), StoreError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o777 != expected_mode
+    {
+        return Err(StoreError::new(
+            "DEP_STORE_DIRECTORY_POLICY_DENIED",
+            "retained ancestor owner, mode, or type violates policy",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn directory_record_from_file(
+    label: &str,
+    directory: &File,
+    expected_mode: u32,
+) -> Result<(String, u32, u32, u64, u64), StoreError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = directory.metadata().map_err(|_| state_error())?;
+    validate_retained_directory_metadata(&metadata, expected_mode)?;
+    Ok((
+        label.to_owned(),
+        expected_mode,
+        metadata.uid(),
+        metadata.dev(),
+        metadata.ino(),
+    ))
+}
+
+fn retained_tree_mismatch() -> StoreError {
+    StoreError::new(
+        "DEP_STORE_RETAINED_TREE_MISMATCH",
+        "retained dependency bundle changed during descriptor-backed verification",
+    )
 }
 
 fn admit_retained_tree_entry(count: &mut usize, max_entries: usize) -> Result<(), StoreError> {
@@ -1569,47 +2723,15 @@ fn retained_tree_bound_error() -> StoreError {
     )
 }
 
-#[cfg(unix)]
-fn directory_record(
-    label: &str,
-    path: &Path,
-    expected_mode: u32,
-) -> Result<(String, u32, u32, u64, u64), StoreError> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| state_error())?;
-    if !metadata.file_type().is_dir()
-        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-        || metadata.permissions().mode() & 0o777 != expected_mode
-    {
-        return Err(StoreError::new(
-            "DEP_STORE_DIRECTORY_POLICY_DENIED",
-            "retained ancestor owner, mode, or type violates policy",
-        ));
-    }
-    Ok((
-        label.to_owned(),
-        expected_mode,
-        metadata.uid(),
-        metadata.dev(),
-        metadata.ino(),
-    ))
-}
-
-#[cfg(not(unix))]
-fn directory_record(
-    _label: &str,
-    _path: &Path,
-    _expected_mode: u32,
-) -> Result<(String, u32, u32, u64, u64), StoreError> {
-    Err(StoreError::new(
-        "DEP_STORE_PLATFORM_UNSUPPORTED",
-        "retained ancestor verification requires Unix inode semantics",
-    ))
-}
-
-fn verify_file(path: &Path, mode: u32, size: u64, digest: &str) -> Result<(), StoreError> {
-    let (actual_size, actual_digest) = hash_bounded_file(path, size, mode)?;
+#[cfg(target_os = "linux")]
+fn verify_file_at(
+    root: &File,
+    relative: &Path,
+    mode: u32,
+    size: u64,
+    digest: &str,
+) -> Result<(), StoreError> {
+    let (actual_size, actual_digest) = hash_bounded_file_at(root, relative, size, mode)?;
     if actual_size != size || actual_digest != digest {
         return Err(StoreError::new(
             "DEP_STORE_ARTIFACT_CONTENT_MISMATCH",
@@ -1619,8 +2741,25 @@ fn verify_file(path: &Path, mode: u32, size: u64, digest: &str) -> Result<(), St
     Ok(())
 }
 
-fn hash_bounded_file(path: &Path, max_bytes: u64, mode: u32) -> Result<(u64, String), StoreError> {
-    let mut file = open_verified_file(path, max_bytes, mode)?;
+#[cfg(not(target_os = "linux"))]
+fn verify_file_at(
+    _root: &File,
+    _relative: &Path,
+    _mode: u32,
+    _size: u64,
+    _digest: &str,
+) -> Result<(), StoreError> {
+    Err(state_error())
+}
+
+#[cfg(target_os = "linux")]
+fn hash_bounded_file_at(
+    root: &File,
+    relative: &Path,
+    max_bytes: u64,
+    mode: u32,
+) -> Result<(u64, String), StoreError> {
+    let mut file = open_verified_file_at(root, relative, max_bytes, mode)?;
     let mut hasher = Sha256::new();
     let mut total = 0_u64;
     let mut buffer = [0_u8; 65_536];
@@ -1663,12 +2802,14 @@ fn open_verified_file(path: &Path, max_bytes: u64, mode: u32) -> Result<File, St
         .custom_flags((OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW).bits())
         .open(path)
         .map_err(|_| state_error())?;
+    trace_verified_file_open(path, "path-inspected");
     let inspected = inspection.metadata().map_err(|_| state_error())?;
     if !verified_file_metadata(&inspected, max_bytes, mode) {
         return Err(file_policy_error());
     }
 
     let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+    trace_verified_file_open(path, "data-open");
     let file = OpenOptions::new()
         .read(true)
         .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
@@ -1686,6 +2827,213 @@ fn open_verified_file(path: &Path, max_bytes: u64, mode: u32) -> Result<File, St
         return Err(file_policy_error());
     }
     Ok(file)
+}
+
+#[cfg(target_os = "linux")]
+fn open_verified_file_at(
+    root: &File,
+    relative: &Path,
+    max_bytes: u64,
+    mode: u32,
+) -> Result<File, StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name),
+            _ => Err(state_error()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (name, parents) = components.split_last().ok_or_else(state_error)?;
+    let mut parent = root.try_clone().map_err(|_| state_error())?;
+    for component in parents {
+        parent = File::from(
+            openat(
+                &parent,
+                *component,
+                OFlag::O_RDONLY
+                    | OFlag::O_DIRECTORY
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|_| state_error())?,
+        );
+    }
+    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| state_error())?;
+    let inspection = File::from(
+        openat(
+            &parent,
+            name.as_c_str(),
+            OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| state_error())?,
+    );
+    open_verified_inspected_file(&parent, name.as_c_str(), &inspection, max_bytes, mode)
+}
+
+#[cfg(target_os = "linux")]
+fn open_verified_inspected_file(
+    parent: &File,
+    name: &std::ffi::CStr,
+    inspection: &File,
+    max_bytes: u64,
+    mode: u32,
+) -> Result<File, StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    let inspected = inspection.metadata().map_err(|_| state_error())?;
+    if !verified_file_metadata(&inspected, max_bytes, mode) {
+        return Err(file_policy_error());
+    }
+    let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+        .open(pinned_path)
+        .map_err(|_| state_error())?;
+    let opened = file.metadata().map_err(|_| state_error())?;
+    let linked = File::from(
+        openat(
+            parent,
+            name,
+            OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| state_error())?,
+    );
+    let linked = linked.metadata().map_err(|_| state_error())?;
+    if !verified_file_metadata(&opened, max_bytes, mode)
+        || !verified_file_metadata(&linked, max_bytes, mode)
+        || opened.dev() != inspected.dev()
+        || opened.ino() != inspected.ino()
+        || linked.dev() != inspected.dev()
+        || linked.ino() != inspected.ino()
+    {
+        return Err(file_policy_error());
+    }
+    Ok(file)
+}
+
+#[cfg(target_os = "linux")]
+fn lock_receipt_admission(path: &Path) -> Result<ReceiptAdmissionLock, StoreError> {
+    use nix::fcntl::{Flock, FlockArg};
+
+    let file = open_verified_file(path, MAX_STATE_BYTES, 0o400)?;
+    trace_receipt_admission_lock(path, "attempt");
+    let lock = Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|_| state_error())?;
+    trace_receipt_admission_lock(path, "acquired");
+    Ok(lock)
+}
+
+#[cfg(target_os = "linux")]
+fn revalidate_loaded_receipt_pair(
+    loaded: &LoadedReceipt,
+    receipt_path: &Path,
+    completion_path: &Path,
+) -> Result<(), StoreError> {
+    revalidate_verified_file_link(
+        receipt_path,
+        &loaded.admission_lock,
+        &loaded.receipt_identity,
+        MAX_STATE_BYTES,
+        0o400,
+    )?;
+    revalidate_verified_file_link(
+        completion_path,
+        &loaded.completion_file,
+        &loaded.completion_identity,
+        MAX_STATE_BYTES,
+        0o400,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn revalidate_loaded_receipt_pair(
+    _loaded: &LoadedReceipt,
+    _receipt_path: &Path,
+    _completion_path: &Path,
+) -> Result<(), StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "receipt pair revalidation requires Linux descriptor semantics",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn revalidate_verified_file_link(
+    path: &Path,
+    pinned: &File,
+    expected: &RetainedLinkIdentity,
+    max_bytes: u64,
+    mode: u32,
+) -> Result<(), StoreError> {
+    use nix::fcntl::OFlag;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let linked = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW).bits())
+        .open(path)
+        .map_err(|_| receipt_pair_changed())?;
+    let pinned = pinned.metadata().map_err(|_| receipt_pair_changed())?;
+    let linked = linked.metadata().map_err(|_| receipt_pair_changed())?;
+    if !verified_file_metadata(&pinned, max_bytes, mode)
+        || !verified_file_metadata(&linked, max_bytes, mode)
+        || retained_link_identity(&pinned) != *expected
+        || retained_link_identity(&linked) != *expected
+    {
+        return Err(receipt_pair_changed());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn verified_file_fingerprint(
+    file: &File,
+    max_bytes: u64,
+    mode: u32,
+) -> Result<RetainedLinkIdentity, StoreError> {
+    let metadata = file.metadata().map_err(|_| receipt_pair_changed())?;
+    if !verified_file_metadata(&metadata, max_bytes, mode) {
+        return Err(receipt_pair_changed());
+    }
+    Ok(retained_link_identity(&metadata))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verified_file_fingerprint(
+    _file: &File,
+    _max_bytes: u64,
+    _mode: u32,
+) -> Result<RetainedLinkIdentity, StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "receipt fingerprinting requires Linux file semantics",
+    ))
+}
+
+fn receipt_pair_changed() -> StoreError {
+    StoreError::new(
+        "DEP_STORE_AMBIGUOUS_COMPLETION",
+        "receipt and completion links changed during replay verification",
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lock_receipt_admission(_path: &Path) -> Result<ReceiptAdmissionLock, StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "receipt replay admission locking requires Linux file semantics",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -1732,7 +3080,32 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, mode: u32) -> Result<T, 
     })
 }
 
-fn write_new_json<T: Serialize>(path: &Path, value: &T, final_mode: u32) -> Result<(), StoreError> {
+fn read_json_from_file<T: for<'de> Deserialize<'de>>(file: &mut File) -> Result<T, StoreError> {
+    file.seek(SeekFrom::Start(0)).map_err(|_| state_error())?;
+    let metadata = file.metadata().map_err(|_| state_error())?;
+    if metadata.len() > MAX_STATE_BYTES {
+        return Err(state_error());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| state_error())?;
+    if bytes.len() as u64 > MAX_STATE_BYTES {
+        return Err(state_error());
+    }
+    crate::strict_json::from_slice(&bytes).map_err(|_| {
+        StoreError::new(
+            "DEP_STORE_STATE_INVALID",
+            "stored state is malformed or not closed JSON",
+        )
+    })
+}
+
+fn write_new_json<T: Serialize>(
+    path: &Path,
+    value: &T,
+    final_mode: u32,
+) -> Result<File, StoreError> {
     let bytes = serde_json::to_vec(value).map_err(|_| state_error())?;
     if bytes.len() as u64 > MAX_STATE_BYTES {
         return Err(state_error());
@@ -1743,18 +3116,26 @@ fn write_new_json<T: Serialize>(path: &Path, value: &T, final_mode: u32) -> Resu
         .and_then(|value| value.to_str())
         .ok_or_else(state_error)?;
     let temporary = parent.join(format!(".{name}.{}.tmp", Uuid::new_v4()));
-    write_new_file(&temporary, &bytes)?;
-    if let Err(error) =
-        set_mode_and_sync(&temporary, final_mode).and_then(|()| rename_no_replace(&temporary, path))
+    let file = write_new_file(&temporary, &bytes)?;
+    #[cfg(unix)]
     {
-        let _ = remove_private_file(&temporary);
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(final_mode))
+            .map_err(|_| state_error())?;
+    }
+    file.sync_all().map_err(|_| state_error())?;
+    if let Err(error) = rename_no_replace(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
-    sync_directory(parent)
+    sync_directory(parent)?;
+    let identity = verified_file_fingerprint(&file, MAX_STATE_BYTES, final_mode)?;
+    revalidate_verified_file_link(path, &file, &identity, MAX_STATE_BYTES, final_mode)?;
+    Ok(file)
 }
 
 #[cfg(unix)]
-fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+fn write_new_file(path: &Path, bytes: &[u8]) -> Result<File, StoreError> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
     let mut file = OpenOptions::new()
@@ -1765,27 +3146,34 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         .open(path)
         .map_err(|_| state_error())?;
     file.write_all(bytes).map_err(|_| state_error())?;
-    file.sync_all().map_err(|_| state_error())
+    file.sync_all().map_err(|_| state_error())?;
+    Ok(file)
 }
 
 #[cfg(not(unix))]
-fn write_new_file(_path: &Path, _bytes: &[u8]) -> Result<(), StoreError> {
+fn write_new_file(_path: &Path, _bytes: &[u8]) -> Result<File, StoreError> {
     Err(StoreError::new(
         "DEP_STORE_PLATFORM_UNSUPPORTED",
         "durable dependency publication requires Unix file semantics",
     ))
 }
 
-#[cfg(unix)]
-fn copy_new_file(source: &Path, destination: &Path, expected_size: u64) -> Result<(), StoreError> {
+#[cfg(target_os = "linux")]
+fn copy_new_file_at(
+    root: &File,
+    source: &Path,
+    destination: &Path,
+    expected_size: u64,
+) -> Result<(), StoreError> {
+    use nix::fcntl::OFlag;
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    let mut source = open_verified_file(source, expected_size, 0o600)?;
+    let mut source = open_verified_file_at(root, source, expected_size, 0o600)?;
     let mut destination = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits())
+        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | OFlag::O_NOFOLLOW.bits())
         .open(destination)
         .map_err(|_| state_error())?;
     let copied = std::io::copy(&mut source, &mut destination).map_err(|_| state_error())?;
@@ -1795,22 +3183,24 @@ fn copy_new_file(source: &Path, destination: &Path, expected_size: u64) -> Resul
             "artifact size changed while it was copied for publication",
         ));
     }
+    use std::os::unix::fs::PermissionsExt as _;
+    destination
+        .set_permissions(std::fs::Permissions::from_mode(0o400))
+        .map_err(|_| state_error())?;
     destination.sync_all().map_err(|_| state_error())
 }
 
-#[cfg(not(unix))]
-fn copy_new_file(
+#[cfg(not(target_os = "linux"))]
+fn copy_new_file_at(
+    _root: &File,
     _source: &Path,
     _destination: &Path,
     _expected_size: u64,
 ) -> Result<(), StoreError> {
-    Err(StoreError::new(
-        "DEP_STORE_PLATFORM_UNSUPPORTED",
-        "durable dependency publication requires Unix file semantics",
-    ))
+    Err(state_error())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn set_mode_and_sync(path: &Path, mode: u32) -> Result<(), StoreError> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -1821,7 +3211,7 @@ fn set_mode_and_sync(path: &Path, mode: u32) -> Result<(), StoreError> {
         .map_err(|_| state_error())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), test))]
 fn set_mode_and_sync(_path: &Path, _mode: u32) -> Result<(), StoreError> {
     Err(StoreError::new(
         "DEP_STORE_PLATFORM_UNSUPPORTED",
@@ -1871,6 +3261,128 @@ fn validate_directory(_path: &Path, _mode: u32) -> Result<(), StoreError> {
     ))
 }
 
+#[cfg(target_os = "linux")]
+fn pin_private_directory_at(
+    parent: &File,
+    name: &str,
+    expected_mode: u32,
+    expected_identity: Option<(u64, u64)>,
+) -> Result<PinnedPublicationDirectory, StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let directory = File::from(
+        openat(
+            parent,
+            name,
+            OFlag::O_RDONLY
+                | OFlag::O_DIRECTORY
+                | OFlag::O_NOFOLLOW
+                | OFlag::O_CLOEXEC
+                | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|_| state_error())?,
+    );
+    let metadata = directory.metadata().map_err(|_| state_error())?;
+    let parent_metadata = parent.metadata().map_err(|_| state_error())?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o777 != expected_mode
+        || metadata.dev() != parent_metadata.dev()
+        || expected_identity.is_some_and(|(device, inode)| {
+            metadata.dev() != device || (inode != 0 && metadata.ino() != inode)
+        })
+    {
+        return Err(StoreError::new(
+            "DEP_STORE_DIRECTORY_POLICY_DENIED",
+            "publication directory owner, mode, device, or identity violates policy",
+        ));
+    }
+    let pinned = PinnedPublicationDirectory {
+        path: pinned_directory_path(&directory),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        directory,
+    };
+    revalidate_private_directory_link(parent, name, &pinned, expected_mode)?;
+    Ok(pinned)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pin_private_directory_at(
+    _parent: &File,
+    _name: &str,
+    _expected_mode: u32,
+    _expected_identity: Option<(u64, u64)>,
+) -> Result<PinnedPublicationDirectory, StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "descriptor-pinned publication requires Linux file semantics",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn revalidate_private_directory_link(
+    parent: &File,
+    name: &str,
+    expected: &PinnedPublicationDirectory,
+    expected_mode: u32,
+) -> Result<(), StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let linked = File::from(
+        openat(
+            parent,
+            name,
+            OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| state_error())?,
+    );
+    let metadata = linked.metadata().map_err(|_| state_error())?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o777 != expected_mode
+        || metadata.dev() != expected.device
+        || metadata.ino() != expected.inode
+    {
+        return Err(StoreError::new(
+            "DEP_STORE_PUBLICATION_AMBIGUOUS",
+            "publication directory link changed while its descriptor was retained",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn revalidate_private_directory_link(
+    _parent: &File,
+    _name: &str,
+    _expected: &PinnedPublicationDirectory,
+    _expected_mode: u32,
+) -> Result<(), StoreError> {
+    Err(state_error())
+}
+
+#[cfg(unix)]
+fn seal_directory(directory: &File, mode: u32) -> Result<(), StoreError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    directory
+        .set_permissions(std::fs::Permissions::from_mode(mode))
+        .map_err(|_| state_error())?;
+    directory.sync_all().map_err(|_| state_error())
+}
+
+#[cfg(not(unix))]
+fn seal_directory(_directory: &File, _mode: u32) -> Result<(), StoreError> {
+    Err(state_error())
+}
+
 fn sync_directory(path: &Path) -> Result<(), StoreError> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
@@ -1910,12 +3422,61 @@ fn rename_no_replace(_source: &Path, _destination: &Path) -> Result<(), StoreErr
     ))
 }
 
-fn remove_private_tree(path: &Path) -> Result<(), StoreError> {
-    if !path_exists(path)? {
-        return Ok(());
-    }
-    make_tree_writable(path)?;
-    std::fs::remove_dir_all(path).map_err(|_| state_error())
+#[cfg(all(target_os = "linux", test))]
+fn remove_private_tree(
+    root_directory: &File,
+    root_path: &Path,
+    path: &Path,
+) -> Result<(), StoreError> {
+    let (mut parent, name) = open_cleanup_parent(root_directory, root_path, path)?;
+    let mut entries = 1_usize;
+    remove_private_tree_at(&mut parent, &name, path, None, 0, &mut entries)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn remove_private_tree_exact(
+    root_directory: &File,
+    root_path: &Path,
+    path: &Path,
+    expected_device: u64,
+    expected_inode: u64,
+) -> Result<(), StoreError> {
+    let (mut parent, name) = open_cleanup_parent(root_directory, root_path, path)?;
+    let mut entries = 1_usize;
+    remove_private_tree_at(
+        &mut parent,
+        &name,
+        path,
+        Some((expected_device, expected_inode)),
+        0,
+        &mut entries,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn remove_private_tree_exact(
+    _root_directory: &File,
+    _root_path: &Path,
+    _path: &Path,
+    _expected_device: u64,
+    _expected_inode: u64,
+) -> Result<(), StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "descriptor-pinned cleanup requires Linux file semantics",
+    ))
+}
+
+#[cfg(all(not(target_os = "linux"), test))]
+fn remove_private_tree(
+    _root_directory: &File,
+    _root_path: &Path,
+    _path: &Path,
+) -> Result<(), StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "descriptor-pinned cleanup requires Linux file semantics",
+    ))
 }
 
 fn path_exists(path: &Path) -> Result<bool, StoreError> {
@@ -1926,56 +3487,459 @@ fn path_exists(path: &Path) -> Result<bool, StoreError> {
     }
 }
 
-#[cfg(unix)]
-fn remove_private_file(path: &Path) -> Result<(), StoreError> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| state_error())?;
-    if !metadata.file_type().is_file() {
-        return Err(state_error());
-    }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|_| state_error())?;
-    std::fs::remove_file(path).map_err(|_| state_error())
+#[cfg(target_os = "linux")]
+fn remove_private_file(
+    root_directory: &File,
+    root_path: &Path,
+    path: &Path,
+) -> Result<(), StoreError> {
+    let (parent, name) = open_cleanup_parent(root_directory, root_path, path)?;
+    remove_private_file_at(&parent, &name, path, None)
 }
 
-#[cfg(not(unix))]
-fn remove_private_file(_path: &Path) -> Result<(), StoreError> {
+#[cfg(target_os = "linux")]
+fn remove_private_file_exact(
+    root_directory: &File,
+    root_path: &Path,
+    path: &Path,
+    expected_device: u64,
+    expected_inode: u64,
+) -> Result<(), StoreError> {
+    let (parent, name) = open_cleanup_parent(root_directory, root_path, path)?;
+    remove_private_file_at(
+        &parent,
+        &name,
+        path,
+        Some((expected_device, expected_inode)),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn remove_private_file(
+    _root_directory: &File,
+    _root_path: &Path,
+    _path: &Path,
+) -> Result<(), StoreError> {
     Err(StoreError::new(
         "DEP_STORE_PLATFORM_UNSUPPORTED",
-        "durable dependency publication requires Unix file semantics",
+        "descriptor-pinned cleanup requires Linux file semantics",
     ))
 }
 
-#[cfg(unix)]
-fn make_tree_writable(path: &Path) -> Result<(), StoreError> {
-    use std::os::unix::fs::PermissionsExt as _;
+#[cfg(not(target_os = "linux"))]
+fn remove_private_file_exact(
+    _root_directory: &File,
+    _root_path: &Path,
+    _path: &Path,
+    _expected_device: u64,
+    _expected_inode: u64,
+) -> Result<(), StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "exact private-file cleanup requires Linux file semantics",
+    ))
+}
 
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| state_error())?;
-    if metadata.file_type().is_symlink() {
+#[cfg(target_os = "linux")]
+pub(crate) fn open_pinned_cleanup_root(path: &Path) -> Result<File, StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+
+    if !path.is_absolute() {
         return Err(state_error());
     }
-    if metadata.is_dir() {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|_| state_error())?;
-        for entry in std::fs::read_dir(path).map_err(|_| state_error())? {
-            make_tree_writable(&entry.map_err(|_| state_error())?.path())?;
+    let mut directory = File::open("/").map_err(|_| state_error())?;
+    let mut opened_component = false;
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                directory = File::from(
+                    openat(
+                        &directory,
+                        name,
+                        OFlag::O_RDONLY
+                            | OFlag::O_DIRECTORY
+                            | OFlag::O_NOFOLLOW
+                            | OFlag::O_CLOEXEC
+                            | OFlag::O_NONBLOCK,
+                        Mode::empty(),
+                    )
+                    .map_err(|_| state_error())?,
+                );
+                opened_component = true;
+            }
+            _ => return Err(state_error()),
         }
-    } else if metadata.is_file() {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| state_error())?;
-    } else {
+    }
+    let root_stat = nix::sys::stat::fstat(&directory).map_err(|_| state_error())?;
+    if !opened_component || !owned_cleanup_directory(&root_stat) {
         return Err(state_error());
+    }
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn pinned_directory_path(directory: &File) -> PathBuf {
+    use std::os::fd::AsRawFd as _;
+
+    PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+}
+
+#[cfg(unix)]
+fn directory_device_inode(directory: &File) -> Result<(u64, u64), StoreError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = directory.metadata().map_err(|_| state_error())?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+fn require_directory_identity(
+    directory: &File,
+    expected: crate::transport::TransportRootIdentity,
+    code: &'static str,
+    message: &'static str,
+) -> Result<(), StoreError> {
+    if directory_device_inode(directory)? != (expected.device, expected.inode) {
+        return Err(StoreError::new(code, message));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_private_directory(
+    directory: &File,
+    code: &'static str,
+    message: &'static str,
+) -> Result<(), StoreError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let metadata = directory.metadata().map_err(|_| state_error())?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(StoreError::new(code, message));
     }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn make_tree_writable(_path: &Path) -> Result<(), StoreError> {
+fn validate_private_directory(
+    _directory: &File,
+    _code: &'static str,
+    _message: &'static str,
+) -> Result<(), StoreError> {
+    Err(state_error())
+}
+
+#[cfg(not(unix))]
+fn directory_device_inode(_directory: &File) -> Result<(u64, u64), StoreError> {
+    Err(state_error())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn open_pinned_cleanup_root(_path: &Path) -> Result<File, StoreError> {
     Err(StoreError::new(
         "DEP_STORE_PLATFORM_UNSUPPORTED",
-        "durable dependency publication requires Unix file semantics",
+        "descriptor-pinned cleanup requires Linux file semantics",
     ))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn pinned_directory_path(_directory: &File) -> PathBuf {
+    PathBuf::new()
+}
+
+#[cfg(target_os = "linux")]
+fn open_cleanup_parent(
+    root_directory: &File,
+    root_path: &Path,
+    path: &Path,
+) -> Result<(nix::dir::Dir, std::ffi::CString), StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let relative = path.strip_prefix(root_path).map_err(|_| state_error())?;
+    let components = relative
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name),
+            _ => Err(state_error()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (name, parents) = components.split_last().ok_or_else(state_error)?;
+    let mut directory = root_directory.try_clone().map_err(|_| state_error())?;
+    for component in parents {
+        directory = File::from(
+            openat(
+                &directory,
+                *component,
+                OFlag::O_RDONLY
+                    | OFlag::O_DIRECTORY
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_CLOEXEC
+                    | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )
+            .map_err(|_| state_error())?,
+        );
+        let stat = nix::sys::stat::fstat(&directory).map_err(|_| state_error())?;
+        if !owned_cleanup_directory(&stat) {
+            return Err(state_error());
+        }
+    }
+    let parent = nix::dir::Dir::from_fd(OwnedFd::from(directory)).map_err(|_| state_error())?;
+    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| state_error())?;
+    Ok((parent, name))
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_cleanup_entry<Fd: std::os::fd::AsFd>(
+    parent: Fd,
+    name: &std::ffi::CStr,
+) -> Result<std::os::fd::OwnedFd, StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+
+    openat(
+        parent,
+        name,
+        OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| state_error())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_private_file_at<Fd: std::os::fd::AsFd>(
+    parent: Fd,
+    name: &std::ffi::CStr,
+    display_path: &Path,
+    expected_identity: Option<(u64, u64)>,
+) -> Result<(), StoreError> {
+    use nix::fcntl::{OFlag, open};
+    use nix::sys::stat::{Mode, SFlag, fchmod, fstat};
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+    use std::os::fd::AsRawFd as _;
+
+    run_cleanup_pre_inspection_swap_hook(display_path)?;
+    let inspection = inspect_cleanup_entry(&parent, name)?;
+    let inspected = fstat(&inspection).map_err(|_| state_error())?;
+    if expected_identity.is_some_and(|identity| (inspected.st_dev, inspected.st_ino) != identity) {
+        return Err(cleanup_exact_mismatch());
+    }
+    if !owned_cleanup_entry(&inspected, SFlag::S_IFREG) || inspected.st_nlink != 1 {
+        return Err(state_error());
+    }
+    run_cleanup_swap_hook(display_path)?;
+    let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+    let opened = open(
+        pinned_path.as_str(),
+        OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|_| state_error())?;
+    let opened_stat = fstat(&opened).map_err(|_| state_error())?;
+    if !same_cleanup_identity(&inspected, &opened_stat)
+        || !owned_cleanup_entry(&opened_stat, SFlag::S_IFREG)
+    {
+        return Err(state_error());
+    }
+    require_cleanup_identity(&parent, name, &inspected)?;
+    run_cleanup_final_swap_hook(display_path)?;
+    let quarantine = quarantine_cleanup_entry(&parent, name)?;
+    let quarantined = inspect_cleanup_entry(&parent, &quarantine)?;
+    let quarantined_stat = fstat(&quarantined).map_err(|_| state_error())?;
+    if !same_cleanup_identity(&inspected, &quarantined_stat) {
+        return Err(cleanup_selection_changed(expected_identity));
+    }
+    fchmod(&opened, Mode::from_bits_truncate(0o600)).map_err(|_| state_error())?;
+    require_cleanup_identity(&parent, &quarantine, &inspected)?;
+    run_cleanup_pre_unlink_swap_hook(&parent, &quarantine, display_path)?;
+    unlinkat(&parent, quarantine.as_c_str(), UnlinkatFlags::NoRemoveDir)
+        .map_err(|_| cleanup_selection_changed(expected_identity))?;
+    let removed = fstat(&opened).map_err(|_| cleanup_selection_changed(expected_identity))?;
+    if removed.st_nlink != 0 {
+        return Err(cleanup_selection_changed(expected_identity));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn remove_private_tree_at(
+    parent: &mut nix::dir::Dir,
+    name: &std::ffi::CStr,
+    display_path: &Path,
+    expected_identity: Option<(u64, u64)>,
+    depth: usize,
+    entries: &mut usize,
+) -> Result<(), StoreError> {
+    use nix::fcntl::OFlag;
+    use nix::sys::stat::{Mode, SFlag, fchmod, fstat};
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    if depth > MAX_CLEANUP_DEPTH || *entries > MAX_RETAINED_TREE_ENTRIES {
+        return Err(state_error());
+    }
+    run_cleanup_pre_inspection_swap_hook(display_path)?;
+    let inspection = inspect_cleanup_entry(&*parent, name)?;
+    let inspected = fstat(&inspection).map_err(|_| state_error())?;
+    if expected_identity.is_some_and(|identity| (inspected.st_dev, inspected.st_ino) != identity) {
+        return Err(cleanup_exact_mismatch());
+    }
+    if !owned_cleanup_entry(&inspected, SFlag::S_IFDIR) {
+        return Err(state_error());
+    }
+    run_cleanup_swap_hook(display_path)?;
+    let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+    let mut directory = nix::dir::Dir::open(
+        pinned_path.as_str(),
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|_| state_error())?;
+    let opened = fstat(&directory).map_err(|_| state_error())?;
+    if !same_cleanup_identity(&inspected, &opened) || !owned_cleanup_entry(&opened, SFlag::S_IFDIR)
+    {
+        return Err(state_error());
+    }
+    require_cleanup_identity(&*parent, name, &inspected)?;
+    run_cleanup_final_swap_hook(display_path)?;
+    let quarantine = quarantine_cleanup_entry(&*parent, name)?;
+    let quarantined = inspect_cleanup_entry(&*parent, &quarantine)?;
+    let quarantined_stat = fstat(&quarantined).map_err(|_| state_error())?;
+    if !same_cleanup_identity(&inspected, &quarantined_stat) {
+        return Err(cleanup_selection_changed(expected_identity));
+    }
+    fchmod(&directory, Mode::from_bits_truncate(0o700)).map_err(|_| state_error())?;
+    let names = collect_cleanup_names(&mut directory, entries, MAX_RETAINED_TREE_ENTRIES)?;
+    for child_name in names {
+        let child_path = display_path.join(std::ffi::OsStr::from_bytes(child_name.to_bytes()));
+        let child = inspect_cleanup_entry(&directory, &child_name)?;
+        let child_stat = fstat(&child).map_err(|_| state_error())?;
+        let child_type = nix::sys::stat::SFlag::from_bits_truncate(child_stat.st_mode);
+        if child_type.contains(SFlag::S_IFDIR) {
+            remove_private_tree_at(
+                &mut directory,
+                &child_name,
+                &child_path,
+                None,
+                depth + 1,
+                entries,
+            )?;
+        } else if child_type.contains(SFlag::S_IFREG) {
+            remove_private_file_at(&directory, &child_name, &child_path, None)?;
+        } else {
+            return Err(state_error());
+        }
+    }
+    require_cleanup_identity(&*parent, &quarantine, &inspected)?;
+    run_cleanup_pre_unlink_swap_hook(&*parent, &quarantine, display_path)?;
+    unlinkat(&*parent, quarantine.as_c_str(), UnlinkatFlags::RemoveDir)
+        .map_err(|_| cleanup_selection_changed(expected_identity))?;
+    let removed = fstat(&directory).map_err(|_| cleanup_selection_changed(expected_identity))?;
+    if removed.st_nlink != 0 {
+        return Err(cleanup_selection_changed(expected_identity));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn quarantine_cleanup_entry<Fd: std::os::fd::AsFd>(
+    parent: &Fd,
+    name: &std::ffi::CStr,
+) -> Result<std::ffi::CString, StoreError> {
+    use nix::errno::Errno;
+    use nix::fcntl::{RenameFlags, renameat2};
+
+    for _ in 0..16 {
+        let quarantine =
+            std::ffi::CString::new(format!(".mcloving-cleanup-{}", Uuid::new_v4().simple()))
+                .map_err(|_| state_error())?;
+        match renameat2(
+            parent,
+            name,
+            parent,
+            quarantine.as_c_str(),
+            RenameFlags::RENAME_NOREPLACE,
+        ) {
+            Ok(()) => return Ok(quarantine),
+            Err(Errno::EEXIST) => continue,
+            Err(_) => return Err(state_error()),
+        }
+    }
+    Err(state_error())
+}
+
+fn cleanup_selection_changed(expected_identity: Option<(u64, u64)>) -> StoreError {
+    if expected_identity.is_some() {
+        cleanup_exact_mismatch()
+    } else {
+        state_error()
+    }
+}
+
+fn cleanup_exact_mismatch() -> StoreError {
+    StoreError::new(
+        "DEP_STORE_PUBLICATION_AMBIGUOUS",
+        "cleanup link no longer names the exact retained inode",
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn collect_cleanup_names(
+    directory: &mut nix::dir::Dir,
+    entries: &mut usize,
+    max_entries: usize,
+) -> Result<Vec<std::ffi::CString>, StoreError> {
+    let mut names = Vec::new();
+    for entry in directory.iter() {
+        let entry = entry.map_err(|_| state_error())?;
+        if entry.file_name().to_bytes() == b"." || entry.file_name().to_bytes() == b".." {
+            continue;
+        }
+        if *entries >= max_entries {
+            return Err(state_error());
+        }
+        *entries += 1;
+        names.push(entry.file_name().to_owned());
+    }
+    Ok(names)
+}
+
+#[cfg(target_os = "linux")]
+fn require_cleanup_identity<Fd: std::os::fd::AsFd>(
+    parent: Fd,
+    name: &std::ffi::CStr,
+    expected: &nix::libc::stat,
+) -> Result<(), StoreError> {
+    let linked = inspect_cleanup_entry(parent, name)?;
+    let linked_stat = nix::sys::stat::fstat(&linked).map_err(|_| state_error())?;
+    if !same_cleanup_identity(expected, &linked_stat) {
+        return Err(state_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn owned_cleanup_entry(metadata: &nix::libc::stat, expected: nix::sys::stat::SFlag) -> bool {
+    nix::sys::stat::SFlag::from_bits_truncate(metadata.st_mode).contains(expected)
+        && metadata.st_uid == nix::unistd::Uid::effective().as_raw()
+}
+
+#[cfg(target_os = "linux")]
+fn owned_cleanup_directory(metadata: &nix::libc::stat) -> bool {
+    owned_cleanup_entry(metadata, nix::sys::stat::SFlag::S_IFDIR)
+}
+
+#[cfg(target_os = "linux")]
+fn same_cleanup_identity(left: &nix::libc::stat, right: &nix::libc::stat) -> bool {
+    left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
 fn current_unix_ms() -> Result<u64, StoreError> {
@@ -2002,7 +3966,7 @@ fn state_error() -> StoreError {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
     use tempfile::TempDir;
 
@@ -2194,12 +4158,19 @@ mod tests {
                 repository_ids: request.repository_ids.clone(),
             };
             let fetched = vec![FetchedArtifact {
-                node_id: node.node_id,
-                transient_path: transient,
+                node_id: node.node_id.clone(),
+                transient_path: PathBuf::from(resolution_id.to_string())
+                    .join(format!("{}.part", node.node_id)),
                 declared_size: body.len() as u64,
                 sha256: artifact_sha256,
                 attestation_sha256: "8".repeat(64),
                 publication_generation: config.generation,
+                transient_root_device: std::fs::metadata(&resolution_transport)
+                    .expect("transport resolution metadata")
+                    .dev(),
+                transient_root_inode: std::fs::metadata(&resolution_transport)
+                    .expect("transport resolution metadata")
+                    .ino(),
             }];
             request.expected_graph_sha256 = plan.graph_sha256.clone();
             Self {
@@ -2218,14 +4189,72 @@ mod tests {
         }
 
         fn store_with_markers(&self, markers: Vec<Vec<u8>>) -> ResolutionStore {
-            ResolutionStore::open_inner(&self.config, &self.receipt_key, markers)
+            ResolutionStore::open_inner(&self.config, &self.receipt_key, markers, None)
                 .expect("resolution store")
         }
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn publication_parent_delegates_the_exact_locked_file() {
+    fn publication_artifacts_relink_cannot_redirect_writes_or_cleanup() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().expect("publication root");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private publication root");
+        let bundles = root.path().join("bundles");
+        std::fs::create_dir(&bundles).expect("bundles root");
+        std::fs::set_permissions(&bundles, std::fs::Permissions::from_mode(0o700))
+            .expect("private bundles root");
+        let bundles_directory = open_pinned_cleanup_root(&bundles).expect("pinned bundles root");
+        let stage_name = ".contained.stage";
+        let stage_link = bundles.join(stage_name);
+        create_directory(&stage_link, 0o700).expect("stage directory");
+        let stage = pin_private_directory_at(&bundles_directory, stage_name, 0o700, None)
+            .expect("pinned stage");
+        let artifacts_link = stage.path.join("artifacts");
+        create_directory(&artifacts_link, 0o700).expect("artifacts directory");
+        let artifacts = pin_private_directory_at(
+            &stage.directory,
+            "artifacts",
+            0o700,
+            Some((stage.device, 0)),
+        )
+        .expect("pinned artifacts");
+
+        let held = stage.path.join("held-artifacts");
+        std::fs::rename(&artifacts_link, &held).expect("unlink pinned artifacts");
+        let outside = TempDir::new().expect("outside directory");
+        symlink(outside.path(), &artifacts_link).expect("replacement artifacts symlink");
+        std::fs::write(artifacts.path.join("digest"), b"retained bytes")
+            .expect("write through pinned artifacts descriptor");
+        seal_directory(&artifacts.directory, 0o500).expect("seal pinned artifacts");
+
+        assert_eq!(
+            std::fs::read(held.join("digest")).expect("retained artifact"),
+            b"retained bytes"
+        );
+        assert!(!outside.path().join("digest").exists());
+        assert!(
+            revalidate_private_directory_link(&stage.directory, "artifacts", &artifacts, 0o500)
+                .is_err()
+        );
+        assert!(
+            remove_private_tree_exact(
+                &bundles_directory,
+                &bundles,
+                &stage_link,
+                stage.device,
+                stage.inode,
+            )
+            .is_err()
+        );
+        assert!(outside.path().exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publication_parent_delegates_the_exact_locked_root() {
         use std::os::unix::fs::MetadataExt as _;
 
         let fixture = Fixture::new();
@@ -2234,13 +4263,198 @@ mod tests {
             .publication_lock_file()
             .expect("delegated parent lock");
         let expected =
-            std::fs::metadata(PathBuf::from(&fixture.config.output_root).join(LOCK_FILE))
-                .expect("output lock metadata");
+            std::fs::metadata(&fixture.config.output_root).expect("output root metadata");
         let actual = delegated.metadata().expect("delegated lock metadata");
         assert_eq!(
             (actual.dev(), actual.ino()),
             (expected.dev(), expected.ino())
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replacing_the_lock_sentinel_cannot_split_root_serialization() {
+        let fixture = Fixture::new();
+        let _store = fixture.store();
+        let root = PathBuf::from(&fixture.config.output_root);
+        let sentinel = root.join(LOCK_FILE);
+        std::fs::rename(&sentinel, root.join("detached-lock-sentinel"))
+            .expect("detach lock sentinel");
+        write_new_file(&sentinel, b"").expect("replacement lock sentinel");
+        set_mode_and_sync(&sentinel, 0o600).expect("seal replacement sentinel");
+        let root_directory = open_pinned_cleanup_root(&root).expect("pinned output root");
+
+        let error = acquire_output_lock(&root_directory, &root)
+            .expect_err("the output root inode remains locked");
+        assert_eq!(error.code, "DEP_STORE_ROOT_LOCKED");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn worker_output_identity_rejects_a_private_replacement_root() {
+        let root = TempDir::new().expect("worker root parent");
+        let configured = root.path().join("output");
+        std::fs::create_dir(&configured).expect("output root");
+        std::fs::set_permissions(&configured, std::fs::Permissions::from_mode(0o700))
+            .expect("private output root");
+        let parent_root = open_pinned_cleanup_root(&configured).expect("parent pinned root");
+        let (device, inode) = directory_device_inode(&parent_root).expect("parent identity");
+        let expected = crate::transport::TransportRootIdentity { device, inode };
+
+        let held = root.path().join("held-output");
+        std::fs::rename(&configured, &held).expect("move parent output root");
+        std::fs::create_dir(&configured).expect("replacement output root");
+        std::fs::set_permissions(&configured, std::fs::Permissions::from_mode(0o700))
+            .expect("private replacement root");
+        let replacement = open_pinned_cleanup_root(&configured).expect("replacement pinned root");
+        let error = require_directory_identity(
+            &replacement,
+            expected,
+            "DEP_STORE_WORKER_PARENT_ROOT_INVALID",
+            "publication worker output root does not match the pinned parent root",
+        )
+        .expect_err("replacement worker root");
+        assert_eq!(error.code, "DEP_STORE_WORKER_PARENT_ROOT_INVALID");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fixed_store_directory_relink_is_rejected_after_pinning() {
+        let root = TempDir::new().expect("store root");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private store root");
+        let claims = root.path().join("claims");
+        std::fs::create_dir(&claims).expect("claims directory");
+        std::fs::set_permissions(&claims, std::fs::Permissions::from_mode(0o700))
+            .expect("private claims directory");
+        let root_directory = open_pinned_cleanup_root(root.path()).expect("pinned store root");
+        let pinned = open_store_directory(&root_directory, "claims").expect("pinned claims");
+
+        std::fs::rename(&claims, root.path().join("held-claims")).expect("move pinned claims");
+        std::fs::create_dir(&claims).expect("replacement claims");
+        std::fs::set_permissions(&claims, std::fs::Permissions::from_mode(0o700))
+            .expect("private replacement claims");
+        let error = revalidate_store_directory_link(&root_directory, "claims", &pinned)
+            .expect_err("relinked claims directory");
+        assert_eq!(error.code, "DEP_STORE_FIXED_DIRECTORY_AMBIGUOUS");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn output_store_remains_bound_to_the_root_that_holds_its_lock() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let configured = PathBuf::from(&fixture.config.output_root);
+        let pinned = fixture._root.path().join("output-pinned");
+        std::fs::rename(&configured, &pinned).expect("move locked output root");
+        std::fs::create_dir(&configured).expect("replacement output root");
+        std::fs::set_permissions(&configured, std::fs::Permissions::from_mode(0o700))
+            .expect("replacement output mode");
+
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("claim through pinned store")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        assert!(
+            pinned
+                .join(format!(
+                    "claims/{claim_id}.json",
+                    claim_id = claim.resolution_id
+                ))
+                .exists()
+        );
+        assert!(
+            !configured
+                .join(format!(
+                    "claims/{claim_id}.json",
+                    claim_id = claim.resolution_id
+                ))
+                .exists(),
+            "replacement pathname must not redirect locked store writes"
+        );
+        let delegated = store
+            .publication_lock_file()
+            .expect("delegated output lock");
+        let locked = std::fs::metadata(&pinned).expect("locked root inode");
+        let delegated = delegated.metadata().expect("delegated inode");
+        assert_eq!(
+            (delegated.dev(), delegated.ino()),
+            (locked.dev(), locked.ino())
+        );
+        store.release_incomplete_claim(&claim);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn store_rejects_a_transport_root_replaced_after_lease_identity_capture() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let fixture = Fixture::new();
+        let configured = PathBuf::from(&fixture.config.transport_root);
+        let metadata = std::fs::metadata(&configured).expect("leased transport root");
+        let expected = crate::transport::TransportRootIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let leased = fixture._root.path().join("transport-leased");
+        std::fs::rename(&configured, &leased).expect("move leased transport root");
+        std::fs::create_dir(&configured).expect("replacement transport root");
+        std::fs::set_permissions(&configured, std::fs::Permissions::from_mode(0o700))
+            .expect("replacement transport mode");
+
+        let error = match ResolutionStore::open_inner(
+            &fixture.config,
+            &fixture.receipt_key,
+            vec![fixture.receipt_key.clone()],
+            Some(expected),
+        ) {
+            Ok(_) => panic!("replacement transport root was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "DEP_STORE_TRANSIENT_PATH_MISMATCH");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn store_construction_rechecks_private_output_and_transport_modes() {
+        let output_fixture = Fixture::new();
+        std::fs::set_permissions(
+            &output_fixture.config.output_root,
+            std::fs::Permissions::from_mode(0o750),
+        )
+        .expect("broaden output root mode");
+        let output_error = match ResolutionStore::open_inner(
+            &output_fixture.config,
+            &output_fixture.receipt_key,
+            vec![output_fixture.receipt_key.clone()],
+            None,
+        ) {
+            Ok(_) => panic!("broadened output root was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(output_error.code, "DEP_STORE_ROOT_POLICY_DENIED");
+
+        let transport_fixture = Fixture::new();
+        std::fs::set_permissions(
+            &transport_fixture.config.transport_root,
+            std::fs::Permissions::from_mode(0o750),
+        )
+        .expect("broaden transport root mode");
+        let transport_error = match ResolutionStore::open_inner(
+            &transport_fixture.config,
+            &transport_fixture.receipt_key,
+            vec![transport_fixture.receipt_key.clone()],
+            None,
+        ) {
+            Ok(_) => panic!("broadened transport root was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(transport_error.code, "DEP_STORE_TRANSIENT_PATH_MISMATCH");
     }
 
     #[cfg(target_os = "linux")]
@@ -2259,6 +4473,7 @@ mod tests {
             &fixture.config,
             &fixture.receipt_key,
             vec![fixture.receipt_key.clone()],
+            None,
         ) {
             Ok(_) => panic!("non-regular output lock was accepted"),
             Err(error) => error,
@@ -2276,26 +4491,477 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn fifo_and_device_state_are_rejected_before_data_open() {
+    fn retained_state_workflows_reject_special_files_before_target_data_open() {
         use nix::sys::stat::Mode;
         use nix::unistd::mkfifo;
         use std::time::Duration;
 
-        let root = TempDir::new().expect("state inspection root");
-        let fifo = root.path().join("claim.json");
-        mkfifo(&fifo, Mode::S_IRUSR).expect("state fifo");
+        fn clear_trace() {
+            VERIFIED_FILE_OPEN_TRACE.with(|trace| trace.borrow_mut().clear());
+        }
 
-        let started = Instant::now();
-        let error = read_bounded_file(&fifo, MAX_STATE_BYTES, 0o400)
-            .expect_err("non-regular state must fail closed");
+        fn target_events(path: &Path) -> Vec<&'static str> {
+            VERIFIED_FILE_OPEN_TRACE.with(|trace| {
+                trace
+                    .borrow()
+                    .iter()
+                    .filter_map(|(opened, event)| (opened == path).then_some(*event))
+                    .collect()
+            })
+        }
+
+        fn published_fixture() -> (Fixture, ResolutionStore, ResolutionClaim) {
+            let fixture = Fixture::new();
+            let store = fixture.store();
+            let claim = match store
+                .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+                .expect("new claim")
+            {
+                ClaimOutcome::New(claim) => claim,
+                other => panic!("unexpected claim outcome: {other:?}"),
+            };
+            store
+                .publish(
+                    &claim,
+                    fixture.request.clone(),
+                    &fixture.admitted,
+                    fixture.plan.clone(),
+                    &fixture.fetched,
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .expect("published receipt");
+            (fixture, store, claim)
+        }
+
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim_path = store
+            .claim_path(Uuid::parse_str(&fixture.request.resolution_id).expect("resolution UUID"));
+        mkfifo(&claim_path, Mode::S_IRUSR | Mode::S_IWUSR).expect("claim fifo");
+        clear_trace();
+        let error = store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect_err("claim workflow must reject FIFO state");
         assert_eq!(error.code, "DEP_STORE_FILE_POLICY_DENIED");
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(target_events(&claim_path), ["path-inspected"]);
 
+        let (fixture, store, claim) = published_fixture();
+        let receipt_path = store.receipt_path(claim.resolution_id);
+        std::fs::remove_file(&receipt_path).expect("remove receipt fixture");
+        mkfifo(&receipt_path, Mode::S_IRUSR).expect("receipt fifo");
+        clear_trace();
+        let error = store
+            .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
+            .expect_err("receipt workflow must reject FIFO state");
+        assert_eq!(error.code, "DEP_STORE_FILE_POLICY_DENIED");
+        assert_eq!(target_events(&receipt_path), ["path-inspected"]);
+
+        let (fixture, store, claim) = published_fixture();
+        let completion_path = store.completion_path(claim.resolution_id);
+        std::fs::remove_file(&completion_path).expect("remove completion fixture");
+        mkfifo(&completion_path, Mode::S_IRUSR).expect("completion fifo");
+        clear_trace();
+        let error = store
+            .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
+            .expect_err("completion workflow must reject FIFO state");
+        assert_eq!(error.code, "DEP_STORE_FILE_POLICY_DENIED");
+        assert_eq!(target_events(&completion_path), ["path-inspected"]);
+
+        let (fixture, store, claim) = published_fixture();
+        let ambiguity_path = store.ambiguity_path(claim.resolution_id);
+        mkfifo(&ambiguity_path, Mode::S_IRUSR | Mode::S_IWUSR).expect("ambiguity fifo");
+        clear_trace();
+        let error = store
+            .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
+            .expect_err("ambiguity workflow must reject blocked replay");
+        assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_CLAIM");
+        assert!(target_events(&ambiguity_path).is_empty());
+
+        clear_trace();
         let started = Instant::now();
         let error = read_bounded_file(Path::new("/dev/null"), MAX_STATE_BYTES, 0o666)
             .expect_err("device state must fail closed");
         assert_eq!(error.code, "DEP_STORE_FILE_POLICY_DENIED");
+        assert_eq!(target_events(Path::new("/dev/null")), ["path-inspected"]);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_chmods_and_traverses_only_pinned_entries_after_path_swaps() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().expect("cleanup swap root");
+        let private = root.path().join("private");
+        std::fs::create_dir(&private).expect("private cleanup parent");
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+            .expect("private cleanup parent mode");
+        let root_directory = open_pinned_cleanup_root(root.path()).expect("pinned cleanup root");
+
+        let outside_file = root.path().join("outside-file");
+        std::fs::write(&outside_file, b"outside").expect("outside file");
+        std::fs::set_permissions(&outside_file, std::fs::Permissions::from_mode(0o400))
+            .expect("outside file mode");
+        let target_file = private.join("claim.json");
+        std::fs::write(&target_file, b"claim").expect("cleanup target file");
+        std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o400))
+            .expect("cleanup target file mode");
+        let file_backup = private.join("claim.backup");
+        CLEANUP_SWAP_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((
+                target_file.clone(),
+                outside_file.clone(),
+                file_backup.clone(),
+            ));
+        });
+        remove_private_file(&root_directory, root.path(), &target_file)
+            .expect_err("swapped cleanup file identity");
+        assert_eq!(
+            std::fs::metadata(&outside_file)
+                .expect("outside file metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o400,
+            "cleanup must not chmod a symlink replacement target"
+        );
+        assert!(file_backup.exists());
+        assert!(
+            std::fs::symlink_metadata(&target_file)
+                .expect("swapped file entry")
+                .file_type()
+                .is_symlink()
+        );
+
+        let outside_directory = root.path().join("outside-directory");
+        std::fs::create_dir(&outside_directory).expect("outside directory");
+        std::fs::write(outside_directory.join("sentinel"), b"outside").expect("outside sentinel");
+        std::fs::set_permissions(&outside_directory, std::fs::Permissions::from_mode(0o500))
+            .expect("outside directory mode");
+        let target_tree = private.join("bundle");
+        std::fs::create_dir(&target_tree).expect("cleanup target tree");
+        std::fs::write(target_tree.join("artifact"), b"artifact").expect("cleanup target artifact");
+        std::fs::set_permissions(
+            target_tree.join("artifact"),
+            std::fs::Permissions::from_mode(0o400),
+        )
+        .expect("cleanup target artifact mode");
+        std::fs::set_permissions(&target_tree, std::fs::Permissions::from_mode(0o500))
+            .expect("cleanup target tree mode");
+        let tree_backup = private.join("bundle.backup");
+        CLEANUP_SWAP_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((
+                target_tree.clone(),
+                outside_directory.clone(),
+                tree_backup.clone(),
+            ));
+        });
+        remove_private_tree(&root_directory, root.path(), &target_tree)
+            .expect_err("swapped cleanup tree identity");
+        assert_eq!(
+            std::fs::metadata(&outside_directory)
+                .expect("outside directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o500,
+            "cleanup must not chmod a symlink replacement directory"
+        );
+        assert!(outside_directory.join("sentinel").exists());
+        assert!(tree_backup.exists());
+        assert!(
+            std::fs::symlink_metadata(&target_tree)
+                .expect("swapped tree entry")
+                .file_type()
+                .is_symlink()
+        );
+        std::fs::set_permissions(&outside_directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore outside directory mode for fixture cleanup");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exact_cleanup_never_adopts_a_replacement_at_final_selection() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let root = TempDir::new().expect("exact cleanup root");
+        let private = root.path().join("private");
+        std::fs::create_dir(&private).expect("private cleanup parent");
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+            .expect("private cleanup parent mode");
+        let root_directory = open_pinned_cleanup_root(root.path()).expect("pinned cleanup root");
+
+        let target_file = private.join("receipt.json");
+        std::fs::write(&target_file, b"receipt").expect("exact target file");
+        std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o400))
+            .expect("exact target file mode");
+        let file_identity = std::fs::metadata(&target_file).expect("target file metadata");
+        let outside_file = root.path().join("outside-file");
+        std::fs::write(&outside_file, b"outside").expect("outside file");
+        std::fs::set_permissions(&outside_file, std::fs::Permissions::from_mode(0o400))
+            .expect("outside file mode");
+        let file_backup = private.join("receipt.backup");
+        CLEANUP_PRE_INSPECTION_SWAP_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((
+                target_file.clone(),
+                outside_file.clone(),
+                file_backup.clone(),
+            ));
+        });
+        let error = remove_private_file_exact(
+            &root_directory,
+            root.path(),
+            &target_file,
+            file_identity.dev(),
+            file_identity.ino(),
+        )
+        .expect_err("exact file replacement");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_AMBIGUOUS");
+        assert_eq!(
+            std::fs::read(&outside_file).expect("outside file"),
+            b"outside"
+        );
+        assert!(file_backup.exists());
+
+        let target_tree = private.join("bundle");
+        std::fs::create_dir(&target_tree).expect("exact target tree");
+        std::fs::set_permissions(&target_tree, std::fs::Permissions::from_mode(0o500))
+            .expect("exact target tree mode");
+        let tree_identity = std::fs::metadata(&target_tree).expect("target tree metadata");
+        let outside_tree = root.path().join("outside-tree");
+        std::fs::create_dir(&outside_tree).expect("outside tree");
+        std::fs::write(outside_tree.join("sentinel"), b"outside").expect("outside sentinel");
+        std::fs::set_permissions(&outside_tree, std::fs::Permissions::from_mode(0o500))
+            .expect("outside tree mode");
+        let tree_backup = private.join("bundle.backup");
+        CLEANUP_PRE_INSPECTION_SWAP_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((
+                target_tree.clone(),
+                outside_tree.clone(),
+                tree_backup.clone(),
+            ));
+        });
+        let error = remove_private_tree_exact(
+            &root_directory,
+            root.path(),
+            &target_tree,
+            tree_identity.dev(),
+            tree_identity.ino(),
+        )
+        .expect_err("exact tree replacement");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_AMBIGUOUS");
+        assert!(outside_tree.join("sentinel").exists());
+        assert!(tree_backup.exists());
+        std::fs::set_permissions(&outside_tree, std::fs::Permissions::from_mode(0o700))
+            .expect("restore outside tree mode");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_quarantines_the_final_selected_name_before_deletion() {
+        let root = TempDir::new().expect("quarantine cleanup root");
+        let private = root.path().join("private");
+        std::fs::create_dir(&private).expect("private cleanup parent");
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+            .expect("private cleanup parent mode");
+        let root_directory = open_pinned_cleanup_root(root.path()).expect("pinned cleanup root");
+
+        let target_file = private.join("receipt.json");
+        std::fs::write(&target_file, b"receipt").expect("exact target file");
+        std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o400))
+            .expect("exact target file mode");
+        let file_identity = std::fs::metadata(&target_file).expect("target file metadata");
+        let outside_file = root.path().join("outside-file-final");
+        std::fs::write(&outside_file, b"outside").expect("outside file");
+        let file_backup = private.join("receipt.final-backup");
+        CLEANUP_FINAL_SWAP_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((
+                target_file.clone(),
+                outside_file.clone(),
+                file_backup.clone(),
+            ));
+        });
+        let error = remove_private_file_exact(
+            &root_directory,
+            root.path(),
+            &target_file,
+            file_identity.dev(),
+            file_identity.ino(),
+        )
+        .expect_err("final file exchange");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_AMBIGUOUS");
+        assert_eq!(
+            std::fs::read(&outside_file).expect("outside file"),
+            b"outside"
+        );
+        assert!(file_backup.exists());
+
+        let target_tree = private.join("bundle");
+        std::fs::create_dir(&target_tree).expect("exact target tree");
+        std::fs::set_permissions(&target_tree, std::fs::Permissions::from_mode(0o500))
+            .expect("exact target tree mode");
+        let tree_identity = std::fs::metadata(&target_tree).expect("target tree metadata");
+        let outside_tree = root.path().join("outside-tree-final");
+        std::fs::create_dir(&outside_tree).expect("outside tree");
+        std::fs::write(outside_tree.join("sentinel"), b"outside").expect("outside sentinel");
+        let tree_backup = private.join("bundle.final-backup");
+        CLEANUP_FINAL_SWAP_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((
+                target_tree.clone(),
+                outside_tree.clone(),
+                tree_backup.clone(),
+            ));
+        });
+        let error = remove_private_tree_exact(
+            &root_directory,
+            root.path(),
+            &target_tree,
+            tree_identity.dev(),
+            tree_identity.ino(),
+        )
+        .expect_err("final tree exchange");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_AMBIGUOUS");
+        assert!(outside_tree.join("sentinel").exists());
+        assert!(tree_backup.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_detects_quarantine_replacement_before_unlink() {
+        let root = TempDir::new().expect("pre-unlink cleanup root");
+        let private = root.path().join("private");
+        std::fs::create_dir(&private).expect("private cleanup parent");
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+            .expect("private cleanup parent mode");
+        let root_directory = open_pinned_cleanup_root(root.path()).expect("pinned cleanup root");
+
+        let target_file = private.join("receipt.json");
+        std::fs::write(&target_file, b"receipt").expect("exact target file");
+        std::fs::set_permissions(&target_file, std::fs::Permissions::from_mode(0o400))
+            .expect("exact target file mode");
+        let file_identity = std::fs::metadata(&target_file).expect("target file metadata");
+        let outside_file = root.path().join("outside-file-pre-unlink");
+        std::fs::write(&outside_file, b"outside").expect("outside file");
+        let file_backup = private.join("receipt.pre-unlink-backup");
+        CLEANUP_PRE_UNLINK_SWAP_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((
+                target_file.clone(),
+                outside_file.clone(),
+                file_backup.clone(),
+            ));
+        });
+        let error = remove_private_file_exact(
+            &root_directory,
+            root.path(),
+            &target_file,
+            file_identity.dev(),
+            file_identity.ino(),
+        )
+        .expect_err("pre-unlink file exchange");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_AMBIGUOUS");
+        assert_eq!(
+            std::fs::read(&outside_file).expect("outside file survives"),
+            b"outside"
+        );
+        assert_eq!(
+            std::fs::read(&file_backup).expect("exact file survives"),
+            b"receipt"
+        );
+
+        let target_tree = private.join("bundle");
+        std::fs::create_dir(&target_tree).expect("exact target tree");
+        std::fs::set_permissions(&target_tree, std::fs::Permissions::from_mode(0o500))
+            .expect("exact target tree mode");
+        let tree_identity = std::fs::metadata(&target_tree).expect("target tree metadata");
+        let outside_tree = root.path().join("outside-tree-pre-unlink");
+        std::fs::create_dir(&outside_tree).expect("outside tree");
+        std::fs::write(outside_tree.join("sentinel"), b"outside").expect("outside sentinel");
+        let tree_backup = private.join("bundle.pre-unlink-backup");
+        CLEANUP_PRE_UNLINK_SWAP_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((
+                target_tree.clone(),
+                outside_tree.clone(),
+                tree_backup.clone(),
+            ));
+        });
+        let error = remove_private_tree_exact(
+            &root_directory,
+            root.path(),
+            &target_tree,
+            tree_identity.dev(),
+            tree_identity.ino(),
+        )
+        .expect_err("pre-unlink tree exchange");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_AMBIGUOUS");
+        assert!(outside_tree.join("sentinel").exists());
+        assert!(tree_backup.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_stays_beneath_the_pinned_root_after_root_path_replacement() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let outer = TempDir::new().expect("cleanup root replacement fixture");
+        let store_root = outer.path().join("store");
+        let claims = store_root.join("claims");
+        std::fs::create_dir_all(&claims).expect("store claims");
+        let trusted_claim = claims.join("claim.json");
+        std::fs::write(&trusted_claim, b"trusted").expect("trusted claim");
+        std::fs::set_permissions(&trusted_claim, std::fs::Permissions::from_mode(0o400))
+            .expect("trusted claim mode");
+        let root_directory =
+            open_pinned_cleanup_root(&store_root).expect("pinned trusted store root");
+
+        let outside_root = outer.path().join("outside");
+        let outside_claims = outside_root.join("claims");
+        std::fs::create_dir_all(&outside_claims).expect("outside claims");
+        let outside_claim = outside_claims.join("claim.json");
+        std::fs::write(&outside_claim, b"outside").expect("outside claim");
+        std::fs::set_permissions(&outside_claim, std::fs::Permissions::from_mode(0o400))
+            .expect("outside claim mode");
+
+        let pinned_backup = outer.path().join("store-pinned");
+        std::fs::rename(&store_root, &pinned_backup).expect("move trusted store root");
+        symlink(&outside_root, &store_root).expect("replace store pathname");
+        remove_private_file(&root_directory, &store_root, &trusted_claim)
+            .expect("cleanup through pinned root");
+
+        assert!(!pinned_backup.join("claims/claim.json").exists());
+        assert_eq!(
+            std::fs::read(&outside_claim).expect("outside claim"),
+            b"outside"
+        );
+        assert_eq!(
+            std::fs::metadata(&outside_claim)
+                .expect("outside claim metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o400
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_name_collection_enforces_the_cap_during_iteration() {
+        use nix::fcntl::OFlag;
+        use nix::sys::stat::Mode;
+
+        let root = TempDir::new().expect("cleanup entry cap fixture");
+        for name in ["one", "two", "three"] {
+            std::fs::write(root.path().join(name), name).expect("cleanup cap entry");
+        }
+        let mut directory = nix::dir::Dir::open(
+            root.path(),
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("cleanup cap directory");
+        let mut entries = 1_usize;
+        collect_cleanup_names(&mut directory, &mut entries, 3)
+            .expect_err("fourth admitted entry must fail during iteration");
+        assert_eq!(entries, 3);
     }
 
     #[test]
@@ -2338,6 +5004,82 @@ mod tests {
                 .expect("stored receipt"),
             Some(receipt)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replay_admission_bounds_lock_contention_and_serializes_blocker_retry() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + Duration::from_secs(60),
+            )
+            .expect("published receipt");
+
+        let loaded = store
+            .load_receipt(claim.resolution_id)
+            .expect("load completed receipt")
+            .expect("completed receipt");
+        REPLAY_NAMESPACE_TRACE
+            .lock()
+            .expect("replay trace")
+            .retain(|(resolution_id, _)| *resolution_id != claim.resolution_id);
+
+        let receipt_path = store.receipt_path(claim.resolution_id);
+        let (lock_tx, lock_rx) = mpsc::channel();
+        *RECEIPT_LOCK_TEST_HOOK.lock().expect("receipt-lock hook") = Some((receipt_path, lock_tx));
+        let writer_store = store.clone();
+        let writer_claim = claim.clone();
+        let started = Instant::now();
+        let writer = std::thread::spawn(move || {
+            writer_store
+                .ensure_exact_claim(&writer_claim)
+                .expect_err("contended blocker lock must fail closed")
+        });
+        assert_eq!(lock_rx.recv().expect("writer lock attempt"), "attempt");
+        let contention = writer.join().expect("contended blocker writer");
+        assert_eq!(contention.code, "DEP_STORE_STATE_UNAVAILABLE");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(
+            !store.claim_path(claim.resolution_id).exists(),
+            "contended blocker writer must fail before linking state"
+        );
+
+        let replay = store
+            .admit_loaded_receipt(loaded, &fixture.admitted.request_sha256)
+            .expect("serialized replay admission");
+        assert_eq!(replay.resolution_id, claim.resolution_id);
+        store
+            .ensure_exact_claim(&claim)
+            .expect("blocker retry after replay admission");
+        assert_eq!(lock_rx.recv().expect("retry lock attempt"), "attempt");
+        assert_eq!(lock_rx.recv().expect("writer lock acquisition"), "acquired");
+        assert!(store.claim_path(claim.resolution_id).exists());
+        let events = REPLAY_NAMESPACE_TRACE
+            .lock()
+            .expect("replay trace")
+            .iter()
+            .filter_map(|(resolution_id, event)| {
+                (*resolution_id == claim.resolution_id).then_some(*event)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(events, ["replay-admitted", "blocker-created"]);
     }
 
     #[test]
@@ -2396,7 +5138,7 @@ mod tests {
             .expect_err("request secret marker");
         assert_eq!(error.code, "DEP_STORE_SECRET_MARKER_DETECTED");
         assert!(
-            std::fs::read_dir(store.inner.root.join("claims"))
+            std::fs::read_dir(&store.inner.claims_root)
                 .expect("claims directory")
                 .next()
                 .is_none(),
@@ -2448,6 +5190,83 @@ mod tests {
         assert!(!guard.admit(second));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replay_revalidates_exact_receipt_and_completion_links_after_tree_verification() {
+        fn loaded_fixture() -> (Fixture, ResolutionStore, ResolutionClaim, LoadedReceipt) {
+            let fixture = Fixture::new();
+            let store = fixture.store();
+            let claim = match store
+                .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+                .expect("new claim")
+            {
+                ClaimOutcome::New(claim) => claim,
+                other => panic!("unexpected claim outcome: {other:?}"),
+            };
+            store
+                .publish(
+                    &claim,
+                    fixture.request.clone(),
+                    &fixture.admitted,
+                    fixture.plan.clone(),
+                    &fixture.fetched,
+                    Instant::now() + std::time::Duration::from_secs(60),
+                )
+                .expect("published receipt");
+            let loaded = store
+                .load_receipt(claim.resolution_id)
+                .expect("load receipt pair")
+                .expect("completed receipt pair");
+            (fixture, store, claim, loaded)
+        }
+
+        let (fixture, store, claim, loaded) = loaded_fixture();
+        let completion_path = store.completion_path(claim.resolution_id);
+        let completion_bytes = std::fs::read(&completion_path).expect("completion bytes");
+        std::fs::remove_file(&completion_path).expect("unlink completion");
+        write_new_file(&completion_path, &completion_bytes).expect("replacement completion");
+        set_mode_and_sync(&completion_path, 0o400).expect("seal replacement completion");
+        let completion_error = store
+            .admit_loaded_receipt(loaded, &fixture.admitted.request_sha256)
+            .expect_err("replacement completion link must fail replay");
+        assert_eq!(completion_error.code, "DEP_STORE_AMBIGUOUS_COMPLETION");
+
+        let (fixture, store, claim, loaded) = loaded_fixture();
+        let receipt_path = store.receipt_path(claim.resolution_id);
+        let receipt_bytes = std::fs::read(&receipt_path).expect("receipt bytes");
+        std::fs::remove_file(&receipt_path).expect("unlink locked receipt");
+        write_new_file(&receipt_path, &receipt_bytes).expect("replacement receipt");
+        set_mode_and_sync(&receipt_path, 0o400).expect("seal replacement receipt");
+        let receipt_error = store
+            .admit_loaded_receipt(loaded, &fixture.admitted.request_sha256)
+            .expect_err("replacement receipt link must fail replay");
+        assert_eq!(receipt_error.code, "DEP_STORE_AMBIGUOUS_COMPLETION");
+
+        let (fixture, store, claim, loaded) = loaded_fixture();
+        let completion_path = store.completion_path(claim.resolution_id);
+        let mut completion_bytes = std::fs::read(&completion_path).expect("completion bytes");
+        let digest_prefix = b"\"receipt_hmac_sha256\":\"";
+        let digest_start = completion_bytes
+            .windows(digest_prefix.len())
+            .position(|window| window == digest_prefix)
+            .map(|index| index + digest_prefix.len())
+            .expect("completion digest field");
+        completion_bytes[digest_start] = if completion_bytes[digest_start] == b'0' {
+            b'1'
+        } else {
+            b'0'
+        };
+        std::fs::set_permissions(&completion_path, std::fs::Permissions::from_mode(0o600))
+            .expect("make completion writable");
+        std::fs::write(&completion_path, completion_bytes).expect("mutate completion in place");
+        std::fs::set_permissions(&completion_path, std::fs::Permissions::from_mode(0o400))
+            .expect("reseal mutated completion");
+        let mutation_error = store
+            .admit_loaded_receipt(loaded, &fixture.admitted.request_sha256)
+            .expect_err("in-place completion mutation must fail replay");
+        assert_eq!(mutation_error.code, "DEP_STORE_AMBIGUOUS_COMPLETION");
+    }
+
     #[test]
     fn claim_precedes_completion_and_completion_marker_is_required() {
         let fixture = Fixture::new();
@@ -2476,12 +5295,21 @@ mod tests {
             .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
             .expect_err("claim must dominate completion");
         assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_CLAIM");
-        remove_private_file(&store.claim_path(claim.resolution_id)).expect("remove test claim");
-        sync_directory(&store.inner.root.join("claims")).expect("sync test claim removal");
+        remove_private_file(
+            &store.inner.claims_directory,
+            &store.inner.claims_root,
+            &store.claim_path(claim.resolution_id),
+        )
+        .expect("remove test claim");
+        sync_directory(&store.inner.claims_root).expect("sync test claim removal");
 
-        remove_private_file(&store.completion_path(claim.resolution_id))
-            .expect("remove completion record");
-        sync_directory(&store.inner.root.join("completions")).expect("sync completion removal");
+        remove_private_file(
+            &store.inner.completions_directory,
+            &store.inner.completions_root,
+            &store.completion_path(claim.resolution_id),
+        )
+        .expect("remove completion record");
+        sync_directory(&store.inner.completions_root).expect("sync completion removal");
         let error = store
             .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
             .expect_err("receipt without completion");
@@ -2667,14 +5495,137 @@ mod tests {
         assert!(!bundle_path.exists());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn receipt_withdrawal_refuses_a_relinked_private_file() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let receipt = store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("published receipt");
+        let receipt_path = store.receipt_path(receipt.resolution_id);
+        let bundle_path = store.bundle_path(receipt.resolution_id);
+        let receipt_identity = directory_device_inode(
+            &open_verified_file(&receipt_path, MAX_STATE_BYTES, 0o400).expect("published receipt"),
+        )
+        .expect("receipt identity");
+        let bundle_identity =
+            directory_device_inode(&File::open(&bundle_path).expect("published bundle directory"))
+                .expect("bundle identity");
+        let held_receipt = store.inner.receipts_root.join("held-receipt.json");
+        std::fs::rename(&receipt_path, &held_receipt).expect("move published receipt");
+        write_new_file(&receipt_path, b"replacement")
+            .expect("replacement receipt")
+            .set_permissions(std::fs::Permissions::from_mode(0o400))
+            .expect("seal replacement receipt");
+
+        let error = store
+            .withdraw_publication_exact(
+                &receipt_path,
+                &bundle_path,
+                Some(receipt_identity),
+                bundle_identity,
+            )
+            .expect_err("relinked receipt withdrawal");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_AMBIGUOUS");
+        assert!(receipt_path.exists(), "replacement must not be deleted");
+        assert!(
+            held_receipt.exists(),
+            "published inode must remain explicit"
+        );
+        assert!(
+            bundle_path.exists(),
+            "bundle must remain paired on ambiguity"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exact_withdrawal_refuses_missing_receipt_and_completion_links() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let receipt = store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("published receipt");
+        let receipt_path = store.receipt_path(receipt.resolution_id);
+        let completion_path = store.completion_path(receipt.resolution_id);
+        let bundle_path = store.bundle_path(receipt.resolution_id);
+        let receipt_identity = directory_device_inode(
+            &open_verified_file(&receipt_path, MAX_STATE_BYTES, 0o400).expect("published receipt"),
+        )
+        .expect("receipt identity");
+        let completion_identity = directory_device_inode(
+            &open_verified_file(&completion_path, MAX_STATE_BYTES, 0o400)
+                .expect("published completion"),
+        )
+        .expect("completion identity");
+        let bundle_identity =
+            directory_device_inode(&File::open(&bundle_path).expect("published bundle directory"))
+                .expect("bundle identity");
+        let held_receipt = store.inner.receipts_root.join("held-missing-receipt.json");
+        std::fs::rename(&receipt_path, &held_receipt).expect("move published receipt");
+
+        let receipt_error = store
+            .withdraw_publication_exact(
+                &receipt_path,
+                &bundle_path,
+                Some(receipt_identity),
+                bundle_identity,
+            )
+            .expect_err("missing exact receipt link");
+        assert_eq!(receipt_error.code, "DEP_STORE_PUBLICATION_AMBIGUOUS");
+        assert!(held_receipt.exists());
+        assert!(bundle_path.exists(), "bundle remains paired on ambiguity");
+
+        let held_completion = store
+            .inner
+            .completions_root
+            .join("held-missing-completion.json");
+        std::fs::rename(&completion_path, &held_completion).expect("move published completion");
+        let completion_error = store
+            .remove_completion_exact(&completion_path, completion_identity)
+            .expect_err("missing exact completion link");
+        assert_eq!(completion_error.code, "DEP_STORE_PUBLICATION_AMBIGUOUS");
+        assert!(held_completion.exists());
+    }
+
     #[test]
     fn uncertain_receipt_lookup_retains_the_publication_bundle() {
         let fixture = Fixture::new();
         let store = fixture.store();
-        let blocker = store.inner.root.join("receipt-lookup-blocker");
+        let blocker =
+            pinned_directory_path(&store.inner.root_directory).join("receipt-lookup-blocker");
         std::fs::write(&blocker, b"not a directory").expect("lookup blocker");
         let receipt_path = blocker.join("receipt.json");
-        let bundle_path = store.inner.root.join("bundles/uncertain");
+        let bundle_path = store.inner.bundles_root.join("uncertain");
         create_directory(&bundle_path, 0o700).expect("test bundle");
 
         let error = store
@@ -2809,32 +5760,76 @@ mod tests {
         monotonic_store.release_incomplete_claim(&monotonic_claim);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publication_rejects_unmanifested_entries_before_signing_the_tree() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        RETAINED_TREE_PRE_SCAN_INJECTION_TEST_HOOK.with(|hook| hook.set(true));
+
+        let error = store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect_err("unmanifested retained entry");
+        assert_eq!(error.code, "DEP_STORE_RETAINED_TREE_MISMATCH");
+        assert_eq!(
+            error.message,
+            "retained dependency bundle contains a path not closed by its manifest"
+        );
+        assert!(!store.bundle_path(claim.resolution_id).exists());
+        assert!(!store.receipt_path(claim.resolution_id).exists());
+        assert!(!store.completion_path(claim.resolution_id).exists());
+    }
+
     #[test]
     fn retained_tree_scan_bounds_entries_and_depth_before_descending() {
         let root = TempDir::new().expect("retained tree root");
-        let tree = root.path().join("tree");
+        let output = root.path().join("output");
+        let bundles = output.join("bundles");
+        let tree = bundles.join("tree");
         let first = tree.join("first");
         let nested = first.join("nested");
         let second = tree.join("second");
+        std::fs::create_dir(&output).expect("output");
+        std::fs::create_dir(&bundles).expect("bundles");
         std::fs::create_dir(&tree).expect("tree");
         std::fs::create_dir(&first).expect("first");
         std::fs::create_dir(&nested).expect("nested");
         std::fs::create_dir(&second).expect("second");
+        for directory in [&output, &bundles] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                .expect("private retained ancestor");
+        }
         for directory in [&tree, &first, &nested, &second] {
             std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o500))
                 .expect("seal retained directory");
         }
+        let output_directory = open_pinned_cleanup_root(&output).expect("pinned output root");
+        let bundles_directory =
+            open_store_directory(&output_directory, "bundles").expect("pinned bundles root");
 
         let scan = |limits| {
-            let mut total = 0;
-            let mut directories = Vec::new();
-            let mut files = Vec::new();
-            let mut records = RetainedTreeRecords {
-                total: &mut total,
-                directories: &mut directories,
-                files: &mut files,
-            };
-            collect_tree(&tree, &tree, 1, 1, limits, &mut records)
+            retained_tree_evidence_with_limits(
+                &output_directory,
+                &bundles_directory,
+                "tree",
+                1,
+                1,
+                limits,
+            )
         };
         let entry_error = scan(RetainedTreeLimits {
             max_entries: 2,
@@ -2849,6 +5844,60 @@ mod tests {
         })
         .expect_err("depth cap");
         assert_eq!(depth_error.code, "DEP_STORE_RETAINED_TREE_MISMATCH");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replay_rejects_a_retained_directory_relinked_after_descriptor_traversal() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let receipt = store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("published receipt");
+        let artifacts = PathBuf::from(&fixture.config.output_root)
+            .join("bundles")
+            .join(claim.resolution_id.to_string())
+            .join("artifacts");
+        let moved = artifacts
+            .parent()
+            .expect("retained bundle root")
+            .join("moved-retained-artifacts");
+        RETAINED_TREE_SWAP_TEST_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some((artifacts.clone(), moved.clone()));
+        });
+
+        let error = store
+            .verify_replay(&receipt, &fixture.admitted.request_sha256)
+            .expect_err("relinked retained directory must fail replay");
+        assert!(
+            moved.is_dir(),
+            "the originally inspected directory was moved"
+        );
+        assert!(
+            std::fs::symlink_metadata(&artifacts)
+                .expect("replacement retained entry")
+                .file_type()
+                .is_symlink(),
+            "the mutable pathname was replaced only after traversal"
+        );
+        assert_eq!(
+            error.code, "DEP_STORE_RETAINED_TREE_MISMATCH",
+            "unexpected relink denial: {error}"
+        );
     }
 
     #[test]
@@ -2960,6 +6009,10 @@ mod tests {
             .expect("rotated transient artifact");
         std::fs::set_permissions(&next_transient, std::fs::Permissions::from_mode(0o600))
             .expect("rotated transient mode");
-        fixture.fetched[0].transient_path = next_transient;
+        fixture.fetched[0].transient_path = PathBuf::from(&fixture.request.resolution_id)
+            .join(format!("{}.part", fixture.fetched[0].node_id));
+        let next_metadata = std::fs::metadata(&next_root).expect("rotated transport metadata");
+        fixture.fetched[0].transient_root_device = next_metadata.dev();
+        fixture.fetched[0].transient_root_inode = next_metadata.ino();
     }
 }

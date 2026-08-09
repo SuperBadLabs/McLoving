@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -29,6 +30,23 @@ pub struct FetchedArtifact {
     pub sha256: String,
     pub attestation_sha256: String,
     pub publication_generation: u64,
+    pub transient_root_device: u64,
+    pub transient_root_inode: u64,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TransportRootIdentity {
+    pub device: u64,
+    pub inode: u64,
+}
+
+struct PinnedTransportResolution {
+    _directory: std::fs::File,
+    root_directory: Arc<std::fs::File>,
+    path: PathBuf,
+    linked_path: PathBuf,
+    identity: TransportRootIdentity,
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -72,9 +90,31 @@ impl HttpTransport {
         config: &CertifiedConfig,
         authorities: &LoadedAuthorities,
     ) -> Result<Self, TransportError> {
+        Self::new_inner(config, authorities, None)
+    }
+
+    pub(crate) fn new_with_bound_roots(
+        config: &CertifiedConfig,
+        authorities: &LoadedAuthorities,
+        output_device: u64,
+        transport_identity: TransportRootIdentity,
+    ) -> Result<Self, TransportError> {
+        Self::new_inner(
+            config,
+            authorities,
+            Some((output_device, transport_identity)),
+        )
+    }
+
+    fn new_inner(
+        config: &CertifiedConfig,
+        authorities: &LoadedAuthorities,
+        expected_roots: Option<(u64, TransportRootIdentity)>,
+    ) -> Result<Self, TransportError> {
         crate::validate_config(config)
             .map_err(|error| TransportError::new(error.code, error.message))?;
-        let lease = TransportLease::acquire(config)?;
+        let lease = TransportLease::acquire(config, expected_roots)?;
+        let transport_root = lease.root_path.clone();
         let markers = authorities
             .markers()
             .map(<[u8]>::to_vec)
@@ -155,12 +195,19 @@ impl HttpTransport {
             max_header_bytes: config.limits.max_header_bytes,
             max_artifact_bytes: config.limits.max_artifact_bytes,
             max_total_artifact_bytes: config.limits.max_total_artifact_bytes,
-            transport_root: PathBuf::from(&config.transport_root),
+            transport_root,
             markers,
             repositories,
             cleanup_poisoned: AtomicBool::new(false),
             _lease: Some(lease),
         })
+    }
+
+    pub(crate) fn root_identity(&self) -> Result<TransportRootIdentity, TransportError> {
+        self._lease
+            .as_ref()
+            .map(|lease| lease.root_identity)
+            .ok_or_else(root_state_error)
     }
 
     pub fn ensure_available(&self) -> Result<(), TransportError> {
@@ -176,6 +223,20 @@ impl HttpTransport {
 
     pub fn preserve_cleanup_ambiguity(&self) {
         self.cleanup_poisoned.store(true, Ordering::Release);
+    }
+
+    fn resolution_root_directory(&self) -> Result<Arc<std::fs::File>, TransportError> {
+        if let Some(lease) = &self._lease {
+            return Ok(Arc::clone(&lease._root_directory));
+        }
+        #[cfg(test)]
+        {
+            crate::publication::open_pinned_cleanup_root(&self.transport_root)
+                .map(Arc::new)
+                .map_err(|_| root_state_error())
+        }
+        #[cfg(not(test))]
+        Err(root_state_error())
     }
 
     pub async fn fetch_plan(
@@ -201,65 +262,77 @@ impl HttpTransport {
             ));
         }
         let resolution_root = self.transport_root.join(resolution_id.to_string());
-        run_transport_before_deadline(deadline, create_private_resolution_root(&resolution_root))
+        let relative_root = PathBuf::from(resolution_id.to_string());
+        let created_identity = run_transport_before_deadline(
+            deadline,
+            create_private_resolution_root(&resolution_root),
+        )
+        .await
+        .map_err(|error| preserve_transport_setup_error(&self.cleanup_poisoned, error))?;
+        let resolution = pin_transport_resolution(
+            self.resolution_root_directory()?,
+            &self.transport_root,
+            resolution_id,
+            created_identity,
+        )
+        .map_err(|error| preserve_transport_setup_error(&self.cleanup_poisoned, error))?;
+        match self
+            .fetch_plan_into(plan, deadline, &resolution, &relative_root)
             .await
-            .map_err(|error| preserve_transport_setup_error(&self.cleanup_poisoned, error))?;
-        match self.fetch_plan_into(plan, deadline, &resolution_root).await {
+        {
             Ok(fetched) => Ok(fetched),
             Err(error) => {
                 if Instant::now() >= deadline {
                     self.preserve_cleanup_ambiguity();
                     return Err(error);
                 }
-                self.cleanup_resolution_before_deadline(resolution_id, deadline)
+                self.cleanup_resolution_before_deadline(&resolution, deadline)
                     .await?;
                 Err(error)
             }
         }
     }
 
-    pub async fn cleanup_resolution_before_deadline(
+    async fn cleanup_resolution_before_deadline(
         &self,
-        resolution_id: Uuid,
+        resolution: &PinnedTransportResolution,
         deadline: Instant,
     ) -> Result<(), TransportError> {
         self.ensure_available()?;
         supervise_cleanup(
             &self.cleanup_poisoned,
             deadline,
-            self.cleanup_resolution(resolution_id),
+            self.cleanup_resolution(resolution),
         )
         .await
     }
 
-    async fn cleanup_resolution(&self, resolution_id: Uuid) -> Result<(), TransportError> {
-        let resolution_root = self.transport_root.join(resolution_id.to_string());
-        tokio::fs::remove_dir_all(&resolution_root)
-            .await
-            .map_err(|_| {
-                TransportError::new(
-                    "DEP_TRANSPORT_CLEANUP_AMBIGUOUS",
-                    "verified transient resolution could not be removed",
-                )
-            })?;
+    async fn cleanup_resolution(
+        &self,
+        resolution: &PinnedTransportResolution,
+    ) -> Result<(), TransportError> {
+        let root_directory = resolution
+            .root_directory
+            .try_clone()
+            .map_err(|_| root_state_error())?;
         let root = self.transport_root.clone();
+        let linked_path = resolution.linked_path.clone();
+        let identity = resolution.identity;
         tokio::task::spawn_blocking(move || {
-            std::fs::File::open(root)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|_| {
-                    TransportError::new(
-                        "DEP_TRANSPORT_CLEANUP_AMBIGUOUS",
-                        "transient cleanup directory entry could not be synchronized",
-                    )
-                })
+            crate::publication::remove_private_tree_exact(
+                &root_directory,
+                &root,
+                &linked_path,
+                identity.device,
+                identity.inode,
+            )
+            .map_err(|_| cleanup_ambiguity_error())?;
+            root_directory
+                .sync_all()
+                .map_err(|_| cleanup_ambiguity_error())
         })
         .await
-        .map_err(|_| {
-            TransportError::new(
-                "DEP_TRANSPORT_CLEANUP_AMBIGUOUS",
-                "transient cleanup task did not complete",
-            )
-        })??;
+        .map_err(|_| cleanup_ambiguity_error())??;
         Ok(())
     }
 
@@ -267,7 +340,8 @@ impl HttpTransport {
         &self,
         plan: &CanonicalPlan,
         deadline: Instant,
-        resolution_root: &Path,
+        resolution: &PinnedTransportResolution,
+        relative_root: &Path,
     ) -> Result<Vec<FetchedArtifact>, TransportError> {
         let mut total = 0_u64;
         let mut fetched = Vec::with_capacity(plan.nodes.len());
@@ -285,8 +359,15 @@ impl HttpTransport {
                 ));
             }
             fetched.push(
-                self.fetch_node(plan.ecosystem, node, deadline, resolution_root)
-                    .await?,
+                self.fetch_node(
+                    plan.ecosystem,
+                    node,
+                    deadline,
+                    &resolution.path,
+                    relative_root,
+                    resolution.identity,
+                )
+                .await?,
             );
         }
         Ok(fetched)
@@ -298,6 +379,8 @@ impl HttpTransport {
         node: &PackageNode,
         deadline: Instant,
         resolution_root: &Path,
+        relative_root: &Path,
+        transient_root_identity: TransportRootIdentity,
     ) -> Result<FetchedArtifact, TransportError> {
         let repository = self.repositories.get(&node.repository_id).ok_or_else(|| {
             TransportError::new(
@@ -394,17 +477,63 @@ impl HttpTransport {
         }
         run_before_deadline(deadline, file.sync_all()).await?;
         drop(file);
+        substitute_transient_after_sync_for_test(&transient_path)?;
         verify_transient_file(&transient_path, node.declared_size, &node.sha256, deadline).await?;
         Ok(FetchedArtifact {
             node_id: node.node_id.clone(),
-            transient_path,
+            transient_path: relative_root.join(format!("{}.part", node.node_id)),
             declared_size: received,
             sha256: node.sha256.clone(),
             attestation_sha256: format!("{:x}", Sha256::digest(&signature)),
             publication_generation: self.generation,
+            transient_root_device: transient_root_identity.device,
+            transient_root_inode: transient_root_identity.inode,
         })
     }
 }
+
+#[cfg(test)]
+thread_local! {
+    static TRANSIENT_OPEN_TRACE: std::cell::RefCell<Vec<(PathBuf, &'static str)>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+    static TRANSIENT_FIFO_SUBSTITUTION: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn substitute_transient_after_sync_for_test(path: &Path) -> Result<(), TransportError> {
+    use nix::sys::stat::Mode;
+    use nix::unistd::mkfifo;
+
+    let substitute = TRANSIENT_FIFO_SUBSTITUTION.with(|target| {
+        target
+            .borrow_mut()
+            .take_if(|configured| configured.file_name() == path.file_name())
+            .is_some()
+    });
+    if substitute {
+        std::fs::remove_file(path).map_err(|_| transient_content_error())?;
+        mkfifo(path, Mode::S_IRUSR | Mode::S_IWUSR).map_err(|_| transient_content_error())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn substitute_transient_after_sync_for_test(_path: &Path) -> Result<(), TransportError> {
+    Ok(())
+}
+
+#[cfg(test)]
+fn trace_transient_open(path: &Path, event: &'static str) {
+    TRANSIENT_OPEN_TRACE.with(|trace| {
+        trace.borrow_mut().push((path.to_path_buf(), event));
+    });
+}
+
+#[cfg(not(test))]
+fn trace_transient_open(_path: &Path, _event: &'static str) {}
 
 async fn supervise_cleanup<F>(
     cleanup_poisoned: &AtomicBool,
@@ -431,6 +560,142 @@ where
 }
 
 #[cfg(target_os = "linux")]
+fn pin_transport_resolution(
+    root_directory: Arc<std::fs::File>,
+    root_path: &Path,
+    resolution_id: Uuid,
+    created_identity: TransportRootIdentity,
+) -> Result<PinnedTransportResolution, TransportError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let name = resolution_id.to_string();
+    let directory = std::fs::File::from(
+        openat(
+            &*root_directory,
+            name.as_str(),
+            OFlag::O_RDONLY
+                | OFlag::O_DIRECTORY
+                | OFlag::O_NOFOLLOW
+                | OFlag::O_CLOEXEC
+                | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|_| root_state_error())?,
+    );
+    let metadata = directory.metadata().map_err(|_| root_state_error())?;
+    let root_metadata = root_directory.metadata().map_err(|_| root_state_error())?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o777 != 0o700
+        || metadata.dev() != root_metadata.dev()
+        || metadata.dev() != created_identity.device
+        || metadata.ino() != created_identity.inode
+    {
+        return Err(root_state_error());
+    }
+    let path = crate::publication::pinned_directory_path(&directory);
+    if std::fs::read_dir(&path)
+        .map_err(|_| root_state_error())?
+        .next()
+        .is_some()
+    {
+        return Err(root_state_error());
+    }
+    let linked_path = root_path.join(&name);
+    let linked = std::fs::symlink_metadata(&linked_path).map_err(|_| root_state_error())?;
+    if !linked.file_type().is_dir()
+        || linked.dev() != metadata.dev()
+        || linked.ino() != metadata.ino()
+    {
+        return Err(root_state_error());
+    }
+    let pinned_root_path = crate::publication::pinned_directory_path(&root_directory);
+    validate_transport_resolution_root(&pinned_root_path, &name, &metadata)?;
+    let final_link =
+        std::fs::symlink_metadata(pinned_root_path.join(&name)).map_err(|_| root_state_error())?;
+    if !final_link.file_type().is_dir()
+        || final_link.dev() != created_identity.device
+        || final_link.ino() != created_identity.inode
+    {
+        return Err(root_state_error());
+    }
+    Ok(PinnedTransportResolution {
+        _directory: directory,
+        root_directory,
+        path,
+        linked_path,
+        identity: TransportRootIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        },
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn validate_transport_resolution_root(
+    root_path: &Path,
+    resolution_name: &str,
+    resolution_metadata: &std::fs::Metadata,
+) -> Result<(), TransportError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let mut resolution_seen = false;
+    let mut lock_seen = false;
+    for entry in std::fs::read_dir(root_path).map_err(|_| root_state_error())? {
+        let entry = entry.map_err(|_| root_state_error())?;
+        if entry.file_name() == resolution_name {
+            if resolution_seen {
+                return Err(root_state_error());
+            }
+            let linked = entry.metadata().map_err(|_| root_state_error())?;
+            if !entry.file_type().map_err(|_| root_state_error())?.is_dir()
+                || linked.dev() != resolution_metadata.dev()
+                || linked.ino() != resolution_metadata.ino()
+            {
+                return Err(root_state_error());
+            }
+            resolution_seen = true;
+        } else if entry.file_name() == ".mcloving-dependency-resolver.lock" {
+            if lock_seen {
+                return Err(root_state_error());
+            }
+            let linked = entry.metadata().map_err(|_| root_state_error())?;
+            if !entry.file_type().map_err(|_| root_state_error())?.is_file()
+                || !linked.is_file()
+                || linked.uid() != nix::unistd::Uid::effective().as_raw()
+                || linked.nlink() != 1
+                || linked.permissions().mode() & 0o777 != 0o600
+                || linked.len() != TRANSPORT_LOCK_CONTENT.len() as u64
+            {
+                return Err(root_state_error());
+            }
+            lock_seen = true;
+        } else {
+            return Err(root_state_error());
+        }
+    }
+    if !resolution_seen || (!cfg!(test) && !lock_seen) {
+        return Err(root_state_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pin_transport_resolution(
+    _root_directory: Arc<std::fs::File>,
+    _root_path: &Path,
+    _resolution_id: Uuid,
+    _created_identity: TransportRootIdentity,
+) -> Result<PinnedTransportResolution, TransportError> {
+    Err(TransportError::new(
+        "DEP_TRANSPORT_PLATFORM_UNSUPPORTED",
+        "transient resolution pinning requires Linux descriptor semantics",
+    ))
+}
+
+#[cfg(target_os = "linux")]
 async fn verify_transient_file(
     path: &Path,
     expected_size: u64,
@@ -453,6 +718,7 @@ async fn verify_transient_file(
         .custom_flags((OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW).bits())
         .open(path)
         .map_err(|_| transient_content_error())?;
+    trace_transient_open(path, "path-inspected");
     let inspected = inspection
         .metadata()
         .map_err(|_| transient_content_error())?;
@@ -460,6 +726,7 @@ async fn verify_transient_file(
         return Err(transient_content_error());
     }
     let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+    trace_transient_open(path, "data-open");
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
@@ -523,6 +790,13 @@ fn transient_content_error() -> TransportError {
     TransportError::new(
         "DEP_TRANSPORT_CONTENT_MISMATCH",
         "persisted transient artifact size, type, owner, mode, link count, or identity changed",
+    )
+}
+
+fn cleanup_ambiguity_error() -> TransportError {
+    TransportError::new(
+        "DEP_TRANSPORT_CLEANUP_AMBIGUOUS",
+        "verified transient resolution could not be removed exactly",
     )
 }
 
@@ -661,35 +935,56 @@ struct TransportRootLock;
 
 struct TransportLease {
     _lock: TransportRootLock,
+    _root_directory: Arc<std::fs::File>,
+    root_path: PathBuf,
+    root_identity: TransportRootIdentity,
 }
 
 impl TransportLease {
     #[cfg(target_os = "linux")]
-    fn acquire(config: &CertifiedConfig) -> Result<Self, TransportError> {
-        use nix::fcntl::{Flock, FlockArg};
+    fn acquire(
+        config: &CertifiedConfig,
+        expected_roots: Option<(u64, TransportRootIdentity)>,
+    ) -> Result<Self, TransportError> {
         use nix::sys::statvfs::statvfs;
         use nix::unistd::Uid;
         use std::io::{Seek as _, SeekFrom, Write as _};
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-        let root = Path::new(&config.transport_root);
+        let configured_root = Path::new(&config.transport_root);
         let output = Path::new(&config.output_root);
-        let canonical = std::fs::canonicalize(root).map_err(|_| root_policy_error())?;
-        let parent = root.parent().ok_or_else(root_policy_error)?;
-        let root_metadata = std::fs::symlink_metadata(root).map_err(|_| root_policy_error())?;
+        let root_directory = Arc::new(
+            crate::publication::open_pinned_cleanup_root(configured_root)
+                .map_err(|_| root_policy_error())?,
+        );
+        let root = crate::publication::pinned_directory_path(&root_directory);
+        let parent = configured_root.parent().ok_or_else(root_policy_error)?;
+        let root_metadata = root_directory.metadata().map_err(|_| root_policy_error())?;
+        let linked_metadata =
+            std::fs::symlink_metadata(configured_root).map_err(|_| root_policy_error())?;
         let parent_metadata = std::fs::metadata(parent).map_err(|_| root_policy_error())?;
-        let output_metadata = std::fs::metadata(output).map_err(|_| root_policy_error())?;
-        let filesystem = statvfs(root).map_err(|_| root_policy_error())?;
+        let output_device = match expected_roots {
+            Some((output_device, _)) => output_device,
+            None => std::fs::metadata(output)
+                .map_err(|_| root_policy_error())?
+                .dev(),
+        };
+        let filesystem = statvfs(&root).map_err(|_| root_policy_error())?;
         let capacity = filesystem
             .blocks()
             .checked_mul(filesystem.fragment_size())
             .ok_or_else(root_policy_error)?;
-        if canonical != root
-            || !root_metadata.file_type().is_dir()
+        if !root_metadata.file_type().is_dir()
+            || !linked_metadata.file_type().is_dir()
             || root_metadata.uid() != Uid::effective().as_raw()
             || root_metadata.permissions().mode() & 0o777 != 0o700
+            || root_metadata.dev() != linked_metadata.dev()
+            || root_metadata.ino() != linked_metadata.ino()
             || root_metadata.dev() == parent_metadata.dev()
-            || root_metadata.dev() == output_metadata.dev()
+            || root_metadata.dev() == output_device
+            || expected_roots.is_some_and(|(_, expected)| {
+                (root_metadata.dev(), root_metadata.ino()) != (expected.device, expected.inode)
+            })
             || capacity != config.limits.transport_capacity_bytes
         {
             return Err(root_policy_error());
@@ -715,12 +1010,9 @@ impl TransportLease {
             return Err(root_state_error());
         }
         file.sync_all().map_err(|_| root_state_error())?;
-        std::fs::File::open(root)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| root_state_error())?;
-        let lock =
-            Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|_| root_state_error())?;
-        let mut entries = std::fs::read_dir(root).map_err(|_| root_state_error())?;
+        root_directory.sync_all().map_err(|_| root_state_error())?;
+        let lock = lock_transport_root(&root_directory)?;
+        let mut entries = std::fs::read_dir(&root).map_err(|_| root_state_error())?;
         let mut lock_seen = false;
         for entry in &mut entries {
             let entry = entry.map_err(|_| root_state_error())?;
@@ -740,16 +1032,37 @@ impl TransportLease {
         if !lock_seen {
             return Err(root_state_error());
         }
-        Ok(Self { _lock: lock })
+        Ok(Self {
+            _lock: lock,
+            _root_directory: root_directory,
+            root_path: root,
+            root_identity: TransportRootIdentity {
+                device: root_metadata.dev(),
+                inode: root_metadata.ino(),
+            },
+        })
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn acquire(_config: &CertifiedConfig) -> Result<Self, TransportError> {
+    fn acquire(
+        _config: &CertifiedConfig,
+        _expected_roots: Option<(u64, TransportRootIdentity)>,
+    ) -> Result<Self, TransportError> {
         Err(TransportError::new(
             "DEP_TRANSPORT_PLATFORM_UNSUPPORTED",
             "dedicated transport filesystem enforcement requires Linux",
         ))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn lock_transport_root(
+    root_directory: &std::fs::File,
+) -> Result<TransportRootLock, TransportError> {
+    use nix::fcntl::{Flock, FlockArg};
+
+    let lock_target = root_directory.try_clone().map_err(|_| root_state_error())?;
+    Flock::lock(lock_target, FlockArg::LockExclusiveNonblock).map_err(|_| root_state_error())
 }
 
 #[cfg(target_os = "linux")]
@@ -899,7 +1212,11 @@ fn preserve_transport_setup_error(
 }
 
 #[cfg(unix)]
-async fn create_private_resolution_root(path: &Path) -> Result<(), TransportError> {
+async fn create_private_resolution_root(
+    path: &Path,
+) -> Result<TransportRootIdentity, TransportError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
     let mut builder = tokio::fs::DirBuilder::new();
     builder.mode(0o700);
     builder.create(path).await.map_err(|_| {
@@ -907,11 +1224,24 @@ async fn create_private_resolution_root(path: &Path) -> Result<(), TransportErro
             "DEP_TRANSPORT_STATE_CONFLICT",
             "transient resolution root already exists or cannot be created",
         )
+    })?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| root_state_error())?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o777 != 0o700
+    {
+        return Err(root_state_error());
+    }
+    Ok(TransportRootIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
     })
 }
 
 #[cfg(not(unix))]
-async fn create_private_resolution_root(_path: &Path) -> Result<(), TransportError> {
+async fn create_private_resolution_root(
+    _path: &Path,
+) -> Result<TransportRootIdentity, TransportError> {
     Err(TransportError::new(
         "DEP_TRANSPORT_PLATFORM_UNSUPPORTED",
         "private transport roots require Unix file semantics",
@@ -1007,6 +1337,144 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn replacing_the_transport_sentinel_cannot_split_root_serialization() {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+        let root = TempDir::new().expect("transport lock root");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private transport root");
+        let sentinel = root.path().join(".mcloving-dependency-resolver.lock");
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&sentinel)
+            .expect("transport sentinel");
+        file.write_all(TRANSPORT_LOCK_CONTENT)
+            .expect("sentinel content");
+        file.sync_all().expect("sentinel durability");
+        let root_directory = crate::publication::open_pinned_cleanup_root(root.path())
+            .expect("pinned transport root");
+        let _lock = lock_transport_root(&root_directory).expect("first root lock");
+
+        std::fs::rename(&sentinel, root.path().join("detached-transport-sentinel"))
+            .expect("detach sentinel");
+        let mut replacement = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&sentinel)
+            .expect("replacement sentinel");
+        replacement
+            .write_all(TRANSPORT_LOCK_CONTENT)
+            .expect("replacement content");
+        replacement.sync_all().expect("replacement durability");
+
+        let competing_root = crate::publication::open_pinned_cleanup_root(root.path())
+            .expect("independently pinned competing root");
+        let error = lock_transport_root(&competing_root)
+            .expect_err("the stable transport root remains locked");
+        assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolution_directory_relink_cannot_redirect_writes_or_exact_cleanup() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+
+        let root = TempDir::new().expect("transport root");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private transport root");
+        let resolution_id = Uuid::new_v4();
+        let linked = root.path().join(resolution_id.to_string());
+        std::fs::create_dir(&linked).expect("resolution directory");
+        std::fs::set_permissions(&linked, std::fs::Permissions::from_mode(0o700))
+            .expect("private resolution directory");
+        let root_directory = Arc::new(
+            crate::publication::open_pinned_cleanup_root(root.path())
+                .expect("pinned transport root"),
+        );
+        let created = std::fs::symlink_metadata(&linked).expect("created resolution identity");
+        let pinned = pin_transport_resolution(
+            Arc::clone(&root_directory),
+            root.path(),
+            resolution_id,
+            TransportRootIdentity {
+                device: created.dev(),
+                inode: created.ino(),
+            },
+        )
+        .expect("pinned resolution directory");
+
+        let held = root.path().join("held-resolution");
+        std::fs::rename(&linked, &held).expect("unlink pinned resolution");
+        let outside = TempDir::new().expect("outside directory");
+        symlink(outside.path(), &linked).expect("replacement resolution symlink");
+        std::fs::write(pinned.path.join("artifact.part"), b"pinned bytes")
+            .expect("write through retained descriptor");
+
+        assert_eq!(
+            std::fs::read(held.join("artifact.part")).expect("pinned artifact"),
+            b"pinned bytes"
+        );
+        assert!(!outside.path().join("artifact.part").exists());
+        assert!(
+            crate::publication::remove_private_tree_exact(
+                &root_directory,
+                root.path(),
+                &linked,
+                pinned.identity.device,
+                pinned.identity.inode,
+            )
+            .is_err()
+        );
+        assert!(outside.path().exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn resolution_directory_replacement_between_creation_and_pin_is_rejected() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let root = TempDir::new().expect("transport root");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private transport root");
+        let resolution_id = Uuid::new_v4();
+        let linked = root.path().join(resolution_id.to_string());
+        std::fs::create_dir(&linked).expect("created resolution directory");
+        std::fs::set_permissions(&linked, std::fs::Permissions::from_mode(0o700))
+            .expect("private created directory");
+        let created = std::fs::symlink_metadata(&linked).expect("created identity");
+        let created_identity = TransportRootIdentity {
+            device: created.dev(),
+            inode: created.ino(),
+        };
+        let held = root.path().join("held-created-resolution");
+        std::fs::rename(&linked, &held).expect("move created directory");
+        std::fs::create_dir(&linked).expect("replacement resolution directory");
+        std::fs::set_permissions(&linked, std::fs::Permissions::from_mode(0o700))
+            .expect("private replacement directory");
+        let root_directory = Arc::new(
+            crate::publication::open_pinned_cleanup_root(root.path())
+                .expect("pinned transport root"),
+        );
+
+        let error =
+            pin_transport_resolution(root_directory, root.path(), resolution_id, created_identity)
+                .err()
+                .expect("replacement must not satisfy the created identity");
+        assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
+        assert!(
+            held.exists(),
+            "the originally created inode remains explicit"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn fifo_and_device_transients_are_rejected_before_data_open() {
         use nix::sys::stat::Mode;
@@ -1030,6 +1498,61 @@ mod tests {
             .expect_err("device transient");
         assert_eq!(error.code, "DEP_TRANSPORT_CONTENT_MISMATCH");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn production_fetch_rejects_fifo_substitution_before_data_open() {
+        let fixture = TransportFixture::new(
+            b"contained artifact bytes".to_vec(),
+            vec![b"credential-marker-not-present".to_vec()],
+            "contained-maven",
+            false,
+        )
+        .await;
+        let resolution_id = Uuid::new_v4();
+        let transient_path = fixture
+            .transport
+            .transport_root
+            .join(resolution_id.to_string())
+            .join(format!("{}.part", fixture.plan.nodes[0].node_id));
+        TRANSIENT_OPEN_TRACE.with(|trace| trace.borrow_mut().clear());
+        TRANSIENT_FIFO_SUBSTITUTION.with(|target| {
+            *target.borrow_mut() = Some(transient_path.clone());
+        });
+
+        let error = fixture
+            .transport
+            .fetch_plan(
+                resolution_id,
+                &fixture.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("post-download FIFO substitution");
+        assert_eq!(error.code, "DEP_TRANSPORT_CLEANUP_AMBIGUOUS");
+        assert_eq!(
+            fixture
+                .transport
+                .ensure_available()
+                .expect_err("ambiguous cleanup poisons the transport")
+                .code,
+            "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED"
+        );
+        let events = TRANSIENT_OPEN_TRACE.with(|trace| {
+            trace
+                .borrow()
+                .iter()
+                .filter_map(|(opened, event)| {
+                    (opened.file_name() == transient_path.file_name()).then_some(*event)
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            events,
+            ["path-inspected"],
+            "the production fetch flow must reject substituted special state before data open"
+        );
     }
 
     #[derive(Clone)]
@@ -1233,9 +1756,14 @@ mod tests {
             .expect("verified artifact");
         assert_eq!(fetched.len(), 1);
         assert_eq!(
-            tokio::fs::read(&fetched[0].transient_path)
-                .await
-                .expect("retained transient bytes"),
+            tokio::fs::read(
+                fixture
+                    .transport
+                    .transport_root
+                    .join(&fetched[0].transient_path),
+            )
+            .await
+            .expect("retained transient bytes"),
             b"contained artifact bytes"
         );
         assert_eq!(fetched[0].publication_generation, 7);
