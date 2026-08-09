@@ -52,6 +52,16 @@ The process may:
 - atomically publish verified artifacts below its private output root; and
 - emit one signed receipt or bounded typed error for each NDJSON request.
 
+The `mcloving-dependency-resolver` executable accepts only `--config <path>`.
+The configuration is a resolver-owned regular file with no group/other mode
+bits, the running executable is re-hashed against `executable_sha256`, and each
+input line is capped before JSON allocation. A frame is one closed
+`ResolutionFrame` object containing `request` and standard-base64 `lock_base64`.
+Output is exactly one LF-terminated closed object per input: either
+`{"status":"ok","receipt":...}` or a static, source-independent
+`{"status":"error","code":...,"message":...}`. Oversized receipts are
+replaced by `DEP_RESPONSE_FRAME_OVERSIZED`; they are never emitted partially.
+
 It has no scheduler, controller database/filesystem, source credential, source
 network authority, package-execution authority, build tool, shell, agent RPC,
 shared cache, connector, observer, or production-effect authority. A pipeline
@@ -150,6 +160,12 @@ final symlink. Authority files must be owned by the effective resolver UID with
 no group or other permission bits. Construction validates every authority and
 limit before creating a claim or contacting a repository.
 
+`mcloving.secret-markers/v1` is closed JSON with one strictly sorted,
+duplicate-free `markers_hex` array. Entries are lowercase even-length hex for
+at least eight bytes. Every configured credential must occur as one exact
+decoded entry; repository headers and streamed bodies are checked against all
+decoded markers, including matches spanning response chunks.
+
 ## Resolution request
 
 Every request binds:
@@ -180,6 +196,14 @@ declared size, use `application/octet-stream`, and carry the configured
 repository identity plus an Ed25519 attestation envelope. The signed canonical
 message binds repository/key identity, ecosystem, coordinate, version, path,
 size, SHA-256, and an immutable publication generation.
+
+The singleton response headers are `x-mcloving-repository-id`,
+`x-mcloving-publication-generation`, and standard-base64
+`x-mcloving-attestation`. The Ed25519 message uses the domain
+`mcloving-dependency-attestation-v1` and unsigned-big-endian-length-prefixed
+segments in the exact binding order above. Header size and secret scanning
+precede parsing. The configured authorization value is the only request header
+derived from repository credentials and is marked sensitive in the client.
 
 The response body is streamed to a unique private file while simultaneously
 enforcing the declared size, per-artifact and aggregate limits, SHA-256, and
@@ -231,6 +255,19 @@ attestation, artifact path/size/content, retained-tree, marker-set, generation,
 deadline, and rollback lineage fields. HMAC-SHA-256 covers canonical receipt
 bytes. The verifier re-hashes the retained tree and refuses substituted,
 missing, extra, mutable, or late content.
+
+The private output layout contains `.mcloving-dependency-output.lock` plus
+mutable `claims/`, `receipts/`, and `bundles/` directories. Claims are durable
+mode-`0600` `mcloving.dependency-claim/v1` JSON. A unique mode-`0700` stage is
+populated with content-addressed artifacts, files are synchronized and sealed
+to `0400`, the artifacts directory is sealed to `0500`, and the stage is
+renamed beneath `bundles/<resolution-id>`. The bundle root is sealed to `0500`
+before its parent entry is synchronized. `mcloving.dependency-manifest/v1`
+binds the exact node-to-content mapping. The retained-tree digest covers every
+relative path, mode, size, and content digest. Only then is a mode-`0400`
+`mcloving.dependency-receipt/v1` written and HMAC-SHA-256 signed. A deadline
+crossing withdraws the receipt and bundle and retains or restores the durable
+claim for explicit reconciliation.
 
 ## Required executable evidence
 

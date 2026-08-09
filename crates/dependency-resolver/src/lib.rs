@@ -3,8 +3,11 @@ mod authority;
 mod config;
 mod npm_adapter;
 mod plan;
+mod publication;
 mod pypi_adapter;
 mod request;
+mod service;
+mod standalone;
 mod strict_json;
 mod transport;
 
@@ -20,11 +23,21 @@ pub use plan::{
     CanonicalPlan, Ecosystem, PackageNode, PlanError, RepositoryBinding, SourceTrustClass,
     canonical_graph_sha256, canonical_node_id, validate_plan,
 };
+pub use publication::{
+    ClaimOutcome, ResolutionClaim, ResolutionReceipt, ResolutionStore, RetainedArtifact, StoreError,
+};
 pub use pypi_adapter::parse_pypi_requirements;
 pub use request::{
     AdmittedRequest, GrantUse, RequestError, ResolutionRequest, admit_request, request_sha256,
 };
-pub use transport::{FetchedArtifact, HttpTransport, TransportError};
+pub use service::{DependencyResolver, ResolutionFrame, ResolverError, parse_resolution_frame};
+pub use standalone::{
+    FrameReadError, ResolverResponse, load_certified_config, read_bounded_frame,
+    verify_running_executable,
+};
+pub use transport::{
+    FetchedArtifact, HttpTransport, TransportError, canonical_attestation_message,
+};
 
 pub const PROTOCOL_VERSION: &str = "mcloving.dependency-resolver/v1";
 pub const PLAN_SCHEMA_VERSION: &str = "mcloving.dependency-plan/v1";

@@ -170,6 +170,37 @@ impl HttpTransport {
         result
     }
 
+    pub async fn cleanup_resolution(&self, resolution_id: Uuid) -> Result<(), TransportError> {
+        let resolution_root = self.transport_root.join(resolution_id.to_string());
+        tokio::fs::remove_dir_all(&resolution_root)
+            .await
+            .map_err(|_| {
+                TransportError::new(
+                    "DEP_TRANSPORT_CLEANUP_AMBIGUOUS",
+                    "verified transient resolution could not be removed",
+                )
+            })?;
+        let root = self.transport_root.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::File::open(root)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| {
+                    TransportError::new(
+                        "DEP_TRANSPORT_CLEANUP_AMBIGUOUS",
+                        "transient cleanup directory entry could not be synchronized",
+                    )
+                })
+        })
+        .await
+        .map_err(|_| {
+            TransportError::new(
+                "DEP_TRANSPORT_CLEANUP_AMBIGUOUS",
+                "transient cleanup task did not complete",
+            )
+        })??;
+        Ok(())
+    }
+
     async fn fetch_plan_into(
         &self,
         plan: &CanonicalPlan,
@@ -257,7 +288,7 @@ impl HttpTransport {
                     "repository attestation is missing or malformed",
                 )
             })?;
-        let message = attestation_message(
+        let message = canonical_attestation_message(
             node,
             &repository.attestation_key_id,
             self.generation,
@@ -361,7 +392,7 @@ fn validate_headers(
     Ok(())
 }
 
-fn attestation_message(
+pub fn canonical_attestation_message(
     node: &PackageNode,
     key_id: &str,
     generation: u64,
@@ -644,7 +675,7 @@ mod tests {
                 .body(Body::empty())
                 .expect("unauthorized response");
         }
-        let message = attestation_message(
+        let message = canonical_attestation_message(
             &state.node,
             "contained-key",
             state.generation,
