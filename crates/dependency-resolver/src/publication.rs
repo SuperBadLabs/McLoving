@@ -1652,30 +1652,61 @@ fn read_bounded_file(path: &Path, max_bytes: u64, mode: u32) -> Result<Vec<u8>, 
     Ok(bytes)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn open_verified_file(path: &Path, max_bytes: u64, mode: u32) -> Result<File, StoreError> {
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    use nix::fcntl::OFlag;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
-    let file = OpenOptions::new()
+    let inspection = OpenOptions::new()
         .read(true)
-        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits())
+        .custom_flags((OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW).bits())
         .open(path)
         .map_err(|_| state_error())?;
-    let metadata = file.metadata().map_err(|_| state_error())?;
-    if !metadata.is_file()
-        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-        || metadata.permissions().mode() & 0o777 != mode
-        || metadata.len() > max_bytes
+    let inspected = inspection.metadata().map_err(|_| state_error())?;
+    if !verified_file_metadata(&inspected, max_bytes, mode) {
+        return Err(file_policy_error());
+    }
+
+    let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+        .open(pinned_path)
+        .map_err(|_| state_error())?;
+    let opened = file.metadata().map_err(|_| state_error())?;
+    let linked = std::fs::symlink_metadata(path).map_err(|_| state_error())?;
+    if !verified_file_metadata(&opened, max_bytes, mode)
+        || !verified_file_metadata(&linked, max_bytes, mode)
+        || opened.dev() != inspected.dev()
+        || opened.ino() != inspected.ino()
+        || linked.dev() != inspected.dev()
+        || linked.ino() != inspected.ino()
     {
-        return Err(StoreError::new(
-            "DEP_STORE_FILE_POLICY_DENIED",
-            "state file owner, mode, type, or size violates policy",
-        ));
+        return Err(file_policy_error());
     }
     Ok(file)
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "linux")]
+fn verified_file_metadata(metadata: &std::fs::Metadata, max_bytes: u64, mode: u32) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    metadata.is_file()
+        && metadata.uid() == nix::unistd::Uid::effective().as_raw()
+        && metadata.nlink() == 1
+        && metadata.permissions().mode() & 0o777 == mode
+        && metadata.len() <= max_bytes
+}
+
+fn file_policy_error() -> StoreError {
+    StoreError::new(
+        "DEP_STORE_FILE_POLICY_DENIED",
+        "state file owner, mode, type, link count, size, or identity violates policy",
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
 fn open_verified_file(_path: &Path, _max_bytes: u64, _mode: u32) -> Result<File, StoreError> {
     Err(StoreError::new(
         "DEP_STORE_PLATFORM_UNSUPPORTED",
@@ -2240,6 +2271,30 @@ mod tests {
                 "non-regular state must be rejected after path-only inspection and before data open"
             );
         });
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fifo_and_device_state_are_rejected_before_data_open() {
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+        use std::time::Duration;
+
+        let root = TempDir::new().expect("state inspection root");
+        let fifo = root.path().join("claim.json");
+        mkfifo(&fifo, Mode::S_IRUSR).expect("state fifo");
+
+        let started = Instant::now();
+        let error = read_bounded_file(&fifo, MAX_STATE_BYTES, 0o400)
+            .expect_err("non-regular state must fail closed");
+        assert_eq!(error.code, "DEP_STORE_FILE_POLICY_DENIED");
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let started = Instant::now();
+        let error = read_bounded_file(Path::new("/dev/null"), MAX_STATE_BYTES, 0o666)
+            .expect_err("device state must fail closed");
+        assert_eq!(error.code, "DEP_STORE_FILE_POLICY_DENIED");
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 

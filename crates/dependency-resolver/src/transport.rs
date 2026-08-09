@@ -430,32 +430,53 @@ where
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 async fn verify_transient_file(
     path: &Path,
     expected_size: u64,
     expected_sha256: &str,
     deadline: Instant,
 ) -> Result<(), TransportError> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use nix::fcntl::OFlag;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     use tokio::io::AsyncReadExt as _;
 
-    let mut options = tokio::fs::OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits());
-    let mut file = run_before_deadline(deadline, options.open(path)).await?;
-    let metadata = run_before_deadline(deadline, file.metadata()).await?;
-    if !metadata.is_file()
-        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-        || metadata.permissions().mode() & 0o777 != 0o600
-        || metadata.len() != expected_size
-    {
+    if Instant::now() >= deadline {
         return Err(TransportError::new(
-            "DEP_TRANSPORT_CONTENT_MISMATCH",
-            "persisted transient artifact size, type, owner, or mode changed",
+            "DEP_TRANSPORT_DEADLINE",
+            "absolute transport deadline expired",
         ));
     }
+    let inspection = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW).bits())
+        .open(path)
+        .map_err(|_| transient_content_error())?;
+    let inspected = inspection
+        .metadata()
+        .map_err(|_| transient_content_error())?;
+    if !transient_metadata_matches(&inspected, expected_size) {
+        return Err(transient_content_error());
+    }
+    let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+        .open(pinned_path)
+        .map_err(|_| transient_content_error())?;
+    let opened = file.metadata().map_err(|_| transient_content_error())?;
+    let linked = std::fs::symlink_metadata(path).map_err(|_| transient_content_error())?;
+    if !transient_metadata_matches(&opened, expected_size)
+        || !transient_metadata_matches(&linked, expected_size)
+        || opened.dev() != inspected.dev()
+        || opened.ino() != inspected.ino()
+        || linked.dev() != inspected.dev()
+        || linked.ino() != inspected.ino()
+    {
+        return Err(transient_content_error());
+    }
+    let mut file = tokio::fs::File::from_std(file);
     let mut hasher = Sha256::new();
     let mut total = 0_u64;
     let mut buffer = [0_u8; 65_536];
@@ -487,7 +508,25 @@ async fn verify_transient_file(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "linux")]
+fn transient_metadata_matches(metadata: &std::fs::Metadata, expected_size: u64) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    metadata.is_file()
+        && metadata.uid() == nix::unistd::Uid::effective().as_raw()
+        && metadata.nlink() == 1
+        && metadata.permissions().mode() & 0o777 == 0o600
+        && metadata.len() == expected_size
+}
+
+fn transient_content_error() -> TransportError {
+    TransportError::new(
+        "DEP_TRANSPORT_CONTENT_MISMATCH",
+        "persisted transient artifact size, type, owner, mode, link count, or identity changed",
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
 async fn verify_transient_file(
     _path: &Path,
     _expected_size: u64,
@@ -964,6 +1003,32 @@ mod tests {
         let started = Instant::now();
         let error = open_transport_lock(Path::new("/dev/null")).expect_err("device lock");
         assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn fifo_and_device_transients_are_rejected_before_data_open() {
+        use nix::sys::stat::Mode;
+        use nix::unistd::mkfifo;
+
+        let root = TempDir::new().expect("transient inspection root");
+        let fifo = root.path().join("artifact.part");
+        mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).expect("transient fifo");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let started = Instant::now();
+        let error = verify_transient_file(&fifo, 0, &"0".repeat(64), deadline)
+            .await
+            .expect_err("non-regular transient");
+        assert_eq!(error.code, "DEP_TRANSPORT_CONTENT_MISMATCH");
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let started = Instant::now();
+        let error = verify_transient_file(Path::new("/dev/null"), 0, &"0".repeat(64), deadline)
+            .await
+            .expect_err("device transient");
+        assert_eq!(error.code, "DEP_TRANSPORT_CONTENT_MISMATCH");
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
