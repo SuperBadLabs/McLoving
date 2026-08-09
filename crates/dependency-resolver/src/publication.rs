@@ -3,6 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use hmac::{Hmac, Mac as _};
 use serde::{Deserialize, Serialize};
@@ -259,9 +260,10 @@ impl ResolutionStore {
         admitted: &AdmittedRequest,
         plan: CanonicalPlan,
         fetched: &[FetchedArtifact],
+        deadline: Instant,
     ) -> Result<ResolutionReceipt, StoreError> {
         let now_unix_ms = current_unix_ms()?;
-        if now_unix_ms >= claim.publication_deadline_unix_ms {
+        if Instant::now() >= deadline || now_unix_ms >= claim.publication_deadline_unix_ms {
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
                 "publication deadline expired before staging",
@@ -334,7 +336,7 @@ impl ResolutionStore {
         rename_no_replace(&stage, &bundle_path)?;
         set_mode_and_sync(&bundle_path, 0o500)?;
         sync_directory(&self.inner.root.join("bundles"))?;
-        if current_unix_ms()? >= claim.publication_deadline_unix_ms {
+        if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
             remove_private_tree(&bundle_path)?;
             sync_directory(&self.inner.root.join("bundles"))?;
             return Err(StoreError::new(
@@ -352,7 +354,8 @@ impl ResolutionStore {
                 .ok_or_else(state_error)?,
         )?;
         let published_at_unix_ms = current_unix_ms()?;
-        if published_at_unix_ms >= claim.publication_deadline_unix_ms {
+        if Instant::now() >= deadline || published_at_unix_ms >= claim.publication_deadline_unix_ms
+        {
             remove_private_tree(&bundle_path)?;
             sync_directory(&self.inner.root.join("bundles"))?;
             return Err(StoreError::new(
@@ -388,7 +391,7 @@ impl ResolutionStore {
             return Err(error);
         }
         sync_directory(&self.inner.root.join("receipts"))?;
-        if current_unix_ms()? >= claim.publication_deadline_unix_ms {
+        if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
             remove_private_file(&receipt_path)?;
             remove_private_tree(&bundle_path)?;
             sync_directory(&self.inner.root.join("receipts"))?;
@@ -400,7 +403,7 @@ impl ResolutionStore {
         }
         std::fs::remove_file(self.claim_path(resolution_id)).map_err(|_| state_error())?;
         sync_directory(&self.inner.root.join("claims"))?;
-        if current_unix_ms()? >= claim.publication_deadline_unix_ms {
+        if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
             write_new_json(&self.claim_path(resolution_id), claim, 0o600)?;
             sync_directory(&self.inner.root.join("claims"))?;
             remove_private_file(&receipt_path)?;
@@ -1416,6 +1419,7 @@ mod tests {
                 &fixture.admitted,
                 fixture.plan.clone(),
                 &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
             )
             .expect("published receipt");
         assert!(!store.claim_path(claim.resolution_id).exists());
@@ -1486,6 +1490,7 @@ mod tests {
                 &fixture.admitted,
                 fixture.plan.clone(),
                 &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
             )
             .expect("publication");
         let artifact_path = store
@@ -1519,11 +1524,39 @@ mod tests {
                 &late_admitted,
                 late.plan.clone(),
                 &late.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
             )
             .expect_err("late publication");
         assert_eq!(error.code, "DEP_STORE_PUBLICATION_LATE");
         assert!(!late_store.bundle_path(late_claim.resolution_id).exists());
         late_store.release_incomplete_claim(&late_claim);
+
+        let monotonic = Fixture::new();
+        let monotonic_store = monotonic.store();
+        let monotonic_claim = match monotonic_store
+            .claim_or_replay(&monotonic.request, &monotonic.admitted, &monotonic.plan)
+            .expect("monotonic claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let error = monotonic_store
+            .publish(
+                &monotonic_claim,
+                monotonic.request.clone(),
+                &monotonic.admitted,
+                monotonic.plan.clone(),
+                &monotonic.fetched,
+                Instant::now(),
+            )
+            .expect_err("expired monotonic publication");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_LATE");
+        assert!(
+            !monotonic_store
+                .bundle_path(monotonic_claim.resolution_id)
+                .exists()
+        );
+        monotonic_store.release_incomplete_claim(&monotonic_claim);
     }
 
     #[test]
@@ -1555,6 +1588,7 @@ mod tests {
                 &fixture.admitted,
                 fixture.plan.clone(),
                 &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
             )
             .expect_err("foreign transient path");
         assert_eq!(error.code, "DEP_STORE_TRANSIENT_PATH_MISMATCH");
@@ -1599,6 +1633,7 @@ mod tests {
                 &fixture.admitted,
                 fixture.plan.clone(),
                 &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
             )
             .expect("generation publication")
     }

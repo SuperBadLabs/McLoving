@@ -61,15 +61,14 @@ impl DependencyResolver {
         frame: ResolutionFrame,
     ) -> Result<ResolutionReceipt, ResolverError> {
         let started_at = Instant::now();
-        let now_unix_ms = now_unix_ms()?;
-        let remaining_ms = frame
-            .request
-            .expires_at_unix_ms
-            .checked_sub(now_unix_ms)
-            .filter(|remaining| *remaining > 0)
-            .ok_or_else(|| ResolverError::denied("DEP_REQUEST_TIME_INVALID"))?;
+        let wall_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ResolverError::denied("DEP_REQUEST_TIME_INVALID"))?;
+        let now_unix_ms = u64::try_from(wall_now.as_millis())
+            .map_err(|_| ResolverError::denied("DEP_REQUEST_TIME_INVALID"))?;
+        let remaining = duration_until_unix_deadline(frame.request.expires_at_unix_ms, wall_now)?;
         let deadline = started_at
-            .checked_add(Duration::from_millis(remaining_ms))
+            .checked_add(remaining)
             .ok_or_else(|| ResolverError::denied("DEP_REQUEST_TIME_INVALID"))?;
         let lock_bytes = BASE64
             .decode(&frame.lock_base64)
@@ -133,6 +132,7 @@ impl DependencyResolver {
                 &publish_admitted,
                 publish_plan,
                 &fetched,
+                deadline,
             )
         })
         .await
@@ -235,10 +235,30 @@ fn parse_lock(
     .map_err(|error| ResolverError::denied(error.code))
 }
 
-fn now_unix_ms() -> Result<u64, ResolverError> {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| ResolverError::denied("DEP_REQUEST_TIME_INVALID"))?
-        .as_millis();
-    u64::try_from(millis).map_err(|_| ResolverError::denied("DEP_REQUEST_TIME_INVALID"))
+fn duration_until_unix_deadline(
+    deadline_unix_ms: u64,
+    wall_now: Duration,
+) -> Result<Duration, ResolverError> {
+    Duration::from_millis(deadline_unix_ms)
+        .checked_sub(wall_now)
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| ResolverError::denied("DEP_REQUEST_TIME_INVALID"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadline_derivation_preserves_submillisecond_remainder() {
+        assert_eq!(
+            duration_until_unix_deadline(1_000, Duration::from_nanos(999_999_999)).unwrap(),
+            Duration::from_nanos(1)
+        );
+        assert_eq!(
+            duration_until_unix_deadline(1_000, Duration::from_millis(1_000))
+                .expect_err("equal deadline"),
+            ResolverError::denied("DEP_REQUEST_TIME_INVALID")
+        );
+    }
 }
