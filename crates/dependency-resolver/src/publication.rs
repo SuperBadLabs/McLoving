@@ -520,6 +520,7 @@ impl ResolutionStore {
         receipt: &ResolutionReceipt,
         expected_request_sha256: &str,
     ) -> Result<(), StoreError> {
+        let hmac_valid = verify_receipt_hmac(receipt, &self.inner.receipt_key).is_ok();
         if receipt.schema_version != RECEIPT_SCHEMA
             || receipt.request_sha256 != expected_request_sha256
             || receipt.generation != self.inner.generation
@@ -527,7 +528,7 @@ impl ResolutionStore {
             || receipt.executable_sha256 != self.inner.executable_sha256
             || receipt.secret_marker_set_sha256 != self.inner.secret_marker_set_sha256
             || receipt.receipt_key_id != self.inner.receipt_key_id
-            || sign_receipt(receipt, &self.inner.receipt_key)? != receipt.hmac_sha256
+            || !hmac_valid
         {
             return Err(StoreError::new(
                 "DEP_STORE_RECEIPT_INVALID",
@@ -666,6 +667,54 @@ fn sign_receipt(receipt: &ResolutionReceipt, key: &[u8]) -> Result<String, Store
     mac.update(&(bytes.len() as u64).to_be_bytes());
     mac.update(&bytes);
     Ok(format!("{:x}", mac.finalize().into_bytes()))
+}
+
+fn verify_receipt_hmac(receipt: &ResolutionReceipt, key: &[u8]) -> Result<(), StoreError> {
+    let signature = decode_hmac(&receipt.hmac_sha256).ok_or_else(|| {
+        StoreError::new(
+            "DEP_STORE_RECEIPT_INVALID",
+            "stored receipt HMAC is not canonical lowercase hex",
+        )
+    })?;
+    let mut unsigned = receipt.clone();
+    unsigned.hmac_sha256.clear();
+    let bytes = serde_json::to_vec(&unsigned).map_err(|_| state_error())?;
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| {
+        StoreError::new(
+            "DEP_STORE_RECEIPT_KEY_INVALID",
+            "receipt HMAC key is invalid",
+        )
+    })?;
+    mac.update(b"mcloving-dependency-receipt-hmac-v1");
+    mac.update(&(bytes.len() as u64).to_be_bytes());
+    mac.update(&bytes);
+    mac.verify_slice(&signature).map_err(|_| {
+        StoreError::new(
+            "DEP_STORE_RECEIPT_INVALID",
+            "stored receipt HMAC does not verify",
+        )
+    })
+}
+
+fn decode_hmac(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_nibble(pair[0])?;
+        let low = hex_nibble(pair[1])?;
+        decoded[index] = high << 4 | low;
+    }
+    Some(decoded)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1540,6 +1589,44 @@ mod tests {
                 .is_none(),
             "secret-bearing request must not create a durable claim"
         );
+    }
+
+    #[test]
+    fn receipt_hmac_tampering_is_denied() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let mut receipt = store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("publication");
+        receipt.hmac_sha256 = "0".repeat(64);
+        let receipt_path = store.receipt_path(claim.resolution_id);
+        std::fs::set_permissions(&receipt_path, std::fs::Permissions::from_mode(0o600))
+            .expect("make receipt mutable for adversarial fixture");
+        std::fs::write(
+            &receipt_path,
+            serde_json::to_vec(&receipt).expect("tampered receipt bytes"),
+        )
+        .expect("tamper receipt");
+        std::fs::set_permissions(&receipt_path, std::fs::Permissions::from_mode(0o400))
+            .expect("restore sealed receipt mode");
+        let error = store
+            .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
+            .expect_err("tampered receipt HMAC");
+        assert_eq!(error.code, "DEP_STORE_RECEIPT_INVALID");
     }
 
     #[test]
