@@ -363,7 +363,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
             schema_version: "mcloving.source-provenance/v1".to_owned(),
             key_id: config.source_attestation_key_id.clone(),
             issued_at_unix_ms: now,
-            expires_at_unix_ms: now + 60_000,
+            expires_at_unix_ms: now + 120_000,
             signature_base64: String::new(),
         },
         expected_executable_sha256: config.executable_sha256.clone(),
@@ -387,7 +387,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
             scope: "read:com.example".to_owned(),
         }],
         requested_at_unix_ms: now,
-        expires_at_unix_ms: now + 60_000,
+        expires_at_unix_ms: now + 120_000,
         rollback_from_generation: None,
     };
     sign_source_request(&mut request, &source_key);
