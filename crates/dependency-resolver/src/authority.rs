@@ -69,17 +69,20 @@ impl LoadedAuthorities {
             ));
         }
         let mut authority_identities = BTreeSet::new();
+        let mut authority_digests = BTreeSet::new();
         let receipt_key = read_authority(
             Path::new(&config.receipt_key_path),
             MAX_SECRET_BYTES,
             &config.receipt_key_sha256,
             &mut authority_identities,
+            &mut authority_digests,
         )?;
         let marker_bytes = read_authority(
             Path::new(&config.secret_marker_set_path),
             MAX_MARKER_SET_BYTES,
             &config.secret_marker_set_sha256,
             &mut authority_identities,
+            &mut authority_digests,
         )?;
         let marker_set = parse_markers(&marker_bytes)?;
         if receipt_key.len() < 32 {
@@ -107,6 +110,7 @@ impl LoadedAuthorities {
                         MAX_SECRET_BYTES,
                         digest,
                         &mut authority_identities,
+                        &mut authority_digests,
                     )?;
                     if !marker_set.iter().any(|marker| marker == &bytes) {
                         return Err(AuthorityError::new(
@@ -124,6 +128,7 @@ impl LoadedAuthorities {
                 MAX_PUBLIC_KEY_BYTES,
                 &repository.attestation_key_sha256,
                 &mut authority_identities,
+                &mut authority_digests,
             )?;
             let private_ca = match (
                 repository.private_ca_path.as_deref(),
@@ -134,6 +139,7 @@ impl LoadedAuthorities {
                     MAX_CA_BYTES,
                     digest,
                     &mut authority_identities,
+                    &mut authority_digests,
                 )?),
                 (None, None) => None,
                 _ => unreachable!("configuration validation binds CA path and digest"),
@@ -282,6 +288,7 @@ fn read_authority(
     max_bytes: u64,
     expected: &str,
     authority_identities: &mut BTreeSet<(u64, u64)>,
+    authority_digests: &mut BTreeSet<String>,
 ) -> Result<Vec<u8>, AuthorityError> {
     let file = open_nofollow(path)?;
     let metadata = file.metadata().map_err(|_| authority_read_error())?;
@@ -298,10 +305,17 @@ fn read_authority(
     bounded
         .read_to_end(&mut bytes)
         .map_err(|_| authority_read_error())?;
-    if bytes.is_empty() || bytes.len() as u64 > max_bytes || sha256_hex(&bytes) != expected {
+    let actual_digest = sha256_hex(&bytes);
+    if bytes.is_empty() || bytes.len() as u64 > max_bytes || actual_digest != expected {
         return Err(AuthorityError::new(
             "DEP_AUTHORITY_CONTENT_MISMATCH",
             "authority file is empty, oversized, or digest-mismatched",
+        ));
+    }
+    if !authority_digests.insert(actual_digest) {
+        return Err(AuthorityError::new(
+            "DEP_AUTHORITY_ROLE_CONTENT_ALIAS_DENIED",
+            "one authority value cannot serve multiple authority roles",
         ));
     }
     Ok(bytes)
