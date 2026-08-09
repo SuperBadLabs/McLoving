@@ -257,6 +257,10 @@ fn one_secret_authority_cannot_be_embedded_in_another_role() {
                 .as_bytes(),
         ),
         prefixed(
+            b"Bearer ",
+            mixed_case_hex_bytes(b"contained-receipt-key-material-v1").as_bytes(),
+        ),
+        prefixed(
             b"Basic ",
             STANDARD
                 .encode(b"contained-receipt-key-material-v1")
@@ -315,6 +319,20 @@ fn prefixed(prefix: &[u8], value: &[u8]) -> Vec<u8> {
 
 fn hex_bytes(value: &[u8]) -> String {
     value.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn mixed_case_hex_bytes(value: &[u8]) -> String {
+    hex_bytes(value)
+        .chars()
+        .enumerate()
+        .map(|(index, character)| {
+            if index % 2 == 0 {
+                character.to_ascii_uppercase()
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn authority_file(root: &Path, name: &str, bytes: &[u8]) -> PathBuf {

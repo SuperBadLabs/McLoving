@@ -278,6 +278,62 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
     );
 
+    let topology_alias = output_root.join("topology-alias");
+    let topology_nested = output_root.join("topology-nested");
+    create_private_directory(&topology_alias);
+    create_private_directory(&topology_nested);
+    let topology_mount_status = Command::new("sudo")
+        .arg("mount")
+        .arg("--bind")
+        .arg(&output_root)
+        .arg(&topology_alias)
+        .status()
+        .await
+        .expect("bind mutable root alias");
+    assert!(topology_mount_status.success(), "bind mutable root alias");
+    let nested_authority_path = topology_alias.join("topology-nested");
+    let nested_mount_status = Command::new("sudo")
+        .arg("mount")
+        .arg("--bind")
+        .arg(fixture.path())
+        .arg(&nested_authority_path)
+        .status()
+        .await
+        .expect("bind nested authority topology");
+    assert!(
+        nested_mount_status.success(),
+        "bind nested authority topology"
+    );
+    let nested_topology_result = LoadedAuthorities::load(&config);
+    let nested_unmount_status = Command::new("sudo")
+        .arg("umount")
+        .arg(&nested_authority_path)
+        .status()
+        .await
+        .expect("unmount nested authority topology");
+    assert!(
+        nested_unmount_status.success(),
+        "unmount nested authority topology"
+    );
+    let topology_unmount_status = Command::new("sudo")
+        .arg("umount")
+        .arg(&topology_alias)
+        .status()
+        .await
+        .expect("unmount mutable root alias");
+    assert!(
+        topology_unmount_status.success(),
+        "unmount mutable root alias"
+    );
+    fs::remove_dir(&topology_alias).expect("remove mutable root alias");
+    fs::remove_dir(&topology_nested).expect("remove topology mount point");
+    let nested_topology_error =
+        nested_topology_result.expect_err("path-distinct nested bind topology");
+    assert_eq!(
+        nested_topology_error.code,
+        "DEP_AUTHORITY_MUTABLE_IDENTITY_ALIAS_DENIED"
+    );
+
     let config_digest = configuration_sha256(&config).expect("configuration digest");
     let request = ResolutionRequest {
         schema_version: "mcloving.dependency-request/v1".to_owned(),

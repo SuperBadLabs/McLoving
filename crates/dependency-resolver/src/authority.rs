@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::collections::VecDeque;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{Read, Take};
@@ -226,12 +228,8 @@ fn secret_values_overlap(left: &[u8], right: &[u8]) -> bool {
     let right_views = structured_secret_views(right);
     left_views.iter().any(|left_view| {
         right_views.iter().any(|right_view| {
-            canonical_secret_representations(left_view)
-                .iter()
-                .any(|candidate| contains_subslice(right_view, candidate))
-                || canonical_secret_representations(right_view)
-                    .iter()
-                    .any(|candidate| contains_subslice(left_view, candidate))
+            secret_representation_is_contained(right_view, left_view)
+                || secret_representation_is_contained(left_view, right_view)
         })
     })
 }
@@ -279,24 +277,26 @@ fn trim_http_ows(value: &[u8]) -> &[u8] {
     &value[start..end]
 }
 
-fn canonical_secret_representations(value: &[u8]) -> Vec<Vec<u8>> {
-    vec![
-        value.to_vec(),
-        value
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-            .into_bytes(),
-        value
-            .iter()
-            .map(|byte| format!("{byte:02X}"))
-            .collect::<String>()
-            .into_bytes(),
+fn secret_representation_is_contained(container: &[u8], value: &[u8]) -> bool {
+    if contains_subslice(container, value) {
+        return true;
+    }
+    let lowercase_hex = value
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .into_bytes();
+    if contains_subslice_ascii_case_insensitive(container, &lowercase_hex) {
+        return true;
+    }
+    [
         STANDARD.encode(value).into_bytes(),
         STANDARD_NO_PAD.encode(value).into_bytes(),
         URL_SAFE.encode(value).into_bytes(),
         URL_SAFE_NO_PAD.encode(value).into_bytes(),
     ]
+    .iter()
+    .any(|candidate| contains_subslice(container, candidate))
 }
 
 fn contains_subslice(container: &[u8], candidate: &[u8]) -> bool {
@@ -306,18 +306,24 @@ fn contains_subslice(container: &[u8], candidate: &[u8]) -> bool {
             .any(|window| window == candidate)
 }
 
+fn contains_subslice_ascii_case_insensitive(container: &[u8], candidate: &[u8]) -> bool {
+    !candidate.is_empty()
+        && container
+            .windows(candidate.len())
+            .any(|window| window.eq_ignore_ascii_case(candidate))
+}
+
 #[cfg(unix)]
 fn validate_mutable_identity_separation(
     config: &CertifiedConfig,
     authority_identities: &BTreeSet<(u64, u64)>,
 ) -> Result<(), AuthorityError> {
-    let mut visited_directories = BTreeSet::new();
     let mut visited_entries = 0_usize;
     for root in [&config.output_root, &config.transport_root] {
         let resolved = std::fs::canonicalize(root).map_err(|_| mutable_identity_scan_error())?;
-        let mut pending = Vec::new();
+        let mut pending = VecDeque::new();
         queue_mutable_tree_entry(&mut pending, &mut visited_entries, resolved)?;
-        while let Some(path) = pending.pop() {
+        while let Some(path) = pending.pop_front() {
             let metadata =
                 std::fs::symlink_metadata(&path).map_err(|_| mutable_identity_scan_error())?;
             let identity = authority_identity(&metadata)?;
@@ -327,7 +333,7 @@ fn validate_mutable_identity_separation(
                     "authority filesystem identity cannot appear beneath a mutable resolver root",
                 ));
             }
-            if metadata.file_type().is_dir() && visited_directories.insert(identity) {
+            if metadata.file_type().is_dir() {
                 let entries =
                     std::fs::read_dir(&path).map_err(|_| mutable_identity_scan_error())?;
                 for entry in entries {
@@ -342,7 +348,7 @@ fn validate_mutable_identity_separation(
 
 #[cfg(unix)]
 fn queue_mutable_tree_entry(
-    pending: &mut Vec<std::path::PathBuf>,
+    pending: &mut VecDeque<std::path::PathBuf>,
     visited_entries: &mut usize,
     path: std::path::PathBuf,
 ) -> Result<(), AuthorityError> {
@@ -351,7 +357,7 @@ fn queue_mutable_tree_entry(
         .filter(|count| *count <= MAX_MUTABLE_TREE_ENTRIES)
         .ok_or_else(mutable_identity_scan_error)?;
     *visited_entries = admitted;
-    pending.push(path);
+    pending.push_back(path);
     Ok(())
 }
 
@@ -633,7 +639,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn mutable_tree_entry_is_rejected_before_worklist_allocation() {
-        let mut pending = Vec::new();
+        let mut pending = VecDeque::new();
         let mut visited_entries = MAX_MUTABLE_TREE_ENTRIES;
         let error = queue_mutable_tree_entry(
             &mut pending,
