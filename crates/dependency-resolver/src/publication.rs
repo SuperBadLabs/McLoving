@@ -1278,6 +1278,7 @@ fn open_output_lock(path: &Path) -> Result<File, StoreError> {
                 .custom_flags((OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW).bits())
                 .open(path)
                 .map_err(|_| state_error())?;
+            trace_output_lock_open("path-inspected");
             let inspected = inspection.metadata().map_err(|_| state_error())?;
             if !private_output_lock_metadata(&inspected) {
                 return Err(state_error());
@@ -1285,6 +1286,7 @@ fn open_output_lock(path: &Path) -> Result<File, StoreError> {
 
             // Reopen the exact inspected inode, retaining O_NONBLOCK as a
             // second boundary, rather than reopening the mutable pathname.
+            trace_output_lock_open("data-open");
             let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
             let file = OpenOptions::new()
                 .read(true)
@@ -1315,6 +1317,21 @@ fn open_output_lock(path: &Path) -> Result<File, StoreError> {
     }
     Ok(file)
 }
+
+#[cfg(test)]
+thread_local! {
+    static OUTPUT_LOCK_OPEN_TRACE: std::cell::RefCell<Vec<&'static str>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(test)]
+fn trace_output_lock_open(event: &'static str) {
+    OUTPUT_LOCK_OPEN_TRACE.with(|trace| trace.borrow_mut().push(event));
+}
+
+#[cfg(not(test))]
+fn trace_output_lock_open(_event: &'static str) {}
 
 #[cfg(target_os = "linux")]
 fn private_output_lock_metadata(metadata: &std::fs::Metadata) -> bool {
@@ -2197,7 +2214,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn fifo_output_lock_is_rejected_before_blocking_open() {
+    fn fifo_output_lock_is_rejected_after_inspection_before_data_open() {
         use nix::sys::stat::Mode;
         use nix::unistd::mkfifo;
         use std::time::Duration;
@@ -2205,6 +2222,7 @@ mod tests {
         let fixture = Fixture::new();
         let lock_path = PathBuf::from(&fixture.config.output_root).join(LOCK_FILE);
         mkfifo(&lock_path, Mode::S_IRUSR | Mode::S_IWUSR).expect("output lock fifo");
+        OUTPUT_LOCK_OPEN_TRACE.with(|trace| trace.borrow_mut().clear());
         let started = Instant::now();
         let error = match ResolutionStore::open_inner(
             &fixture.config,
@@ -2215,6 +2233,13 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.code, "DEP_STORE_STATE_UNAVAILABLE");
+        OUTPUT_LOCK_OPEN_TRACE.with(|trace| {
+            assert_eq!(
+                trace.borrow().as_slice(),
+                ["path-inspected"],
+                "non-regular state must be rejected after path-only inspection and before data open"
+            );
+        });
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 

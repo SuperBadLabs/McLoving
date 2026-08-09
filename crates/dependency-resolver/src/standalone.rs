@@ -259,25 +259,6 @@ mod tests {
 
     use super::{FrameReadError, read_bounded_frame, serialized_response_fits_frame};
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn running_executable_hash_is_bound_to_the_proc_inode() {
-        use super::{MAX_EXECUTABLE_BYTES, hash_open_regular, hash_running_executable};
-        use nix::fcntl::OFlag;
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::OpenOptionsExt as _;
-
-        let proc_inode = OpenOptions::new()
-            .read(true)
-            .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
-            .open("/proc/self/exe")
-            .expect("running executable inode");
-        assert_eq!(
-            hash_running_executable(MAX_EXECUTABLE_BYTES).expect("running executable digest"),
-            hash_open_regular(proc_inode, MAX_EXECUTABLE_BYTES).expect("pinned inode digest")
-        );
-    }
-
     #[test]
     fn frame_cap_is_enforced_before_unbounded_allocation_and_reader_recovers() {
         let mut input = Cursor::new(b"123456789\nok\npartial".to_vec());

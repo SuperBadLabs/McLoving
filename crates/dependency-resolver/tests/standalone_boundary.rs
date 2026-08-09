@@ -2,7 +2,9 @@
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use mcloving_dependency_resolver::{
@@ -63,6 +65,47 @@ fn config_mode_symlink_duplicate_members_and_executable_substitution_fail_closed
     let executable = std::env::current_exe().expect("test executable");
     config.executable_sha256 = sha256(&fs::read(executable).expect("test executable bytes"));
     verify_running_executable(&config).expect("exact running executable");
+}
+
+#[test]
+fn public_verifier_keeps_the_running_inode_after_path_replacement() {
+    const CHILD_ROOT: &str = "MCLOVING_EXECUTABLE_REPLACEMENT_CHILD_ROOT";
+
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let mut config = config();
+        config.executable_sha256 =
+            sha256(&fs::read("/proc/self/exe").expect("kernel-pinned running executable bytes"));
+        fs::write(root.join("ready"), b"ready").expect("replacement child ready");
+        wait_for_path(&root.join("continue"));
+        verify_running_executable(&config)
+            .expect("public verifier must retain the running executable inode");
+        return;
+    }
+
+    let root = TempDir::new().expect("executable replacement root");
+    let deployed = root.path().join("deployed-test");
+    fs::copy(std::env::current_exe().expect("test executable"), &deployed)
+        .expect("copied executable");
+    let mut child = Command::new(&deployed)
+        .arg("--exact")
+        .arg("public_verifier_keeps_the_running_inode_after_path_replacement")
+        .arg("--nocapture")
+        .env(CHILD_ROOT, root.path())
+        .spawn()
+        .expect("replacement child");
+    wait_for_path(&root.path().join("ready"));
+
+    let replacement = root.path().join("replacement");
+    fs::write(&replacement, b"different replacement bytes").expect("replacement bytes");
+    fs::rename(&replacement, &deployed).expect("atomic deployment replacement");
+    fs::write(root.path().join("continue"), b"continue").expect("continue child");
+
+    let status = child.wait().expect("replacement child status");
+    assert!(
+        status.success(),
+        "public verifier rejected its running inode"
+    );
 }
 
 #[test]
@@ -167,6 +210,14 @@ fn config() -> CertifiedConfig {
 fn write_private(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).expect("write config fixture");
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private config mode");
+}
+
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "timed out waiting for {path:?}");
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn sha256(bytes: &[u8]) -> String {

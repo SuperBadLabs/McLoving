@@ -230,7 +230,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
                 grant_id: "contained-grant".to_owned(),
                 version: 3,
                 scope: "read:com.example".to_owned(),
-                expires_at_unix_ms: now + 120_000,
+                expires_at_unix_ms: now + 600_000,
             }),
         }],
         source_attestation_key_id: "contained-source-key".to_owned(),
@@ -401,7 +401,6 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         &config_path,
         &serde_json::to_vec(&config).expect("serialized config"),
     );
-    let input = serde_json::to_vec(&frame).expect("serialized frame");
     let concurrent_output = fixture.path().join("concurrent-output");
     create_private_directory(&concurrent_output);
     let mut concurrent_config = config.clone();
@@ -499,10 +498,21 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     assert_eq!(denied["code"], "DEP_UNTRUSTED_REPOSITORY_DENIED");
     assert_eq!(requests.load(Ordering::SeqCst), 2);
 
+    let replay_now = unix_ms();
+    let mut replay = frame.clone();
+    replay.request.resolution_id = Uuid::new_v4().to_string();
+    replay.request.build_id = Uuid::new_v4().to_string();
+    replay.request.attempt_id = Uuid::new_v4().to_string();
+    replay.request.requested_at_unix_ms = replay_now;
+    replay.request.expires_at_unix_ms = replay_now + 120_000;
+    replay.request.source_provenance.issued_at_unix_ms = replay_now;
+    replay.request.source_provenance.expires_at_unix_ms = replay_now + 120_000;
+    sign_source_request(&mut replay.request, &source_key);
+    let replay_input = serde_json::to_vec(&replay).expect("serialized replay frame");
     let first = run_resolver(
         &resolver_binary,
         &config_path,
-        &input,
+        &replay_input,
         &credential,
         &receipt_key,
     )
@@ -510,6 +520,20 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     assert_eq!(first["status"], "ok", "first resolver response: {first}");
     assert_eq!(requests.load(Ordering::SeqCst), 3);
     server.abort();
+
+    let second = run_resolver(
+        &resolver_binary,
+        &config_path,
+        &replay_input,
+        &credential,
+        &receipt_key,
+    )
+    .await;
+    assert_eq!(
+        second, first,
+        "offline restart replay must be byte-equivalent JSON"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), 3);
 
     let later_lock = String::from_utf8(lock.clone())
         .expect("UTF-8 lock")
@@ -532,7 +556,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         },
     )
     .expect("later exact plan");
-    let mut later = frame.clone();
+    let mut later = replay;
     later.lock_base64 = BASE64.encode(&later_lock);
     later.request.expected_lock_sha256 = later_plan.lock_sha256;
     later.request.expected_graph_sha256 = later_plan.graph_sha256;
@@ -549,19 +573,6 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     assert_eq!(denied["code"], "DEP_STORE_RECEIPT_INVALID");
     assert_eq!(requests.load(Ordering::SeqCst), 3);
 
-    let second = run_resolver(
-        &resolver_binary,
-        &config_path,
-        &input,
-        &credential,
-        &receipt_key,
-    )
-    .await;
-    assert_eq!(
-        second, first,
-        "offline restart replay must be byte-equivalent JSON"
-    );
-    assert_eq!(requests.load(Ordering::SeqCst), 3);
     assert!(!contains_bytes(
         serde_json::to_vec(&second)
             .expect("response bytes")
