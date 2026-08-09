@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use base64::Engine as _;
@@ -62,6 +63,7 @@ pub struct HttpTransport {
     transport_root: PathBuf,
     markers: Vec<Vec<u8>>,
     repositories: BTreeMap<String, RepositoryRuntime>,
+    cleanup_poisoned: AtomicBool,
     _lease: Option<TransportLease>,
 }
 
@@ -155,8 +157,24 @@ impl HttpTransport {
             transport_root: PathBuf::from(&config.transport_root),
             markers,
             repositories,
+            cleanup_poisoned: AtomicBool::new(false),
             _lease: Some(lease),
         })
+    }
+
+    pub fn ensure_available(&self) -> Result<(), TransportError> {
+        if self.cleanup_poisoned.load(Ordering::Acquire) {
+            Err(TransportError::new(
+                "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED",
+                "transport cleanup is ambiguous and requires resolver restart",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn preserve_cleanup_ambiguity(&self) {
+        self.cleanup_poisoned.store(true, Ordering::Release);
     }
 
     pub async fn fetch_plan(
@@ -165,6 +183,7 @@ impl HttpTransport {
         plan: &CanonicalPlan,
         deadline: Instant,
     ) -> Result<Vec<FetchedArtifact>, TransportError> {
+        self.ensure_available()?;
         crate::validate_plan(plan)
             .map_err(|error| TransportError::new(error.code, error.message))?;
         let total = plan.nodes.iter().try_fold(0_u64, |total, node| {
@@ -185,13 +204,32 @@ impl HttpTransport {
         match self.fetch_plan_into(plan, deadline, &resolution_root).await {
             Ok(fetched) => Ok(fetched),
             Err(error) => {
-                self.cleanup_resolution(resolution_id).await?;
+                if Instant::now() >= deadline {
+                    self.preserve_cleanup_ambiguity();
+                    return Err(error);
+                }
+                self.cleanup_resolution_before_deadline(resolution_id, deadline)
+                    .await?;
                 Err(error)
             }
         }
     }
 
-    pub async fn cleanup_resolution(&self, resolution_id: Uuid) -> Result<(), TransportError> {
+    pub async fn cleanup_resolution_before_deadline(
+        &self,
+        resolution_id: Uuid,
+        deadline: Instant,
+    ) -> Result<(), TransportError> {
+        self.ensure_available()?;
+        supervise_cleanup(
+            &self.cleanup_poisoned,
+            deadline,
+            self.cleanup_resolution(resolution_id),
+        )
+        .await
+    }
+
+    async fn cleanup_resolution(&self, resolution_id: Uuid) -> Result<(), TransportError> {
         let resolution_root = self.transport_root.join(resolution_id.to_string());
         tokio::fs::remove_dir_all(&resolution_root)
             .await
@@ -361,6 +399,30 @@ impl HttpTransport {
             attestation_sha256: format!("{:x}", Sha256::digest(&signature)),
             publication_generation: self.generation,
         })
+    }
+}
+
+async fn supervise_cleanup<F>(
+    cleanup_poisoned: &AtomicBool,
+    deadline: Instant,
+    cleanup: F,
+) -> Result<(), TransportError>
+where
+    F: std::future::Future<Output = Result<(), TransportError>>,
+{
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), cleanup).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            cleanup_poisoned.store(true, Ordering::Release);
+            Err(error)
+        }
+        Err(_) => {
+            cleanup_poisoned.store(true, Ordering::Release);
+            Err(TransportError::new(
+                "DEP_TRANSPORT_CLEANUP_AMBIGUOUS",
+                "transient cleanup exceeded the absolute deadline and requires resolver restart",
+            ))
+        }
     }
 }
 
@@ -895,6 +957,7 @@ mod tests {
                 transport_root: root.path().to_path_buf(),
                 markers,
                 repositories: BTreeMap::from([("contained-maven".to_owned(), repository)]),
+                cleanup_poisoned: AtomicBool::new(false),
                 _lease: None,
             };
             let mut plan = CanonicalPlan {
@@ -1173,6 +1236,11 @@ mod tests {
             .await
             .expect_err("absolute timeout");
         assert_eq!(error.code, "DEP_TRANSPORT_DEADLINE");
+        let restart = timeout
+            .transport
+            .ensure_available()
+            .expect_err("timed-out cleanup ambiguity");
+        assert_eq!(restart.code, "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED");
     }
 
     #[test]
@@ -1224,5 +1292,21 @@ mod tests {
             .expect("partial marker");
         let error = scanner.scan(b"secret-suffix").expect_err("spanning marker");
         assert_eq!(error.code, "DEP_TRANSPORT_SECRET_MARKER");
+    }
+
+    #[tokio::test]
+    async fn cleanup_timeout_returns_promptly_and_poisons_transport() {
+        let poisoned = AtomicBool::new(false);
+        let started = Instant::now();
+        let error = supervise_cleanup(
+            &poisoned,
+            started + Duration::from_millis(5),
+            std::future::pending::<Result<(), TransportError>>(),
+        )
+        .await
+        .expect_err("stalled cleanup");
+        assert_eq!(error.code, "DEP_TRANSPORT_CLEANUP_AMBIGUOUS");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(poisoned.load(Ordering::Acquire));
     }
 }

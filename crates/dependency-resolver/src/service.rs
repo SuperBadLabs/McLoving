@@ -130,6 +130,9 @@ impl DependencyResolver {
                 "DEP_STORE_PUBLICATION_RESTART_REQUIRED",
             ));
         }
+        self.transport
+            .ensure_available()
+            .map_err(|error| ResolverError::denied(error.code))?;
         let started_at = Instant::now();
         let wall_now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -185,9 +188,8 @@ impl DependencyResolver {
             }
         };
         if Instant::now() >= deadline {
-            let cleanup = self.transport.cleanup_resolution(resolution_id).await;
+            self.transport.preserve_cleanup_ambiguity();
             self.store.release_incomplete_claim(&claim);
-            cleanup.map_err(|error| ResolverError::denied(error.code))?;
             return Err(ResolverError::denied("DEP_TRANSPORT_DEADLINE"));
         }
         let receipt = match self
@@ -205,7 +207,7 @@ impl DependencyResolver {
             }
         };
         self.transport
-            .cleanup_resolution(resolution_id)
+            .cleanup_resolution_before_deadline(resolution_id, deadline)
             .await
             .map_err(|error| ResolverError::denied(error.code))?;
         Ok(receipt)

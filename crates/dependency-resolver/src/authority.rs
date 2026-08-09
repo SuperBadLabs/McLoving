@@ -14,6 +14,7 @@ const MAX_SECRET_BYTES: u64 = 65_536;
 const MAX_PUBLIC_KEY_BYTES: u64 = 4_096;
 const MAX_CA_BYTES: u64 = 1_048_576;
 const MAX_MARKER_SET_BYTES: u64 = 1_048_576;
+const MAX_SECRET_MARKERS: usize = 256;
 const MARKER_SCHEMA_VERSION: &str = "mcloving.secret-markers/v1";
 
 #[derive(Debug)]
@@ -173,7 +174,10 @@ fn parse_markers(bytes: &[u8]) -> Result<Vec<Vec<u8>>, AuthorityError> {
             "secret marker set is not closed canonical JSON",
         )
     })?;
-    if document.schema_version != MARKER_SCHEMA_VERSION || document.markers_hex.is_empty() {
+    if document.schema_version != MARKER_SCHEMA_VERSION
+        || document.markers_hex.is_empty()
+        || document.markers_hex.len() > MAX_SECRET_MARKERS
+    {
         return Err(AuthorityError::new(
             "DEP_AUTHORITY_MARKER_SET_INVALID",
             "secret marker set schema or marker count is invalid",
@@ -299,4 +303,22 @@ fn authority_read_error() -> AuthorityError {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_marker_count_is_rejected_before_scanning() {
+        let markers = (0..=MAX_SECRET_MARKERS)
+            .map(|index| format!("{index:016x}"))
+            .collect::<Vec<_>>()
+            .join("\",\"");
+        let document = format!(
+            "{{\"schema_version\":\"{MARKER_SCHEMA_VERSION}\",\"markers_hex\":[\"{markers}\"]}}"
+        );
+        let error = parse_markers(document.as_bytes()).expect_err("oversized marker count");
+        assert_eq!(error.code, "DEP_AUTHORITY_MARKER_SET_INVALID");
+    }
 }
