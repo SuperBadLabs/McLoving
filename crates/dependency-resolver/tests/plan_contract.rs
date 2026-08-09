@@ -192,3 +192,26 @@ fn canonical_order_is_enforced() {
         "DEP_GRAPH_NONCANONICAL"
     );
 }
+
+#[test]
+fn one_coordinate_cannot_select_multiple_versions_or_repositories() {
+    let mut plan = valid_plan();
+    let mut conflict = node(
+        "org.example:leaf",
+        "9.9.9",
+        "org/example/leaf/9.9.9/leaf.jar",
+        vec![],
+    );
+    conflict.sha256 = digest('b');
+    conflict.node_id = canonical_node_id(Ecosystem::Maven, &conflict).expect("conflict id");
+    plan.nodes.push(conflict);
+    plan.nodes
+        .sort_by(|left, right| left.node_id.cmp(&right.node_id));
+
+    assert_eq!(
+        validate_plan(&plan)
+            .expect_err("coordinate conflict must fail")
+            .code,
+        "DEP_COORDINATE_CONFLICT"
+    );
+}

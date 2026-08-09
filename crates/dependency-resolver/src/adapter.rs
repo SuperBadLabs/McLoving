@@ -34,7 +34,7 @@ pub struct AdapterError {
 }
 
 impl AdapterError {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -206,7 +206,7 @@ fn validate_maven_coordinate_part(name: &str, value: &str) -> Result<(), Adapter
     Ok(())
 }
 
-fn validate_local_key(value: &str) -> Result<(), AdapterError> {
+pub(crate) fn validate_local_key(value: &str) -> Result<(), AdapterError> {
     if value.is_empty()
         || value.len() > MAX_LOCAL_KEY_BYTES
         || value
@@ -257,6 +257,45 @@ fn translate_keys(
         }
     }
     Ok(translated.into_iter().collect())
+}
+
+pub(crate) fn assemble_plan(
+    ecosystem: Ecosystem,
+    lock_bytes: &[u8],
+    bindings: &AdapterBindings,
+    mut nodes: Vec<PackageNode>,
+    mut roots: Vec<String>,
+) -> Result<CanonicalPlan, AdapterError> {
+    nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+    roots.sort();
+    let mut plan = CanonicalPlan {
+        schema_version: PLAN_SCHEMA_VERSION.to_owned(),
+        ecosystem,
+        adapter_id: bindings.adapter_id.clone(),
+        adapter_sha256: bindings.adapter_sha256.clone(),
+        source_tree_sha256: bindings.source_tree_sha256.clone(),
+        lock_sha256: sha256_hex(lock_bytes),
+        resolver_toolchain_id: bindings.resolver_toolchain_id.clone(),
+        resolver_toolchain_sha256: bindings.resolver_toolchain_sha256.clone(),
+        source_trust_class: bindings.source_trust_class,
+        repositories: bindings.repositories.clone(),
+        nodes,
+        roots,
+        graph_sha256: String::new(),
+    };
+    plan.graph_sha256 = canonical_graph_sha256(&plan)?;
+    validate_plan(&plan)?;
+    Ok(plan)
+}
+
+pub(crate) fn validate_lock_size(lock_bytes: &[u8], ecosystem: &str) -> Result<(), AdapterError> {
+    if lock_bytes.is_empty() || lock_bytes.len() > MAX_LOCK_BYTES {
+        return Err(AdapterError::new(
+            "DEP_LOCK_SIZE_INVALID",
+            format!("{ecosystem} lock bytes are empty or exceed the adapter bound"),
+        ));
+    }
+    Ok(())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

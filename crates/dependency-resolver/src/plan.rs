@@ -218,15 +218,10 @@ fn validate_nodes<'a>(
                 "package nodes must be strictly sorted by node id",
             ));
         }
-        let coordinate_version = (
-            node.coordinate.as_str(),
-            node.exact_version.as_str(),
-            node.repository_id.as_str(),
-        );
-        if !coordinates.insert(coordinate_version) {
+        if !coordinates.insert(node.coordinate.as_str()) {
             return Err(PlanError::new(
-                "DEP_COORDINATE_DUPLICATE",
-                "a coordinate/version/repository tuple is duplicated",
+                "DEP_COORDINATE_CONFLICT",
+                "a coordinate is bound to more than one package node",
             ));
         }
         if canonical_node_id(plan.ecosystem, node)? != node.node_id {
