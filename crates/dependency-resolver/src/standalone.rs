@@ -42,6 +42,13 @@ impl From<Result<ResolutionReceipt, ResolverError>> for ResolverResponse {
     }
 }
 
+pub fn serialized_response_fits_frame(serialized_bytes: usize, max_frame_bytes: u64) -> bool {
+    u64::try_from(serialized_bytes)
+        .ok()
+        .and_then(|bytes| bytes.checked_add(1))
+        .is_some_and(|emitted_bytes| emitted_bytes <= max_frame_bytes)
+}
+
 pub fn load_certified_config(path: &Path) -> Result<CertifiedConfig, ResolverError> {
     let bytes = read_private_config(path)?;
     let config: CertifiedConfig = crate::strict_json::from_slice(&bytes)
@@ -199,7 +206,7 @@ fn read_bounded(file: File, max_bytes: u64) -> Result<Vec<u8>, ResolverError> {
 mod tests {
     use std::io::Cursor;
 
-    use super::{FrameReadError, read_bounded_frame};
+    use super::{FrameReadError, read_bounded_frame, serialized_response_fits_frame};
 
     #[test]
     fn frame_cap_is_enforced_before_unbounded_allocation_and_reader_recovers() {
@@ -217,5 +224,12 @@ mod tests {
             Some(b"partial".to_vec())
         );
         assert_eq!(read_bounded_frame(&mut input, 8).expect("EOF"), None);
+    }
+
+    #[test]
+    fn response_frame_cap_includes_the_line_terminator() {
+        assert!(serialized_response_fits_frame(127, 128));
+        assert!(!serialized_response_fits_frame(128, 128));
+        assert!(!serialized_response_fits_frame(usize::MAX, u64::MAX));
     }
 }

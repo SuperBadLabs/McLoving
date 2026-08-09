@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     AdmittedRequest, CanonicalPlan, CertifiedConfig, FetchedArtifact, LoadedAuthorities,
-    ResolutionRequest,
+    ResolutionRequest, serialized_response_fits_frame,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -420,7 +420,7 @@ impl ResolutionStore {
             receipt: Box::new(receipt),
         };
         let response_bytes = serde_json::to_vec(&response).map_err(|_| state_error())?;
-        if response_bytes.len() as u64 > max_frame_bytes {
+        if !serialized_response_fits_frame(response_bytes.len(), max_frame_bytes) {
             return Err(StoreError::new(
                 "DEP_RESPONSE_FRAME_OVERSIZED",
                 "successful dependency receipt exceeds the certified response frame",

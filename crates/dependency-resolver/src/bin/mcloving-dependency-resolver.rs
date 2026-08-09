@@ -4,7 +4,7 @@ use std::path::Path;
 use mcloving_dependency_resolver::{
     DependencyResolver, FrameReadError, MAX_PUBLICATION_WORKER_BYTES, ResolverResponse,
     SerializedOutputGuard, load_certified_config, parse_resolution_frame, read_bounded_frame,
-    run_publication_worker, verify_running_executable,
+    run_publication_worker, serialized_response_fits_frame, verify_running_executable,
 };
 
 fn main() {
@@ -137,7 +137,7 @@ async fn write_response<W: Write>(
             "dependency resolution was denied",
         )
     })?;
-    let oversized = bytes.len() > max_frame;
+    let oversized = !serialized_response_fits_frame(bytes.len(), max_frame as u64);
     if oversized {
         bytes = serde_json::to_vec(&ResolverResponse::Error {
             code: "DEP_RESPONSE_FRAME_OVERSIZED",

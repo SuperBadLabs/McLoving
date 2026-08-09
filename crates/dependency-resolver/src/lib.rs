@@ -37,7 +37,7 @@ pub use service::{
 };
 pub use standalone::{
     FrameReadError, ResolverResponse, load_certified_config, read_bounded_frame,
-    verify_running_executable,
+    serialized_response_fits_frame, verify_running_executable,
 };
 pub use transport::{
     FetchedArtifact, HttpTransport, TransportError, canonical_attestation_message,
