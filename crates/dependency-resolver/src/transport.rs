@@ -631,7 +631,7 @@ impl TransportLease {
         use nix::sys::statvfs::statvfs;
         use nix::unistd::Uid;
         use std::io::{Seek as _, SeekFrom, Write as _};
-        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
         let root = Path::new(&config.transport_root);
         let output = Path::new(&config.output_root);
@@ -657,16 +657,7 @@ impl TransportLease {
         }
 
         let lock_path = root.join(".mcloving-dependency-resolver.lock");
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(
-                nix::fcntl::OFlag::O_CLOEXEC.bits() | nix::fcntl::OFlag::O_NOFOLLOW.bits(),
-            )
-            .open(lock_path)
-            .map_err(|_| root_state_error())?;
+        let mut file = open_transport_lock(&lock_path)?;
         let existing = read_transport_lock_bounded(&mut file)?;
         if existing.is_empty() {
             file.seek(SeekFrom::Start(0))
@@ -677,6 +668,8 @@ impl TransportLease {
         }
         let metadata = file.metadata().map_err(|_| root_state_error())?;
         if !metadata.is_file()
+            || metadata.uid() != Uid::effective().as_raw()
+            || metadata.nlink() != 1
             || metadata.permissions().mode() & 0o077 != 0
             || metadata.len() != TRANSPORT_LOCK_CONTENT.len() as u64
         {
@@ -695,7 +688,12 @@ impl TransportLease {
             if entry.file_name() != ".mcloving-dependency-resolver.lock" || lock_seen {
                 return Err(root_state_error());
             }
-            if !entry.file_type().map_err(|_| root_state_error())?.is_file() {
+            let entry_metadata = entry.metadata().map_err(|_| root_state_error())?;
+            if !entry.file_type().map_err(|_| root_state_error())?.is_file()
+                || !entry_metadata.is_file()
+                || entry_metadata.dev() != metadata.dev()
+                || entry_metadata.ino() != metadata.ino()
+            {
                 return Err(root_state_error());
             }
             lock_seen = true;
@@ -712,6 +710,62 @@ impl TransportLease {
             "DEP_TRANSPORT_PLATFORM_UNSUPPORTED",
             "dedicated transport filesystem enforcement requires Linux",
         ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_transport_lock(path: &Path) -> Result<std::fs::File, TransportError> {
+    use nix::fcntl::OFlag;
+    use nix::unistd::Uid;
+    use std::io::ErrorKind;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
+        .open(path)
+    {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            // O_PATH pins and stats the directory entry without invoking a
+            // FIFO or device driver's potentially blocking open operation.
+            let inspection = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags((OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW).bits())
+                .open(path)
+                .map_err(|_| root_state_error())?;
+            let inspected = inspection.metadata().map_err(|_| root_state_error())?;
+            if !inspected.is_file()
+                || inspected.uid() != Uid::effective().as_raw()
+                || inspected.nlink() != 1
+                || inspected.mode() & 0o077 != 0
+            {
+                return Err(root_state_error());
+            }
+
+            // Reopen the exact pinned inode, not the attacker-controlled path.
+            // O_NONBLOCK is retained as a second defensive boundary.
+            let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+                .open(pinned_path)
+                .map_err(|_| root_state_error())?;
+            let opened = file.metadata().map_err(|_| root_state_error())?;
+            if !opened.is_file()
+                || opened.dev() != inspected.dev()
+                || opened.ino() != inspected.ino()
+            {
+                return Err(root_state_error());
+            }
+            Ok(file)
+        }
+        Err(_) => Err(root_state_error()),
     }
 }
 
@@ -898,14 +952,17 @@ mod tests {
         let root = TempDir::new().expect("transport lock root");
         let lock_path = root.path().join("transport.lock");
         mkfifo(&lock_path, Mode::S_IRUSR | Mode::S_IWUSR).expect("transport lock fifo");
-        let mut lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(lock_path)
-            .expect("open transport lock fifo");
-
         let started = Instant::now();
-        let error = read_transport_lock_bounded(&mut lock).expect_err("non-regular lock");
+        let error = open_transport_lock(&lock_path).expect_err("non-regular lock");
+        assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn device_transport_lock_is_rejected_before_device_open() {
+        let started = Instant::now();
+        let error = open_transport_lock(Path::new("/dev/null")).expect_err("device lock");
         assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
         assert!(started.elapsed() < Duration::from_secs(1));
     }

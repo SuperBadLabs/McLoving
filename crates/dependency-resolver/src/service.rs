@@ -65,6 +65,7 @@ impl ResolverError {
 
 pub struct DependencyResolver {
     config: CertifiedConfig,
+    source_attestation_key: Vec<u8>,
     store: ResolutionStore,
     transport: HttpTransport,
     publication_worker: PathBuf,
@@ -115,8 +116,10 @@ impl DependencyResolver {
             .map_err(|error| ResolverError::denied(error.code))?;
         let transport = HttpTransport::new(&config, &authorities)
             .map_err(|error| ResolverError::denied(error.code))?;
+        let source_attestation_key = authorities.source_attestation_key().to_vec();
         Ok(Self {
             config,
+            source_attestation_key,
             store,
             transport,
             publication_worker,
@@ -176,6 +179,7 @@ impl DependencyResolver {
         }
         let admitted = crate::admit_request(
             &self.config,
+            &self.source_attestation_key,
             &frame.request,
             &plan,
             &lock_bytes,

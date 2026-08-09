@@ -15,11 +15,13 @@ use axum::http::{Request, Response, StatusCode};
 use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::engine::general_purpose::STANDARD_NO_PAD as SOURCE_BASE64;
 use mcloving_dependency_resolver::{
     AdapterBindings, AdapterConfig, CertifiedConfig, DependencyResolver, Ecosystem, GrantUse,
     LoadedAuthorities, PackageNode, RepositoryBinding, RepositoryConfig, RepositoryGrant,
-    ResolutionFrame, ResolutionRequest, ResolverLimits, SourceTrustClass,
+    ResolutionFrame, ResolutionRequest, ResolverLimits, SourceProvenance, SourceTrustClass,
     canonical_attestation_message, configuration_sha256, parse_maven_lock,
+    source_provenance_message,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use sha2::{Digest, Sha256};
@@ -95,10 +97,18 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     let receipt_key = b"contained-dependency-receipt-key-material-v1".to_vec();
     let key =
         Arc::new(Ed25519KeyPair::from_seed_unchecked(&[11_u8; 32]).expect("contained Ed25519 key"));
+    let source_key = Ed25519KeyPair::from_seed_unchecked(&[12_u8; 32])
+        .expect("contained source attestation key");
+    let source_attestation_key = source_key.public_key().as_ref().to_vec();
     let attestation_key = key.public_key().as_ref().to_vec();
     let marker_document = marker_document(&[&credential, &receipt_key]);
     let credential_path = private_file(fixture.path(), "repository.credential", &credential);
     let attestation_path = private_file(fixture.path(), "repository.pub", &attestation_key);
+    let source_attestation_path = private_file(
+        fixture.path(),
+        "source-attestation.pub",
+        &source_attestation_key,
+    );
     let receipt_path = private_file(fixture.path(), "receipt.key", &receipt_key);
     let markers_path = private_file(fixture.path(), "markers.json", &marker_document);
 
@@ -223,6 +233,9 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
                 expires_at_unix_ms: now + 120_000,
             }),
         }],
+        source_attestation_key_id: "contained-source-key".to_owned(),
+        source_attestation_key_path: path_string(&source_attestation_path),
+        source_attestation_key_sha256: sha256(&source_attestation_key),
         receipt_key_id: "contained-receipt-key".to_owned(),
         receipt_key_path: path_string(&receipt_path),
         receipt_key_sha256: sha256(&receipt_key),
@@ -335,7 +348,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     );
 
     let config_digest = configuration_sha256(&config).expect("configuration digest");
-    let request = ResolutionRequest {
+    let mut request = ResolutionRequest {
         schema_version: "mcloving.dependency-request/v1".to_owned(),
         protocol_version: config.protocol_version.clone(),
         resolution_id: Uuid::new_v4().to_string(),
@@ -346,6 +359,13 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         attempt_id: Uuid::new_v4().to_string(),
         audit_lineage: "audit/contained/standalone".to_owned(),
         source_trust_class: SourceTrustClass::Trusted,
+        source_provenance: SourceProvenance {
+            schema_version: "mcloving.source-provenance/v1".to_owned(),
+            key_id: config.source_attestation_key_id.clone(),
+            issued_at_unix_ms: now,
+            expires_at_unix_ms: now + 60_000,
+            signature_base64: String::new(),
+        },
         expected_executable_sha256: config.executable_sha256.clone(),
         expected_configuration_sha256: config_digest,
         expected_adapter_id: preliminary_plan.adapter_id.clone(),
@@ -370,6 +390,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
         expires_at_unix_ms: now + 60_000,
         rollback_from_generation: None,
     };
+    sign_source_request(&mut request, &source_key);
     let frame = ResolutionFrame {
         request,
         lock_base64: BASE64.encode(&lock),
@@ -392,6 +413,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     concurrent_frame.request.attempt_id = Uuid::new_v4().to_string();
     concurrent_frame.request.expected_configuration_sha256 =
         configuration_sha256(&concurrent_config).expect("concurrent config digest");
+    sign_source_request(&mut concurrent_frame.request, &source_key);
     let resolver = Arc::new(
         DependencyResolver::new_with_publication_worker(concurrent_config, resolver_binary.clone())
             .expect("concurrent contained resolver"),
@@ -410,12 +432,30 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     assert_eq!(requests.load(Ordering::SeqCst), 1);
     drop(resolver);
 
+    let mut forged_trusted = frame.clone();
+    forged_trusted.request.resolution_id = Uuid::new_v4().to_string();
+    forged_trusted.request.source_trust_class = SourceTrustClass::Untrusted;
+    sign_source_request(&mut forged_trusted.request, &source_key);
+    forged_trusted.request.source_trust_class = SourceTrustClass::Trusted;
+    let denied = run_resolver(
+        &resolver_binary,
+        &config_path,
+        &serde_json::to_vec(&forged_trusted).expect("forged trusted frame"),
+        &credential,
+        &receipt_key,
+    )
+    .await;
+    assert_eq!(denied["status"], "error");
+    assert_eq!(denied["code"], "DEP_REQUEST_SOURCE_PROVENANCE_INVALID");
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+
     let mut disk_full = frame.clone();
     disk_full.request.resolution_id = Uuid::new_v4().to_string();
     disk_full.request.logical_lock_path = "dependency-locks/full-maven.json".to_owned();
     disk_full.request.expected_lock_sha256 = full_plan.lock_sha256;
     disk_full.request.expected_graph_sha256 = full_plan.graph_sha256;
     disk_full.lock_base64 = BASE64.encode(&full_lock);
+    sign_source_request(&mut disk_full.request, &source_key);
     let denied = run_resolver(
         &resolver_binary,
         &config_path,
@@ -430,6 +470,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
 
     let mut wrong_graph = frame.clone();
     wrong_graph.request.expected_graph_sha256 = "f".repeat(64);
+    sign_source_request(&mut wrong_graph.request, &source_key);
     let denied = run_resolver(
         &resolver_binary,
         &config_path,
@@ -445,6 +486,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     let mut untrusted = frame.clone();
     untrusted.request.resolution_id = Uuid::new_v4().to_string();
     untrusted.request.source_trust_class = SourceTrustClass::Untrusted;
+    sign_source_request(&mut untrusted.request, &source_key);
     let denied = run_resolver(
         &resolver_binary,
         &config_path,
@@ -494,6 +536,7 @@ async fn standalone_exact_resolution_and_offline_restart_replay() {
     later.lock_base64 = BASE64.encode(&later_lock);
     later.request.expected_lock_sha256 = later_plan.lock_sha256;
     later.request.expected_graph_sha256 = later_plan.graph_sha256;
+    sign_source_request(&mut later.request, &source_key);
     let denied = run_resolver(
         &resolver_binary,
         &config_path,
@@ -593,6 +636,12 @@ fn create_private_directory(path: &Path) {
 
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn sign_source_request(request: &mut ResolutionRequest, key: &Ed25519KeyPair) {
+    request.source_provenance.signature_base64.clear();
+    let message = source_provenance_message(request).expect("source provenance message");
+    request.source_provenance.signature_base64 = SOURCE_BASE64.encode(key.sign(&message).as_ref());
 }
 
 fn hex(bytes: &[u8]) -> String {

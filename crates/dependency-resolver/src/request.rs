@@ -1,5 +1,8 @@
 use std::collections::BTreeSet;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD_NO_PAD;
+use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -10,6 +13,18 @@ use crate::config::{
     validate_config, validate_digest,
 };
 use crate::{CanonicalPlan, Ecosystem, REQUEST_SCHEMA_VERSION, SourceTrustClass};
+
+pub const SOURCE_PROVENANCE_SCHEMA_VERSION: &str = "mcloving.source-provenance/v1";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceProvenance {
+    pub schema_version: String,
+    pub key_id: String,
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub signature_base64: String,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +48,7 @@ pub struct ResolutionRequest {
     pub attempt_id: String,
     pub audit_lineage: String,
     pub source_trust_class: SourceTrustClass,
+    pub source_provenance: SourceProvenance,
     pub expected_executable_sha256: String,
     pub expected_configuration_sha256: String,
     pub expected_adapter_id: String,
@@ -86,6 +102,7 @@ impl From<ConfigError> for RequestError {
 
 pub fn admit_request(
     config: &CertifiedConfig,
+    source_attestation_key: &[u8],
     request: &ResolutionRequest,
     plan: &CanonicalPlan,
     lock_bytes: &[u8],
@@ -106,6 +123,7 @@ pub fn admit_request(
             "request does not bind the exact certified resolver runtime",
         ));
     }
+    verify_source_provenance(config, source_attestation_key, request)?;
     if request
         .rollback_from_generation
         .is_some_and(|generation| generation >= request.expected_generation)
@@ -123,6 +141,68 @@ pub fn admit_request(
         absolute_expiry_unix_ms: request.expires_at_unix_ms,
         repository_ids: request.repository_ids.clone(),
     })
+}
+
+pub fn source_provenance_message(request: &ResolutionRequest) -> Result<Vec<u8>, RequestError> {
+    let mut unsigned = request.clone();
+    unsigned.source_provenance.signature_base64.clear();
+    let bytes = serde_json::to_vec(&unsigned).map_err(|_| {
+        RequestError::new(
+            "DEP_REQUEST_SOURCE_PROVENANCE_INVALID",
+            "source provenance could not be serialized canonically",
+        )
+    })?;
+    let domain = b"mcloving-source-provenance-v1";
+    let mut message = Vec::with_capacity(16 + domain.len() + bytes.len());
+    message.extend_from_slice(&(domain.len() as u64).to_be_bytes());
+    message.extend_from_slice(domain);
+    message.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    message.extend_from_slice(&bytes);
+    Ok(message)
+}
+
+fn verify_source_provenance(
+    config: &CertifiedConfig,
+    source_attestation_key: &[u8],
+    request: &ResolutionRequest,
+) -> Result<(), RequestError> {
+    let provenance = &request.source_provenance;
+    if provenance.schema_version != SOURCE_PROVENANCE_SCHEMA_VERSION
+        || provenance.key_id != config.source_attestation_key_id
+        || provenance.issued_at_unix_ms != request.requested_at_unix_ms
+        || provenance.expires_at_unix_ms != request.expires_at_unix_ms
+        || source_attestation_key.len() != 32
+        || format!("{:x}", Sha256::digest(source_attestation_key))
+            != config.source_attestation_key_sha256
+    {
+        return Err(RequestError::new(
+            "DEP_REQUEST_SOURCE_PROVENANCE_INVALID",
+            "source provenance schema, authority, lifetime, or key is invalid",
+        ));
+    }
+    let signature = STANDARD_NO_PAD
+        .decode(provenance.signature_base64.as_bytes())
+        .map_err(|_| {
+            RequestError::new(
+                "DEP_REQUEST_SOURCE_PROVENANCE_INVALID",
+                "source provenance signature encoding is invalid",
+            )
+        })?;
+    if signature.len() != 64 || STANDARD_NO_PAD.encode(&signature) != provenance.signature_base64 {
+        return Err(RequestError::new(
+            "DEP_REQUEST_SOURCE_PROVENANCE_INVALID",
+            "source provenance signature encoding is invalid",
+        ));
+    }
+    let message = source_provenance_message(request)?;
+    UnparsedPublicKey::new(&ED25519, source_attestation_key)
+        .verify(&message, &signature)
+        .map_err(|_| {
+            RequestError::new(
+                "DEP_REQUEST_SOURCE_PROVENANCE_INVALID",
+                "source provenance signature does not bind the exact request",
+            )
+        })
 }
 
 pub fn request_sha256(request: &ResolutionRequest) -> Result<String, RequestError> {

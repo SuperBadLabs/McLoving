@@ -84,6 +84,9 @@ pub struct CertifiedConfig {
     pub resolver_toolchain_sha256: String,
     pub adapters: Vec<AdapterConfig>,
     pub repositories: Vec<RepositoryConfig>,
+    pub source_attestation_key_id: String,
+    pub source_attestation_key_path: String,
+    pub source_attestation_key_sha256: String,
     pub receipt_key_id: String,
     pub receipt_key_path: String,
     pub receipt_key_sha256: String,
@@ -124,6 +127,10 @@ pub fn validate_config(config: &CertifiedConfig) -> Result<(), ConfigError> {
         ("deployment", config.deployment_id.as_str()),
         ("operator", config.operator_id.as_str()),
         ("resolver toolchain", config.resolver_toolchain_id.as_str()),
+        (
+            "source attestation key",
+            config.source_attestation_key_id.as_str(),
+        ),
         ("receipt key", config.receipt_key_id.as_str()),
     ] {
         validate_binding(name, value)?;
@@ -140,6 +147,10 @@ pub fn validate_config(config: &CertifiedConfig) -> Result<(), ConfigError> {
             "resolver toolchain",
             config.resolver_toolchain_sha256.as_str(),
         ),
+        (
+            "source attestation key",
+            config.source_attestation_key_sha256.as_str(),
+        ),
         ("receipt key", config.receipt_key_sha256.as_str()),
         (
             "secret marker set",
@@ -150,6 +161,10 @@ pub fn validate_config(config: &CertifiedConfig) -> Result<(), ConfigError> {
     }
     validate_adapters(&config.adapters)?;
     validate_repositories(config)?;
+    validate_authority_path(
+        "source attestation key",
+        &config.source_attestation_key_path,
+    )?;
     validate_authority_path("receipt key", &config.receipt_key_path)?;
     validate_authority_path("secret marker set", &config.secret_marker_set_path)?;
     validate_private_root("output", &config.output_root)?;
@@ -175,6 +190,7 @@ fn validate_path_separation(config: &CertifiedConfig) -> Result<(), ConfigError>
         ));
     }
     let mut authority_paths = vec![
+        config.source_attestation_key_path.as_str(),
         config.receipt_key_path.as_str(),
         config.secret_marker_set_path.as_str(),
     ];

@@ -29,7 +29,8 @@ pub use publication::{
 };
 pub use pypi_adapter::parse_pypi_requirements;
 pub use request::{
-    AdmittedRequest, GrantUse, RequestError, ResolutionRequest, admit_request, request_sha256,
+    AdmittedRequest, GrantUse, RequestError, ResolutionRequest, SOURCE_PROVENANCE_SCHEMA_VERSION,
+    SourceProvenance, admit_request, request_sha256, source_provenance_message,
 };
 pub use service::{
     DependencyResolver, MAX_PUBLICATION_WORKER_BYTES, PublicationWorkerResponse, ResolutionFrame,

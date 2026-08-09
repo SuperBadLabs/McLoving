@@ -43,8 +43,9 @@ recertification, without changing the canonical receipt contract.
 The process may:
 
 - read one immutable configuration, one optional repository credential per
-  configured repository, repository attestation public keys, one receipt key,
-  and one secret-marker set;
+  configured repository, one source-provenance attestation public key,
+  repository attestation public keys, one receipt key, and one secret-marker
+  set;
 - read one bounded lock file supplied with the request;
 - issue `GET` only to exact artifact paths derived from the admitted canonical
   graph and configured repository base URL;
@@ -143,6 +144,8 @@ The canonical configuration digest binds:
 - protocol, schema, resolver, deployment, operator, and generation identities;
 - exact running executable and every adapter implementation digest;
 - exact resolver/toolchain identity and digest;
+- the dedicated source-provenance Ed25519 public-key identity and content
+  digest;
 - each repository identity, normalized base URL, allowed ecosystem and
   coordinate prefixes, trust classes, private/public disposition, content
   policy, and attestation public-key identity/content digest;
@@ -216,6 +219,21 @@ Every request binds:
 - request and expiry times; and
 - optional rollback-from generation.
 
+The caller-supplied source trust class is not authority by itself. Every request
+also carries a closed `mcloving.source-provenance/v1` envelope. Its canonical
+unpadded standard-Base64 Ed25519 signature covers a domain-separated canonical
+serialization of the complete request with only `signature_base64` cleared, so
+it binds source trust,
+acquisition-receipt and source-tree digests, logical lock path and digest,
+scope identities, graph and repository policy, exact certified configuration,
+generation, and lifetime in one statement. The envelope key identity is pinned
+by certified configuration, and its issued/expiry fields must equal the request
+times exactly. The dedicated public key is loaded through the same bounded,
+no-follow, owner/mode/link, device/inode, content-digest, and mutable-root
+separation checks as every other authority. Signature verification precedes
+claim creation and repository policy admission; a forged `Trusted` value can
+therefore never unlock credentialed transport.
+
 Frames are capped at 1 MiB before JSON allocation. Unknown fields, recursively
 duplicate JSON members, control-bearing identities, invalid UUIDs/digests,
 untrusted-source use of a private or credentialed repository, expired grants,
@@ -264,12 +282,18 @@ lock and residual-state denial occur before claim creation. Kernel `ENOSPC`
 therefore prevents transient allocation beyond the signed ceiling even if a
 temporary artifact appears and disappears between scans.
 
-The root-lock descriptor must be a regular file before any seek or read. Its
-logical metadata length must not exceed the exact versioned lock content before
-allocation; the subsequent read is limited to that length plus one byte so
-concurrent growth also fails closed. Initialization rechecks the exact final
-length. Sparse oversized files, FIFOs, devices, malformed content, and other
-substituted lock state are denied without blocking or unbounded allocation.
+An existing root-lock path is first opened with Linux `O_PATH|O_NOFOLLOW`, so
+its type and identity are inspected without invoking FIFO or device open
+behavior. Only a regular, single-link, resolver-owned inode is reopened through
+its pinned `/proc/self/fd` identity with `O_NONBLOCK`; device/inode equality is
+rechecked before any seek or read. A newly created lock uses exclusive creation
+and the same nonblocking/no-follow boundary. Its logical metadata length must
+not exceed the exact versioned lock content before allocation; the subsequent
+read is limited to that length plus one byte so concurrent growth also fails
+closed. Initialization rechecks owner, link count, mode, exact final length,
+and directory-entry device/inode identity. Sparse oversized files, FIFOs,
+devices, path replacements, malformed content, and other substituted lock state
+are denied without blocking or unbounded allocation.
 
 One absolute monotonic deadline is established before lock parsing and shared
 by admission, every transport future, body streaming, verification, and
@@ -357,6 +381,8 @@ repositories. It must cover:
 - missing artifact and repository/package/path/graph substitution;
 - wrong content, size, signature, key, attestation generation, or mirror;
 - untrusted-source denial for private/credentialed repositories;
+- source-provenance signature, authority, lifetime, source tree, acquisition
+  receipt, lock, scope, and forged-trust substitution denial before network;
 - credential and marker non-disclosure across headers, bodies, errors, output,
   receipts, and working tree;
 - timeout, offline failure, exact completed replay without network, concurrent

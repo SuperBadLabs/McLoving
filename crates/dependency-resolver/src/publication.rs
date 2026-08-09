@@ -1895,8 +1895,8 @@ mod tests {
     use super::*;
     use crate::{
         AdapterConfig, Ecosystem, PackageNode, RepositoryBinding, RepositoryConfig, ResolverLimits,
-        SourceTrustClass, canonical_graph_sha256, canonical_node_id, configuration_sha256,
-        request_sha256,
+        SourceProvenance, SourceTrustClass, canonical_graph_sha256, canonical_node_id,
+        configuration_sha256, request_sha256,
     };
 
     struct Fixture {
@@ -2007,6 +2007,9 @@ mod tests {
                     private_ca_sha256: Some("4".repeat(64)),
                     grant: None,
                 }],
+                source_attestation_key_id: "source-key-v1".to_owned(),
+                source_attestation_key_path: "/authority/source-attestation.pub".to_owned(),
+                source_attestation_key_sha256: "9".repeat(64),
                 receipt_key_id: "receipt-key-v1".to_owned(),
                 receipt_key_path: "/authority/receipt.key".to_owned(),
                 receipt_key_sha256: "5".repeat(64),
@@ -2042,6 +2045,13 @@ mod tests {
                 attempt_id: Uuid::new_v4().to_string(),
                 audit_lineage: "audit/publication/1".to_owned(),
                 source_trust_class: SourceTrustClass::Trusted,
+                source_provenance: SourceProvenance {
+                    schema_version: "mcloving.source-provenance/v1".to_owned(),
+                    key_id: config.source_attestation_key_id.clone(),
+                    issued_at_unix_ms: now.saturating_sub(1_000),
+                    expires_at_unix_ms: now + 60_000,
+                    signature_base64: "AA".repeat(43),
+                },
                 expected_executable_sha256: config.executable_sha256.clone(),
                 expected_configuration_sha256: configuration_sha256(&config)
                     .expect("configuration digest"),

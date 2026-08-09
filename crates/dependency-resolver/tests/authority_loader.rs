@@ -19,6 +19,7 @@ struct Fixture {
     credential_path: PathBuf,
     marker_path: PathBuf,
     credential: Vec<u8>,
+    source_attestation: Vec<u8>,
     attestation: Vec<u8>,
     ca: Vec<u8>,
     receipt: Vec<u8>,
@@ -28,11 +29,14 @@ impl Fixture {
     fn new() -> Self {
         let root = TempDir::new().expect("temporary authority root");
         let credential = b"contained-repository-credential".to_vec();
+        let source_attestation = vec![9_u8; 32];
         let attestation = vec![7_u8; 32];
         let ca = b"contained-private-ca".to_vec();
         let receipt = b"contained-receipt-key-material-v1".to_vec();
         let marker = marker_document(&[&credential, &receipt]);
         let credential_path = authority_file(root.path(), "repository.credential", &credential);
+        let source_attestation_path =
+            authority_file(root.path(), "source-attestation.pub", &source_attestation);
         let attestation_path = authority_file(root.path(), "repository.pub", &attestation);
         let ca_path = authority_file(root.path(), "repository.ca", &ca);
         let receipt_path = authority_file(root.path(), "receipt.key", &receipt);
@@ -86,6 +90,9 @@ impl Fixture {
                     expires_at_unix_ms: 100,
                 }),
             }],
+            source_attestation_key_id: "source-key-v1".to_owned(),
+            source_attestation_key_path: path_string(&source_attestation_path),
+            source_attestation_key_sha256: sha256(&source_attestation),
             receipt_key_id: "receipt-v1".to_owned(),
             receipt_key_path: path_string(&receipt_path),
             receipt_key_sha256: sha256(&receipt),
@@ -115,6 +122,7 @@ impl Fixture {
             credential_path,
             marker_path,
             credential,
+            source_attestation,
             attestation,
             ca,
             receipt,
@@ -127,6 +135,7 @@ fn exact_private_authorities_are_loaded_without_exposure() {
     let fixture = Fixture::new();
     let loaded = LoadedAuthorities::load(&fixture.config).expect("authority load");
     assert_eq!(loaded.receipt_key(), fixture.receipt);
+    assert_eq!(loaded.source_attestation_key(), fixture.source_attestation);
     assert_eq!(
         loaded.repository_credential("contained-maven"),
         Some(fixture.credential.as_slice())

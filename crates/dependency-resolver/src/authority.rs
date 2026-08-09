@@ -25,6 +25,7 @@ const MARKER_SCHEMA_VERSION: &str = "mcloving.secret-markers/v1";
 
 #[derive(Debug)]
 pub struct LoadedAuthorities {
+    source_attestation_key: Vec<u8>,
     receipt_key: Vec<u8>,
     marker_set: Vec<Vec<u8>>,
     repositories: BTreeMap<String, LoadedRepositoryAuthority>,
@@ -76,6 +77,14 @@ impl LoadedAuthorities {
         let mut authority_identities = BTreeSet::new();
         let mut authority_path_identities = BTreeSet::new();
         let mut authority_digests = BTreeSet::new();
+        let source_attestation_key = read_authority(
+            Path::new(&config.source_attestation_key_path),
+            MAX_PUBLIC_KEY_BYTES,
+            &config.source_attestation_key_sha256,
+            &mut authority_identities,
+            &mut authority_path_identities,
+            &mut authority_digests,
+        )?;
         let receipt_key = read_authority(
             Path::new(&config.receipt_key_path),
             MAX_SECRET_BYTES,
@@ -93,6 +102,12 @@ impl LoadedAuthorities {
             &mut authority_digests,
         )?;
         let marker_set = parse_markers(&marker_bytes)?;
+        if source_attestation_key.len() != 32 {
+            return Err(AuthorityError::new(
+                "DEP_AUTHORITY_SOURCE_ATTESTATION_KEY_INVALID",
+                "source attestation key must be an Ed25519 public key",
+            ));
+        }
         if receipt_key.len() < 32 {
             return Err(AuthorityError::new(
                 "DEP_AUTHORITY_RECEIPT_KEY_INVALID",
@@ -167,10 +182,15 @@ impl LoadedAuthorities {
         validate_secret_authority_separation(&receipt_key, &repositories)?;
         validate_mutable_identity_separation(config, &authority_path_identities)?;
         Ok(Self {
+            source_attestation_key,
             receipt_key,
             marker_set,
             repositories,
         })
+    }
+
+    pub fn source_attestation_key(&self) -> &[u8] {
+        &self.source_attestation_key
     }
 
     pub fn receipt_key(&self) -> &[u8] {
@@ -390,6 +410,7 @@ fn validate_resolved_separation(config: &CertifiedConfig) -> Result<(), Authorit
         ));
     }
     let mut authorities = vec![
+        config.source_attestation_key_path.as_str(),
         config.receipt_key_path.as_str(),
         config.secret_marker_set_path.as_str(),
     ];
