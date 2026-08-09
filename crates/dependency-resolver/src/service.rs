@@ -15,7 +15,7 @@ use crate::publication::ConcurrentClaimState;
 use crate::{
     AdapterBindings, CanonicalPlan, CertifiedConfig, ClaimOutcome, Ecosystem, HttpTransport,
     LoadedAuthorities, RepositoryBinding, ResolutionReceipt, ResolutionRequest, ResolutionStore,
-    parse_maven_lock, parse_npm_package_lock, parse_pypi_requirements,
+    StoreError, parse_maven_lock, parse_npm_package_lock, parse_pypi_requirements,
 };
 
 pub const MAX_PUBLICATION_WORKER_BYTES: usize = 16 * 1_048_576;
@@ -67,6 +67,8 @@ pub struct DependencyResolver {
     store: ResolutionStore,
     transport: HttpTransport,
     publication_worker: PathBuf,
+    store_serial: tokio::sync::Mutex<()>,
+    store_poisoned: AtomicBool,
     publication_serial: tokio::sync::Mutex<()>,
     publication_poisoned: AtomicBool,
 }
@@ -117,6 +119,8 @@ impl DependencyResolver {
             store,
             transport,
             publication_worker,
+            store_serial: tokio::sync::Mutex::new(()),
+            store_poisoned: AtomicBool::new(false),
             publication_serial: tokio::sync::Mutex::new(()),
             publication_poisoned: AtomicBool::new(false),
         })
@@ -126,6 +130,11 @@ impl DependencyResolver {
         &self,
         frame: ResolutionFrame,
     ) -> Result<ResolutionReceipt, ResolverError> {
+        if self.store_poisoned.load(Ordering::Acquire) {
+            return Err(ResolverError::denied(
+                "DEP_STORE_PARENT_IO_RESTART_REQUIRED",
+            ));
+        }
         if self.publication_poisoned.load(Ordering::Acquire) {
             return Err(ResolverError::denied(
                 "DEP_STORE_PUBLICATION_RESTART_REQUIRED",
@@ -163,22 +172,23 @@ impl DependencyResolver {
             now_unix_ms,
         )
         .map_err(|error| ResolverError::denied(error.code))?;
-        self.store
-            .ensure_receipt_response_capacity(
-                &frame.request,
-                &admitted,
-                &plan,
-                self.config.limits.max_frame_bytes,
-            )
-            .map_err(|error| ResolverError::denied(error.code))?;
-        if Instant::now() >= deadline {
-            return Err(ResolverError::denied("DEP_REQUEST_TIME_INVALID"));
-        }
-        let claim = match self
-            .store
-            .claim_or_replay(&frame.request, &admitted, &plan)
-            .map_err(|error| ResolverError::denied(error.code))?
-        {
+        let store = self.store.clone();
+        let claim_request = frame.request.clone();
+        let claim_admitted = admitted.clone();
+        let claim_plan = plan.clone();
+        let max_frame_bytes = self.config.limits.max_frame_bytes;
+        let claim_outcome = self
+            .run_store_operation(deadline, move || {
+                store.ensure_receipt_response_capacity(
+                    &claim_request,
+                    &claim_admitted,
+                    &claim_plan,
+                    max_frame_bytes,
+                )?;
+                store.claim_or_replay(&claim_request, &claim_admitted, &claim_plan)
+            })
+            .await?;
+        let claim = match claim_outcome {
             ClaimOutcome::Replay(receipt) => return Ok(*receipt),
             ClaimOutcome::Concurrent(claim) => {
                 return self
@@ -214,6 +224,7 @@ impl DependencyResolver {
                 // kernel syscall. Preserve the durable claim and transient
                 // allocation as explicit restart ambiguity instead of racing
                 // cleanup against an incompletely terminated worker.
+                self.preserve_publication_ambiguity();
                 self.store.release_incomplete_claim(&claim);
                 return Err(error);
             }
@@ -234,12 +245,16 @@ impl DependencyResolver {
         fetched: Vec<crate::FetchedArtifact>,
         deadline: Instant,
     ) -> Result<ResolutionReceipt, ResolverError> {
-        let _publication_guard = tokio::time::timeout_at(
+        let publication_guard = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             self.publication_serial.lock(),
         )
         .await
-        .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_QUEUE_DEADLINE"))?;
+        .map_err(|_| {
+            self.preserve_publication_ambiguity();
+            ResolverError::denied("DEP_STORE_PUBLICATION_QUEUE_DEADLINE")
+        })?;
+        let _publication_guard = publication_guard;
         if self.publication_poisoned.load(Ordering::Acquire) {
             return Err(ResolverError::denied(
                 "DEP_STORE_PUBLICATION_RESTART_REQUIRED",
@@ -278,26 +293,72 @@ impl DependencyResolver {
         {
             command.env("MCLOVING_DEPENDENCY_RESOLVER_TEST_MODE", "1");
         }
-        let output =
-            supervise_publication_worker(command, payload, deadline, &self.publication_poisoned)
-                .await?;
+        let output = match supervise_publication_worker(
+            command,
+            payload,
+            deadline,
+            &self.publication_poisoned,
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                self.preserve_publication_ambiguity();
+                return Err(error);
+            }
+        };
         if !output.status.success() || output.stdout.len() > 512 {
+            self.preserve_publication_ambiguity();
             return Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"));
         }
-        let response: PublicationWorkerResponse = crate::strict_json::from_slice(&output.stdout)
-            .map_err(|_| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))?;
+        let response: PublicationWorkerResponse =
+            match crate::strict_json::from_slice(&output.stdout) {
+                Ok(response) => response,
+                Err(_) => {
+                    self.preserve_publication_ambiguity();
+                    return Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"));
+                }
+            };
         match response {
             PublicationWorkerResponse::Ok => {
                 self.store.release_incomplete_claim(claim);
-                self.store
-                    .load_completed(claim.resolution_id, &admitted.request_sha256)
-                    .map_err(|error| ResolverError::denied(error.code))?
-                    .ok_or_else(|| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))
+                let store = self.store.clone();
+                let resolution_id = claim.resolution_id;
+                let request_sha256 = admitted.request_sha256.clone();
+                self.run_store_operation(deadline, move || {
+                    store.load_completed(resolution_id, &request_sha256)
+                })
+                .await?
+                .ok_or_else(|| ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))
             }
             PublicationWorkerResponse::Error { code } => {
+                self.preserve_publication_ambiguity();
                 Err(ResolverError::denied(worker_error_code(&code)))
             }
         }
+    }
+
+    fn preserve_publication_ambiguity(&self) {
+        self.publication_poisoned.store(true, Ordering::Release);
+        self.transport.preserve_cleanup_ambiguity();
+    }
+
+    async fn run_store_operation<T, F>(
+        &self,
+        deadline: Instant,
+        operation: F,
+    ) -> Result<T, ResolverError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, StoreError> + Send + 'static,
+    {
+        supervise_parent_store_operation(
+            &self.store_serial,
+            &self.store_poisoned,
+            deadline,
+            operation,
+        )
+        .await
     }
 
     fn adapter_bindings(
@@ -344,10 +405,13 @@ impl DependencyResolver {
         deadline: Instant,
     ) -> Result<ResolutionReceipt, ResolverError> {
         loop {
+            let store = self.store.clone();
+            let request_sha256 = expected_request_sha256.to_owned();
             match self
-                .store
-                .concurrent_claim_state(resolution_id, expected_request_sha256)
-                .map_err(|error| ResolverError::denied(error.code))?
+                .run_store_operation(deadline, move || {
+                    store.concurrent_claim_state(resolution_id, &request_sha256)
+                })
+                .await?
             {
                 ConcurrentClaimState::Completed(receipt) => return Ok(*receipt),
                 ConcurrentClaimState::InactiveIncomplete => {
@@ -359,6 +423,42 @@ impl DependencyResolver {
                 .checked_duration_since(Instant::now())
                 .ok_or_else(|| ResolverError::denied("DEP_STORE_CONCURRENT_DEADLINE"))?;
             tokio::time::sleep(remaining.min(Duration::from_millis(10))).await;
+        }
+    }
+}
+
+async fn supervise_parent_store_operation<T, F>(
+    store_serial: &tokio::sync::Mutex<()>,
+    store_poisoned: &AtomicBool,
+    deadline: Instant,
+    operation: F,
+) -> Result<T, ResolverError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, StoreError> + Send + 'static,
+{
+    let _guard = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        store_serial.lock(),
+    )
+    .await
+    .map_err(|_| ResolverError::denied("DEP_STORE_PARENT_IO_QUEUE_DEADLINE"))?;
+    if store_poisoned.load(Ordering::Acquire) {
+        return Err(ResolverError::denied(
+            "DEP_STORE_PARENT_IO_RESTART_REQUIRED",
+        ));
+    }
+    let task = tokio::task::spawn_blocking(operation);
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task).await {
+        Ok(Ok(Ok(result))) if Instant::now() < deadline => Ok(result),
+        Ok(Ok(Err(error))) if Instant::now() < deadline => Err(ResolverError::denied(error.code)),
+        Ok(Err(_)) => {
+            store_poisoned.store(true, Ordering::Release);
+            Err(ResolverError::denied("DEP_STORE_PARENT_IO_FAILED"))
+        }
+        Ok(_) | Err(_) => {
+            store_poisoned.store(true, Ordering::Release);
+            Err(ResolverError::denied("DEP_STORE_PARENT_IO_DEADLINE"))
         }
     }
 }
@@ -580,6 +680,27 @@ mod tests {
         .await
         .expect_err("stalled publication worker deadline");
         assert_eq!(error.code, "DEP_STORE_PUBLICATION_DEADLINE");
+        assert!(poisoned.load(Ordering::Acquire));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn parent_store_operation_is_bounded_and_poisoned_at_deadline() {
+        let serial = tokio::sync::Mutex::new(());
+        let poisoned = AtomicBool::new(false);
+        let started = Instant::now();
+        let error = supervise_parent_store_operation(
+            &serial,
+            &poisoned,
+            started + Duration::from_millis(5),
+            || {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok::<_, StoreError>(())
+            },
+        )
+        .await
+        .expect_err("stalled parent store operation");
+        assert_eq!(error.code, "DEP_STORE_PARENT_IO_DEADLINE");
         assert!(poisoned.load(Ordering::Acquire));
         assert!(started.elapsed() < Duration::from_secs(1));
     }

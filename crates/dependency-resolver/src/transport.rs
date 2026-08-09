@@ -200,7 +200,8 @@ impl HttpTransport {
             ));
         }
         let resolution_root = self.transport_root.join(resolution_id.to_string());
-        create_private_resolution_root(&resolution_root).await?;
+        run_transport_before_deadline(deadline, create_private_resolution_root(&resolution_root))
+            .await?;
         match self.fetch_plan_into(plan, deadline, &resolution_root).await {
             Ok(fetched) => Ok(fetched),
             Err(error) => {
@@ -363,7 +364,8 @@ impl HttpTransport {
             })?;
 
         let transient_path = resolution_root.join(format!("{}.part", node.node_id));
-        let mut file = create_private_file(&transient_path).await?;
+        let mut file =
+            run_transport_before_deadline(deadline, create_private_file(&transient_path)).await?;
         let mut response = response;
         let mut hasher = Sha256::new();
         let mut received = 0_u64;
@@ -750,6 +752,23 @@ where
                 "bounded transport operation failed",
             )
         })
+}
+
+async fn run_transport_before_deadline<F, T>(
+    deadline: Instant,
+    future: F,
+) -> Result<T, TransportError>
+where
+    F: std::future::Future<Output = Result<T, TransportError>>,
+{
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), future)
+        .await
+        .map_err(|_| {
+            TransportError::new(
+                "DEP_TRANSPORT_DEADLINE",
+                "absolute transport deadline expired",
+            )
+        })?
 }
 
 #[cfg(unix)]
@@ -1308,5 +1327,18 @@ mod tests {
         assert_eq!(error.code, "DEP_TRANSPORT_CLEANUP_AMBIGUOUS");
         assert!(started.elapsed() < Duration::from_secs(1));
         assert!(poisoned.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn transient_creation_future_is_bounded_by_the_deadline() {
+        let started = Instant::now();
+        let error = run_transport_before_deadline(
+            started + Duration::from_millis(5),
+            std::future::pending::<Result<(), TransportError>>(),
+        )
+        .await
+        .expect_err("stalled transient creation");
+        assert_eq!(error.code, "DEP_TRANSPORT_DEADLINE");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }
