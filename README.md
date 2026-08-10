@@ -20,7 +20,10 @@ and the isolated Jenkins compiler and migration evidence planes.
 The contained parity substrate also includes a standalone, signed, fenced
 dynamic-agent provisioner protocol; the sealed Mario inventory currently
 contains zero admitted live dynamic provisioners, so no production dynamic
-compute claim follows from that implementation.
+compute claim follows from that implementation. A standalone transactional
+cache boundary likewise isolates tenant, project, pipeline, and trust-class
+state behind immutable keys and signed receipts; the sealed inventory contains
+zero admitted production cache mappings.
 
 The project is not release-ready. The execution board remains authoritative
 for source and trigger boundaries, external effects, external client migration,
