@@ -957,6 +957,27 @@ async fn cursor_is_monotonic_across_effect_fences_and_stored_replay_is_reverifie
     );
 }
 
+#[tokio::test]
+async fn cursor_outside_the_ledger_range_is_terminal_and_releases_the_destination() {
+    let rig = Rig::new().await;
+    rig.server
+        .cursor
+        .store(i64::MAX as u64 + 1, Ordering::SeqCst);
+    let invalid = rig.prepare(rig.request(ObservationPhase::PreAction));
+    assert_eq!(
+        rig.observer.observe_at(invalid.clone(), NOW).await,
+        Err(ObserverError::MalformedResponse)
+    );
+    assert_eq!(
+        rig.observer.observe_at(invalid, NOW).await,
+        Err(ObserverError::MalformedResponse)
+    );
+
+    rig.server.cursor.store(10, Ordering::SeqCst);
+    let replacement = rig.prepare(rig.request(ObservationPhase::PreAction));
+    rig.observer.observe_at(replacement, NOW).await.unwrap();
+}
+
 fn public_key(seed: &[u8]) -> Vec<u8> {
     Ed25519KeyPair::from_seed_unchecked(seed)
         .unwrap()

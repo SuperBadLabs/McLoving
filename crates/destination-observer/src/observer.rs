@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::engine::general_purpose::{STANDARD as BASE64, STANDARD_NO_PAD as BASE64_NO_PAD};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, StatusCode, Url, redirect};
 use serde::Serialize;
@@ -520,6 +520,7 @@ impl DestinationObserver {
             || body.grant_version != self.config.read_grant_version
             || body.grant_scope != self.config.read_grant_scope
             || body.attestation_key_id != self.config.destination_attestation_key_id
+            || body.cursor > i64::MAX as u64
         {
             return Err(ObserverError::MalformedResponse);
         }
@@ -753,6 +754,7 @@ fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
         let percent = percent_encode(marker);
         contains(raw, marker)
             || contains(raw, BASE64.encode(marker).as_bytes())
+            || contains(raw, BASE64_NO_PAD.encode(marker).as_bytes())
             || contains_ascii_case_insensitive(raw, lowercase_hex.as_bytes())
             || contains_ascii_case_insensitive(raw, percent.as_bytes())
     })
@@ -797,7 +799,10 @@ fn contains_secret_in_json(
             if contains_secret(value.as_bytes(), markers) {
                 return Ok(true);
             }
-            if let Ok(decoded) = BASE64.decode(value) {
+            if let Ok(decoded) = BASE64
+                .decode(value)
+                .or_else(|_| BASE64_NO_PAD.decode(value))
+            {
                 Ok(contains_secret(&decoded, markers))
             } else {
                 Ok(false)
@@ -880,6 +885,7 @@ mod tests {
         assert!(contains_secret(b"%AB%CD%EF%10", &markers));
         assert!(contains_secret(b"%ab%cd%ef%10", &markers));
         assert!(contains_secret(b"%aB%Cd%eF%10", &markers));
+        assert!(contains_secret(b"q83vEA", &markers));
     }
 
     #[test]

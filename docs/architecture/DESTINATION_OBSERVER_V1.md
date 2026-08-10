@@ -94,14 +94,14 @@ unavailable outcomes remain failures, never evidence of absence.
 Response headers, including canonical separator and terminator framing bytes,
 and every streamed body chunk are continuously bounded. The
 complete raw response and decoded JSON are checked against the configured
-secret markers and their common Base64 plus per-nibble case-insensitive
+secret markers and their common padded and unpadded Base64 plus per-nibble case-insensitive
 hexadecimal and percent encodings. Decoded JSON string values are scanned
 directly as well as in serialized and Base64-decoded form, including strings
 whose marker bytes require JSON escaping.
 Secret-labelled state is denied. Fields not in the closed response schema,
 wrong JSON types, stale or future observations, substituted signatures or
-bindings, and a cursor that does not advance from the signed predecessor are
-denied.
+bindings, a cursor outside the signed SQLite integer range, and a cursor that
+does not advance from the signed predecessor are denied.
 
 Each tenant/project/pipeline, destination, and effect-fence identity admits
 exactly this chain. Build and attempt IDs remain signed receipt provenance but
