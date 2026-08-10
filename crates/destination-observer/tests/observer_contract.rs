@@ -54,6 +54,7 @@ enum Mode {
     MalformedContentTypeSecret,
     Timeout,
     Slow,
+    SlowMalformed,
     OversizedHeaderSecret,
 }
 
@@ -356,8 +357,11 @@ async fn destination_handler(
     if matches!(mode, Mode::Timeout) {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
-    if matches!(mode, Mode::Slow) {
+    if matches!(mode, Mode::Slow | Mode::SlowMalformed) {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if matches!(mode, Mode::SlowMalformed) {
+        return json_response(StatusCode::OK, b"{\"body\":".to_vec());
     }
     let mut body = DestinationStateBody {
         schema_version: DESTINATION_STATE_SCHEMA_VERSION.to_owned(),
@@ -857,6 +861,31 @@ async fn expired_retry_tombstone_wins_over_an_in_flight_transport_failure() {
 
     assert_eq!(first_result, Err(ObserverError::ExpiredRequest));
     assert_eq!(retry_result, Err(ObserverError::ExpiredRequest));
+}
+
+#[tokio::test]
+async fn successful_and_terminal_reads_converge_on_a_concurrent_tombstone() {
+    for mode in [Mode::Slow, Mode::SlowMalformed] {
+        let rig = Rig::new().await;
+        rig.set_mode(mode);
+        let mut request = rig.request(ObservationPhase::PreAction);
+        request.expires_at_unix_ms = NOW + 1_000;
+        let request = rig.prepare(request);
+
+        let first_observation = rig.observer.observe_at(request.clone(), NOW);
+        let expired_retry = async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            rig.observer.observe_at(request.clone(), NOW + 2_000).await
+        };
+        let (first_result, retry_result) = tokio::join!(first_observation, expired_retry);
+
+        assert_eq!(first_result, Err(ObserverError::ExpiredRequest));
+        assert_eq!(retry_result, Err(ObserverError::ExpiredRequest));
+        assert_eq!(
+            rig.observer.observe_at(request, NOW).await,
+            Err(ObserverError::ExpiredRequest)
+        );
+    }
 }
 
 #[tokio::test]

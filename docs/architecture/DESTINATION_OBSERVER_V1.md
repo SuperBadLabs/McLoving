@@ -92,8 +92,9 @@ retention pruning, the expired signed request is denied without another GET.
 Expired, generation-fenced, explicitly failed, or retry-exhausted
 pending claims become bounded failure tombstones and release the destination;
 if a concurrent in-flight read returns after that transition, its failure
-bookkeeping converges on and returns the stored tombstone instead of replacing
-it or surfacing a replay mismatch;
+bookkeeping or successful finalization converges on and returns the stored
+tombstone instead of replacing it, surfacing a replay mismatch, or returning a
+different local terminal error;
 terminal authentication, validation, confidentiality, freshness, cursor, body,
 and evidence-envelope size denials do the same immediately. HTTP/2 decoder or
 application header-list overflow is treated as destination unavailability and,

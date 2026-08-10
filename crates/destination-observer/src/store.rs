@@ -424,12 +424,18 @@ impl ObserverStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ObserverError::StateUnavailable)?;
         assert_active_transaction(&transaction, generation, config_sha256)?;
-        transaction
+        let changed = transaction
             .execute(
                 "UPDATE observations SET status='failed', failure_code=?3 WHERE observation_id=?1 AND request_sha256=?2 AND status='pending'",
                 params![request.observation_id.to_string(), request_sha256, error.code()],
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
+        if changed != 1 {
+            if let Some(stored) = stored_failure(&transaction, request, request_sha256)? {
+                return Err(stored);
+            }
+            return Err(ObserverError::ReplayMismatch);
+        }
         transaction
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)
@@ -592,6 +598,9 @@ impl ObserverStore {
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
         if changed != 1 {
+            if let Some(stored) = stored_failure(&transaction, request, request_sha256)? {
+                return Err(stored);
+            }
             return Err(ObserverError::ReplayMismatch);
         }
         transaction
@@ -630,6 +639,28 @@ fn assert_active_transaction(
         return Err(ObserverError::RuntimeFenced);
     }
     Ok(())
+}
+
+fn stored_failure(
+    transaction: &rusqlite::Transaction<'_>,
+    request: &ObservationRequest,
+    request_sha256: &str,
+) -> Result<Option<ObserverError>, ObserverError> {
+    let existing: Option<(String, String, Option<String>)> = transaction
+        .query_row(
+            "SELECT request_sha256, status, failure_code FROM observations WHERE observation_id=?1",
+            [request.observation_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    let Some((stored_request_sha256, status, failure_code)) = existing else {
+        return Ok(None);
+    };
+    if stored_request_sha256 != request_sha256 {
+        return Err(ObserverError::ReplayMismatch);
+    }
+    Ok((status == "failed").then(|| error_from_code(failure_code.as_deref())))
 }
 
 fn enforce_receipt_capacity(
