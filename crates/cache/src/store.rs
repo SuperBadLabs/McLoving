@@ -827,83 +827,131 @@ impl CacheStore {
         namespace_sha256: &str,
         key_sha256: &str,
     ) -> Result<bool, CacheError> {
-        let runtime: Option<(String, String, i64, i64)> = transaction
-            .query_row(
-                "SELECT configuration_sha256, implementation_sha256,
-                        cache_generation, restore_epoch
-                 FROM runtime_generations WHERE generation_sha256 = ?1",
-                [&stored.generation_sha256],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()
-            .map_err(|_| CacheError::StateUnavailable)?;
-        let Some((configuration_sha256, implementation_sha256, cache_generation, restore_epoch)) =
-            runtime
-        else {
-            return Err(CacheError::StateUnavailable);
-        };
-        let cache_generation =
-            u64::try_from(cache_generation).map_err(|_| CacheError::StateUnavailable)?;
-        let restore_epoch =
-            u64::try_from(restore_epoch).map_err(|_| CacheError::StateUnavailable)?;
-        let expected_generation_sha256 = canonical_digest(&GenerationBinding {
-            protocol_version: PROTOCOL_VERSION,
-            service_id: &canonical.service_id,
-            configuration_sha256: &configuration_sha256,
-            cache_generation,
-            restore_epoch,
-        })?;
-        if canonical.cache_generation != cache_generation
-            || canonical.restore_epoch != restore_epoch
-            || canonical.generation_sha256 != expected_generation_sha256
-        {
-            return Err(CacheError::StateUnavailable);
-        }
-        if !valid_digest(&stored.publication_event_sha256) {
-            return Ok(false);
-        }
-        let publication = transaction
-            .query_row(
-                "SELECT event_json, event_sha256, signature
-                 FROM audit_events WHERE event_sha256 = ?1",
-                [&stored.publication_event_sha256],
-                |row| {
-                    Ok((
-                        row.get::<_, Vec<u8>>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|_| CacheError::StateUnavailable)?;
-        let Some((event_json, event_sha256, signature)) = publication else {
-            return Ok(false);
-        };
-        let event: AuditEvent = match serde_json::from_slice(&event_json) {
-            Ok(event) => event,
-            Err(_) => return Ok(false),
-        };
-        Ok(canonical_bytes(&event)? == event_json
-            && event_digest(&event_json) == event_sha256
+        let (event, event_sha256) = self.authenticated_publication_subject(
+            transaction,
+            canonical,
+            namespace_sha256,
+            key_sha256,
+            &stored.publication_event_sha256,
+        )?;
+        Ok(valid_digest(&stored.publication_event_sha256)
             && event_sha256 == stored.publication_event_sha256
-            && self.verify_signature(&event_sha256, &signature)
-            && event.schema_version == EVENT_SCHEMA_VERSION
-            && event.service_id == self.config.service_id
-            && event.implementation_sha256 == implementation_sha256
-            && event.configuration_sha256 == configuration_sha256
-            && event.operation == CacheOperation::Publish
-            && event.outcome == CacheOutcome::Published
-            && event.policy_id == canonical.policy_id
-            && event.policy_sha256 == canonical.policy_sha256
-            && event.generation_sha256 == canonical.generation_sha256
-            && event.restore_epoch == canonical.restore_epoch
-            && event.namespace_sha256 == namespace_sha256
-            && event.key_sha256 == key_sha256
             && event.content_sha256.as_deref() == Some(stored.content_sha256.as_str())
             && event.content_bytes == Some(stored.content_bytes)
             && event.expires_at_unix_ms == Some(stored.expires_at_unix_ms)
             && event.observed_at_unix_ms == stored.created_at_unix_ms)
+    }
+
+    fn authenticated_publication_subject(
+        &self,
+        transaction: &Transaction<'_>,
+        canonical: &CanonicalCacheKey,
+        namespace_sha256: &str,
+        key_sha256: &str,
+        preferred_event_sha256: &str,
+    ) -> Result<(AuditEvent, String), CacheError> {
+        if valid_digest(preferred_event_sha256) {
+            let preferred = transaction
+                .query_row(
+                    "SELECT event_json, event_sha256, signature
+                     FROM audit_events WHERE event_sha256 = ?1",
+                    [preferred_event_sha256],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|_| CacheError::StateUnavailable)?;
+            if let Some((event_json, event_sha256, signature)) = preferred
+                && let Some(publication) = self.authenticate_publication_candidate(
+                    event_json,
+                    event_sha256,
+                    signature,
+                    canonical,
+                    namespace_sha256,
+                    key_sha256,
+                )?
+            {
+                return Ok(publication);
+            }
+        }
+        let mut statement = transaction
+            .prepare(
+                "SELECT event_json, event_sha256, signature
+                 FROM audit_events ORDER BY sequence ASC",
+            )
+            .map_err(|_| CacheError::StateUnavailable)?;
+        let mut rows = statement
+            .query([])
+            .map_err(|_| CacheError::StateUnavailable)?;
+        while let Some(row) = rows.next().map_err(|_| CacheError::StateUnavailable)? {
+            let event_json: Vec<u8> = row.get(0).map_err(|_| CacheError::StateUnavailable)?;
+            let event_sha256: String = row.get(1).map_err(|_| CacheError::StateUnavailable)?;
+            let signature: String = row.get(2).map_err(|_| CacheError::StateUnavailable)?;
+            if event_sha256 == preferred_event_sha256 {
+                continue;
+            }
+            if let Some(publication) = self.authenticate_publication_candidate(
+                event_json,
+                event_sha256,
+                signature,
+                canonical,
+                namespace_sha256,
+                key_sha256,
+            )? {
+                return Ok(publication);
+            }
+        }
+        Err(CacheError::StateUnavailable)
+    }
+
+    fn authenticate_publication_candidate(
+        &self,
+        event_json: Vec<u8>,
+        event_sha256: String,
+        signature: String,
+        canonical: &CanonicalCacheKey,
+        namespace_sha256: &str,
+        key_sha256: &str,
+    ) -> Result<Option<(AuditEvent, String)>, CacheError> {
+        let Ok(event) = serde_json::from_slice::<AuditEvent>(&event_json) else {
+            return Ok(None);
+        };
+        if canonical_bytes(&event)? != event_json
+            || event_digest(&event_json) != event_sha256
+            || !self.verify_signature(&event_sha256, &signature)
+            || event.schema_version != EVENT_SCHEMA_VERSION
+            || event.service_id != self.config.service_id
+            || event.operation != CacheOperation::Publish
+            || event.outcome != CacheOutcome::Published
+            || event.policy_id != canonical.policy_id
+            || event.policy_sha256 != canonical.policy_sha256
+            || event.generation_sha256 != canonical.generation_sha256
+            || event.restore_epoch != canonical.restore_epoch
+            || event.namespace_sha256 != namespace_sha256
+            || event.key_sha256 != key_sha256
+            || !valid_digest(&event.implementation_sha256)
+            || !valid_digest(&event.configuration_sha256)
+            || !valid_digest(&event.policy_sha256)
+            || !event.content_sha256.as_deref().is_some_and(valid_digest)
+            || event.content_bytes.is_none()
+            || event.expires_at_unix_ms.is_none()
+        {
+            return Ok(None);
+        }
+        let expected_generation_sha256 = canonical_digest(&GenerationBinding {
+            protocol_version: PROTOCOL_VERSION,
+            service_id: &canonical.service_id,
+            configuration_sha256: &event.configuration_sha256,
+            cache_generation: canonical.cache_generation,
+            restore_epoch: canonical.restore_epoch,
+        })?;
+        Ok((expected_generation_sha256 == canonical.generation_sha256)
+            .then_some((event, event_sha256)))
     }
 
     fn append_subject_receipt(

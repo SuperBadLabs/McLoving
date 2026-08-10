@@ -634,6 +634,14 @@ fn an_expired_key_is_atomically_replaced_instead_of_replayed() {
             .as_deref(),
         Some(b"second".as_slice())
     );
+    clock.set(68_022);
+    let cleanup = store.cleanup("operator").unwrap();
+    assert_eq!(cleanup.removed, 1);
+    assert_eq!(
+        cleanup.receipts[0].event.outcome,
+        mcloving_cache::CacheOutcome::Expired
+    );
+    store.verify_audit_chain().unwrap();
 }
 
 #[test]
@@ -1073,6 +1081,87 @@ fn corrupt_content_does_not_bypass_stored_subject_validation() {
         .query_row(
             "SELECT count(*) FROM entries WHERE key_sha256 = ?1",
             [invalid_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, 1);
+}
+
+#[test]
+fn cleanup_requires_an_authenticated_publication_subject() {
+    let temp = TempDir::new().unwrap();
+    let key = [25_u8; 32];
+    let clock = Arc::new(ManualClock::new(73_250));
+    let first_config = config(
+        &temp,
+        &key,
+        vec![policy("policy-a", "trusted", "reader", "writer")],
+    );
+    let database_path = first_config.database_path.clone();
+    let first = open_store(first_config.clone(), &key, Arc::clone(&clock)).unwrap();
+    let request_a = request(
+        first.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"authenticated-subject-a",
+    );
+    let publication_a = first
+        .publish("writer", "trusted", &request_a, b"content-a")
+        .unwrap();
+    let key_a = publication_a.receipts[0].event.key_sha256.clone();
+    let connection = Connection::open(&database_path).unwrap();
+    let canonical: Vec<u8> = connection
+        .query_row(
+            "SELECT canonical_key FROM entries WHERE key_sha256 = ?1",
+            [&key_a],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let fabricated_canonical = String::from_utf8(canonical)
+        .unwrap()
+        .replace(
+            &request_a.logical_key_sha256,
+            &digest(b"fabricated-subject"),
+        )
+        .into_bytes();
+    let fabricated_key = cache_key_digest(&fabricated_canonical);
+    connection
+        .execute(
+            "UPDATE entries
+             SET key_sha256 = ?1, canonical_key = ?2, content = ?3,
+                 publication_event_sha256 = ?4
+             WHERE key_sha256 = ?5",
+            rusqlite::params![
+                fabricated_key,
+                fabricated_canonical,
+                b"tampered".as_slice(),
+                digest(b"fabricated-publication"),
+                key_a
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    drop(first);
+
+    let mut second_config = first_config;
+    second_config.cache_generation = 2;
+    let second = open_store(second_config, &key, clock).unwrap();
+    let current = request(
+        second.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"authenticated-subject-current",
+    );
+    assert!(matches!(
+        second.publish("writer", "trusted", &current, b"current"),
+        Err(CacheError::StateUnavailable)
+    ));
+    assert_eq!(second.verify_audit_chain().unwrap(), 1);
+    let retained: i64 = Connection::open(database_path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM entries WHERE key_sha256 = ?1",
+            [fabricated_key],
             |row| row.get(0),
         )
         .unwrap();
