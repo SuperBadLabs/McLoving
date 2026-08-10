@@ -51,6 +51,7 @@ enum Mode {
     UnauthorizedSecret,
     Outage,
     OutageSecret,
+    MalformedContentTypeSecret,
     Timeout,
     Slow,
     OversizedHeaderSecret,
@@ -287,16 +288,14 @@ async fn destination_handler(
             .and_then(|value| value.to_str().ok())
             != Some("Bearer read-only-observer-token")
     {
-        let mut response = Response::builder()
+        let response = Response::builder()
             .status(StatusCode::FORBIDDEN)
-            .body(Body::empty())
+            .body(if matches!(mode, Mode::UnauthorizedSecret) {
+                Body::from(TOKEN)
+            } else {
+                Body::empty()
+            })
             .unwrap();
-        if matches!(mode, Mode::UnauthorizedSecret) {
-            response.headers_mut().insert(
-                "x-debug-credential",
-                axum::http::HeaderValue::from_static("read-only-observer-token"),
-            );
-        }
         return response;
     }
     let request = server.request.lock().unwrap().clone().unwrap();
@@ -338,14 +337,21 @@ async fn destination_handler(
         return json_response(StatusCode::OK, vec![b'x'; 32 * 1024]);
     }
     if matches!(mode, Mode::Outage | Mode::OutageSecret) {
-        let mut response = json_response(StatusCode::SERVICE_UNAVAILABLE, b"{}".to_vec());
-        if matches!(mode, Mode::OutageSecret) {
-            response.headers_mut().insert(
-                "x-debug-credential",
-                axum::http::HeaderValue::from_static("read-only-observer-token"),
-            );
-        }
-        return response;
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            if matches!(mode, Mode::OutageSecret) {
+                TOKEN.to_vec()
+            } else {
+                b"{}".to_vec()
+            },
+        );
+    }
+    if matches!(mode, Mode::MalformedContentTypeSecret) {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/plain")
+            .body(Body::from(TOKEN))
+            .unwrap();
     }
     if matches!(mode, Mode::Timeout) {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -508,6 +514,10 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
             ObserverError::ConfidentialityDenied,
         ),
         (Mode::OutageSecret, ObserverError::ConfidentialityDenied),
+        (
+            Mode::MalformedContentTypeSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
         (
             Mode::OversizedHeaderSecret,
             ObserverError::ConfidentialityDenied,
@@ -1379,6 +1389,31 @@ async fn signature_binding_phase_cursor_and_replay_substitution_fail_closed() {
     assert_eq!(
         rig.observer.observe_at(unsigned, NOW).await,
         Err(ObserverError::UnauthorizedRequest)
+    );
+
+    let reads_before_confidential_request = rig.server.reads.load(Ordering::SeqCst);
+    let mut secret_query = rig.request(ObservationPhase::PreAction);
+    secret_query.query.insert(
+        "release_id".to_owned(),
+        String::from_utf8(SECRET.to_vec()).unwrap(),
+    );
+    assert_eq!(
+        rig.observer
+            .observe_at(rig.prepare(secret_query), NOW)
+            .await,
+        Err(ObserverError::ConfidentialityDenied)
+    );
+    let mut secret_audit = rig.request(ObservationPhase::PreAction);
+    secret_audit.audit_provenance = String::from_utf8(SECRET.to_vec()).unwrap();
+    assert_eq!(
+        rig.observer
+            .observe_at(rig.prepare(secret_audit), NOW)
+            .await,
+        Err(ObserverError::ConfidentialityDenied)
+    );
+    assert_eq!(
+        rig.server.reads.load(Ordering::SeqCst),
+        reads_before_confidential_request
     );
 
     let first = rig.prepare(rig.request(ObservationPhase::PreAction));

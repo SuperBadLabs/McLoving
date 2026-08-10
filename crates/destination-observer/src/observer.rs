@@ -439,30 +439,14 @@ impl DestinationObserver {
             return Err(ObserverError::ConfidentialityDenied);
         }
         enforce_header_bound(response.headers(), self.config.limits.max_header_bytes)?;
-        if matches!(
-            response.status(),
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-        ) {
-            return Err(ObserverError::DestinationUnauthorized);
-        }
-        if response.status() != StatusCode::OK {
-            return Err(ObserverError::DestinationUnavailable);
-        }
-        let mut content_types = response.headers().get_all(CONTENT_TYPE).iter();
-        let content_type = content_types
-            .next()
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
-        if content_types.next().is_some() {
-            return Err(ObserverError::MalformedResponse);
-        }
-        if !content_type
-            .split(';')
-            .next()
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
-        {
-            return Err(ObserverError::MalformedResponse);
-        }
+        let status = response.status();
+        let content_types: Vec<_> = response.headers().get_all(CONTENT_TYPE).iter().collect();
+        let valid_content_type = content_types.len() == 1
+            && content_types[0]
+                .to_str()
+                .ok()
+                .and_then(|value| value.split(';').next())
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
         if response
             .content_length()
             .is_some_and(|size| size > self.config.limits.max_response_bytes as u64)
@@ -486,6 +470,15 @@ impl DestinationObserver {
         }
         if contains_secret(&raw, &self.secret_markers) {
             return Err(ObserverError::ConfidentialityDenied);
+        }
+        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+            return Err(ObserverError::DestinationUnauthorized);
+        }
+        if status != StatusCode::OK {
+            return Err(ObserverError::DestinationUnavailable);
+        }
+        if !valid_content_type {
+            return Err(ObserverError::MalformedResponse);
         }
         let signed: SignedDestinationState = parse_json_no_duplicates(&raw)?;
         verify_destination_state(&signed, &self.destination_public_key)?;
@@ -602,7 +595,16 @@ impl DestinationObserver {
         {
             return Err(ObserverError::MalformedRequest);
         }
-        verify_request(request, &self.request_public_key)
+        verify_request(request, &self.request_public_key)?;
+        if contains_secret(request.audit_provenance.as_bytes(), &self.secret_markers)
+            || request.query.iter().any(|(key, value)| {
+                contains_secret(key.as_bytes(), &self.secret_markers)
+                    || contains_secret(value.as_bytes(), &self.secret_markers)
+            })
+        {
+            return Err(ObserverError::ConfidentialityDenied);
+        }
+        Ok(())
     }
 
     fn validate_destination_state(

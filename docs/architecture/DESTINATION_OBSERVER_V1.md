@@ -136,11 +136,14 @@ The lower certified application ceiling is enforced after bounded
 confidentiality scanning.
 Response headers, including canonical separator and terminator framing bytes,
 are also measured before the body is consumed, and exactly one `Content-Type`
-header is required. Every streamed body chunk is continuously bounded. The
-complete raw response and decoded JSON are checked against the configured
-secret markers and their standard and URL-safe padded and unpadded Base64 plus
-per-nibble case-insensitive hexadecimal, fully percent-encoded, and mixed
-percent-encoded forms. Marker count and aggregate bytes are bounded. Decoded
+header is required. Every streamed body chunk is continuously bounded.
+Receipt-bound query and audit-provenance fields are checked before dispatch.
+Every bounded response body is checked before HTTP status or content-type
+classification, and the complete raw response and decoded JSON are checked
+against the configured secret markers and their standard and URL-safe padded
+and unpadded Base64 plus per-nibble case-insensitive hexadecimal, fully
+percent-encoded, and mixed percent-encoded forms. Marker count and aggregate
+bytes are bounded. Decoded
 JSON string values are scanned directly and after Base64 decoding, including
 strings whose marker bytes require JSON escaping.
 Secret-labelled state is denied. Fields not in the closed response schema,
