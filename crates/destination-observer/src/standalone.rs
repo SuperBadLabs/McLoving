@@ -16,7 +16,7 @@ const MAX_CONFIG_BYTES: usize = 256 * 1024;
 const MAX_AUTHORITY_BYTES: usize = 4096;
 const MAX_MARKER_FILE_BYTES: usize = 64 * 1024;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ObserverCommand {
     Observe { request: ObservationRequest },

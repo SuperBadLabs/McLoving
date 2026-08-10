@@ -995,7 +995,11 @@ fn maximum_request_envelope_fits(
             signature_base64: "A".repeat(88),
         },
     };
-    let Ok(base_bytes) = serde_json::to_vec(&maximum) else {
+    // Validate the actual standalone command, not merely its request member. The process reads
+    // the tagged command and its trailing newline as one bounded frame.
+    let Ok(base_bytes) =
+        serde_json::to_vec(&crate::standalone::ObserverCommand::Observe { request: maximum })
+    else {
         return false;
     };
     let Ok(maximum_value) = serde_json::to_vec(&"\0".repeat(MAX_QUERY_VALUE_BYTES)) else {

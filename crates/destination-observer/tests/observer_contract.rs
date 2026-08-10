@@ -1126,6 +1126,13 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
         },
         {
             let mut config = rig.config.clone();
+            // Admission covers the complete standalone command wrapper and newline, so an
+            // authority identifier cannot push the otherwise valid request past the frame cap.
+            config.request_authority_key_id = "k".repeat(MAX_FRAME_BYTES);
+            config
+        },
+        {
+            let mut config = rig.config.clone();
             config.response_schema = vec![StateFieldSchema {
                 name: "x".repeat(config.limits.max_response_bytes),
                 kind: JsonKind::Boolean,
