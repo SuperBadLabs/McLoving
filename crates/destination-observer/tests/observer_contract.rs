@@ -1404,7 +1404,7 @@ async fn signature_binding_phase_cursor_and_replay_substitution_fail_closed() {
 }
 
 #[tokio::test]
-async fn cursor_is_monotonic_across_effect_fences_and_stored_replay_is_reverified() {
+async fn cursor_history_is_chain_scoped_and_stored_replay_is_reverified() {
     let rig = Rig::new().await;
     let first_request = rig.prepare(rig.request(ObservationPhase::PreAction));
     let mut first_receipt = rig
@@ -1416,21 +1416,26 @@ async fn cursor_is_monotonic_across_effect_fences_and_stored_replay_is_reverifie
     let mut next_fence = rig.request(ObservationPhase::PreAction);
     next_fence.effect_fence = 18;
     let next_fence = rig.prepare(next_fence);
+    let next_fence_receipt = rig
+        .observer
+        .observe_at(next_fence.clone(), NOW)
+        .await
+        .unwrap();
     assert_eq!(
-        rig.observer.observe_at(next_fence.clone(), NOW).await,
-        Err(ObserverError::CursorRollback)
-    );
-    assert_eq!(
-        rig.observer.observe_at(next_fence, NOW).await,
-        Err(ObserverError::CursorRollback)
+        rig.observer.observe_at(next_fence, NOW).await.unwrap(),
+        next_fence_receipt
     );
     let mut later_fence = rig.request(ObservationPhase::PreAction);
     later_fence.effect_fence = 19;
     let later_fence = rig.prepare(later_fence);
-    assert_eq!(
-        rig.observer.observe_at(later_fence, NOW).await,
-        Err(ObserverError::CursorRollback)
-    );
+    rig.observer.observe_at(later_fence, NOW).await.unwrap();
+
+    let mut other_query = rig.request(ObservationPhase::PreAction);
+    other_query
+        .query
+        .insert("release_id".to_owned(), "release-43".to_owned());
+    let other_query = rig.prepare(other_query);
+    rig.observer.observe_at(other_query, NOW).await.unwrap();
 
     first_receipt.signature_base64 = "AAAA".to_owned();
     let connection =

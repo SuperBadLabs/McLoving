@@ -380,7 +380,7 @@ impl DestinationObserver {
             &request,
             &request_sha256,
             &scope_sha256,
-            &destination_scope_sha256,
+            &scope_sha256,
             &receipt,
             &receipt_sha256,
         ) {

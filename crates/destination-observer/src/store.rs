@@ -539,7 +539,7 @@ impl ObserverStore {
         request: &ObservationRequest,
         request_sha256: &str,
         scope_sha256: &str,
-        destination_scope_sha256: &str,
+        cursor_scope_sha256: &str,
         receipt: &ObservationReceipt,
         receipt_sha256: &str,
     ) -> Result<(), ObserverError> {
@@ -559,7 +559,7 @@ impl ObserverStore {
         let destination_cursor: Option<u64> = transaction
             .query_row(
                 "SELECT cursor FROM destination_heads WHERE destination_scope_sha256=?1",
-                [destination_scope_sha256],
+                [cursor_scope_sha256],
                 |row| row.get(0),
             )
             .optional()
@@ -610,7 +610,7 @@ impl ObserverStore {
             .execute(
                 "INSERT INTO destination_heads(destination_scope_sha256, cursor, receipt_sha256) VALUES(?1, ?2, ?3)
                  ON CONFLICT(destination_scope_sha256) DO UPDATE SET cursor=excluded.cursor, receipt_sha256=excluded.receipt_sha256",
-                params![destination_scope_sha256, receipt.destination_cursor, receipt_sha256],
+                params![cursor_scope_sha256, receipt.destination_cursor, receipt_sha256],
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
         transaction
