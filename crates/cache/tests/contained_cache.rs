@@ -46,6 +46,17 @@ fn digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn cache_key_digest(bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"mcloving.cache-key/v1\0");
+    digest.update(bytes);
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn policy(id: &str, trust: &str, reader: &str, writer: &str) -> CachePolicy {
     CachePolicy {
         policy_id: id.to_owned(),
@@ -990,6 +1001,82 @@ fn publish_time_cleanup_purges_corrupt_stale_content() {
     assert!(rejected.event.content_bytes.is_none());
     assert!(rejected.event.expires_at_unix_ms.is_none());
     second.verify_audit_chain().unwrap();
+}
+
+#[test]
+fn corrupt_content_does_not_bypass_stored_subject_validation() {
+    let temp = TempDir::new().unwrap();
+    let key = [24_u8; 32];
+    let clock = Arc::new(ManualClock::new(73_225));
+    let first_config = config(
+        &temp,
+        &key,
+        vec![policy("policy-a", "trusted", "reader", "writer")],
+    );
+    let database_path = first_config.database_path.clone();
+    let first = open_store(first_config.clone(), &key, Arc::clone(&clock)).unwrap();
+    let request_a = request(
+        first.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"invalid-subject-a",
+    );
+    let publication_a = first
+        .publish("writer", "trusted", &request_a, b"content-a")
+        .unwrap();
+    let key_a = publication_a.receipts[0].event.key_sha256.clone();
+    let connection = Connection::open(&database_path).unwrap();
+    let canonical: Vec<u8> = connection
+        .query_row(
+            "SELECT canonical_key FROM entries WHERE key_sha256 = ?1",
+            [&key_a],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let invalid_canonical = String::from_utf8(canonical)
+        .unwrap()
+        .replace(&request_a.logical_key_sha256, "not-a-digest")
+        .into_bytes();
+    let invalid_key = cache_key_digest(&invalid_canonical);
+    connection
+        .execute(
+            "UPDATE entries
+             SET key_sha256 = ?1, canonical_key = ?2, content = ?3
+             WHERE key_sha256 = ?4",
+            rusqlite::params![
+                invalid_key,
+                invalid_canonical,
+                b"tampered".as_slice(),
+                key_a
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    drop(first);
+
+    let mut second_config = first_config;
+    second_config.cache_generation = 2;
+    let second = open_store(second_config, &key, clock).unwrap();
+    let current = request(
+        second.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"invalid-subject-current",
+    );
+    assert!(matches!(
+        second.publish("writer", "trusted", &current, b"current"),
+        Err(CacheError::StateUnavailable)
+    ));
+    assert_eq!(second.verify_audit_chain().unwrap(), 1);
+    let retained: i64 = Connection::open(database_path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM entries WHERE key_sha256 = ?1",
+            [invalid_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, 1);
 }
 
 #[test]

@@ -114,6 +114,9 @@ metadata/content, including the publication's signed absolute expiry. Missing
 or substituted publication provenance or expiry is removed only as
 `corrupt_rejected`. A row with a valid canonical receipt subject but corrupt
 content remains purgeable and cannot indefinitely block cleanup or publication.
+Canonical identity/digest syntax and the historical generation derivation are
+validated independently of content; an invalid receipt subject remains
+fail-closed and cannot receive a service signature.
 
 The restore epoch is controller-owned authority and must not be restored from
 the cache backup. If that external invariant is unavailable, the cache must be
@@ -159,7 +162,8 @@ Contained tests must prove:
 - generation rotation and restored-state cold behavior;
 - receipt-key rotation rejection and signed stale-publication revalidation on
   explicit cleanup, publication-time cleanup, and quota eviction, including
-  forged-expiry rejection and purgeability of corrupt stale content;
+  forged-expiry rejection, purgeability of corrupt stale content, and
+  independent rejection of malformed stored receipt subjects;
 - complete signed audit-chain verification and tamper rejection;
 - independently retained audit-head verification and bounded audit exhaustion;
 - duplicate/unknown JSON rejection and bounded standalone frames;

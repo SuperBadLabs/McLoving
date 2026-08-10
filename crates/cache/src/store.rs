@@ -767,20 +767,31 @@ impl CacheStore {
             || canonical.restore_epoch != stored.restore_epoch
             || namespace_sha256 != stored.namespace_sha256
             || domain_digest(b"mcloving.cache-key/v1\0", &stored.canonical_key) != key_sha256
+            || !valid_identity(&canonical.service_id)
+            || !valid_identity(&canonical.policy_id)
+            || !valid_identity(&canonical.tenant_id)
+            || !valid_identity(&canonical.project_id)
+            || !valid_identity(&canonical.pipeline_id)
+            || !valid_identity(&canonical.trust_class)
             || !valid_digest(&stored.policy_sha256)
             || !valid_digest(&stored.generation_sha256)
+            || !valid_digest(&canonical.logical_key_sha256)
+            || !valid_digest(&canonical.input_sha256)
+            || !valid_digest(&canonical.toolchain_sha256)
+            || !valid_digest(&canonical.platform_sha256)
         {
             return Err(CacheError::StateUnavailable);
         }
-        let publication_valid = valid_digest(&stored.content_sha256)
-            && stored_content_matches(stored)
-            && self.stored_publication_matches(
-                transaction,
-                stored,
-                &canonical,
-                &namespace_sha256,
-                key_sha256,
-            )?;
+        let publication_matches = self.stored_publication_matches(
+            transaction,
+            stored,
+            &canonical,
+            &namespace_sha256,
+            key_sha256,
+        )?;
+        let publication_valid = publication_matches
+            && valid_digest(&stored.content_sha256)
+            && stored_content_matches(stored);
         let details = if publication_valid {
             details
         } else {
@@ -816,9 +827,6 @@ impl CacheStore {
         namespace_sha256: &str,
         key_sha256: &str,
     ) -> Result<bool, CacheError> {
-        if !valid_digest(&stored.publication_event_sha256) {
-            return Ok(false);
-        }
         let runtime: Option<(String, String, i64, i64)> = transaction
             .query_row(
                 "SELECT configuration_sha256, implementation_sha256,
@@ -832,8 +840,28 @@ impl CacheStore {
         let Some((configuration_sha256, implementation_sha256, cache_generation, restore_epoch)) =
             runtime
         else {
-            return Ok(false);
+            return Err(CacheError::StateUnavailable);
         };
+        let cache_generation =
+            u64::try_from(cache_generation).map_err(|_| CacheError::StateUnavailable)?;
+        let restore_epoch =
+            u64::try_from(restore_epoch).map_err(|_| CacheError::StateUnavailable)?;
+        let expected_generation_sha256 = canonical_digest(&GenerationBinding {
+            protocol_version: PROTOCOL_VERSION,
+            service_id: &canonical.service_id,
+            configuration_sha256: &configuration_sha256,
+            cache_generation,
+            restore_epoch,
+        })?;
+        if canonical.cache_generation != cache_generation
+            || canonical.restore_epoch != restore_epoch
+            || canonical.generation_sha256 != expected_generation_sha256
+        {
+            return Err(CacheError::StateUnavailable);
+        }
+        if !valid_digest(&stored.publication_event_sha256) {
+            return Ok(false);
+        }
         let publication = transaction
             .query_row(
                 "SELECT event_json, event_sha256, signature
@@ -875,11 +903,7 @@ impl CacheStore {
             && event.content_sha256.as_deref() == Some(stored.content_sha256.as_str())
             && event.content_bytes == Some(stored.content_bytes)
             && event.expires_at_unix_ms == Some(stored.expires_at_unix_ms)
-            && event.observed_at_unix_ms == stored.created_at_unix_ms
-            && canonical.cache_generation
-                == u64::try_from(cache_generation).map_err(|_| CacheError::StateUnavailable)?
-            && canonical.restore_epoch
-                == u64::try_from(restore_epoch).map_err(|_| CacheError::StateUnavailable)?)
+            && event.observed_at_unix_ms == stored.created_at_unix_ms)
     }
 
     fn append_subject_receipt(
