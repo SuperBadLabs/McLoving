@@ -1136,6 +1136,7 @@ impl ResolutionStore {
     }
 
     fn record_publication_commit(&self, commit: PublicationCommit) -> Result<(), StoreError> {
+        self.deny_secret_markers(&commit, &())?;
         verify_publication_commit_hmac(&commit, &self.inner.receipt_key)?;
         revalidate_store_directory_link(
             &self.inner.root_directory,
@@ -1168,6 +1169,7 @@ impl ResolutionStore {
             &self.inner.commits_directory,
         )?;
         let commit: PublicationCommit = read_json(&self.commit_path(resolution_id), 0o400)?;
+        self.deny_secret_markers(&commit, &())?;
         verify_publication_commit_hmac(&commit, &self.inner.receipt_key)?;
         Ok(commit)
     }
@@ -5705,6 +5707,51 @@ mod tests {
                 .expect("acknowledged completion"),
             Some(receipt)
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publication_commit_markers_are_denied_before_persistence() {
+        let fixture = Fixture::new();
+        let marker = b"987654321012345678".to_vec();
+        let store = fixture.store_with_markers(vec![marker]);
+        let resolution_id = Uuid::parse_str(&fixture.request.resolution_id).expect("resolution ID");
+        let claim = ResolutionClaim {
+            schema_version: CLAIM_SCHEMA.to_owned(),
+            resolution_id,
+            request_sha256: fixture.admitted.request_sha256.clone(),
+            configuration_sha256: fixture.admitted.configuration_sha256.clone(),
+            graph_sha256: fixture.plan.graph_sha256.clone(),
+            generation: fixture.config.generation,
+            publication_deadline_unix_ms: fixture.admitted.absolute_expiry_unix_ms,
+        };
+        let identity = RetainedLinkIdentity {
+            device: 987_654_321_012_345_678,
+            inode: 1,
+            mode: 0o100400,
+            uid: 1,
+            links: 1,
+            size: 1,
+            modified_seconds: 1,
+            modified_nanoseconds: 1,
+            changed_seconds: 1,
+            changed_nanoseconds: 1,
+        };
+        let mut commit = PublicationCommit {
+            schema_version: PUBLICATION_COMMIT_SCHEMA.to_owned(),
+            claim,
+            receipt_identity: identity,
+            completion_identity: identity,
+            hmac_sha256: String::new(),
+        };
+        commit.hmac_sha256 =
+            sign_publication_commit(&commit, &fixture.receipt_key).expect("commit HMAC");
+
+        let error = store
+            .record_publication_commit(commit)
+            .expect_err("marker-bearing commit must not be persisted");
+        assert_eq!(error.code, "DEP_STORE_SECRET_MARKER_DETECTED");
+        assert!(!store.commit_path(resolution_id).exists());
     }
 
     #[cfg(target_os = "linux")]
