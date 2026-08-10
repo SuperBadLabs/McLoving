@@ -1,10 +1,10 @@
 # DEP-001 security and implementation closure
 
-Date: 2026-08-09
+Date: 2026-08-10
 
 Verdict: LOCAL PASS for the architecture-repair candidate at exact
-implementation head `9e3235ce0c100413a9c1ad613fb783d405a9e9d2`.
-The focused gate passes 120 dependency-resolution tests: 75 unit tests, 44
+implementation head `9d305145622b1965cbdd05169407babd437a69b2`.
+The focused gate passes 121 dependency-resolution tests: 76 unit tests, 44
 ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Strict all-target resolver Clippy,
 formatting, and `git diff --check` also pass on HeMan. This head replaces both
@@ -183,8 +183,8 @@ the same resolution identity is denied offline; restart with the repository
 offline returns byte-equivalent JSON; and neither the repository credential nor
 receipt key appears in stdout, stderr, or the receipt.
 
-Exact implementation head `9e3235ce` passes strict resolver all-target Clippy,
-formatting, `git diff --check`, all 119 ordinary focused tests, and the real
+Exact implementation head `9d305145` passes strict resolver all-target Clippy,
+formatting, `git diff --check`, all 120 ordinary focused tests, and the real
 exact-capacity contained journey on HeMan. Documentation head `8d15ca5` passes
 workspace-wide strict Clippy, the complete locked non-source workspace, the
 same contained resolver journey, board verification, and the complete
@@ -200,8 +200,8 @@ response to that runner-only failure.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired 136
-actionable findings across 141 important seams. Five comments repeated an
+Pre-closure review and repeated contained execution exposed and repaired 137
+actionable findings across 142 important seams. Five comments repeated an
 already counted underlying seam and are not double-counted:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -523,8 +523,8 @@ already counted underlying seam and are not double-counted:
     making the later zero assertion redundant. The counter is removed while the
     stronger per-record kind, identity, disposition, and absent-credential
     assertions remain.
-87-141. Subsequent thread-aware exact-head review covered 55 important seams and
-    produced 55 additional actionable findings. Five comments in the complete
+87-142. Subsequent thread-aware exact-head review covered 56 important seams and
+    produced 56 additional actionable findings. Five comments in the complete
     chronology repeated the same already counted underlying race or execution
     prediction. The repairs bind
     executable verification to the running `/proc/self/exe` inode, serialize on
@@ -590,7 +590,15 @@ already counted underlying seam and are not double-counted:
     cannot complete until that fetch returns and every later fetch is denied.
     The identity fixture now mutates the actual scalar inputs to the production
     validator and separately proves non-file, device mismatch, and zero-inode
-    rejection, alongside archive- and root-metadata failures.
+    rejection, alongside archive- and root-metadata failures. Review of the
+    complete documentation head then found that an external poison caller could
+    wait behind an active fetch whose later deadline exceeded the caller's own
+    deadline. Head `9d305145` establishes a non-cancelable pending-poison state
+    before awaiting anything, denies every later fetch immediately, and attempts
+    the slot-fenced final transition only until the caller's absolute deadline.
+    A delayed active fetch proves the poison caller returns promptly at expiry,
+    the earlier fetch may finish, and every subsequent production fetch remains
+    denied for restart reconciliation.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -669,7 +677,7 @@ ecosystem-crossed adapter error and redundant Mario counter. Their exact-head
 repairs and focused regressions brought that audit stage to eighty-one
 actionable findings across eighty-six important seams. The later thread-aware
 review, archive conversion, and final exact-cleanup/proof repairs summarized in
-seams 87-141 bring the current audit to 136 actionable findings across 141 important
+seams 87-142 bring the current audit to 137 actionable findings across 142 important
 seams;
 every fixed thread must be replied to and resolved only after the complete
 closure head passes protected checks and fresh review.

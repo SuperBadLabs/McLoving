@@ -312,9 +312,12 @@ Complete transport fetches are serialized through one async slot acquired
 under that same absolute deadline. Poison state is checked only after the slot
 is held, so a fetch that overlaps an unknown post-create identity cannot remain
 admitted and later return a publishable archive after the poison transition.
-Publication- or service-driven transport poison transitions also acquire this
-slot before changing state; an active fetch therefore finishes before the
-transition, while every later fetch observes poison after slot acquisition.
+Publication- or service-driven transport poison transitions first establish a
+non-cancelable pending-poison state before awaiting anything, so every later
+fetch is denied even if the caller is cancelled. The final poisoned transition
+attempts to acquire the same slot only until that caller's absolute deadline.
+An already active fetch may therefore finish, but an expired poison caller never
+inherits the active fetch's later deadline and no subsequent fetch is admitted.
 
 ## Claim, publication, and replay
 
