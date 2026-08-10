@@ -381,7 +381,6 @@ impl ObserverStore {
         validate_temporal(config, request, now_ms)?;
         enforce_receipt_capacity(&transaction, config)?;
         enforce_phase(&transaction, request, scope_sha256)?;
-        reserve_request_attempt(&transaction, config, now_ms)?;
         transaction
             .execute(
                 "INSERT INTO observations(observation_id, scope_sha256, destination_scope_sha256, request_sha256, phase, status, retry_count, created_at_ms, expires_at_ms)
@@ -407,6 +406,7 @@ impl ObserverStore {
                     ObserverError::StateUnavailable
                 }
             })?;
+        reserve_request_attempt(&transaction, config, now_ms)?;
         transaction
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)?;

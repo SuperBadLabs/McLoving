@@ -726,6 +726,53 @@ async fn outbound_retries_consume_the_durable_request_rate_budget() {
 }
 
 #[tokio::test]
+async fn competing_pending_claims_do_not_starve_the_legitimate_retry_budget() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_requests_per_minute = 2;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    rig.set_mode(Mode::Outage);
+    let mut original = rig.request(ObservationPhase::PreAction);
+    original.expected_config_sha256 = observer.config_sha256().to_owned();
+    let original = rig.prepare(original);
+    assert_eq!(
+        observer.observe_at(original.clone(), NOW).await,
+        Err(ObserverError::DestinationUnavailable)
+    );
+
+    for effect_fence in 18..22 {
+        let mut competing = rig.request(ObservationPhase::PreAction);
+        competing.effect_fence = effect_fence;
+        competing.expected_config_sha256 = observer.config_sha256().to_owned();
+        let competing = rig.prepare(competing);
+        assert_eq!(
+            observer.observe_at(competing, NOW).await,
+            Err(ObserverError::ObservationPending)
+        );
+    }
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let attempts: u64 = connection
+        .query_row("SELECT COUNT(*) FROM request_attempts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(attempts, 1);
+    drop(connection);
+
+    rig.set_mode(Mode::Good);
+    let original = rig.prepare(original);
+    observer.observe_at(original, NOW).await.unwrap();
+}
+
+#[tokio::test]
 async fn expired_failed_claim_frees_destination_without_consuming_receipt_capacity() {
     let rig = Rig::new().await;
     rig.set_mode(Mode::Outage);

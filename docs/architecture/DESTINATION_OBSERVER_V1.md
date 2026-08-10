@@ -126,9 +126,11 @@ grant, and destination key ID. Only status 200 with `application/json` is
 admitted. Authentication denial remains a typed denial; all other missing or
 unavailable outcomes remain failures, never evidence of absence.
 
-The observer requires HTTP/2 and advertises the configured header-list ceiling
-to the protocol stack, so an over-limit header block is refused during protocol
-decoding rather than accepted into an unbounded application allocation.
+The observer requires HTTP/2 and advertises a fixed 256 KiB hard header-list
+ceiling to the protocol stack, so a transport-over-limit block is refused
+during decoding rather than accepted into an unbounded application allocation.
+The lower certified application ceiling is enforced after bounded
+confidentiality scanning.
 Response headers, including canonical separator and terminator framing bytes,
 are also measured before the body is consumed, and exactly one `Content-Type`
 header is required. Every streamed body chunk is continuously bounded. The
