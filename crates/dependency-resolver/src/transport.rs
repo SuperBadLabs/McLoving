@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Instant;
 
 use base64::Engine as _;
@@ -20,6 +20,10 @@ const REPOSITORY_HEADER: &str = "x-mcloving-repository-id";
 const ATTESTATION_HEADER: &str = "x-mcloving-attestation";
 const GENERATION_HEADER: &str = "x-mcloving-publication-generation";
 const TRANSPORT_LOCK_CONTENT: &[u8] = b"mcloving-dependency-transport-lock/v1\n";
+const TRANSPORT_AVAILABLE: u8 = 0;
+const FETCH_SUCCESS_COMMITTING: u8 = 1;
+const POISON_PENDING: u8 = 2;
+const FETCH_SUCCESS_COMMITTING_POISON_PENDING: u8 = 3;
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +66,12 @@ struct PinnedTransportResolution {
     identity: TransportRootIdentity,
 }
 
+#[cfg(test)]
+struct SuccessCompletionHook {
+    reached: tokio::sync::Barrier,
+    release: tokio::sync::Notify,
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{code}: {message}")]
 pub struct TransportError {
@@ -95,10 +105,10 @@ pub struct HttpTransport {
     markers: Vec<Vec<u8>>,
     repositories: BTreeMap<String, RepositoryRuntime>,
     fetch_slot: tokio::sync::Mutex<()>,
-    poison_pending: AtomicBool,
+    availability_state: AtomicU8,
     cleanup_poisoned: AtomicBool,
     #[cfg(test)]
-    success_completion_delay: std::time::Duration,
+    success_completion_hook: Option<Arc<SuccessCompletionHook>>,
     _lease: Option<TransportLease>,
 }
 
@@ -216,10 +226,10 @@ impl HttpTransport {
             markers,
             repositories,
             fetch_slot: tokio::sync::Mutex::new(()),
-            poison_pending: AtomicBool::new(false),
+            availability_state: AtomicU8::new(TRANSPORT_AVAILABLE),
             cleanup_poisoned: AtomicBool::new(false),
             #[cfg(test)]
-            success_completion_delay: std::time::Duration::ZERO,
+            success_completion_hook: None,
             _lease: Some(lease),
         })
     }
@@ -232,8 +242,11 @@ impl HttpTransport {
     }
 
     pub fn ensure_available(&self) -> Result<(), TransportError> {
-        if self.poison_pending.load(Ordering::Acquire)
-            || self.cleanup_poisoned.load(Ordering::Acquire)
+        let state = self.availability_state.load(Ordering::Acquire);
+        if matches!(
+            state,
+            POISON_PENDING | FETCH_SUCCESS_COMMITTING_POISON_PENDING
+        ) || self.cleanup_poisoned.load(Ordering::Acquire)
         {
             Err(TransportError::new(
                 "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED",
@@ -245,7 +258,7 @@ impl HttpTransport {
     }
 
     pub async fn preserve_cleanup_ambiguity(&self, deadline: Instant) {
-        self.poison_pending.store(true, Ordering::Release);
+        self.begin_pending_poison();
         if let Ok(_fetch_slot) = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             self.fetch_slot.lock(),
@@ -257,8 +270,72 @@ impl HttpTransport {
     }
 
     fn poison_cleanup_while_fetch_slot_held(&self) {
-        self.poison_pending.store(true, Ordering::Release);
+        self.availability_state
+            .store(POISON_PENDING, Ordering::Release);
         self.cleanup_poisoned.store(true, Ordering::Release);
+    }
+
+    fn begin_pending_poison(&self) {
+        let mut state = self.availability_state.load(Ordering::Acquire);
+        loop {
+            let target = match state {
+                TRANSPORT_AVAILABLE => POISON_PENDING,
+                FETCH_SUCCESS_COMMITTING => FETCH_SUCCESS_COMMITTING_POISON_PENDING,
+                POISON_PENDING | FETCH_SUCCESS_COMMITTING_POISON_PENDING => return,
+                _ => unreachable!("closed transport availability state"),
+            };
+            match self.availability_state.compare_exchange_weak(
+                state,
+                target,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => state = observed,
+            }
+        }
+    }
+
+    fn commit_fetch_success(&self, deadline: Instant) -> Result<(), TransportError> {
+        self.begin_fetch_success_commit()?;
+        self.finish_fetch_success_commit(deadline)
+    }
+
+    fn begin_fetch_success_commit(&self) -> Result<(), TransportError> {
+        self.availability_state
+            .compare_exchange(
+                TRANSPORT_AVAILABLE,
+                FETCH_SUCCESS_COMMITTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| restart_required_error())
+    }
+
+    fn finish_fetch_success_commit(&self, deadline: Instant) -> Result<(), TransportError> {
+        if Instant::now() >= deadline {
+            self.poison_cleanup_while_fetch_slot_held();
+            return Err(TransportError::new(
+                "DEP_TRANSPORT_DEADLINE",
+                "absolute transport deadline expired before fetch completion",
+            ));
+        }
+
+        match self.availability_state.compare_exchange(
+            FETCH_SUCCESS_COMMITTING,
+            TRANSPORT_AVAILABLE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(()),
+            Err(FETCH_SUCCESS_COMMITTING_POISON_PENDING) => {
+                self.availability_state
+                    .store(POISON_PENDING, Ordering::Release);
+                Ok(())
+            }
+            Err(_) => unreachable!("closed fetch-success commit state"),
+        }
     }
 
     fn resolution_root_directory(&self) -> Result<Arc<std::fs::File>, TransportError> {
@@ -363,15 +440,11 @@ impl HttpTransport {
                 match verify_transient_archive(&archive_path, &fetched, deadline).await {
                     Ok(()) => {
                         #[cfg(test)]
-                        tokio::time::sleep(self.success_completion_delay).await;
-                        if Instant::now() >= deadline {
-                            self.poison_cleanup_while_fetch_slot_held();
-                            return Err(TransportError::new(
-                                "DEP_TRANSPORT_DEADLINE",
-                                "absolute transport deadline expired before fetch completion",
-                            ));
+                        if let Some(hook) = &self.success_completion_hook {
+                            hook.reached.wait().await;
+                            hook.release.notified().await;
                         }
-                        self.ensure_available()?;
+                        self.commit_fetch_success(deadline)?;
                         Ok(fetched)
                     }
                     Err(error) => {
@@ -1535,6 +1608,13 @@ fn root_state_error() -> TransportError {
     )
 }
 
+fn restart_required_error() -> TransportError {
+    TransportError::new(
+        "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED",
+        "transport cleanup is ambiguous and requires resolver restart",
+    )
+}
+
 async fn run_before_deadline<F, T, E>(deadline: Instant, future: F) -> Result<T, TransportError>
 where
     F: std::future::Future<Output = Result<T, E>>,
@@ -2040,9 +2120,9 @@ mod tests {
                 markers,
                 repositories: BTreeMap::from([("contained-maven".to_owned(), repository)]),
                 fetch_slot: tokio::sync::Mutex::new(()),
-                poison_pending: AtomicBool::new(false),
+                availability_state: AtomicU8::new(TRANSPORT_AVAILABLE),
                 cleanup_poisoned: AtomicBool::new(false),
-                success_completion_delay: Duration::ZERO,
+                success_completion_hook: None,
                 _lease: None,
             };
             let mut plan = CanonicalPlan {
@@ -2198,9 +2278,9 @@ mod tests {
                 markers: vec![marker],
                 repositories: BTreeMap::from([("contained-maven".to_owned(), repository)]),
                 fetch_slot: tokio::sync::Mutex::new(()),
-                poison_pending: AtomicBool::new(false),
+                availability_state: AtomicU8::new(TRANSPORT_AVAILABLE),
                 cleanup_poisoned: AtomicBool::new(false),
-                success_completion_delay: Duration::ZERO,
+                success_completion_hook: None,
                 _lease: None,
             };
             Self {
@@ -2737,6 +2817,43 @@ mod tests {
         assert_eq!(later.code, "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED");
     }
 
+    #[tokio::test]
+    async fn success_commit_and_pending_poison_have_one_atomic_order() {
+        let fixture = TransportFixture::new(
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+        )
+        .await;
+
+        fixture
+            .transport
+            .begin_fetch_success_commit()
+            .expect("success wins the first atomic transition");
+        fixture.transport.begin_pending_poison();
+        assert_eq!(
+            fixture.transport.availability_state.load(Ordering::Acquire),
+            FETCH_SUCCESS_COMMITTING_POISON_PENDING
+        );
+        fixture
+            .transport
+            .finish_fetch_success_commit(Instant::now() + Duration::from_secs(1))
+            .expect("already-linearized success may finish");
+        assert_eq!(
+            fixture.transport.availability_state.load(Ordering::Acquire),
+            POISON_PENDING
+        );
+        assert_eq!(
+            fixture
+                .transport
+                .ensure_available()
+                .expect_err("pending poison denies the next fetch")
+                .code,
+            "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn expired_fetch_completion_poisons_before_queued_fetch_admission() {
         let mut fixture = TransportFixture::new(
@@ -2746,27 +2863,42 @@ mod tests {
             false,
         )
         .await;
-        fixture.transport.success_completion_delay = Duration::from_millis(50);
+        let hook = Arc::new(SuccessCompletionHook {
+            reached: tokio::sync::Barrier::new(3),
+            release: tokio::sync::Notify::new(),
+        });
+        fixture.transport.success_completion_hook = Some(Arc::clone(&hook));
         let expired_resolution = Uuid::new_v4();
         let queued_resolution = Uuid::new_v4();
-        let (expired, queued) = tokio::join!(
-            fixture.transport.fetch_plan(
-                expired_resolution,
-                &fixture.plan,
-                Instant::now() + Duration::from_millis(20),
-            ),
-            async {
-                tokio::time::sleep(Duration::from_millis(5)).await;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let (expired, (), queued) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
                 fixture
                     .transport
-                    .fetch_plan(
-                        queued_resolution,
-                        &fixture.plan,
-                        Instant::now() + Duration::from_secs(2),
+                    .fetch_plan(expired_resolution, &fixture.plan, deadline),
+                async {
+                    hook.reached.wait().await;
+                    tokio::time::sleep_until(
+                        tokio::time::Instant::from_std(deadline) + Duration::from_millis(10),
                     )
-                    .await
-            }
-        );
+                    .await;
+                    hook.release.notify_one();
+                },
+                async {
+                    hook.reached.wait().await;
+                    fixture
+                        .transport
+                        .fetch_plan(
+                            queued_resolution,
+                            &fixture.plan,
+                            Instant::now() + Duration::from_secs(2),
+                        )
+                        .await
+                }
+            )
+        })
+        .await
+        .expect("fetch reaches the post-verification completion hook");
         assert_eq!(
             expired.expect_err("completion after deadline").code,
             "DEP_TRANSPORT_DEADLINE"
