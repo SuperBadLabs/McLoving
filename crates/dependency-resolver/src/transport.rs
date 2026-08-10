@@ -30,6 +30,7 @@ pub struct FetchedArtifact {
     pub sha256: String,
     pub attestation_sha256: String,
     pub publication_generation: u64,
+    pub transient_offset: u64,
     pub transient_root_device: u64,
     pub transient_root_inode: u64,
 }
@@ -41,11 +42,23 @@ pub(crate) struct TransportRootIdentity {
     pub inode: u64,
 }
 
+struct PendingTransportArchive {
+    root_directory: Arc<std::fs::File>,
+    linked_path: PathBuf,
+    identity: TransportRootIdentity,
+}
+
+struct TransportArchiveWriter<'a> {
+    file: &'a mut tokio::fs::File,
+    name: &'a str,
+    offset: u64,
+    identity: TransportRootIdentity,
+}
+
+#[cfg(test)]
 struct PinnedTransportResolution {
     _directory: std::fs::File,
-    root_directory: Arc<std::fs::File>,
     path: PathBuf,
-    linked_path: PathBuf,
     identity: TransportRootIdentity,
 }
 
@@ -261,28 +274,62 @@ impl HttpTransport {
                 "artifact plan exceeds a certified per-artifact or aggregate bound",
             ));
         }
-        let relative_root = PathBuf::from(resolution_id.to_string());
-        let resolution = run_transport_before_deadline(
-            deadline,
-            create_private_resolution_root(
-                self.resolution_root_directory()?,
-                &self.transport_root,
-                resolution_id,
-            ),
-        )
-        .await
-        .map_err(|error| preserve_transport_setup_error(&self.cleanup_poisoned, error))?;
+        let root_directory = self.resolution_root_directory()?;
+        let archive_name = format!(".{resolution_id}.transport");
+        let archive_path =
+            crate::publication::pinned_directory_path(&root_directory).join(&archive_name);
+        let mut archive =
+            run_transport_before_deadline(deadline, create_private_file(&archive_path))
+                .await
+                .map_err(|error| preserve_transport_setup_error(&self.cleanup_poisoned, error))?;
+        let created = archive.metadata().await.map_err(|_| root_state_error())?;
+        let root_metadata = root_directory.metadata().map_err(|_| root_state_error())?;
+        #[cfg(target_os = "linux")]
+        let identity = {
+            use std::os::unix::fs::MetadataExt as _;
+            if !created.is_file() || created.dev() != root_metadata.dev() || created.ino() == 0 {
+                return Err(root_state_error());
+            }
+            TransportRootIdentity {
+                device: created.dev(),
+                inode: created.ino(),
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let identity = return Err(root_state_error());
+        let pending = PendingTransportArchive {
+            root_directory,
+            linked_path: self.transport_root.join(&archive_name),
+            identity,
+        };
         match self
-            .fetch_plan_into(plan, deadline, &resolution, &relative_root)
+            .fetch_plan_into(plan, deadline, &mut archive, &archive_name, identity)
             .await
         {
-            Ok(fetched) => Ok(fetched),
+            Ok(fetched) => {
+                run_before_deadline(deadline, archive.sync_all()).await?;
+                drop(archive);
+                substitute_transient_after_sync_for_test(&archive_path)?;
+                match verify_transient_archive(&archive_path, &fetched, deadline).await {
+                    Ok(()) => Ok(fetched),
+                    Err(error) => {
+                        if Instant::now() >= deadline {
+                            self.preserve_cleanup_ambiguity();
+                            return Err(error);
+                        }
+                        self.cleanup_resolution_before_deadline(&pending, deadline)
+                            .await?;
+                        Err(error)
+                    }
+                }
+            }
             Err(error) => {
+                drop(archive);
                 if Instant::now() >= deadline {
                     self.preserve_cleanup_ambiguity();
                     return Err(error);
                 }
-                self.cleanup_resolution_before_deadline(&resolution, deadline)
+                self.cleanup_resolution_before_deadline(&pending, deadline)
                     .await?;
                 Err(error)
             }
@@ -291,7 +338,7 @@ impl HttpTransport {
 
     async fn cleanup_resolution_before_deadline(
         &self,
-        resolution: &PinnedTransportResolution,
+        resolution: &PendingTransportArchive,
         deadline: Instant,
     ) -> Result<(), TransportError> {
         self.ensure_available()?;
@@ -305,7 +352,7 @@ impl HttpTransport {
 
     async fn cleanup_resolution(
         &self,
-        resolution: &PinnedTransportResolution,
+        resolution: &PendingTransportArchive,
     ) -> Result<(), TransportError> {
         let root_directory = resolution
             .root_directory
@@ -315,7 +362,7 @@ impl HttpTransport {
         let linked_path = resolution.linked_path.clone();
         let identity = resolution.identity;
         tokio::task::spawn_blocking(move || {
-            crate::publication::remove_private_tree_exact(
+            crate::publication::remove_private_file_exact(
                 &root_directory,
                 &root,
                 &linked_path,
@@ -336,8 +383,9 @@ impl HttpTransport {
         &self,
         plan: &CanonicalPlan,
         deadline: Instant,
-        resolution: &PinnedTransportResolution,
-        relative_root: &Path,
+        archive: &mut tokio::fs::File,
+        archive_name: &str,
+        archive_identity: TransportRootIdentity,
     ) -> Result<Vec<FetchedArtifact>, TransportError> {
         let mut total = 0_u64;
         let mut fetched = Vec::with_capacity(plan.nodes.len());
@@ -359,9 +407,12 @@ impl HttpTransport {
                     plan.ecosystem,
                     node,
                     deadline,
-                    &resolution.path,
-                    relative_root,
-                    resolution.identity,
+                    TransportArchiveWriter {
+                        file: archive,
+                        name: archive_name,
+                        offset: total - node.declared_size,
+                        identity: archive_identity,
+                    },
                 )
                 .await?,
             );
@@ -374,9 +425,7 @@ impl HttpTransport {
         ecosystem: crate::Ecosystem,
         node: &PackageNode,
         deadline: Instant,
-        resolution_root: &Path,
-        relative_root: &Path,
-        transient_root_identity: TransportRootIdentity,
+        archive: TransportArchiveWriter<'_>,
     ) -> Result<FetchedArtifact, TransportError> {
         let repository = self.repositories.get(&node.repository_id).ok_or_else(|| {
             TransportError::new(
@@ -444,9 +493,6 @@ impl HttpTransport {
                 )
             })?;
 
-        let transient_path = resolution_root.join(format!("{}.part", node.node_id));
-        let mut file =
-            run_transport_before_deadline(deadline, create_private_file(&transient_path)).await?;
         let mut response = response;
         let mut hasher = Sha256::new();
         let mut received = 0_u64;
@@ -463,7 +509,7 @@ impl HttpTransport {
             }
             scanner.scan(&chunk)?;
             hasher.update(&chunk);
-            run_before_deadline(deadline, file.write_all(&chunk)).await?;
+            run_before_deadline(deadline, archive.file.write_all(&chunk)).await?;
         }
         if received != node.declared_size || format!("{:x}", hasher.finalize()) != node.sha256 {
             return Err(TransportError::new(
@@ -471,19 +517,16 @@ impl HttpTransport {
                 "artifact size or content digest does not match the canonical plan",
             ));
         }
-        run_before_deadline(deadline, file.sync_all()).await?;
-        drop(file);
-        substitute_transient_after_sync_for_test(&transient_path)?;
-        verify_transient_file(&transient_path, node.declared_size, &node.sha256, deadline).await?;
         Ok(FetchedArtifact {
             node_id: node.node_id.clone(),
-            transient_path: relative_root.join(format!("{}.part", node.node_id)),
+            transient_path: PathBuf::from(archive.name),
             declared_size: received,
             sha256: node.sha256.clone(),
             attestation_sha256: format!("{:x}", Sha256::digest(&signature)),
             publication_generation: self.generation,
-            transient_root_device: transient_root_identity.device,
-            transient_root_inode: transient_root_identity.inode,
+            transient_offset: archive.offset,
+            transient_root_device: archive.identity.device,
+            transient_root_inode: archive.identity.inode,
         })
     }
 }
@@ -588,7 +631,7 @@ fn pin_transport_resolution(
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn finish_transport_resolution_pin(
     root_directory: Arc<std::fs::File>,
     root_path: &Path,
@@ -639,9 +682,7 @@ fn finish_transport_resolution_pin(
     }
     Ok(PinnedTransportResolution {
         _directory: directory,
-        root_directory,
         path,
-        linked_path,
         identity: TransportRootIdentity {
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -649,7 +690,7 @@ fn finish_transport_resolution_pin(
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn validate_transport_resolution_root(
     root_path: &Path,
     resolution_name: &str,
@@ -712,6 +753,113 @@ fn pin_transport_resolution(
 }
 
 #[cfg(target_os = "linux")]
+async fn verify_transient_archive(
+    path: &Path,
+    artifacts: &[FetchedArtifact],
+    deadline: Instant,
+) -> Result<(), TransportError> {
+    use nix::fcntl::OFlag;
+    use std::io::SeekFrom;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+
+    let first = artifacts.first().ok_or_else(transient_content_error)?;
+    let expected_size = artifacts
+        .iter()
+        .try_fold(0_u64, |expected, artifact| {
+            if artifact.transient_path != first.transient_path
+                || artifact.transient_root_device != first.transient_root_device
+                || artifact.transient_root_inode != first.transient_root_inode
+                || artifact.transient_offset != expected
+            {
+                return None;
+            }
+            expected.checked_add(artifact.declared_size)
+        })
+        .ok_or_else(transient_content_error)?;
+    if Instant::now() >= deadline {
+        return Err(TransportError::new(
+            "DEP_TRANSPORT_DEADLINE",
+            "absolute transport deadline expired",
+        ));
+    }
+    let inspection = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_PATH | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW).bits())
+        .open(path)
+        .map_err(|_| transient_content_error())?;
+    trace_transient_open(path, "path-inspected");
+    let inspected = inspection
+        .metadata()
+        .map_err(|_| transient_content_error())?;
+    if !transient_metadata_matches(&inspected, expected_size)
+        || inspected.dev() != first.transient_root_device
+        || inspected.ino() != first.transient_root_inode
+    {
+        return Err(transient_content_error());
+    }
+    let pinned_path = format!("/proc/self/fd/{}", inspection.as_raw_fd());
+    trace_transient_open(path, "data-open");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).bits())
+        .open(pinned_path)
+        .map_err(|_| transient_content_error())?;
+    let opened = file.metadata().map_err(|_| transient_content_error())?;
+    if !transient_metadata_matches(&opened, expected_size)
+        || opened.dev() != inspected.dev()
+        || opened.ino() != inspected.ino()
+    {
+        return Err(transient_content_error());
+    }
+    let mut file = tokio::fs::File::from_std(file);
+    let mut buffer = [0_u8; 65_536];
+    for artifact in artifacts {
+        run_before_deadline(
+            deadline,
+            file.seek(SeekFrom::Start(artifact.transient_offset)),
+        )
+        .await?;
+        let mut remaining = artifact.declared_size;
+        let mut hasher = Sha256::new();
+        while remaining > 0 {
+            let limit = usize::try_from(remaining.min(buffer.len() as u64))
+                .map_err(|_| transient_content_error())?;
+            let read = run_before_deadline(deadline, file.read(&mut buffer[..limit])).await?;
+            if read == 0 {
+                return Err(transient_content_error());
+            }
+            remaining -= read as u64;
+            hasher.update(&buffer[..read]);
+        }
+        if format!("{:x}", hasher.finalize()) != artifact.sha256 {
+            return Err(transient_content_error());
+        }
+    }
+    let linked = std::fs::symlink_metadata(path).map_err(|_| transient_content_error())?;
+    if !transient_metadata_matches(&linked, expected_size)
+        || linked.dev() != inspected.dev()
+        || linked.ino() != inspected.ino()
+    {
+        return Err(transient_content_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn verify_transient_archive(
+    _path: &Path,
+    _artifacts: &[FetchedArtifact],
+    _deadline: Instant,
+) -> Result<(), TransportError> {
+    Err(TransportError::new(
+        "DEP_TRANSPORT_PLATFORM_UNSUPPORTED",
+        "transient archive verification requires Linux descriptor semantics",
+    ))
+}
+
+#[cfg(all(target_os = "linux", test))]
 async fn verify_transient_file(
     path: &Path,
     expected_size: u64,
@@ -816,7 +964,7 @@ fn cleanup_ambiguity_error() -> TransportError {
     )
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), test))]
 async fn verify_transient_file(
     _path: &Path,
     _expected_size: u64,
@@ -1227,56 +1375,6 @@ fn preserve_transport_setup_error(
     error
 }
 
-#[cfg(target_os = "linux")]
-async fn create_private_resolution_root(
-    root_directory: Arc<std::fs::File>,
-    root_path: &Path,
-    resolution_id: Uuid,
-) -> Result<PinnedTransportResolution, TransportError> {
-    use nix::fcntl::{OFlag, openat};
-    use nix::sys::stat::{Mode, mkdirat};
-
-    let name = resolution_id.to_string();
-    mkdirat(
-        &*root_directory,
-        name.as_str(),
-        Mode::from_bits_truncate(0o700),
-    )
-    .map_err(|_| {
-        TransportError::new(
-            "DEP_TRANSPORT_STATE_CONFLICT",
-            "transient resolution root already exists or cannot be created",
-        )
-    })?;
-    root_directory.sync_all().map_err(|_| root_state_error())?;
-    let directory = std::fs::File::from(
-        openat(
-            &*root_directory,
-            name.as_str(),
-            OFlag::O_RDONLY
-                | OFlag::O_DIRECTORY
-                | OFlag::O_NOFOLLOW
-                | OFlag::O_CLOEXEC
-                | OFlag::O_NONBLOCK,
-            Mode::empty(),
-        )
-        .map_err(|_| root_state_error())?,
-    );
-    finish_transport_resolution_pin(root_directory, root_path, resolution_id, directory, None)
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn create_private_resolution_root(
-    _root_directory: Arc<std::fs::File>,
-    _root_path: &Path,
-    _resolution_id: Uuid,
-) -> Result<PinnedTransportResolution, TransportError> {
-    Err(TransportError::new(
-        "DEP_TRANSPORT_PLATFORM_UNSUPPORTED",
-        "private transport roots require Unix file semantics",
-    ))
-}
-
 #[cfg(unix)]
 async fn create_private_file(path: &Path) -> Result<tokio::fs::File, TransportError> {
     let mut options = tokio::fs::OpenOptions::new();
@@ -1543,8 +1641,7 @@ mod tests {
         let transient_path = fixture
             .transport
             .transport_root
-            .join(resolution_id.to_string())
-            .join(format!("{}.part", fixture.plan.nodes[0].node_id));
+            .join(format!(".{resolution_id}.transport"));
         TRANSIENT_OPEN_TRACE.with(|trace| trace.borrow_mut().clear());
         TRANSIENT_FIFO_SUBSTITUTION.with(|target| {
             *target.borrow_mut() = Some(transient_path.clone());

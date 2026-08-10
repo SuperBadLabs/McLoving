@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
+use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -21,30 +23,31 @@ const CLAIM_SCHEMA: &str = "mcloving.dependency-claim/v1";
 const COMPLETION_SCHEMA: &str = "mcloving.dependency-completion/v1";
 const PUBLICATION_COMMIT_SCHEMA: &str = "mcloving.dependency-publication-commit/v1";
 const MANIFEST_SCHEMA: &str = "mcloving.dependency-manifest/v1";
+const ARCHIVE_SCHEMA: &str = "mcloving.dependency-archive/v1";
 const RECEIPT_SCHEMA: &str = "mcloving.dependency-receipt/v1";
 const MAX_STATE_BYTES: u64 = 16 * 1_048_576;
+#[cfg(test)]
 const MAX_RETAINED_TREE_ENTRIES: usize = 1_000_000;
-const MAX_RETAINED_TREE_DEPTH: usize = 4_096;
+#[cfg(test)]
 const MAX_CLEANUP_DEPTH: usize = 64;
 const LOCK_FILE: &str = ".mcloving-dependency-output.lock";
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct RetainedTreeLimits {
     max_entries: usize,
     max_depth: usize,
 }
 
-const CERTIFIED_RETAINED_TREE_LIMITS: RetainedTreeLimits = RetainedTreeLimits {
-    max_entries: MAX_RETAINED_TREE_ENTRIES,
-    max_depth: MAX_RETAINED_TREE_DEPTH,
-};
-
+#[cfg(test)]
 struct RetainedTreeRecords<'a> {
     total: &'a mut u64,
     directories: &'a mut Vec<(String, u32, u32, u64, u64)>,
     files: &'a mut Vec<(String, u32, u64, String)>,
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug)]
 struct RetainedTreeEvidence {
     sha256: String,
@@ -53,6 +56,7 @@ struct RetainedTreeEvidence {
     manifest_bytes: Vec<u8>,
 }
 
+#[cfg(test)]
 struct PinnedPublicationDirectory {
     directory: File,
     path: PathBuf,
@@ -60,7 +64,7 @@ struct PinnedPublicationDirectory {
     inode: u64,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 struct PendingRetainedDirectory {
     directory: Arc<File>,
     relative: String,
@@ -70,7 +74,7 @@ struct PendingRetainedDirectory {
     identity: RetainedLinkIdentity,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 struct RetainedTreeLink {
     parent: Arc<File>,
     name: std::ffi::CString,
@@ -143,6 +147,23 @@ struct ResolutionManifest {
     request_sha256: String,
     graph_sha256: String,
     artifacts: Vec<RetainedArtifact>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResolutionArchiveHeader {
+    schema_version: String,
+    manifest: ResolutionManifest,
+    entries: Vec<ResolutionArchiveEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResolutionArchiveEntry {
+    relative_path: String,
+    payload_offset: u64,
+    size: u64,
+    sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -270,7 +291,6 @@ struct StoreInner {
     receipt_key_id: String,
     receipt_key: Vec<u8>,
     marker_set: Vec<Vec<u8>>,
-    max_artifact_bytes: u64,
     max_total_artifact_bytes: u64,
     active: Mutex<BTreeSet<Uuid>>,
     _lock: OutputLockGuard,
@@ -451,7 +471,6 @@ impl ResolutionStore {
                 receipt_key_id: config.receipt_key_id.clone(),
                 receipt_key: receipt_key.to_vec(),
                 marker_set,
-                max_artifact_bytes: config.limits.max_artifact_bytes,
                 max_total_artifact_bytes: config.limits.max_total_artifact_bytes,
                 active: Mutex::new(BTreeSet::new()),
                 _lock: lock,
@@ -764,157 +783,121 @@ impl ResolutionStore {
             ));
         }
 
-        let transient_identity = fetched
-            .first()
-            .map(|artifact| {
-                (
-                    artifact.transient_root_device,
-                    artifact.transient_root_inode,
-                )
-            })
-            .ok_or_else(|| {
-                StoreError::new(
-                    "DEP_STORE_ARTIFACT_SET_MISMATCH",
-                    "verified artifact set must identify its dedicated transport directory",
-                )
-            })?;
-        if transient_identity.0 == 0
-            || transient_identity.1 == 0
-            || fetched.iter().any(|artifact| {
-                (
-                    artifact.transient_root_device,
-                    artifact.transient_root_inode,
-                ) != transient_identity
-            })
+        let first_transient = fetched.first().ok_or_else(|| {
+            StoreError::new(
+                "DEP_STORE_ARTIFACT_SET_MISMATCH",
+                "verified artifact set must identify its dedicated transport archive",
+            )
+        })?;
+        let transient_identity = (
+            first_transient.transient_root_device,
+            first_transient.transient_root_inode,
+        );
+        let transient_name = format!(".{resolution_id}.transport");
+        if fetched
+            .iter()
+            .any(|artifact| artifact.transient_path != Path::new(&transient_name))
         {
             return Err(StoreError::new(
-                "DEP_STORE_TRANSIENT_ROOT_MISMATCH",
-                "verified artifacts do not share one exact transport directory identity",
+                "DEP_STORE_TRANSIENT_PATH_MISMATCH",
+                "verified artifact is not bound to its dedicated transport archive",
             ));
         }
-        let resolution_name = resolution_id.to_string();
-        let transient_root = pin_private_directory_at(
+        let transient_size = fetched.iter().try_fold(0_u64, |offset, artifact| {
+            if (
+                artifact.transient_root_device,
+                artifact.transient_root_inode,
+            ) != transient_identity
+                || artifact.transient_offset != offset
+            {
+                return None;
+            }
+            offset.checked_add(artifact.declared_size)
+        });
+        if transient_identity.0 == 0 || transient_identity.1 == 0 || transient_size.is_none() {
+            return Err(StoreError::new(
+                "DEP_STORE_TRANSIENT_ROOT_MISMATCH",
+                "verified artifacts do not share one exact contiguous transport archive",
+            ));
+        }
+        let transient_archive = pin_private_regular_file_at(
             &self.inner.transport_directory,
-            &resolution_name,
-            0o700,
-            Some(transient_identity),
+            &transient_name,
+            0o600,
+            transient_size.expect("checked above"),
+            transient_identity,
         )?;
 
         let stage_name = format!(".{}.{}.stage", resolution_id, Uuid::new_v4());
         let stage = self.inner.bundles_root.join(&stage_name);
-        let pinned_stage = match create_and_pin_private_directory_at(
-            &self.inner.bundles_directory,
-            &stage_name,
-            0o700,
-        ) {
-            Ok(directory) => directory,
-            Err(_) => {
-                return Err(StoreError::new(
-                    "DEP_STORE_PUBLICATION_AMBIGUOUS",
-                    "new publication stage could not be bound to its exact directory",
-                ));
-            }
-        };
-        let pinned_artifacts = match create_and_pin_private_directory_at(
-            &pinned_stage.directory,
-            "artifacts",
-            0o700,
-        ) {
-            Ok(directory) => directory,
-            Err(error) => {
-                remove_private_tree_exact(
-                    &self.inner.bundles_directory,
-                    &self.inner.bundles_root,
-                    &stage,
-                    pinned_stage.device,
-                    pinned_stage.inode,
-                )?;
-                return Err(error);
-            }
-        };
-        let publication = self.stage_publication(
-            &pinned_stage,
-            &pinned_artifacts,
-            &transient_root,
+        let (stage_file, artifacts) = self.stage_archive_publication(
+            &stage,
+            &transient_archive,
             claim,
             &plan,
             &artifact_by_node,
-        );
-        let artifacts = match publication {
-            Ok(value) => value,
-            Err(error) => {
-                remove_private_tree_exact(
-                    &self.inner.bundles_directory,
-                    &self.inner.bundles_root,
-                    &stage,
-                    pinned_stage.device,
-                    pinned_stage.inode,
-                )?;
-                return Err(error);
-            }
-        };
+        )?;
+        let archive_max_bytes = self
+            .inner
+            .max_total_artifact_bytes
+            .checked_add(MAX_STATE_BYTES)
+            .and_then(|value| value.checked_add(8))
+            .ok_or_else(state_error)?;
+        let staged_identity = verified_file_fingerprint(&stage_file, archive_max_bytes, 0o400)?;
         let bundle_path = self.bundle_path(resolution_id);
         if path_exists(&bundle_path)? {
-            remove_private_tree_exact(
+            remove_private_file_exact(
                 &self.inner.bundles_directory,
                 &self.inner.bundles_root,
                 &stage,
-                pinned_stage.device,
-                pinned_stage.inode,
+                staged_identity.device,
+                staged_identity.inode,
             )?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_CONFLICT",
                 "resolution bundle already exists",
             ));
         }
-        if let Err(error) = revalidate_private_directory_link(
-            &self.inner.bundles_directory,
-            &stage_name,
-            &pinned_stage,
-            0o500,
-        ) {
-            remove_private_tree_exact(
-                &self.inner.bundles_directory,
-                &self.inner.bundles_root,
-                &stage,
-                pinned_stage.device,
-                pinned_stage.inode,
-            )?;
-            return Err(error);
-        }
         if let Err(error) = rename_no_replace(&stage, &bundle_path) {
-            remove_private_tree_exact(
+            remove_private_file_exact(
                 &self.inner.bundles_directory,
                 &self.inner.bundles_root,
                 &stage,
-                pinned_stage.device,
-                pinned_stage.inode,
+                staged_identity.device,
+                staged_identity.inode,
             )?;
             return Err(error);
         }
-        if let Err(error) = revalidate_private_directory_link(
-            &self.inner.bundles_directory,
-            &resolution_name,
-            &pinned_stage,
-            0o500,
+        let stage_fingerprint = verified_file_fingerprint(&stage_file, archive_max_bytes, 0o400)?;
+        if (stage_fingerprint.device, stage_fingerprint.inode)
+            != (staged_identity.device, staged_identity.inode)
+        {
+            return Err(receipt_pair_changed());
+        }
+        if let Err(error) = revalidate_verified_file_link(
+            &bundle_path,
+            &stage_file,
+            &stage_fingerprint,
+            archive_max_bytes,
+            0o400,
         ) {
-            remove_private_tree_exact(
+            remove_private_file_exact(
                 &self.inner.bundles_directory,
                 &self.inner.bundles_root,
                 &bundle_path,
-                pinned_stage.device,
-                pinned_stage.inode,
+                stage_fingerprint.device,
+                stage_fingerprint.inode,
             )?;
             return Err(error);
         }
         sync_directory(&self.inner.bundles_root)?;
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
-            remove_private_tree_exact(
+            remove_private_file_exact(
                 &self.inner.bundles_directory,
                 &self.inner.bundles_root,
                 &bundle_path,
-                pinned_stage.device,
-                pinned_stage.inode,
+                stage_fingerprint.device,
+                stage_fingerprint.inode,
             )?;
             sync_directory(&self.inner.bundles_root)?;
             return Err(StoreError::new(
@@ -929,43 +912,30 @@ impl ResolutionStore {
             graph_sha256: claim.graph_sha256.clone(),
             artifacts: artifacts.clone(),
         };
-        let retained_tree = match retained_tree_evidence(
-            &self.inner.root_directory,
-            &self.inner.bundles_directory,
-            &resolution_name,
-            self.inner.max_artifact_bytes.max(MAX_STATE_BYTES),
-            self.inner
-                .max_total_artifact_bytes
-                .checked_add(MAX_STATE_BYTES)
-                .ok_or_else(state_error)?,
-        )
-        .and_then(|evidence| {
-            validate_retained_bundle(&evidence, &expected_manifest)?;
-            Ok(evidence)
-        }) {
-            Ok(evidence) => evidence,
-            Err(error) => {
-                remove_private_tree_exact(
-                    &self.inner.bundles_directory,
-                    &self.inner.bundles_root,
-                    &bundle_path,
-                    pinned_stage.device,
-                    pinned_stage.inode,
-                )?;
-                sync_directory(&self.inner.bundles_root)?;
-                return Err(error);
-            }
-        };
-        let retained_tree_sha256 = retained_tree.sha256;
+        let retained_tree_sha256 =
+            match verify_resolution_archive(&bundle_path, &expected_manifest, archive_max_bytes) {
+                Ok(sha256) => sha256,
+                Err(error) => {
+                    remove_private_file_exact(
+                        &self.inner.bundles_directory,
+                        &self.inner.bundles_root,
+                        &bundle_path,
+                        stage_fingerprint.device,
+                        stage_fingerprint.inode,
+                    )?;
+                    sync_directory(&self.inner.bundles_root)?;
+                    return Err(error);
+                }
+            };
         let published_at_unix_ms = current_unix_ms()?;
         if Instant::now() >= deadline || published_at_unix_ms >= claim.publication_deadline_unix_ms
         {
-            remove_private_tree_exact(
+            remove_private_file_exact(
                 &self.inner.bundles_directory,
                 &self.inner.bundles_root,
                 &bundle_path,
-                pinned_stage.device,
-                pinned_stage.inode,
+                stage_fingerprint.device,
+                stage_fingerprint.inode,
             )?;
             sync_directory(&self.inner.bundles_root)?;
             return Err(StoreError::new(
@@ -1003,7 +973,7 @@ impl ResolutionStore {
                     &receipt_path,
                     &bundle_path,
                     None,
-                    (pinned_stage.device, pinned_stage.inode),
+                    (stage_fingerprint.device, stage_fingerprint.inode),
                 )?;
                 return Err(error);
             }
@@ -1016,7 +986,7 @@ impl ResolutionStore {
                 &receipt_path,
                 &bundle_path,
                 Some(receipt_identity),
-                (pinned_stage.device, pinned_stage.inode),
+                (stage_fingerprint.device, stage_fingerprint.inode),
             )?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
@@ -1024,13 +994,13 @@ impl ResolutionStore {
             ));
         }
         self.verify_replay(&receipt, &admitted.request_sha256)?;
-        self.cleanup_transient_resolution(resolution_id, transient_identity)?;
+        self.cleanup_transient_archive(resolution_id, transient_identity)?;
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
             self.withdraw_publication_exact(
                 &receipt_path,
                 &bundle_path,
                 Some(receipt_identity),
-                (pinned_stage.device, pinned_stage.inode),
+                (stage_fingerprint.device, stage_fingerprint.inode),
             )?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
@@ -1054,7 +1024,7 @@ impl ResolutionStore {
                 &receipt_path,
                 &bundle_path,
                 Some(receipt_identity),
-                (pinned_stage.device, pinned_stage.inode),
+                (stage_fingerprint.device, stage_fingerprint.inode),
             )?;
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_LATE",
@@ -1095,7 +1065,7 @@ impl ResolutionStore {
                 &receipt_path,
                 &bundle_path,
                 Some(receipt_identity),
-                (pinned_stage.device, pinned_stage.inode),
+                (stage_fingerprint.device, stage_fingerprint.inode),
             );
             self.deactivate(resolution_id);
             withdrawal?;
@@ -1294,7 +1264,7 @@ impl ResolutionStore {
             )?;
             sync_directory(&self.inner.receipts_root)?;
         }
-        remove_private_tree(
+        remove_private_file(
             &self.inner.bundles_directory,
             &self.inner.bundles_root,
             bundle_path,
@@ -1329,7 +1299,7 @@ impl ResolutionStore {
             (false, Some(_)) => return Err(cleanup_exact_mismatch()),
             (false, None) => {}
         }
-        remove_private_tree_exact(
+        remove_private_file_exact(
             &self.inner.bundles_directory,
             &self.inner.bundles_root,
             bundle_path,
@@ -1339,16 +1309,19 @@ impl ResolutionStore {
         sync_directory(&self.inner.bundles_root)
     }
 
-    fn cleanup_transient_resolution(
+    fn cleanup_transient_archive(
         &self,
         resolution_id: Uuid,
         identity: (u64, u64),
     ) -> Result<(), StoreError> {
-        let resolution_root = self.inner.transport_root.join(resolution_id.to_string());
-        remove_private_tree_exact(
+        let archive_path = self
+            .inner
+            .transport_root
+            .join(format!(".{resolution_id}.transport"));
+        remove_private_file_exact(
             &self.inner.transport_directory,
             &self.inner.transport_root,
-            &resolution_root,
+            &archive_path,
             identity.0,
             identity.1,
         )?;
@@ -1389,17 +1362,18 @@ impl ResolutionStore {
         SerializedOutputGuard::new(&self.inner.marker_set)
     }
 
-    fn stage_publication(
+    fn stage_archive_publication(
         &self,
-        stage: &PinnedPublicationDirectory,
-        artifacts_root: &PinnedPublicationDirectory,
-        transient_root: &PinnedPublicationDirectory,
+        stage: &Path,
+        transient_archive: &File,
         claim: &ResolutionClaim,
         plan: &CanonicalPlan,
         artifact_by_node: &BTreeMap<&str, &FetchedArtifact>,
-    ) -> Result<Vec<RetainedArtifact>, StoreError> {
+    ) -> Result<(File, Vec<RetainedArtifact>), StoreError> {
         let mut retained = Vec::with_capacity(plan.nodes.len());
-        let mut content_paths = BTreeMap::new();
+        let mut unique_payloads = BTreeMap::new();
+        let archive_identity = directory_device_inode(transient_archive)?;
+        let mut expected_offset = 0_u64;
         for node in &plan.nodes {
             let fetched = artifact_by_node
                 .get(node.node_id.as_str())
@@ -1413,48 +1387,39 @@ impl ResolutionStore {
                     "verified artifact metadata changed before publication",
                 ));
             }
-            let expected_transient = PathBuf::from(claim.resolution_id.to_string())
-                .join(format!("{}.part", node.node_id));
+            let expected_transient = PathBuf::from(format!(".{}.transport", claim.resolution_id));
             if fetched.transient_path != expected_transient {
                 return Err(StoreError::new(
                     "DEP_STORE_TRANSIENT_PATH_MISMATCH",
                     "verified artifact is not bound to its dedicated transport path",
                 ));
             }
-            if (fetched.transient_root_device, fetched.transient_root_inode)
-                != (transient_root.device, transient_root.inode)
+            if (fetched.transient_root_device, fetched.transient_root_inode) != archive_identity
+                || fetched.transient_offset != expected_offset
             {
                 return Err(StoreError::new(
                     "DEP_STORE_TRANSIENT_ROOT_MISMATCH",
-                    "verified artifact transport directory changed before publication",
+                    "verified artifact transport archive changed before publication",
                 ));
             }
-            let transient_name = fetched
-                .transient_path
-                .file_name()
-                .map(PathBuf::from)
-                .ok_or_else(state_error)?;
-            verify_file_at(
-                &transient_root.directory,
-                &transient_name,
-                0o600,
+            verify_archive_slice(
+                transient_archive,
+                fetched.transient_offset,
                 node.declared_size,
                 &node.sha256,
             )?;
             let relative_path = format!("artifacts/{}", node.sha256);
-            let destination = artifacts_root.path.join(&node.sha256);
-            if let Some(existing) = content_paths.get(&node.sha256) {
-                if existing != &relative_path {
+            if let Some((_, existing_size)) = unique_payloads.get(&relative_path) {
+                // Equal content may occur at different transport offsets. The first
+                // verified occurrence is the sole durable payload.
+                if *existing_size != node.declared_size {
                     return Err(state_error());
                 }
             } else {
-                copy_new_file_at(
-                    &transient_root.directory,
-                    &transient_name,
-                    &destination,
-                    node.declared_size,
-                )?;
-                content_paths.insert(node.sha256.clone(), relative_path.clone());
+                unique_payloads.insert(
+                    relative_path.clone(),
+                    (fetched.transient_offset, node.declared_size),
+                );
             }
             retained.push(RetainedArtifact {
                 node_id: node.node_id.clone(),
@@ -1464,6 +1429,9 @@ impl ResolutionStore {
                 attestation_sha256: fetched.attestation_sha256.clone(),
                 publication_generation: fetched.publication_generation,
             });
+            expected_offset = expected_offset
+                .checked_add(node.declared_size)
+                .ok_or_else(state_error)?;
         }
         retained.sort_by(|left, right| left.node_id.cmp(&right.node_id));
         let manifest = ResolutionManifest {
@@ -1473,11 +1441,67 @@ impl ResolutionStore {
             graph_sha256: claim.graph_sha256.clone(),
             artifacts: retained.clone(),
         };
-        write_new_json(&stage.path.join("manifest.json"), &manifest, 0o400)?;
-        seal_directory(&artifacts_root.directory, 0o500)?;
-        revalidate_private_directory_link(&stage.directory, "artifacts", artifacts_root, 0o500)?;
-        seal_directory(&stage.directory, 0o500)?;
-        Ok(retained)
+        let mut payload_offset = 0_u64;
+        let mut payload_sources = Vec::with_capacity(unique_payloads.len());
+        let mut entries = Vec::with_capacity(unique_payloads.len());
+        for (relative_path, (source_offset, size)) in unique_payloads {
+            let sha256 = relative_path
+                .strip_prefix("artifacts/")
+                .ok_or_else(state_error)?
+                .to_owned();
+            entries.push(ResolutionArchiveEntry {
+                relative_path,
+                payload_offset,
+                size,
+                sha256: sha256.clone(),
+            });
+            payload_sources.push((source_offset, size, sha256));
+            payload_offset = payload_offset.checked_add(size).ok_or_else(state_error)?;
+        }
+        let header = ResolutionArchiveHeader {
+            schema_version: ARCHIVE_SCHEMA.to_owned(),
+            manifest,
+            entries,
+        };
+        let header_bytes = serde_json::to_vec(&header).map_err(|_| state_error())?;
+        if header_bytes.len() as u64 > MAX_STATE_BYTES {
+            return Err(state_error());
+        }
+        let mut prefix = Vec::with_capacity(8 + header_bytes.len());
+        prefix.extend_from_slice(&(header_bytes.len() as u64).to_be_bytes());
+        prefix.extend_from_slice(&header_bytes);
+        let mut stage_file = write_new_file(stage, &prefix)?;
+        let stage_identity = directory_device_inode(&stage_file)?;
+        let staging = (|| {
+            for (source_offset, size, sha256) in payload_sources {
+                append_archive_slice(
+                    transient_archive,
+                    source_offset,
+                    &mut stage_file,
+                    size,
+                    &sha256,
+                )?;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                stage_file
+                    .set_permissions(std::fs::Permissions::from_mode(0o400))
+                    .map_err(|_| state_error())?;
+            }
+            stage_file.sync_all().map_err(|_| state_error())
+        })();
+        if let Err(error) = staging {
+            remove_private_file_exact(
+                &self.inner.bundles_directory,
+                &self.inner.bundles_root,
+                stage,
+                stage_identity.0,
+                stage_identity.1,
+            )?;
+            return Err(error);
+        }
+        Ok((stage_file, retained))
     }
 
     fn verify_replay(
@@ -1515,22 +1539,6 @@ impl ResolutionStore {
                 "stored receipt request, plan, generation, rollback, or deadline binding is invalid",
             ));
         }
-        let retained = retained_tree_evidence(
-            &self.inner.root_directory,
-            &self.inner.bundles_directory,
-            &receipt.resolution_id.to_string(),
-            self.inner.max_artifact_bytes.max(MAX_STATE_BYTES),
-            self.inner
-                .max_total_artifact_bytes
-                .checked_add(MAX_STATE_BYTES)
-                .ok_or_else(state_error)?,
-        )?;
-        if retained.sha256 != receipt.retained_tree_sha256 {
-            return Err(StoreError::new(
-                "DEP_STORE_RETAINED_TREE_MISMATCH",
-                "retained dependency bundle has been substituted",
-            ));
-        }
         let expected_manifest = ResolutionManifest {
             schema_version: MANIFEST_SCHEMA.to_owned(),
             resolution_id: receipt.resolution_id,
@@ -1538,16 +1546,22 @@ impl ResolutionStore {
             graph_sha256: receipt.plan.graph_sha256.clone(),
             artifacts: receipt.artifacts.clone(),
         };
-        validate_retained_bundle(&retained, &expected_manifest)?;
-        for artifact in &receipt.artifacts {
-            if retained.files.get(&artifact.relative_path)
-                != Some(&(artifact.size, artifact.sha256.clone()))
-            {
-                return Err(StoreError::new(
-                    "DEP_STORE_ARTIFACT_CONTENT_MISMATCH",
-                    "artifact content changed before or after publication",
-                ));
-            }
+        let archive_max_bytes = self
+            .inner
+            .max_total_artifact_bytes
+            .checked_add(MAX_STATE_BYTES)
+            .and_then(|value| value.checked_add(8))
+            .ok_or_else(state_error)?;
+        let retained_sha256 = verify_resolution_archive(
+            &self.bundle_path(receipt.resolution_id),
+            &expected_manifest,
+            archive_max_bytes,
+        )?;
+        if retained_sha256 != receipt.retained_tree_sha256 {
+            return Err(StoreError::new(
+                "DEP_STORE_RETAINED_TREE_MISMATCH",
+                "retained dependency archive has been substituted",
+            ));
         }
         Ok(())
     }
@@ -1693,7 +1707,9 @@ impl ResolutionStore {
     }
 
     fn bundle_path(&self, resolution_id: Uuid) -> PathBuf {
-        self.inner.bundles_root.join(resolution_id.to_string())
+        self.inner
+            .bundles_root
+            .join(format!("{resolution_id}.bundle"))
     }
 
     fn deactivate(&self, resolution_id: Uuid) {
@@ -2162,11 +2178,16 @@ fn run_retained_tree_swap_hook() -> Result<(), StoreError> {
     let swap = RETAINED_TREE_SWAP_TEST_HOOK.with(|hook| hook.borrow_mut().take());
     if let Some((target, backup)) = swap {
         let parent = target.parent().expect("retained swap parent");
+        let original_mode = std::fs::metadata(parent)
+            .expect("retained swap parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
         std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
             .expect("make retained swap parent writable");
-        std::fs::rename(&target, &backup).expect("move traversed retained directory");
-        symlink(&backup, &target).expect("relink traversed retained directory");
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o500))
+        std::fs::rename(&target, &backup).expect("move traversed retained entry");
+        symlink(&backup, &target).expect("relink traversed retained entry");
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(original_mode))
             .expect("reseal retained swap parent");
     }
     Ok(())
@@ -2175,21 +2196,22 @@ fn run_retained_tree_swap_hook() -> Result<(), StoreError> {
 #[cfg(all(test, target_os = "linux"))]
 fn run_retained_tree_pre_scan_injection_hook(bundle: &File) -> Result<(), StoreError> {
     use nix::sys::stat::{Mode, fchmod};
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::fd::AsRawFd as _;
 
     if !RETAINED_TREE_PRE_SCAN_INJECTION_TEST_HOOK.with(|hook| hook.replace(false)) {
         return Ok(());
     }
-    fchmod(bundle, Mode::from_bits_truncate(0o700)).map_err(|_| retained_tree_mismatch())?;
-    let injected = pinned_directory_path(bundle).join("@output-root");
-    std::fs::create_dir(&injected).map_err(|_| retained_tree_mismatch())?;
-    let payload = injected.join("payload");
-    std::fs::write(&payload, b"unverified bytes").map_err(|_| retained_tree_mismatch())?;
-    std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o400))
+    fchmod(bundle, Mode::from_bits_truncate(0o600)).map_err(|_| retained_tree_mismatch())?;
+    let pinned_path = format!("/proc/self/fd/{}", bundle.as_raw_fd());
+    let mut writable = OpenOptions::new()
+        .append(true)
+        .open(pinned_path)
         .map_err(|_| retained_tree_mismatch())?;
-    std::fs::set_permissions(&injected, std::fs::Permissions::from_mode(0o500))
+    writable
+        .write_all(b"unmanifested archive bytes")
         .map_err(|_| retained_tree_mismatch())?;
-    fchmod(bundle, Mode::from_bits_truncate(0o500)).map_err(|_| retained_tree_mismatch())
+    writable.sync_all().map_err(|_| retained_tree_mismatch())?;
+    fchmod(bundle, Mode::from_bits_truncate(0o400)).map_err(|_| retained_tree_mismatch())
 }
 
 #[cfg(any(not(test), not(target_os = "linux")))]
@@ -2416,76 +2438,130 @@ fn revalidate_store_directory_link(
     Err(state_error())
 }
 
-fn validate_retained_bundle(
-    retained: &RetainedTreeEvidence,
-    expected_manifest: &ResolutionManifest,
-) -> Result<(), StoreError> {
-    let manifest: ResolutionManifest = crate::strict_json::from_slice(&retained.manifest_bytes)
-        .map_err(|_| {
-            StoreError::new(
-                "DEP_STORE_STATE_INVALID",
-                "stored state is malformed or not closed JSON",
-            )
-        })?;
-    if &manifest != expected_manifest {
-        return Err(StoreError::new(
-            "DEP_STORE_MANIFEST_MISMATCH",
-            "retained manifest does not match the exact publication receipt",
-        ));
-    }
-
-    let expected_directories = BTreeSet::from([".".to_owned(), "artifacts".to_owned()]);
-    let expected_files = std::iter::once("manifest.json".to_owned())
-        .chain(
-            expected_manifest
-                .artifacts
-                .iter()
-                .map(|artifact| artifact.relative_path.clone()),
-        )
-        .collect::<BTreeSet<_>>();
-    let actual_files = retained.files.keys().cloned().collect::<BTreeSet<_>>();
-    if retained.directories != expected_directories || actual_files != expected_files {
-        return Err(StoreError::new(
-            "DEP_STORE_RETAINED_TREE_MISMATCH",
-            "retained dependency bundle contains a path not closed by its manifest",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn retained_tree_evidence(
-    output_directory: &File,
-    bundles_directory: &File,
-    resolution_id: &str,
-    max_file_bytes: u64,
-    max_total_bytes: u64,
-) -> Result<RetainedTreeEvidence, StoreError> {
-    retained_tree_evidence_with_limits(
-        output_directory,
-        bundles_directory,
-        resolution_id,
-        max_file_bytes,
-        max_total_bytes,
-        CERTIFIED_RETAINED_TREE_LIMITS,
+fn retained_archive_mismatch() -> StoreError {
+    StoreError::new(
+        "DEP_STORE_RETAINED_TREE_MISMATCH",
+        "retained dependency archive is malformed, incomplete, or has been substituted",
     )
 }
 
-#[cfg(not(target_os = "linux"))]
-fn retained_tree_evidence(
-    _output_directory: &File,
-    _bundles_directory: &File,
-    _resolution_id: &str,
-    _max_file_bytes: u64,
-    _max_total_bytes: u64,
-) -> Result<RetainedTreeEvidence, StoreError> {
-    Err(StoreError::new(
-        "DEP_STORE_PLATFORM_UNSUPPORTED",
-        "retained tree verification requires Linux descriptor semantics",
-    ))
+fn verify_resolution_archive(
+    path: &Path,
+    expected_manifest: &ResolutionManifest,
+    max_bytes: u64,
+) -> Result<String, StoreError> {
+    let mut archive =
+        open_verified_file(path, max_bytes, 0o400).map_err(|_| retained_archive_mismatch())?;
+    let fingerprint = verified_file_fingerprint(&archive, max_bytes, 0o400)
+        .map_err(|_| retained_archive_mismatch())?;
+    let archive_size = fingerprint.size;
+    run_retained_tree_pre_scan_injection_hook(&archive)?;
+    let mut length_bytes = [0_u8; 8];
+    archive
+        .read_exact(&mut length_bytes)
+        .map_err(|_| retained_archive_mismatch())?;
+    let header_length = u64::from_be_bytes(length_bytes);
+    if header_length == 0 || header_length > MAX_STATE_BYTES {
+        return Err(retained_archive_mismatch());
+    }
+    let header_size = usize::try_from(header_length).map_err(|_| retained_archive_mismatch())?;
+    let mut header_bytes = vec![0_u8; header_size];
+    archive
+        .read_exact(&mut header_bytes)
+        .map_err(|_| retained_archive_mismatch())?;
+    let header: ResolutionArchiveHeader =
+        crate::strict_json::from_slice(&header_bytes).map_err(|_| retained_archive_mismatch())?;
+    if header.schema_version != ARCHIVE_SCHEMA || header.manifest != *expected_manifest {
+        return Err(StoreError::new(
+            "DEP_STORE_MANIFEST_MISMATCH",
+            "retained archive manifest does not match the exact publication receipt",
+        ));
+    }
+
+    let mut unique_artifacts = BTreeMap::<String, (u64, String)>::new();
+    for artifact in &expected_manifest.artifacts {
+        let expected_path = format!("artifacts/{}", artifact.sha256);
+        if artifact.relative_path != expected_path {
+            return Err(retained_archive_mismatch());
+        }
+        if unique_artifacts
+            .insert(
+                artifact.relative_path.clone(),
+                (artifact.size, artifact.sha256.clone()),
+            )
+            .is_some_and(|existing| existing != (artifact.size, artifact.sha256.clone()))
+        {
+            return Err(retained_archive_mismatch());
+        }
+    }
+    let mut expected_offset = 0_u64;
+    let mut expected_entries = Vec::with_capacity(unique_artifacts.len());
+    for (relative_path, (size, sha256)) in unique_artifacts {
+        expected_entries.push(ResolutionArchiveEntry {
+            relative_path,
+            payload_offset: expected_offset,
+            size,
+            sha256,
+        });
+        expected_offset = expected_offset
+            .checked_add(size)
+            .ok_or_else(retained_archive_mismatch)?;
+    }
+    if header.entries != expected_entries {
+        return Err(retained_archive_mismatch());
+    }
+    let payload_start = 8_u64
+        .checked_add(header_length)
+        .ok_or_else(retained_archive_mismatch)?;
+    let expected_size = payload_start
+        .checked_add(expected_offset)
+        .ok_or_else(retained_archive_mismatch)?;
+    if archive_size != expected_size {
+        return Err(retained_archive_mismatch());
+    }
+    for entry in &header.entries {
+        let offset = payload_start
+            .checked_add(entry.payload_offset)
+            .ok_or_else(retained_archive_mismatch)?;
+        verify_archive_slice(&archive, offset, entry.size, &entry.sha256)
+            .map_err(|_| retained_archive_mismatch())?;
+    }
+
+    archive
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| retained_archive_mismatch())?;
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 65_536];
+    loop {
+        let read = archive
+            .read(&mut buffer)
+            .map_err(|_| retained_archive_mismatch())?;
+        if read == 0 {
+            break;
+        }
+        total = total
+            .checked_add(read as u64)
+            .ok_or_else(retained_archive_mismatch)?;
+        if total > archive_size {
+            return Err(retained_archive_mismatch());
+        }
+        hasher.update(&buffer[..read]);
+    }
+    run_retained_tree_swap_hook()?;
+    if total != archive_size
+        || verified_file_fingerprint(&archive, max_bytes, 0o400)
+            .map_err(|_| retained_archive_mismatch())?
+            != fingerprint
+    {
+        return Err(retained_archive_mismatch());
+    }
+    revalidate_verified_file_link(path, &archive, &fingerprint, max_bytes, 0o400)
+        .map_err(|_| retained_archive_mismatch())?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn retained_tree_evidence_with_limits(
     output_directory: &File,
     bundles_directory: &File,
@@ -2765,7 +2841,7 @@ fn retained_tree_evidence_with_limits(
     })
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn revalidate_retained_link(link: &RetainedTreeLink) -> Result<(), StoreError> {
     use nix::fcntl::{OFlag, openat};
     use nix::sys::stat::Mode;
@@ -2807,7 +2883,7 @@ fn retained_link_identity(metadata: &std::fs::Metadata) -> RetainedLinkIdentity 
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn validate_retained_directory_metadata(
     metadata: &std::fs::Metadata,
     expected_mode: u32,
@@ -2826,7 +2902,7 @@ fn validate_retained_directory_metadata(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn directory_record_from_file(
     label: &str,
     directory: &File,
@@ -2845,6 +2921,7 @@ fn directory_record_from_file(
     ))
 }
 
+#[cfg(test)]
 fn retained_tree_mismatch() -> StoreError {
     StoreError::new(
         "DEP_STORE_RETAINED_TREE_MISMATCH",
@@ -2852,6 +2929,7 @@ fn retained_tree_mismatch() -> StoreError {
     )
 }
 
+#[cfg(test)]
 fn admit_retained_tree_entry(count: &mut usize, max_entries: usize) -> Result<(), StoreError> {
     *count = count.checked_add(1).ok_or_else(retained_tree_bound_error)?;
     if *count > max_entries {
@@ -2860,65 +2938,12 @@ fn admit_retained_tree_entry(count: &mut usize, max_entries: usize) -> Result<()
     Ok(())
 }
 
+#[cfg(test)]
 fn retained_tree_bound_error() -> StoreError {
     StoreError::new(
         "DEP_STORE_RETAINED_TREE_MISMATCH",
         "retained dependency tree exceeds its certified entry or depth bound",
     )
-}
-
-#[cfg(target_os = "linux")]
-fn verify_file_at(
-    root: &File,
-    relative: &Path,
-    mode: u32,
-    size: u64,
-    digest: &str,
-) -> Result<(), StoreError> {
-    let (actual_size, actual_digest) = hash_bounded_file_at(root, relative, size, mode)?;
-    if actual_size != size || actual_digest != digest {
-        return Err(StoreError::new(
-            "DEP_STORE_ARTIFACT_CONTENT_MISMATCH",
-            "artifact content changed before or after publication",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn verify_file_at(
-    _root: &File,
-    _relative: &Path,
-    _mode: u32,
-    _size: u64,
-    _digest: &str,
-) -> Result<(), StoreError> {
-    Err(state_error())
-}
-
-#[cfg(target_os = "linux")]
-fn hash_bounded_file_at(
-    root: &File,
-    relative: &Path,
-    max_bytes: u64,
-    mode: u32,
-) -> Result<(u64, String), StoreError> {
-    let mut file = open_verified_file_at(root, relative, max_bytes, mode)?;
-    let mut hasher = Sha256::new();
-    let mut total = 0_u64;
-    let mut buffer = [0_u8; 65_536];
-    loop {
-        let read = file.read(&mut buffer).map_err(|_| state_error())?;
-        if read == 0 {
-            break;
-        }
-        total = total.checked_add(read as u64).ok_or_else(state_error)?;
-        if total > max_bytes {
-            return Err(state_error());
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok((total, format!("{:x}", hasher.finalize())))
 }
 
 #[cfg(unix)]
@@ -2973,55 +2998,7 @@ fn open_verified_file(path: &Path, max_bytes: u64, mode: u32) -> Result<File, St
     Ok(file)
 }
 
-#[cfg(target_os = "linux")]
-fn open_verified_file_at(
-    root: &File,
-    relative: &Path,
-    max_bytes: u64,
-    mode: u32,
-) -> Result<File, StoreError> {
-    use nix::fcntl::{OFlag, openat};
-    use nix::sys::stat::Mode;
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let components = relative
-        .components()
-        .map(|component| match component {
-            Component::Normal(name) => Ok(name),
-            _ => Err(state_error()),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let (name, parents) = components.split_last().ok_or_else(state_error)?;
-    let mut parent = root.try_clone().map_err(|_| state_error())?;
-    for component in parents {
-        parent = File::from(
-            openat(
-                &parent,
-                *component,
-                OFlag::O_RDONLY
-                    | OFlag::O_DIRECTORY
-                    | OFlag::O_NOFOLLOW
-                    | OFlag::O_CLOEXEC
-                    | OFlag::O_NONBLOCK,
-                Mode::empty(),
-            )
-            .map_err(|_| state_error())?,
-        );
-    }
-    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| state_error())?;
-    let inspection = File::from(
-        openat(
-            &parent,
-            name.as_c_str(),
-            OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| state_error())?,
-    );
-    open_verified_inspected_file(&parent, name.as_c_str(), &inspection, max_bytes, mode)
-}
-
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn open_verified_inspected_file(
     parent: &File,
     name: &std::ffi::CStr,
@@ -3348,48 +3325,6 @@ fn write_new_file(_path: &Path, _bytes: &[u8]) -> Result<File, StoreError> {
     ))
 }
 
-#[cfg(target_os = "linux")]
-fn copy_new_file_at(
-    root: &File,
-    source: &Path,
-    destination: &Path,
-    expected_size: u64,
-) -> Result<(), StoreError> {
-    use nix::fcntl::OFlag;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    let mut source = open_verified_file_at(root, source, expected_size, 0o600)?;
-    let mut destination = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(nix::fcntl::OFlag::O_CLOEXEC.bits() | OFlag::O_NOFOLLOW.bits())
-        .open(destination)
-        .map_err(|_| state_error())?;
-    let copied = std::io::copy(&mut source, &mut destination).map_err(|_| state_error())?;
-    if copied != expected_size {
-        return Err(StoreError::new(
-            "DEP_STORE_ARTIFACT_CONTENT_MISMATCH",
-            "artifact size changed while it was copied for publication",
-        ));
-    }
-    use std::os::unix::fs::PermissionsExt as _;
-    destination
-        .set_permissions(std::fs::Permissions::from_mode(0o400))
-        .map_err(|_| state_error())?;
-    destination.sync_all().map_err(|_| state_error())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn copy_new_file_at(
-    _root: &File,
-    _source: &Path,
-    _destination: &Path,
-    _expected_size: u64,
-) -> Result<(), StoreError> {
-    Err(state_error())
-}
-
 #[cfg(all(unix, test))]
 fn set_mode_and_sync(path: &Path, mode: u32) -> Result<(), StoreError> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -3452,6 +3387,147 @@ fn validate_directory(_path: &Path, _mode: u32) -> Result<(), StoreError> {
 }
 
 #[cfg(target_os = "linux")]
+fn pin_private_regular_file_at(
+    parent: &File,
+    name: &str,
+    expected_mode: u32,
+    expected_size: u64,
+    expected_identity: (u64, u64),
+) -> Result<File, StoreError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::Mode;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let file = File::from(
+        openat(
+            parent,
+            name,
+            OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|_| state_error())?,
+    );
+    let metadata = file.metadata().map_err(|_| state_error())?;
+    let parent_metadata = parent.metadata().map_err(|_| state_error())?;
+    if !metadata.is_file()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o777 != expected_mode
+        || metadata.nlink() != 1
+        || metadata.len() != expected_size
+        || metadata.dev() != parent_metadata.dev()
+        || (metadata.dev(), metadata.ino()) != expected_identity
+    {
+        return Err(StoreError::new(
+            "DEP_STORE_TRANSIENT_ROOT_MISMATCH",
+            "transport archive type, owner, mode, size, links, device, or inode changed",
+        ));
+    }
+    let linked = File::from(
+        openat(
+            parent,
+            name,
+            OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| state_error())?,
+    );
+    let linked = linked.metadata().map_err(|_| state_error())?;
+    if !linked.is_file() || linked.dev() != metadata.dev() || linked.ino() != metadata.ino() {
+        return Err(StoreError::new(
+            "DEP_STORE_TRANSIENT_ROOT_MISMATCH",
+            "transport archive link changed while its descriptor was retained",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pin_private_regular_file_at(
+    _parent: &File,
+    _name: &str,
+    _expected_mode: u32,
+    _expected_size: u64,
+    _expected_identity: (u64, u64),
+) -> Result<File, StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "descriptor-pinned transport archives require Linux file semantics",
+    ))
+}
+
+fn verify_archive_slice(
+    archive: &File,
+    offset: u64,
+    size: u64,
+    expected_sha256: &str,
+) -> Result<(), StoreError> {
+    let mut archive = archive.try_clone().map_err(|_| state_error())?;
+    archive
+        .seek(SeekFrom::Start(offset))
+        .map_err(|_| state_error())?;
+    let mut remaining = size;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 65_536];
+    while remaining > 0 {
+        let limit =
+            usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| state_error())?;
+        let read = archive
+            .read(&mut buffer[..limit])
+            .map_err(|_| state_error())?;
+        if read == 0 {
+            return Err(state_error());
+        }
+        remaining -= read as u64;
+        hasher.update(&buffer[..read]);
+    }
+    if format!("{:x}", hasher.finalize()) != expected_sha256 {
+        return Err(StoreError::new(
+            "DEP_STORE_ARTIFACT_CONTENT_MISMATCH",
+            "transport archive slice does not match the exact artifact digest",
+        ));
+    }
+    Ok(())
+}
+
+fn append_archive_slice(
+    source: &File,
+    offset: u64,
+    destination: &mut File,
+    size: u64,
+    expected_sha256: &str,
+) -> Result<(), StoreError> {
+    let mut source = source.try_clone().map_err(|_| state_error())?;
+    source
+        .seek(SeekFrom::Start(offset))
+        .map_err(|_| state_error())?;
+    let mut remaining = size;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 65_536];
+    while remaining > 0 {
+        let limit =
+            usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| state_error())?;
+        let read = source
+            .read(&mut buffer[..limit])
+            .map_err(|_| state_error())?;
+        if read == 0 {
+            return Err(state_error());
+        }
+        destination
+            .write_all(&buffer[..read])
+            .map_err(|_| state_error())?;
+        remaining -= read as u64;
+        hasher.update(&buffer[..read]);
+    }
+    if format!("{:x}", hasher.finalize()) != expected_sha256 {
+        return Err(StoreError::new(
+            "DEP_STORE_ARTIFACT_CONTENT_MISMATCH",
+            "copied transport archive slice does not match the exact artifact digest",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", test))]
 fn create_and_pin_private_directory_at(
     parent: &File,
     name: &str,
@@ -3467,7 +3543,7 @@ fn create_and_pin_private_directory_at(
     pin_private_directory_at(parent, name, mode, None)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), test))]
 fn create_and_pin_private_directory_at(
     _parent: &File,
     _name: &str,
@@ -3479,7 +3555,7 @@ fn create_and_pin_private_directory_at(
     ))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn pin_private_directory_at(
     parent: &File,
     name: &str,
@@ -3528,7 +3604,7 @@ fn pin_private_directory_at(
     Ok(pinned)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), test))]
 fn pin_private_directory_at(
     _parent: &File,
     _name: &str,
@@ -3541,7 +3617,7 @@ fn pin_private_directory_at(
     ))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn revalidate_private_directory_link(
     parent: &File,
     name: &str,
@@ -3576,7 +3652,7 @@ fn revalidate_private_directory_link(
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), test))]
 fn revalidate_private_directory_link(
     _parent: &File,
     _name: &str,
@@ -3586,7 +3662,7 @@ fn revalidate_private_directory_link(
     Err(state_error())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn seal_directory(directory: &File, mode: u32) -> Result<(), StoreError> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -3596,7 +3672,7 @@ fn seal_directory(directory: &File, mode: u32) -> Result<(), StoreError> {
     directory.sync_all().map_err(|_| state_error())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), test))]
 fn seal_directory(_directory: &File, _mode: u32) -> Result<(), StoreError> {
     Err(state_error())
 }
@@ -3651,7 +3727,7 @@ fn remove_private_tree(
     remove_private_tree_at(&mut parent, &name, path, None, 0, &mut entries)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 pub(crate) fn remove_private_tree_exact(
     root_directory: &File,
     root_path: &Path,
@@ -3671,7 +3747,7 @@ pub(crate) fn remove_private_tree_exact(
     )
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), test))]
 pub(crate) fn remove_private_tree_exact(
     _root_directory: &File,
     _root_path: &Path,
@@ -3716,7 +3792,7 @@ fn remove_private_file(
 }
 
 #[cfg(target_os = "linux")]
-fn remove_private_file_exact(
+pub(crate) fn remove_private_file_exact(
     root_directory: &File,
     root_path: &Path,
     path: &Path,
@@ -3745,7 +3821,7 @@ fn remove_private_file(
 }
 
 #[cfg(not(target_os = "linux"))]
-fn remove_private_file_exact(
+pub(crate) fn remove_private_file_exact(
     _root_directory: &File,
     _root_path: &Path,
     _path: &Path,
@@ -3986,7 +4062,7 @@ fn remove_private_file_at<Fd: std::os::fd::AsFd>(
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn remove_private_tree_at(
     parent: &mut nix::dir::Dir,
     name: &std::ffi::CStr,
@@ -4109,7 +4185,7 @@ fn cleanup_exact_mismatch() -> StoreError {
     )
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn collect_cleanup_names(
     directory: &mut nix::dir::Dir,
     entries: &mut usize,
@@ -4170,6 +4246,7 @@ fn current_unix_ms() -> Result<u64, StoreError> {
     u64::try_from(millis).map_err(|_| state_error())
 }
 
+#[cfg(test)]
 fn update_segment(hasher: &mut Sha256, value: &[u8]) {
     hasher.update((value.len() as u64).to_be_bytes());
     hasher.update(value);
@@ -4228,16 +4305,10 @@ mod tests {
             node.node_id = canonical_node_id(Ecosystem::Maven, &node).expect("node id");
             let resolution_id = Uuid::new_v4();
             let transport = root.path().join("transport");
-            let resolution_transport = transport.join(resolution_id.to_string());
-            std::fs::create_dir_all(&resolution_transport).expect("transport resolution root");
+            std::fs::create_dir_all(&transport).expect("transport root");
             std::fs::set_permissions(&transport, std::fs::Permissions::from_mode(0o700))
                 .expect("private transport root");
-            std::fs::set_permissions(
-                &resolution_transport,
-                std::fs::Permissions::from_mode(0o700),
-            )
-            .expect("private transport resolution root");
-            let transient = resolution_transport.join(format!("{}.part", node.node_id));
+            let transient = transport.join(format!(".{resolution_id}.transport"));
             std::fs::write(&transient, body).expect("transient artifact");
             std::fs::set_permissions(&transient, std::fs::Permissions::from_mode(0o600))
                 .expect("private transient artifact");
@@ -4377,17 +4448,17 @@ mod tests {
             };
             let fetched = vec![FetchedArtifact {
                 node_id: node.node_id.clone(),
-                transient_path: PathBuf::from(resolution_id.to_string())
-                    .join(format!("{}.part", node.node_id)),
+                transient_path: PathBuf::from(format!(".{resolution_id}.transport")),
                 declared_size: body.len() as u64,
                 sha256: artifact_sha256,
                 attestation_sha256: "8".repeat(64),
                 publication_generation: config.generation,
-                transient_root_device: std::fs::metadata(&resolution_transport)
-                    .expect("transport resolution metadata")
+                transient_offset: 0,
+                transient_root_device: std::fs::metadata(&transient)
+                    .expect("transport archive metadata")
                     .dev(),
-                transient_root_inode: std::fs::metadata(&resolution_transport)
-                    .expect("transport resolution metadata")
+                transient_root_inode: std::fs::metadata(&transient)
+                    .expect("transport archive metadata")
                     .ino(),
             }];
             request.expected_graph_sha256 = plan.graph_sha256.clone();
@@ -6034,7 +6105,7 @@ mod tests {
             ClaimOutcome::New(claim) => claim,
             other => panic!("unexpected claim outcome: {other:?}"),
         };
-        let receipt = store
+        let _receipt = store
             .publish(
                 &claim,
                 fixture.request.clone(),
@@ -6044,13 +6115,18 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(60),
             )
             .expect("publication");
-        let artifact_path = store
-            .bundle_path(claim.resolution_id)
-            .join(&receipt.artifacts[0].relative_path);
-        std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o600))
-            .expect("make artifact mutable for adversarial fixture");
-        std::fs::write(&artifact_path, b"substituted").expect("substitute artifact");
-        std::fs::set_permissions(&artifact_path, std::fs::Permissions::from_mode(0o400))
+        let archive_path = store.bundle_path(claim.resolution_id);
+        std::fs::set_permissions(&archive_path, std::fs::Permissions::from_mode(0o600))
+            .expect("make archive mutable for adversarial fixture");
+        let mut archive = OpenOptions::new()
+            .append(true)
+            .open(&archive_path)
+            .expect("open archive for substitution");
+        archive
+            .write_all(b"substituted")
+            .expect("substitute archive");
+        archive.sync_all().expect("sync substituted archive");
+        std::fs::set_permissions(&archive_path, std::fs::Permissions::from_mode(0o400))
             .expect("restore sealed mode");
         let error = store
             .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
@@ -6137,7 +6213,7 @@ mod tests {
         assert_eq!(error.code, "DEP_STORE_RETAINED_TREE_MISMATCH");
         assert_eq!(
             error.message,
-            "retained dependency bundle contains a path not closed by its manifest"
+            "retained dependency archive is malformed, incomplete, or has been substituted"
         );
         assert!(!store.bundle_path(claim.resolution_id).exists());
         assert!(!store.receipt_path(claim.resolution_id).exists());
@@ -6198,7 +6274,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn replay_rejects_a_retained_directory_relinked_after_descriptor_traversal() {
+    fn replay_rejects_a_retained_archive_relinked_after_descriptor_verification() {
         let fixture = Fixture::new();
         let store = fixture.store();
         let claim = match store
@@ -6218,31 +6294,30 @@ mod tests {
                 Instant::now() + std::time::Duration::from_secs(60),
             )
             .expect("published receipt");
-        let artifacts = PathBuf::from(&fixture.config.output_root)
+        let archive = PathBuf::from(&fixture.config.output_root)
             .join("bundles")
-            .join(claim.resolution_id.to_string())
-            .join("artifacts");
-        let moved = artifacts
+            .join(format!("{}.bundle", claim.resolution_id));
+        let moved = archive
             .parent()
             .expect("retained bundle root")
-            .join("moved-retained-artifacts");
+            .join("moved-retained-archive.bundle");
         RETAINED_TREE_SWAP_TEST_HOOK.with(|hook| {
-            *hook.borrow_mut() = Some((artifacts.clone(), moved.clone()));
+            *hook.borrow_mut() = Some((archive.clone(), moved.clone()));
         });
 
         let error = store
             .verify_replay(&receipt, &fixture.admitted.request_sha256)
-            .expect_err("relinked retained directory must fail replay");
+            .expect_err("relinked retained archive must fail replay");
         assert!(
-            moved.is_dir(),
-            "the originally inspected directory was moved"
+            moved.is_file(),
+            "the originally inspected archive was moved"
         );
         assert!(
-            std::fs::symlink_metadata(&artifacts)
+            std::fs::symlink_metadata(&archive)
                 .expect("replacement retained entry")
                 .file_type()
                 .is_symlink(),
-            "the mutable pathname was replaced only after traversal"
+            "the mutable pathname was replaced only after descriptor verification"
         );
         assert_eq!(
             error.code, "DEP_STORE_RETAINED_TREE_MISMATCH",
@@ -6330,11 +6405,6 @@ mod tests {
     }
 
     fn rotate_generation(fixture: &mut Fixture, generation: u64, rollback_from: Option<u64>) {
-        let previous_bundle_artifact = PathBuf::from(&fixture.config.output_root)
-            .join("bundles")
-            .join(&fixture.request.resolution_id)
-            .join("artifacts")
-            .join(&fixture.plan.nodes[0].sha256);
         fixture.config.generation = generation;
         fixture.request.resolution_id = Uuid::new_v4().to_string();
         fixture.request.build_id = Uuid::new_v4().to_string();
@@ -6349,19 +6419,15 @@ mod tests {
             request_sha256(&fixture.request).expect("rotated request digest");
         fixture.admitted.absolute_expiry_unix_ms = fixture.request.expires_at_unix_ms;
         fixture.fetched[0].publication_generation = generation;
-        let next_root =
-            PathBuf::from(&fixture.config.transport_root).join(&fixture.request.resolution_id);
-        std::fs::create_dir(&next_root).expect("rotated transport root");
-        std::fs::set_permissions(&next_root, std::fs::Permissions::from_mode(0o700))
-            .expect("private rotated transport root");
-        let next_transient = next_root.join(format!("{}.part", fixture.fetched[0].node_id));
-        std::fs::copy(previous_bundle_artifact, &next_transient)
+        let next_transient = PathBuf::from(&fixture.config.transport_root)
+            .join(format!(".{}.transport", fixture.request.resolution_id));
+        std::fs::write(&next_transient, b"contained published artifact")
             .expect("rotated transient artifact");
         std::fs::set_permissions(&next_transient, std::fs::Permissions::from_mode(0o600))
             .expect("rotated transient mode");
-        fixture.fetched[0].transient_path = PathBuf::from(&fixture.request.resolution_id)
-            .join(format!("{}.part", fixture.fetched[0].node_id));
-        let next_metadata = std::fs::metadata(&next_root).expect("rotated transport metadata");
+        fixture.fetched[0].transient_path =
+            PathBuf::from(format!(".{}.transport", fixture.request.resolution_id));
+        let next_metadata = std::fs::metadata(&next_transient).expect("rotated transport metadata");
         fixture.fetched[0].transient_root_device = next_metadata.dev();
         fixture.fetched[0].transient_root_inode = next_metadata.ino();
     }
