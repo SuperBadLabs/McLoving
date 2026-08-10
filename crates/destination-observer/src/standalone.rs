@@ -15,6 +15,7 @@ pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 const MAX_CONFIG_BYTES: usize = 256 * 1024;
 const MAX_AUTHORITY_BYTES: usize = 4096;
 const MAX_MARKER_FILE_BYTES: usize = 64 * 1024;
+const MAX_RUNTIME_IMAGE_DIGEST_BYTES: usize = 66;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -54,9 +55,7 @@ pub fn load_observer(
     secret_marker_path: &Path,
 ) -> Result<DestinationObserver, ObserverError> {
     let config = read_config(config_path)?;
-    let runtime_image_sha256 = read_private_bounded_regular_file(runtime_image_sha256_path, 64)?;
-    let runtime_image_sha256 =
-        String::from_utf8(runtime_image_sha256).map_err(|_| ObserverError::InvalidConfig)?;
+    let runtime_image_sha256 = read_runtime_image_sha256(runtime_image_sha256_path)?;
     let read_token = read_private_bounded_regular_file(token_path, MAX_AUTHORITY_BYTES)?;
     let request_public_key =
         read_bounded_regular_file(request_public_key_path, MAX_AUTHORITY_BYTES)?;
@@ -90,6 +89,19 @@ pub fn load_observer(
 fn read_config(path: &Path) -> Result<ObserverConfig, ObserverError> {
     let bytes = read_private_bounded_regular_file(path, MAX_CONFIG_BYTES)?;
     parse_json_no_duplicates(&bytes).map_err(|_| ObserverError::InvalidConfig)
+}
+
+fn read_runtime_image_sha256(path: &Path) -> Result<String, ObserverError> {
+    let bytes = read_private_bounded_regular_file(path, MAX_RUNTIME_IMAGE_DIGEST_BYTES)?;
+    let value = std::str::from_utf8(&bytes).map_err(|_| ObserverError::InvalidConfig)?;
+    let digest = value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value);
+    if digest.len() != 64 {
+        return Err(ObserverError::InvalidConfig);
+    }
+    Ok(digest.to_owned())
 }
 
 pub fn read_bounded_frame<R: Read>(input: &mut R) -> Result<Option<Vec<u8>>, ObserverError> {
@@ -152,7 +164,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
 
-    use super::read_config;
+    use super::{read_config, read_runtime_image_sha256};
     use crate::ObserverError;
 
     #[test]
@@ -165,5 +177,20 @@ mod tests {
 
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(read_config(&path), Err(ObserverError::InvalidConfig));
+    }
+
+    #[test]
+    fn runtime_image_digest_accepts_one_text_line_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("runtime-image.sha256");
+        fs::write(&path, format!("{}\n", "a".repeat(64))).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_runtime_image_sha256(&path).unwrap(), "a".repeat(64));
+
+        fs::write(&path, format!("{} \n", "a".repeat(64))).unwrap();
+        assert_eq!(
+            read_runtime_image_sha256(&path),
+            Err(ObserverError::InvalidConfig)
+        );
     }
 }

@@ -50,7 +50,9 @@ deployment-provided runtime-image attestation file, secret files, and the state
 directory must be owned by the process user and inaccessible to group or other
 users. The executable is measured through `/proc/self/exe`; the separately
 mounted runtime-image digest must match the image identity certified by
-configuration. The executable, image, complete configuration, read token, three signing
+configuration. That attestation is exactly 64 lowercase hexadecimal bytes with
+an optional single LF or CRLF text-file terminator. The executable, image,
+complete configuration, read token, three signing
 authorities, CA, and secret-marker set are digest-bound before the ledger opens.
 The startup denylist is applied to every authority digest and to the attested
 executable, image, complete configuration, CA bundle, prior configuration, and

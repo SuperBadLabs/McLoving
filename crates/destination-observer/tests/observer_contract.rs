@@ -1626,7 +1626,7 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
     let receipt_seed_path = process_directory.path().join("receipt.seed");
     let markers_path = process_directory.path().join("markers.json");
     fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
-    fs::write(&image_sha256_path, config.image_sha256.as_bytes()).unwrap();
+    fs::write(&image_sha256_path, format!("{}\n", config.image_sha256)).unwrap();
     fs::write(&token_path, TOKEN).unwrap();
     fs::write(&request_key_path, &rig.request_public_key).unwrap();
     fs::write(&destination_key_path, &rig.destination_public_key).unwrap();
