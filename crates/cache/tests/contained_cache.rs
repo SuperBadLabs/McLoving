@@ -877,6 +877,63 @@ fn publish_time_stale_cleanup_rejects_substituted_publication_provenance() {
 }
 
 #[test]
+fn publish_time_cleanup_rejects_a_forged_expiry() {
+    let temp = TempDir::new().unwrap();
+    let key = [22_u8; 32];
+    let clock = Arc::new(ManualClock::new(73_125));
+    let config = config(
+        &temp,
+        &key,
+        vec![policy("policy-a", "trusted", "reader", "writer")],
+    );
+    let database_path = config.database_path.clone();
+    let store = open_store(config, &key, clock).unwrap();
+    let request_a = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"expiry-a",
+    );
+    let publication_a = store
+        .publish("writer", "trusted", &request_a, b"content-a")
+        .unwrap();
+    assert_eq!(
+        publication_a.receipts[0].event.expires_at_unix_ms,
+        Some(74_125)
+    );
+    let key_a = publication_a.receipts[0].event.key_sha256.clone();
+    Connection::open(database_path)
+        .unwrap()
+        .execute(
+            "UPDATE entries SET expires_at_unix_ms = 1 WHERE key_sha256 = ?1",
+            [&key_a],
+        )
+        .unwrap();
+
+    let request_b = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"expiry-b",
+    );
+    let publication_b = store
+        .publish("writer", "trusted", &request_b, b"content-b")
+        .unwrap();
+    let rejected = publication_b
+        .receipts
+        .iter()
+        .find(|receipt| receipt.event.key_sha256 == key_a)
+        .unwrap();
+    assert_eq!(
+        rejected.event.outcome,
+        mcloving_cache::CacheOutcome::CorruptRejected
+    );
+    assert!(rejected.event.content_sha256.is_none());
+    assert!(rejected.event.expires_at_unix_ms.is_none());
+    store.verify_audit_chain().unwrap();
+}
+
+#[test]
 fn quota_eviction_rejects_substituted_publication_provenance() {
     let temp = TempDir::new().unwrap();
     let key = [21_u8; 32];

@@ -134,6 +134,7 @@ struct ReceiptDetails<'a> {
     outcome: CacheOutcome,
     content_sha256: Option<&'a str>,
     content_bytes: Option<u64>,
+    expires_at_unix_ms: Option<i64>,
     observed_at_unix_ms: i64,
 }
 
@@ -227,6 +228,7 @@ impl CacheStore {
                         outcome: CacheOutcome::CorruptRejected,
                         content_sha256: Some(&stored.content_sha256),
                         content_bytes: Some(stored.content_bytes),
+                        expires_at_unix_ms: None,
                         observed_at_unix_ms: now,
                     },
                 )?);
@@ -249,6 +251,7 @@ impl CacheStore {
                         outcome: CacheOutcome::Expired,
                         content_sha256: Some(&stored.content_sha256),
                         content_bytes: Some(stored.content_bytes),
+                        expires_at_unix_ms: Some(stored.expires_at_unix_ms),
                         observed_at_unix_ms: now,
                     },
                 )?);
@@ -270,6 +273,7 @@ impl CacheStore {
                         outcome,
                         content_sha256: Some(&content_sha256),
                         content_bytes: Some(content_bytes),
+                        expires_at_unix_ms: None,
                         observed_at_unix_ms: now,
                     },
                 )?);
@@ -322,6 +326,7 @@ impl CacheStore {
                 outcome: CacheOutcome::Published,
                 content_sha256: Some(&content_sha256),
                 content_bytes: Some(content_bytes),
+                expires_at_unix_ms: Some(expires_at),
                 observed_at_unix_ms: now,
             },
         )?;
@@ -370,6 +375,7 @@ impl CacheStore {
                     outcome: CacheOutcome::Miss,
                     content_sha256: None,
                     content_bytes: None,
+                    expires_at_unix_ms: None,
                     observed_at_unix_ms: now,
                 },
             )?;
@@ -395,6 +401,7 @@ impl CacheStore {
                     outcome: CacheOutcome::CorruptRejected,
                     content_sha256: Some(&stored.content_sha256),
                     content_bytes: Some(stored.content_bytes),
+                    expires_at_unix_ms: None,
                     observed_at_unix_ms: now,
                 },
             )?;
@@ -418,6 +425,7 @@ impl CacheStore {
                     outcome: CacheOutcome::Expired,
                     content_sha256: Some(&stored.content_sha256),
                     content_bytes: Some(stored.content_bytes),
+                    expires_at_unix_ms: Some(stored.expires_at_unix_ms),
                     observed_at_unix_ms: now,
                 },
             )?;
@@ -430,6 +438,7 @@ impl CacheStore {
                     outcome: CacheOutcome::Miss,
                     content_sha256: None,
                     content_bytes: None,
+                    expires_at_unix_ms: None,
                     observed_at_unix_ms: now,
                 },
             )?;
@@ -451,6 +460,7 @@ impl CacheStore {
                 outcome: CacheOutcome::Hit,
                 content_sha256: Some(&stored.content_sha256),
                 content_bytes: Some(stored.content_bytes),
+                expires_at_unix_ms: Some(stored.expires_at_unix_ms),
                 observed_at_unix_ms: now,
             },
         )?;
@@ -529,6 +539,7 @@ impl CacheStore {
                     outcome,
                     content_sha256: Some(&stored.content_sha256),
                     content_bytes: Some(stored.content_bytes),
+                    expires_at_unix_ms: Some(stored.expires_at_unix_ms),
                     observed_at_unix_ms: now,
                 },
             )?);
@@ -778,6 +789,7 @@ impl CacheStore {
                 outcome: CacheOutcome::CorruptRejected,
                 content_sha256: None,
                 content_bytes: None,
+                expires_at_unix_ms: None,
                 observed_at_unix_ms: details.observed_at_unix_ms,
             }
         };
@@ -862,6 +874,7 @@ impl CacheStore {
             && event.key_sha256 == key_sha256
             && event.content_sha256.as_deref() == Some(stored.content_sha256.as_str())
             && event.content_bytes == Some(stored.content_bytes)
+            && event.expires_at_unix_ms == Some(stored.expires_at_unix_ms)
             && event.observed_at_unix_ms == stored.created_at_unix_ms
             && canonical.cache_generation
                 == u64::try_from(cache_generation).map_err(|_| CacheError::StateUnavailable)?
@@ -909,6 +922,7 @@ impl CacheStore {
             key_sha256: subject.key_sha256,
             content_sha256: details.content_sha256.map(str::to_owned),
             content_bytes: details.content_bytes,
+            expires_at_unix_ms: details.expires_at_unix_ms,
             observed_at_unix_ms: details.observed_at_unix_ms,
             previous_event_sha256: previous,
         };
@@ -999,6 +1013,7 @@ impl CacheStore {
             && event.key_sha256 == admitted.key_sha256
             && event.content_sha256.as_deref() == Some(stored.content_sha256.as_str())
             && event.content_bytes == Some(stored.content_bytes)
+            && event.expires_at_unix_ms == Some(stored.expires_at_unix_ms)
             && event.observed_at_unix_ms == stored.created_at_unix_ms)
     }
 
@@ -1061,6 +1076,7 @@ impl CacheStore {
                     outcome,
                     content_sha256: Some(&stored.content_sha256),
                     content_bytes: Some(stored.content_bytes),
+                    expires_at_unix_ms: Some(stored.expires_at_unix_ms),
                     observed_at_unix_ms: now,
                 },
             )?);
@@ -1133,6 +1149,7 @@ impl CacheStore {
                     ),
                     content_sha256: Some(&stored.content_sha256),
                     content_bytes: Some(stored.content_bytes),
+                    expires_at_unix_ms: Some(stored.expires_at_unix_ms),
                     observed_at_unix_ms: now,
                 },
             )?);

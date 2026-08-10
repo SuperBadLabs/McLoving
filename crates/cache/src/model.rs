@@ -124,6 +124,7 @@ pub struct AuditEvent {
     pub key_sha256: String,
     pub content_sha256: Option<String>,
     pub content_bytes: Option<u64>,
+    pub expires_at_unix_ms: Option<i64>,
     pub observed_at_unix_ms: i64,
     pub previous_event_sha256: String,
 }

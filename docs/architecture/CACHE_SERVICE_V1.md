@@ -110,8 +110,9 @@ current generation or restore epoch, with a bounded number of rows per command.
 Before any explicit or publication-triggered cleanup or quota eviction signs a
 stale, expired, or removed-policy disposition, it revalidates the original
 signed publication against the historical runtime generation and exact stored
-metadata/content. Missing or substituted publication provenance is removed
-only as `corrupt_rejected`.
+metadata/content, including the publication's signed absolute expiry. Missing
+or substituted publication provenance or expiry is removed only as
+`corrupt_rejected`.
 
 The restore epoch is controller-owned authority and must not be restored from
 the cache backup. If that external invariant is unavailable, the cache must be
@@ -122,8 +123,9 @@ disabled rather than treating restored rows as current.
 Every admitted cache outcome appends a canonical event inside the same
 transaction as the state transition. Events bind service/configuration/implementation,
 policy/generation/restore epoch, caller, namespace/key/content digests, byte
-length, operation, outcome, event time, and the previous event digest. The
-event digest is domain-separated SHA-256 and its signature is HMAC-SHA-256.
+length, signed absolute expiry when present, operation, outcome, event time,
+and the previous event digest. The event digest is domain-separated SHA-256
+and its signature is HMAC-SHA-256.
 The database stores a contiguous sequence, previous digest, canonical event
 bytes, digest, and signature. Verification against an independently retained
 receipt count and head digest rejects deletion, reordering, substitution,
@@ -155,7 +157,8 @@ Contained tests must prove:
 - size, count, TTL, deterministic eviction, and bounded cleanup;
 - generation rotation and restored-state cold behavior;
 - receipt-key rotation rejection and signed stale-publication revalidation on
-  explicit cleanup, publication-time cleanup, and quota eviction;
+  explicit cleanup, publication-time cleanup, and quota eviction, including
+  forged-expiry rejection;
 - complete signed audit-chain verification and tamper rejection;
 - independently retained audit-head verification and bounded audit exhaustion;
 - duplicate/unknown JSON rejection and bounded standalone frames;
