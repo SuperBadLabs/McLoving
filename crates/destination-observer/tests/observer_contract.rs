@@ -48,9 +48,12 @@ enum Mode {
     Malformed,
     Oversized,
     Unauthorized,
+    UnauthorizedSecret,
     Outage,
+    OutageSecret,
     Timeout,
     Slow,
+    OversizedHeaderSecret,
 }
 
 struct DestinationState {
@@ -278,16 +281,23 @@ async fn destination_handler(
     headers: HeaderMap,
 ) -> Response<Body> {
     let mode = *server.mode.lock().unwrap();
-    if matches!(mode, Mode::Unauthorized)
+    if matches!(mode, Mode::Unauthorized | Mode::UnauthorizedSecret)
         || headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             != Some("Bearer read-only-observer-token")
     {
-        return Response::builder()
+        let mut response = Response::builder()
             .status(StatusCode::FORBIDDEN)
             .body(Body::empty())
             .unwrap();
+        if matches!(mode, Mode::UnauthorizedSecret) {
+            response.headers_mut().insert(
+                "x-debug-credential",
+                axum::http::HeaderValue::from_static("read-only-observer-token"),
+            );
+        }
+        return response;
     }
     let request = server.request.lock().unwrap().clone().unwrap();
     let query_sha256 = domain_digest(b"mcloving-observer-query-v1", &request.query);
@@ -327,8 +337,15 @@ async fn destination_handler(
     if matches!(mode, Mode::Oversized) {
         return json_response(StatusCode::OK, vec![b'x'; 32 * 1024]);
     }
-    if matches!(mode, Mode::Outage) {
-        return json_response(StatusCode::SERVICE_UNAVAILABLE, b"{}".to_vec());
+    if matches!(mode, Mode::Outage | Mode::OutageSecret) {
+        let mut response = json_response(StatusCode::SERVICE_UNAVAILABLE, b"{}".to_vec());
+        if matches!(mode, Mode::OutageSecret) {
+            response.headers_mut().insert(
+                "x-debug-credential",
+                axum::http::HeaderValue::from_static("read-only-observer-token"),
+            );
+        }
+        return response;
     }
     if matches!(mode, Mode::Timeout) {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -381,10 +398,16 @@ async fn destination_handler(
             axum::http::HeaderValue::from_static("read-only-observer-token"),
         );
     }
-    if matches!(mode, Mode::OversizedHeader) {
+    if matches!(mode, Mode::OversizedHeader | Mode::OversizedHeaderSecret) {
         response.headers_mut().insert(
             "x-oversized",
             axum::http::HeaderValue::from_str(&"x".repeat(9 * 1024)).unwrap(),
+        );
+    }
+    if matches!(mode, Mode::OversizedHeaderSecret) {
+        response.headers_mut().insert(
+            "x-debug-credential",
+            axum::http::HeaderValue::from_static("read-only-observer-token"),
         );
     }
     if matches!(mode, Mode::DuplicateContentType) {
@@ -480,6 +503,15 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         (Mode::Malformed, ObserverError::MalformedResponse),
         (Mode::Oversized, ObserverError::OversizedResponse),
         (Mode::Unauthorized, ObserverError::DestinationUnauthorized),
+        (
+            Mode::UnauthorizedSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
+        (Mode::OutageSecret, ObserverError::ConfidentialityDenied),
+        (
+            Mode::OversizedHeaderSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
     ] {
         let rig = Rig::new().await;
         rig.set_mode(mode);
@@ -876,7 +908,17 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
         },
         {
             let mut config = rig.config.clone();
+            config.limits.max_header_bytes = 256 * 1024 + 1;
+            config
+        },
+        {
+            let mut config = rig.config.clone();
             config.allowed_query_keys = vec!["q".repeat(129)];
+            config
+        },
+        {
+            let mut config = rig.config.clone();
+            config.allowed_query_keys = (0..24).map(|index| format!("query_{index:02}")).collect();
             config
         },
     ] {

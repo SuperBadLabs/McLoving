@@ -31,6 +31,7 @@ const MAX_QUERY_VALUE_BYTES: usize = 2048;
 const MAX_SECRET_MARKERS: usize = 32;
 const MAX_TOTAL_SECRET_MARKER_BYTES: usize = 8 * 1024;
 const MIN_SUCCESS_HEADER_BYTES: usize = 34;
+const MAX_TRANSPORT_HEADER_BYTES: usize = 256 * 1024;
 const OBSERVATION_ID_HEADER: &str = "x-mcloving-observation-id";
 const EFFECT_FENCE_HEADER: &str = "x-mcloving-effect-fence";
 const OBSERVATION_PHASE_HEADER: &str = "x-mcloving-observation-phase";
@@ -87,10 +88,7 @@ impl DestinationObserver {
             .retry(reqwest::retry::never())
             .no_proxy()
             .http2_prior_knowledge()
-            .http2_max_header_list_size(
-                u32::try_from(config.limits.max_header_bytes)
-                    .map_err(|_| ObserverError::InvalidConfig)?,
-            )
+            .http2_max_header_list_size(MAX_TRANSPORT_HEADER_BYTES as u32)
             .timeout(std::time::Duration::from_millis(config.limits.timeout_ms));
         if let Some(path) = &config.ca_bundle_path {
             let pem = crate::read_bounded_regular_file(path, 1024 * 1024)?;
@@ -434,6 +432,13 @@ impl DestinationObserver {
             .send()
             .await
             .map_err(|_| ObserverError::DestinationUnavailable)?;
+        if response.headers().iter().any(|(name, value)| {
+            contains_secret(name.as_str().as_bytes(), &self.secret_markers)
+                || contains_secret(value.as_bytes(), &self.secret_markers)
+        }) {
+            return Err(ObserverError::ConfidentialityDenied);
+        }
+        enforce_header_bound(response.headers(), self.config.limits.max_header_bytes)?;
         if matches!(
             response.status(),
             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
@@ -442,13 +447,6 @@ impl DestinationObserver {
         }
         if response.status() != StatusCode::OK {
             return Err(ObserverError::DestinationUnavailable);
-        }
-        enforce_header_bound(response.headers(), self.config.limits.max_header_bytes)?;
-        if response.headers().iter().any(|(name, value)| {
-            contains_secret(name.as_str().as_bytes(), &self.secret_markers)
-                || contains_secret(value.as_bytes(), &self.secret_markers)
-        }) {
-            return Err(ObserverError::ConfidentialityDenied);
         }
         let mut content_types = response.headers().get_all(CONTENT_TYPE).iter();
         let content_type = content_types
@@ -752,6 +750,7 @@ fn validate_config(
         || config.limits.max_response_bytes >= crate::standalone::MAX_FRAME_BYTES
         || config.limits.max_header_bytes == 0
         || config.limits.max_header_bytes < MIN_SUCCESS_HEADER_BYTES
+        || config.limits.max_header_bytes > MAX_TRANSPORT_HEADER_BYTES
         || config.limits.max_requests_per_minute == 0
         || config.limits.max_evidence_bytes == 0
         || config.limits.max_receipts == 0
@@ -871,6 +870,7 @@ fn validate_config(
         || config.request_authority_key_id.is_empty()
         || config.destination_attestation_key_id.is_empty()
         || config.receipt_signing_key_id.is_empty()
+        || !maximum_request_envelope_fits(config, config_sha256, implementation_sha256)
         || !maximum_receipt_envelope_fits(config, config_sha256, implementation_sha256)
         || authority_digests
             .iter()
@@ -890,6 +890,77 @@ fn validate_config(
         return Err(ObserverError::InvalidConfig);
     }
     Ok(())
+}
+
+fn maximum_request_envelope_fits(
+    config: &ObserverConfig,
+    config_sha256: &str,
+    implementation_sha256: &str,
+) -> bool {
+    let maximum = ObservationRequest {
+        schema_version: REQUEST_SCHEMA_VERSION.to_owned(),
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        observation_id: Uuid::from_u128(u128::MAX),
+        tenant_id: Uuid::from_u128(u128::MAX),
+        project_id: Uuid::from_u128(u128::MAX),
+        pipeline_id: Uuid::from_u128(u128::MAX),
+        build_id: Uuid::from_u128(u128::MAX),
+        attempt_id: Uuid::from_u128(u128::MAX),
+        effect_fence: u64::MAX,
+        phase: crate::ObservationPhase::Reconciliation,
+        observer_id: config.observer_id.clone(),
+        request_authority_identity: config.request_authority_identity.clone(),
+        expected_implementation_sha256: implementation_sha256.to_owned(),
+        expected_image_sha256: config.image_sha256.clone(),
+        expected_config_sha256: config_sha256.to_owned(),
+        expected_generation: config.generation,
+        activation_mode: config.activation_mode,
+        previous_generation: config.previous_generation,
+        rollback_from_generation: config.rollback_from_generation,
+        endpoint_identity: config.endpoint_identity.clone(),
+        account_identity: config.account_identity.clone(),
+        resource_identity: config.resource_identity.clone(),
+        effect_class: config.effect_class.clone(),
+        read_grant_id: config.read_grant_id.clone(),
+        read_grant_version: config.read_grant_version.clone(),
+        read_grant_scope: config.read_grant_scope.clone(),
+        query: BTreeMap::new(),
+        expected_previous_cursor: Some(u64::MAX),
+        predecessor_receipt_sha256: Some("f".repeat(64)),
+        requested_at_unix_ms: i64::MIN,
+        expires_at_unix_ms: i64::MIN,
+        audit_provenance: "\0".repeat(MAX_AUDIT_PROVENANCE_BYTES),
+        authorization: crate::RequestAuthorization {
+            key_id: config.request_authority_key_id.clone(),
+            signature_base64: "A".repeat(88),
+        },
+    };
+    let Ok(base_bytes) = serde_json::to_vec(&maximum) else {
+        return false;
+    };
+    let Ok(maximum_value) = serde_json::to_vec(&"\0".repeat(MAX_QUERY_VALUE_BYTES)) else {
+        return false;
+    };
+    let query_bytes =
+        config
+            .allowed_query_keys
+            .iter()
+            .enumerate()
+            .try_fold(0_usize, |total, (index, key)| {
+                let key_bytes = serde_json::to_vec(key).ok()?;
+                total
+                    .checked_add(usize::from(index != 0))
+                    .and_then(|size| size.checked_add(key_bytes.len()))
+                    .and_then(|size| size.checked_add(1))
+                    .and_then(|size| size.checked_add(maximum_value.len()))
+            });
+    query_bytes.is_some_and(|query_bytes| {
+        base_bytes
+            .len()
+            .checked_add(query_bytes)
+            .and_then(|size| size.checked_add(1))
+            .is_some_and(|size| size <= crate::standalone::MAX_FRAME_BYTES)
+    })
 }
 
 fn is_literal_loopback_test_endpoint(config: &ObserverConfig) -> bool {

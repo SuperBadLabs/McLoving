@@ -68,6 +68,12 @@ Unknown fields, duplicate JSON members, unknown query keys, stale requests,
 substituted bindings, or invalid signatures fail before network access.
 Configuration admission rejects query-key names beyond the request-protocol
 bound and header budgets too small for the mandatory JSON response header.
+It also proves that the largest legal signed request fits the complete NDJSON
+frame before the ledger opens. Response headers are confidentiality-scanned
+before status or size classification, including non-success responses.
+The HTTP/2 decoder has a fixed 256 KiB hard ceiling above the lower certified
+application header budget, allowing bounded oversized blocks to be scanned
+before they are classified as application overflows.
 The GET carries reserved non-secret headers for the observation ID, effect
 fence, phase, canonical-query digest, and complete signed-request digest. An
 independently deployed destination therefore receives every fresh binding it
