@@ -55,8 +55,9 @@ an optional single LF or CRLF text-file terminator. The executable, image,
 complete configuration, read token, three signing
 authorities, CA, and secret-marker set are digest-bound before the ledger opens.
 The SQLite ledger is pre-created as a no-follow, owner-private, single-link
-regular file before SQLite opens it; the private state directory contains its
-WAL and shared-memory sidecars.
+regular file before SQLite opens it. Preexisting WAL and shared-memory sidecars
+must satisfy the same owner-private regular-file boundary before WAL is enabled,
+and SQLite-created sidecars are revalidated before startup completes.
 The startup denylist is applied to every authority digest and to the attested
 executable, image, complete configuration, CA bundle, prior configuration, and
 secret-marker-set digests; duplicate or malformed denylist entries fail closed.
@@ -71,6 +72,9 @@ and effect class, grant ID/version/scope, canonical allowlisted query, prior
 cursor and predecessor receipt, short validity window, and audit provenance.
 Unknown fields, duplicate JSON members, unknown query keys, stale requests,
 substituted bindings, or invalid signatures fail before network access.
+Configuration values that cross the request, destination, or receipt boundary
+are scanned against every secret marker and its encoded forms before the ledger
+opens.
 Configuration admission rejects query-key names beyond the request-protocol
 bound and header budgets too small for the mandatory JSON response header.
 It also proves that the largest legal signed request fits the complete NDJSON

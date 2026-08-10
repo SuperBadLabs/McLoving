@@ -827,6 +827,9 @@ fn validate_config(
     {
         return Err(ObserverError::InvalidConfig);
     }
+    if config_contains_secret(config, secret_markers) {
+        return Err(ObserverError::InvalidConfig);
+    }
     let identities = [
         config.deployment_identity.as_str(),
         config.operator_trust_identity.as_str(),
@@ -943,6 +946,41 @@ fn validate_config(
         return Err(ObserverError::InvalidConfig);
     }
     Ok(())
+}
+
+fn config_contains_secret(config: &ObserverConfig, markers: &[Vec<u8>]) -> bool {
+    let public_values = [
+        config.observer_id.as_str(),
+        config.deployment_identity.as_str(),
+        config.operator_trust_identity.as_str(),
+        config.runtime_boundary_identity.as_str(),
+        config.service_identity.as_str(),
+        config.credential_issuance_path_identity.as_str(),
+        config.configuration_authority_identity.as_str(),
+        config.request_authority_identity.as_str(),
+        config.endpoint_url.as_str(),
+        config.endpoint_identity.as_str(),
+        config.account_identity.as_str(),
+        config.resource_identity.as_str(),
+        config.effect_class.as_str(),
+        config.state_schema_version.as_str(),
+        config.read_grant_id.as_str(),
+        config.read_grant_version.as_str(),
+        config.read_grant_scope.as_str(),
+        config.request_authority_key_id.as_str(),
+        config.destination_attestation_key_id.as_str(),
+        config.receipt_signing_key_id.as_str(),
+    ];
+    public_values
+        .into_iter()
+        .chain(config.allowed_query_keys.iter().map(String::as_str))
+        .chain(
+            config
+                .response_schema
+                .iter()
+                .map(|field| field.name.as_str()),
+        )
+        .any(|value| contains_secret(value.as_bytes(), markers))
 }
 
 fn minimum_destination_response_fits(config: &ObserverConfig) -> bool {

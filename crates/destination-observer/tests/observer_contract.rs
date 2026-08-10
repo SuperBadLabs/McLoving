@@ -1555,6 +1555,30 @@ async fn runtime_attestation_denylist_and_production_constructor_boundary_fail_c
     assert!(!state.path().join("observer.sqlite3").exists());
 }
 
+#[tokio::test]
+async fn secret_bearing_public_configuration_is_rejected_before_ledger_creation() {
+    let rig = Rig::new().await;
+    for secret_value in [
+        String::from_utf8(TOKEN.to_vec()).unwrap(),
+        BASE64.encode(TOKEN),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut config = rig.config.clone();
+        config.state_dir = state.path().to_path_buf();
+        config.resource_identity = secret_value;
+        assert!(matches!(
+            rig.observer_for_config(config),
+            Err(ObserverError::InvalidConfig)
+        ));
+        assert!(!state.path().join("observer.sqlite3").exists());
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn ledger_is_owner_private_and_rejects_a_preexisting_symlink() {
@@ -1588,6 +1612,25 @@ async fn ledger_is_owner_private_and_rejects_a_preexisting_symlink() {
         Err(ObserverError::StateUnavailable)
     ));
     assert_eq!(fs::read(target).unwrap(), b"sentinel");
+
+    for suffix in ["-wal", "-shm"] {
+        let state = tempfile::tempdir().unwrap();
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let target = outside.path().join(format!("do-not-open{suffix}"));
+        fs::write(&target, b"sidecar-sentinel").unwrap();
+        symlink(
+            &target,
+            state.path().join(format!("observer.sqlite3{suffix}")),
+        )
+        .unwrap();
+        let mut config = rig.config.clone();
+        config.state_dir = state.path().to_path_buf();
+        assert!(matches!(
+            rig.observer_for_config(config),
+            Err(ObserverError::StateUnavailable)
+        ));
+        assert_eq!(fs::read(target).unwrap(), b"sidecar-sentinel");
+    }
 }
 
 #[tokio::test]

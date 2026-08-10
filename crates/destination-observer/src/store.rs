@@ -46,8 +46,9 @@ impl ObserverStore {
         }
         let database_path = config.state_dir.join("observer.sqlite3");
         prepare_private_database(&database_path)?;
+        validate_private_sidecars(&database_path)?;
         let connection = Connection::open_with_flags(
-            database_path,
+            &database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
                 | OpenFlags::SQLITE_OPEN_FULL_MUTEX
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -109,6 +110,7 @@ impl ObserverStore {
                  INSERT OR IGNORE INTO evidence_sequence(singleton, next_value) VALUES(1, 1);",
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
+        validate_private_sidecars(&database_path)?;
         let store = Self {
             connection: Mutex::new(connection),
         };
@@ -869,7 +871,7 @@ fn validate_state_dir(path: &Path) -> Result<(), ObserverError> {
 #[cfg(unix)]
 fn prepare_private_database(path: &Path) -> Result<(), ObserverError> {
     use std::fs::OpenOptions;
-    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+    use std::os::unix::fs::OpenOptionsExt as _;
 
     if !path.exists() {
         let file = OpenOptions::new()
@@ -885,7 +887,28 @@ fn prepare_private_database(path: &Path) -> Result<(), ObserverError> {
             .and_then(|directory| directory.sync_all())
             .map_err(|_| ObserverError::StateUnavailable)?;
     }
-    let metadata = fs::symlink_metadata(path).map_err(|_| ObserverError::StateUnavailable)?;
+    validate_private_file(path, true)
+}
+
+#[cfg(unix)]
+fn validate_private_sidecars(database_path: &Path) -> Result<(), ObserverError> {
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = database_path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        validate_private_file(Path::new(&sidecar), false)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_private_file(path: &Path, required: bool) -> Result<(), ObserverError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(ObserverError::StateUnavailable),
+    };
     if metadata.file_type().is_symlink()
         || !metadata.file_type().is_file()
         || metadata.uid() != nix::unistd::geteuid().as_raw()
@@ -899,5 +922,10 @@ fn prepare_private_database(path: &Path) -> Result<(), ObserverError> {
 
 #[cfg(not(unix))]
 fn prepare_private_database(_path: &Path) -> Result<(), ObserverError> {
+    Err(ObserverError::StateUnavailable)
+}
+
+#[cfg(not(unix))]
+fn validate_private_sidecars(_database_path: &Path) -> Result<(), ObserverError> {
     Err(ObserverError::StateUnavailable)
 }
