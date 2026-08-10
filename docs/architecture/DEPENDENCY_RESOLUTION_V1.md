@@ -312,6 +312,9 @@ Complete transport fetches are serialized through one async slot acquired
 under that same absolute deadline. Poison state is checked only after the slot
 is held, so a fetch that overlaps an unknown post-create identity cannot remain
 admitted and later return a publishable archive after the poison transition.
+Publication- or service-driven transport poison transitions also acquire this
+slot before changing state; an active fetch therefore finishes before the
+transition, while every later fetch observes poison after slot acquisition.
 
 ## Claim, publication, and replay
 
@@ -334,7 +337,8 @@ not a direct return: before the absolute deadline it removes and synchronizes
 the exact retained archive inode; at or beyond the deadline, or if exact cleanup
 cannot be proven, it poisons transport state and requires reconciliation after
 restart. Once exclusive creation links the archive, any failure to inspect the
-archive or pinned-root metadata, or any invalid device/inode relationship,
+archive or pinned-root metadata, or any non-file, cross-device, or zero-inode
+relationship,
 likewise poisons transport state before returning; an unknown identity is never
 treated as safe to remove or safe for later requests to ignore. Every later
 production fetch must first acquire the serialized slot and then fails before
