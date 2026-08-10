@@ -10,9 +10,13 @@ tmpfs/HTTP/standalone-process test. Strict all-target resolver Clippy,
 formatting, and `git diff --check` also pass on HeMan. This head replaces both
 dynamic per-resolution directory hierarchies with exclusive regular archives,
 closing the two repeated `mkdirat`/`openat` creation windows that blocked the
-prior candidate. Protected workflows and fresh independent exact-head review
-remain mandatory before this receipt may return to a final PASS verdict, before
-fixed threads may be resolved, and before merge.
+prior candidate. Documentation closure head
+`8d15ca537db6ccaea91fe041514f4b6de76bdbf7` additionally passes workspace-wide
+strict Clippy, the complete locked non-source workspace, the exact-capacity
+resolver journey, execution-board verification, and the serialized 19-case
+AppArmor-confined source-acquirer matrix on HeMan. Protected workflows and fresh
+independent exact-head review remain mandatory before this receipt may return to
+a final PASS verdict, before fixed threads may be resolved, and before merge.
 
 The DEP-001-to-CACHE-001 post-merge execution-board transition entered PR #35 at
 `02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at exact
@@ -181,10 +185,11 @@ receipt key appears in stdout, stderr, or the receipt.
 
 Exact implementation head `f602618e` passes strict resolver all-target Clippy,
 formatting, `git diff --check`, all 113 ordinary focused tests, and the real
-exact-capacity contained journey on HeMan. The complete locked non-source
-workspace, serialized AppArmor source-acquirer suite, protected Foundation
-workflow, and protected Windows impact classification must be rerun on the
-complete documentation head before closure.
+exact-capacity contained journey on HeMan. Documentation head `8d15ca5` passes
+workspace-wide strict Clippy, the complete locked non-source workspace, the
+same contained resolver journey, board verification, and the complete
+serialized AppArmor source-acquirer suite. Protected Foundation and Windows
+checks plus fresh exact-head review remain open.
 
 Foundation run 31327583362 completed on unchanged-head attempt 2. Attempt 1's
 only failures were three unrelated provisioner timing assertions under shared
