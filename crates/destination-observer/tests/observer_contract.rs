@@ -44,6 +44,8 @@ enum Mode {
     Substitute,
     Secret,
     EscapedEnvelopeSecret,
+    PostErrorEscapedSecret,
+    TrailingEscapedSecret,
     HeaderSecret,
     OversizedHeader,
     DuplicateContentType,
@@ -355,6 +357,18 @@ async fn destination_handler(
             br#"{"unknown":"read-only-observer-\u0074oken","unknown":"safe"}"#.to_vec(),
         );
     }
+    if matches!(mode, Mode::PostErrorEscapedSecret) {
+        return json_response(
+            StatusCode::OK,
+            br#"{"bad":"\q"} junk "read-only-observer-\u0074oken""#.to_vec(),
+        );
+    }
+    if matches!(mode, Mode::TrailingEscapedSecret) {
+        return json_response(
+            StatusCode::OK,
+            br#"{"safe":true} trailing "read-only-observer-\u0074oken""#.to_vec(),
+        );
+    }
     if matches!(mode, Mode::Oversized) {
         return json_response(StatusCode::OK, vec![b'x'; 32 * 1024]);
     }
@@ -563,6 +577,14 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         (Mode::Secret, ObserverError::ConfidentialityDenied),
         (
             Mode::EscapedEnvelopeSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
+        (
+            Mode::PostErrorEscapedSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
+        (
+            Mode::TrailingEscapedSecret,
             ObserverError::ConfidentialityDenied,
         ),
         (Mode::HeaderSecret, ObserverError::ConfidentialityDenied),
@@ -1080,6 +1102,15 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
         {
             let mut config = rig.config.clone();
             config.allowed_query_keys = (0..24).map(|index| format!("query_{index:02}")).collect();
+            config
+        },
+        {
+            let mut config = rig.config.clone();
+            config.response_schema = vec![StateFieldSchema {
+                name: "x".repeat(config.limits.max_response_bytes),
+                kind: JsonKind::Boolean,
+                required: true,
+            }];
             config
         },
     ] {

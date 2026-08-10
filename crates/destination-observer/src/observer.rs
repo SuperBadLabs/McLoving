@@ -887,6 +887,7 @@ fn validate_config(
         || config.destination_attestation_key_id.is_empty()
         || config.receipt_signing_key_id.is_empty()
         || !maximum_request_envelope_fits(config, config_sha256, implementation_sha256)
+        || !minimum_destination_response_fits(config)
         || !maximum_receipt_envelope_fits(config, config_sha256, implementation_sha256)
         || authority_digests
             .iter()
@@ -906,6 +907,47 @@ fn validate_config(
         return Err(ObserverError::InvalidConfig);
     }
     Ok(())
+}
+
+fn minimum_destination_response_fits(config: &ObserverConfig) -> bool {
+    let mut state = serde_json::Map::new();
+    for field in config.response_schema.iter().filter(|field| field.required) {
+        let value = match field.kind {
+            crate::JsonKind::Array => serde_json::Value::Array(Vec::new()),
+            crate::JsonKind::Boolean => serde_json::Value::Bool(false),
+            crate::JsonKind::Null => serde_json::Value::Null,
+            crate::JsonKind::Number => serde_json::json!(0),
+            crate::JsonKind::Object => serde_json::Value::Object(serde_json::Map::new()),
+            crate::JsonKind::String => serde_json::Value::String(String::new()),
+        };
+        state.insert(field.name.clone(), value);
+    }
+    let minimum = SignedDestinationState {
+        body: crate::DestinationStateBody {
+            schema_version: DESTINATION_STATE_SCHEMA_VERSION.to_owned(),
+            observation_id: Uuid::nil(),
+            observer_id: config.observer_id.clone(),
+            service_identity: config.service_identity.clone(),
+            endpoint_identity: config.endpoint_identity.clone(),
+            account_identity: config.account_identity.clone(),
+            resource_identity: config.resource_identity.clone(),
+            effect_class: config.effect_class.clone(),
+            effect_fence: 0,
+            phase: crate::ObservationPhase::PreAction,
+            canonical_query_sha256: "0".repeat(64),
+            cursor: 0,
+            observed_at_unix_ms: 0,
+            state_schema_version: config.state_schema_version.clone(),
+            confidentiality: Confidentiality::Public,
+            state: serde_json::Value::Object(state),
+            grant_id: config.read_grant_id.clone(),
+            grant_version: config.read_grant_version.clone(),
+            grant_scope: config.read_grant_scope.clone(),
+            attestation_key_id: config.destination_attestation_key_id.clone(),
+        },
+        signature_base64: "A".repeat(88),
+    };
+    serde_json::to_vec(&minimum).is_ok_and(|bytes| bytes.len() <= config.limits.max_response_bytes)
 }
 
 fn maximum_request_envelope_fits(

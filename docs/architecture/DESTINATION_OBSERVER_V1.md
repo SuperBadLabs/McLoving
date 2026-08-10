@@ -69,7 +69,8 @@ substituted bindings, or invalid signatures fail before network access.
 Configuration admission rejects query-key names beyond the request-protocol
 bound and header budgets too small for the mandatory JSON response header.
 It also proves that the largest legal signed request fits the complete NDJSON
-frame before the ledger opens. Response headers are confidentiality-scanned
+frame and that the smallest schema-valid signed destination response fits the
+configured body cap before the ledger opens. Response headers are confidentiality-scanned
 before status or size classification, including non-success responses.
 The HTTP/2 decoder has a fixed 256 KiB hard ceiling above the lower certified
 application header budget, allowing bounded oversized blocks to be scanned
@@ -163,7 +164,9 @@ percent-encoded, and mixed percent-encoded forms. Marker count and aggregate
 bytes are bounded. Decoded
 JSON string values are scanned directly and after Base64 decoding, including
 strings whose marker bytes require JSON escaping.
-Decoded JSON keys and values across the complete syntactic envelope are scanned
+Decoded JSON string literals across the complete bounded buffer are scanned
+even after a prior syntax error or complete JSON value, and keys and values in
+the complete syntactic envelope are scanned
 before duplicate-member, typed-envelope, signature, or binding validation, so
 schema-invalid and substituted envelopes cannot hide escaped confidential data.
 Secret-labelled state is denied. Fields not in the closed response schema,
