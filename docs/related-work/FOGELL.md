@@ -16,8 +16,8 @@ owned by the same owner, developed privately, and named for the character
 whose real identity sits behind the McLovin fake ID; the naming is not a
 coincidence and neither is the relationship.
 
-- Checkouts: `~/fogell` on the owner's Mac (Manyu); board records HeMan
-  `~/projects/fogell` as the canonical private repository.
+- Checkouts: local on the owner's development machine; board records HeMan as the canonical private repository.
+- (Intentionally location-agnostic: do not record hostnames or filesystem paths here.)
 - Command center: `docs/EXECUTION_BOARD.md` (waves 0–8, `FG-xxx` tickets),
   `docs/adr/` for decisions, `evidence/` for sealed receipts.
 - As of 2026-08-05: 44 of 100 live board tickets DONE, 4 PARTIAL. The durable
