@@ -54,7 +54,7 @@ async fn run() -> Result<(), ObserverError> {
                     receipt: Box::new(receipt),
                 })
                 .unwrap_or_else(|error| ObserverResponse::from_error(&error)),
-            Err(error) => ObserverResponse::from_error(&error),
+            Err(_) => ObserverResponse::from_error(&ObserverError::MalformedRequest),
         };
         write_response(&mut output, &response)?;
     }

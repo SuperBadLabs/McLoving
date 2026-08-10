@@ -794,6 +794,9 @@ fn contains_secret_in_json(
     }
     match value {
         serde_json::Value::String(value) => {
+            if contains_secret(value.as_bytes(), markers) {
+                return Ok(true);
+            }
             if let Ok(decoded) = BASE64.decode(value) {
                 Ok(contains_secret(&decoded, markers))
             } else {
@@ -877,6 +880,20 @@ mod tests {
         assert!(contains_secret(b"%AB%CD%EF%10", &markers));
         assert!(contains_secret(b"%ab%cd%ef%10", &markers));
         assert!(contains_secret(b"%aB%Cd%eF%10", &markers));
+    }
+
+    #[test]
+    fn decoded_json_strings_are_scanned_for_escaped_markers() {
+        for marker in [
+            b"line\nsecret".as_slice(),
+            b"quoted\"secret",
+            b"path\\secret",
+        ] {
+            let value = serde_json::Value::String(
+                String::from_utf8([b"prefix-".as_slice(), marker, b"-suffix"].concat()).unwrap(),
+            );
+            assert!(contains_secret_in_json(&value, &[marker.to_vec()]).unwrap());
+        }
     }
 
     #[test]

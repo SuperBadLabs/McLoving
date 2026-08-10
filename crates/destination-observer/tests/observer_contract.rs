@@ -876,6 +876,7 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         serde_json::from_value(responses[0]["receipt"].clone()).unwrap();
     verify_observation_receipt(&receipt, &rig.receipt_public_key).unwrap();
     assert_eq!(responses[1]["status"], "error");
+    assert_eq!(responses[1]["code"], "malformed_request");
 }
 
 #[tokio::test]
