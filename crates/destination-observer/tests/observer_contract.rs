@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::io::Write as _;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
@@ -859,6 +862,7 @@ async fn cutover_fences_old_process_and_rollback_requires_an_exact_historical_ta
     assert_ne!(rollback.config_sha256(), cutover.config_sha256());
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operation() {
     let rig = Rig::new().await;
