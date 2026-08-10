@@ -240,7 +240,7 @@ impl DependencyResolver {
             }
         };
         if Instant::now() >= deadline {
-            self.transport.preserve_cleanup_ambiguity();
+            self.transport.preserve_cleanup_ambiguity().await;
             self.store.release_incomplete_claim(&claim);
             return Err(ResolverError::denied("DEP_TRANSPORT_DEADLINE"));
         }
@@ -254,7 +254,7 @@ impl DependencyResolver {
                 // kernel syscall. Preserve the durable claim and transient
                 // allocation as explicit restart ambiguity instead of racing
                 // cleanup against an incompletely terminated worker.
-                self.preserve_publication_ambiguity();
+                self.preserve_publication_ambiguity().await;
                 self.store.release_incomplete_claim(&claim);
                 Err(error)
             }
@@ -274,15 +274,20 @@ impl DependencyResolver {
         fetched: Vec<crate::FetchedArtifact>,
         deadline: Instant,
     ) -> Result<ResolutionReceipt, ResolverError> {
-        let publication_guard = tokio::time::timeout_at(
+        let publication_guard = match tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             self.publication_serial.lock(),
         )
         .await
-        .map_err(|_| {
-            self.preserve_publication_ambiguity();
-            ResolverError::denied("DEP_STORE_PUBLICATION_QUEUE_DEADLINE")
-        })?;
+        {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.preserve_publication_ambiguity().await;
+                return Err(ResolverError::denied(
+                    "DEP_STORE_PUBLICATION_QUEUE_DEADLINE",
+                ));
+            }
+        };
         let _publication_guard = publication_guard;
         if self.publication_poisoned.load(Ordering::Acquire) {
             return Err(ResolverError::denied(
@@ -337,21 +342,21 @@ impl DependencyResolver {
         {
             Ok(output) => output,
             Err(error) => {
-                self.preserve_publication_ambiguity();
+                self.preserve_publication_ambiguity().await;
                 return Err(error);
             }
         };
         if !output.status.success()
             || output.stdout.len() as u64 > self.config.limits.max_frame_bytes
         {
-            self.preserve_publication_ambiguity();
+            self.preserve_publication_ambiguity().await;
             return Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"));
         }
         let response: PublicationWorkerResponse =
             match crate::strict_json::from_slice(&output.stdout) {
                 Ok(response) => response,
                 Err(_) => {
-                    self.preserve_publication_ambiguity();
+                    self.preserve_publication_ambiguity().await;
                     return Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"));
                 }
             };
@@ -363,19 +368,19 @@ impl DependencyResolver {
                 Ok(*receipt)
             }
             PublicationWorkerResponse::Ok { .. } => {
-                self.preserve_publication_ambiguity();
+                self.preserve_publication_ambiguity().await;
                 Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))
             }
             PublicationWorkerResponse::Error { code } => {
-                self.preserve_publication_ambiguity();
+                self.preserve_publication_ambiguity().await;
                 Err(ResolverError::denied(worker_error_code(&code)))
             }
         }
     }
 
-    fn preserve_publication_ambiguity(&self) {
+    async fn preserve_publication_ambiguity(&self) {
         self.publication_poisoned.store(true, Ordering::Release);
-        self.transport.preserve_cleanup_ambiguity();
+        self.transport.preserve_cleanup_ambiguity().await;
     }
 
     pub async fn acknowledge_response_delivery(&self, receipt: &ResolutionReceipt) {

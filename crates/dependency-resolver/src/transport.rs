@@ -236,7 +236,12 @@ impl HttpTransport {
         }
     }
 
-    pub fn preserve_cleanup_ambiguity(&self) {
+    pub async fn preserve_cleanup_ambiguity(&self) {
+        let _fetch_slot = self.fetch_slot.lock().await;
+        self.poison_cleanup_while_fetch_slot_held();
+    }
+
+    fn poison_cleanup_while_fetch_slot_held(&self) {
         self.cleanup_poisoned.store(true, Ordering::Release);
     }
 
@@ -298,21 +303,21 @@ impl HttpTransport {
         let created = inspect_transport_archive_metadata(&archive, &archive_path)
             .await
             .inspect_err(|_| {
-                self.preserve_cleanup_ambiguity();
+                self.poison_cleanup_while_fetch_slot_held();
             })?;
         let root_metadata = inspect_transport_root_metadata(&root_directory, &archive_path)
             .inspect_err(|_| {
-                self.preserve_cleanup_ambiguity();
+                self.poison_cleanup_while_fetch_slot_held();
             })?;
         #[cfg(target_os = "linux")]
         let identity =
             establish_transport_archive_identity(&created, &root_metadata, &archive_path)
                 .inspect_err(|_| {
-                    self.preserve_cleanup_ambiguity();
+                    self.poison_cleanup_while_fetch_slot_held();
                 })?;
         #[cfg(not(target_os = "linux"))]
         let identity = {
-            self.preserve_cleanup_ambiguity();
+            self.poison_cleanup_while_fetch_slot_held();
             return Err(root_state_error());
         };
         let pending = PendingTransportArchive {
@@ -330,7 +335,7 @@ impl HttpTransport {
                 {
                     drop(archive);
                     if Instant::now() >= deadline {
-                        self.preserve_cleanup_ambiguity();
+                        self.poison_cleanup_while_fetch_slot_held();
                         return Err(error);
                     }
                     self.cleanup_resolution_before_deadline(&pending, deadline)
@@ -343,7 +348,7 @@ impl HttpTransport {
                     Ok(()) => Ok(fetched),
                     Err(error) => {
                         if Instant::now() >= deadline {
-                            self.preserve_cleanup_ambiguity();
+                            self.poison_cleanup_while_fetch_slot_held();
                             return Err(error);
                         }
                         self.cleanup_resolution_before_deadline(&pending, deadline)
@@ -355,7 +360,7 @@ impl HttpTransport {
             Err(error) => {
                 drop(archive);
                 if Instant::now() >= deadline {
-                    self.preserve_cleanup_ambiguity();
+                    self.poison_cleanup_while_fetch_slot_held();
                     return Err(error);
                 }
                 self.cleanup_resolution_before_deadline(&pending, deadline)
@@ -567,7 +572,9 @@ impl HttpTransport {
 enum PostCreateInspectionFailure {
     ArchiveMetadata,
     RootMetadata,
-    IdentityValidation,
+    IdentityNotFile,
+    IdentityDeviceMismatch,
+    IdentityZeroInode,
 }
 
 #[cfg(test)]
@@ -638,13 +645,25 @@ fn establish_transport_archive_identity(
     root: &std::fs::Metadata,
     archive_path: &Path,
 ) -> Result<TransportRootIdentity, TransportError> {
-    if take_post_create_failure(
+    use std::os::unix::fs::MetadataExt as _;
+
+    let mut is_file = created.is_file();
+    let device = created.dev();
+    let inode = created.ino();
+    let mut root_device = root.dev();
+    let mut validated_inode = inode;
+    if take_post_create_failure(archive_path, PostCreateInspectionFailure::IdentityNotFile) {
+        is_file = false;
+    } else if take_post_create_failure(
         archive_path,
-        PostCreateInspectionFailure::IdentityValidation,
+        PostCreateInspectionFailure::IdentityDeviceMismatch,
     ) {
-        return Err(root_state_error());
+        root_device = device.wrapping_add(1);
+    } else if take_post_create_failure(archive_path, PostCreateInspectionFailure::IdentityZeroInode)
+    {
+        validated_inode = 0;
     }
-    establish_transport_archive_identity_inner(created, root)
+    validate_transport_archive_identity(is_file, device, validated_inode, root_device)
 }
 
 #[cfg(all(target_os = "linux", not(test)))]
@@ -653,23 +672,22 @@ fn establish_transport_archive_identity(
     root: &std::fs::Metadata,
     _archive_path: &Path,
 ) -> Result<TransportRootIdentity, TransportError> {
-    establish_transport_archive_identity_inner(created, root)
+    use std::os::unix::fs::MetadataExt as _;
+
+    validate_transport_archive_identity(created.is_file(), created.dev(), created.ino(), root.dev())
 }
 
 #[cfg(target_os = "linux")]
-fn establish_transport_archive_identity_inner(
-    created: &std::fs::Metadata,
-    root: &std::fs::Metadata,
+fn validate_transport_archive_identity(
+    is_file: bool,
+    device: u64,
+    inode: u64,
+    root_device: u64,
 ) -> Result<TransportRootIdentity, TransportError> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    if !created.is_file() || created.dev() != root.dev() || created.ino() == 0 {
+    if !is_file || device != root_device || inode == 0 {
         return Err(root_state_error());
     }
-    Ok(TransportRootIdentity {
-        device: created.dev(),
-        inode: created.ino(),
-    })
+    Ok(TransportRootIdentity { device, inode })
 }
 
 #[cfg(not(test))]
@@ -2525,7 +2543,9 @@ mod tests {
         for failure in [
             PostCreateInspectionFailure::ArchiveMetadata,
             PostCreateInspectionFailure::RootMetadata,
-            PostCreateInspectionFailure::IdentityValidation,
+            PostCreateInspectionFailure::IdentityNotFile,
+            PostCreateInspectionFailure::IdentityDeviceMismatch,
+            PostCreateInspectionFailure::IdentityZeroInode,
         ] {
             let fixture = TransportFixture::new(
                 b"artifact".to_vec(),
@@ -2627,6 +2647,58 @@ mod tests {
         );
         assert!(failing_path.exists());
         assert!(!overlapping_path.exists());
+    }
+
+    #[tokio::test]
+    async fn external_poison_transition_waits_for_the_active_fetch_slot() {
+        let fixture = TransportFixture::with_response(
+            b"artifact".to_vec(),
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+            Duration::from_millis(50),
+            7,
+        )
+        .await;
+        let active_resolution = Uuid::new_v4();
+        let poison_completed = AtomicBool::new(false);
+        let (active, ()) = tokio::join!(
+            async {
+                let result = fixture
+                    .transport
+                    .fetch_plan(
+                        active_resolution,
+                        &fixture.plan,
+                        Instant::now() + Duration::from_secs(2),
+                    )
+                    .await;
+                (result, poison_completed.load(Ordering::Acquire))
+            },
+            async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                fixture.transport.preserve_cleanup_ambiguity().await;
+                poison_completed.store(true, Ordering::Release);
+            }
+        );
+        assert!(active.0.is_ok(), "active fetch finishes before poison");
+        assert!(
+            !active.1,
+            "external poison cannot transition while a fetch holds the slot"
+        );
+        assert!(poison_completed.load(Ordering::Acquire));
+
+        let later_resolution = Uuid::new_v4();
+        let later = fixture
+            .transport
+            .fetch_plan(
+                later_resolution,
+                &fixture.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("later fetch after external poison");
+        assert_eq!(later.code, "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED");
     }
 
     #[tokio::test]
