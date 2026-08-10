@@ -3,8 +3,8 @@
 Date: 2026-08-10
 
 Verdict: LOCAL PASS for the architecture-repair candidate at exact
-implementation head `772baead461cff87768ea2ed4668309a394af5f7`.
-The focused gate passes 122 dependency-resolution tests: 77 unit tests, 44
+implementation head `075634f6ce6ee6f1ef5e371cbad313dddab4aaf3`.
+The focused gate passes 123 dependency-resolution tests: 78 unit tests, 44
 ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Strict all-target resolver Clippy,
 formatting, and `git diff --check` also pass on HeMan. This head replaces both
@@ -183,8 +183,8 @@ the same resolution identity is denied offline; restart with the repository
 offline returns byte-equivalent JSON; and neither the repository credential nor
 receipt key appears in stdout, stderr, or the receipt.
 
-Exact implementation head `772baead` passes strict resolver all-target Clippy,
-formatting, `git diff --check`, all 121 ordinary focused tests, and the real
+Exact implementation head `075634f6` passes strict resolver all-target Clippy,
+formatting, `git diff --check`, all 122 ordinary focused tests, and the real
 exact-capacity contained journey on HeMan. Documentation head `8d15ca5` passes
 workspace-wide strict Clippy, the complete locked non-source workspace, the
 same contained resolver journey, board verification, and the complete
@@ -200,8 +200,8 @@ response to that runner-only failure.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired 138
-actionable findings across 143 important seams. Five comments repeated an
+Pre-closure review and repeated contained execution exposed and repaired 140
+actionable findings across 145 important seams. Five comments repeated an
 already counted underlying seam and are not double-counted:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -523,8 +523,8 @@ already counted underlying seam and are not double-counted:
     making the later zero assertion redundant. The counter is removed while the
     stronger per-record kind, identity, disposition, and absent-credential
     assertions remain.
-87-143. Subsequent thread-aware exact-head review covered 57 important seams and
-    produced 57 additional actionable findings. Five comments in the complete
+87-145. Subsequent thread-aware exact-head review covered 59 important seams and
+    produced 59 additional actionable findings. Five comments in the complete
     chronology repeated the same already counted underlying race or execution
     prediction. The repairs bind
     executable verification to the running `/proc/self/exe` inode, serialize on
@@ -607,7 +607,20 @@ already counted underlying seam and are not double-counted:
     now also denies the active fetch's success. A two-worker production-path
     regression delays final completion through expiry, proves the expired fetch
     poisons before releasing the slot, and proves the queued fetch creates no
-    archive and returns restart-required denial.
+    archive and returns restart-required denial. Review of that head found two
+    remaining proof/protocol gaps: an external pending-poison store could still
+    occur after the final availability load but before slot release, and the
+    millisecond-delay regression could pass through an earlier timeout branch.
+    Head `075634f6` replaces the boolean/load protocol with a closed four-state
+    atomic handshake: available, success-committing, poison-pending, and
+    success-committing-with-poison-pending. Fetch success and external poison
+    compete through compare-and-swap, so either poison wins and denies success
+    or success linearizes first and the combined state preserves pending poison
+    for every subsequent fetch. A direct state-transition proof covers the
+    success-first order. The deadline regression now stops after successful
+    archive verification at an explicit three-party barrier, expires the real
+    absolute deadline, and only then releases completion while the queued fetch
+    waits on the same slot; earlier timeout paths cannot satisfy the barrier.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -686,7 +699,7 @@ ecosystem-crossed adapter error and redundant Mario counter. Their exact-head
 repairs and focused regressions brought that audit stage to eighty-one
 actionable findings across eighty-six important seams. The later thread-aware
 review, archive conversion, and final exact-cleanup/proof repairs summarized in
-seams 87-143 bring the current audit to 138 actionable findings across 143 important
+seams 87-145 bring the current audit to 140 actionable findings across 145 important
 seams;
 every fixed thread must be replied to and resolved only after the complete
 closure head passes protected checks and fresh review.

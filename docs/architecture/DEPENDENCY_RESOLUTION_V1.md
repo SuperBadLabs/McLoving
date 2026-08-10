@@ -313,10 +313,14 @@ under that same absolute deadline. Poison state is checked only after the slot
 is held, so a fetch that overlaps an unknown post-create identity cannot remain
 admitted and later return a publishable archive after the poison transition.
 Immediately before successful completion, the fetch rechecks both the absolute
-deadline and poison state while it still owns the slot. Expiry poisons under the
-slot; otherwise the availability load is the success linearization point. The
-service does not perform a second transport-only deadline transition after the
-slot is released.
+deadline and poison state while it still owns the slot. A closed atomic state
+machine makes fetch success and external poison compete through one
+compare-and-swap order: `available`, `success-committing`, `poison-pending`, and
+`success-committing-with-poison-pending`. Expiry poisons under the slot. If
+poison wins first, success is denied; if success commits first, a later poison
+transition enters the combined state and is preserved as pending before slot
+release. The service does not perform a second transport-only deadline
+transition after the slot is released.
 Publication- or service-driven transport poison transitions first establish a
 non-cancelable pending-poison state before awaiting anything, so every later
 fetch is denied even if the caller is cancelled. The final poisoned transition
