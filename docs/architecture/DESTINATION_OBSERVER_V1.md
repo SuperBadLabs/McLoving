@@ -105,7 +105,8 @@ hexadecimal and percent encodings. Decoded JSON string values are scanned
 directly as well as in serialized and Base64-decoded form, including strings
 whose marker bytes require JSON escaping.
 Secret-labelled state is denied. Fields not in the closed response schema,
-wrong JSON types, stale or future observations, substituted signatures or
+wrong JSON types, observations captured before the signed request or stale or
+future observations, substituted signatures or
 bindings, a cursor outside the signed SQLite integer range, and a cursor that
 does not advance from the signed predecessor are denied.
 

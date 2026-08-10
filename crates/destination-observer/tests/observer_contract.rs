@@ -36,6 +36,7 @@ const SECRET: &[u8] = b"never-publish-this-secret";
 enum Mode {
     Good,
     Stale,
+    PredatesRequest,
     Substitute,
     Secret,
     HeaderSecret,
@@ -322,6 +323,9 @@ async fn destination_handler(
     };
     match mode {
         Mode::Stale => body.observed_at_unix_ms = NOW - 20_000,
+        Mode::PredatesRequest => {
+            body.observed_at_unix_ms = request.requested_at_unix_ms - 1;
+        }
         Mode::Substitute => body.resource_identity = "release/substituted".to_owned(),
         Mode::Secret => body.state = json!({"published": true, "leak": BASE64.encode(SECRET)}),
         Mode::LargeState => {
@@ -420,6 +424,7 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
 async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fail_closed() {
     for (mode, expected) in [
         (Mode::Stale, ObserverError::StaleObservation),
+        (Mode::PredatesRequest, ObserverError::StaleObservation),
         (Mode::Substitute, ObserverError::MalformedResponse),
         (Mode::Secret, ObserverError::ConfidentialityDenied),
         (Mode::HeaderSecret, ObserverError::ConfidentialityDenied),
@@ -553,6 +558,9 @@ async fn expired_failed_claim_frees_destination_without_consuming_receipt_capaci
     );
 
     rig.set_mode(Mode::Good);
+    rig.server
+        .observed_at_unix_ms
+        .store(NOW + 2_000, Ordering::SeqCst);
     let mut replacement = rig.request(ObservationPhase::PreAction);
     replacement.requested_at_unix_ms = NOW + 1_999;
     replacement.expires_at_unix_ms = NOW + 2_999;
@@ -772,10 +780,22 @@ async fn cutover_fences_old_process_and_rollback_requires_an_exact_historical_ta
     cutover_config.previous_generation = Some(1);
     cutover_config.previous_config_sha256 = Some(old_digest.clone());
     let cutover = rig.observer_for_config(cutover_config).unwrap();
+    let cutover_digest = cutover.config_sha256().to_owned();
     assert_eq!(
         rig.observer.observe_at(old_request, NOW).await,
         Err(ObserverError::RuntimeFenced)
     );
+
+    let mut same_generation_rollback = rig.config.clone();
+    same_generation_rollback.generation = 3;
+    same_generation_rollback.activation_mode = ActivationMode::Rollback;
+    same_generation_rollback.previous_generation = Some(2);
+    same_generation_rollback.previous_config_sha256 = Some(cutover_digest);
+    same_generation_rollback.rollback_from_generation = Some(2);
+    assert!(matches!(
+        rig.observer_for_config(same_generation_rollback),
+        Err(ObserverError::InvalidConfig)
+    ));
 
     let mut invalid_rollback = rig.config.clone();
     invalid_rollback.generation = 3;

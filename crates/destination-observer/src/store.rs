@@ -155,7 +155,9 @@ impl ObserverStore {
                 ActivationMode::Rollback => {
                     if config.generation <= generation
                         || config.rollback_from_generation != Some(generation)
-                        || config.previous_generation.is_none()
+                        || config
+                            .previous_generation
+                            .is_none_or(|target| target >= generation)
                         || config.previous_config_sha256.is_none()
                     {
                         return Err(ObserverError::InvalidConfig);

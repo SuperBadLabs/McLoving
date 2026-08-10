@@ -535,7 +535,8 @@ impl DestinationObserver {
         if body.confidentiality == Confidentiality::Secret {
             return Err(ObserverError::ConfidentialityDenied);
         }
-        if body.observed_at_unix_ms > now_ms
+        if body.observed_at_unix_ms < request.requested_at_unix_ms
+            || body.observed_at_unix_ms > now_ms
             || now_ms.saturating_sub(body.observed_at_unix_ms) > self.config.limits.max_age_ms
         {
             return Err(ObserverError::StaleObservation);
