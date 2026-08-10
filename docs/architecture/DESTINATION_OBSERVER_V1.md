@@ -64,7 +64,11 @@ request and grant validity are checked again at the monotonic GET-completion
 time before any receipt can be signed;
 only complete evidence consumes the receipt-count and evidence-byte quotas. A
 unique pending claim per destination scope prevents competing reads across
-builds and effect fences. Rate, receipt-count, evidence byte, response, header,
+builds and effect fences. A nonblocking kernel lease held for the complete
+observation call also prevents a same-ID retry or overlapping process from
+duplicating an in-flight GET; process exit releases the lease for restart.
+Receipt-count and evidence-byte quotas are rechecked in the atomic finalization
+transaction. Rate, receipt-count, evidence byte, response, header,
 timeout, freshness, and retry limits are configuration authority.
 
 ## Destination attestation and state ordering

@@ -450,9 +450,17 @@ impl ObserverStore {
                 |row| row.get(0),
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
-        if total
-            .checked_add(evidence_bytes)
-            .is_none_or(|value| value > config.limits.max_evidence_bytes)
+        let count: usize = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM observations WHERE status='complete'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        if count >= config.limits.max_receipts
+            || total
+                .checked_add(evidence_bytes)
+                .is_none_or(|value| value > config.limits.max_evidence_bytes)
         {
             return Err(ObserverError::CapacityExceeded);
         }

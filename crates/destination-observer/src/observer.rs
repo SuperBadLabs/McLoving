@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fs::{File, OpenOptions};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -121,6 +122,7 @@ impl DestinationObserver {
             b"mcloving-observer-destination-scope-v1",
             &DestinationScope::from_request(&request),
         )?;
+        let _destination_lease = self.acquire_destination_lease(&destination_scope_sha256)?;
         let retry_count = match self.store.claim(
             &self.config,
             &self.config_sha256,
@@ -386,6 +388,37 @@ impl DestinationObserver {
             return Err(ObserverError::InvalidReceipt);
         }
         Ok(())
+    }
+
+    fn acquire_destination_lease(
+        &self,
+        destination_scope_sha256: &str,
+    ) -> Result<File, ObserverError> {
+        let path = self
+            .config
+            .state_dir
+            .join(format!("destination-{destination_scope_sha256}.lock"));
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|_| ObserverError::StateUnavailable)?;
+        }
+        match file.try_lock() {
+            Ok(()) => Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => Err(ObserverError::ObservationPending),
+            Err(std::fs::TryLockError::Error(_)) => Err(ObserverError::StateUnavailable),
+        }
     }
 
     fn validate_request(&self, request: &ObservationRequest) -> Result<(), ObserverError> {

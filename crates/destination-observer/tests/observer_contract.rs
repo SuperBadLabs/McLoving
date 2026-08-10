@@ -499,6 +499,21 @@ async fn concurrent_builds_are_serialized_before_destination_access() {
 }
 
 #[tokio::test]
+async fn concurrent_retry_of_the_same_observation_does_not_duplicate_the_get() {
+    let rig = Rig::new().await;
+    rig.set_mode(Mode::Slow);
+    let request = rig.prepare(rig.request(ObservationPhase::PreAction));
+    let first_observation = rig.observer.observe_at(request.clone(), NOW);
+    let concurrent_retry = async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        rig.observer.observe_at(request, NOW).await
+    };
+    let (first_result, retry_result) = tokio::join!(first_observation, concurrent_retry);
+    first_result.unwrap();
+    assert_eq!(retry_result, Err(ObserverError::ObservationPending));
+}
+
+#[tokio::test]
 async fn oversized_success_is_failed_before_receipt_commit() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();
