@@ -75,7 +75,7 @@ pub fn load_observer(
                 .map_err(|_| ObserverError::InvalidConfig)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    DestinationObserver::new(
+    DestinationObserver::new_measured(
         config,
         sha256_running_executable()?,
         runtime_image_sha256,

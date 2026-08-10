@@ -173,7 +173,7 @@ impl Rig {
             ca_bundle_sha256: None,
             test_allow_http_loopback: true,
         };
-        let observer = DestinationObserver::new(
+        let observer = DestinationObserver::new_for_loopback_test(
             config.clone(),
             implementation_sha256.clone(),
             image_sha256.clone(),
@@ -260,7 +260,7 @@ impl Rig {
         &self,
         config: ObserverConfig,
     ) -> Result<DestinationObserver, ObserverError> {
-        DestinationObserver::new(
+        DestinationObserver::new_for_loopback_test(
             config,
             self.implementation_sha256.clone(),
             self.image_sha256.clone(),
@@ -524,7 +524,7 @@ async fn restart_waits_for_the_shared_ledger_writer() {
     let destination_public_key = rig.destination_public_key.clone();
     let receipt_seed = rig.receipt_seed.clone();
     let restart = std::thread::spawn(move || {
-        DestinationObserver::new(
+        DestinationObserver::new_for_loopback_test(
             config,
             implementation_sha256,
             image_sha256,
@@ -925,7 +925,7 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
     rig.observer.observe_at(replacement, NOW).await.unwrap();
 
     assert!(matches!(
-        DestinationObserver::new(
+        DestinationObserver::new_for_loopback_test(
             rig.config.clone(),
             rig.implementation_sha256.clone(),
             rig.image_sha256.clone(),
@@ -938,7 +938,7 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
         Err(ObserverError::InvalidConfig)
     ));
     assert!(matches!(
-        DestinationObserver::new(
+        DestinationObserver::new_for_loopback_test(
             rig.config.clone(),
             rig.implementation_sha256.clone(),
             "f".repeat(64),
@@ -963,7 +963,7 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
     excessive_marker_config.secret_marker_set_sha256 =
         domain_digest(b"mcloving-secret-marker-set-v1", &marker_digests);
     assert!(matches!(
-        DestinationObserver::new(
+        DestinationObserver::new_for_loopback_test(
             excessive_marker_config,
             rig.implementation_sha256.clone(),
             rig.image_sha256.clone(),
@@ -979,7 +979,7 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
     let mut substituted_config = rig.config.clone();
     substituted_config.observer_id = "observer-substituted".to_owned();
     assert!(matches!(
-        DestinationObserver::new(
+        DestinationObserver::new_for_loopback_test(
             substituted_config,
             rig.implementation_sha256.clone(),
             rig.image_sha256.clone(),
@@ -1003,6 +1003,55 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
         rig.observer_for_config(empty_ca_config),
         Err(ObserverError::InvalidConfig)
     ));
+}
+
+#[tokio::test]
+async fn runtime_attestation_denylist_and_production_constructor_boundary_fail_closed() {
+    let rig = Rig::new().await;
+    for denied_digest in [
+        rig.implementation_sha256.clone(),
+        rig.image_sha256.clone(),
+        rig.config.secret_marker_set_sha256.clone(),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut config = rig.config.clone();
+        config.state_dir = state.path().to_path_buf();
+        config.denied_authority_sha256.push(denied_digest);
+        assert!(matches!(
+            rig.observer_for_config(config),
+            Err(ObserverError::InvalidConfig)
+        ));
+        assert!(!state.path().join("observer.sqlite3").exists());
+    }
+
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut non_test_config = rig.config.clone();
+    non_test_config.state_dir = state.path().to_path_buf();
+    non_test_config.test_allow_http_loopback = false;
+    assert!(matches!(
+        DestinationObserver::new_for_loopback_test(
+            non_test_config,
+            "f".repeat(64),
+            "e".repeat(64),
+            TOKEN.to_vec(),
+            rig.request_public_key.clone(),
+            rig.destination_public_key.clone(),
+            rig.receipt_seed.clone(),
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
+        ),
+        Err(ObserverError::InvalidConfig)
+    ));
+    assert!(!state.path().join("observer.sqlite3").exists());
 }
 
 #[tokio::test]

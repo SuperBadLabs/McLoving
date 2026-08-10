@@ -51,7 +51,7 @@ pub struct DestinationObserver {
 
 impl DestinationObserver {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new_measured(
         config: ObserverConfig,
         implementation_sha256: String,
         runtime_image_sha256: String,
@@ -120,6 +120,37 @@ impl DestinationObserver {
             client,
             store,
         })
+    }
+
+    /// Constructor for the literal-loopback integration-test boundary.
+    ///
+    /// Production startup must use `standalone::load_observer`, which measures
+    /// the running executable and reads the sealed runtime-image attestation.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_loopback_test(
+        config: ObserverConfig,
+        implementation_sha256: String,
+        runtime_image_sha256: String,
+        read_token: Vec<u8>,
+        request_public_key: Vec<u8>,
+        destination_public_key: Vec<u8>,
+        receipt_seed: Vec<u8>,
+        secret_markers: Vec<Vec<u8>>,
+    ) -> Result<Self, ObserverError> {
+        if !is_literal_loopback_test_endpoint(&config) {
+            return Err(ObserverError::InvalidConfig);
+        }
+        Self::new_measured(
+            config,
+            implementation_sha256,
+            runtime_image_sha256,
+            read_token,
+            request_public_key,
+            destination_public_key,
+            receipt_seed,
+            secret_markers,
+        )
     }
 
     pub fn config_sha256(&self) -> &str {
@@ -805,6 +836,17 @@ fn validate_config(
         content_sha256(read_token),
     ];
     let unique_authorities: BTreeSet<&str> = authority_digests.iter().map(String::as_str).collect();
+    let denied_digests: BTreeSet<&str> = config
+        .denied_authority_sha256
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let attested_runtime_digests = [
+        implementation_sha256,
+        runtime_image_sha256,
+        config_sha256,
+        marker_set_sha.as_str(),
+    ];
     if config.read_token_sha256 != authority_digests[4]
         || config.request_authority_key_sha256 != authority_digests[0]
         || config.destination_attestation_key_sha256 != authority_digests[1]
@@ -812,6 +854,8 @@ fn validate_config(
         || config.receipt_signing_public_key_sha256 != authority_digests[3]
         || config.secret_marker_set_sha256 != marker_set_sha
         || unique_authorities.len() != authority_digests.len()
+        || denied_digests.len() != config.denied_authority_sha256.len()
+        || denied_digests.iter().any(|digest| !valid_sha(digest))
         || config.endpoint_identity.is_empty()
         || config.account_identity.is_empty()
         || config.resource_identity.is_empty()
@@ -827,7 +871,18 @@ fn validate_config(
         || !maximum_receipt_envelope_fits(config, config_sha256, implementation_sha256)
         || authority_digests
             .iter()
-            .any(|digest| config.denied_authority_sha256.contains(digest))
+            .any(|digest| denied_digests.contains(digest.as_str()))
+        || attested_runtime_digests
+            .iter()
+            .any(|digest| denied_digests.contains(*digest))
+        || config
+            .ca_bundle_sha256
+            .as_deref()
+            .is_some_and(|digest| denied_digests.contains(digest))
+        || config
+            .previous_config_sha256
+            .as_deref()
+            .is_some_and(|digest| denied_digests.contains(digest))
     {
         return Err(ObserverError::InvalidConfig);
     }

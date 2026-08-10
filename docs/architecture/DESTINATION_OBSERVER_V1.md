@@ -33,6 +33,9 @@ controller database or filesystem, agent RPC, shell, repository, workload
 secret, connector-control, or external-effect capability. Production requires
 HTTPS with a content-pinned, nonempty private CA bundle. Plain HTTP is accepted only when
 both the explicit test flag and a literal loopback address are present.
+The only public direct constructor is restricted to that literal-loopback test
+boundary. Production construction is crate-internal to the standalone loader,
+which supplies the measured executable digest and sealed runtime-image digest.
 
 The observer is a fail-closed Linux process: its implementation digest is read
 from the kernel's `/proc/self/exe` handle for the executing inode, never by
@@ -49,6 +52,9 @@ users. The executable is measured through `/proc/self/exe`; the separately
 mounted runtime-image digest must match the image identity certified by
 configuration. The executable, image, complete configuration, read token, three signing
 authorities, CA, and secret-marker set are digest-bound before the ledger opens.
+The startup denylist is applied to every authority digest and to the attested
+executable, image, complete configuration, CA bundle, prior configuration, and
+secret-marker-set digests; duplicate or malformed denylist entries fail closed.
 
 ## Signed request and canonical read
 
