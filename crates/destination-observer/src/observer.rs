@@ -793,6 +793,8 @@ fn validate_config(
         || config.limits.max_receipts == 0
         || config.limits.timeout_ms == 0
         || config.limits.max_age_ms <= 0
+        || u64::try_from(config.limits.max_age_ms)
+            .is_ok_and(|max_age_ms| config.limits.timeout_ms > max_age_ms)
         || config.limits.retry_attempts > 8
         || read_token.is_empty()
         || read_token.len() > 4096

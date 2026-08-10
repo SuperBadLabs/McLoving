@@ -115,7 +115,9 @@ request and grant validity are checked again at the monotonic GET-completion
 time before any success or terminal outcome is committed. They are also
 resampled after ledger and
 lease delays immediately before dispatch, so authority that expires while
-waiting cannot cause a GET;
+waiting cannot cause a GET. Configuration admission requires the transport
+timeout to fit within the freshness window so no in-flight read can outlive its
+terminal tombstone retention basis;
 only complete evidence consumes the receipt-count and evidence-byte quotas.
 Replay and new-admission transactions prune complete and failed observations
 whose signed request expiry is more than one freshness window old before they

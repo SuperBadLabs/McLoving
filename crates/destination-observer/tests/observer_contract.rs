@@ -47,6 +47,8 @@ enum Mode {
     EscapedEnvelopeSecret,
     PostErrorEscapedSecret,
     TrailingEscapedSecret,
+    MalformedLiteralEscapedSecret,
+    UnterminatedEscapedSecret,
     HeaderSecret,
     OversizedHeader,
     DuplicateContentType,
@@ -372,6 +374,18 @@ async fn destination_handler(
             br#"{"safe":true} trailing "read-only-observer-\u0074oken""#.to_vec(),
         );
     }
+    if matches!(mode, Mode::MalformedLiteralEscapedSecret) {
+        return json_response(
+            StatusCode::OK,
+            br#"{"bad":"\qread-only-observer-\u0074oken"}"#.to_vec(),
+        );
+    }
+    if matches!(mode, Mode::UnterminatedEscapedSecret) {
+        return json_response(
+            StatusCode::OK,
+            br#"{"bad":"read-only-observer-\u0074oken"#.to_vec(),
+        );
+    }
     if matches!(mode, Mode::Oversized) {
         return json_response(StatusCode::OK, vec![b'x'; 32 * 1024]);
     }
@@ -626,6 +640,14 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         ),
         (
             Mode::TrailingEscapedSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
+        (
+            Mode::MalformedLiteralEscapedSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
+        (
+            Mode::UnterminatedEscapedSecret,
             ObserverError::ConfidentialityDenied,
         ),
         (Mode::HeaderSecret, ObserverError::ConfidentialityDenied),
@@ -1130,6 +1152,11 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
         {
             let mut config = rig.config.clone();
             config.limits.max_header_bytes = 33;
+            config
+        },
+        {
+            let mut config = rig.config.clone();
+            config.limits.timeout_ms = u64::try_from(config.limits.max_age_ms).unwrap() + 1;
             config
         },
         {

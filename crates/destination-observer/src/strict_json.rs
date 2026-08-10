@@ -25,9 +25,10 @@ pub(crate) fn collect_decoded_json_strings(bytes: &[u8]) -> Vec<String> {
         for end in start.saturating_add(1)..bytes.len() {
             match bytes[end] {
                 b'"' if !escaped => {
-                    if let Ok(value) = serde_json::from_slice::<String>(&bytes[start..=end]) {
-                        strings.push(value);
-                    }
+                    strings.push(
+                        serde_json::from_slice::<String>(&bytes[start..=end])
+                            .unwrap_or_else(|_| decode_json_string_lossy(&bytes[start + 1..end])),
+                    );
                     closed_at = Some(end);
                     break;
                 }
@@ -36,11 +37,85 @@ pub(crate) fn collect_decoded_json_strings(bytes: &[u8]) -> Vec<String> {
             }
         }
         let Some(end) = closed_at else {
+            strings.push(decode_json_string_lossy(&bytes[start + 1..]));
             break;
         };
         cursor = end.saturating_add(1);
     }
     strings
+}
+
+fn decode_json_string_lossy(bytes: &[u8]) -> String {
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0_usize;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let Some(escape) = bytes.get(index + 1).copied() else {
+            decoded.push(b'\\');
+            break;
+        };
+        match escape {
+            b'"' | b'\\' | b'/' => {
+                decoded.push(escape);
+                index += 2;
+            }
+            b'b' => {
+                decoded.push(0x08);
+                index += 2;
+            }
+            b'f' => {
+                decoded.push(0x0c);
+                index += 2;
+            }
+            b'n' => {
+                decoded.push(b'\n');
+                index += 2;
+            }
+            b'r' => {
+                decoded.push(b'\r');
+                index += 2;
+            }
+            b't' => {
+                decoded.push(b'\t');
+                index += 2;
+            }
+            b'u' if index + 6 <= bytes.len() => {
+                let value = bytes[index + 2..index + 6]
+                    .iter()
+                    .try_fold(0_u32, |value, byte| {
+                        hex_nibble(*byte).map(|nibble| (value << 4) | u32::from(nibble))
+                    });
+                if let Some(character) = value.and_then(char::from_u32) {
+                    let mut encoded = [0_u8; 4];
+                    decoded.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+                    index += 6;
+                } else {
+                    decoded.push(b'\\');
+                    index += 1;
+                }
+            }
+            _ => {
+                // Preserve malformed escapes conservatively and continue, so a later valid
+                // escaped marker in the same malformed literal is still decoded and scanned.
+                decoded.push(b'\\');
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 struct DuplicateRejectingSeed;
@@ -149,5 +224,16 @@ mod string_collection_tests {
                 .iter()
                 .any(|value| value == "later value")
         );
+
+        for malformed in [
+            br#""prefix\qread-only-observer-\u0074oken""#.as_slice(),
+            br#""read-only-observer-\u0074oken"#.as_slice(),
+        ] {
+            assert!(
+                collect_decoded_json_strings(malformed)
+                    .iter()
+                    .any(|value| value.contains("read-only-observer-token"))
+            );
+        }
     }
 }
