@@ -769,18 +769,18 @@ impl CacheStore {
             || domain_digest(b"mcloving.cache-key/v1\0", &stored.canonical_key) != key_sha256
             || !valid_digest(&stored.policy_sha256)
             || !valid_digest(&stored.generation_sha256)
-            || !valid_digest(&stored.content_sha256)
-            || !stored_content_matches(stored)
         {
             return Err(CacheError::StateUnavailable);
         }
-        let publication_valid = self.stored_publication_matches(
-            transaction,
-            stored,
-            &canonical,
-            &namespace_sha256,
-            key_sha256,
-        )?;
+        let publication_valid = valid_digest(&stored.content_sha256)
+            && stored_content_matches(stored)
+            && self.stored_publication_matches(
+                transaction,
+                stored,
+                &canonical,
+                &namespace_sha256,
+                key_sha256,
+            )?;
         let details = if publication_valid {
             details
         } else {

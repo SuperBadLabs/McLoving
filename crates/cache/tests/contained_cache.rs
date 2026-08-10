@@ -934,6 +934,65 @@ fn publish_time_cleanup_rejects_a_forged_expiry() {
 }
 
 #[test]
+fn publish_time_cleanup_purges_corrupt_stale_content() {
+    let temp = TempDir::new().unwrap();
+    let key = [23_u8; 32];
+    let clock = Arc::new(ManualClock::new(73_200));
+    let first_config = config(
+        &temp,
+        &key,
+        vec![policy("policy-a", "trusted", "reader", "writer")],
+    );
+    let database_path = first_config.database_path.clone();
+    let first = open_store(first_config.clone(), &key, Arc::clone(&clock)).unwrap();
+    let request_a = request(
+        first.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"corrupt-stale-a",
+    );
+    let publication_a = first
+        .publish("writer", "trusted", &request_a, b"content-a")
+        .unwrap();
+    let key_a = publication_a.receipts[0].event.key_sha256.clone();
+    Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE entries SET content = ?1 WHERE key_sha256 = ?2",
+            rusqlite::params![b"tampered".as_slice(), key_a],
+        )
+        .unwrap();
+    drop(first);
+
+    let mut second_config = first_config;
+    second_config.cache_generation = 2;
+    let second = open_store(second_config, &key, clock).unwrap();
+    let current = request(
+        second.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"corrupt-stale-current",
+    );
+    let publication = second
+        .publish("writer", "trusted", &current, b"current")
+        .unwrap();
+    assert_eq!(publication.status, PublishStatus::Published);
+    let rejected = publication
+        .receipts
+        .iter()
+        .find(|receipt| receipt.event.key_sha256 == key_a)
+        .unwrap();
+    assert_eq!(
+        rejected.event.outcome,
+        mcloving_cache::CacheOutcome::CorruptRejected
+    );
+    assert!(rejected.event.content_sha256.is_none());
+    assert!(rejected.event.content_bytes.is_none());
+    assert!(rejected.event.expires_at_unix_ms.is_none());
+    second.verify_audit_chain().unwrap();
+}
+
+#[test]
 fn quota_eviction_rejects_substituted_publication_provenance() {
     let temp = TempDir::new().unwrap();
     let key = [21_u8; 32];
