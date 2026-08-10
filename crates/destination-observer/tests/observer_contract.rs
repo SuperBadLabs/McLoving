@@ -796,6 +796,18 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
         ),
         Err(ObserverError::RuntimeFenced)
     ));
+
+    let empty_ca = rig.directory.path().join("empty-ca.pem");
+    fs::write(&empty_ca, b"").unwrap();
+    let mut empty_ca_config = rig.config.clone();
+    empty_ca_config.endpoint_url = "https://observer.invalid/state".to_owned();
+    empty_ca_config.ca_bundle_path = Some(empty_ca);
+    empty_ca_config.ca_bundle_sha256 = Some(content_sha256(b""));
+    empty_ca_config.test_allow_http_loopback = false;
+    assert!(matches!(
+        rig.observer_for_config(empty_ca_config),
+        Err(ObserverError::InvalidConfig)
+    ));
 }
 
 #[tokio::test]

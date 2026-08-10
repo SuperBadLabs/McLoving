@@ -31,7 +31,7 @@ when the prior process is completing a transaction. It has no
 write method, redirect or proxy inheritance, implicit HTTP retry, scheduler,
 controller database or filesystem, agent RPC, shell, repository, workload
 secret, connector-control, or external-effect capability. Production requires
-HTTPS with a content-pinned private CA bundle. Plain HTTP is accepted only when
+HTTPS with a content-pinned, nonempty private CA bundle. Plain HTTP is accepted only when
 both the explicit test flag and a literal loopback address are present.
 
 The observer is a fail-closed Linux process: its implementation digest is read

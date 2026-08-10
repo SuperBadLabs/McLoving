@@ -69,6 +69,7 @@ impl DestinationObserver {
 
         let mut builder = Client::builder()
             .redirect(redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .no_proxy()
             .http2_prior_knowledge()
             .http2_max_header_list_size(
@@ -81,11 +82,15 @@ impl DestinationObserver {
             if config.ca_bundle_sha256.as_deref() != Some(content_sha256(&pem).as_str()) {
                 return Err(ObserverError::InvalidConfig);
             }
-            let certificate =
-                reqwest::Certificate::from_pem(&pem).map_err(|_| ObserverError::InvalidConfig)?;
-            builder = builder
-                .tls_built_in_root_certs(false)
-                .add_root_certificate(certificate);
+            let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+                .map_err(|_| ObserverError::InvalidConfig)?;
+            if certificates.is_empty() {
+                return Err(ObserverError::InvalidConfig);
+            }
+            builder = builder.tls_built_in_root_certs(false);
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
         }
         let client = builder.build().map_err(|_| ObserverError::InvalidConfig)?;
         let store = ObserverStore::open(&config, &config_sha256)?;
