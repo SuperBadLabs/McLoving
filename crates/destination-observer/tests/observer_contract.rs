@@ -771,6 +771,35 @@ async fn expired_retry_tombstone_wins_over_an_in_flight_transport_failure() {
 }
 
 #[tokio::test]
+async fn transport_failure_that_crosses_expiry_is_immediately_tombstoned() {
+    let rig = Rig::new().await;
+    rig.set_mode(Mode::Timeout);
+    let mut request = rig.request(ObservationPhase::PreAction);
+    request.expires_at_unix_ms = NOW + 50;
+    let request = rig.prepare(request);
+
+    assert_eq!(
+        rig.observer.observe_at(request.clone(), NOW).await,
+        Err(ObserverError::ExpiredRequest)
+    );
+    assert_eq!(
+        rig.observer.observe_at(request.clone(), NOW).await,
+        Err(ObserverError::ExpiredRequest)
+    );
+
+    let connection =
+        rusqlite::Connection::open(rig.directory.path().join("observer.sqlite3")).unwrap();
+    let status: (String, String) = connection
+        .query_row(
+            "SELECT status, failure_code FROM observations WHERE observation_id=?1",
+            [request.observation_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, ("failed".to_owned(), "expired_request".to_owned()));
+}
+
+#[tokio::test]
 async fn completed_replay_bypasses_an_unrelated_live_destination_read() {
     let rig = Rig::new().await;
     let completed_request = rig.prepare(rig.request(ObservationPhase::PreAction));
@@ -1248,6 +1277,36 @@ async fn cursor_is_monotonic_across_effect_fences_and_stored_replay_is_reverifie
         .unwrap();
     assert_eq!(
         rig.observer.observe_at(first_request, NOW).await,
+        Err(ObserverError::InvalidReceipt)
+    );
+}
+
+#[tokio::test]
+async fn stored_receipt_with_duplicate_keys_is_rejected() {
+    let rig = Rig::new().await;
+    let request = rig.prepare(rig.request(ObservationPhase::PreAction));
+    rig.observer.observe_at(request.clone(), NOW).await.unwrap();
+
+    let connection =
+        rusqlite::Connection::open(rig.directory.path().join("observer.sqlite3")).unwrap();
+    let receipt: Vec<u8> = connection
+        .query_row(
+            "SELECT receipt_json FROM observations WHERE observation_id=?1",
+            [request.observation_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut duplicate = br#"{"schema_version":"substituted","#.to_vec();
+    duplicate.extend_from_slice(&receipt[1..]);
+    connection
+        .execute(
+            "UPDATE observations SET receipt_json=?2 WHERE observation_id=?1",
+            rusqlite::params![request.observation_id.to_string(), duplicate],
+        )
+        .unwrap();
+
+    assert_eq!(
+        rig.observer.observe_at(request, NOW).await,
         Err(ObserverError::InvalidReceipt)
     );
 }

@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 
 use crate::{
     ActivationMode, ObservationPhase, ObservationReceipt, ObservationRequest, ObserverConfig,
-    ObserverError,
+    ObserverError, parse_json_no_duplicates,
 };
 
 pub(crate) enum ClaimResult {
@@ -273,7 +273,7 @@ impl ObserverStore {
                     .receipt_json
                     .ok_or(ObserverError::StateUnavailable)?;
                 let receipt =
-                    serde_json::from_slice(&bytes).map_err(|_| ObserverError::StateUnavailable)?;
+                    parse_json_no_duplicates(&bytes).map_err(|_| ObserverError::InvalidReceipt)?;
                 Ok(Some(Box::new(receipt)))
             }
             "failed" => Err(error_from_code(existing.failure_code.as_deref())),
@@ -351,7 +351,7 @@ impl ObserverStore {
                     .receipt_json
                     .ok_or(ObserverError::StateUnavailable)?;
                 let receipt =
-                    serde_json::from_slice(&bytes).map_err(|_| ObserverError::StateUnavailable)?;
+                    parse_json_no_duplicates(&bytes).map_err(|_| ObserverError::InvalidReceipt)?;
                 return Ok(ClaimResult::Completed(Box::new(receipt)));
             }
             if existing.status == "failed" {

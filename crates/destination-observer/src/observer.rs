@@ -221,6 +221,17 @@ impl DestinationObserver {
             Ok(observation) => observation,
             Err(error) => {
                 if error == ObserverError::DestinationUnavailable {
+                    let failure_at_ms = elapsed_time_ms(now_ms, started_at)?;
+                    if let Err(expiry) = validate_temporal(&self.config, &request, failure_at_ms) {
+                        self.store.fail_pending(
+                            self.config.generation,
+                            &self.config_sha256,
+                            &request,
+                            &request_sha256,
+                            &expiry,
+                        )?;
+                        return Err(expiry);
+                    }
                     self.store.record_destination_failure(
                         &self.config,
                         &self.config_sha256,
