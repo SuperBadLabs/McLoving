@@ -282,12 +282,20 @@ impl HttpTransport {
             run_transport_before_deadline(deadline, create_private_file(&archive_path))
                 .await
                 .map_err(|error| preserve_transport_setup_error(&self.cleanup_poisoned, error))?;
-        let created = archive.metadata().await.map_err(|_| root_state_error())?;
-        let root_metadata = root_directory.metadata().map_err(|_| root_state_error())?;
+        let created = inspect_transport_archive_metadata(&archive, &archive_path)
+            .await
+            .inspect_err(|_| {
+                self.preserve_cleanup_ambiguity();
+            })?;
+        let root_metadata = root_directory.metadata().map_err(|_| {
+            self.preserve_cleanup_ambiguity();
+            root_state_error()
+        })?;
         #[cfg(target_os = "linux")]
         let identity = {
             use std::os::unix::fs::MetadataExt as _;
             if !created.is_file() || created.dev() != root_metadata.dev() || created.ino() == 0 {
+                self.preserve_cleanup_ambiguity();
                 return Err(root_state_error());
             }
             TransportRootIdentity {
@@ -296,7 +304,10 @@ impl HttpTransport {
             }
         };
         #[cfg(not(target_os = "linux"))]
-        let identity = return Err(root_state_error());
+        let identity = {
+            self.preserve_cleanup_ambiguity();
+            return Err(root_state_error());
+        };
         let pending = PendingTransportArchive {
             root_directory,
             linked_path: self.transport_root.join(&archive_name),
@@ -555,6 +566,34 @@ thread_local! {
     static TRANSIENT_SYNC_FAILURE: std::cell::RefCell<Option<PathBuf>> = const {
         std::cell::RefCell::new(None)
     };
+    static TRANSIENT_METADATA_FAILURE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+async fn inspect_transport_archive_metadata(
+    archive: &tokio::fs::File,
+    path: &Path,
+) -> Result<std::fs::Metadata, TransportError> {
+    let fail = TRANSIENT_METADATA_FAILURE.with(|target| {
+        target
+            .borrow_mut()
+            .take_if(|configured| configured.file_name() == path.file_name())
+            .is_some()
+    });
+    if fail {
+        return Err(root_state_error());
+    }
+    archive.metadata().await.map_err(|_| root_state_error())
+}
+
+#[cfg(not(test))]
+async fn inspect_transport_archive_metadata(
+    archive: &tokio::fs::File,
+    _path: &Path,
+) -> Result<std::fs::Metadata, TransportError> {
+    archive.metadata().await.map_err(|_| root_state_error())
 }
 
 #[cfg(test)]
@@ -2393,6 +2432,47 @@ mod tests {
             .transport
             .ensure_available()
             .expect("exact cleanup keeps transport available");
+    }
+
+    #[tokio::test]
+    async fn post_create_metadata_failure_poisons_transport_when_identity_is_unknown() {
+        let fixture = TransportFixture::new(
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+        )
+        .await;
+        let resolution_id = Uuid::new_v4();
+        let transient = fixture
+            ._root
+            .path()
+            .join(format!(".{resolution_id}.transport"));
+        TRANSIENT_METADATA_FAILURE.with(|target| {
+            *target.borrow_mut() = Some(transient.clone());
+        });
+        let error = fixture
+            .transport
+            .fetch_plan(
+                resolution_id,
+                &fixture.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("post-create metadata failure");
+        assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
+        assert!(
+            transient.exists(),
+            "unknown identity is preserved for restart"
+        );
+        assert_eq!(
+            fixture
+                .transport
+                .ensure_available()
+                .expect_err("unknown post-create identity poisons transport")
+                .code,
+            "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED"
+        );
     }
 
     #[tokio::test]
