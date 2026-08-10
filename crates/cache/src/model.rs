@@ -39,6 +39,7 @@ pub struct CacheConfig {
     pub receipt_key_sha256: String,
     pub max_frame_bytes: u64,
     pub max_database_bytes: u64,
+    pub max_audit_events: u64,
     pub max_cleanup_rows: u64,
     pub policies: Vec<CachePolicy>,
 }
@@ -52,6 +53,7 @@ pub struct CacheKeyRequest {
     pub pipeline_id: String,
     pub trust_class: String,
     pub cache_kind: CacheKind,
+    pub generation_sha256: String,
     pub restore_epoch: u64,
     pub logical_key_sha256: String,
     pub input_sha256: String,

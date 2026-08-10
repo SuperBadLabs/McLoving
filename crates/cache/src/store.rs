@@ -137,6 +137,15 @@ struct ReceiptDetails<'a> {
     observed_at_unix_ms: i64,
 }
 
+struct ReceiptSubject {
+    policy_id: String,
+    policy_sha256: String,
+    generation_sha256: String,
+    restore_epoch: u64,
+    namespace_sha256: String,
+    key_sha256: String,
+}
+
 impl CacheStore {
     pub fn open(config: CacheConfig, receipt_key: Vec<u8>) -> Result<Self, CacheError> {
         Self::open_with_clock(config, receipt_key, Arc::new(SystemClock))
@@ -152,13 +161,7 @@ impl CacheStore {
             return Err(CacheError::InvalidConfig);
         }
         let configuration_sha256 = canonical_digest(&config)?;
-        let generation_sha256 = canonical_digest(&GenerationBinding {
-            protocol_version: &config.protocol_version,
-            service_id: &config.service_id,
-            configuration_sha256: &configuration_sha256,
-            cache_generation: config.cache_generation,
-            restore_epoch: config.restore_epoch,
-        })?;
+        let generation_sha256 = derive_generation_sha256(&config)?;
         let database_path = PathBuf::from(&config.database_path);
         initialize_database(
             &database_path,
@@ -198,16 +201,17 @@ impl CacheStore {
             return Err(CacheError::EntryQuotaExceeded);
         }
         let content_sha256 = sha256(content);
+        let mut connection = self.open_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| CacheError::StateUnavailable)?;
+        self.assert_active_generation(&transaction)?;
         let now = self.clock.now_unix_ms()?;
         let expires_at = now
             .checked_add(
                 i64::try_from(admitted.policy.ttl_ms).map_err(|_| CacheError::InvalidConfig)?,
             )
             .ok_or(CacheError::ClockUnavailable)?;
-        let mut connection = self.open_connection()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| CacheError::StateUnavailable)?;
         let mut receipts = Vec::new();
         if let Some(stored) = load_entry(&transaction, &admitted.key_sha256)? {
             if !self.entry_matches(&transaction, &stored, &admitted)?
@@ -350,11 +354,12 @@ impl CacheStore {
         request: &CacheKeyRequest,
     ) -> Result<ReadResult, CacheError> {
         let admitted = self.admit(caller_id, caller_trust_class, request, false)?;
-        let now = self.clock.now_unix_ms()?;
         let mut connection = self.open_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| CacheError::StateUnavailable)?;
+        self.assert_active_generation(&transaction)?;
+        let now = self.clock.now_unix_ms()?;
         let Some(stored) = load_entry(&transaction, &admitted.key_sha256)? else {
             let receipt = self.append_receipt(
                 &transaction,
@@ -469,11 +474,12 @@ impl CacheStore {
         if caller_id != self.config.operator_identity {
             return Err(CacheError::Unauthorized);
         }
-        let now = self.clock.now_unix_ms()?;
         let mut connection = self.open_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| CacheError::StateUnavailable)?;
+        self.assert_active_generation(&transaction)?;
+        let now = self.clock.now_unix_ms()?;
         let limit = to_i64(self.config.max_cleanup_rows)?;
         let candidates = {
             let mut statement = transaction
@@ -505,8 +511,7 @@ impl CacheStore {
                 .map_err(|_| CacheError::StateUnavailable)?
         };
         let mut receipts = Vec::with_capacity(candidates.len());
-        for (key_sha256, policy_id, stored) in candidates {
-            let admitted = self.admitted_from_stored(&policy_id, &key_sha256, &stored)?;
+        for (key_sha256, _policy_id, stored) in candidates {
             let outcome = stale_outcome(
                 &stored,
                 &self.generation_sha256,
@@ -514,10 +519,11 @@ impl CacheStore {
                 now,
             );
             delete_entry(&transaction, &key_sha256)?;
-            receipts.push(self.append_receipt(
+            receipts.push(self.append_stored_receipt(
                 &transaction,
                 caller_id,
-                &admitted,
+                &key_sha256,
+                &stored,
                 ReceiptDetails {
                     operation: CacheOperation::Cleanup,
                     outcome,
@@ -603,7 +609,9 @@ impl CacheStore {
         if !valid_identity(caller_id) || !valid_identity(caller_trust_class) {
             return Err(CacheError::InvalidRequest);
         }
-        if request.restore_epoch != self.config.restore_epoch
+        if request.generation_sha256 != self.generation_sha256
+            || request.restore_epoch != self.config.restore_epoch
+            || !valid_digest(&request.generation_sha256)
             || !valid_digest(&request.logical_key_sha256)
             || !valid_digest(&request.input_sha256)
             || !valid_digest(&request.toolchain_sha256)
@@ -706,6 +714,24 @@ impl CacheStore {
         open_database(&self.database_path, false)
     }
 
+    fn assert_active_generation(&self, transaction: &Transaction<'_>) -> Result<(), CacheError> {
+        let active: (String, i64, i64) = transaction
+            .query_row(
+                "SELECT active_generation_sha256, active_cache_generation, active_restore_epoch
+                 FROM metadata WHERE singleton = 1 AND schema_version = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|_| CacheError::StateUnavailable)?;
+        if active.0 != self.generation_sha256
+            || active.1 != to_i64(self.config.cache_generation)?
+            || active.2 != to_i64(self.config.restore_epoch)?
+        {
+            return Err(CacheError::StateUnavailable);
+        }
+        Ok(())
+    }
+
     fn append_receipt(
         &self,
         transaction: &Transaction<'_>,
@@ -713,6 +739,85 @@ impl CacheStore {
         admitted: &AdmittedKey<'_>,
         details: ReceiptDetails<'_>,
     ) -> Result<CacheReceipt, CacheError> {
+        self.append_subject_receipt(
+            transaction,
+            caller_id,
+            ReceiptSubject {
+                policy_id: admitted.policy.policy_id.clone(),
+                policy_sha256: admitted.policy_sha256.clone(),
+                generation_sha256: admitted.canonical.generation_sha256.clone(),
+                restore_epoch: admitted.canonical.restore_epoch,
+                namespace_sha256: admitted.namespace_sha256.clone(),
+                key_sha256: admitted.key_sha256.clone(),
+            },
+            details,
+        )
+    }
+
+    fn append_stored_receipt(
+        &self,
+        transaction: &Transaction<'_>,
+        caller_id: &str,
+        key_sha256: &str,
+        stored: &StoredEntry,
+        details: ReceiptDetails<'_>,
+    ) -> Result<CacheReceipt, CacheError> {
+        let canonical: CanonicalCacheKey = serde_json::from_slice(&stored.canonical_key)
+            .map_err(|_| CacheError::StateUnavailable)?;
+        let namespace_sha256 = canonical_digest(&NamespaceBinding {
+            service_id: &canonical.service_id,
+            policy_id: &canonical.policy_id,
+            tenant_id: &canonical.tenant_id,
+            project_id: &canonical.project_id,
+            pipeline_id: &canonical.pipeline_id,
+            trust_class: &canonical.trust_class,
+        })?;
+        if canonical_bytes(&canonical)? != stored.canonical_key
+            || canonical.schema_version != KEY_SCHEMA_VERSION
+            || canonical.service_id != self.config.service_id
+            || canonical.policy_id != stored.policy_id
+            || canonical.policy_sha256 != stored.policy_sha256
+            || canonical.generation_sha256 != stored.generation_sha256
+            || canonical.restore_epoch != stored.restore_epoch
+            || namespace_sha256 != stored.namespace_sha256
+            || domain_digest(b"mcloving.cache-key/v1\0", &stored.canonical_key) != key_sha256
+            || !valid_digest(&stored.policy_sha256)
+            || !valid_digest(&stored.generation_sha256)
+            || !valid_digest(&stored.content_sha256)
+            || !stored_content_matches(stored)
+        {
+            return Err(CacheError::StateUnavailable);
+        }
+        self.append_subject_receipt(
+            transaction,
+            caller_id,
+            ReceiptSubject {
+                policy_id: stored.policy_id.clone(),
+                policy_sha256: stored.policy_sha256.clone(),
+                generation_sha256: stored.generation_sha256.clone(),
+                restore_epoch: stored.restore_epoch,
+                namespace_sha256: stored.namespace_sha256.clone(),
+                key_sha256: key_sha256.to_owned(),
+            },
+            details,
+        )
+    }
+
+    fn append_subject_receipt(
+        &self,
+        transaction: &Transaction<'_>,
+        caller_id: &str,
+        subject: ReceiptSubject,
+        details: ReceiptDetails<'_>,
+    ) -> Result<CacheReceipt, CacheError> {
+        let retained_events: i64 = transaction
+            .query_row("SELECT count(*) FROM audit_events", [], |row| row.get(0))
+            .map_err(|_| CacheError::StateUnavailable)?;
+        if u64::try_from(retained_events).map_err(|_| CacheError::StateUnavailable)?
+            >= self.config.max_audit_events
+        {
+            return Err(CacheError::StateUnavailable);
+        }
         let previous = transaction
             .query_row(
                 "SELECT event_sha256 FROM audit_events ORDER BY sequence DESC LIMIT 1",
@@ -730,12 +835,12 @@ impl CacheStore {
             operation: details.operation,
             outcome: details.outcome,
             caller_id: caller_id.to_owned(),
-            policy_id: admitted.policy.policy_id.clone(),
-            policy_sha256: admitted.policy_sha256.clone(),
-            generation_sha256: admitted.canonical.generation_sha256.clone(),
-            restore_epoch: admitted.canonical.restore_epoch,
-            namespace_sha256: admitted.namespace_sha256.clone(),
-            key_sha256: admitted.key_sha256.clone(),
+            policy_id: subject.policy_id,
+            policy_sha256: subject.policy_sha256,
+            generation_sha256: subject.generation_sha256,
+            restore_epoch: subject.restore_epoch,
+            namespace_sha256: subject.namespace_sha256,
+            key_sha256: subject.key_sha256,
             content_sha256: details.content_sha256.map(str::to_owned),
             content_bytes: details.content_bytes,
             observed_at_unix_ms: details.observed_at_unix_ms,
@@ -857,7 +962,13 @@ impl CacheStore {
         now: i64,
         receipts: &mut Vec<CacheReceipt>,
     ) -> Result<(), CacheError> {
-        let limit = to_i64(self.config.max_cleanup_rows)?;
+        let remaining = self.config.max_cleanup_rows.saturating_sub(
+            u64::try_from(receipts.len()).map_err(|_| CacheError::StateUnavailable)?,
+        );
+        if remaining == 0 {
+            return Ok(());
+        }
+        let limit = to_i64(remaining)?;
         let candidates = select_policy_candidates(
             transaction,
             &admitted.policy.policy_id,
@@ -921,6 +1032,11 @@ impl CacheStore {
             if count_fits && bytes_fit {
                 return Ok(());
             }
+            if u64::try_from(receipts.len()).map_err(|_| CacheError::StateUnavailable)?
+                >= self.config.max_cleanup_rows
+            {
+                return Err(CacheError::PolicyQuotaExceeded);
+            }
             let candidate = transaction
                 .query_row(
                     "SELECT key_sha256, canonical_key, namespace_sha256, policy_id,
@@ -945,7 +1061,12 @@ impl CacheStore {
                 &candidate,
                 ReceiptDetails {
                     operation: CacheOperation::Evict,
-                    outcome: CacheOutcome::Evicted,
+                    outcome: stale_outcome(
+                        &stored,
+                        &self.generation_sha256,
+                        self.config.restore_epoch,
+                        now,
+                    ),
                     content_sha256: Some(&stored.content_sha256),
                     content_bytes: Some(stored.content_bytes),
                     observed_at_unix_ms: now,
@@ -953,6 +1074,18 @@ impl CacheStore {
             )?);
         }
     }
+}
+
+pub fn derive_generation_sha256(config: &CacheConfig) -> Result<String, CacheError> {
+    validate_config(config)?;
+    let configuration_sha256 = canonical_digest(config)?;
+    canonical_digest(&GenerationBinding {
+        protocol_version: &config.protocol_version,
+        service_id: &config.service_id,
+        configuration_sha256: &configuration_sha256,
+        cache_generation: config.cache_generation,
+        restore_epoch: config.restore_epoch,
+    })
 }
 
 fn validate_config(config: &CacheConfig) -> Result<(), CacheError> {
@@ -967,6 +1100,7 @@ fn validate_config(config: &CacheConfig) -> Result<(), CacheError> {
         || !valid_digest(&config.receipt_key_sha256)
         || config.max_frame_bytes < 1_024
         || config.max_database_bytes == 0
+        || config.max_audit_events == 0
         || config.max_cleanup_rows == 0
         || config.max_cleanup_rows > 10_000
         || config.policies.is_empty()
@@ -1020,14 +1154,18 @@ fn initialize_database(
     generation_sha256: &str,
 ) -> Result<(), CacheError> {
     prepare_private_database(path)?;
-    let connection = open_database(path, true)?;
+    let mut connection = open_database(path, true)?;
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS metadata (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
                  service_id TEXT NOT NULL,
-                 receipt_key_id TEXT NOT NULL
+                 receipt_key_id TEXT NOT NULL,
+                 active_configuration_sha256 TEXT NOT NULL,
+                 active_generation_sha256 TEXT NOT NULL,
+                 active_cache_generation INTEGER NOT NULL CHECK (active_cache_generation > 0),
+                 active_restore_epoch INTEGER NOT NULL CHECK (active_restore_epoch >= 0)
              ) STRICT;
              CREATE TABLE IF NOT EXISTS runtime_generations (
                  configuration_sha256 TEXT PRIMARY KEY,
@@ -1062,24 +1200,61 @@ fn initialize_database(
              ) STRICT;",
         )
         .map_err(|_| CacheError::StateUnavailable)?;
-    connection
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Exclusive)
+        .map_err(|_| CacheError::StateUnavailable)?;
+    transaction
         .execute(
-            "INSERT INTO metadata(singleton, schema_version, service_id, receipt_key_id)
-             VALUES (1, 1, ?1, ?2) ON CONFLICT(singleton) DO NOTHING",
-            params![config.service_id, config.receipt_key_id],
+            "INSERT INTO metadata(
+                 singleton, schema_version, service_id, receipt_key_id,
+                 active_configuration_sha256, active_generation_sha256,
+                 active_cache_generation, active_restore_epoch
+             ) VALUES (1, 1, ?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(singleton) DO NOTHING",
+            params![
+                config.service_id,
+                config.receipt_key_id,
+                configuration_sha256,
+                generation_sha256,
+                to_i64(config.cache_generation)?,
+                to_i64(config.restore_epoch)?,
+            ],
         )
         .map_err(|_| CacheError::StateUnavailable)?;
-    let stored: (String, String) = connection
+    let stored: (String, String, String, String, i64, i64) = transaction
         .query_row(
-            "SELECT service_id, receipt_key_id FROM metadata WHERE singleton = 1 AND schema_version = 1",
+            "SELECT service_id, receipt_key_id, active_configuration_sha256,
+                    active_generation_sha256, active_cache_generation, active_restore_epoch
+             FROM metadata WHERE singleton = 1 AND schema_version = 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )
         .map_err(|_| CacheError::StateUnavailable)?;
     if stored.0 != config.service_id || stored.1 != config.receipt_key_id {
         return Err(CacheError::StateUnavailable);
     }
-    connection
+    let requested_cache_generation = to_i64(config.cache_generation)?;
+    let requested_restore_epoch = to_i64(config.restore_epoch)?;
+    let exact_active = stored.2 == configuration_sha256
+        && stored.3 == generation_sha256
+        && stored.4 == requested_cache_generation
+        && stored.5 == requested_restore_epoch;
+    let monotonic_advance = requested_cache_generation >= stored.4
+        && requested_restore_epoch >= stored.5
+        && (requested_cache_generation > stored.4 || requested_restore_epoch > stored.5);
+    if !exact_active && !monotonic_advance {
+        return Err(CacheError::StateUnavailable);
+    }
+    transaction
         .execute(
             "INSERT INTO runtime_generations(
                  configuration_sha256, implementation_sha256, cache_generation,
@@ -1095,7 +1270,7 @@ fn initialize_database(
             ],
         )
         .map_err(|_| CacheError::StateUnavailable)?;
-    let stored_generation: (String, i64, i64, String) = connection
+    let stored_generation: (String, i64, i64, String) = transaction
         .query_row(
             "SELECT implementation_sha256, cache_generation, restore_epoch, generation_sha256
              FROM runtime_generations WHERE configuration_sha256 = ?1",
@@ -1110,6 +1285,27 @@ fn initialize_database(
     {
         return Err(CacheError::StateUnavailable);
     }
+    if monotonic_advance {
+        transaction
+            .execute(
+                "UPDATE metadata
+                 SET active_configuration_sha256 = ?1,
+                     active_generation_sha256 = ?2,
+                     active_cache_generation = ?3,
+                     active_restore_epoch = ?4
+                 WHERE singleton = 1",
+                params![
+                    configuration_sha256,
+                    generation_sha256,
+                    requested_cache_generation,
+                    requested_restore_epoch,
+                ],
+            )
+            .map_err(|_| CacheError::StateUnavailable)?;
+    }
+    transaction
+        .commit()
+        .map_err(|_| CacheError::StateUnavailable)?;
     let integrity: String = connection
         .query_row("PRAGMA quick_check", [], |row| row.get(0))
         .map_err(|_| CacheError::StateUnavailable)?;

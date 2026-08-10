@@ -14,7 +14,8 @@ use crate::{
 
 const MAX_CONFIG_BYTES: usize = 256 * 1_024;
 const MAX_RECEIPT_KEY_BYTES: usize = 4 * 1_024;
-const RESPONSE_OVERHEAD_BYTES: u64 = 64 * 1_024;
+const MAX_RECEIPT_RESPONSE_BYTES: u64 = 4 * 1_024;
+const RESPONSE_ENVELOPE_BYTES: u64 = 1_024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -35,6 +36,8 @@ pub enum CacheCommand {
     },
     VerifyAudit {
         caller_id: String,
+        expected_events: u64,
+        expected_head_sha256: String,
     },
 }
 
@@ -86,11 +89,20 @@ impl CacheCommand {
                 key,
             } => CacheResponse::from_result(store.read(&caller_id, &caller_trust_class, &key)),
             Self::Cleanup { caller_id } => CacheResponse::from_result(store.cleanup(&caller_id)),
-            Self::VerifyAudit { caller_id } => {
+            Self::VerifyAudit {
+                caller_id,
+                expected_events,
+                expected_head_sha256,
+            } => {
                 if caller_id != operator_identity {
                     CacheResponse::from_error(CacheError::Unauthorized)
                 } else {
-                    CacheResponse::from_result(store.verify_audit_chain())
+                    match store.verify_audit_chain_against(expected_events, &expected_head_sha256) {
+                        Ok(()) => CacheResponse::AuditVerified {
+                            events: expected_events,
+                        },
+                        Err(error) => CacheResponse::from_error(error),
+                    }
                 }
             }
         }
@@ -152,6 +164,7 @@ impl CacheResponse {
 pub enum FrameReadError {
     Io,
     Oversized,
+    Unterminated,
 }
 
 pub fn read_bounded_frame<R: Read>(
@@ -163,7 +176,7 @@ pub fn read_bounded_frame<R: Read>(
     loop {
         match input.read(&mut byte) {
             Ok(0) if frame.is_empty() => return Ok(None),
-            Ok(0) => return Ok(Some(frame)),
+            Ok(0) => return Err(FrameReadError::Unterminated),
             Ok(_) if byte[0] == b'\n' => {
                 if frame.last() == Some(&b'\r') {
                     frame.pop();
@@ -200,7 +213,7 @@ pub fn serialized_response_fits_frame(serialized_bytes: usize, maximum: u64) -> 
 }
 
 pub fn load_config(path: &Path) -> Result<CacheConfig, CacheError> {
-    let bytes = read_bounded_regular_file(path, MAX_CONFIG_BYTES, false)?;
+    let bytes = read_bounded_regular_file(path, MAX_CONFIG_BYTES, true, true)?;
     let config: CacheConfig = parse_json_no_duplicates(&bytes)?;
     let largest_entry = config
         .policies
@@ -213,17 +226,24 @@ pub fn load_config(path: &Path) -> Result<CacheConfig, CacheError> {
         .and_then(|bytes| bytes.checked_div(3))
         .and_then(|groups| groups.checked_mul(4))
         .ok_or(CacheError::InvalidConfig)?;
-    if encoded
-        .checked_add(RESPONSE_OVERHEAD_BYTES)
-        .is_none_or(|minimum| config.max_frame_bytes < minimum)
-    {
+    let read_response_minimum = encoded
+        .checked_add(MAX_RECEIPT_RESPONSE_BYTES)
+        .and_then(|bytes| bytes.checked_add(RESPONSE_ENVELOPE_BYTES))
+        .ok_or(CacheError::InvalidConfig)?;
+    let receipt_response_minimum = config
+        .max_cleanup_rows
+        .checked_add(1)
+        .and_then(|receipts| receipts.checked_mul(MAX_RECEIPT_RESPONSE_BYTES))
+        .and_then(|bytes| bytes.checked_add(RESPONSE_ENVELOPE_BYTES))
+        .ok_or(CacheError::InvalidConfig)?;
+    if config.max_frame_bytes < read_response_minimum.max(receipt_response_minimum) {
         return Err(CacheError::InvalidConfig);
     }
     Ok(config)
 }
 
 pub fn read_private_receipt_key(path: &Path) -> Result<Vec<u8>, CacheError> {
-    read_bounded_regular_file(path, MAX_RECEIPT_KEY_BYTES, true)
+    read_bounded_regular_file(path, MAX_RECEIPT_KEY_BYTES, true, false)
 }
 
 #[cfg(unix)]
@@ -231,6 +251,7 @@ fn read_bounded_regular_file(
     path: &Path,
     maximum: usize,
     private: bool,
+    immutable: bool,
 ) -> Result<Vec<u8>, CacheError> {
     use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
@@ -243,6 +264,7 @@ fn read_bounded_regular_file(
         || metadata.len() > maximum as u64
         || (private
             && (metadata.uid() != nix::unistd::geteuid().as_raw() || metadata.mode() & 0o077 != 0))
+        || (immutable && metadata.mode() & 0o777 != 0o400)
     {
         return Err(CacheError::InvalidConfig);
     }
@@ -261,6 +283,7 @@ fn read_bounded_regular_file(
     _path: &Path,
     _maximum: usize,
     _private: bool,
+    _immutable: bool,
 ) -> Result<Vec<u8>, CacheError> {
     Err(CacheError::InvalidConfig)
 }

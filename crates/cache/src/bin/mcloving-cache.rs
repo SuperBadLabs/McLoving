@@ -44,7 +44,7 @@ fn run() -> Result<(), CacheError> {
         let frame = match read_bounded_frame(&mut input, maximum) {
             Ok(Some(frame)) => frame,
             Ok(None) => break,
-            Err(FrameReadError::Oversized) => {
+            Err(FrameReadError::Oversized | FrameReadError::Unterminated) => {
                 write_response(
                     &mut output,
                     &CacheResponse::from_error(CacheError::MalformedProtocol),

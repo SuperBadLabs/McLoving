@@ -10,21 +10,32 @@ use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 
 #[derive(Debug)]
-struct ManualClock(AtomicI64);
+struct ManualClock {
+    now: AtomicI64,
+    calls: AtomicI64,
+}
 
 impl ManualClock {
     fn new(now: i64) -> Self {
-        Self(AtomicI64::new(now))
+        Self {
+            now: AtomicI64::new(now),
+            calls: AtomicI64::new(0),
+        }
     }
 
     fn set(&self, now: i64) {
-        self.0.store(now, Ordering::SeqCst);
+        self.now.store(now, Ordering::SeqCst);
+    }
+
+    fn calls(&self) -> i64 {
+        self.calls.load(Ordering::SeqCst)
     }
 }
 
 impl Clock for ManualClock {
     fn now_unix_ms(&self) -> Result<i64, CacheError> {
-        Ok(self.0.load(Ordering::SeqCst))
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.now.load(Ordering::SeqCst))
     }
 }
 
@@ -71,12 +82,13 @@ fn config(temp: &TempDir, key: &[u8], policies: Vec<CachePolicy>) -> CacheConfig
         receipt_key_sha256: digest(key),
         max_frame_bytes: 64 * 1_024,
         max_database_bytes: 1_024,
+        max_audit_events: 1_024,
         max_cleanup_rows: 32,
         policies,
     }
 }
 
-fn request(policy_id: &str, trust: &str, seed: &[u8]) -> CacheKeyRequest {
+fn request(generation_sha256: &str, policy_id: &str, trust: &str, seed: &[u8]) -> CacheKeyRequest {
     CacheKeyRequest {
         policy_id: policy_id.to_owned(),
         tenant_id: "tenant-a".to_owned(),
@@ -84,6 +96,7 @@ fn request(policy_id: &str, trust: &str, seed: &[u8]) -> CacheKeyRequest {
         pipeline_id: "pipeline-a".to_owned(),
         trust_class: trust.to_owned(),
         cache_kind: CacheKind::Dependency,
+        generation_sha256: generation_sha256.to_owned(),
         restore_epoch: 7,
         logical_key_sha256: digest(&[seed, b"logical"].concat()),
         input_sha256: digest(&[seed, b"input"].concat()),
@@ -115,7 +128,7 @@ fn cold_publication_and_valid_hit_are_byte_exact_and_audited() {
         clock,
     )
     .unwrap();
-    let request = request("policy-a", "trusted", b"one");
+    let request = request(store.generation_sha256(), "policy-a", "trusted", b"one");
 
     let cold = store.read("reader", "trusted", &request).unwrap();
     assert_eq!(cold.status, ReadStatus::Miss);
@@ -163,7 +176,12 @@ fn tenant_pipeline_principal_and_trust_substitution_fail_closed() {
         clock,
     )
     .unwrap();
-    let untrusted = request("policy-untrusted", "untrusted", b"same");
+    let untrusted = request(
+        store.generation_sha256(),
+        "policy-untrusted",
+        "untrusted",
+        b"same",
+    );
     store
         .publish(
             "untrusted-writer",
@@ -173,7 +191,12 @@ fn tenant_pipeline_principal_and_trust_substitution_fail_closed() {
         )
         .unwrap();
 
-    let trusted = request("policy-trusted", "trusted", b"same");
+    let trusted = request(
+        store.generation_sha256(),
+        "policy-trusted",
+        "trusted",
+        b"same",
+    );
     assert_eq!(
         store
             .read("trusted-reader", "trusted", &trusted)
@@ -236,7 +259,7 @@ fn corrupt_content_and_canonical_key_are_rejected_without_returning_bytes() {
     );
     let database_path = config.database_path.clone();
     let store = open_store(config, &key, clock).unwrap();
-    let request = request("policy-a", "trusted", b"corrupt");
+    let request = request(store.generation_sha256(), "policy-a", "trusted", b"corrupt");
     store
         .publish("writer", "trusted", &request, b"original")
         .unwrap();
@@ -308,7 +331,12 @@ fn concurrent_same_content_converges_and_different_content_never_replaces() {
         )
         .unwrap(),
     );
-    let race_request = Arc::new(request("policy-a", "trusted", b"race"));
+    let race_request = Arc::new(request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"race",
+    ));
     let barrier = Arc::new(Barrier::new(3));
     let mut handles = Vec::new();
     for content in [b"winner-a".as_slice(), b"winner-b".as_slice()] {
@@ -358,7 +386,12 @@ fn concurrent_same_content_converges_and_different_content_never_replaces() {
         .unwrap();
     assert_eq!(replay.status, PublishStatus::Replay);
 
-    let same_request = Arc::new(request("policy-a", "trusted", b"same-race"));
+    let same_request = Arc::new(request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"same-race",
+    ));
     let barrier = Arc::new(Barrier::new(3));
     let mut handles = Vec::new();
     for _ in 0..2 {
@@ -402,9 +435,9 @@ fn lru_eviction_expiry_generation_rotation_and_restore_are_cold() {
     bounded_policy.ttl_ms = 100;
     let first_config = config(&temp, &key, vec![bounded_policy.clone()]);
     let store = open_store(first_config.clone(), &key, Arc::clone(&clock)).unwrap();
-    let one = request("policy-a", "trusted", b"one");
-    let two = request("policy-a", "trusted", b"two");
-    let three = request("policy-a", "trusted", b"three");
+    let one = request(store.generation_sha256(), "policy-a", "trusted", b"one");
+    let two = request(store.generation_sha256(), "policy-a", "trusted", b"two");
+    let three = request(store.generation_sha256(), "policy-a", "trusted", b"three");
     store.publish("writer", "trusted", &one, b"1111").unwrap();
     store.publish("writer", "trusted", &two, b"2222").unwrap();
     store.read("reader", "trusted", &one).unwrap();
@@ -424,7 +457,12 @@ fn lru_eviction_expiry_generation_rotation_and_restore_are_cold() {
         ReadStatus::Miss
     );
 
-    let rotating = request("policy-a", "trusted", b"rotation");
+    let rotating = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"rotation",
+    );
     clock.set(60_000);
     store
         .publish("writer", "trusted", &rotating, b"old1")
@@ -432,17 +470,44 @@ fn lru_eviction_expiry_generation_rotation_and_restore_are_cold() {
     let mut generation_two = first_config.clone();
     generation_two.cache_generation = 2;
     let rotated = open_store(generation_two, &key, Arc::clone(&clock)).unwrap();
+    assert!(matches!(
+        rotated.read("reader", "trusted", &rotating),
+        Err(CacheError::InvalidRequest)
+    ));
+    let rotated_request = request(
+        rotated.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"rotation",
+    );
     assert_eq!(
-        rotated.read("reader", "trusted", &rotating).unwrap().status,
+        rotated
+            .read("reader", "trusted", &rotated_request)
+            .unwrap()
+            .status,
         ReadStatus::Miss
     );
+    assert!(matches!(
+        store.read("reader", "trusted", &rotating),
+        Err(CacheError::StateUnavailable)
+    ));
+    assert!(matches!(
+        open_store(first_config.clone(), &key, Arc::clone(&clock)),
+        Err(CacheError::StateUnavailable)
+    ));
     let cleanup = rotated.cleanup("operator").unwrap();
     assert!(cleanup.removed >= 1);
 
     let mut restore_two = first_config;
+    restore_two.cache_generation = 3;
     restore_two.restore_epoch = 8;
     let restored = open_store(restore_two, &key, clock).unwrap();
-    let mut restored_request = rotating;
+    let mut restored_request = request(
+        restored.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"rotation",
+    );
     restored_request.restore_epoch = 8;
     assert_eq!(
         restored
@@ -465,8 +530,13 @@ fn physically_restored_database_cannot_serve_the_new_restore_epoch() {
         vec![policy("policy-a", "trusted", "reader", "writer")],
     );
     let database_path = first_config.database_path.clone();
-    let old_request = request("policy-a", "trusted", b"restored");
     let store = open_store(first_config.clone(), &key, Arc::clone(&clock)).unwrap();
+    let old_request = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"restored",
+    );
     store
         .publish("writer", "trusted", &old_request, b"old-state")
         .unwrap();
@@ -479,7 +549,12 @@ fn physically_restored_database_cannot_serve_the_new_restore_epoch() {
         .publish(
             "writer",
             "trusted",
-            &request("policy-a", "trusted", b"post-backup"),
+            &request(
+                store.generation_sha256(),
+                "policy-a",
+                "trusted",
+                b"post-backup",
+            ),
             b"new-state",
         )
         .unwrap();
@@ -490,6 +565,7 @@ fn physically_restored_database_cannot_serve_the_new_restore_epoch() {
     restored_config.restore_epoch = 8;
     let restored = open_store(restored_config, &key, clock).unwrap();
     let mut current_request = old_request;
+    current_request.generation_sha256 = restored.generation_sha256().to_owned();
     current_request.restore_epoch = 8;
     assert_eq!(
         restored
@@ -520,7 +596,12 @@ fn an_expired_key_is_atomically_replaced_instead_of_replayed() {
         Arc::clone(&clock),
     )
     .unwrap();
-    let request = request("policy-a", "trusted", b"expired-republish");
+    let request = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"expired-republish",
+    );
     store
         .publish("writer", "trusted", &request, b"first")
         .unwrap();
@@ -545,6 +626,43 @@ fn an_expired_key_is_atomically_replaced_instead_of_replayed() {
 }
 
 #[test]
+fn ttl_is_sampled_only_after_the_write_transaction_is_acquired() {
+    let temp = TempDir::new().unwrap();
+    let key = [19_u8; 32];
+    let clock = Arc::new(ManualClock::new(69_000));
+    let mut short_policy = policy("policy-a", "trusted", "reader", "writer");
+    short_policy.ttl_ms = 100;
+    let config = config(&temp, &key, vec![short_policy]);
+    let database_path = config.database_path.clone();
+    let store = Arc::new(open_store(config, &key, Arc::clone(&clock)).unwrap());
+    let request = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"locked-ttl",
+    );
+    store
+        .publish("writer", "trusted", &request, b"value")
+        .unwrap();
+    assert_eq!(clock.calls(), 1);
+
+    let lock = Connection::open(database_path).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+    let reader_store = Arc::clone(&store);
+    let handle = std::thread::spawn(move || {
+        ready_sender.send(()).unwrap();
+        reader_store.read("reader", "trusted", &request)
+    });
+    ready_receiver.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(clock.calls(), 1);
+    clock.set(69_101);
+    lock.execute_batch("COMMIT").unwrap();
+    assert_eq!(handle.join().unwrap().unwrap().status, ReadStatus::Miss);
+}
+
+#[test]
 fn cleanup_is_bounded_and_audit_tampering_is_detected() {
     let temp = TempDir::new().unwrap();
     let key = [12_u8; 32];
@@ -562,7 +680,7 @@ fn cleanup_is_bounded_and_audit_tampering_is_detected() {
             .publish(
                 "writer",
                 "trusted",
-                &request("policy-a", "trusted", seed),
+                &request(store.generation_sha256(), "policy-a", "trusted", seed),
                 b"data",
             )
             .unwrap();
@@ -592,6 +710,76 @@ fn cleanup_is_bounded_and_audit_tampering_is_detected() {
 }
 
 #[test]
+fn cleanup_removes_rows_for_a_policy_absent_from_the_active_generation() {
+    let temp = TempDir::new().unwrap();
+    let key = [17_u8; 32];
+    let clock = Arc::new(ManualClock::new(72_000));
+    let first_config = config(
+        &temp,
+        &key,
+        vec![policy("policy-a", "trusted", "reader", "writer")],
+    );
+    let first = open_store(first_config.clone(), &key, Arc::clone(&clock)).unwrap();
+    let request = request(
+        first.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"removed-policy",
+    );
+    first
+        .publish("writer", "trusted", &request, b"retained")
+        .unwrap();
+    drop(first);
+
+    let mut second_config = first_config;
+    second_config.cache_generation = 2;
+    second_config.policies = vec![policy(
+        "policy-b",
+        "trusted",
+        "other-reader",
+        "other-writer",
+    )];
+    let second = open_store(second_config, &key, clock).unwrap();
+    let cleanup = second.cleanup("operator").unwrap();
+    assert_eq!(cleanup.removed, 1);
+    assert_eq!(
+        cleanup.receipts[0].event.outcome,
+        mcloving_cache::CacheOutcome::StaleGeneration
+    );
+    assert_eq!(cleanup.receipts[0].event.policy_id, "policy-a");
+    second.verify_audit_chain().unwrap();
+}
+
+#[test]
+fn audit_event_quota_rolls_back_the_operation_that_would_exceed_it() {
+    let temp = TempDir::new().unwrap();
+    let key = [18_u8; 32];
+    let clock = Arc::new(ManualClock::new(74_000));
+    let mut bounded = config(
+        &temp,
+        &key,
+        vec![policy("policy-a", "trusted", "reader", "writer")],
+    );
+    bounded.max_audit_events = 1;
+    let store = open_store(bounded, &key, clock).unwrap();
+    let request = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"audit-quota",
+    );
+    assert_eq!(
+        store.read("reader", "trusted", &request).unwrap().status,
+        ReadStatus::Miss
+    );
+    assert!(matches!(
+        store.read("reader", "trusted", &request),
+        Err(CacheError::StateUnavailable)
+    ));
+    assert_eq!(store.verify_audit_chain().unwrap(), 1);
+}
+
+#[test]
 fn audit_deletion_reordering_and_signature_substitution_are_detected() {
     for mutation in [
         "DELETE FROM audit_events WHERE sequence = 1",
@@ -612,7 +800,7 @@ fn audit_deletion_reordering_and_signature_substitution_are_detected() {
             .publish(
                 "writer",
                 "trusted",
-                &request("policy-a", "trusted", b"audit"),
+                &request(store.generation_sha256(), "policy-a", "trusted", b"audit"),
                 b"data",
             )
             .unwrap();

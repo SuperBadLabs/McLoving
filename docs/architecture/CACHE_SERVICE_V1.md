@@ -24,13 +24,16 @@ RPC, connector, observer, or external-effect authority.
 
 The process may:
 
-- read one bounded immutable configuration and one private receipt HMAC key;
+- read one bounded, owner-private, read-only configuration and one private
+  receipt HMAC key;
 - read bounded cache commands and publication bytes from stdin;
 - maintain one private FULL-synchronous SQLite database;
 - return bounded cache bytes and signed receipts on stdout; and
 - execute no cached bytes.
 
-Configuration binds the protocol, service and implementation identity,
+The configuration is admitted only as an owner-owned, single-link regular file
+with no group/other access and no write bits. Configuration binds the protocol,
+service and implementation identity,
 deployment and operator identity, monotonically increasing cache generation,
 receipt key identity and digest, private database path, all limits, and a
 sorted closed policy set. The running executable digest, configuration digest,
@@ -51,7 +54,9 @@ Every cache key is canonical JSON and its domain-separated SHA-256 binds:
 
 Identifiers are bounded printable ASCII without path syntax. Digests are exact
 lowercase SHA-256. Policy sets and principals are strictly sorted and
-duplicate-free. The service derives policy and generation digests itself; a
+duplicate-free. The service derives policy and generation digests itself.
+Callers must present that exact generation digest with every key request; a
+stale caller cannot be silently rebound to the active generation, and a
 request cannot supply replacement policy bytes.
 
 The exact trust class is part of both the policy and canonical key. A publisher
@@ -77,17 +82,24 @@ returning content. Any mismatch is a corruption rejection: the row is removed
 in the same transaction and no bytes are returned.
 
 Policy independently bounds entry bytes, total live bytes, live entry count,
-and TTL within service-wide maxima. Before publication, expired rows are
+and TTL within service-wide maxima. Configuration also bounds retained audit
+events. Before publication, expired rows are
 removed and deterministic least-recently-accessed rows are evicted until both
-byte and count budgets admit the new row. Access order is a database sequence,
-not caller time. Publication, read, eviction, expiry, cleanup, and rejection
-use the service clock; caller timestamps never determine eligibility.
+byte and count budgets admit the new row. Receipt-producing eviction work is
+bounded before commit so its complete response always fits the configured
+frame. Access order is a database sequence, not caller time. Publication, read,
+eviction, expiry, cleanup, and rejection sample the service clock only after
+the write transaction is acquired; caller timestamps never determine
+eligibility.
 
 ## Generation, restore, and cleanup
 
 Every operation presents the current cache generation digest and controller
 restore epoch. A generation rotation changes the derived generation digest;
-old rows become misses and are cleanup-eligible. A controller restore advances
+the database atomically advances a monotonic active-generation/restore pointer,
+and already-running stale processes fail closed on their next transaction. Old
+rows become misses and are cleanup-eligible even when their policy no longer
+exists in the active configuration. A controller restore advances
 its existing monotonic restore epoch, so rows from a restored cache database
 cannot satisfy current reads even when their logical key and content are
 otherwise identical. Cleanup removes expired rows and any row outside the
@@ -99,8 +111,8 @@ disabled rather than treating restored rows as current.
 
 ## Auditable provenance
 
-Every observable outcome appends a canonical event inside the same transaction
-as the state transition. Events bind service/configuration/implementation,
+Every admitted cache outcome appends a canonical event inside the same
+transaction as the state transition. Events bind service/configuration/implementation,
 policy/generation/restore epoch, caller, namespace/key/content digests, byte
 length, operation, outcome, event time, and the previous event digest. The
 event digest is domain-separated SHA-256 and its signature is HMAC-SHA-256.
@@ -109,8 +121,19 @@ bytes, digest, and signature. Verification against an independently retained
 receipt count and head digest rejects deletion, reordering, substitution,
 malformed canonical bytes, or signature mismatch.
 
+The standalone audit-verification command requires that independently retained
+count and head; it cannot bless a merely self-consistent shorter local chain.
+Audit growth is capped by `max_audit_events`. The transaction that would exceed
+the cap rolls back and the service fails closed until the operator retains the
+head and provisions a new bounded database generation. Denied admission and
+malformed or unterminated transport frames never mutate cache state and are not
+inserted into this authoritative cache-outcome chain because their caller and
+key fields have not passed canonical admission; the supervising controller
+owns transport-denial telemetry.
+
 Receipts never contain content. The standalone response carries content only
-for a verified hit and is bounded by the configured frame limit.
+for a verified hit and is bounded by the configured frame limit. Nonempty EOF
+without a newline is a malformed NDJSON frame and is never executed.
 
 ## Required proof
 
@@ -124,6 +147,7 @@ Contained tests must prove:
 - size, count, TTL, deterministic eviction, and bounded cleanup;
 - generation rotation and restored-state cold behavior;
 - complete signed audit-chain verification and tamper rejection;
+- independently retained audit-head verification and bounded audit exhaustion;
 - duplicate/unknown JSON rejection and bounded standalone frames;
 - private state/key admission and zero network or execution authority; and
 - a sealed Mario inventory assertion proving zero production cache authority.

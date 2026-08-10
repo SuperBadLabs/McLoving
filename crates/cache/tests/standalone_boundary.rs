@@ -4,8 +4,8 @@ use std::process::{Command, Stdio};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use mcloving_cache::{
-    CacheConfig, CacheKeyRequest, CacheKind, CachePolicy, FrameReadError, read_bounded_frame,
-    serialized_response_fits_frame,
+    CacheConfig, CacheError, CacheKeyRequest, CacheKind, CachePolicy, FrameReadError,
+    derive_generation_sha256, load_config, read_bounded_frame, serialized_response_fits_frame,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -42,6 +42,7 @@ fn fixture(temp: &TempDir, binary: &[u8], receipt_key: &[u8]) -> (CacheConfig, C
         receipt_key_sha256: digest(receipt_key),
         max_frame_bytes: 128 * 1_024,
         max_database_bytes: 1_024,
+        max_audit_events: 1_024,
         max_cleanup_rows: 16,
         policies: vec![CachePolicy {
             policy_id: "policy-a".to_owned(),
@@ -65,6 +66,7 @@ fn fixture(temp: &TempDir, binary: &[u8], receipt_key: &[u8]) -> (CacheConfig, C
         pipeline_id: "pipeline-a".to_owned(),
         trust_class: "trusted".to_owned(),
         cache_kind: CacheKind::Dependency,
+        generation_sha256: derive_generation_sha256(&config).unwrap(),
         restore_epoch: 9,
         logical_key_sha256: digest(b"logical"),
         input_sha256: digest(b"input"),
@@ -77,11 +79,17 @@ fn fixture(temp: &TempDir, binary: &[u8], receipt_key: &[u8]) -> (CacheConfig, C
 fn write_fixture(temp: &TempDir, config: &CacheConfig, receipt_key: &[u8]) -> (String, String) {
     let config_path = temp.path().join("cache.json");
     let key_path = temp.path().join("receipt.key");
+    #[cfg(unix)]
+    if config_path.exists() {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     std::fs::write(&config_path, serde_json::to_vec(config).unwrap()).unwrap();
     std::fs::write(&key_path, receipt_key).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o400)).unwrap();
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     (
@@ -108,6 +116,12 @@ fn standalone_process_is_strict_bounded_and_preserves_byte_exact_hits() {
     let mut input = child.stdin.take().unwrap();
     let commands = [
         json!({
+            "operation": "verify_audit",
+            "caller_id": "operator",
+            "expected_events": 0,
+            "expected_head_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        }),
+        json!({
             "operation": "read",
             "caller_id": "reader",
             "caller_trust_class": "trusted",
@@ -126,7 +140,6 @@ fn standalone_process_is_strict_bounded_and_preserves_byte_exact_hits() {
             "caller_trust_class": "trusted",
             "key": request,
         }),
-        json!({"operation": "verify_audit", "caller_id": "operator"}),
     ];
     for command in commands {
         serde_json::to_writer(&mut input, &command).unwrap();
@@ -156,15 +169,15 @@ fn standalone_process_is_strict_bounded_and_preserves_byte_exact_hits() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(responses.len(), 6);
-    assert_eq!(responses[0]["status"], "read");
-    assert_eq!(responses[0]["outcome"], "miss");
-    assert_eq!(responses[1]["status"], "published");
-    assert_eq!(responses[1]["outcome"], "published");
-    assert_eq!(responses[2]["status"], "read");
-    assert_eq!(responses[2]["outcome"], "hit");
-    assert_eq!(responses[2]["content_base64"], BASE64.encode(b"sealed"));
-    assert_eq!(responses[3]["status"], "audit_verified");
-    assert_eq!(responses[3]["events"], 3);
+    assert_eq!(responses[0]["status"], "audit_verified");
+    assert_eq!(responses[0]["events"], 0);
+    assert_eq!(responses[1]["status"], "read");
+    assert_eq!(responses[1]["outcome"], "miss");
+    assert_eq!(responses[2]["status"], "published");
+    assert_eq!(responses[2]["outcome"], "published");
+    assert_eq!(responses[3]["status"], "read");
+    assert_eq!(responses[3]["outcome"], "hit");
+    assert_eq!(responses[3]["content_base64"], BASE64.encode(b"sealed"));
     assert_eq!(responses[4]["status"], "error");
     assert_eq!(responses[5]["status"], "error");
 }
@@ -237,6 +250,29 @@ fn executable_and_private_key_substitution_fail_before_state_creation() {
 }
 
 #[test]
+fn mutable_configuration_fails_before_state_creation() {
+    let binary_path = env!("CARGO_BIN_EXE_mcloving-cache");
+    let binary = std::fs::read(binary_path).unwrap();
+    let receipt_key = [24_u8; 32];
+    let temp = private_temp();
+    let (config, _) = fixture(&temp, &binary, &receipt_key);
+    let (config_path, key_path) = write_fixture(&temp, &config, &receipt_key);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let output = Command::new(binary_path)
+        .args(["--config", &config_path, "--receipt-key", &key_path])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert!(!temp.path().join("cache.sqlite3").exists());
+}
+
+#[test]
 fn bounded_frame_reader_discards_only_the_oversized_frame() {
     let mut input = std::io::Cursor::new(b"12345\nok\n".as_slice());
     assert_eq!(
@@ -249,4 +285,28 @@ fn bounded_frame_reader_discards_only_the_oversized_frame() {
     );
     assert!(serialized_response_fits_frame(3, 4));
     assert!(!serialized_response_fits_frame(4, 4));
+    let mut unterminated = std::io::Cursor::new(b"ok".as_slice());
+    assert_eq!(
+        read_bounded_frame(&mut unterminated, 4),
+        Err(FrameReadError::Unterminated)
+    );
+}
+
+#[test]
+fn config_rejects_a_frame_too_small_for_a_committed_receipt_batch() {
+    let receipt_key = [23_u8; 32];
+    let temp = private_temp();
+    let (mut config, _) = fixture(&temp, b"binary", &receipt_key);
+    config.max_frame_bytes = (config.max_cleanup_rows + 1) * 4 * 1_024;
+    let config_path = temp.path().join("undersized-frame.json");
+    std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o400)).unwrap();
+    }
+    assert!(matches!(
+        load_config(&config_path),
+        Err(CacheError::InvalidConfig)
+    ));
 }
