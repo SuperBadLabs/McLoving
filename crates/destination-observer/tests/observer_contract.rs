@@ -51,6 +51,7 @@ enum Mode {
     UnterminatedEscapedSecret,
     HeaderSecret,
     OversizedHeader,
+    OversizedHeaderOversizedBody,
     DuplicateContentType,
     Trailer,
     TrailerSecret,
@@ -389,6 +390,14 @@ async fn destination_handler(
     if matches!(mode, Mode::Oversized) {
         return json_response(StatusCode::OK, vec![b'x'; 32 * 1024]);
     }
+    if matches!(mode, Mode::OversizedHeaderOversizedBody) {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .header("x-oversized", "x".repeat(9 * 1024))
+            .body(Body::from(vec![b'x'; 32 * 1024]))
+            .unwrap();
+    }
     if matches!(
         mode,
         Mode::OutageOversizedChunked | Mode::OutageOversizedChunkedSecret
@@ -702,6 +711,7 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         Mode::OutageOversized,
         Mode::Timeout,
         Mode::OversizedHeader,
+        Mode::OversizedHeaderOversizedBody,
     ] {
         let rig = Rig::new().await;
         rig.set_mode(mode);

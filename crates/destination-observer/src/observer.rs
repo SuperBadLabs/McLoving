@@ -447,6 +447,12 @@ impl DestinationObserver {
         let header_bound =
             enforce_header_bound(response.headers(), self.config.limits.max_header_bytes);
         let status = response.status();
+        if let Err(error) = header_bound {
+            if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                return Err(ObserverError::DestinationUnauthorized);
+            }
+            return Err(error);
+        }
         let content_types: Vec<_> = response.headers().get_all(CONTENT_TYPE).iter().collect();
         let valid_content_type = content_types.len() == 1
             && content_types[0]
@@ -508,7 +514,6 @@ impl DestinationObserver {
         if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
             return Err(ObserverError::DestinationUnauthorized);
         }
-        header_bound?;
         if status != StatusCode::OK {
             return Err(ObserverError::DestinationUnavailable);
         }
