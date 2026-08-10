@@ -316,22 +316,33 @@ the same resolution ID with different content is denied. A crash after claim
 but before receipt is fail-closed and requires reconciliation; it never starts
 a second mutable resolution silently.
 
-Verified artifacts are copied from transport into a unique private staging
-directory using content-addressed filenames, synchronized, made immutable, and
-published by atomic no-overwrite rename below the output root. The complete
-retained tree and every ancestor mode/owner/inode are verified before success.
-That retained-tree verification uses an iterative path-distinct FIFO, enforces
-its one-million-entry bound before worklist insertion, and enforces depth 4,096
-before descent; it does not recurse on the process stack.
-Late publication is withdrawn. Ambiguous cleanup or publication state is
-retained and reported rather than guessed.
+Transport creates one exclusive mode-`0600` regular file named
+`.<resolution-id>.transport` directly beneath the pinned transport root. Every
+verified artifact occupies one contiguous admitted slice of that file. The
+descriptor-returning exclusive create, retained device/inode identity,
+nonblocking no-follow reopen, exact aggregate length, per-slice digest, and
+final link revalidation eliminate a create-then-open directory window.
+
+Publication copies the verified slices into one unique regular staging archive,
+synchronizes and seals that inode to mode `0400`, and publishes it by atomic
+no-overwrite rename below the output root. The archive has an eight-byte
+big-endian header length, a bounded strict-JSON
+`mcloving.dependency-archive/v1` header containing the exact
+`mcloving.dependency-manifest/v1` and a closed sorted entry table, then one
+contiguous payload for each unique content digest. Verification requires exact
+schema and manifest equality, unique closed logical paths, contiguous offsets,
+exact total length, every payload digest, the full archive digest, unchanged
+file fingerprint, and final pathname-to-inode equality. No mutable stage,
+artifact, or bundle subdirectory is created. Late publication is withdrawn;
+ambiguous cleanup or publication state is retained and reported rather than
+guessed.
 
 A matching completed request verifies and returns the exact signed receipt
 without repository access. The receipt binds all request/configuration,
 source/lock/plan/graph, repository/grant, adapter/resolver/toolchain,
-attestation, artifact path/size/content, retained-tree, marker-set, generation,
+attestation, artifact path/size/content, retained-archive, marker-set, generation,
 deadline, and rollback lineage fields. HMAC-SHA-256 covers canonical receipt
-bytes. The verifier re-hashes the retained tree and refuses substituted,
+bytes. The verifier re-hashes the retained archive and refuses substituted,
 missing, extra, mutable, or late content.
 
 Authority files are canonical absolute paths outside both mutable resolver
@@ -341,17 +352,19 @@ roots are disjoint before and after resolution: neither may contain the other.
 The private output layout contains `.mcloving-dependency-output.lock` plus
 mutable `claims/`, `ambiguities/`, `receipts/`, `completions/`, and `bundles/`
 directories.
-Claims are durable mode-`0600` `mcloving.dependency-claim/v1` JSON. A unique mode-`0700` stage is
-populated with content-addressed artifacts, files are synchronized and sealed
-to `0400`, the artifacts directory is sealed to `0500`, and the stage is
-renamed beneath `bundles/<resolution-id>`. The bundle root is sealed to `0500`
-before its parent entry is synchronized. `mcloving.dependency-manifest/v1`
-binds the exact node-to-content mapping. The retained-tree digest covers every
-relative path, mode, size, and content digest. Only then is a mode-`0400`
+Claims are durable mode-`0600` `mcloving.dependency-claim/v1` JSON. A unique
+mode-`0600` `bundles/.<resolution-id>.<uuid>.stage` regular file is populated
+with the bounded archive header and content-addressed payloads, synchronized,
+sealed to `0400`, and atomically renamed to
+`bundles/<resolution-id>.bundle`. The `bundles/` parent is synchronized after
+the rename. The archive manifest and entry table bind the exact node-to-content
+mapping, while the receipt's compatibility-named `retained_tree_sha256` field
+holds the digest of every byte in the sealed archive. Only then is a mode-`0400`
 `mcloving.dependency-receipt/v1` written and HMAC-SHA-256 signed. While the
 durable claim still blocks replay, the worker revalidates that signed receipt
-against the complete retained tree, durably removes the exact private transport
-resolution, and rechecks the deadline. Only then is a mode-`0400`
+against the complete retained archive, durably removes the exact private
+transport archive by its retained device/inode identity, and rechecks the
+deadline. Only then is a mode-`0400`
 `mcloving.dependency-completion/v1` record binding the request and receipt HMAC
 synchronized. The claim is removed and synchronized only after all fallible
 verification and transient cleanup are complete. Replay requires an exact

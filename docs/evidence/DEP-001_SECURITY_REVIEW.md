@@ -2,28 +2,21 @@
 
 Date: 2026-08-09
 
-Verdict: PASS for the implementation gate at exact implementation head
-`4bd16451762bb4018dbaa187e0ee1a433a7f0d1c`. All required protected workflows
-completed cleanly
-across [Foundation run 31331554285](https://github.com/SuperBadLabs/McLoving/actions/runs/31331554285)
-and [Windows Agent run 31331554219](https://github.com/SuperBadLabs/McLoving/actions/runs/31331554219).
-The Windows impact classifier passed and intentionally skipped the Windows-agent
-job because the resolver diff did not enter the agent dependency closure. The
-focused gate passed eighty-five dependency-resolution tests: forty-one unit
-tests, forty-three ordinary integration tests, and one real exact-capacity
-tmpfs/HTTP/standalone-process test. Ready-transition review found an
-ecosystem-crossed typed adapter error and a redundant Mario zero-authority
-counter; both were repaired, their focused regressions pass, and fresh
-independent review of the exact repair head found no further issue. The
-recertification
-threads remain merge gates until this closure commit passes protected checks and
-a fresh complete-PR review.
-Every actionable thread remains a merge gate until its exact fix evidence is
-pushed and independently checked.
+Verdict: LOCAL PASS for the architecture-repair candidate at exact
+implementation head `f602618eae3f299c2affeee6f2b8185108c784f4e`.
+The focused gate passes 114 dependency-resolution tests: 69 unit tests, 44
+ordinary integration tests, and one real exact-capacity
+tmpfs/HTTP/standalone-process test. Strict all-target resolver Clippy,
+formatting, and `git diff --check` also pass on HeMan. This head replaces both
+dynamic per-resolution directory hierarchies with exclusive regular archives,
+closing the two repeated `mkdirat`/`openat` creation windows that blocked the
+prior candidate. Protected workflows and fresh independent exact-head review
+remain mandatory before this receipt may return to a final PASS verdict, before
+fixed threads may be resolved, and before merge.
 
-The DEP-001-to-CACHE-001 execution-board transition entered PR #35 at
+The DEP-001-to-CACHE-001 post-merge execution-board transition entered PR #35 at
 `02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at exact
-implementation head `4bd16451762bb4018dbaa187e0ee1a433a7f0d1c`. Closure
+an earlier implementation head. Closure
 commits update this receipt and recertify those existing board rows; they
 do not introduce the transition. The complete PR #35 diff against protected
 `main` includes the resolver implementation, tests, protected workflow change,
@@ -101,13 +94,14 @@ provenance evidence and is not substituted for live dependency authority.
   so sparse files, FIFOs, devices, replacements, growth races, and other
   substituted state fail closed without blocking or unbounded allocation;
 - durable first-writer claims, in-process concurrent convergence, explicit
-  restart ambiguity, transport-path-bound verified inputs, private staging,
-  synchronized read-only content, atomic no-overwrite publication, and
-  fail-closed cleanup ambiguity, with retained-tree verification and transient
-  cleanup completed before the durable completion record becomes visible;
+  restart ambiguity, one exclusive contiguous transport archive bound by its
+  retained descriptor identity, one strict-header sealed publication archive,
+  atomic no-overwrite publication, and fail-closed exact-inode cleanup, with
+  archive verification and transient cleanup completed before the durable
+  completion record becomes visible;
 - HMAC-SHA-256 receipts binding the exact request, configuration, executable,
   source/lock/plan/graph, repositories/grants, artifacts/attestations, complete
-  retained tree, marker set, generation, rollback, and deadline, with
+  retained archive, marker set, generation, rollback, and deadline, with
   constant-time verification, direct delivery of the worker-verified committed
   receipt, and durable ambiguity when rollback or post-commit delivery cannot
   be proven;
@@ -115,8 +109,10 @@ provenance evidence and is not substituted for live dependency authority.
   request repository/grant bindings, so unused repository or credential
   authority cannot enter a signed resolution receipt;
 - exact offline replay that revalidates receipt HMAC, request and runtime
-  bindings, manifest, owner/mode/type/size, content digests, ancestor topology,
-  and the complete retained-tree digest without repository access; and
+  bindings, the strict bounded archive header, closed manifest and entry table,
+  owner/mode/type/link/size/fingerprint policy, every payload digest, final
+  pathname identity, and the complete archive digest without repository access;
+  and
 - one stateful stdout guard across the complete standalone process lifetime that
   detects configured markers within or across serialized response frames before
   emission, acknowledges new completion only after a safe frame is flushed,
@@ -153,8 +149,8 @@ The ordinary focused suite proves:
   lock-length and identity verification after initialization;
 - claim-first concurrency, request substitution, restart ambiguity, exact replay,
   generation cutover, explicit rollback lineage, late withdrawal, foreign
-  transient-path denial, retained-tree substitution, receipt-HMAC tampering,
-  pre-claim secret-marker denial, retained-tree verification before completion,
+  transient-path denial, retained-archive substitution, receipt-HMAC tampering,
+  pre-claim secret-marker denial, archive verification before completion,
   pre-completion transient cleanup, post-commit delivery ambiguity, and cleanup
   truth; and
 - standalone config mode/symlink/schema, bounded frame, static response, and
@@ -162,8 +158,9 @@ The ordinary focused suite proves:
   denial, replay/convergence acknowledgement ownership, and silent startup,
   fatal, and pre-runtime panic paths;
 - standalone configuration FIFO/device denial before blocking startup open;
-- retained-tree entry/depth limits checked before worklist insertion or descent,
-  including path-distinct traversal without recursive stack growth; and
+- strict archive-schema, exact-length, closed-path, contiguous-offset,
+  unmanifested-byte, payload-substitution, and final-link-replacement denial;
+  and
 - a focused 100,000-node linear-graph regression that directly exercises
   iterative reachability and cycle validation without recursive stack growth.
 
@@ -182,12 +179,12 @@ the same resolution identity is denied offline; restart with the repository
 offline returns byte-equivalent JSON; and neither the repository credential nor
 receipt key appears in stdout, stderr, or the receipt.
 
-The exact implementation head also passes strict resolver Clippy, formatting,
-`git diff --check`, the complete locked non-source workspace, and the complete
-serialized source-acquirer suite beneath the activated repository-owned
-AppArmor profile on HeMan. Foundation CI independently repeats strict workspace
-Clippy, the complete non-source workspace, the real dependency contained
-journey, and the AppArmor-confined source suite.
+Exact implementation head `f602618e` passes strict resolver all-target Clippy,
+formatting, `git diff --check`, all 113 ordinary focused tests, and the real
+exact-capacity contained journey on HeMan. The complete locked non-source
+workspace, serialized AppArmor source-acquirer suite, protected Foundation
+workflow, and protected Windows impact classification must be rerun on the
+complete documentation head before closure.
 
 Foundation run 31327583362 completed on unchanged-head attempt 2. Attempt 1's
 only failures were three unrelated provisioner timing assertions under shared
@@ -198,8 +195,9 @@ response to that runner-only failure.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired
-eighty-one actionable findings across eighty-six important seams:
+Pre-closure review and repeated contained execution exposed and repaired 124
+actionable findings across 129 important seams. Five later comments repeated an
+already counted underlying seam and are not double-counted:
 
 1. A concurrent reader could observe a receipt after create but before its final
    read-only mode. JSON state now becomes visible only through a fully written,
@@ -520,6 +518,28 @@ eighty-one actionable findings across eighty-six important seams:
     making the later zero assertion redundant. The counter is removed while the
     stronger per-record kind, identity, disposition, and absent-credential
     assertions remain.
+87-129. Subsequent thread-aware exact-head review covered 43 important seams and
+    produced 38 additional actionable findings; five comments repeated the same
+    already counted underlying race or execution prediction. The repairs bind
+    executable verification to the running `/proc/self/exe` inode, serialize on
+    stable output and transport root inodes, pin every fixed root, make cleanup
+    descriptor-relative with atomic quarantine and unlink postconditions, carry
+    exact receipt/completion fingerprints through parsing and final admission,
+    and authenticate a permanent publication commit before claim removal. They
+    also close receipt/blocker admission races, bound receipt-lock contention,
+    deny absent expected links, bind the worker to the parent's exact roots,
+    reject unmanifested retained bytes, and add deterministic replacement,
+    special-file, contention, and hosted contained regressions. The final fresh
+    review correctly observed that Linux `mkdirat` followed by `openat` cannot
+    bind the directory created in the intervening namespace window, even when
+    both calls share a pinned parent. Implementation head `f602618e` resolves
+    both repeated dynamic-directory findings architecturally: fetch uses one
+    exclusive regular transport archive returned by `open(O_CREAT|O_EXCL)`, and
+    durable publication uses one exclusive regular stage archive that is sealed
+    and atomically renamed. Exact descriptor identity, contiguous offsets,
+    bounded strict headers, closed manifests, per-slice and whole-archive
+    digests, exact-inode cleanup, and final link revalidation replace the former
+    transient, stage, artifacts, and bundle directory trees.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -595,8 +615,10 @@ only subsequent finding was this exact-head receipt and board recertification,
 bringing the closure audit to seventy-nine actionable findings across
 eighty-four important seams; ready-transition Copilot review then found the
 ecosystem-crossed adapter error and redundant Mario counter. Their exact-head
-repairs and focused regressions bring the final audit to eighty-one actionable
-findings across eighty-six important seams;
+repairs and focused regressions brought that audit stage to eighty-one
+actionable findings across eighty-six important seams. The later thread-aware
+review and archive conversion summarized in seams 87-129 bring the current
+audit to 124 actionable findings across 129 important seams;
 every fixed thread must be replied to and resolved only after the complete
 closure head passes protected checks and fresh review.
 
