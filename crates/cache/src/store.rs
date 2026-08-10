@@ -788,6 +788,24 @@ impl CacheStore {
         {
             return Err(CacheError::StateUnavailable);
         }
+        let publication_valid = self.stored_publication_matches(
+            transaction,
+            stored,
+            &canonical,
+            &namespace_sha256,
+            key_sha256,
+        )?;
+        let details = if publication_valid {
+            details
+        } else {
+            ReceiptDetails {
+                operation: details.operation,
+                outcome: CacheOutcome::CorruptRejected,
+                content_sha256: None,
+                content_bytes: None,
+                observed_at_unix_ms: details.observed_at_unix_ms,
+            }
+        };
         self.append_subject_receipt(
             transaction,
             caller_id,
@@ -801,6 +819,79 @@ impl CacheStore {
             },
             details,
         )
+    }
+
+    fn stored_publication_matches(
+        &self,
+        transaction: &Transaction<'_>,
+        stored: &StoredEntry,
+        canonical: &CanonicalCacheKey,
+        namespace_sha256: &str,
+        key_sha256: &str,
+    ) -> Result<bool, CacheError> {
+        if !valid_digest(&stored.publication_event_sha256) {
+            return Ok(false);
+        }
+        let runtime: Option<(String, String, i64, i64)> = transaction
+            .query_row(
+                "SELECT configuration_sha256, implementation_sha256,
+                        cache_generation, restore_epoch
+                 FROM runtime_generations WHERE generation_sha256 = ?1",
+                [&stored.generation_sha256],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|_| CacheError::StateUnavailable)?;
+        let Some((configuration_sha256, implementation_sha256, cache_generation, restore_epoch)) =
+            runtime
+        else {
+            return Ok(false);
+        };
+        let publication = transaction
+            .query_row(
+                "SELECT event_json, event_sha256, signature
+                 FROM audit_events WHERE event_sha256 = ?1",
+                [&stored.publication_event_sha256],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| CacheError::StateUnavailable)?;
+        let Some((event_json, event_sha256, signature)) = publication else {
+            return Ok(false);
+        };
+        let event: AuditEvent = match serde_json::from_slice(&event_json) {
+            Ok(event) => event,
+            Err(_) => return Ok(false),
+        };
+        Ok(canonical_bytes(&event)? == event_json
+            && event_digest(&event_json) == event_sha256
+            && event_sha256 == stored.publication_event_sha256
+            && self.verify_signature(&event_sha256, &signature)
+            && event.schema_version == EVENT_SCHEMA_VERSION
+            && event.service_id == self.config.service_id
+            && event.implementation_sha256 == implementation_sha256
+            && event.configuration_sha256 == configuration_sha256
+            && event.operation == CacheOperation::Publish
+            && event.outcome == CacheOutcome::Published
+            && event.policy_id == canonical.policy_id
+            && event.policy_sha256 == canonical.policy_sha256
+            && event.generation_sha256 == canonical.generation_sha256
+            && event.restore_epoch == canonical.restore_epoch
+            && event.namespace_sha256 == namespace_sha256
+            && event.key_sha256 == key_sha256
+            && event.content_sha256.as_deref() == Some(stored.content_sha256.as_str())
+            && event.content_bytes == Some(stored.content_bytes)
+            && event.observed_at_unix_ms == stored.created_at_unix_ms
+            && canonical.cache_generation
+                == u64::try_from(cache_generation).map_err(|_| CacheError::StateUnavailable)?
+            && canonical.restore_epoch
+                == u64::try_from(restore_epoch).map_err(|_| CacheError::StateUnavailable)?)
     }
 
     fn append_subject_receipt(
@@ -1162,6 +1253,7 @@ fn initialize_database(
                  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
                  service_id TEXT NOT NULL,
                  receipt_key_id TEXT NOT NULL,
+                 receipt_key_sha256 TEXT NOT NULL,
                  active_configuration_sha256 TEXT NOT NULL,
                  active_generation_sha256 TEXT NOT NULL,
                  active_cache_generation INTEGER NOT NULL CHECK (active_cache_generation > 0),
@@ -1206,14 +1298,15 @@ fn initialize_database(
     transaction
         .execute(
             "INSERT INTO metadata(
-                 singleton, schema_version, service_id, receipt_key_id,
+                 singleton, schema_version, service_id, receipt_key_id, receipt_key_sha256,
                  active_configuration_sha256, active_generation_sha256,
                  active_cache_generation, active_restore_epoch
-             ) VALUES (1, 1, ?1, ?2, ?3, ?4, ?5, ?6)
+             ) VALUES (1, 1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(singleton) DO NOTHING",
             params![
                 config.service_id,
                 config.receipt_key_id,
+                config.receipt_key_sha256,
                 configuration_sha256,
                 generation_sha256,
                 to_i64(config.cache_generation)?,
@@ -1221,9 +1314,9 @@ fn initialize_database(
             ],
         )
         .map_err(|_| CacheError::StateUnavailable)?;
-    let stored: (String, String, String, String, i64, i64) = transaction
+    let stored: (String, String, String, String, String, i64, i64) = transaction
         .query_row(
-            "SELECT service_id, receipt_key_id, active_configuration_sha256,
+            "SELECT service_id, receipt_key_id, receipt_key_sha256, active_configuration_sha256,
                     active_generation_sha256, active_cache_generation, active_restore_epoch
              FROM metadata WHERE singleton = 1 AND schema_version = 1",
             [],
@@ -1235,22 +1328,26 @@ fn initialize_database(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .map_err(|_| CacheError::StateUnavailable)?;
-    if stored.0 != config.service_id || stored.1 != config.receipt_key_id {
+    if stored.0 != config.service_id
+        || stored.1 != config.receipt_key_id
+        || stored.2 != config.receipt_key_sha256
+    {
         return Err(CacheError::StateUnavailable);
     }
     let requested_cache_generation = to_i64(config.cache_generation)?;
     let requested_restore_epoch = to_i64(config.restore_epoch)?;
-    let exact_active = stored.2 == configuration_sha256
-        && stored.3 == generation_sha256
-        && stored.4 == requested_cache_generation
-        && stored.5 == requested_restore_epoch;
-    let monotonic_advance = requested_cache_generation >= stored.4
-        && requested_restore_epoch >= stored.5
-        && (requested_cache_generation > stored.4 || requested_restore_epoch > stored.5);
+    let exact_active = stored.3 == configuration_sha256
+        && stored.4 == generation_sha256
+        && stored.5 == requested_cache_generation
+        && stored.6 == requested_restore_epoch;
+    let monotonic_advance = requested_cache_generation >= stored.5
+        && requested_restore_epoch >= stored.6
+        && (requested_cache_generation > stored.5 || requested_restore_epoch > stored.6);
     if !exact_active && !monotonic_advance {
         return Err(CacheError::StateUnavailable);
     }

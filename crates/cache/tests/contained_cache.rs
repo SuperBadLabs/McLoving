@@ -751,6 +751,88 @@ fn cleanup_removes_rows_for_a_policy_absent_from_the_active_generation() {
 }
 
 #[test]
+fn cleanup_rejects_substituted_publication_provenance() {
+    let temp = TempDir::new().unwrap();
+    let key = [20_u8; 32];
+    let clock = Arc::new(ManualClock::new(73_000));
+    let first_config = config(
+        &temp,
+        &key,
+        vec![policy("policy-a", "trusted", "reader", "writer")],
+    );
+    let database_path = first_config.database_path.clone();
+    let first = open_store(first_config.clone(), &key, Arc::clone(&clock)).unwrap();
+    let request_a = request(
+        first.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"publication-a",
+    );
+    let request_b = request(
+        first.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"publication-b",
+    );
+    let publication_a = first
+        .publish("writer", "trusted", &request_a, b"content-a")
+        .unwrap();
+    let publication_b = first
+        .publish("writer", "trusted", &request_b, b"content-b")
+        .unwrap();
+    let key_a = publication_a.receipts[0].event.key_sha256.clone();
+    let event_b = publication_b.receipts[0].event_sha256.clone();
+    Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE entries SET publication_event_sha256 = ?1 WHERE key_sha256 = ?2",
+            rusqlite::params![event_b, key_a],
+        )
+        .unwrap();
+    drop(first);
+
+    let mut second_config = first_config;
+    second_config.cache_generation = 2;
+    let second = open_store(second_config, &key, clock).unwrap();
+    let cleanup = second.cleanup("operator").unwrap();
+    assert_eq!(cleanup.removed, 2);
+    let rejected = cleanup
+        .receipts
+        .iter()
+        .find(|receipt| receipt.event.key_sha256 == key_a)
+        .unwrap();
+    assert_eq!(
+        rejected.event.outcome,
+        mcloving_cache::CacheOutcome::CorruptRejected
+    );
+    assert!(rejected.event.content_sha256.is_none());
+    second.verify_audit_chain().unwrap();
+}
+
+#[test]
+fn receipt_key_rotation_requires_a_new_database() {
+    let temp = TempDir::new().unwrap();
+    let first_key = [25_u8; 32];
+    let second_key = [26_u8; 32];
+    let clock = Arc::new(ManualClock::new(73_500));
+    let first_config = config(
+        &temp,
+        &first_key,
+        vec![policy("policy-a", "trusted", "reader", "writer")],
+    );
+    let first = open_store(first_config.clone(), &first_key, Arc::clone(&clock)).unwrap();
+    drop(first);
+
+    let mut rotated = first_config;
+    rotated.cache_generation = 2;
+    rotated.receipt_key_sha256 = digest(&second_key);
+    assert!(matches!(
+        open_store(rotated, &second_key, clock),
+        Err(CacheError::StateUnavailable)
+    ));
+}
+
+#[test]
 fn audit_event_quota_rolls_back_the_operation_that_would_exceed_it() {
     let temp = TempDir::new().unwrap();
     let key = [18_u8; 32];

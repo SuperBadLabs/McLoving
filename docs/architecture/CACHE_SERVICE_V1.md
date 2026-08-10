@@ -38,6 +38,9 @@ deployment and operator identity, monotonically increasing cache generation,
 receipt key identity and digest, private database path, all limits, and a
 sorted closed policy set. The running executable digest, configuration digest,
 and receipt-key digest are rechecked before the database is opened.
+The database persists the receipt-key identity and digest and rejects rotation;
+key rotation requires a newly provisioned database so one audit chain can never
+mix signatures from different keys.
 
 ## Canonical namespace and key
 
@@ -104,6 +107,10 @@ its existing monotonic restore epoch, so rows from a restored cache database
 cannot satisfy current reads even when their logical key and content are
 otherwise identical. Cleanup removes expired rows and any row outside the
 current generation or restore epoch, with a bounded number of rows per command.
+Before cleanup signs a stale, expired, or removed-policy disposition, it
+revalidates the original signed publication against the historical runtime
+generation and exact stored metadata/content. Missing or substituted
+publication provenance is removed only as `corrupt_rejected`.
 
 The restore epoch is controller-owned authority and must not be restored from
 the cache backup. If that external invariant is unavailable, the cache must be
@@ -146,6 +153,7 @@ Contained tests must prove:
 - same-content convergence and different-content conflict under concurrency;
 - size, count, TTL, deterministic eviction, and bounded cleanup;
 - generation rotation and restored-state cold behavior;
+- receipt-key rotation rejection and signed stale-publication revalidation;
 - complete signed audit-chain verification and tamper rejection;
 - independently retained audit-head verification and bounded audit exhaustion;
 - duplicate/unknown JSON rejection and bounded standalone frames;
