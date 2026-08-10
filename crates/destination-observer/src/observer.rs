@@ -344,7 +344,9 @@ impl DestinationObserver {
             destination_cursor: signed.body.cursor,
             destination_observed_at_unix_ms: signed.body.observed_at_unix_ms,
             captured_at_unix_ms: captured_at_ms,
-            publication_deadline_unix_ms: captured_at_ms
+            publication_deadline_unix_ms: signed
+                .body
+                .observed_at_unix_ms
                 .saturating_add(self.config.limits.max_age_ms)
                 .min(request.expires_at_unix_ms)
                 .min(self.config.read_grant_expires_unix_ms),

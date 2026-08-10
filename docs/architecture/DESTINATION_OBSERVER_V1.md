@@ -200,8 +200,9 @@ generation/cutover/rollback fields, grant, destination cursor and observation
 time, capture and publication deadline, typed state and confidentiality,
 complete raw response digest and destination signature, retry count, audit
 provenance, receipt sequence, key identity, and public-key digest.
-The publication deadline is the minimum of the freshness bound, signed request
-expiry, and read-grant expiry. `observation_receipt_digest` is the supported
+The publication deadline is the minimum of the freshness bound anchored to the
+signed destination observation timestamp, signed request expiry, and read-grant
+expiry. `observation_receipt_digest` is the supported
 predecessor helper: SHA-256 over
 `mcloving-observer-receipt-digest-v1 || 0x00 || serde_json(receipt)`, including
 the receipt signature.

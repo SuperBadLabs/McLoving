@@ -569,6 +569,26 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
 }
 
 #[tokio::test]
+async fn publication_deadline_is_anchored_to_signed_destination_freshness() {
+    let rig = Rig::new().await;
+    rig.set_mode(Mode::Slow);
+    rig.server
+        .observed_at_unix_ms
+        .store(NOW - 9_000, Ordering::SeqCst);
+    let mut request = rig.request(ObservationPhase::PreAction);
+    request.requested_at_unix_ms = NOW - 9_000;
+    request.expires_at_unix_ms = NOW + 1_000;
+    let receipt = rig
+        .observer
+        .observe_at(rig.prepare(request), NOW)
+        .await
+        .unwrap();
+
+    assert!(receipt.captured_at_unix_ms > NOW);
+    assert_eq!(receipt.publication_deadline_unix_ms, NOW + 1_000);
+}
+
+#[tokio::test]
 async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fail_closed() {
     for (mode, expected) in [
         (Mode::Stale, ObserverError::StaleObservation),
