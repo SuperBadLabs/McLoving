@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::io::Write as _;
@@ -51,6 +52,7 @@ enum Mode {
     UnauthorizedOversizedHeader,
     UnauthorizedSecret,
     Outage,
+    OutageOversizedChunked,
     OutageOversized,
     OutageSecret,
     MalformedContentTypeSecret,
@@ -347,6 +349,17 @@ async fn destination_handler(
     if matches!(mode, Mode::Oversized) {
         return json_response(StatusCode::OK, vec![b'x'; 32 * 1024]);
     }
+    if matches!(mode, Mode::OutageOversizedChunked) {
+        let stream = tokio_stream::iter([
+            Ok::<_, Infallible>(vec![b'x'; 12 * 1024]),
+            Ok::<_, Infallible>(vec![b'x'; 12 * 1024]),
+        ]);
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header("content-type", "application/json")
+            .body(Body::from_stream(stream))
+            .unwrap();
+    }
     if matches!(
         mode,
         Mode::Outage | Mode::OutageOversized | Mode::OutageSecret
@@ -561,6 +574,7 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
 
     for mode in [
         Mode::Outage,
+        Mode::OutageOversizedChunked,
         Mode::OutageOversized,
         Mode::Timeout,
         Mode::OversizedHeader,

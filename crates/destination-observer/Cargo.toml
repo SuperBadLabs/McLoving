@@ -34,6 +34,7 @@ uuid = { version = "=1.18.1", features = ["serde", "v4"] }
 axum = "=0.8.6"
 serde-saphyr = "=1.0.0-rc.2"
 tempfile = "=3.27.0"
+tokio-stream = "=0.1.19"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "=0.31.3", features = ["fs", "user"] }

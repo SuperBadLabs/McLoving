@@ -467,14 +467,25 @@ impl DestinationObserver {
             .await
             .map_err(|_| ObserverError::DestinationUnavailable)?
         {
-            if raw
-                .len()
-                .checked_add(chunk.len())
-                .is_none_or(|size| size > self.config.limits.max_response_bytes)
-            {
+            let remaining = self
+                .config
+                .limits
+                .max_response_bytes
+                .saturating_sub(raw.len());
+            let admitted = chunk.len().min(remaining);
+            raw.extend_from_slice(&chunk[..admitted]);
+            if chunk.len() > remaining {
+                if contains_secret(&raw, &self.secret_markers) {
+                    return Err(ObserverError::ConfidentialityDenied);
+                }
+                if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                    return Err(ObserverError::DestinationUnauthorized);
+                }
+                if status != StatusCode::OK {
+                    return Err(ObserverError::DestinationUnavailable);
+                }
                 return Err(ObserverError::OversizedResponse);
             }
-            raw.extend_from_slice(&chunk);
         }
         if contains_secret(&raw, &self.secret_markers) {
             return Err(ObserverError::ConfidentialityDenied);

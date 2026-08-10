@@ -43,9 +43,9 @@ reopening a replaceable executable pathname. The standalone process accepts
 bounded newline-complete frames from stdin; the newline is included in the
 frame-size limit. Crossing that bound produces `oversized_request` and
 terminates immediately without draining an attacker-controlled tail. It emits
-generic bounded responses on stdout. Configuration
-and authority files
-are opened without following a final symlink; the complete configuration,
+generic bounded responses on stdout. Configuration and authority files are
+opened nonblocking and without following a final symlink, so a FIFO/device
+substitution fails before data reads; the complete configuration,
 deployment-provided runtime-image attestation file, secret files, and the state
 directory must be owned by the process user and inaccessible to group or other
 users. The executable is measured through `/proc/self/exe`; the separately
@@ -104,8 +104,9 @@ overflow is treated as destination unavailability and retains the bounded
 pending retry path. Application header-list overflow does the same unless a
 confidentiality denial or permanent 401/403 authentication denial takes
 precedence;
-an oversized declared body is not consumed, but its non-200 status remains a
-retryable unavailable outcome instead of becoming a permanent size tombstone;
+an oversized body is consumed only through its certified prefix, but its
+non-200 status remains a retryable unavailable outcome instead of becoming a
+permanent size tombstone regardless of declared-length or chunked framing;
 request and grant validity are checked again at the monotonic GET-completion
 time before any success or terminal outcome is committed. They are also
 resampled after ledger and

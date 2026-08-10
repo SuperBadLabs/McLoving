@@ -27,7 +27,7 @@ fn read_file(path: &Path, maximum: usize, private: bool) -> Result<Vec<u8>, Obse
 
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
         .open(path)
         .map_err(|_| ObserverError::StateUnavailable)?;
     let metadata = file
@@ -92,4 +92,37 @@ fn sha256_open_file(mut file: File) -> Result<String, ObserverError> {
         let _ = write!(encoded, "{byte:02x}");
     }
     Ok(encoded)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    use nix::sys::stat::Mode;
+    use nix::unistd::mkfifo;
+
+    use super::read_private_bounded_regular_file;
+    use crate::ObserverError;
+
+    #[test]
+    fn authority_special_files_fail_without_blocking() {
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("authority.fifo");
+        mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+
+        let started = Instant::now();
+        assert_eq!(
+            read_private_bounded_regular_file(&fifo, 64),
+            Err(ObserverError::StateUnavailable)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let started = Instant::now();
+        assert_eq!(
+            read_private_bounded_regular_file(Path::new("/dev/null"), 64),
+            Err(ObserverError::StateUnavailable)
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }
