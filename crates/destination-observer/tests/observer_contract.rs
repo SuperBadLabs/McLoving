@@ -866,6 +866,37 @@ async fn response_limit_must_leave_room_for_the_maximum_receipt_envelope() {
 }
 
 #[tokio::test]
+async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
+    let rig = Rig::new().await;
+    for invalid_config in [
+        {
+            let mut config = rig.config.clone();
+            config.limits.max_header_bytes = 33;
+            config
+        },
+        {
+            let mut config = rig.config.clone();
+            config.allowed_query_keys = vec!["q".repeat(129)];
+            config
+        },
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut invalid_config = invalid_config;
+        invalid_config.state_dir = state.path().to_path_buf();
+        assert!(matches!(
+            rig.observer_for_config(invalid_config),
+            Err(ObserverError::InvalidConfig)
+        ));
+        assert!(!state.path().join("observer.sqlite3").exists());
+    }
+}
+
+#[tokio::test]
 async fn evidence_capacity_failure_releases_the_destination_claim() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();

@@ -30,6 +30,7 @@ const MAX_AUDIT_PROVENANCE_BYTES: usize = 4096;
 const MAX_QUERY_VALUE_BYTES: usize = 2048;
 const MAX_SECRET_MARKERS: usize = 32;
 const MAX_TOTAL_SECRET_MARKER_BYTES: usize = 8 * 1024;
+const MIN_SUCCESS_HEADER_BYTES: usize = 34;
 const OBSERVATION_ID_HEADER: &str = "x-mcloving-observation-id";
 const EFFECT_FENCE_HEADER: &str = "x-mcloving-effect-fence";
 const OBSERVATION_PHASE_HEADER: &str = "x-mcloving-observation-phase";
@@ -750,6 +751,7 @@ fn validate_config(
         || config.limits.max_response_bytes == 0
         || config.limits.max_response_bytes >= crate::standalone::MAX_FRAME_BYTES
         || config.limits.max_header_bytes == 0
+        || config.limits.max_header_bytes < MIN_SUCCESS_HEADER_BYTES
         || config.limits.max_requests_per_minute == 0
         || config.limits.max_evidence_bytes == 0
         || config.limits.max_receipts == 0
@@ -819,6 +821,7 @@ fn validate_config(
         || fields.contains("")
         || query_keys.len() != config.allowed_query_keys.len()
         || query_keys.contains("")
+        || query_keys.iter().any(|key| key.len() > 128)
     {
         return Err(ObserverError::InvalidConfig);
     }

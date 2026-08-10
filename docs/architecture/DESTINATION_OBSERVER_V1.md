@@ -66,6 +66,8 @@ and effect class, grant ID/version/scope, canonical allowlisted query, prior
 cursor and predecessor receipt, short validity window, and audit provenance.
 Unknown fields, duplicate JSON members, unknown query keys, stale requests,
 substituted bindings, or invalid signatures fail before network access.
+Configuration admission rejects query-key names beyond the request-protocol
+bound and header budgets too small for the mandatory JSON response header.
 The GET carries reserved non-secret headers for the observation ID, effect
 fence, phase, canonical-query digest, and complete signed-request digest. An
 independently deployed destination therefore receives every fresh binding it
