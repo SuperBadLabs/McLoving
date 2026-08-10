@@ -219,10 +219,11 @@ impl CacheStore {
                 || !stored_content_matches(&stored)
             {
                 delete_entry(&transaction, &admitted.key_sha256)?;
-                receipts.push(self.append_receipt(
+                receipts.push(self.append_stored_receipt(
                     &transaction,
                     caller_id,
-                    &admitted,
+                    &admitted.key_sha256,
+                    &stored,
                     ReceiptDetails {
                         operation: CacheOperation::Publish,
                         outcome: CacheOutcome::CorruptRejected,
@@ -242,10 +243,11 @@ impl CacheStore {
             }
             if stored.expires_at_unix_ms <= now {
                 delete_entry(&transaction, &admitted.key_sha256)?;
-                receipts.push(self.append_receipt(
+                receipts.push(self.append_stored_receipt(
                     &transaction,
                     caller_id,
-                    &admitted,
+                    &admitted.key_sha256,
+                    &stored,
                     ReceiptDetails {
                         operation: CacheOperation::Evict,
                         outcome: CacheOutcome::Expired,
@@ -392,10 +394,11 @@ impl CacheStore {
             || !stored_content_matches(&stored)
         {
             delete_entry(&transaction, &admitted.key_sha256)?;
-            let receipt = self.append_receipt(
+            let receipt = self.append_stored_receipt(
                 &transaction,
                 caller_id,
-                &admitted,
+                &admitted.key_sha256,
+                &stored,
                 ReceiptDetails {
                     operation: CacheOperation::Read,
                     outcome: CacheOutcome::CorruptRejected,
@@ -416,10 +419,11 @@ impl CacheStore {
         }
         if stored.expires_at_unix_ms <= now {
             delete_entry(&transaction, &admitted.key_sha256)?;
-            let expired = self.append_receipt(
+            let expired = self.append_stored_receipt(
                 &transaction,
                 caller_id,
-                &admitted,
+                &admitted.key_sha256,
+                &stored,
                 ReceiptDetails {
                     operation: CacheOperation::Evict,
                     outcome: CacheOutcome::Expired,

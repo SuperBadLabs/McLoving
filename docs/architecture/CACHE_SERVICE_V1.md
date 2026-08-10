@@ -107,18 +107,19 @@ its existing monotonic restore epoch, so rows from a restored cache database
 cannot satisfy current reads even when their logical key and content are
 otherwise identical. Cleanup removes expired rows and any row outside the
 current generation or restore epoch, with a bounded number of rows per command.
-Before any explicit or publication-triggered cleanup or quota eviction signs a
-stale, expired, or removed-policy disposition, it locates an HMAC-authenticated
-historical publication independently of the mutable entry pointer and requires
-that publication to bind the exact canonical subject and generation. It then
-revalidates the entry pointer and exact stored metadata/content, including the
-publication's signed absolute expiry. Missing or substituted entry provenance
-or expiry is removed only as `corrupt_rejected`. A row with an authenticated
-canonical publication subject but corrupt content remains purgeable and cannot
-indefinitely block cleanup or publication. Canonical identity/digest syntax and
-the signed historical generation derivation are validated independently of
-content; an unauthenticated or invalid receipt subject remains fail-closed and
-cannot receive a service signature.
+Before any read, publish, explicit cleanup, publication-triggered cleanup, or
+quota-eviction path signs a stored-row removal, it locates an
+HMAC-authenticated historical publication independently of the mutable entry
+pointer and requires that publication to bind the exact canonical subject and
+generation. It then revalidates the entry pointer and exact stored
+metadata/content, including the publication's signed absolute expiry. Missing
+or substituted entry provenance or expiry is removed only as
+`corrupt_rejected`. A row with an authenticated canonical publication subject
+but corrupt content remains purgeable and cannot indefinitely block cleanup or
+publication. Canonical identity/digest syntax and the signed historical
+generation derivation are validated independently of content; an
+unauthenticated or invalid receipt subject remains fail-closed and cannot
+receive a service signature.
 
 The restore epoch is controller-owned authority and must not be restored from
 the cache backup. If that external invariant is unavailable, the cache must be
@@ -163,10 +164,10 @@ Contained tests must prove:
 - size, count, TTL, deterministic eviction, and bounded cleanup;
 - generation rotation and restored-state cold behavior;
 - receipt-key rotation rejection and signed stale-publication revalidation on
-  explicit cleanup, publication-time cleanup, and quota eviction, including
-  forged-expiry rejection, purgeability of corrupt stale content, and
-  independent rejection of malformed or unauthenticated stored receipt
-  subjects;
+  current-key read/publish removal, explicit cleanup, publication-time cleanup,
+  and quota eviction, including forged-expiry rejection, purgeability of
+  corrupt stale content, and independent rejection of malformed or
+  unauthenticated stored receipt subjects;
 - complete signed audit-chain verification and tamper rejection;
 - independently retained audit-head verification and bounded audit exhaustion;
 - duplicate/unknown JSON rejection and bounded standalone frames;

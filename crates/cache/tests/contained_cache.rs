@@ -292,9 +292,15 @@ fn corrupt_content_and_canonical_key_are_rejected_without_returning_bytes() {
         .unwrap()
         .execute("UPDATE entries SET canonical_key = X'7b7d'", [])
         .unwrap();
-    let rejected = store.read("reader", "trusted", &request).unwrap();
-    assert_eq!(rejected.status, ReadStatus::CorruptRejected);
-    assert!(rejected.content.is_none());
+    assert!(matches!(
+        store.read("reader", "trusted", &request),
+        Err(CacheError::StateUnavailable)
+    ));
+    assert_eq!(store.verify_audit_chain().unwrap(), 3);
+    Connection::open(&database_path)
+        .unwrap()
+        .execute("DELETE FROM entries", [])
+        .unwrap();
 
     store
         .publish("writer", "trusted", &request, b"original")
@@ -303,10 +309,15 @@ fn corrupt_content_and_canonical_key_are_rejected_without_returning_bytes() {
         .unwrap()
         .execute("UPDATE entries SET policy_id = 'substituted-policy'", [])
         .unwrap();
-    assert_eq!(
-        store.read("reader", "trusted", &request).unwrap().status,
-        ReadStatus::CorruptRejected
-    );
+    assert!(matches!(
+        store.read("reader", "trusted", &request),
+        Err(CacheError::StateUnavailable)
+    ));
+    assert_eq!(store.verify_audit_chain().unwrap(), 4);
+    Connection::open(&database_path)
+        .unwrap()
+        .execute("DELETE FROM entries", [])
+        .unwrap();
 
     store
         .publish("writer", "trusted", &request, b"original")
@@ -1157,6 +1168,85 @@ fn cleanup_requires_an_authenticated_publication_subject() {
         Err(CacheError::StateUnavailable)
     ));
     assert_eq!(second.verify_audit_chain().unwrap(), 1);
+    let retained: i64 = Connection::open(database_path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM entries WHERE key_sha256 = ?1",
+            [fabricated_key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained, 1);
+}
+
+#[test]
+fn current_key_removal_requires_an_authenticated_publication_subject() {
+    let temp = TempDir::new().unwrap();
+    let key = [27_u8; 32];
+    let clock = Arc::new(ManualClock::new(73_275));
+    let config = config(
+        &temp,
+        &key,
+        vec![policy("policy-a", "trusted", "reader", "writer")],
+    );
+    let database_path = config.database_path.clone();
+    let store = open_store(config, &key, clock).unwrap();
+    let request_a = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"authenticated-current-a",
+    );
+    let request_b = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"fabricated-current-b",
+    );
+    let publication_a = store
+        .publish("writer", "trusted", &request_a, b"content-a")
+        .unwrap();
+    let key_a = publication_a.receipts[0].event.key_sha256.clone();
+    let connection = Connection::open(&database_path).unwrap();
+    let canonical: Vec<u8> = connection
+        .query_row(
+            "SELECT canonical_key FROM entries WHERE key_sha256 = ?1",
+            [&key_a],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let fabricated_canonical = String::from_utf8(canonical)
+        .unwrap()
+        .replace(&request_a.logical_key_sha256, &request_b.logical_key_sha256)
+        .replace(&request_a.input_sha256, &request_b.input_sha256)
+        .into_bytes();
+    let fabricated_key = cache_key_digest(&fabricated_canonical);
+    connection
+        .execute(
+            "UPDATE entries
+             SET key_sha256 = ?1, canonical_key = ?2, content = ?3,
+                 publication_event_sha256 = ?4
+             WHERE key_sha256 = ?5",
+            rusqlite::params![
+                fabricated_key,
+                fabricated_canonical,
+                b"tampered".as_slice(),
+                digest(b"fabricated-current-publication"),
+                key_a
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    assert!(matches!(
+        store.read("reader", "trusted", &request_b),
+        Err(CacheError::StateUnavailable)
+    ));
+    assert!(matches!(
+        store.publish("writer", "trusted", &request_b, b"content-b"),
+        Err(CacheError::StateUnavailable)
+    ));
+    assert_eq!(store.verify_audit_chain().unwrap(), 1);
     let retained: i64 = Connection::open(database_path)
         .unwrap()
         .query_row(
