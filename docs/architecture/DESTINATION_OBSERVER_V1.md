@@ -25,7 +25,9 @@ not match configured runner or connector identities or denied authority
 digests.
 
 The process can issue only an HTTP `GET` to its configured endpoint, read and
-write its private SQLite evidence ledger, and return signed receipts. It has no
+write its private SQLite evidence ledger, and return signed receipts. SQLite
+writers use a bounded busy wait so a restart or generation cutover converges
+when the prior process is completing a transaction. It has no
 write method, redirect or proxy inheritance, implicit HTTP retry, scheduler,
 controller database or filesystem, agent RPC, shell, repository, workload
 secret, connector-control, or external-effect capability. Production requires
@@ -91,8 +93,12 @@ grant, and destination key ID. Only status 200 with `application/json` is
 admitted. Authentication denial remains a typed denial; all other missing or
 unavailable outcomes remain failures, never evidence of absence.
 
+The observer requires HTTP/2 and advertises the configured header-list ceiling
+to the protocol stack, so an over-limit header block is refused during protocol
+decoding rather than accepted into an unbounded application allocation.
 Response headers, including canonical separator and terminator framing bytes,
-and every streamed body chunk are continuously bounded. The
+are also measured before the body is consumed, and exactly one `Content-Type`
+header is required. Every streamed body chunk is continuously bounded. The
 complete raw response and decoded JSON are checked against the configured
 secret markers and their common padded and unpadded Base64 plus per-nibble case-insensitive
 hexadecimal and percent encodings. Decoded JSON string values are scanned

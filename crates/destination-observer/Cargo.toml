@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 base64 = "=0.22.1"
 reqwest = { version = "=0.12.23", default-features = false, features = [
+  "http2",
   "json",
   "rustls-tls-native-roots",
 ] }

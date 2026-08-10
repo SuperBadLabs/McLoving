@@ -39,6 +39,8 @@ enum Mode {
     Substitute,
     Secret,
     HeaderSecret,
+    OversizedHeader,
+    DuplicateContentType,
     Malformed,
     Oversized,
     Unauthorized,
@@ -341,6 +343,18 @@ async fn destination_handler(
             axum::http::HeaderValue::from_static("read-only-observer-token"),
         );
     }
+    if matches!(mode, Mode::OversizedHeader) {
+        response.headers_mut().insert(
+            "x-oversized",
+            axum::http::HeaderValue::from_str(&"x".repeat(9 * 1024)).unwrap(),
+        );
+    }
+    if matches!(mode, Mode::DuplicateContentType) {
+        response.headers_mut().append(
+            "content-type",
+            axum::http::HeaderValue::from_static("text/plain"),
+        );
+    }
     response
 }
 
@@ -409,6 +423,7 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         (Mode::Substitute, ObserverError::MalformedResponse),
         (Mode::Secret, ObserverError::ConfidentialityDenied),
         (Mode::HeaderSecret, ObserverError::ConfidentialityDenied),
+        (Mode::DuplicateContentType, ObserverError::MalformedResponse),
         (Mode::Malformed, ObserverError::MalformedResponse),
         (Mode::Oversized, ObserverError::OversizedResponse),
         (Mode::Unauthorized, ObserverError::DestinationUnauthorized),
@@ -426,7 +441,7 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         rig.observer.observe_at(replacement, NOW).await.unwrap();
     }
 
-    for mode in [Mode::Outage, Mode::Timeout] {
+    for mode in [Mode::Outage, Mode::Timeout, Mode::OversizedHeader] {
         let rig = Rig::new().await;
         rig.set_mode(mode);
         let request = rig.prepare(rig.request(ObservationPhase::PreAction));
@@ -440,6 +455,34 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
             Err(ObserverError::ObservationPending)
         );
     }
+}
+
+#[tokio::test]
+async fn restart_waits_for_the_shared_ledger_writer() {
+    let rig = Rig::new().await;
+    let connection =
+        rusqlite::Connection::open(rig.directory.path().join("observer.sqlite3")).unwrap();
+    connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let config = rig.config.clone();
+    let implementation_sha256 = rig.implementation_sha256.clone();
+    let request_public_key = rig.request_public_key.clone();
+    let destination_public_key = rig.destination_public_key.clone();
+    let receipt_seed = rig.receipt_seed.clone();
+    let restart = std::thread::spawn(move || {
+        DestinationObserver::new(
+            config,
+            implementation_sha256,
+            TOKEN.to_vec(),
+            request_public_key,
+            destination_public_key,
+            receipt_seed,
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
+        )
+    });
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    connection.execute_batch("COMMIT").unwrap();
+    assert!(restart.join().unwrap().is_ok());
 }
 
 #[tokio::test]

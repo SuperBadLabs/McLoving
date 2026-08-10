@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 
@@ -46,6 +47,9 @@ impl ObserverStore {
         let database_path = config.state_dir.join("observer.sqlite3");
         let connection =
             Connection::open(database_path).map_err(|_| ObserverError::StateUnavailable)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|_| ObserverError::StateUnavailable)?;
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;

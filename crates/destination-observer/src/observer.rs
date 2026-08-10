@@ -70,6 +70,11 @@ impl DestinationObserver {
         let mut builder = Client::builder()
             .redirect(redirect::Policy::none())
             .no_proxy()
+            .http2_prior_knowledge()
+            .http2_max_header_list_size(
+                u32::try_from(config.limits.max_header_bytes)
+                    .map_err(|_| ObserverError::InvalidConfig)?,
+            )
             .timeout(std::time::Duration::from_millis(config.limits.timeout_ms));
         if let Some(path) = &config.ca_bundle_path {
             let pem = crate::read_bounded_regular_file(path, 1024 * 1024)?;
@@ -343,11 +348,14 @@ impl DestinationObserver {
         }) {
             return Err(ObserverError::ConfidentialityDenied);
         }
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
+        let mut content_types = response.headers().get_all(CONTENT_TYPE).iter();
+        let content_type = content_types
+            .next()
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
+        if content_types.next().is_some() {
+            return Err(ObserverError::MalformedResponse);
+        }
         if !content_type
             .split(';')
             .next()
