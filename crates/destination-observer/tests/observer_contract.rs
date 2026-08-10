@@ -44,6 +44,7 @@ enum Mode {
     Unauthorized,
     Outage,
     Timeout,
+    Slow,
     LargeState,
 }
 
@@ -291,6 +292,9 @@ async fn destination_handler(
     if matches!(mode, Mode::Timeout) {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
+    if matches!(mode, Mode::Slow) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     let request = server.request.lock().unwrap().clone().unwrap();
     let mut body = DestinationStateBody {
         schema_version: DESTINATION_STATE_SCHEMA_VERSION.to_owned(),
@@ -528,6 +532,41 @@ async fn oversized_success_is_failed_before_receipt_commit() {
 }
 
 #[tokio::test]
+async fn evidence_capacity_failure_releases_the_destination_claim() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_evidence_bytes = 1;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    for _ in 0..2 {
+        let mut request = rig.request(ObservationPhase::PreAction);
+        request.expected_config_sha256 = observer.config_sha256().to_owned();
+        let request = rig.prepare(request);
+        assert_eq!(
+            observer.observe_at(request, NOW).await,
+            Err(ObserverError::CapacityExceeded)
+        );
+    }
+
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let pending_count: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM observations WHERE status='pending'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pending_count, 0);
+}
+
+#[tokio::test]
 async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() {
     let rig = Rig::new().await;
     let mut expired = rig.request(ObservationPhase::PreAction);
@@ -538,6 +577,18 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
         rig.observer.observe_at(expired, NOW + 61_000).await,
         Err(ObserverError::ExpiredGrant)
     );
+
+    rig.set_mode(Mode::Slow);
+    let mut expires_during_read = rig.request(ObservationPhase::PreAction);
+    expires_during_read.expires_at_unix_ms = NOW + 50;
+    let expires_during_read = rig.prepare(expires_during_read);
+    assert_eq!(
+        rig.observer.observe_at(expires_during_read, NOW).await,
+        Err(ObserverError::ExpiredRequest)
+    );
+    rig.set_mode(Mode::Good);
+    let replacement = rig.prepare(rig.request(ObservationPhase::PreAction));
+    rig.observer.observe_at(replacement, NOW).await.unwrap();
 
     assert!(matches!(
         DestinationObserver::new(
@@ -774,7 +825,18 @@ async fn cursor_is_monotonic_across_effect_fences_and_stored_replay_is_reverifie
     next_fence.effect_fence = 18;
     let next_fence = rig.prepare(next_fence);
     assert_eq!(
+        rig.observer.observe_at(next_fence.clone(), NOW).await,
+        Err(ObserverError::CursorRollback)
+    );
+    assert_eq!(
         rig.observer.observe_at(next_fence, NOW).await,
+        Err(ObserverError::CursorRollback)
+    );
+    let mut later_fence = rig.request(ObservationPhase::PreAction);
+    later_fence.effect_fence = 19;
+    let later_fence = rig.prepare(later_fence);
+    assert_eq!(
+        rig.observer.observe_at(later_fence, NOW).await,
         Err(ObserverError::CursorRollback)
     );
 

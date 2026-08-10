@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -11,7 +11,7 @@ use crate::crypto::{
     canonical_digest, content_sha256, public_key_from_seed, sign_receipt, verify_destination_state,
     verify_observation_receipt, verify_request,
 };
-use crate::store::{ClaimResult, ObserverStore};
+use crate::store::{ClaimResult, ObserverStore, validate_temporal};
 use crate::{
     CONFIG_SCHEMA_VERSION, Confidentiality, DESTINATION_STATE_SCHEMA_VERSION, ObservationReceipt,
     ObservationRequest, ObserverConfig, ObserverError, PROTOCOL_VERSION, RECEIPT_SCHEMA_VERSION,
@@ -113,6 +113,7 @@ impl DestinationObserver {
         request: ObservationRequest,
         now_ms: i64,
     ) -> Result<ObservationReceipt, ObserverError> {
+        let started_at = Instant::now();
         self.validate_request(&request)?;
         let request_sha256 = canonical_digest(REQUEST_DIGEST_DOMAIN, &request)?;
         let scope_sha256 = canonical_digest(SCOPE_DOMAIN, &Scope::from_request(&request))?;
@@ -138,8 +139,8 @@ impl DestinationObserver {
         self.store
             .assert_active(self.config.generation, &self.config_sha256)?;
 
-        let destination_result = self.read_destination(&request, now_ms).await;
-        let (signed, raw) = match destination_result {
+        let destination_result = self.read_destination(&request, now_ms, started_at).await;
+        let (signed, raw, captured_at_ms) = match destination_result {
             Ok(observation) => observation,
             Err(error) => {
                 if is_terminal_destination_error(&error) {
@@ -157,9 +158,23 @@ impl DestinationObserver {
         self.store
             .assert_active(self.config.generation, &self.config_sha256)?;
 
-        let evidence_sequence = self
+        let evidence_sequence = match self
             .store
-            .next_sequence(self.config.generation, &self.config_sha256)?;
+            .next_sequence(self.config.generation, &self.config_sha256)
+        {
+            Ok(sequence) => sequence,
+            Err(error @ ObserverError::CapacityExceeded) => {
+                self.store.fail_pending(
+                    self.config.generation,
+                    &self.config_sha256,
+                    &request,
+                    &request_sha256,
+                    &error,
+                )?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let mut receipt = ObservationReceipt {
             schema_version: RECEIPT_SCHEMA_VERSION.to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -202,8 +217,9 @@ impl DestinationObserver {
             canonical_query: request.query.clone(),
             destination_cursor: signed.body.cursor,
             destination_observed_at_unix_ms: signed.body.observed_at_unix_ms,
-            captured_at_unix_ms: now_ms,
-            publication_deadline_unix_ms: now_ms.saturating_add(self.config.limits.max_age_ms),
+            captured_at_unix_ms: captured_at_ms,
+            publication_deadline_unix_ms: captured_at_ms
+                .saturating_add(self.config.limits.max_age_ms),
             state_schema_version: signed.body.state_schema_version.clone(),
             confidentiality: signed.body.confidentiality,
             destination_response_sha256: content_sha256(&raw),
@@ -231,7 +247,7 @@ impl DestinationObserver {
             return Err(ObserverError::OversizedResponse);
         }
         let receipt_sha256 = canonical_digest(RECEIPT_DIGEST_DOMAIN, &receipt)?;
-        self.store.finalize(
+        if let Err(error) = self.store.finalize(
             &self.config,
             &self.config_sha256,
             &request,
@@ -240,7 +256,23 @@ impl DestinationObserver {
             &destination_scope_sha256,
             &receipt,
             &receipt_sha256,
-        )?;
+        ) {
+            if matches!(
+                error,
+                ObserverError::CursorRollback
+                    | ObserverError::CapacityExceeded
+                    | ObserverError::ReplayMismatch
+            ) {
+                self.store.fail_pending(
+                    self.config.generation,
+                    &self.config_sha256,
+                    &request,
+                    &request_sha256,
+                    &error,
+                )?;
+            }
+            return Err(error);
+        }
         Ok(receipt)
     }
 
@@ -248,7 +280,8 @@ impl DestinationObserver {
         &self,
         request: &ObservationRequest,
         now_ms: i64,
-    ) -> Result<(SignedDestinationState, Vec<u8>), ObserverError> {
+        started_at: Instant,
+    ) -> Result<(SignedDestinationState, Vec<u8>, i64), ObserverError> {
         let query_sha256 = canonical_digest(QUERY_DOMAIN, &request.query)?;
         let mut url =
             Url::parse(&self.config.endpoint_url).map_err(|_| ObserverError::InvalidConfig)?;
@@ -322,11 +355,15 @@ impl DestinationObserver {
         }
         let signed: SignedDestinationState = parse_json_no_duplicates(&raw)?;
         verify_destination_state(&signed, &self.destination_public_key)?;
-        self.validate_destination_state(request, &signed, &query_sha256, now_ms)?;
+        let elapsed_ms = i64::try_from(started_at.elapsed().as_millis())
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let captured_at_ms = now_ms.saturating_add(elapsed_ms);
+        validate_temporal(&self.config, request, captured_at_ms)?;
+        self.validate_destination_state(request, &signed, &query_sha256, captured_at_ms)?;
         if contains_secret_in_json(&signed.body.state, &self.secret_markers)? {
             return Err(ObserverError::ConfidentialityDenied);
         }
-        Ok((signed, raw))
+        Ok((signed, raw, captured_at_ms))
     }
 
     fn validate_replayed_receipt(
@@ -660,15 +697,11 @@ fn validate_config(
 fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
     markers.iter().any(|marker| {
         let lowercase_hex = hex(marker);
-        let uppercase_hex = lowercase_hex.to_ascii_uppercase();
-        let uppercase_percent = percent_encode(marker);
-        let lowercase_percent = uppercase_percent.to_ascii_lowercase();
+        let percent = percent_encode(marker);
         contains(raw, marker)
             || contains(raw, BASE64.encode(marker).as_bytes())
-            || contains(raw, lowercase_hex.as_bytes())
-            || contains(raw, uppercase_hex.as_bytes())
-            || contains(raw, uppercase_percent.as_bytes())
-            || contains(raw, lowercase_percent.as_bytes())
+            || contains_ascii_case_insensitive(raw, lowercase_hex.as_bytes())
+            || contains_ascii_case_insensitive(raw, percent.as_bytes())
     })
 }
 
@@ -686,7 +719,10 @@ fn header_wire_bytes(headers: &HeaderMap) -> Result<usize, ObserverError> {
 fn is_terminal_destination_error(error: &ObserverError) -> bool {
     matches!(
         error,
-        ObserverError::DestinationUnauthorized
+        ObserverError::MalformedRequest
+            | ObserverError::ExpiredRequest
+            | ObserverError::ExpiredGrant
+            | ObserverError::DestinationUnauthorized
             | ObserverError::MalformedResponse
             | ObserverError::OversizedResponse
             | ObserverError::StaleObservation
@@ -740,6 +776,16 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
             .any(|window| window == needle)
 }
 
+fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
+}
+
 fn hex(bytes: &[u8]) -> String {
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -774,8 +820,10 @@ mod tests {
         let markers = vec![vec![0xab, 0xcd, 0xef, 0x10]];
         assert!(contains_secret(b"abcdef10", &markers));
         assert!(contains_secret(b"ABCDEF10", &markers));
+        assert!(contains_secret(b"AbCdEf10", &markers));
         assert!(contains_secret(b"%AB%CD%EF%10", &markers));
         assert!(contains_secret(b"%ab%cd%ef%10", &markers));
+        assert!(contains_secret(b"%aB%Cd%eF%10", &markers));
     }
 
     #[test]

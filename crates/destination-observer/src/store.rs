@@ -532,7 +532,7 @@ fn enforce_capacity(
     Ok(())
 }
 
-fn validate_temporal(
+pub(crate) fn validate_temporal(
     config: &ObserverConfig,
     request: &ObservationRequest,
     now_ms: i64,

@@ -60,6 +60,8 @@ pending claims become bounded failure tombstones and release the destination;
 terminal authentication, validation, confidentiality, freshness, cursor, and
 size denials do the same immediately, while transport outages retain the
 bounded pending retry path;
+request and grant validity are checked again at the monotonic GET-completion
+time before any receipt can be signed;
 only complete evidence consumes the receipt-count and evidence-byte quotas. A
 unique pending claim per destination scope prevents competing reads across
 builds and effect fences. Rate, receipt-count, evidence byte, response, header,
@@ -79,8 +81,8 @@ unavailable outcomes remain failures, never evidence of absence.
 Response headers, including canonical separator and terminator framing bytes,
 and every streamed body chunk are continuously bounded. The
 complete raw response and decoded JSON are checked against the configured
-secret markers and their common Base64, case-complete hexadecimal, and
-case-complete percent encodings.
+secret markers and their common Base64 plus per-nibble case-insensitive
+hexadecimal and percent encodings.
 Secret-labelled state is denied. Fields not in the closed response schema,
 wrong JSON types, stale or future observations, substituted signatures or
 bindings, and a cursor that does not advance from the signed predecessor are
