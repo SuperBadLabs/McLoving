@@ -3,8 +3,8 @@
 Date: 2026-08-09
 
 Verdict: LOCAL PASS for the architecture-repair candidate at exact
-implementation head `f602618eae3f299c2affeee6f2b8185108c784f4e`.
-The focused gate passes 114 dependency-resolution tests: 69 unit tests, 44
+implementation head `b6f9a0138976d3457c1a3a478c7bfee521ec7adf`.
+The focused gate passes 115 dependency-resolution tests: 70 unit tests, 44
 ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Strict all-target resolver Clippy,
 formatting, and `git diff --check` also pass on HeMan. This head replaces both
@@ -183,7 +183,7 @@ the same resolution identity is denied offline; restart with the repository
 offline returns byte-equivalent JSON; and neither the repository credential nor
 receipt key appears in stdout, stderr, or the receipt.
 
-Exact implementation head `f602618e` passes strict resolver all-target Clippy,
+Exact implementation head `b6f9a013` passes strict resolver all-target Clippy,
 formatting, `git diff --check`, all 113 ordinary focused tests, and the real
 exact-capacity contained journey on HeMan. Documentation head `8d15ca5` passes
 workspace-wide strict Clippy, the complete locked non-source workspace, the
@@ -200,8 +200,8 @@ response to that runner-only failure.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired 124
-actionable findings across 129 important seams. Five later comments repeated an
+Pre-closure review and repeated contained execution exposed and repaired 125
+actionable findings across 130 important seams. Five later comments repeated an
 already counted underlying seam and are not double-counted:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -523,8 +523,8 @@ already counted underlying seam and are not double-counted:
     making the later zero assertion redundant. The counter is removed while the
     stronger per-record kind, identity, disposition, and absent-credential
     assertions remain.
-87-129. Subsequent thread-aware exact-head review covered 43 important seams and
-    produced 38 additional actionable findings; five comments repeated the same
+87-130. Subsequent thread-aware exact-head review covered 44 important seams and
+    produced 39 additional actionable findings; five comments repeated the same
     already counted underlying race or execution prediction. The repairs bind
     executable verification to the running `/proc/self/exe` inode, serialize on
     stable output and transport root inodes, pin every fixed root, make cleanup
@@ -544,7 +544,12 @@ already counted underlying seam and are not double-counted:
     and atomically renamed. Exact descriptor identity, contiguous offsets,
     bounded strict headers, closed manifests, per-slice and whole-archive
     digests, exact-inode cleanup, and final link revalidation replace the former
-    transient, stage, artifacts, and bundle directory trees.
+    transient, stage, artifacts, and bundle directory trees. The final seam
+    found that the authenticated publication commit itself could persist a
+    configured numeric or hexadecimal marker through its fingerprints or HMAC.
+    Head `b6f9a013` marker-scans the complete signed commit both before
+    persistence and after replay loading; a decimal-fingerprint regression
+    proves rejection before any commit file becomes visible.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -622,8 +627,8 @@ eighty-four important seams; ready-transition Copilot review then found the
 ecosystem-crossed adapter error and redundant Mario counter. Their exact-head
 repairs and focused regressions brought that audit stage to eighty-one
 actionable findings across eighty-six important seams. The later thread-aware
-review and archive conversion summarized in seams 87-129 bring the current
-audit to 124 actionable findings across 129 important seams;
+review, archive conversion, and commit-marker repair summarized in seams 87-130
+bring the current audit to 125 actionable findings across 130 important seams;
 every fixed thread must be replied to and resolved only after the complete
 closure head passes protected checks and fresh review.
 
