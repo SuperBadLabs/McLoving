@@ -261,20 +261,16 @@ impl HttpTransport {
                 "artifact plan exceeds a certified per-artifact or aggregate bound",
             ));
         }
-        let resolution_root = self.transport_root.join(resolution_id.to_string());
         let relative_root = PathBuf::from(resolution_id.to_string());
-        let created_identity = run_transport_before_deadline(
+        let resolution = run_transport_before_deadline(
             deadline,
-            create_private_resolution_root(&resolution_root),
+            create_private_resolution_root(
+                self.resolution_root_directory()?,
+                &self.transport_root,
+                resolution_id,
+            ),
         )
         .await
-        .map_err(|error| preserve_transport_setup_error(&self.cleanup_poisoned, error))?;
-        let resolution = pin_transport_resolution(
-            self.resolution_root_directory()?,
-            &self.transport_root,
-            resolution_id,
-            created_identity,
-        )
         .map_err(|error| preserve_transport_setup_error(&self.cleanup_poisoned, error))?;
         match self
             .fetch_plan_into(plan, deadline, &resolution, &relative_root)
@@ -559,7 +555,7 @@ where
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", test))]
 fn pin_transport_resolution(
     root_directory: Arc<std::fs::File>,
     root_path: &Path,
@@ -568,7 +564,6 @@ fn pin_transport_resolution(
 ) -> Result<PinnedTransportResolution, TransportError> {
     use nix::fcntl::{OFlag, openat};
     use nix::sys::stat::Mode;
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
     let name = resolution_id.to_string();
     let directory = std::fs::File::from(
@@ -584,14 +579,35 @@ fn pin_transport_resolution(
         )
         .map_err(|_| root_state_error())?,
     );
+    finish_transport_resolution_pin(
+        root_directory,
+        root_path,
+        resolution_id,
+        directory,
+        Some(created_identity),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn finish_transport_resolution_pin(
+    root_directory: Arc<std::fs::File>,
+    root_path: &Path,
+    resolution_id: Uuid,
+    directory: std::fs::File,
+    created_identity: Option<TransportRootIdentity>,
+) -> Result<PinnedTransportResolution, TransportError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let name = resolution_id.to_string();
     let metadata = directory.metadata().map_err(|_| root_state_error())?;
     let root_metadata = root_directory.metadata().map_err(|_| root_state_error())?;
     if !metadata.is_dir()
         || metadata.uid() != nix::unistd::Uid::effective().as_raw()
         || metadata.permissions().mode() & 0o777 != 0o700
         || metadata.dev() != root_metadata.dev()
-        || metadata.dev() != created_identity.device
-        || metadata.ino() != created_identity.inode
+        || created_identity.is_some_and(|identity| {
+            metadata.dev() != identity.device || metadata.ino() != identity.inode
+        })
     {
         return Err(root_state_error());
     }
@@ -616,8 +632,8 @@ fn pin_transport_resolution(
     let final_link =
         std::fs::symlink_metadata(pinned_root_path.join(&name)).map_err(|_| root_state_error())?;
     if !final_link.file_type().is_dir()
-        || final_link.dev() != created_identity.device
-        || final_link.ino() != created_identity.inode
+        || final_link.dev() != metadata.dev()
+        || final_link.ino() != metadata.ino()
     {
         return Err(root_state_error());
     }
@@ -682,7 +698,7 @@ fn validate_transport_resolution_root(
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), test))]
 fn pin_transport_resolution(
     _root_directory: Arc<std::fs::File>,
     _root_path: &Path,
@@ -1211,37 +1227,50 @@ fn preserve_transport_setup_error(
     error
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 async fn create_private_resolution_root(
-    path: &Path,
-) -> Result<TransportRootIdentity, TransportError> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    root_directory: Arc<std::fs::File>,
+    root_path: &Path,
+    resolution_id: Uuid,
+) -> Result<PinnedTransportResolution, TransportError> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::{Mode, mkdirat};
 
-    let mut builder = tokio::fs::DirBuilder::new();
-    builder.mode(0o700);
-    builder.create(path).await.map_err(|_| {
+    let name = resolution_id.to_string();
+    mkdirat(
+        &*root_directory,
+        name.as_str(),
+        Mode::from_bits_truncate(0o700),
+    )
+    .map_err(|_| {
         TransportError::new(
             "DEP_TRANSPORT_STATE_CONFLICT",
             "transient resolution root already exists or cannot be created",
         )
     })?;
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| root_state_error())?;
-    if !metadata.file_type().is_dir()
-        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-        || metadata.permissions().mode() & 0o777 != 0o700
-    {
-        return Err(root_state_error());
-    }
-    Ok(TransportRootIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    })
+    root_directory.sync_all().map_err(|_| root_state_error())?;
+    let directory = std::fs::File::from(
+        openat(
+            &*root_directory,
+            name.as_str(),
+            OFlag::O_RDONLY
+                | OFlag::O_DIRECTORY
+                | OFlag::O_NOFOLLOW
+                | OFlag::O_CLOEXEC
+                | OFlag::O_NONBLOCK,
+            Mode::empty(),
+        )
+        .map_err(|_| root_state_error())?,
+    );
+    finish_transport_resolution_pin(root_directory, root_path, resolution_id, directory, None)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 async fn create_private_resolution_root(
-    _path: &Path,
-) -> Result<TransportRootIdentity, TransportError> {
+    _root_directory: Arc<std::fs::File>,
+    _root_path: &Path,
+    _resolution_id: Uuid,
+) -> Result<PinnedTransportResolution, TransportError> {
     Err(TransportError::new(
         "DEP_TRANSPORT_PLATFORM_UNSUPPORTED",
         "private transport roots require Unix file semantics",
