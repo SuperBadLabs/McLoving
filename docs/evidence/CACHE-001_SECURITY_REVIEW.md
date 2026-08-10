@@ -1,7 +1,11 @@
 # CACHE-001 security and closure review
 
-Status: closed against protected `main` commit
-`f58986cd36019588b9731150a663e5dff32773bd`.
+Date: 2026-08-10
+
+Verdict: PASS. The contained cache implementation is bound to exact reviewed
+head `87e3f75936e1d5f153b99167e1340308e92ac9ac` and closed against protected
+`main` commit `f58986cd36019588b9731150a663e5dff32773bd` after exact-head and
+post-merge Foundation and Windows verification.
 
 ## Scope
 
