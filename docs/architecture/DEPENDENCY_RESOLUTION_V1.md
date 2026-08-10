@@ -308,6 +308,11 @@ publication. No component reconstructs a relative window after descheduling.
 Expiry cancels the HTTP body, removes transient state, withholds publication,
 and emits no credential- or source-derived diagnostic.
 
+Complete transport fetches are serialized through one async slot acquired
+under that same absolute deadline. Poison state is checked only after the slot
+is held, so a fetch that overlaps an unknown post-create identity cannot remain
+admitted and later return a publishable archive after the poison transition.
+
 ## Claim, publication, and replay
 
 Before network access, the resolver durably publishes an immutable claim that
@@ -331,7 +336,9 @@ cannot be proven, it poisons transport state and requires reconciliation after
 restart. Once exclusive creation links the archive, any failure to inspect the
 archive or pinned-root metadata, or any invalid device/inode relationship,
 likewise poisons transport state before returning; an unknown identity is never
-treated as safe to remove or safe for later requests to ignore.
+treated as safe to remove or safe for later requests to ignore. Every later
+production fetch must first acquire the serialized slot and then fails before
+creating a new archive.
 
 Publication copies the verified slices into one unique regular staging archive,
 synchronizes and seals that inode to mode `0400`, and publishes it by atomic
