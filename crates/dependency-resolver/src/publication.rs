@@ -784,34 +784,41 @@ impl ResolutionStore {
 
         let stage_name = format!(".{}.{}.stage", resolution_id, Uuid::new_v4());
         let stage = self.inner.bundles_root.join(&stage_name);
-        create_directory(&stage, 0o700)?;
-        let pinned_stage =
-            match pin_private_directory_at(&self.inner.bundles_directory, &stage_name, 0o700, None)
-            {
-                Ok(directory) => directory,
-                Err(_) => {
-                    return Err(StoreError::new(
-                        "DEP_STORE_PUBLICATION_AMBIGUOUS",
-                        "new publication stage could not be bound to its exact directory",
-                    ));
+        let stage_identity = create_private_directory_with_identity(&stage, 0o700)?;
+        let pinned_stage = match pin_private_directory_at(
+            &self.inner.bundles_directory,
+            &stage_name,
+            0o700,
+            Some(stage_identity),
+        ) {
+            Ok(directory) => directory,
+            Err(_) => {
+                return Err(StoreError::new(
+                    "DEP_STORE_PUBLICATION_AMBIGUOUS",
+                    "new publication stage could not be bound to its exact directory",
+                ));
+            }
+        };
+        let artifacts_root = pinned_stage.path.join("artifacts");
+        let artifacts_identity =
+            match create_private_directory_with_identity(&artifacts_root, 0o700) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    remove_private_tree_exact(
+                        &self.inner.bundles_directory,
+                        &self.inner.bundles_root,
+                        &stage,
+                        pinned_stage.device,
+                        pinned_stage.inode,
+                    )?;
+                    return Err(error);
                 }
             };
-        let artifacts_root = pinned_stage.path.join("artifacts");
-        if let Err(error) = create_directory(&artifacts_root, 0o700) {
-            remove_private_tree_exact(
-                &self.inner.bundles_directory,
-                &self.inner.bundles_root,
-                &stage,
-                pinned_stage.device,
-                pinned_stage.inode,
-            )?;
-            return Err(error);
-        }
         let pinned_artifacts = match pin_private_directory_at(
             &pinned_stage.directory,
             "artifacts",
             0o700,
-            Some((pinned_stage.device, 0)),
+            Some(artifacts_identity),
         ) {
             Ok(directory) => directory,
             Err(error) => {
@@ -1001,7 +1008,8 @@ impl ResolutionStore {
                 return Err(error);
             }
         };
-        let receipt_identity = directory_device_inode(&receipt_file)?;
+        let receipt_fingerprint = verified_file_fingerprint(&receipt_file, MAX_STATE_BYTES, 0o400)?;
+        let receipt_identity = (receipt_fingerprint.device, receipt_fingerprint.inode);
         sync_directory(&self.inner.receipts_root)?;
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
             self.withdraw_publication_exact(
@@ -1037,7 +1045,9 @@ impl ResolutionStore {
         };
         let completion_path = self.completion_path(resolution_id);
         let completion_file = write_new_json(&completion_path, &completion, 0o400)?;
-        let completion_identity = directory_device_inode(&completion_file)?;
+        let completion_fingerprint =
+            verified_file_fingerprint(&completion_file, MAX_STATE_BYTES, 0o400)?;
+        let completion_identity = (completion_fingerprint.device, completion_fingerprint.inode);
         if Instant::now() >= deadline || current_unix_ms()? >= claim.publication_deadline_unix_ms {
             self.remove_completion_exact(&completion_path, completion_identity)?;
             self.withdraw_publication_exact(
@@ -1052,6 +1062,14 @@ impl ResolutionStore {
             ));
         }
         self.record_ambiguity(claim)?;
+        revalidate_publication_pair(
+            &receipt_path,
+            &receipt_file,
+            &receipt_fingerprint,
+            &completion_path,
+            &completion_file,
+            &completion_fingerprint,
+        )?;
         remove_private_file(
             &self.inner.claims_directory,
             &self.inner.claims_root,
@@ -2940,19 +2958,13 @@ fn revalidate_loaded_receipt_pair(
     receipt_path: &Path,
     completion_path: &Path,
 ) -> Result<(), StoreError> {
-    revalidate_verified_file_link(
+    revalidate_publication_pair(
         receipt_path,
         &loaded.admission_lock,
         &loaded.receipt_identity,
-        MAX_STATE_BYTES,
-        0o400,
-    )?;
-    revalidate_verified_file_link(
         completion_path,
         &loaded.completion_file,
         &loaded.completion_identity,
-        MAX_STATE_BYTES,
-        0o400,
     )
 }
 
@@ -2965,6 +2977,46 @@ fn revalidate_loaded_receipt_pair(
     Err(StoreError::new(
         "DEP_STORE_PLATFORM_UNSUPPORTED",
         "receipt pair revalidation requires Linux descriptor semantics",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn revalidate_publication_pair(
+    receipt_path: &Path,
+    receipt_file: &File,
+    receipt_identity: &RetainedLinkIdentity,
+    completion_path: &Path,
+    completion_file: &File,
+    completion_identity: &RetainedLinkIdentity,
+) -> Result<(), StoreError> {
+    revalidate_verified_file_link(
+        receipt_path,
+        receipt_file,
+        receipt_identity,
+        MAX_STATE_BYTES,
+        0o400,
+    )?;
+    revalidate_verified_file_link(
+        completion_path,
+        completion_file,
+        completion_identity,
+        MAX_STATE_BYTES,
+        0o400,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn revalidate_publication_pair(
+    _receipt_path: &Path,
+    _receipt_file: &File,
+    _receipt_identity: &RetainedLinkIdentity,
+    _completion_path: &Path,
+    _completion_file: &File,
+    _completion_identity: &RetainedLinkIdentity,
+) -> Result<(), StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "publication pair revalidation requires Linux descriptor semantics",
     ))
 }
 
@@ -3228,8 +3280,40 @@ fn create_directory(path: &Path, mode: u32) -> Result<(), StoreError> {
     sync_directory(path.parent().ok_or_else(state_error)?)
 }
 
+#[cfg(unix)]
+fn create_private_directory_with_identity(
+    path: &Path,
+    mode: u32,
+) -> Result<(u64, u64), StoreError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    create_directory(path, mode)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| state_error())?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.permissions().mode() & 0o777 != mode
+    {
+        return Err(StoreError::new(
+            "DEP_STORE_DIRECTORY_POLICY_DENIED",
+            "new publication directory owner, mode, or type violates policy",
+        ));
+    }
+    Ok((metadata.dev(), metadata.ino()))
+}
+
 #[cfg(not(unix))]
 fn create_directory(_path: &Path, _mode: u32) -> Result<(), StoreError> {
+    Err(StoreError::new(
+        "DEP_STORE_PLATFORM_UNSUPPORTED",
+        "durable dependency publication requires Unix file semantics",
+    ))
+}
+
+#[cfg(not(unix))]
+fn create_private_directory_with_identity(
+    _path: &Path,
+    _mode: u32,
+) -> Result<(u64, u64), StoreError> {
     Err(StoreError::new(
         "DEP_STORE_PLATFORM_UNSUPPORTED",
         "durable dependency publication requires Unix file semantics",
@@ -4209,16 +4293,19 @@ mod tests {
         let bundles_directory = open_pinned_cleanup_root(&bundles).expect("pinned bundles root");
         let stage_name = ".contained.stage";
         let stage_link = bundles.join(stage_name);
-        create_directory(&stage_link, 0o700).expect("stage directory");
-        let stage = pin_private_directory_at(&bundles_directory, stage_name, 0o700, None)
-            .expect("pinned stage");
+        let stage_identity =
+            create_private_directory_with_identity(&stage_link, 0o700).expect("stage directory");
+        let stage =
+            pin_private_directory_at(&bundles_directory, stage_name, 0o700, Some(stage_identity))
+                .expect("pinned stage");
         let artifacts_link = stage.path.join("artifacts");
-        create_directory(&artifacts_link, 0o700).expect("artifacts directory");
+        let artifacts_identity = create_private_directory_with_identity(&artifacts_link, 0o700)
+            .expect("artifacts directory");
         let artifacts = pin_private_directory_at(
             &stage.directory,
             "artifacts",
             0o700,
-            Some((stage.device, 0)),
+            Some(artifacts_identity),
         )
         .expect("pinned artifacts");
 
@@ -4250,6 +4337,64 @@ mod tests {
             .is_err()
         );
         assert!(outside.path().exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn publication_stage_and_artifacts_replacements_before_pin_are_rejected() {
+        let root = TempDir::new().expect("publication root");
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("private publication root");
+        let bundles = root.path().join("bundles");
+        std::fs::create_dir(&bundles).expect("bundles root");
+        std::fs::set_permissions(&bundles, std::fs::Permissions::from_mode(0o700))
+            .expect("private bundles root");
+        let bundles_directory = open_pinned_cleanup_root(&bundles).expect("pinned bundles root");
+
+        let replaced_stage_name = ".replaced.stage";
+        let replaced_stage = bundles.join(replaced_stage_name);
+        let replaced_stage_identity =
+            create_private_directory_with_identity(&replaced_stage, 0o700).expect("created stage");
+        let held_stage = bundles.join("held-created-stage");
+        std::fs::rename(&replaced_stage, &held_stage).expect("move created stage");
+        create_directory(&replaced_stage, 0o700).expect("replacement stage");
+        let stage_error = pin_private_directory_at(
+            &bundles_directory,
+            replaced_stage_name,
+            0o700,
+            Some(replaced_stage_identity),
+        )
+        .err()
+        .expect("replacement stage must not satisfy created identity");
+        assert_eq!(stage_error.code, "DEP_STORE_DIRECTORY_POLICY_DENIED");
+        assert!(held_stage.exists(), "created stage remains explicit");
+
+        let stage_name = ".artifacts-parent.stage";
+        let stage_link = bundles.join(stage_name);
+        let stage_identity =
+            create_private_directory_with_identity(&stage_link, 0o700).expect("created stage");
+        let stage =
+            pin_private_directory_at(&bundles_directory, stage_name, 0o700, Some(stage_identity))
+                .expect("pinned stage");
+        let artifacts_link = stage.path.join("artifacts");
+        let artifacts_identity = create_private_directory_with_identity(&artifacts_link, 0o700)
+            .expect("created artifacts");
+        let held_artifacts = stage.path.join("held-created-artifacts");
+        std::fs::rename(&artifacts_link, &held_artifacts).expect("move created artifacts");
+        create_directory(&artifacts_link, 0o700).expect("replacement artifacts");
+        let artifacts_error = pin_private_directory_at(
+            &stage.directory,
+            "artifacts",
+            0o700,
+            Some(artifacts_identity),
+        )
+        .err()
+        .expect("replacement artifacts must not satisfy created identity");
+        assert_eq!(artifacts_error.code, "DEP_STORE_DIRECTORY_POLICY_DENIED");
+        assert!(
+            held_artifacts.exists(),
+            "created artifacts directory remains explicit"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -5550,6 +5695,77 @@ mod tests {
         assert!(
             bundle_path.exists(),
             "bundle must remain paired on ambiguity"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn claim_commit_revalidates_the_exact_durable_pair() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("new claim")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let receipt = store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("published receipt");
+        let receipt_path = store.receipt_path(receipt.resolution_id);
+        let completion_path = store.completion_path(receipt.resolution_id);
+        let receipt_file =
+            open_verified_file(&receipt_path, MAX_STATE_BYTES, 0o400).expect("pinned receipt");
+        let receipt_identity = verified_file_fingerprint(&receipt_file, MAX_STATE_BYTES, 0o400)
+            .expect("receipt fingerprint");
+        let completion_file = open_verified_file(&completion_path, MAX_STATE_BYTES, 0o400)
+            .expect("pinned completion");
+        let completion_identity =
+            verified_file_fingerprint(&completion_file, MAX_STATE_BYTES, 0o400)
+                .expect("completion fingerprint");
+
+        let held_receipt = store.inner.receipts_root.join("held-commit-receipt.json");
+        std::fs::rename(&receipt_path, &held_receipt).expect("move exact receipt");
+        write_new_json(&receipt_path, &receipt, 0o400).expect("replacement receipt");
+        let receipt_error = revalidate_publication_pair(
+            &receipt_path,
+            &receipt_file,
+            &receipt_identity,
+            &completion_path,
+            &completion_file,
+            &completion_identity,
+        )
+        .expect_err("replacement receipt must prevent claim commit");
+        assert_eq!(receipt_error.code, "DEP_STORE_AMBIGUOUS_COMPLETION");
+        std::fs::remove_file(&receipt_path).expect("remove replacement receipt");
+        std::fs::rename(&held_receipt, &receipt_path).expect("restore exact receipt");
+
+        let held_completion = store
+            .inner
+            .completions_root
+            .join("held-commit-completion.json");
+        std::fs::rename(&completion_path, &held_completion).expect("move exact completion");
+        let completion_error = revalidate_publication_pair(
+            &receipt_path,
+            &receipt_file,
+            &receipt_identity,
+            &completion_path,
+            &completion_file,
+            &completion_identity,
+        )
+        .expect_err("missing completion must prevent claim commit");
+        assert_eq!(completion_error.code, "DEP_STORE_AMBIGUOUS_COMPLETION");
+        assert!(
+            held_completion.exists(),
+            "the exact completion remains explicit"
         );
     }
 
