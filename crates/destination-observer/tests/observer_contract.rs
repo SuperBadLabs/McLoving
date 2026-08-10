@@ -801,6 +801,20 @@ async fn cutover_fences_old_process_and_rollback_requires_an_exact_historical_ta
     let old_digest = rig.observer.config_sha256().to_owned();
     let old_request = rig.prepare(rig.request(ObservationPhase::PreAction));
 
+    let empty_state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(empty_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut unanchored_generation = rig.config.clone();
+    unanchored_generation.state_dir = empty_state.path().to_path_buf();
+    unanchored_generation.generation = 2;
+    assert!(matches!(
+        rig.observer_for_config(unanchored_generation),
+        Err(ObserverError::InvalidConfig)
+    ));
+
     let mut cutover_config = rig.config.clone();
     cutover_config.generation = 2;
     cutover_config.activation_mode = ActivationMode::Cutover;

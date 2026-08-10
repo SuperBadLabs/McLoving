@@ -145,7 +145,8 @@ completed receipts are signature-, binding-, and frame-size-verified again on
 every replay.
 
 Every claim, sequence allocation, and finalization rereads the active
-generation/configuration fence. Cutover requires a greater generation and the
+generation/configuration fence. An empty ledger bootstraps only generation 1;
+a later generation without its durable ancestry is rejected. Cutover requires a greater generation and the
 exact active predecessor. Rollback is also a new greater generation and names
 the generation it fences; it never resurrects an old process. A process fenced
 during a network call cannot finalize evidence. Credential rotation is a new

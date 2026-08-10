@@ -129,7 +129,8 @@ impl ObserverStore {
         let had_active = active.is_some();
         match active {
             None => {
-                if config.activation_mode != ActivationMode::Current
+                if config.generation != 1
+                    || config.activation_mode != ActivationMode::Current
                     || config.previous_generation.is_some()
                     || config.previous_config_sha256.is_some()
                     || config.rollback_from_generation.is_some()
