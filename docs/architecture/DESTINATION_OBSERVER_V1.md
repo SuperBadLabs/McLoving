@@ -38,12 +38,16 @@ The observer is a fail-closed Linux process: its implementation digest is read
 from the kernel's `/proc/self/exe` handle for the executing inode, never by
 reopening a replaceable executable pathname. The standalone process accepts
 bounded newline-complete frames from stdin; the newline is included in the
-frame-size limit. It emits generic bounded responses on stdout. Configuration
+frame-size limit. Crossing that bound produces `oversized_request` and
+terminates immediately without draining an attacker-controlled tail. It emits
+generic bounded responses on stdout. Configuration
 and authority files
 are opened without following a final symlink; the complete configuration,
-secret files, and the state
+deployment-provided runtime-image attestation file, secret files, and the state
 directory must be owned by the process user and inaccessible to group or other
-users. The executable, image, complete configuration, read token, three signing
+users. The executable is measured through `/proc/self/exe`; the separately
+mounted runtime-image digest must match the image identity certified by
+configuration. The executable, image, complete configuration, read token, three signing
 authorities, CA, and secret-marker set are digest-bound before the ledger opens.
 
 ## Signed request and canonical read
@@ -56,6 +60,10 @@ and effect class, grant ID/version/scope, canonical allowlisted query, prior
 cursor and predecessor receipt, short validity window, and audit provenance.
 Unknown fields, duplicate JSON members, unknown query keys, stale requests,
 substituted bindings, or invalid signatures fail before network access.
+The GET carries reserved non-secret headers for the observation ID, effect
+fence, phase, canonical-query digest, and complete signed-request digest. An
+independently deployed destination therefore receives every fresh binding it
+must echo and sign without shared process state.
 
 The observer persists a pending claim in a `synchronous=FULL` WAL ledger before
 the GET. An observation ID can be replayed only with byte-identical canonical
@@ -75,7 +83,9 @@ and evidence-envelope size denials do the same immediately. HTTP/2 decoder or
 application header-list overflow is treated as destination unavailability and,
 like other transport outages, retains the bounded pending retry path;
 request and grant validity are checked again at the monotonic GET-completion
-time before any receipt can be signed;
+time before any receipt can be signed. They are also resampled after ledger and
+lease delays immediately before dispatch, so authority that expires while
+waiting cannot cause a GET;
 only complete evidence consumes the receipt-count and evidence-byte quotas.
 Every initial or retrying outbound GET reserves a durable timestamped outbound
 intent in the same claim transaction, so process death cannot bypass the
@@ -109,18 +119,19 @@ Response headers, including canonical separator and terminator framing bytes,
 are also measured before the body is consumed, and exactly one `Content-Type`
 header is required. Every streamed body chunk is continuously bounded. The
 complete raw response and decoded JSON are checked against the configured
-secret markers and their common padded and unpadded Base64 plus per-nibble case-insensitive
-hexadecimal and percent encodings. Decoded JSON string values are scanned
-directly as well as in serialized and Base64-decoded form, including strings
-whose marker bytes require JSON escaping.
+secret markers and their standard and URL-safe padded and unpadded Base64 plus
+per-nibble case-insensitive hexadecimal, fully percent-encoded, and mixed
+percent-encoded forms. Marker count and aggregate bytes are bounded. Decoded
+JSON string values are scanned directly and after Base64 decoding, including
+strings whose marker bytes require JSON escaping.
 Secret-labelled state is denied. Fields not in the closed response schema,
 wrong JSON types, observations captured before the signed request or stale or
 future observations, substituted signatures or
 bindings, a cursor outside the signed SQLite integer range, and a cursor that
 does not advance from the signed predecessor are denied.
 
-Each tenant/project/pipeline, destination, and effect-fence identity admits
-exactly this chain. Build and attempt IDs remain signed receipt provenance but
+Each tenant/project/pipeline, destination, effect-fence identity, and canonical
+query admits exactly this chain. Build and attempt IDs remain signed receipt provenance but
 do not create independent phase chains for controller retries:
 
 1. `pre_action` with no predecessor;
@@ -143,6 +154,11 @@ generation/cutover/rollback fields, grant, destination cursor and observation
 time, capture and publication deadline, typed state and confidentiality,
 complete raw response digest and destination signature, retry count, audit
 provenance, receipt sequence, key identity, and public-key digest.
+The publication deadline is the minimum of the freshness bound, signed request
+expiry, and read-grant expiry. `observation_receipt_digest` is the supported
+predecessor helper: SHA-256 over
+`mcloving-observer-receipt-digest-v1 || 0x00 || serde_json(receipt)`, including
+the receipt signature.
 
 The complete signed standalone success envelope must fit the process frame
 before the pending claim can commit. Configuration is rejected before the
@@ -159,7 +175,9 @@ a later generation without its durable ancestry is rejected. Cutover requires a 
 exact active predecessor. Rollback is also a new greater generation and names
 the generation it fences; it never resurrects an old process. A process fenced
 during a network call cannot finalize evidence. Credential rotation is a new
-configuration generation with a new exact grant and token digest.
+configuration generation with a new exact grant and token digest. Once a
+cutover or rollback is active, restarting its byte-identical generation and
+configuration is idempotent and does not fence its own pending observations.
 
 ## Required proof and residual boundary
 

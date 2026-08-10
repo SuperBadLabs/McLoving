@@ -6,6 +6,8 @@ pub enum ObserverError {
     InvalidConfig,
     #[error("observation request is malformed")]
     MalformedRequest,
+    #[error("observation request exceeds its certified bound")]
+    OversizedRequest,
     #[error("observation request authorization is invalid")]
     UnauthorizedRequest,
     #[error("observation request does not bind the certified runtime")]
@@ -50,6 +52,7 @@ impl ObserverError {
         match self {
             Self::InvalidConfig => "invalid_config",
             Self::MalformedRequest => "malformed_request",
+            Self::OversizedRequest => "oversized_request",
             Self::UnauthorizedRequest => "unauthorized_request",
             Self::BindingMismatch => "binding_mismatch",
             Self::ExpiredRequest => "expired_request",

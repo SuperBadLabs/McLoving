@@ -46,6 +46,7 @@ impl ObserverResponse {
 #[allow(clippy::too_many_arguments)]
 pub fn load_observer(
     config_path: &Path,
+    runtime_image_sha256_path: &Path,
     token_path: &Path,
     request_public_key_path: &Path,
     destination_public_key_path: &Path,
@@ -53,6 +54,9 @@ pub fn load_observer(
     secret_marker_path: &Path,
 ) -> Result<DestinationObserver, ObserverError> {
     let config = read_config(config_path)?;
+    let runtime_image_sha256 = read_private_bounded_regular_file(runtime_image_sha256_path, 64)?;
+    let runtime_image_sha256 =
+        String::from_utf8(runtime_image_sha256).map_err(|_| ObserverError::InvalidConfig)?;
     let read_token = read_private_bounded_regular_file(token_path, MAX_AUTHORITY_BYTES)?;
     let request_public_key =
         read_bounded_regular_file(request_public_key_path, MAX_AUTHORITY_BYTES)?;
@@ -74,6 +78,7 @@ pub fn load_observer(
     DestinationObserver::new(
         config,
         sha256_running_executable()?,
+        runtime_image_sha256,
         read_token,
         request_public_key,
         destination_public_key,
@@ -96,7 +101,7 @@ pub fn read_bounded_frame<R: Read>(input: &mut R) -> Result<Option<Vec<u8>>, Obs
             Ok(0) => return Err(ObserverError::MalformedRequest),
             Ok(_) if byte[0] == b'\n' => {
                 if frame.len() >= MAX_FRAME_BYTES {
-                    return Err(ObserverError::OversizedResponse);
+                    return Err(ObserverError::OversizedRequest);
                 }
                 if frame.last() == Some(&b'\r') {
                     frame.pop();
@@ -104,22 +109,9 @@ pub fn read_bounded_frame<R: Read>(input: &mut R) -> Result<Option<Vec<u8>>, Obs
                 return Ok(Some(frame));
             }
             Ok(_) if frame.len() >= MAX_FRAME_BYTES => {
-                discard_to_newline(input)?;
-                return Err(ObserverError::OversizedResponse);
+                return Err(ObserverError::OversizedRequest);
             }
             Ok(_) => frame.push(byte[0]),
-            Err(_) => return Err(ObserverError::StateUnavailable),
-        }
-    }
-}
-
-fn discard_to_newline<R: Read>(input: &mut R) -> Result<(), ObserverError> {
-    let mut byte = [0_u8; 1];
-    loop {
-        match input.read(&mut byte) {
-            Ok(0) => return Ok(()),
-            Ok(_) if byte[0] == b'\n' => return Ok(()),
-            Ok(_) => {}
             Err(_) => return Err(ObserverError::StateUnavailable),
         }
     }

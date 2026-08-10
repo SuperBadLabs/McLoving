@@ -3,15 +3,18 @@ use std::fs::{File, OpenOptions};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
-use base64::engine::general_purpose::{STANDARD as BASE64, STANDARD_NO_PAD as BASE64_NO_PAD};
+use base64::engine::general_purpose::{
+    STANDARD as BASE64, STANDARD_NO_PAD as BASE64_NO_PAD, URL_SAFE as BASE64_URL_SAFE,
+    URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD,
+};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, StatusCode, Url, redirect};
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::crypto::{
-    canonical_digest, content_sha256, public_key_from_seed, sign_receipt, verify_destination_state,
-    verify_observation_receipt, verify_request,
+    canonical_digest, content_sha256, observation_receipt_digest, public_key_from_seed,
+    sign_receipt, verify_destination_state, verify_observation_receipt, verify_request,
 };
 use crate::store::{ClaimResult, ObserverStore, validate_temporal};
 use crate::{
@@ -23,9 +26,15 @@ use crate::{
 const REQUEST_DIGEST_DOMAIN: &[u8] = b"mcloving-observer-request-digest-v1";
 const QUERY_DOMAIN: &[u8] = b"mcloving-observer-query-v1";
 const SCOPE_DOMAIN: &[u8] = b"mcloving-observer-scope-v1";
-const RECEIPT_DIGEST_DOMAIN: &[u8] = b"mcloving-observer-receipt-digest-v1";
 const MAX_AUDIT_PROVENANCE_BYTES: usize = 4096;
 const MAX_QUERY_VALUE_BYTES: usize = 2048;
+const MAX_SECRET_MARKERS: usize = 32;
+const MAX_TOTAL_SECRET_MARKER_BYTES: usize = 8 * 1024;
+const OBSERVATION_ID_HEADER: &str = "x-mcloving-observation-id";
+const EFFECT_FENCE_HEADER: &str = "x-mcloving-effect-fence";
+const OBSERVATION_PHASE_HEADER: &str = "x-mcloving-observation-phase";
+const QUERY_SHA256_HEADER: &str = "x-mcloving-query-sha256";
+const REQUEST_SHA256_HEADER: &str = "x-mcloving-request-sha256";
 
 pub struct DestinationObserver {
     config: ObserverConfig,
@@ -45,6 +54,7 @@ impl DestinationObserver {
     pub fn new(
         config: ObserverConfig,
         implementation_sha256: String,
+        runtime_image_sha256: String,
         read_token: Vec<u8>,
         request_public_key: Vec<u8>,
         destination_public_key: Vec<u8>,
@@ -56,6 +66,7 @@ impl DestinationObserver {
             &config,
             &config_sha256,
             &implementation_sha256,
+            &runtime_image_sha256,
             &read_token,
             &request_public_key,
             &destination_public_key,
@@ -119,10 +130,24 @@ impl DestinationObserver {
         &self,
         request: ObservationRequest,
     ) -> Result<ObservationReceipt, ObserverError> {
-        self.observe_at(request, unix_time_ms()?).await
+        self.observe_with_trusted_time(request, unix_time_ms()?)
+            .await
     }
 
+    /// Deterministic clock entry point for the contained literal-loopback test boundary only.
+    #[doc(hidden)]
     pub async fn observe_at(
+        &self,
+        request: ObservationRequest,
+        now_ms: i64,
+    ) -> Result<ObservationReceipt, ObserverError> {
+        if !is_literal_loopback_test_endpoint(&self.config) {
+            return Err(ObserverError::InvalidConfig);
+        }
+        self.observe_with_trusted_time(request, now_ms).await
+    }
+
+    async fn observe_with_trusted_time(
         &self,
         request: ObservationRequest,
         now_ms: i64,
@@ -179,6 +204,17 @@ impl DestinationObserver {
         };
         self.store
             .assert_active(self.config.generation, &self.config_sha256)?;
+        let dispatch_at_ms = elapsed_time_ms(now_ms, started_at)?;
+        if let Err(error) = validate_temporal(&self.config, &request, dispatch_at_ms) {
+            self.store.fail_pending(
+                self.config.generation,
+                &self.config_sha256,
+                &request,
+                &request_sha256,
+                &error,
+            )?;
+            return Err(error);
+        }
 
         let destination_result = self.read_destination(&request, now_ms, started_at).await;
         let (signed, raw, captured_at_ms) = match destination_result {
@@ -267,7 +303,9 @@ impl DestinationObserver {
             destination_observed_at_unix_ms: signed.body.observed_at_unix_ms,
             captured_at_unix_ms: captured_at_ms,
             publication_deadline_unix_ms: captured_at_ms
-                .saturating_add(self.config.limits.max_age_ms),
+                .saturating_add(self.config.limits.max_age_ms)
+                .min(request.expires_at_unix_ms)
+                .min(self.config.read_grant_expires_unix_ms),
             state_schema_version: signed.body.state_schema_version.clone(),
             confidentiality: signed.body.confidentiality,
             destination_response_sha256: content_sha256(&raw),
@@ -294,7 +332,7 @@ impl DestinationObserver {
             )?;
             return Err(ObserverError::OversizedResponse);
         }
-        let receipt_sha256 = canonical_digest(RECEIPT_DIGEST_DOMAIN, &receipt)?;
+        let receipt_sha256 = observation_receipt_digest(&receipt)?;
         if let Err(error) = self.store.finalize(
             &self.config,
             &self.config_sha256,
@@ -331,6 +369,7 @@ impl DestinationObserver {
         started_at: Instant,
     ) -> Result<(SignedDestinationState, Vec<u8>, i64), ObserverError> {
         let query_sha256 = canonical_digest(QUERY_DOMAIN, &request.query)?;
+        let request_sha256 = canonical_digest(REQUEST_DIGEST_DOMAIN, request)?;
         let mut url =
             Url::parse(&self.config.endpoint_url).map_err(|_| ObserverError::InvalidConfig)?;
         {
@@ -344,6 +383,11 @@ impl DestinationObserver {
             .get(url)
             .header(ACCEPT, "application/json")
             .header(AUTHORIZATION, self.authorization.clone())
+            .header(OBSERVATION_ID_HEADER, request.observation_id.to_string())
+            .header(EFFECT_FENCE_HEADER, request.effect_fence.to_string())
+            .header(OBSERVATION_PHASE_HEADER, request.phase.as_str())
+            .header(QUERY_SHA256_HEADER, query_sha256.as_str())
+            .header(REQUEST_SHA256_HEADER, request_sha256)
             .send()
             .await
             .map_err(|_| ObserverError::DestinationUnavailable)?;
@@ -404,9 +448,7 @@ impl DestinationObserver {
         }
         let signed: SignedDestinationState = parse_json_no_duplicates(&raw)?;
         verify_destination_state(&signed, &self.destination_public_key)?;
-        let elapsed_ms = i64::try_from(started_at.elapsed().as_millis())
-            .map_err(|_| ObserverError::StateUnavailable)?;
-        let captured_at_ms = now_ms.saturating_add(elapsed_ms);
+        let captured_at_ms = elapsed_time_ms(now_ms, started_at)?;
         validate_temporal(&self.config, request, captured_at_ms)?;
         self.validate_destination_state(request, &signed, &query_sha256, captured_at_ms)?;
         if contains_secret_in_json(&signed.body.state, &self.secret_markers)? {
@@ -599,6 +641,7 @@ struct Scope<'a> {
     account_identity: &'a str,
     resource_identity: &'a str,
     effect_class: &'a str,
+    canonical_query: &'a BTreeMap<String, String>,
 }
 
 impl<'a> Scope<'a> {
@@ -612,6 +655,7 @@ impl<'a> Scope<'a> {
             account_identity: &request.account_identity,
             resource_identity: &request.resource_identity,
             effect_class: &request.effect_class,
+            canonical_query: &request.query,
         }
     }
 }
@@ -640,6 +684,7 @@ fn validate_config(
     config: &ObserverConfig,
     config_sha256: &str,
     implementation_sha256: &str,
+    runtime_image_sha256: &str,
     read_token: &[u8],
     request_public_key: &[u8],
     destination_public_key: &[u8],
@@ -659,6 +704,7 @@ fn validate_config(
         || !valid_sha(config_sha256)
         || !valid_sha(implementation_sha256)
         || !valid_sha(&config.image_sha256)
+        || config.image_sha256 != runtime_image_sha256
         || config.limits.max_response_bytes == 0
         || config.limits.max_response_bytes >= crate::standalone::MAX_FRAME_BYTES
         || config.limits.max_header_bytes == 0
@@ -674,6 +720,11 @@ fn validate_config(
         || destination_public_key.len() != 32
         || receipt_seed.len() != 32
         || secret_markers.is_empty()
+        || secret_markers.len() > MAX_SECRET_MARKERS
+        || secret_markers
+            .iter()
+            .try_fold(0_usize, |total, marker| total.checked_add(marker.len()))
+            .is_none_or(|total| total > MAX_TOTAL_SECRET_MARKER_BYTES)
         || secret_markers
             .iter()
             .any(|marker| marker.len() < 4 || marker.len() > 4096)
@@ -701,11 +752,7 @@ fn validate_config(
         return Err(ObserverError::InvalidConfig);
     }
     let endpoint = Url::parse(&config.endpoint_url).map_err(|_| ObserverError::InvalidConfig)?;
-    let is_test_loopback = config.test_allow_http_loopback
-        && endpoint.scheme() == "http"
-        && endpoint
-            .host_str()
-            .is_some_and(|host| host == "127.0.0.1" || host == "[::1]" || host == "::1");
+    let is_test_loopback = is_literal_loopback_test_endpoint(config);
     if endpoint.fragment().is_some()
         || endpoint.query().is_some()
         || !endpoint.username().is_empty()
@@ -774,6 +821,18 @@ fn validate_config(
         return Err(ObserverError::InvalidConfig);
     }
     Ok(())
+}
+
+fn is_literal_loopback_test_endpoint(config: &ObserverConfig) -> bool {
+    if !config.test_allow_http_loopback {
+        return false;
+    }
+    Url::parse(&config.endpoint_url).is_ok_and(|endpoint| {
+        endpoint.scheme() == "http"
+            && endpoint
+                .host_str()
+                .is_some_and(|host| host == "127.0.0.1" || host == "[::1]" || host == "::1")
+    })
 }
 
 fn maximum_receipt_envelope_fits(
@@ -846,12 +905,20 @@ fn maximum_receipt_envelope_fits(
 }
 
 fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
+    contains_secret_representation(raw, markers)
+        || percent_decode_once(raw)
+            .is_some_and(|decoded| contains_secret_representation(&decoded, markers))
+}
+
+fn contains_secret_representation(raw: &[u8], markers: &[Vec<u8>]) -> bool {
     markers.iter().any(|marker| {
         let lowercase_hex = hex(marker);
         let percent = percent_encode(marker);
         contains(raw, marker)
             || contains(raw, BASE64.encode(marker).as_bytes())
             || contains(raw, BASE64_NO_PAD.encode(marker).as_bytes())
+            || contains(raw, BASE64_URL_SAFE.encode(marker).as_bytes())
+            || contains(raw, BASE64_URL_SAFE_NO_PAD.encode(marker).as_bytes())
             || contains_ascii_case_insensitive(raw, lowercase_hex.as_bytes())
             || contains_ascii_case_insensitive(raw, percent.as_bytes())
     })
@@ -896,10 +963,6 @@ fn contains_secret_in_json(
     value: &serde_json::Value,
     markers: &[Vec<u8>],
 ) -> Result<bool, ObserverError> {
-    let encoded = serde_json::to_vec(value).map_err(|_| ObserverError::MalformedResponse)?;
-    if contains_secret(&encoded, markers) {
-        return Ok(true);
-    }
     match value {
         serde_json::Value::String(value) => {
             if contains_secret(value.as_bytes(), markers) {
@@ -908,6 +971,8 @@ fn contains_secret_in_json(
             if let Ok(decoded) = BASE64
                 .decode(value)
                 .or_else(|_| BASE64_NO_PAD.decode(value))
+                .or_else(|_| BASE64_URL_SAFE.decode(value))
+                .or_else(|_| BASE64_URL_SAFE_NO_PAD.decode(value))
             {
                 Ok(contains_secret(&decoded, markers))
             } else {
@@ -971,11 +1036,47 @@ fn percent_encode(bytes: &[u8]) -> String {
     output
 }
 
+fn percent_decode_once(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    let mut decoded_any = false;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_nibble(bytes[index + 1]), hex_nibble(bytes[index + 2]))
+        {
+            output.push((high << 4) | low);
+            index += 3;
+            decoded_any = true;
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    decoded_any.then_some(output)
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn unix_time_ms() -> Result<i64, ObserverError> {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ObserverError::StateUnavailable)?;
     i64::try_from(duration.as_millis()).map_err(|_| ObserverError::StateUnavailable)
+}
+
+fn elapsed_time_ms(started_at_ms: i64, started_at: Instant) -> Result<i64, ObserverError> {
+    let elapsed_ms = i64::try_from(started_at.elapsed().as_millis())
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    Ok(started_at_ms.saturating_add(elapsed_ms))
 }
 
 #[cfg(test)]
@@ -1008,6 +1109,14 @@ mod tests {
         assert!(contains_secret(b"%ab%cd%ef%10", &markers));
         assert!(contains_secret(b"%aB%Cd%eF%10", &markers));
         assert!(contains_secret(b"q83vEA", &markers));
+
+        let url_marker = vec![vec![0xfb, 0xff, 0xfe, 0xfd]];
+        assert!(contains_secret(b"-__-_Q==", &url_marker));
+        assert!(contains_secret(b"-__-_Q", &url_marker));
+        assert!(contains_secret(
+            b"read%2Donly-observer-token",
+            &[b"read-only-observer-token".to_vec()]
+        ));
     }
 
     #[test]

@@ -35,8 +35,9 @@ fn frames_require_termination_and_obey_the_process_bound() {
     let mut oversized = Cursor::new(vec![b'x'; 256 * 1024 + 2]);
     assert_eq!(
         read_bounded_frame(&mut oversized),
-        Err(ObserverError::OversizedResponse)
+        Err(ObserverError::OversizedRequest)
     );
+    assert!(oversized.position() < oversized.get_ref().len() as u64);
 
     let mut exact_bound = vec![b'x'; MAX_FRAME_BYTES - 1];
     exact_bound.push(b'\n');
@@ -51,6 +52,6 @@ fn frames_require_termination_and_obey_the_process_bound() {
     let mut one_byte_over = Cursor::new(one_byte_over);
     assert_eq!(
         read_bounded_frame(&mut one_byte_over),
-        Err(ObserverError::OversizedResponse)
+        Err(ObserverError::OversizedRequest)
     );
 }

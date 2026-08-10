@@ -9,6 +9,7 @@ use crate::{ObservationReceipt, ObservationRequest, ObserverError, SignedDestina
 const REQUEST_DOMAIN: &[u8] = b"mcloving-destination-observation-request-v1";
 const DESTINATION_DOMAIN: &[u8] = b"mcloving-destination-state-v1";
 const RECEIPT_DOMAIN: &[u8] = b"mcloving-destination-observation-receipt-v1";
+const RECEIPT_DIGEST_DOMAIN: &[u8] = b"mcloving-observer-receipt-digest-v1";
 
 fn message<T: Serialize>(domain: &[u8], value: &T) -> Result<Vec<u8>, ObserverError> {
     let encoded = serde_json::to_vec(value).map_err(|_| ObserverError::StateUnavailable)?;
@@ -47,6 +48,10 @@ pub fn receipt_message(receipt: &ObservationReceipt) -> Result<Vec<u8>, Observer
     let mut unsigned = receipt.clone();
     unsigned.signature_base64.clear();
     message(RECEIPT_DOMAIN, &unsigned)
+}
+
+pub fn observation_receipt_digest(receipt: &ObservationReceipt) -> Result<String, ObserverError> {
+    canonical_digest(RECEIPT_DIGEST_DOMAIN, receipt)
 }
 
 pub fn sign_observation_request(

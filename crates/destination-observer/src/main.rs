@@ -24,7 +24,7 @@ async fn run() -> Result<(), ObserverError> {
         .skip(1)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    if arguments.len() != 6 {
+    if arguments.len() != 7 {
         return Err(ObserverError::InvalidConfig);
     }
     let observer = load_observer(
@@ -34,6 +34,7 @@ async fn run() -> Result<(), ObserverError> {
         &arguments[3],
         &arguments[4],
         &arguments[5],
+        &arguments[6],
     )?;
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
@@ -43,6 +44,9 @@ async fn run() -> Result<(), ObserverError> {
             Ok(None) => return Ok(()),
             Err(error) => {
                 write_response(&mut output, &ObserverResponse::from_error(&error))?;
+                if error == ObserverError::OversizedRequest {
+                    return Err(error);
+                }
                 continue;
             }
         };

@@ -21,8 +21,8 @@ use mcloving_destination_observer::{
     DestinationObserver, DestinationStateBody, JsonKind, MAX_FRAME_BYTES, ObservationPhase,
     ObservationReceipt, ObservationRequest, ObserverConfig, ObserverError, ObserverLimits,
     PROTOCOL_VERSION, REQUEST_SCHEMA_VERSION, RequestAuthorization, SignedDestinationState,
-    StateFieldSchema, content_sha256, destination_state_message, sign_observation_request,
-    verify_observation_receipt,
+    StateFieldSchema, content_sha256, destination_state_message, observation_receipt_digest,
+    sign_observation_request, verify_observation_receipt,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use serde::Serialize;
@@ -59,6 +59,7 @@ struct DestinationState {
     mode: Mutex<Mode>,
     cursor: AtomicU64,
     observed_at_unix_ms: AtomicI64,
+    reads: AtomicU64,
 }
 
 struct Rig {
@@ -89,6 +90,7 @@ impl Rig {
             mode: Mutex::new(Mode::Good),
             cursor: AtomicU64::new(10),
             observed_at_unix_ms: AtomicI64::new(NOW),
+            reads: AtomicU64::new(0),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -174,6 +176,7 @@ impl Rig {
         let observer = DestinationObserver::new(
             config.clone(),
             implementation_sha256.clone(),
+            image_sha256.clone(),
             TOKEN.to_vec(),
             request_public_key.clone(),
             destination_public_key.clone(),
@@ -260,6 +263,7 @@ impl Rig {
         DestinationObserver::new(
             config,
             self.implementation_sha256.clone(),
+            self.image_sha256.clone(),
             TOKEN.to_vec(),
             self.request_public_key.clone(),
             self.destination_public_key.clone(),
@@ -285,6 +289,38 @@ async fn destination_handler(
             .body(Body::empty())
             .unwrap();
     }
+    let request = server.request.lock().unwrap().clone().unwrap();
+    let query_sha256 = domain_digest(b"mcloving-observer-query-v1", &request.query);
+    let request_sha256 = domain_digest(b"mcloving-observer-request-digest-v1", &request);
+    let valid_attestation_headers = [
+        (
+            "x-mcloving-observation-id",
+            request.observation_id.to_string(),
+        ),
+        ("x-mcloving-effect-fence", request.effect_fence.to_string()),
+        (
+            "x-mcloving-observation-phase",
+            match request.phase {
+                ObservationPhase::PreAction => "pre_action",
+                ObservationPhase::PostAction => "post_action",
+                ObservationPhase::Reconciliation => "reconciliation",
+            }
+            .to_owned(),
+        ),
+        ("x-mcloving-query-sha256", query_sha256.clone()),
+        ("x-mcloving-request-sha256", request_sha256),
+    ]
+    .into_iter()
+    .all(|(name, expected)| {
+        headers.get(name).and_then(|value| value.to_str().ok()) == Some(expected.as_str())
+    });
+    if !valid_attestation_headers {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::empty())
+            .unwrap();
+    }
+    server.reads.fetch_add(1, Ordering::SeqCst);
     if matches!(mode, Mode::Malformed) {
         return json_response(StatusCode::OK, b"{\"body\":".to_vec());
     }
@@ -300,7 +336,6 @@ async fn destination_handler(
     if matches!(mode, Mode::Slow) {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let request = server.request.lock().unwrap().clone().unwrap();
     let mut body = DestinationStateBody {
         schema_version: DESTINATION_STATE_SCHEMA_VERSION.to_owned(),
         observation_id: request.observation_id,
@@ -312,7 +347,7 @@ async fn destination_handler(
         effect_class: request.effect_class.clone(),
         effect_fence: request.effect_fence,
         phase: request.phase,
-        canonical_query_sha256: domain_digest(b"mcloving-observer-query-v1", &request.query),
+        canonical_query_sha256: query_sha256,
         cursor: server.cursor.load(Ordering::SeqCst),
         observed_at_unix_ms: server.observed_at_unix_ms.load(Ordering::SeqCst),
         state_schema_version: "release-state/v1".to_owned(),
@@ -381,6 +416,7 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
     verify_observation_receipt(&pre, &rig.receipt_public_key).unwrap();
     assert_eq!(pre.destination_cursor, 10);
     assert_eq!(pre.retry_count, 0);
+    assert_eq!(pre.publication_deadline_unix_ms, NOW + 1_000);
 
     let expired_replay = rig
         .observer
@@ -395,6 +431,19 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
 
     rig.set_mode(Mode::Good);
     rig.server.cursor.store(11, Ordering::SeqCst);
+    let mut substituted_query = rig.request(ObservationPhase::PostAction);
+    substituted_query
+        .query
+        .insert("release_id".to_owned(), "release-43".to_owned());
+    substituted_query.expected_previous_cursor = Some(pre.destination_cursor);
+    substituted_query.predecessor_receipt_sha256 = Some(receipt_digest(&pre));
+    assert_eq!(
+        rig.observer
+            .observe_at(rig.prepare(substituted_query), NOW)
+            .await,
+        Err(ObserverError::PhaseMismatch)
+    );
+
     let mut post_request = rig.request(ObservationPhase::PostAction);
     post_request.expected_previous_cursor = Some(pre.destination_cursor);
     post_request.predecessor_receipt_sha256 = Some(receipt_digest(&pre));
@@ -470,6 +519,7 @@ async fn restart_waits_for_the_shared_ledger_writer() {
 
     let config = rig.config.clone();
     let implementation_sha256 = rig.implementation_sha256.clone();
+    let image_sha256 = rig.image_sha256.clone();
     let request_public_key = rig.request_public_key.clone();
     let destination_public_key = rig.destination_public_key.clone();
     let receipt_seed = rig.receipt_seed.clone();
@@ -477,6 +527,7 @@ async fn restart_waits_for_the_shared_ledger_writer() {
         DestinationObserver::new(
             config,
             implementation_sha256,
+            image_sha256,
             TOKEN.to_vec(),
             request_public_key,
             destination_public_key,
@@ -487,6 +538,31 @@ async fn restart_waits_for_the_shared_ledger_writer() {
     std::thread::sleep(std::time::Duration::from_millis(100));
     connection.execute_batch("COMMIT").unwrap();
     assert!(restart.join().unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn authority_is_rechecked_after_store_delay_before_any_get() {
+    let rig = Rig::new().await;
+    let database_path = rig.directory.path().join("observer.sqlite3");
+    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(database_path).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        ready_sender.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        connection.execute_batch("COMMIT").unwrap();
+    });
+    ready_receiver.recv().unwrap();
+
+    let mut request = rig.request(ObservationPhase::PreAction);
+    request.expires_at_unix_ms = NOW + 50;
+    let request = rig.prepare(request);
+    assert_eq!(
+        rig.observer.observe_at(request, NOW).await,
+        Err(ObserverError::ExpiredRequest)
+    );
+    blocker.join().unwrap();
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -823,11 +899,50 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
         DestinationObserver::new(
             rig.config.clone(),
             rig.implementation_sha256.clone(),
+            rig.image_sha256.clone(),
             b"substituted-token".to_vec(),
             rig.request_public_key.clone(),
             rig.destination_public_key.clone(),
             rig.receipt_seed.clone(),
             vec![b"substituted-token".to_vec(), SECRET.to_vec()],
+        ),
+        Err(ObserverError::InvalidConfig)
+    ));
+    assert!(matches!(
+        DestinationObserver::new(
+            rig.config.clone(),
+            rig.implementation_sha256.clone(),
+            "f".repeat(64),
+            TOKEN.to_vec(),
+            rig.request_public_key.clone(),
+            rig.destination_public_key.clone(),
+            rig.receipt_seed.clone(),
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
+        ),
+        Err(ObserverError::InvalidConfig)
+    ));
+
+    let mut excessive_markers = vec![TOKEN.to_vec(), SECRET.to_vec()];
+    for index in 0..31 {
+        excessive_markers.push(format!("marker-{index:02}").into_bytes());
+    }
+    let mut excessive_marker_config = rig.config.clone();
+    let marker_digests: Vec<String> = excessive_markers
+        .iter()
+        .map(|marker| content_sha256(marker))
+        .collect();
+    excessive_marker_config.secret_marker_set_sha256 =
+        domain_digest(b"mcloving-secret-marker-set-v1", &marker_digests);
+    assert!(matches!(
+        DestinationObserver::new(
+            excessive_marker_config,
+            rig.implementation_sha256.clone(),
+            rig.image_sha256.clone(),
+            TOKEN.to_vec(),
+            rig.request_public_key.clone(),
+            rig.destination_public_key.clone(),
+            rig.receipt_seed.clone(),
+            excessive_markers,
         ),
         Err(ObserverError::InvalidConfig)
     ));
@@ -838,6 +953,7 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
         DestinationObserver::new(
             substituted_config,
             rig.implementation_sha256.clone(),
+            rig.image_sha256.clone(),
             TOKEN.to_vec(),
             rig.request_public_key.clone(),
             rig.destination_public_key.clone(),
@@ -885,8 +1001,10 @@ async fn cutover_fences_old_process_and_rollback_requires_an_exact_historical_ta
     cutover_config.activation_mode = ActivationMode::Cutover;
     cutover_config.previous_generation = Some(1);
     cutover_config.previous_config_sha256 = Some(old_digest.clone());
-    let cutover = rig.observer_for_config(cutover_config).unwrap();
+    let cutover = rig.observer_for_config(cutover_config.clone()).unwrap();
     let cutover_digest = cutover.config_sha256().to_owned();
+    let cutover_restart = rig.observer_for_config(cutover_config).unwrap();
+    assert_eq!(cutover_restart.config_sha256(), cutover.config_sha256());
     assert_eq!(
         rig.observer.observe_at(old_request, NOW).await,
         Err(ObserverError::RuntimeFenced)
@@ -920,8 +1038,10 @@ async fn cutover_fences_old_process_and_rollback_requires_an_exact_historical_ta
     rollback_config.previous_generation = Some(1);
     rollback_config.previous_config_sha256 = Some(old_digest);
     rollback_config.rollback_from_generation = Some(2);
-    let rollback = rig.observer_for_config(rollback_config).unwrap();
+    let rollback = rig.observer_for_config(rollback_config.clone()).unwrap();
     assert_ne!(rollback.config_sha256(), cutover.config_sha256());
+    let rollback_restart = rig.observer_for_config(rollback_config).unwrap();
+    assert_eq!(rollback_restart.config_sha256(), rollback.config_sha256());
 }
 
 #[cfg(target_os = "linux")]
@@ -964,12 +1084,14 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
     let request = rig.prepare(request);
 
     let config_path = process_directory.path().join("observer.json");
+    let image_sha256_path = process_directory.path().join("runtime-image.sha256");
     let token_path = process_directory.path().join("read.token");
     let request_key_path = process_directory.path().join("request.pub");
     let destination_key_path = process_directory.path().join("destination.pub");
     let receipt_seed_path = process_directory.path().join("receipt.seed");
     let markers_path = process_directory.path().join("markers.json");
     fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+    fs::write(&image_sha256_path, config.image_sha256.as_bytes()).unwrap();
     fs::write(&token_path, TOKEN).unwrap();
     fs::write(&request_key_path, &rig.request_public_key).unwrap();
     fs::write(&destination_key_path, &rig.destination_public_key).unwrap();
@@ -984,6 +1106,7 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         use std::os::unix::fs::PermissionsExt as _;
         for path in [
             &config_path,
+            &image_sha256_path,
             &token_path,
             &request_key_path,
             &destination_key_path,
@@ -1001,6 +1124,7 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
     .unwrap();
     let paths = [
         config_path,
+        image_sha256_path,
         token_path,
         request_key_path,
         destination_key_path,
@@ -1172,5 +1296,5 @@ fn domain_digest<T: Serialize>(domain: &[u8], value: &T) -> String {
 }
 
 fn receipt_digest(receipt: &ObservationReceipt) -> String {
-    domain_digest(b"mcloving-observer-receipt-digest-v1", receipt)
+    observation_receipt_digest(receipt).unwrap()
 }

@@ -127,6 +127,9 @@ impl ObserverStore {
             .optional()
             .map_err(|_| ObserverError::StateUnavailable)?;
         let had_active = active.is_some();
+        let exact_active = active.as_ref().is_some_and(|(generation, digest)| {
+            *generation == config.generation && digest == config_sha256
+        });
         match active {
             None => {
                 if config.generation != 1
@@ -138,6 +141,7 @@ impl ObserverStore {
                     return Err(ObserverError::InvalidConfig);
                 }
             }
+            Some(_) if exact_active => {}
             Some((generation, digest)) => match config.activation_mode {
                 ActivationMode::Current => {
                     if config.generation != generation || config_sha256 != digest {
@@ -177,7 +181,7 @@ impl ObserverStore {
                 }
             },
         }
-        if had_active && config.activation_mode != ActivationMode::Current {
+        if had_active && !exact_active && config.activation_mode != ActivationMode::Current {
             transaction
                 .execute(
                     "UPDATE observations SET status='failed', failure_code='runtime_fenced' WHERE status='pending'",
@@ -705,6 +709,7 @@ fn error_from_code(code: Option<&str>) -> ObserverError {
     match code {
         Some("invalid_config") => ObserverError::InvalidConfig,
         Some("malformed_request") => ObserverError::MalformedRequest,
+        Some("oversized_request") => ObserverError::OversizedRequest,
         Some("unauthorized_request") => ObserverError::UnauthorizedRequest,
         Some("binding_mismatch") => ObserverError::BindingMismatch,
         Some("expired_request") => ObserverError::ExpiredRequest,
