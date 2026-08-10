@@ -121,6 +121,7 @@ struct PublicationCommit {
     claim: ResolutionClaim,
     receipt_identity: RetainedLinkIdentity,
     completion_identity: RetainedLinkIdentity,
+    hmac_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1061,12 +1062,16 @@ impl ResolutionStore {
             ));
         }
         self.record_ambiguity(claim)?;
-        self.record_publication_commit(PublicationCommit {
+        let mut publication_commit = PublicationCommit {
             schema_version: PUBLICATION_COMMIT_SCHEMA.to_owned(),
             claim: claim.clone(),
             receipt_identity: receipt_fingerprint,
             completion_identity: completion_fingerprint,
-        })?;
+            hmac_sha256: String::new(),
+        };
+        publication_commit.hmac_sha256 =
+            sign_publication_commit(&publication_commit, &self.inner.receipt_key)?;
+        self.record_publication_commit(publication_commit)?;
         revalidate_publication_pair(
             &receipt_path,
             &receipt_file,
@@ -1161,6 +1166,7 @@ impl ResolutionStore {
     }
 
     fn record_publication_commit(&self, commit: PublicationCommit) -> Result<(), StoreError> {
+        verify_publication_commit_hmac(&commit, &self.inner.receipt_key)?;
         revalidate_store_directory_link(
             &self.inner.root_directory,
             "commits",
@@ -1171,7 +1177,9 @@ impl ResolutionStore {
             write_new_json(&path, &commit, 0o400)?;
         }
         let recorded: PublicationCommit = read_json(&path, 0o400)?;
-        if recorded != commit {
+        if recorded != commit
+            || verify_publication_commit_hmac(&recorded, &self.inner.receipt_key).is_err()
+        {
             return Err(StoreError::new(
                 "DEP_STORE_PUBLICATION_AMBIGUOUS",
                 "durable publication commit does not bind the exact retained pair",
@@ -1189,7 +1197,9 @@ impl ResolutionStore {
             "commits",
             &self.inner.commits_directory,
         )?;
-        read_json(&self.commit_path(resolution_id), 0o400)
+        let commit: PublicationCommit = read_json(&self.commit_path(resolution_id), 0o400)?;
+        verify_publication_commit_hmac(&commit, &self.inner.receipt_key)?;
+        Ok(commit)
     }
 
     pub(crate) fn acknowledge_delivery(&self, claim: &ResolutionClaim) -> Result<(), StoreError> {
@@ -1776,6 +1786,52 @@ fn verify_receipt_hmac(receipt: &ResolutionReceipt, key: &[u8]) -> Result<(), St
         StoreError::new(
             "DEP_STORE_RECEIPT_INVALID",
             "stored receipt HMAC does not verify",
+        )
+    })
+}
+
+fn sign_publication_commit(commit: &PublicationCommit, key: &[u8]) -> Result<String, StoreError> {
+    let mut unsigned = commit.clone();
+    unsigned.hmac_sha256.clear();
+    let bytes = serde_json::to_vec(&unsigned).map_err(|_| state_error())?;
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| {
+        StoreError::new(
+            "DEP_STORE_RECEIPT_KEY_INVALID",
+            "publication commit HMAC key is invalid",
+        )
+    })?;
+    mac.update(b"mcloving-dependency-publication-commit-hmac-v1");
+    mac.update(&(bytes.len() as u64).to_be_bytes());
+    mac.update(&bytes);
+    Ok(format!("{:x}", mac.finalize().into_bytes()))
+}
+
+fn verify_publication_commit_hmac(
+    commit: &PublicationCommit,
+    key: &[u8],
+) -> Result<(), StoreError> {
+    let signature = decode_hmac(&commit.hmac_sha256).ok_or_else(|| {
+        StoreError::new(
+            "DEP_STORE_PUBLICATION_AMBIGUOUS",
+            "publication commit HMAC is not canonical lowercase hex",
+        )
+    })?;
+    let mut unsigned = commit.clone();
+    unsigned.hmac_sha256.clear();
+    let bytes = serde_json::to_vec(&unsigned).map_err(|_| state_error())?;
+    let mut mac = HmacSha256::new_from_slice(key).map_err(|_| {
+        StoreError::new(
+            "DEP_STORE_RECEIPT_KEY_INVALID",
+            "publication commit HMAC key is invalid",
+        )
+    })?;
+    mac.update(b"mcloving-dependency-publication-commit-hmac-v1");
+    mac.update(&(bytes.len() as u64).to_be_bytes());
+    mac.update(&bytes);
+    mac.verify_slice(&signature).map_err(|_| {
+        StoreError::new(
+            "DEP_STORE_PUBLICATION_AMBIGUOUS",
+            "publication commit HMAC does not verify",
         )
     })
 }
@@ -5606,18 +5662,33 @@ mod tests {
         let held_receipt = store.inner.receipts_root.join("held-commit-pair.json");
         std::fs::rename(&receipt_path, &held_receipt).expect("move committed receipt");
         write_new_json(&receipt_path, &receipt, 0o400).expect("identical replacement receipt");
+        let replacement_receipt =
+            open_verified_file(&receipt_path, MAX_STATE_BYTES, 0o400).expect("replacement receipt");
+        let mut forged_commit = store
+            .read_publication_commit(claim.resolution_id)
+            .expect("original authenticated commit");
+        forged_commit.receipt_identity =
+            verified_file_fingerprint(&replacement_receipt, MAX_STATE_BYTES, 0o400)
+                .expect("replacement receipt fingerprint");
+        let commit_path = store.commit_path(claim.resolution_id);
+        let held_commit = store
+            .inner
+            .commits_root
+            .join("held-authenticated-commit.json");
+        std::fs::rename(&commit_path, &held_commit).expect("move authenticated commit");
+        write_new_json(&commit_path, &forged_commit, 0o400).expect("forged replacement commit");
 
         let error = store
             .acknowledge_delivery(&claim)
             .expect_err("replacement pair cannot withdraw the delivery blocker");
-        assert_eq!(error.code, "DEP_STORE_AMBIGUOUS_COMPLETION");
+        assert_eq!(error.code, "DEP_STORE_PUBLICATION_AMBIGUOUS");
         assert!(
             store.ambiguity_path(claim.resolution_id).exists(),
             "delivery ambiguity remains durable"
         );
         assert!(
             store.commit_path(claim.resolution_id).exists(),
-            "permanent exact-pair commit remains durable"
+            "forged commit remains explicit for diagnosis"
         );
         let replay_error = store
             .load_completed(claim.resolution_id, &fixture.admitted.request_sha256)
@@ -5626,6 +5697,10 @@ mod tests {
         assert!(
             held_receipt.exists(),
             "the committed receipt remains explicit"
+        );
+        assert!(
+            held_commit.exists(),
+            "the authenticated commit remains explicit"
         );
     }
 
