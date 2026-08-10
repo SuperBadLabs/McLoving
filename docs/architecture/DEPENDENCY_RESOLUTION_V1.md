@@ -324,7 +324,11 @@ nonblocking no-follow reopen, exact aggregate length, per-slice digest, and
 final link revalidation eliminate a create-then-open directory window. One
 stateful marker scanner spans every response-body chunk and every adjacent
 artifact slice in plan order, so a configured marker cannot evade disclosure
-checks by crossing either boundary.
+checks by crossing either boundary. Final archive synchronization failure is
+not a direct return: before the absolute deadline it removes and synchronizes
+the exact retained archive inode; at or beyond the deadline, or if exact cleanup
+cannot be proven, it poisons transport state and requires reconciliation after
+restart.
 
 Publication copies the verified slices into one unique regular staging archive,
 synchronizes and seals that inode to mode `0400`, and publishes it by atomic

@@ -3,8 +3,8 @@
 Date: 2026-08-09
 
 Verdict: LOCAL PASS for the architecture-repair candidate at exact
-implementation head `0f4da19bdb910cbb8f249167461ef3121db9c039`.
-The focused gate passes 116 dependency-resolution tests: 71 unit tests, 44
+implementation head `dd04d6145f70b6eebbf719bfb05a1859f74cf494`.
+The focused gate passes 117 dependency-resolution tests: 72 unit tests, 44
 ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Strict all-target resolver Clippy,
 formatting, and `git diff --check` also pass on HeMan. This head replaces both
@@ -183,8 +183,8 @@ the same resolution identity is denied offline; restart with the repository
 offline returns byte-equivalent JSON; and neither the repository credential nor
 receipt key appears in stdout, stderr, or the receipt.
 
-Exact implementation head `0f4da19b` passes strict resolver all-target Clippy,
-formatting, `git diff --check`, all 115 ordinary focused tests, and the real
+Exact implementation head `dd04d614` passes strict resolver all-target Clippy,
+formatting, `git diff --check`, all 116 ordinary focused tests, and the real
 exact-capacity contained journey on HeMan. Documentation head `8d15ca5` passes
 workspace-wide strict Clippy, the complete locked non-source workspace, the
 same contained resolver journey, board verification, and the complete
@@ -200,8 +200,8 @@ response to that runner-only failure.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired 127
-actionable findings across 132 important seams. Five comments repeated an
+Pre-closure review and repeated contained execution exposed and repaired 130
+actionable findings across 135 important seams. Five comments repeated an
 already counted underlying seam and are not double-counted:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -523,8 +523,8 @@ already counted underlying seam and are not double-counted:
     making the later zero assertion redundant. The counter is removed while the
     stronger per-record kind, identity, disposition, and absent-credential
     assertions remain.
-87-132. Subsequent thread-aware exact-head review covered 46 important seams and
-    produced 46 additional actionable findings. Five comments in the complete
+87-135. Subsequent thread-aware exact-head review covered 49 important seams and
+    produced 49 additional actionable findings. Five comments in the complete
     chronology repeated the same already counted underlying race or execution
     prediction. The repairs bind
     executable verification to the running `/proc/self/exe` inode, serialize on
@@ -557,7 +557,16 @@ already counted underlying seam and are not double-counted:
     entire transport plan and one stateful guard across the exact archive prefix
     and every payload byte before writing or sealing. Regressions prove a marker
     spanning body chunks or adjacent artifact slices and a marker introduced by
-    the generated archive header are denied before publication.
+    the generated archive header are denied before publication. Exact-head
+    review then found that final transport-archive synchronization errors could
+    bypass exact cleanup, and that the two marker regressions exercised scanner
+    helpers rather than the real cross-artifact and header-to-payload wiring.
+    Head `dd04d614` routes synchronization failure through exact cleanup before
+    the deadline or poisons ambiguous state at expiry, and replaces both proofs
+    with production-path boundary fixtures. A deterministic synchronization
+    failure proves the exact archive is removed and the transport remains
+    available; real two-artifact HTTP fetch and generated-header-to-payload
+    fixtures prove the stateful scanners cannot be reinitialized unnoticed.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -635,8 +644,8 @@ eighty-four important seams; ready-transition Copilot review then found the
 ecosystem-crossed adapter error and redundant Mario counter. Their exact-head
 repairs and focused regressions brought that audit stage to eighty-one
 actionable findings across eighty-six important seams. The later thread-aware
-review, archive conversion, and continuous marker repairs summarized in seams
-87-132 bring the current audit to 127 actionable findings across 132 important
+review, archive conversion, and final exact-cleanup/proof repairs summarized in
+seams 87-135 bring the current audit to 130 actionable findings across 135 important
 seams;
 every fixed thread must be replied to and resolved only after the complete
 closure head passes protected checks and fresh review.
