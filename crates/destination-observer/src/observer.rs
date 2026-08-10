@@ -448,10 +448,17 @@ impl DestinationObserver {
                 .ok()
                 .and_then(|value| value.split(';').next())
                 .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
-        if response
+        let declared_oversized = response
             .content_length()
-            .is_some_and(|size| size > self.config.limits.max_response_bytes as u64)
+            .is_some_and(|size| size > self.config.limits.max_response_bytes as u64);
+        if declared_oversized && matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
         {
+            return Err(ObserverError::DestinationUnauthorized);
+        }
+        if declared_oversized && status != StatusCode::OK {
+            return Err(ObserverError::DestinationUnavailable);
+        }
+        if declared_oversized {
             return Err(ObserverError::OversizedResponse);
         }
         let mut raw = Vec::new();

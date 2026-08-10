@@ -104,6 +104,8 @@ overflow is treated as destination unavailability and retains the bounded
 pending retry path. Application header-list overflow does the same unless a
 confidentiality denial or permanent 401/403 authentication denial takes
 precedence;
+an oversized declared body is not consumed, but its non-200 status remains a
+retryable unavailable outcome instead of becoming a permanent size tombstone;
 request and grant validity are checked again at the monotonic GET-completion
 time before any success or terminal outcome is committed. They are also
 resampled after ledger and

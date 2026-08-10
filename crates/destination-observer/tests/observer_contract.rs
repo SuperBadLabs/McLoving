@@ -51,6 +51,7 @@ enum Mode {
     UnauthorizedOversizedHeader,
     UnauthorizedSecret,
     Outage,
+    OutageOversized,
     OutageSecret,
     MalformedContentTypeSecret,
     Timeout,
@@ -346,11 +347,16 @@ async fn destination_handler(
     if matches!(mode, Mode::Oversized) {
         return json_response(StatusCode::OK, vec![b'x'; 32 * 1024]);
     }
-    if matches!(mode, Mode::Outage | Mode::OutageSecret) {
+    if matches!(
+        mode,
+        Mode::Outage | Mode::OutageOversized | Mode::OutageSecret
+    ) {
         return json_response(
             StatusCode::SERVICE_UNAVAILABLE,
             if matches!(mode, Mode::OutageSecret) {
                 TOKEN.to_vec()
+            } else if matches!(mode, Mode::OutageOversized) {
+                vec![b'x'; 32 * 1024]
             } else {
                 b"{}".to_vec()
             },
@@ -553,7 +559,12 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         rig.observer.observe_at(replacement, NOW).await.unwrap();
     }
 
-    for mode in [Mode::Outage, Mode::Timeout, Mode::OversizedHeader] {
+    for mode in [
+        Mode::Outage,
+        Mode::OutageOversized,
+        Mode::Timeout,
+        Mode::OversizedHeader,
+    ] {
         let rig = Rig::new().await;
         rig.set_mode(mode);
         let request = rig.prepare(rig.request(ObservationPhase::PreAction));
