@@ -1697,6 +1697,24 @@ async fn cursor_history_is_chain_scoped_and_stored_replay_is_reverified() {
     let other_query = rig.prepare(other_query);
     rig.observer.observe_at(other_query, NOW).await.unwrap();
 
+    rig.server.cursor.store(11, Ordering::SeqCst);
+    let mut advanced_scope = rig.request(ObservationPhase::PreAction);
+    advanced_scope.effect_fence = 20;
+    rig.observer
+        .observe_at(rig.prepare(advanced_scope), NOW)
+        .await
+        .unwrap();
+
+    rig.server.cursor.store(10, Ordering::SeqCst);
+    let mut rolled_back_scope = rig.request(ObservationPhase::PreAction);
+    rolled_back_scope.effect_fence = 21;
+    assert_eq!(
+        rig.observer
+            .observe_at(rig.prepare(rolled_back_scope), NOW)
+            .await,
+        Err(ObserverError::CursorRollback)
+    );
+
     first_receipt.signature_base64 = "AAAA".to_owned();
     let connection =
         rusqlite::Connection::open(rig.directory.path().join("observer.sqlite3")).unwrap();

@@ -129,9 +129,10 @@ unique pending claim per destination scope prevents competing reads across
 builds and effect fences. A nonblocking kernel lease held for the complete
 observation call also prevents a same-ID retry or overlapping process from
 duplicating an in-flight GET; process exit releases the lease for restart.
-That physical-destination contention key is separate from cursor history:
-cursor heads are keyed by tenant/project/pipeline, destination, effect fence,
-and canonical query, so independent chains can attest equal snapshots.
+That physical-destination key also retains the global cursor high-water mark:
+independent tenant/project/pipeline/fence/query chains may attest an equal
+snapshot, while a lower cursor is rejected across all of them. Per-chain phase
+and predecessor history remains separately keyed by the complete chain scope.
 Receipt-count and evidence-byte quotas are rechecked in the atomic finalization
 transaction. Rate, receipt-count, evidence byte, response, header,
 timeout, freshness, and retry limits are configuration authority.

@@ -569,7 +569,7 @@ impl ObserverStore {
             )
             .optional()
             .map_err(|_| ObserverError::StateUnavailable)?;
-        if destination_cursor.is_some_and(|cursor| receipt.destination_cursor <= cursor) {
+        if destination_cursor.is_some_and(|cursor| receipt.destination_cursor < cursor) {
             return Err(ObserverError::CursorRollback);
         }
 
@@ -713,7 +713,7 @@ fn prune_terminal_observations(
             "DELETE FROM destination_heads
              WHERE NOT EXISTS (
                SELECT 1 FROM observations
-               WHERE observations.scope_sha256=destination_heads.destination_scope_sha256
+               WHERE observations.destination_scope_sha256=destination_heads.destination_scope_sha256
                  AND observations.status IN ('pending', 'complete')
              )",
             [],
