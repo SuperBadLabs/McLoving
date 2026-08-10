@@ -86,8 +86,10 @@ a stored terminal replay is checked before taking the live destination lease,
 and a pending replay is temporally fenced and tombstoned there as well, so
 unrelated destination activity or availability cannot suppress either outcome;
 a pending replay is the only retry path and is bounded. Completed evidence is
-returned even after the request or grant window closes because no new authority
-is exercised. Expired, generation-fenced, explicitly failed, or retry-exhausted
+returned after the request or grant window closes while it remains inside the
+bounded replay-retention window because no new authority is exercised. After
+retention pruning, the expired signed request is denied without another GET.
+Expired, generation-fenced, explicitly failed, or retry-exhausted
 pending claims become bounded failure tombstones and release the destination;
 if a concurrent in-flight read returns after that transition, its failure
 bookkeeping converges on and returns the stored tombstone instead of replacing
@@ -101,6 +103,10 @@ time before any receipt can be signed. They are also resampled after ledger and
 lease delays immediately before dispatch, so authority that expires while
 waiting cannot cause a GET;
 only complete evidence consumes the receipt-count and evidence-byte quotas.
+Before a new admission enforces those quotas, complete and failed observations
+whose signed request expiry is more than one freshness window old are pruned in
+the claim transaction. Orphaned phase/cursor heads are pruned with them, while
+heads for a still-retained chain remain durable.
 Every initial or retrying outbound GET reserves a durable timestamped outbound
 intent in the same claim transaction, so process death cannot bypass the
 per-minute rate limit. That conservative reservation expires with the rate

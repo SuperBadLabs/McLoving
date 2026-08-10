@@ -1031,6 +1031,61 @@ async fn evidence_capacity_failure_releases_the_destination_claim() {
 }
 
 #[tokio::test]
+async fn completed_evidence_is_pruned_after_the_bounded_replay_window() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_receipts = 1;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    let mut first = rig.request(ObservationPhase::PreAction);
+    first.expected_config_sha256 = observer.config_sha256().to_owned();
+    let first = rig.prepare(first);
+    observer.observe_at(first.clone(), NOW).await.unwrap();
+
+    let later = NOW + 12_000;
+    rig.server
+        .observed_at_unix_ms
+        .store(later, Ordering::SeqCst);
+    let mut second = rig.request(ObservationPhase::PreAction);
+    second.effect_fence = 18;
+    second.requested_at_unix_ms = later - 1;
+    second.expires_at_unix_ms = later + 1_000;
+    second.expected_config_sha256 = observer.config_sha256().to_owned();
+    observer
+        .observe_at(rig.prepare(second), later)
+        .await
+        .unwrap();
+
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let retained: (u64, u64, u64) = connection
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM observations WHERE status='complete'),
+               (SELECT COUNT(*) FROM scope_heads),
+               (SELECT COUNT(*) FROM destination_heads)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(retained, (1, 1, 1));
+    drop(connection);
+
+    let reads = rig.server.reads.load(Ordering::SeqCst);
+    assert_eq!(
+        observer.observe_at(first, later).await,
+        Err(ObserverError::MalformedRequest)
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), reads);
+}
+
+#[tokio::test]
 async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() {
     let rig = Rig::new().await;
     let mut expired = rig.request(ObservationPhase::PreAction);

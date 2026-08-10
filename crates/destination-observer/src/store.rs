@@ -317,16 +317,11 @@ impl ObserverStore {
         assert_active_transaction(&transaction, config.generation, config_sha256)?;
         transaction
             .execute(
-                "DELETE FROM observations WHERE status='failed' AND expires_at_ms < ?1",
-                [now_ms.saturating_sub(config.limits.max_age_ms)],
-            )
-            .map_err(|_| ObserverError::StateUnavailable)?;
-        transaction
-            .execute(
                 "UPDATE observations SET status='failed', failure_code='expired_request' WHERE status='pending' AND expires_at_ms < ?1",
                 [now_ms],
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
+        prune_terminal_observations(&transaction, config, now_ms)?;
 
         let existing: Option<ExistingObservation> = transaction
             .query_row(
@@ -651,6 +646,44 @@ fn enforce_receipt_capacity(
     if count >= config.limits.max_receipts {
         return Err(ObserverError::CapacityExceeded);
     }
+    Ok(())
+}
+
+fn prune_terminal_observations(
+    transaction: &rusqlite::Transaction<'_>,
+    config: &ObserverConfig,
+    now_ms: i64,
+) -> Result<(), ObserverError> {
+    let cutoff = now_ms.saturating_sub(config.limits.max_age_ms);
+    transaction
+        .execute(
+            "DELETE FROM observations
+             WHERE status IN ('complete', 'failed') AND expires_at_ms < ?1",
+            [cutoff],
+        )
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    transaction
+        .execute(
+            "DELETE FROM scope_heads
+             WHERE NOT EXISTS (
+               SELECT 1 FROM observations
+               WHERE observations.scope_sha256=scope_heads.scope_sha256
+                 AND observations.status IN ('pending', 'complete')
+             )",
+            [],
+        )
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    transaction
+        .execute(
+            "DELETE FROM destination_heads
+             WHERE NOT EXISTS (
+               SELECT 1 FROM observations
+               WHERE observations.scope_sha256=destination_heads.destination_scope_sha256
+                 AND observations.status IN ('pending', 'complete')
+             )",
+            [],
+        )
+        .map_err(|_| ObserverError::StateUnavailable)?;
     Ok(())
 }
 
