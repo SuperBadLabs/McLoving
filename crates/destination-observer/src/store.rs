@@ -554,13 +554,25 @@ fn validate_temporal(
 
 fn error_from_code(code: Option<&str>) -> ObserverError {
     match code {
+        Some("invalid_config") => ObserverError::InvalidConfig,
         Some("malformed_request") => ObserverError::MalformedRequest,
+        Some("unauthorized_request") => ObserverError::UnauthorizedRequest,
+        Some("binding_mismatch") => ObserverError::BindingMismatch,
         Some("expired_request") => ObserverError::ExpiredRequest,
         Some("expired_grant") => ObserverError::ExpiredGrant,
         Some("runtime_fenced") => ObserverError::RuntimeFenced,
+        Some("replay_mismatch") => ObserverError::ReplayMismatch,
+        Some("observation_pending") => ObserverError::ObservationPending,
+        Some("phase_mismatch") => ObserverError::PhaseMismatch,
+        Some("cursor_rollback") => ObserverError::CursorRollback,
+        Some("destination_unauthorized") => ObserverError::DestinationUnauthorized,
         Some("destination_unavailable") => ObserverError::DestinationUnavailable,
+        Some("malformed_response") => ObserverError::MalformedResponse,
         Some("oversized_response") => ObserverError::OversizedResponse,
+        Some("stale_observation") => ObserverError::StaleObservation,
+        Some("confidentiality_denied") => ObserverError::ConfidentialityDenied,
         Some("capacity_exceeded") => ObserverError::CapacityExceeded,
+        Some("invalid_receipt") => ObserverError::InvalidReceipt,
         _ => ObserverError::StateUnavailable,
     }
 }

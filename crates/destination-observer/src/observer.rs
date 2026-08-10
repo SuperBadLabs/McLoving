@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, StatusCode, Url, redirect};
 use serde::Serialize;
 
@@ -138,92 +138,22 @@ impl DestinationObserver {
         self.store
             .assert_active(self.config.generation, &self.config_sha256)?;
 
-        let query_sha256 = canonical_digest(QUERY_DOMAIN, &request.query)?;
-        let mut url =
-            Url::parse(&self.config.endpoint_url).map_err(|_| ObserverError::InvalidConfig)?;
-        {
-            let mut query = url.query_pairs_mut();
-            for (key, value) in &request.query {
-                query.append_pair(key, value);
+        let destination_result = self.read_destination(&request, now_ms).await;
+        let (signed, raw) = match destination_result {
+            Ok(observation) => observation,
+            Err(error) => {
+                if is_terminal_destination_error(&error) {
+                    self.store.fail_pending(
+                        self.config.generation,
+                        &self.config_sha256,
+                        &request,
+                        &request_sha256,
+                        &error,
+                    )?;
+                }
+                return Err(error);
             }
-        }
-        let mut response = self
-            .client
-            .get(url)
-            .header(ACCEPT, "application/json")
-            .header(AUTHORIZATION, self.authorization.clone())
-            .send()
-            .await
-            .map_err(|_| ObserverError::DestinationUnavailable)?;
-        if matches!(
-            response.status(),
-            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-        ) {
-            return Err(ObserverError::DestinationUnauthorized);
-        }
-        if response.status() != StatusCode::OK {
-            return Err(ObserverError::DestinationUnavailable);
-        }
-        let header_bytes = response
-            .headers()
-            .iter()
-            .try_fold(0_usize, |total, (name, value)| {
-                total
-                    .checked_add(name.as_str().len())?
-                    .checked_add(value.as_bytes().len())
-            })
-            .ok_or(ObserverError::OversizedResponse)?;
-        if header_bytes > self.config.limits.max_header_bytes {
-            return Err(ObserverError::OversizedResponse);
-        }
-        if response.headers().iter().any(|(name, value)| {
-            contains_secret(name.as_str().as_bytes(), &self.secret_markers)
-                || contains_secret(value.as_bytes(), &self.secret_markers)
-        }) {
-            return Err(ObserverError::ConfidentialityDenied);
-        }
-        let content_type = response
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default();
-        if !content_type
-            .split(';')
-            .next()
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
-        {
-            return Err(ObserverError::MalformedResponse);
-        }
-        if response
-            .content_length()
-            .is_some_and(|size| size > self.config.limits.max_response_bytes as u64)
-        {
-            return Err(ObserverError::OversizedResponse);
-        }
-        let mut raw = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| ObserverError::DestinationUnavailable)?
-        {
-            if raw
-                .len()
-                .checked_add(chunk.len())
-                .is_none_or(|size| size > self.config.limits.max_response_bytes)
-            {
-                return Err(ObserverError::OversizedResponse);
-            }
-            raw.extend_from_slice(&chunk);
-        }
-        if contains_secret(&raw, &self.secret_markers) {
-            return Err(ObserverError::ConfidentialityDenied);
-        }
-        let signed: SignedDestinationState = parse_json_no_duplicates(&raw)?;
-        verify_destination_state(&signed, &self.destination_public_key)?;
-        self.validate_destination_state(&request, &signed, &query_sha256, now_ms)?;
-        if contains_secret_in_json(&signed.body.state, &self.secret_markers)? {
-            return Err(ObserverError::ConfidentialityDenied);
-        }
+        };
         self.store
             .assert_active(self.config.generation, &self.config_sha256)?;
 
@@ -312,6 +242,91 @@ impl DestinationObserver {
             &receipt_sha256,
         )?;
         Ok(receipt)
+    }
+
+    async fn read_destination(
+        &self,
+        request: &ObservationRequest,
+        now_ms: i64,
+    ) -> Result<(SignedDestinationState, Vec<u8>), ObserverError> {
+        let query_sha256 = canonical_digest(QUERY_DOMAIN, &request.query)?;
+        let mut url =
+            Url::parse(&self.config.endpoint_url).map_err(|_| ObserverError::InvalidConfig)?;
+        {
+            let mut query = url.query_pairs_mut();
+            for (key, value) in &request.query {
+                query.append_pair(key, value);
+            }
+        }
+        let mut response = self
+            .client
+            .get(url)
+            .header(ACCEPT, "application/json")
+            .header(AUTHORIZATION, self.authorization.clone())
+            .send()
+            .await
+            .map_err(|_| ObserverError::DestinationUnavailable)?;
+        if matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ) {
+            return Err(ObserverError::DestinationUnauthorized);
+        }
+        if response.status() != StatusCode::OK {
+            return Err(ObserverError::DestinationUnavailable);
+        }
+        if header_wire_bytes(response.headers())? > self.config.limits.max_header_bytes {
+            return Err(ObserverError::OversizedResponse);
+        }
+        if response.headers().iter().any(|(name, value)| {
+            contains_secret(name.as_str().as_bytes(), &self.secret_markers)
+                || contains_secret(value.as_bytes(), &self.secret_markers)
+        }) {
+            return Err(ObserverError::ConfidentialityDenied);
+        }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !content_type
+            .split(';')
+            .next()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"))
+        {
+            return Err(ObserverError::MalformedResponse);
+        }
+        if response
+            .content_length()
+            .is_some_and(|size| size > self.config.limits.max_response_bytes as u64)
+        {
+            return Err(ObserverError::OversizedResponse);
+        }
+        let mut raw = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| ObserverError::DestinationUnavailable)?
+        {
+            if raw
+                .len()
+                .checked_add(chunk.len())
+                .is_none_or(|size| size > self.config.limits.max_response_bytes)
+            {
+                return Err(ObserverError::OversizedResponse);
+            }
+            raw.extend_from_slice(&chunk);
+        }
+        if contains_secret(&raw, &self.secret_markers) {
+            return Err(ObserverError::ConfidentialityDenied);
+        }
+        let signed: SignedDestinationState = parse_json_no_duplicates(&raw)?;
+        verify_destination_state(&signed, &self.destination_public_key)?;
+        self.validate_destination_state(request, &signed, &query_sha256, now_ms)?;
+        if contains_secret_in_json(&signed.body.state, &self.secret_markers)? {
+            return Err(ObserverError::ConfidentialityDenied);
+        }
+        Ok((signed, raw))
     }
 
     fn validate_replayed_receipt(
@@ -644,11 +659,40 @@ fn validate_config(
 
 fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
     markers.iter().any(|marker| {
+        let lowercase_hex = hex(marker);
+        let uppercase_hex = lowercase_hex.to_ascii_uppercase();
+        let uppercase_percent = percent_encode(marker);
+        let lowercase_percent = uppercase_percent.to_ascii_lowercase();
         contains(raw, marker)
             || contains(raw, BASE64.encode(marker).as_bytes())
-            || contains(raw, hex(marker).as_bytes())
-            || contains(raw, percent_encode(marker).as_bytes())
+            || contains(raw, lowercase_hex.as_bytes())
+            || contains(raw, uppercase_hex.as_bytes())
+            || contains(raw, uppercase_percent.as_bytes())
+            || contains(raw, lowercase_percent.as_bytes())
     })
+}
+
+fn header_wire_bytes(headers: &HeaderMap) -> Result<usize, ObserverError> {
+    headers.iter().try_fold(2_usize, |total, (name, value)| {
+        total
+            .checked_add(name.as_str().len())
+            .and_then(|size| size.checked_add(2))
+            .and_then(|size| size.checked_add(value.as_bytes().len()))
+            .and_then(|size| size.checked_add(2))
+            .ok_or(ObserverError::OversizedResponse)
+    })
+}
+
+fn is_terminal_destination_error(error: &ObserverError) -> bool {
+    matches!(
+        error,
+        ObserverError::DestinationUnauthorized
+            | ObserverError::MalformedResponse
+            | ObserverError::OversizedResponse
+            | ObserverError::StaleObservation
+            | ObserverError::ConfidentialityDenied
+            | ObserverError::CursorRollback
+    )
 }
 
 fn contains_secret_in_json(
@@ -719,4 +763,25 @@ fn unix_time_ms() -> Result<i64, ObserverError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ObserverError::StateUnavailable)?;
     i64::try_from(duration.as_millis()).map_err(|_| ObserverError::StateUnavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoded_secret_scanner_is_case_complete() {
+        let markers = vec![vec![0xab, 0xcd, 0xef, 0x10]];
+        assert!(contains_secret(b"abcdef10", &markers));
+        assert!(contains_secret(b"ABCDEF10", &markers));
+        assert!(contains_secret(b"%AB%CD%EF%10", &markers));
+        assert!(contains_secret(b"%ab%cd%ef%10", &markers));
+    }
+
+    #[test]
+    fn header_bound_counts_separators_and_terminators() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-a", HeaderValue::from_static("bc"));
+        assert_eq!(header_wire_bytes(&headers), Ok(11));
+    }
 }

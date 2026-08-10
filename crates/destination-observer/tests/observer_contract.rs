@@ -408,13 +408,33 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         (Mode::Malformed, ObserverError::MalformedResponse),
         (Mode::Oversized, ObserverError::OversizedResponse),
         (Mode::Unauthorized, ObserverError::DestinationUnauthorized),
-        (Mode::Outage, ObserverError::DestinationUnavailable),
-        (Mode::Timeout, ObserverError::DestinationUnavailable),
     ] {
         let rig = Rig::new().await;
         rig.set_mode(mode);
         let request = rig.prepare(rig.request(ObservationPhase::PreAction));
+        assert_eq!(
+            rig.observer.observe_at(request.clone(), NOW).await,
+            Err(expected.clone())
+        );
         assert_eq!(rig.observer.observe_at(request, NOW).await, Err(expected));
+        rig.set_mode(Mode::Good);
+        let replacement = rig.prepare(rig.request(ObservationPhase::PreAction));
+        rig.observer.observe_at(replacement, NOW).await.unwrap();
+    }
+
+    for mode in [Mode::Outage, Mode::Timeout] {
+        let rig = Rig::new().await;
+        rig.set_mode(mode);
+        let request = rig.prepare(rig.request(ObservationPhase::PreAction));
+        assert_eq!(
+            rig.observer.observe_at(request, NOW).await,
+            Err(ObserverError::DestinationUnavailable)
+        );
+        let competing = rig.prepare(rig.request(ObservationPhase::PreAction));
+        assert_eq!(
+            rig.observer.observe_at(competing, NOW).await,
+            Err(ObserverError::ObservationPending)
+        );
     }
 }
 
