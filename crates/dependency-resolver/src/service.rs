@@ -240,7 +240,7 @@ impl DependencyResolver {
             }
         };
         if Instant::now() >= deadline {
-            self.transport.preserve_cleanup_ambiguity().await;
+            self.transport.preserve_cleanup_ambiguity(deadline).await;
             self.store.release_incomplete_claim(&claim);
             return Err(ResolverError::denied("DEP_TRANSPORT_DEADLINE"));
         }
@@ -254,7 +254,7 @@ impl DependencyResolver {
                 // kernel syscall. Preserve the durable claim and transient
                 // allocation as explicit restart ambiguity instead of racing
                 // cleanup against an incompletely terminated worker.
-                self.preserve_publication_ambiguity().await;
+                self.preserve_publication_ambiguity(deadline).await;
                 self.store.release_incomplete_claim(&claim);
                 Err(error)
             }
@@ -282,7 +282,7 @@ impl DependencyResolver {
         {
             Ok(guard) => guard,
             Err(_) => {
-                self.preserve_publication_ambiguity().await;
+                self.preserve_publication_ambiguity(deadline).await;
                 return Err(ResolverError::denied(
                     "DEP_STORE_PUBLICATION_QUEUE_DEADLINE",
                 ));
@@ -342,21 +342,21 @@ impl DependencyResolver {
         {
             Ok(output) => output,
             Err(error) => {
-                self.preserve_publication_ambiguity().await;
+                self.preserve_publication_ambiguity(deadline).await;
                 return Err(error);
             }
         };
         if !output.status.success()
             || output.stdout.len() as u64 > self.config.limits.max_frame_bytes
         {
-            self.preserve_publication_ambiguity().await;
+            self.preserve_publication_ambiguity(deadline).await;
             return Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"));
         }
         let response: PublicationWorkerResponse =
             match crate::strict_json::from_slice(&output.stdout) {
                 Ok(response) => response,
                 Err(_) => {
-                    self.preserve_publication_ambiguity().await;
+                    self.preserve_publication_ambiguity(deadline).await;
                     return Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"));
                 }
             };
@@ -368,19 +368,19 @@ impl DependencyResolver {
                 Ok(*receipt)
             }
             PublicationWorkerResponse::Ok { .. } => {
-                self.preserve_publication_ambiguity().await;
+                self.preserve_publication_ambiguity(deadline).await;
                 Err(ResolverError::denied("DEP_STORE_PUBLICATION_WORKER_FAILED"))
             }
             PublicationWorkerResponse::Error { code } => {
-                self.preserve_publication_ambiguity().await;
+                self.preserve_publication_ambiguity(deadline).await;
                 Err(ResolverError::denied(worker_error_code(&code)))
             }
         }
     }
 
-    async fn preserve_publication_ambiguity(&self) {
+    async fn preserve_publication_ambiguity(&self, deadline: Instant) {
         self.publication_poisoned.store(true, Ordering::Release);
-        self.transport.preserve_cleanup_ambiguity().await;
+        self.transport.preserve_cleanup_ambiguity(deadline).await;
     }
 
     pub async fn acknowledge_response_delivery(&self, receipt: &ResolutionReceipt) {

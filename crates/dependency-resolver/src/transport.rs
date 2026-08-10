@@ -95,6 +95,7 @@ pub struct HttpTransport {
     markers: Vec<Vec<u8>>,
     repositories: BTreeMap<String, RepositoryRuntime>,
     fetch_slot: tokio::sync::Mutex<()>,
+    poison_pending: AtomicBool,
     cleanup_poisoned: AtomicBool,
     _lease: Option<TransportLease>,
 }
@@ -213,6 +214,7 @@ impl HttpTransport {
             markers,
             repositories,
             fetch_slot: tokio::sync::Mutex::new(()),
+            poison_pending: AtomicBool::new(false),
             cleanup_poisoned: AtomicBool::new(false),
             _lease: Some(lease),
         })
@@ -226,7 +228,9 @@ impl HttpTransport {
     }
 
     pub fn ensure_available(&self) -> Result<(), TransportError> {
-        if self.cleanup_poisoned.load(Ordering::Acquire) {
+        if self.poison_pending.load(Ordering::Acquire)
+            || self.cleanup_poisoned.load(Ordering::Acquire)
+        {
             Err(TransportError::new(
                 "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED",
                 "transport cleanup is ambiguous and requires resolver restart",
@@ -236,12 +240,20 @@ impl HttpTransport {
         }
     }
 
-    pub async fn preserve_cleanup_ambiguity(&self) {
-        let _fetch_slot = self.fetch_slot.lock().await;
-        self.poison_cleanup_while_fetch_slot_held();
+    pub async fn preserve_cleanup_ambiguity(&self, deadline: Instant) {
+        self.poison_pending.store(true, Ordering::Release);
+        if let Ok(_fetch_slot) = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.fetch_slot.lock(),
+        )
+        .await
+        {
+            self.cleanup_poisoned.store(true, Ordering::Release);
+        }
     }
 
     fn poison_cleanup_while_fetch_slot_held(&self) {
+        self.poison_pending.store(true, Ordering::Release);
         self.cleanup_poisoned.store(true, Ordering::Release);
     }
 
@@ -2012,6 +2024,7 @@ mod tests {
                 markers,
                 repositories: BTreeMap::from([("contained-maven".to_owned(), repository)]),
                 fetch_slot: tokio::sync::Mutex::new(()),
+                poison_pending: AtomicBool::new(false),
                 cleanup_poisoned: AtomicBool::new(false),
                 _lease: None,
             };
@@ -2168,6 +2181,7 @@ mod tests {
                 markers: vec![marker],
                 repositories: BTreeMap::from([("contained-maven".to_owned(), repository)]),
                 fetch_slot: tokio::sync::Mutex::new(()),
+                poison_pending: AtomicBool::new(false),
                 cleanup_poisoned: AtomicBool::new(false),
                 _lease: None,
             };
@@ -2677,7 +2691,10 @@ mod tests {
             },
             async {
                 tokio::time::sleep(Duration::from_millis(5)).await;
-                fixture.transport.preserve_cleanup_ambiguity().await;
+                fixture
+                    .transport
+                    .preserve_cleanup_ambiguity(Instant::now() + Duration::from_secs(2))
+                    .await;
                 poison_completed.store(true, Ordering::Release);
             }
         );
@@ -2698,6 +2715,57 @@ mod tests {
             )
             .await
             .expect_err("later fetch after external poison");
+        assert_eq!(later.code, "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED");
+    }
+
+    #[tokio::test]
+    async fn expired_external_poison_returns_promptly_and_blocks_later_fetches() {
+        let fixture = TransportFixture::with_response(
+            b"artifact".to_vec(),
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+            Duration::from_millis(100),
+            7,
+        )
+        .await;
+        let active_resolution = Uuid::new_v4();
+        let (active, poison_elapsed) = tokio::join!(
+            fixture.transport.fetch_plan(
+                active_resolution,
+                &fixture.plan,
+                Instant::now() + Duration::from_secs(2),
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                let started = Instant::now();
+                fixture
+                    .transport
+                    .preserve_cleanup_ambiguity(started + Duration::from_millis(10))
+                    .await;
+                started.elapsed()
+            }
+        );
+        assert!(
+            active.is_ok(),
+            "active fetch predates the final poison transition"
+        );
+        assert!(
+            poison_elapsed < Duration::from_millis(75),
+            "expired poison caller must not inherit the active fetch deadline"
+        );
+
+        let later_resolution = Uuid::new_v4();
+        let later = fixture
+            .transport
+            .fetch_plan(
+                later_resolution,
+                &fixture.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("later fetch after pending poison");
         assert_eq!(later.code, "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED");
     }
 
