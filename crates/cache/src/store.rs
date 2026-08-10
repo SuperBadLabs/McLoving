@@ -685,31 +685,6 @@ impl CacheStore {
         })
     }
 
-    fn admitted_from_stored<'a>(
-        &'a self,
-        policy_id: &str,
-        key_sha256: &str,
-        stored: &StoredEntry,
-    ) -> Result<AdmittedKey<'a>, CacheError> {
-        let policy = self
-            .config
-            .policies
-            .binary_search_by(|candidate| candidate.policy_id.as_str().cmp(policy_id))
-            .ok()
-            .map(|index| &self.config.policies[index])
-            .ok_or(CacheError::StateUnavailable)?;
-        let canonical: CanonicalCacheKey = serde_json::from_slice(&stored.canonical_key)
-            .map_err(|_| CacheError::StateUnavailable)?;
-        Ok(AdmittedKey {
-            policy,
-            policy_sha256: stored.policy_sha256.clone(),
-            canonical,
-            canonical_bytes: stored.canonical_key.clone(),
-            namespace_sha256: stored.namespace_sha256.clone(),
-            key_sha256: key_sha256.to_owned(),
-        })
-    }
-
     fn open_connection(&self) -> Result<Connection, CacheError> {
         open_database(&self.database_path, false)
     }
@@ -1069,8 +1044,6 @@ impl CacheStore {
             limit,
         )?;
         for (key_sha256, stored) in candidates {
-            let candidate =
-                self.admitted_from_stored(&admitted.policy.policy_id, &key_sha256, &stored)?;
             let outcome = stale_outcome(
                 &stored,
                 &self.generation_sha256,
@@ -1078,10 +1051,11 @@ impl CacheStore {
                 now,
             );
             delete_entry(transaction, &key_sha256)?;
-            receipts.push(self.append_receipt(
+            receipts.push(self.append_stored_receipt(
                 transaction,
                 caller_id,
-                &candidate,
+                &key_sha256,
+                &stored,
                 ReceiptDetails {
                     operation: CacheOperation::Evict,
                     outcome,
@@ -1143,13 +1117,12 @@ impl CacheStore {
                 .map_err(|_| CacheError::StateUnavailable)?
                 .ok_or(CacheError::PolicyQuotaExceeded)?;
             let (key_sha256, stored) = candidate;
-            let candidate =
-                self.admitted_from_stored(&admitted.policy.policy_id, &key_sha256, &stored)?;
             delete_entry(transaction, &key_sha256)?;
-            receipts.push(self.append_receipt(
+            receipts.push(self.append_stored_receipt(
                 transaction,
                 caller_id,
-                &candidate,
+                &key_sha256,
+                &stored,
                 ReceiptDetails {
                     operation: CacheOperation::Evict,
                     outcome: stale_outcome(

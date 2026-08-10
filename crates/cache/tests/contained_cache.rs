@@ -751,7 +751,66 @@ fn cleanup_removes_rows_for_a_policy_absent_from_the_active_generation() {
 }
 
 #[test]
-fn cleanup_rejects_substituted_publication_provenance() {
+fn explicit_cleanup_rejects_substituted_publication_provenance() {
+    let temp = TempDir::new().unwrap();
+    let key = [19_u8; 32];
+    let clock = Arc::new(ManualClock::new(72_750));
+    let first_config = config(
+        &temp,
+        &key,
+        vec![policy("policy-a", "trusted", "reader", "writer")],
+    );
+    let database_path = first_config.database_path.clone();
+    let first = open_store(first_config.clone(), &key, Arc::clone(&clock)).unwrap();
+    let request_a = request(
+        first.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"cleanup-publication-a",
+    );
+    let request_b = request(
+        first.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"cleanup-publication-b",
+    );
+    let publication_a = first
+        .publish("writer", "trusted", &request_a, b"content-a")
+        .unwrap();
+    let publication_b = first
+        .publish("writer", "trusted", &request_b, b"content-b")
+        .unwrap();
+    let key_a = publication_a.receipts[0].event.key_sha256.clone();
+    let event_b = publication_b.receipts[0].event_sha256.clone();
+    Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "UPDATE entries SET publication_event_sha256 = ?1 WHERE key_sha256 = ?2",
+            rusqlite::params![event_b, key_a],
+        )
+        .unwrap();
+    drop(first);
+
+    let mut second_config = first_config;
+    second_config.cache_generation = 2;
+    let second = open_store(second_config, &key, clock).unwrap();
+    let cleanup = second.cleanup("operator").unwrap();
+    assert_eq!(cleanup.removed, 2);
+    let rejected = cleanup
+        .receipts
+        .iter()
+        .find(|receipt| receipt.event.key_sha256 == key_a)
+        .unwrap();
+    assert_eq!(
+        rejected.event.outcome,
+        mcloving_cache::CacheOutcome::CorruptRejected
+    );
+    assert!(rejected.event.content_sha256.is_none());
+    second.verify_audit_chain().unwrap();
+}
+
+#[test]
+fn publish_time_stale_cleanup_rejects_substituted_publication_provenance() {
     let temp = TempDir::new().unwrap();
     let key = [20_u8; 32];
     let clock = Arc::new(ManualClock::new(73_000));
@@ -794,9 +853,17 @@ fn cleanup_rejects_substituted_publication_provenance() {
     let mut second_config = first_config;
     second_config.cache_generation = 2;
     let second = open_store(second_config, &key, clock).unwrap();
-    let cleanup = second.cleanup("operator").unwrap();
-    assert_eq!(cleanup.removed, 2);
-    let rejected = cleanup
+    let current = request(
+        second.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"current-publication",
+    );
+    let publication = second
+        .publish("writer", "trusted", &current, b"current")
+        .unwrap();
+    assert_eq!(publication.status, PublishStatus::Published);
+    let rejected = publication
         .receipts
         .iter()
         .find(|receipt| receipt.event.key_sha256 == key_a)
@@ -807,6 +874,58 @@ fn cleanup_rejects_substituted_publication_provenance() {
     );
     assert!(rejected.event.content_sha256.is_none());
     second.verify_audit_chain().unwrap();
+}
+
+#[test]
+fn quota_eviction_rejects_substituted_publication_provenance() {
+    let temp = TempDir::new().unwrap();
+    let key = [21_u8; 32];
+    let clock = Arc::new(ManualClock::new(73_250));
+    let mut single_entry = policy("policy-a", "trusted", "reader", "writer");
+    single_entry.max_entries = 1;
+    let config = config(&temp, &key, vec![single_entry]);
+    let database_path = config.database_path.clone();
+    let store = open_store(config, &key, clock).unwrap();
+    let request_a = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"eviction-a",
+    );
+    let publication_a = store
+        .publish("writer", "trusted", &request_a, b"content-a")
+        .unwrap();
+    let hit = store.read("reader", "trusted", &request_a).unwrap();
+    let key_a = publication_a.receipts[0].event.key_sha256.clone();
+    let hit_event = hit.receipts[0].event_sha256.clone();
+    Connection::open(database_path)
+        .unwrap()
+        .execute(
+            "UPDATE entries SET publication_event_sha256 = ?1 WHERE key_sha256 = ?2",
+            rusqlite::params![hit_event, key_a],
+        )
+        .unwrap();
+
+    let request_b = request(
+        store.generation_sha256(),
+        "policy-a",
+        "trusted",
+        b"eviction-b",
+    );
+    let publication_b = store
+        .publish("writer", "trusted", &request_b, b"content-b")
+        .unwrap();
+    let rejected = publication_b
+        .receipts
+        .iter()
+        .find(|receipt| receipt.event.key_sha256 == key_a)
+        .unwrap();
+    assert_eq!(
+        rejected.event.outcome,
+        mcloving_cache::CacheOutcome::CorruptRejected
+    );
+    assert!(rejected.event.content_sha256.is_none());
+    store.verify_audit_chain().unwrap();
 }
 
 #[test]
