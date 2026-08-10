@@ -122,7 +122,31 @@ impl DestinationObserver {
             b"mcloving-observer-destination-scope-v1",
             &DestinationScope::from_request(&request),
         )?;
-        let _destination_lease = self.acquire_destination_lease(&destination_scope_sha256)?;
+        if let Some(receipt) = self.store.replay(
+            self.config.generation,
+            &self.config_sha256,
+            &request,
+            &request_sha256,
+        )? {
+            self.validate_replayed_receipt(&request, &request_sha256, &receipt)?;
+            return Ok(*receipt);
+        }
+        let _destination_lease = match self.acquire_destination_lease(&destination_scope_sha256) {
+            Ok(lease) => lease,
+            Err(ObserverError::ObservationPending) => {
+                if let Some(receipt) = self.store.replay(
+                    self.config.generation,
+                    &self.config_sha256,
+                    &request,
+                    &request_sha256,
+                )? {
+                    self.validate_replayed_receipt(&request, &request_sha256, &receipt)?;
+                    return Ok(*receipt);
+                }
+                return Err(ObserverError::ObservationPending);
+            }
+            Err(error) => return Err(error),
+        };
         let retry_count = match self.store.claim(
             &self.config,
             &self.config_sha256,
@@ -542,8 +566,6 @@ struct Scope<'a> {
     tenant_id: uuid::Uuid,
     project_id: uuid::Uuid,
     pipeline_id: uuid::Uuid,
-    build_id: uuid::Uuid,
-    attempt_id: uuid::Uuid,
     effect_fence: u64,
     endpoint_identity: &'a str,
     account_identity: &'a str,
@@ -557,8 +579,6 @@ impl<'a> Scope<'a> {
             tenant_id: request.tenant_id,
             project_id: request.project_id,
             pipeline_id: request.pipeline_id,
-            build_id: request.build_id,
-            attempt_id: request.attempt_id,
             effect_fence: request.effect_fence,
             endpoint_identity: &request.endpoint_identity,
             account_identity: &request.account_identity,

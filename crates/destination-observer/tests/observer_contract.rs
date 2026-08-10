@@ -514,6 +514,48 @@ async fn concurrent_retry_of_the_same_observation_does_not_duplicate_the_get() {
 }
 
 #[tokio::test]
+async fn completed_replay_bypasses_an_unrelated_live_destination_read() {
+    let rig = Rig::new().await;
+    let completed_request = rig.prepare(rig.request(ObservationPhase::PreAction));
+    let completed_receipt = rig
+        .observer
+        .observe_at(completed_request.clone(), NOW)
+        .await
+        .unwrap();
+
+    rig.server.cursor.store(11, Ordering::SeqCst);
+    rig.set_mode(Mode::Slow);
+    let mut next_fence = rig.request(ObservationPhase::PreAction);
+    next_fence.effect_fence = 18;
+    let next_fence = rig.prepare(next_fence);
+    let live_read = rig.observer.observe_at(next_fence, NOW);
+    let stored_replay = async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        rig.observer.observe_at(completed_request, NOW).await
+    };
+    let (live_result, replay_result) = tokio::join!(live_read, stored_replay);
+
+    live_result.unwrap();
+    assert_eq!(replay_result.unwrap(), completed_receipt);
+}
+
+#[tokio::test]
+async fn controller_retry_ids_cannot_create_a_second_phase_chain() {
+    let rig = Rig::new().await;
+    let first = rig.prepare(rig.request(ObservationPhase::PreAction));
+    rig.observer.observe_at(first, NOW).await.unwrap();
+
+    let mut retry = rig.request(ObservationPhase::PreAction);
+    retry.build_id = Uuid::from_u128(40);
+    retry.attempt_id = Uuid::from_u128(50);
+    let retry = rig.prepare(retry);
+    assert_eq!(
+        rig.observer.observe_at(retry, NOW).await,
+        Err(ObserverError::PhaseMismatch)
+    );
+}
+
+#[tokio::test]
 async fn oversized_success_is_failed_before_receipt_commit() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();

@@ -32,8 +32,9 @@ secret, connector-control, or external-effect capability. Production requires
 HTTPS with a content-pinned private CA bundle. Plain HTTP is accepted only when
 both the explicit test flag and a literal loopback address are present.
 
-The standalone process accepts bounded newline-complete frames from stdin and
-emits generic bounded responses on stdout. Configuration and authority files
+The standalone process accepts bounded newline-complete frames from stdin; the
+newline is included in the frame-size limit. It emits generic bounded responses
+on stdout. Configuration and authority files
 are opened without following a final symlink; secret files and the state
 directory must be owned by the process user and inaccessible to group or other
 users. The executable, image, complete configuration, read token, three signing
@@ -53,6 +54,8 @@ substituted bindings, or invalid signatures fail before network access.
 The observer persists a pending claim in a `synchronous=FULL` WAL ledger before
 the GET. An observation ID can be replayed only with byte-identical canonical
 request truth. A completed replay returns the same receipt without another GET;
+a stored terminal replay is checked before taking the live destination lease,
+so unrelated destination activity or availability cannot suppress it;
 a pending replay is the only retry path and is bounded. Completed evidence is
 returned even after the request or grant window closes because no new authority
 is exercised. Expired, generation-fenced, explicitly failed, or retry-exhausted
@@ -92,7 +95,9 @@ wrong JSON types, stale or future observations, substituted signatures or
 bindings, and a cursor that does not advance from the signed predecessor are
 denied.
 
-Each effect fence admits exactly this chain:
+Each tenant/project/pipeline, destination, and effect-fence identity admits
+exactly this chain. Build and attempt IDs remain signed receipt provenance but
+do not create independent phase chains for controller retries:
 
 1. `pre_action` with no predecessor;
 2. `post_action` naming the exact pre-action receipt and cursor; and

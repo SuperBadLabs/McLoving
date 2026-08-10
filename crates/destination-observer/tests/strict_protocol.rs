@@ -1,7 +1,7 @@
 use std::io::Cursor;
 
 use mcloving_destination_observer::{
-    ObserverCommand, ObserverError, parse_json_no_duplicates, read_bounded_frame,
+    MAX_FRAME_BYTES, ObserverCommand, ObserverError, parse_json_no_duplicates, read_bounded_frame,
 };
 
 #[test]
@@ -35,6 +35,22 @@ fn frames_require_termination_and_obey_the_process_bound() {
     let mut oversized = Cursor::new(vec![b'x'; 256 * 1024 + 2]);
     assert_eq!(
         read_bounded_frame(&mut oversized),
+        Err(ObserverError::OversizedResponse)
+    );
+
+    let mut exact_bound = vec![b'x'; MAX_FRAME_BYTES - 1];
+    exact_bound.push(b'\n');
+    let mut exact_bound = Cursor::new(exact_bound);
+    assert_eq!(
+        read_bounded_frame(&mut exact_bound).unwrap(),
+        Some(vec![b'x'; MAX_FRAME_BYTES - 1])
+    );
+
+    let mut one_byte_over = vec![b'x'; MAX_FRAME_BYTES];
+    one_byte_over.push(b'\n');
+    let mut one_byte_over = Cursor::new(one_byte_over);
+    assert_eq!(
+        read_bounded_frame(&mut one_byte_over),
         Err(ObserverError::OversizedResponse)
     );
 }

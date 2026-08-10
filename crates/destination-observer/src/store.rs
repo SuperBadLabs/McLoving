@@ -26,6 +26,13 @@ struct ExistingObservation {
     failure_code: Option<String>,
 }
 
+struct ReplayObservation {
+    request_sha256: String,
+    status: String,
+    receipt_json: Option<Vec<u8>>,
+    failure_code: Option<String>,
+}
+
 impl ObserverStore {
     pub(crate) fn open(
         config: &ObserverConfig,
@@ -206,6 +213,63 @@ impl ObserverStore {
             return Err(ObserverError::RuntimeFenced);
         }
         Ok(())
+    }
+
+    pub(crate) fn replay(
+        &self,
+        generation: u64,
+        config_sha256: &str,
+        request: &ObservationRequest,
+        request_sha256: &str,
+    ) -> Result<Option<Box<ObservationReceipt>>, ObserverError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let active: (u64, String) = connection
+            .query_row(
+                "SELECT generation, config_sha256 FROM active_runtime WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        if active.0 != generation || active.1 != config_sha256 {
+            return Err(ObserverError::RuntimeFenced);
+        }
+        let existing: Option<ReplayObservation> = connection
+            .query_row(
+                "SELECT request_sha256, status, receipt_json, failure_code FROM observations WHERE observation_id=?1",
+                [request.observation_id.to_string()],
+                |row| {
+                    Ok(ReplayObservation {
+                        request_sha256: row.get(0)?,
+                        status: row.get(1)?,
+                        receipt_json: row.get(2)?,
+                        failure_code: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        if existing.request_sha256 != request_sha256 {
+            return Err(ObserverError::ReplayMismatch);
+        }
+        match existing.status.as_str() {
+            "complete" => {
+                let bytes = existing
+                    .receipt_json
+                    .ok_or(ObserverError::StateUnavailable)?;
+                let receipt =
+                    serde_json::from_slice(&bytes).map_err(|_| ObserverError::StateUnavailable)?;
+                Ok(Some(Box::new(receipt)))
+            }
+            "failed" => Err(error_from_code(existing.failure_code.as_deref())),
+            "pending" => Ok(None),
+            _ => Err(ObserverError::StateUnavailable),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

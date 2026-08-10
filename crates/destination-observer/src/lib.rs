@@ -18,6 +18,7 @@ pub use error::ObserverError;
 pub use model::*;
 pub use observer::DestinationObserver;
 pub use standalone::{
-    ObserverCommand, ObserverResponse, load_observer, read_bounded_frame, write_response,
+    MAX_FRAME_BYTES, ObserverCommand, ObserverResponse, load_observer, read_bounded_frame,
+    write_response,
 };
 pub use strict_json::parse_json_no_duplicates;
