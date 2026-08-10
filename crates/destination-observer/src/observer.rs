@@ -434,7 +434,7 @@ impl DestinationObserver {
             .header(EFFECT_FENCE_HEADER, request.effect_fence.to_string())
             .header(OBSERVATION_PHASE_HEADER, request.phase.as_str())
             .header(QUERY_SHA256_HEADER, query_sha256.as_str())
-            .header(REQUEST_SHA256_HEADER, request_sha256)
+            .header(REQUEST_SHA256_HEADER, request_sha256.as_str())
             .send()
             .await
             .map_err(|_| ObserverError::DestinationUnavailable)?;
@@ -524,7 +524,13 @@ impl DestinationObserver {
         verify_destination_state(&signed, &self.destination_public_key)?;
         let captured_at_ms = elapsed_time_ms(now_ms, started_at)?;
         validate_temporal(&self.config, request, captured_at_ms)?;
-        self.validate_destination_state(request, &signed, &query_sha256, captured_at_ms)?;
+        self.validate_destination_state(
+            request,
+            &request_sha256,
+            &signed,
+            &query_sha256,
+            captured_at_ms,
+        )?;
         if contains_secret_in_json(&signed.body.state, &self.secret_markers)? {
             return Err(ObserverError::ConfidentialityDenied);
         }
@@ -650,6 +656,7 @@ impl DestinationObserver {
     fn validate_destination_state(
         &self,
         request: &ObservationRequest,
+        request_sha256: &str,
         signed: &SignedDestinationState,
         query_sha256: &str,
         now_ms: i64,
@@ -657,6 +664,7 @@ impl DestinationObserver {
         let body = &signed.body;
         if body.schema_version != DESTINATION_STATE_SCHEMA_VERSION
             || body.observation_id != request.observation_id
+            || body.request_sha256 != request_sha256
             || body.observer_id != self.config.observer_id
             || body.service_identity != self.config.service_identity
             || body.endpoint_identity != self.config.endpoint_identity
@@ -954,6 +962,7 @@ fn minimum_destination_response_fits(config: &ObserverConfig) -> bool {
         body: crate::DestinationStateBody {
             schema_version: DESTINATION_STATE_SCHEMA_VERSION.to_owned(),
             observation_id: Uuid::nil(),
+            request_sha256: "0".repeat(64),
             observer_id: config.observer_id.clone(),
             service_identity: config.service_identity.clone(),
             endpoint_identity: config.endpoint_identity.clone(),

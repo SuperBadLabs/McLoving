@@ -200,6 +200,7 @@ pub struct ObservationRequest {
 pub struct DestinationStateBody {
     pub schema_version: String,
     pub observation_id: Uuid,
+    pub request_sha256: String,
     pub observer_id: String,
     pub service_identity: String,
     pub endpoint_identity: String,

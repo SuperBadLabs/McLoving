@@ -54,6 +54,9 @@ configuration. That attestation is exactly 64 lowercase hexadecimal bytes with
 an optional single LF or CRLF text-file terminator. The executable, image,
 complete configuration, read token, three signing
 authorities, CA, and secret-marker set are digest-bound before the ledger opens.
+The SQLite ledger is pre-created as a no-follow, owner-private, single-link
+regular file before SQLite opens it; the private state directory contains its
+WAL and shared-memory sidecars.
 The startup denylist is applied to every authority digest and to the attested
 executable, image, complete configuration, CA bundle, prior configuration, and
 secret-marker-set digests; duplicate or malformed denylist entries fail closed.
@@ -81,9 +84,10 @@ therefore dominates all response classification, while a 401/403 remains a
 permanent authentication denial even when it also exceeds the application
 header budget.
 The GET carries reserved non-secret headers for the observation ID, effect
-fence, phase, canonical-query digest, and complete signed-request digest. An
-independently deployed destination therefore receives every fresh binding it
-must echo and sign without shared process state.
+fence, phase, canonical-query digest, and complete signed-request digest. The
+destination repeats that complete request digest inside its signed response
+body. An independently deployed destination therefore attests every fresh
+binding without shared process state.
 
 The observer persists a pending claim in a `synchronous=FULL` WAL ledger before
 the GET. An observation ID can be replayed only with byte-identical canonical

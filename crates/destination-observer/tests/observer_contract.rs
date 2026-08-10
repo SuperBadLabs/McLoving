@@ -43,6 +43,7 @@ enum Mode {
     Stale,
     PredatesRequest,
     Substitute,
+    RequestDigestSubstitute,
     Secret,
     EscapedEnvelopeSecret,
     PostErrorEscapedSecret,
@@ -341,7 +342,7 @@ async fn destination_handler(
             .to_owned(),
         ),
         ("x-mcloving-query-sha256", query_sha256.clone()),
-        ("x-mcloving-request-sha256", request_sha256),
+        ("x-mcloving-request-sha256", request_sha256.clone()),
     ]
     .into_iter()
     .all(|(name, expected)| {
@@ -453,6 +454,7 @@ async fn destination_handler(
     let mut body = DestinationStateBody {
         schema_version: DESTINATION_STATE_SCHEMA_VERSION.to_owned(),
         observation_id: request.observation_id,
+        request_sha256: request_sha256.clone(),
         observer_id: request.observer_id.clone(),
         service_identity: "service/destination-read-api".to_owned(),
         endpoint_identity: request.endpoint_identity.clone(),
@@ -478,6 +480,7 @@ async fn destination_handler(
             body.observed_at_unix_ms = request.requested_at_unix_ms - 1;
         }
         Mode::Substitute => body.resource_identity = "release/substituted".to_owned(),
+        Mode::RequestDigestSubstitute => body.request_sha256 = "f".repeat(64),
         Mode::Secret => body.state = json!({"published": true, "leak": BASE64.encode(SECRET)}),
         _ => {}
     }
@@ -638,6 +641,10 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         (Mode::Stale, ObserverError::StaleObservation),
         (Mode::PredatesRequest, ObserverError::StaleObservation),
         (Mode::Substitute, ObserverError::MalformedResponse),
+        (
+            Mode::RequestDigestSubstitute,
+            ObserverError::MalformedResponse,
+        ),
         (Mode::Secret, ObserverError::ConfidentialityDenied),
         (
             Mode::EscapedEnvelopeSecret,
@@ -1546,6 +1553,41 @@ async fn runtime_attestation_denylist_and_production_constructor_boundary_fail_c
         Err(ObserverError::InvalidConfig)
     ));
     assert!(!state.path().join("observer.sqlite3").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ledger_is_owner_private_and_rejects_a_preexisting_symlink() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
+
+    let rig = Rig::new().await;
+    for path in [
+        rig.directory.path().join("observer.sqlite3"),
+        rig.directory.path().join("observer.sqlite3-wal"),
+        rig.directory.path().join("observer.sqlite3-shm"),
+    ] {
+        let Ok(metadata) = fs::symlink_metadata(path) else {
+            continue;
+        };
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+    }
+
+    let state = tempfile::tempdir().unwrap();
+    fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("do-not-open.sqlite3");
+    fs::write(&target, b"sentinel").unwrap();
+    symlink(&target, state.path().join("observer.sqlite3")).unwrap();
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    assert!(matches!(
+        rig.observer_for_config(config),
+        Err(ObserverError::StateUnavailable)
+    ));
+    assert_eq!(fs::read(target).unwrap(), b"sentinel");
 }
 
 #[tokio::test]

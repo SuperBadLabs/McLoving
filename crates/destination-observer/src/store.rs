@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
 
 use crate::{
     ActivationMode, ObservationPhase, ObservationReceipt, ObservationRequest, ObserverConfig,
@@ -45,8 +45,14 @@ impl ObserverStore {
             return Err(ObserverError::InvalidConfig);
         }
         let database_path = config.state_dir.join("observer.sqlite3");
-        let connection =
-            Connection::open(database_path).map_err(|_| ObserverError::StateUnavailable)?;
+        prepare_private_database(&database_path)?;
+        let connection = Connection::open_with_flags(
+            database_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_FULL_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|_| ObserverError::StateUnavailable)?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| ObserverError::StateUnavailable)?;
@@ -858,4 +864,40 @@ fn validate_state_dir(path: &Path) -> Result<(), ObserverError> {
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn prepare_private_database(path: &Path) -> Result<(), ObserverError> {
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+    if !path.exists() {
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        file.sync_all()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let parent = path.parent().ok_or(ObserverError::InvalidConfig)?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| ObserverError::StateUnavailable)?;
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|_| ObserverError::StateUnavailable)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.file_type().is_file()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(ObserverError::StateUnavailable);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_private_database(_path: &Path) -> Result<(), ObserverError> {
+    Err(ObserverError::StateUnavailable)
 }
