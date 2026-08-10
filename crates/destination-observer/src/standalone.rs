@@ -137,3 +137,15 @@ pub fn write_response<W: Write>(
         .map_err(|_| ObserverError::StateUnavailable)?;
     output.flush().map_err(|_| ObserverError::StateUnavailable)
 }
+
+pub(crate) fn observed_response_fits(receipt: &ObservationReceipt) -> bool {
+    serde_json::to_vec(&ObserverResponse::Observed {
+        receipt: Box::new(receipt.clone()),
+    })
+    .is_ok_and(|bytes| {
+        bytes
+            .len()
+            .checked_add(1)
+            .is_some_and(|size| size <= MAX_FRAME_BYTES)
+    })
+}

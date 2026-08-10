@@ -18,6 +18,14 @@ pub(crate) struct ObserverStore {
     connection: Mutex<Connection>,
 }
 
+struct ExistingObservation {
+    request_sha256: String,
+    status: String,
+    retry_count: u8,
+    receipt_json: Option<Vec<u8>>,
+    failure_code: Option<String>,
+}
+
 impl ObserverStore {
     pub(crate) fn open(
         config: &ObserverConfig,
@@ -48,17 +56,20 @@ impl ObserverStore {
                  CREATE TABLE IF NOT EXISTS observations (
                    observation_id TEXT PRIMARY KEY,
                    scope_sha256 TEXT NOT NULL,
+                   destination_scope_sha256 TEXT NOT NULL,
                    request_sha256 TEXT NOT NULL,
                    phase TEXT NOT NULL,
-                   status TEXT NOT NULL CHECK(status IN ('pending', 'complete')),
+                   status TEXT NOT NULL CHECK(status IN ('pending', 'complete', 'failed')),
                    retry_count INTEGER NOT NULL,
                    created_at_ms INTEGER NOT NULL,
+                   expires_at_ms INTEGER NOT NULL,
                    receipt_sha256 TEXT,
                    receipt_json BLOB,
-                   evidence_bytes INTEGER
+                   evidence_bytes INTEGER,
+                   failure_code TEXT
                  );
-                 CREATE UNIQUE INDEX IF NOT EXISTS one_pending_per_scope
-                   ON observations(scope_sha256) WHERE status = 'pending';
+                 CREATE UNIQUE INDEX IF NOT EXISTS one_pending_per_destination
+                   ON observations(destination_scope_sha256) WHERE status = 'pending';
                  CREATE TABLE IF NOT EXISTS scope_heads (
                    scope_sha256 TEXT PRIMARY KEY,
                    phase TEXT NOT NULL,
@@ -100,6 +111,7 @@ impl ObserverStore {
             )
             .optional()
             .map_err(|_| ObserverError::StateUnavailable)?;
+        let had_active = active.is_some();
         match active {
             None => {
                 if config.activation_mode != ActivationMode::Current
@@ -147,6 +159,14 @@ impl ObserverStore {
                 }
             },
         }
+        if had_active && config.activation_mode != ActivationMode::Current {
+            transaction
+                .execute(
+                    "UPDATE observations SET status='failed', failure_code='runtime_fenced' WHERE status='pending'",
+                    [],
+                )
+                .map_err(|_| ObserverError::StateUnavailable)?;
+        }
         transaction
             .execute(
                 "INSERT INTO runtime_history(generation, config_sha256) VALUES(?1, ?2)
@@ -188,6 +208,7 @@ impl ObserverStore {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn claim(
         &self,
         config: &ObserverConfig,
@@ -195,6 +216,7 @@ impl ObserverStore {
         request: &ObservationRequest,
         request_sha256: &str,
         scope_sha256: &str,
+        destination_scope_sha256: &str,
         now_ms: i64,
     ) -> Result<ClaimResult, ObserverError> {
         let mut connection = self
@@ -205,29 +227,74 @@ impl ObserverStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ObserverError::StateUnavailable)?;
         assert_active_transaction(&transaction, config.generation, config_sha256)?;
+        transaction
+            .execute(
+                "DELETE FROM observations WHERE status='failed' AND expires_at_ms < ?1",
+                [now_ms.saturating_sub(config.limits.max_age_ms)],
+            )
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        transaction
+            .execute(
+                "UPDATE observations SET status='failed', failure_code='expired_request' WHERE status='pending' AND expires_at_ms < ?1",
+                [now_ms],
+            )
+            .map_err(|_| ObserverError::StateUnavailable)?;
 
-        let existing: Option<(String, String, u8, Option<Vec<u8>>)> = transaction
+        let existing: Option<ExistingObservation> = transaction
             .query_row(
-                "SELECT request_sha256, status, retry_count, receipt_json FROM observations WHERE observation_id=?1",
+                "SELECT request_sha256, status, retry_count, receipt_json, failure_code FROM observations WHERE observation_id=?1",
                 [request.observation_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok(ExistingObservation {
+                    request_sha256: row.get(0)?,
+                    status: row.get(1)?,
+                    retry_count: row.get(2)?,
+                    receipt_json: row.get(3)?,
+                    failure_code: row.get(4)?,
+                }),
             )
             .optional()
             .map_err(|_| ObserverError::StateUnavailable)?;
-        if let Some((stored_request, status, retry_count, receipt_json)) = existing {
-            if stored_request != request_sha256 {
+        if let Some(existing) = existing {
+            if existing.request_sha256 != request_sha256 {
                 return Err(ObserverError::ReplayMismatch);
             }
-            if status == "complete" {
-                let bytes = receipt_json.ok_or(ObserverError::StateUnavailable)?;
+            if existing.status == "complete" {
+                let bytes = existing
+                    .receipt_json
+                    .ok_or(ObserverError::StateUnavailable)?;
                 let receipt =
                     serde_json::from_slice(&bytes).map_err(|_| ObserverError::StateUnavailable)?;
                 return Ok(ClaimResult::Completed(Box::new(receipt)));
             }
-            let next_retry = retry_count
+            if existing.status == "failed" {
+                return Err(error_from_code(existing.failure_code.as_deref()));
+            }
+            if let Err(error) = validate_temporal(config, request, now_ms) {
+                transaction
+                    .execute(
+                        "UPDATE observations SET status='failed', failure_code=?2 WHERE observation_id=?1 AND status='pending'",
+                        params![request.observation_id.to_string(), error.code()],
+                    )
+                    .map_err(|_| ObserverError::StateUnavailable)?;
+                transaction
+                    .commit()
+                    .map_err(|_| ObserverError::StateUnavailable)?;
+                return Err(error);
+            }
+            let next_retry = existing
+                .retry_count
                 .checked_add(1)
                 .ok_or(ObserverError::CapacityExceeded)?;
             if next_retry > config.limits.retry_attempts {
+                transaction
+                    .execute(
+                        "UPDATE observations SET status='failed', failure_code='destination_unavailable' WHERE observation_id=?1 AND status='pending'",
+                        [request.observation_id.to_string()],
+                    )
+                    .map_err(|_| ObserverError::StateUnavailable)?;
+                transaction
+                    .commit()
+                    .map_err(|_| ObserverError::StateUnavailable)?;
                 return Err(ObserverError::DestinationUnavailable);
             }
             transaction
@@ -244,22 +311,29 @@ impl ObserverStore {
             });
         }
 
+        validate_temporal(config, request, now_ms)?;
         enforce_capacity(&transaction, config, now_ms)?;
         enforce_phase(&transaction, request, scope_sha256)?;
         transaction
             .execute(
-                "INSERT INTO observations(observation_id, scope_sha256, request_sha256, phase, status, retry_count, created_at_ms)
-                 VALUES(?1, ?2, ?3, ?4, 'pending', 0, ?5)",
+                "INSERT INTO observations(observation_id, scope_sha256, destination_scope_sha256, request_sha256, phase, status, retry_count, created_at_ms, expires_at_ms)
+                 VALUES(?1, ?2, ?3, ?4, ?5, 'pending', 0, ?6, ?7)",
                 params![
                     request.observation_id.to_string(),
                     scope_sha256,
+                    destination_scope_sha256,
                     request_sha256,
                     request.phase.as_str(),
-                    now_ms
+                    now_ms,
+                    request.expires_at_unix_ms
                 ],
             )
             .map_err(|error| {
-                if error.to_string().contains("one_pending_per_scope") {
+                if matches!(
+                    &error,
+                    rusqlite::Error::SqliteFailure(failure, _)
+                        if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                ) {
                     ObserverError::ObservationPending
                 } else {
                     ObserverError::StateUnavailable
@@ -269,6 +343,33 @@ impl ObserverStore {
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)?;
         Ok(ClaimResult::Claimed { retry_count: 0 })
+    }
+
+    pub(crate) fn fail_pending(
+        &self,
+        generation: u64,
+        config_sha256: &str,
+        request: &ObservationRequest,
+        request_sha256: &str,
+        error: &ObserverError,
+    ) -> Result<(), ObserverError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        assert_active_transaction(&transaction, generation, config_sha256)?;
+        transaction
+            .execute(
+                "UPDATE observations SET status='failed', failure_code=?3 WHERE observation_id=?1 AND request_sha256=?2 AND status='pending'",
+                params![request.observation_id.to_string(), request_sha256, error.code()],
+            )
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        transaction
+            .commit()
+            .map_err(|_| ObserverError::StateUnavailable)
     }
 
     pub(crate) fn next_sequence(
@@ -409,7 +510,11 @@ fn enforce_capacity(
     now_ms: i64,
 ) -> Result<(), ObserverError> {
     let count: usize = transaction
-        .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM observations WHERE status='complete'",
+            [],
+            |row| row.get(0),
+        )
         .map_err(|_| ObserverError::StateUnavailable)?;
     if count >= config.limits.max_receipts {
         return Err(ObserverError::CapacityExceeded);
@@ -425,6 +530,39 @@ fn enforce_capacity(
         return Err(ObserverError::CapacityExceeded);
     }
     Ok(())
+}
+
+fn validate_temporal(
+    config: &ObserverConfig,
+    request: &ObservationRequest,
+    now_ms: i64,
+) -> Result<(), ObserverError> {
+    if request.requested_at_unix_ms > now_ms
+        || now_ms.saturating_sub(request.requested_at_unix_ms) > config.limits.max_age_ms
+        || request.expires_at_unix_ms.saturating_sub(now_ms) > config.limits.max_age_ms
+    {
+        return Err(ObserverError::MalformedRequest);
+    }
+    if request.expires_at_unix_ms < now_ms {
+        return Err(ObserverError::ExpiredRequest);
+    }
+    if config.read_grant_expires_unix_ms < now_ms {
+        return Err(ObserverError::ExpiredGrant);
+    }
+    Ok(())
+}
+
+fn error_from_code(code: Option<&str>) -> ObserverError {
+    match code {
+        Some("malformed_request") => ObserverError::MalformedRequest,
+        Some("expired_request") => ObserverError::ExpiredRequest,
+        Some("expired_grant") => ObserverError::ExpiredGrant,
+        Some("runtime_fenced") => ObserverError::RuntimeFenced,
+        Some("destination_unavailable") => ObserverError::DestinationUnavailable,
+        Some("oversized_response") => ObserverError::OversizedResponse,
+        Some("capacity_exceeded") => ObserverError::CapacityExceeded,
+        _ => ObserverError::StateUnavailable,
+    }
 }
 
 fn enforce_phase(

@@ -44,6 +44,7 @@ enum Mode {
     Unauthorized,
     Outage,
     Timeout,
+    LargeState,
 }
 
 struct DestinationState {
@@ -317,6 +318,9 @@ async fn destination_handler(
         Mode::Stale => body.observed_at_unix_ms = NOW - 20_000,
         Mode::Substitute => body.resource_identity = "release/substituted".to_owned(),
         Mode::Secret => body.state = json!({"published": true, "leak": BASE64.encode(SECRET)}),
+        Mode::LargeState => {
+            body.state = json!({"published": true, "padding": "x".repeat(275_000)});
+        }
         _ => {}
     }
     let mut signed = SignedDestinationState {
@@ -356,6 +360,13 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
     verify_observation_receipt(&pre, &rig.receipt_public_key).unwrap();
     assert_eq!(pre.destination_cursor, 10);
     assert_eq!(pre.retry_count, 0);
+
+    let expired_replay = rig
+        .observer
+        .observe_at(pre_request.clone(), NOW + 70_000)
+        .await
+        .unwrap();
+    assert_eq!(expired_replay, pre);
 
     rig.set_mode(Mode::Unauthorized);
     let replay = rig.observer.observe_at(pre_request, NOW).await.unwrap();
@@ -421,6 +432,79 @@ async fn durable_pending_claim_resumes_after_outage_and_process_restart() {
     let receipt = restarted.observe_at(request, NOW).await.unwrap();
     assert_eq!(receipt.retry_count, 1);
     verify_observation_receipt(&receipt, &rig.receipt_public_key).unwrap();
+}
+
+#[tokio::test]
+async fn expired_failed_claim_frees_destination_without_consuming_receipt_capacity() {
+    let rig = Rig::new().await;
+    rig.set_mode(Mode::Outage);
+    let failed = rig.prepare(rig.request(ObservationPhase::PreAction));
+    assert_eq!(
+        rig.observer.observe_at(failed, NOW).await,
+        Err(ObserverError::DestinationUnavailable)
+    );
+
+    rig.set_mode(Mode::Good);
+    let mut replacement = rig.request(ObservationPhase::PreAction);
+    replacement.requested_at_unix_ms = NOW + 1_999;
+    replacement.expires_at_unix_ms = NOW + 2_999;
+    let replacement = rig.prepare(replacement);
+    let receipt = rig
+        .observer
+        .observe_at(replacement, NOW + 2_000)
+        .await
+        .unwrap();
+    assert_eq!(receipt.destination_cursor, 10);
+}
+
+#[tokio::test]
+async fn concurrent_builds_are_serialized_before_destination_access() {
+    let rig = Rig::new().await;
+    rig.set_mode(Mode::Timeout);
+    let first = rig.prepare(rig.request(ObservationPhase::PreAction));
+    let mut second = rig.request(ObservationPhase::PreAction);
+    second.effect_fence = 18;
+    let second = rig.prepare(second);
+    let first_observation = rig.observer.observe_at(first, NOW);
+    let second_observation = async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        rig.observer.observe_at(second, NOW).await
+    };
+    let (_, second_result) = tokio::join!(first_observation, second_observation);
+    assert_eq!(second_result, Err(ObserverError::ObservationPending));
+}
+
+#[tokio::test]
+async fn oversized_success_is_failed_before_receipt_commit() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_response_bytes = 400_000;
+    config.response_schema.push(StateFieldSchema {
+        name: "padding".to_owned(),
+        kind: JsonKind::String,
+        required: true,
+    });
+    let observer = rig.observer_for_config(config).unwrap();
+    rig.set_mode(Mode::LargeState);
+    let mut request = rig.request(ObservationPhase::PreAction);
+    request.expected_config_sha256 = observer.config_sha256().to_owned();
+    let request = rig.prepare(request);
+    assert_eq!(
+        observer.observe_at(request, NOW).await,
+        Err(ObserverError::OversizedResponse)
+    );
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let status: String = connection
+        .query_row("SELECT status FROM observations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(status, "failed");
 }
 
 #[tokio::test]
@@ -537,7 +621,7 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
     request.expected_config_sha256 = config_sha256;
     request.expected_implementation_sha256 = implementation_sha256;
     request.requested_at_unix_ms = process_now - 1;
-    request.expires_at_unix_ms = process_now + 1_000;
+    request.expires_at_unix_ms = process_now + 9_000;
     let request = rig.prepare(request);
 
     let config_path = process_directory.path().join("observer.json");
@@ -614,7 +698,11 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(responses.len(), 2);
-    assert_eq!(responses[0]["status"], "observed");
+    assert_eq!(
+        responses[0]["status"], "observed",
+        "unexpected standalone response: {}",
+        responses[0]
+    );
     let receipt: ObservationReceipt =
         serde_json::from_value(responses[0]["receipt"].clone()).unwrap();
     verify_observation_receipt(&receipt, &rig.receipt_public_key).unwrap();

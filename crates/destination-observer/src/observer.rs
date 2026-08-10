@@ -113,7 +113,7 @@ impl DestinationObserver {
         request: ObservationRequest,
         now_ms: i64,
     ) -> Result<ObservationReceipt, ObserverError> {
-        self.validate_request(&request, now_ms)?;
+        self.validate_request(&request)?;
         let request_sha256 = canonical_digest(REQUEST_DIGEST_DOMAIN, &request)?;
         let scope_sha256 = canonical_digest(SCOPE_DOMAIN, &Scope::from_request(&request))?;
         let destination_scope_sha256 = canonical_digest(
@@ -126,6 +126,7 @@ impl DestinationObserver {
             &request,
             &request_sha256,
             &scope_sha256,
+            &destination_scope_sha256,
             now_ms,
         )? {
             ClaimResult::Completed(receipt) => {
@@ -289,6 +290,16 @@ impl DestinationObserver {
             signature_base64: String::new(),
         };
         sign_receipt(&mut receipt, &self.receipt_seed)?;
+        if !crate::standalone::observed_response_fits(&receipt) {
+            self.store.fail_pending(
+                self.config.generation,
+                &self.config_sha256,
+                &request,
+                &request_sha256,
+                &ObserverError::OversizedResponse,
+            )?;
+            return Err(ObserverError::OversizedResponse);
+        }
         let receipt_sha256 = canonical_digest(RECEIPT_DIGEST_DOMAIN, &receipt)?;
         self.store.finalize(
             &self.config,
@@ -311,7 +322,8 @@ impl DestinationObserver {
     ) -> Result<(), ObserverError> {
         let receipt_public_key = public_key_from_seed(&self.receipt_seed)?;
         verify_observation_receipt(receipt, &receipt_public_key)?;
-        if receipt.observation_id != request.observation_id
+        if !crate::standalone::observed_response_fits(receipt)
+            || receipt.observation_id != request.observation_id
             || receipt.request_sha256 != request_sha256
             || receipt.observer_id != self.config.observer_id
             || receipt.observer_implementation_sha256 != self.implementation_sha256
@@ -324,11 +336,7 @@ impl DestinationObserver {
         Ok(())
     }
 
-    fn validate_request(
-        &self,
-        request: &ObservationRequest,
-        now_ms: i64,
-    ) -> Result<(), ObserverError> {
+    fn validate_request(&self, request: &ObservationRequest) -> Result<(), ObserverError> {
         if request.schema_version != REQUEST_SCHEMA_VERSION
             || request.protocol_version != PROTOCOL_VERSION
             || request.observation_id.is_nil()
@@ -338,19 +346,15 @@ impl DestinationObserver {
             || request.build_id.is_nil()
             || request.attempt_id.is_nil()
             || request.effect_fence == 0
-            || request.requested_at_unix_ms > now_ms
-            || now_ms.saturating_sub(request.requested_at_unix_ms) > self.config.limits.max_age_ms
             || request.expires_at_unix_ms < request.requested_at_unix_ms
-            || request.expires_at_unix_ms.saturating_sub(now_ms) > self.config.limits.max_age_ms
+            || request
+                .expires_at_unix_ms
+                .saturating_sub(request.requested_at_unix_ms)
+                > self.config.limits.max_age_ms
             || request.audit_provenance.is_empty()
+            || request.audit_provenance.len() > 4096
         {
             return Err(ObserverError::MalformedRequest);
-        }
-        if request.expires_at_unix_ms < now_ms {
-            return Err(ObserverError::ExpiredRequest);
-        }
-        if self.config.read_grant_expires_unix_ms < now_ms {
-            return Err(ObserverError::ExpiredGrant);
         }
         if request.observer_id != self.config.observer_id
             || request.request_authority_identity != self.config.request_authority_identity

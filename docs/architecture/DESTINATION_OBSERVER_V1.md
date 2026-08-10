@@ -53,10 +53,14 @@ substituted bindings, or invalid signatures fail before network access.
 The observer persists a pending claim in a `synchronous=FULL` WAL ledger before
 the GET. An observation ID can be replayed only with byte-identical canonical
 request truth. A completed replay returns the same receipt without another GET;
-a pending replay is the only retry path and is bounded. A unique pending claim
-per destination scope prevents competing reads. Rate, receipt-count, evidence
-byte, response, header, timeout, freshness, and retry limits are configuration
-authority.
+a pending replay is the only retry path and is bounded. Completed evidence is
+returned even after the request or grant window closes because no new authority
+is exercised. Expired, generation-fenced, explicitly failed, or retry-exhausted
+pending claims become bounded failure tombstones and release the destination;
+only complete evidence consumes the receipt-count and evidence-byte quotas. A
+unique pending claim per destination scope prevents competing reads across
+builds and effect fences. Rate, receipt-count, evidence byte, response, header,
+timeout, freshness, and retry limits are configuration authority.
 
 ## Destination attestation and state ordering
 
@@ -99,6 +103,12 @@ generation/cutover/rollback fields, grant, destination cursor and observation
 time, capture and publication deadline, typed state and confidentiality,
 complete raw response digest and destination signature, retry count, audit
 provenance, receipt sequence, key identity, and public-key digest.
+
+The complete signed standalone success envelope must fit the process frame
+before the pending claim can commit. An oversized envelope becomes a failed
+claim, never committed evidence followed by an error-only response. Stored
+completed receipts are signature-, binding-, and frame-size-verified again on
+every replay.
 
 Every claim, sequence allocation, and finalization rereads the active
 generation/configuration fence. Cutover requires a greater generation and the
