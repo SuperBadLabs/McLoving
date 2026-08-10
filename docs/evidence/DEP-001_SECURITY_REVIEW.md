@@ -3,8 +3,8 @@
 Date: 2026-08-09
 
 Verdict: LOCAL PASS for the architecture-repair candidate at exact
-implementation head `b6f9a0138976d3457c1a3a478c7bfee521ec7adf`.
-The focused gate passes 115 dependency-resolution tests: 70 unit tests, 44
+implementation head `0f4da19bdb910cbb8f249167461ef3121db9c039`.
+The focused gate passes 116 dependency-resolution tests: 71 unit tests, 44
 ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Strict all-target resolver Clippy,
 formatting, and `git diff --check` also pass on HeMan. This head replaces both
@@ -19,8 +19,8 @@ independent exact-head review remain mandatory before this receipt may return to
 a final PASS verdict, before fixed threads may be resolved, and before merge.
 
 The DEP-001-to-CACHE-001 post-merge execution-board transition entered PR #35 at
-`02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at exact
-an earlier implementation head. Closure
+`02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at an
+earlier implementation head. Closure
 commits update this receipt and recertify those existing board rows; they
 do not introduce the transition. The complete PR #35 diff against protected
 `main` includes the resolver implementation, tests, protected workflow change,
@@ -183,8 +183,8 @@ the same resolution identity is denied offline; restart with the repository
 offline returns byte-equivalent JSON; and neither the repository credential nor
 receipt key appears in stdout, stderr, or the receipt.
 
-Exact implementation head `b6f9a013` passes strict resolver all-target Clippy,
-formatting, `git diff --check`, all 113 ordinary focused tests, and the real
+Exact implementation head `0f4da19b` passes strict resolver all-target Clippy,
+formatting, `git diff --check`, all 115 ordinary focused tests, and the real
 exact-capacity contained journey on HeMan. Documentation head `8d15ca5` passes
 workspace-wide strict Clippy, the complete locked non-source workspace, the
 same contained resolver journey, board verification, and the complete
@@ -200,8 +200,8 @@ response to that runner-only failure.
 
 ## Review-driven hardening
 
-Pre-closure review and repeated contained execution exposed and repaired 125
-actionable findings across 130 important seams. Five later comments repeated an
+Pre-closure review and repeated contained execution exposed and repaired 127
+actionable findings across 132 important seams. Five comments repeated an
 already counted underlying seam and are not double-counted:
 
 1. A concurrent reader could observe a receipt after create but before its final
@@ -523,9 +523,10 @@ already counted underlying seam and are not double-counted:
     making the later zero assertion redundant. The counter is removed while the
     stronger per-record kind, identity, disposition, and absent-credential
     assertions remain.
-87-130. Subsequent thread-aware exact-head review covered 44 important seams and
-    produced 39 additional actionable findings; five comments repeated the same
-    already counted underlying race or execution prediction. The repairs bind
+87-132. Subsequent thread-aware exact-head review covered 46 important seams and
+    produced 46 additional actionable findings. Five comments in the complete
+    chronology repeated the same already counted underlying race or execution
+    prediction. The repairs bind
     executable verification to the running `/proc/self/exe` inode, serialize on
     stable output and transport root inodes, pin every fixed root, make cleanup
     descriptor-relative with atomic quarantine and unlink postconditions, carry
@@ -549,7 +550,14 @@ already counted underlying seam and are not double-counted:
     configured numeric or hexadecimal marker through its fingerprints or HMAC.
     Head `b6f9a013` marker-scans the complete signed commit both before
     persistence and after replay loading; a decimal-fingerprint regression
-    proves rejection before any commit file becomes visible.
+    proves rejection before any commit file becomes visible. Review of the
+    first atomic-archive head then found that per-artifact scanners reset at
+    slice boundaries and that generated header/offset/payload bytes were never
+    scanned as one serialization. Head `0f4da19b` carries one scanner across the
+    entire transport plan and one stateful guard across the exact archive prefix
+    and every payload byte before writing or sealing. Regressions prove a marker
+    spanning body chunks or adjacent artifact slices and a marker introduced by
+    the generated archive header are denied before publication.
 
 Independent GitHub review produced twenty-four initial actionable implementation findings: the
 signed path ceiling, fallback-frame minimum, blocking-publication deadline,
@@ -627,8 +635,9 @@ eighty-four important seams; ready-transition Copilot review then found the
 ecosystem-crossed adapter error and redundant Mario counter. Their exact-head
 repairs and focused regressions brought that audit stage to eighty-one
 actionable findings across eighty-six important seams. The later thread-aware
-review, archive conversion, and commit-marker repair summarized in seams 87-130
-bring the current audit to 125 actionable findings across 130 important seams;
+review, archive conversion, and continuous marker repairs summarized in seams
+87-132 bring the current audit to 127 actionable findings across 132 important
+seams;
 every fixed thread must be replied to and resolved only after the complete
 closure head passes protected checks and fresh review.
 

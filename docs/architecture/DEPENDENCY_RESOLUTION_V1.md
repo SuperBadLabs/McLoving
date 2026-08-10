@@ -321,7 +321,10 @@ Transport creates one exclusive mode-`0600` regular file named
 verified artifact occupies one contiguous admitted slice of that file. The
 descriptor-returning exclusive create, retained device/inode identity,
 nonblocking no-follow reopen, exact aggregate length, per-slice digest, and
-final link revalidation eliminate a create-then-open directory window.
+final link revalidation eliminate a create-then-open directory window. One
+stateful marker scanner spans every response-body chunk and every adjacent
+artifact slice in plan order, so a configured marker cannot evade disclosure
+checks by crossing either boundary.
 
 Publication copies the verified slices into one unique regular staging archive,
 synchronizes and seals that inode to mode `0400`, and publishes it by atomic
@@ -335,7 +338,10 @@ exact total length, every payload digest, the full archive digest, unchanged
 file fingerprint, and final pathname-to-inode equality. No mutable stage,
 artifact, or bundle subdirectory is created. Late publication is withdrawn;
 ambiguous cleanup or publication state is retained and reported rather than
-guessed.
+guessed. Before any archive byte is written or sealed, one stateful output
+guard scans the exact eight-byte prefix, strict serialized header, and every
+payload buffer in output order. It therefore denies markers wholly within or
+spanning the prefix/header, header/payload, or payload/payload boundaries.
 
 A matching completed request verifies and returns the exact signed receipt
 without repository access. The receipt binds all request/configuration,
