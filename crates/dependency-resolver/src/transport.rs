@@ -94,6 +94,7 @@ pub struct HttpTransport {
     transport_root: PathBuf,
     markers: Vec<Vec<u8>>,
     repositories: BTreeMap<String, RepositoryRuntime>,
+    fetch_slot: tokio::sync::Mutex<()>,
     cleanup_poisoned: AtomicBool,
     _lease: Option<TransportLease>,
 }
@@ -211,6 +212,7 @@ impl HttpTransport {
             transport_root,
             markers,
             repositories,
+            fetch_slot: tokio::sync::Mutex::new(()),
             cleanup_poisoned: AtomicBool::new(false),
             _lease: Some(lease),
         })
@@ -258,6 +260,17 @@ impl HttpTransport {
         plan: &CanonicalPlan,
         deadline: Instant,
     ) -> Result<Vec<FetchedArtifact>, TransportError> {
+        let _fetch_slot = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.fetch_slot.lock(),
+        )
+        .await
+        .map_err(|_| {
+            TransportError::new(
+                "DEP_TRANSPORT_DEADLINE",
+                "absolute transport deadline expired while waiting for the serialized fetch slot",
+            )
+        })?;
         self.ensure_available()?;
         crate::validate_plan(plan)
             .map_err(|error| TransportError::new(error.code, error.message))?;
@@ -287,22 +300,16 @@ impl HttpTransport {
             .inspect_err(|_| {
                 self.preserve_cleanup_ambiguity();
             })?;
-        let root_metadata = root_directory.metadata().map_err(|_| {
-            self.preserve_cleanup_ambiguity();
-            root_state_error()
-        })?;
-        #[cfg(target_os = "linux")]
-        let identity = {
-            use std::os::unix::fs::MetadataExt as _;
-            if !created.is_file() || created.dev() != root_metadata.dev() || created.ino() == 0 {
+        let root_metadata = inspect_transport_root_metadata(&root_directory, &archive_path)
+            .inspect_err(|_| {
                 self.preserve_cleanup_ambiguity();
-                return Err(root_state_error());
-            }
-            TransportRootIdentity {
-                device: created.dev(),
-                inode: created.ino(),
-            }
-        };
+            })?;
+        #[cfg(target_os = "linux")]
+        let identity =
+            establish_transport_archive_identity(&created, &root_metadata, &archive_path)
+                .inspect_err(|_| {
+                    self.preserve_cleanup_ambiguity();
+                })?;
         #[cfg(not(target_os = "linux"))]
         let identity = {
             self.preserve_cleanup_ambiguity();
@@ -556,6 +563,14 @@ impl HttpTransport {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PostCreateInspectionFailure {
+    ArchiveMetadata,
+    RootMetadata,
+    IdentityValidation,
+}
+
+#[cfg(test)]
 thread_local! {
     static TRANSIENT_OPEN_TRACE: std::cell::RefCell<Vec<(PathBuf, &'static str)>> = const {
         std::cell::RefCell::new(Vec::new())
@@ -566,9 +581,24 @@ thread_local! {
     static TRANSIENT_SYNC_FAILURE: std::cell::RefCell<Option<PathBuf>> = const {
         std::cell::RefCell::new(None)
     };
-    static TRANSIENT_METADATA_FAILURE: std::cell::RefCell<Option<PathBuf>> = const {
+    static TRANSIENT_METADATA_FAILURE: std::cell::RefCell<Option<(PathBuf, PostCreateInspectionFailure)>> = const {
         std::cell::RefCell::new(None)
     };
+}
+
+#[cfg(test)]
+fn take_post_create_failure(path: &Path, expected: PostCreateInspectionFailure) -> bool {
+    TRANSIENT_METADATA_FAILURE.with(|target| {
+        let mut target = target.borrow_mut();
+        if target.as_ref().is_some_and(|(configured, failure)| {
+            configured.file_name() == path.file_name() && *failure == expected
+        }) {
+            target.take();
+            true
+        } else {
+            false
+        }
+    })
 }
 
 #[cfg(test)]
@@ -576,16 +606,70 @@ async fn inspect_transport_archive_metadata(
     archive: &tokio::fs::File,
     path: &Path,
 ) -> Result<std::fs::Metadata, TransportError> {
-    let fail = TRANSIENT_METADATA_FAILURE.with(|target| {
-        target
-            .borrow_mut()
-            .take_if(|configured| configured.file_name() == path.file_name())
-            .is_some()
-    });
-    if fail {
+    if take_post_create_failure(path, PostCreateInspectionFailure::ArchiveMetadata) {
+        tokio::task::yield_now().await;
         return Err(root_state_error());
     }
     archive.metadata().await.map_err(|_| root_state_error())
+}
+
+#[cfg(test)]
+fn inspect_transport_root_metadata(
+    root: &std::fs::File,
+    archive_path: &Path,
+) -> Result<std::fs::Metadata, TransportError> {
+    if take_post_create_failure(archive_path, PostCreateInspectionFailure::RootMetadata) {
+        return Err(root_state_error());
+    }
+    root.metadata().map_err(|_| root_state_error())
+}
+
+#[cfg(not(test))]
+fn inspect_transport_root_metadata(
+    root: &std::fs::File,
+    _archive_path: &Path,
+) -> Result<std::fs::Metadata, TransportError> {
+    root.metadata().map_err(|_| root_state_error())
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn establish_transport_archive_identity(
+    created: &std::fs::Metadata,
+    root: &std::fs::Metadata,
+    archive_path: &Path,
+) -> Result<TransportRootIdentity, TransportError> {
+    if take_post_create_failure(
+        archive_path,
+        PostCreateInspectionFailure::IdentityValidation,
+    ) {
+        return Err(root_state_error());
+    }
+    establish_transport_archive_identity_inner(created, root)
+}
+
+#[cfg(all(target_os = "linux", not(test)))]
+fn establish_transport_archive_identity(
+    created: &std::fs::Metadata,
+    root: &std::fs::Metadata,
+    _archive_path: &Path,
+) -> Result<TransportRootIdentity, TransportError> {
+    establish_transport_archive_identity_inner(created, root)
+}
+
+#[cfg(target_os = "linux")]
+fn establish_transport_archive_identity_inner(
+    created: &std::fs::Metadata,
+    root: &std::fs::Metadata,
+) -> Result<TransportRootIdentity, TransportError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    if !created.is_file() || created.dev() != root.dev() || created.ino() == 0 {
+        return Err(root_state_error());
+    }
+    Ok(TransportRootIdentity {
+        device: created.dev(),
+        inode: created.ino(),
+    })
 }
 
 #[cfg(not(test))]
@@ -1909,6 +1993,7 @@ mod tests {
                 transport_root: root.path().to_path_buf(),
                 markers,
                 repositories: BTreeMap::from([("contained-maven".to_owned(), repository)]),
+                fetch_slot: tokio::sync::Mutex::new(()),
                 cleanup_poisoned: AtomicBool::new(false),
                 _lease: None,
             };
@@ -2064,6 +2149,7 @@ mod tests {
                 transport_root: root.path().to_path_buf(),
                 markers: vec![marker],
                 repositories: BTreeMap::from([("contained-maven".to_owned(), repository)]),
+                fetch_slot: tokio::sync::Mutex::new(()),
                 cleanup_poisoned: AtomicBool::new(false),
                 _lease: None,
             };
@@ -2435,44 +2521,112 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_create_metadata_failure_poisons_transport_when_identity_is_unknown() {
-        let fixture = TransportFixture::new(
+    async fn every_post_create_identity_failure_poisons_the_next_production_fetch() {
+        for failure in [
+            PostCreateInspectionFailure::ArchiveMetadata,
+            PostCreateInspectionFailure::RootMetadata,
+            PostCreateInspectionFailure::IdentityValidation,
+        ] {
+            let fixture = TransportFixture::new(
+                b"artifact".to_vec(),
+                vec![b"unrelated-marker".to_vec()],
+                "contained-maven",
+                false,
+            )
+            .await;
+            let resolution_id = Uuid::new_v4();
+            let transient = fixture
+                ._root
+                .path()
+                .join(format!(".{resolution_id}.transport"));
+            TRANSIENT_METADATA_FAILURE.with(|target| {
+                *target.borrow_mut() = Some((transient.clone(), failure));
+            });
+            let error = fixture
+                .transport
+                .fetch_plan(
+                    resolution_id,
+                    &fixture.plan,
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .await
+                .expect_err("post-create identity failure");
+            assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
+            assert!(
+                transient.exists(),
+                "unknown identity is preserved for restart"
+            );
+            let later_resolution = Uuid::new_v4();
+            let later_path = fixture
+                ._root
+                .path()
+                .join(format!(".{later_resolution}.transport"));
+            let later = fixture
+                .transport
+                .fetch_plan(
+                    later_resolution,
+                    &fixture.plan,
+                    Instant::now() + Duration::from_secs(2),
+                )
+                .await
+                .expect_err("poisoned production fetch");
+            assert_eq!(later.code, "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED");
+            assert!(!later_path.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn overlapping_fetch_cannot_succeed_after_transport_is_poisoned() {
+        let fixture = TransportFixture::with_response(
+            b"artifact".to_vec(),
             b"artifact".to_vec(),
             vec![b"unrelated-marker".to_vec()],
             "contained-maven",
             false,
+            Duration::from_millis(50),
+            7,
         )
         .await;
-        let resolution_id = Uuid::new_v4();
-        let transient = fixture
+        let failing_resolution = Uuid::new_v4();
+        let failing_path = fixture
             ._root
             .path()
-            .join(format!(".{resolution_id}.transport"));
+            .join(format!(".{failing_resolution}.transport"));
+        let overlapping_resolution = Uuid::new_v4();
+        let overlapping_path = fixture
+            ._root
+            .path()
+            .join(format!(".{overlapping_resolution}.transport"));
         TRANSIENT_METADATA_FAILURE.with(|target| {
-            *target.borrow_mut() = Some(transient.clone());
+            *target.borrow_mut() = Some((
+                failing_path.clone(),
+                PostCreateInspectionFailure::ArchiveMetadata,
+            ));
         });
-        let error = fixture
-            .transport
-            .fetch_plan(
-                resolution_id,
+        let (failing, overlapping) = tokio::join!(
+            fixture.transport.fetch_plan(
+                failing_resolution,
+                &fixture.plan,
+                Instant::now() + Duration::from_secs(2),
+            ),
+            fixture.transport.fetch_plan(
+                overlapping_resolution,
                 &fixture.plan,
                 Instant::now() + Duration::from_secs(2),
             )
-            .await
-            .expect_err("post-create metadata failure");
-        assert_eq!(error.code, "DEP_TRANSPORT_ROOT_STATE_DENIED");
-        assert!(
-            transient.exists(),
-            "unknown identity is preserved for restart"
         );
         assert_eq!(
-            fixture
-                .transport
-                .ensure_available()
-                .expect_err("unknown post-create identity poisons transport")
+            failing.expect_err("post-create failure").code,
+            "DEP_TRANSPORT_ROOT_STATE_DENIED"
+        );
+        assert_eq!(
+            overlapping
+                .expect_err("overlapping fetch after poison")
                 .code,
             "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED"
         );
+        assert!(failing_path.exists());
+        assert!(!overlapping_path.exists());
     }
 
     #[tokio::test]
