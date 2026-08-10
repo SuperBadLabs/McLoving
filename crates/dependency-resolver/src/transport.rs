@@ -97,6 +97,8 @@ pub struct HttpTransport {
     fetch_slot: tokio::sync::Mutex<()>,
     poison_pending: AtomicBool,
     cleanup_poisoned: AtomicBool,
+    #[cfg(test)]
+    success_completion_delay: std::time::Duration,
     _lease: Option<TransportLease>,
 }
 
@@ -216,6 +218,8 @@ impl HttpTransport {
             fetch_slot: tokio::sync::Mutex::new(()),
             poison_pending: AtomicBool::new(false),
             cleanup_poisoned: AtomicBool::new(false),
+            #[cfg(test)]
+            success_completion_delay: std::time::Duration::ZERO,
             _lease: Some(lease),
         })
     }
@@ -357,7 +361,19 @@ impl HttpTransport {
                 drop(archive);
                 substitute_transient_after_sync_for_test(&archive_path)?;
                 match verify_transient_archive(&archive_path, &fetched, deadline).await {
-                    Ok(()) => Ok(fetched),
+                    Ok(()) => {
+                        #[cfg(test)]
+                        tokio::time::sleep(self.success_completion_delay).await;
+                        if Instant::now() >= deadline {
+                            self.poison_cleanup_while_fetch_slot_held();
+                            return Err(TransportError::new(
+                                "DEP_TRANSPORT_DEADLINE",
+                                "absolute transport deadline expired before fetch completion",
+                            ));
+                        }
+                        self.ensure_available()?;
+                        Ok(fetched)
+                    }
                     Err(error) => {
                         if Instant::now() >= deadline {
                             self.poison_cleanup_while_fetch_slot_held();
@@ -2026,6 +2042,7 @@ mod tests {
                 fetch_slot: tokio::sync::Mutex::new(()),
                 poison_pending: AtomicBool::new(false),
                 cleanup_poisoned: AtomicBool::new(false),
+                success_completion_delay: Duration::ZERO,
                 _lease: None,
             };
             let mut plan = CanonicalPlan {
@@ -2183,6 +2200,7 @@ mod tests {
                 fetch_slot: tokio::sync::Mutex::new(()),
                 poison_pending: AtomicBool::new(false),
                 cleanup_poisoned: AtomicBool::new(false),
+                success_completion_delay: Duration::ZERO,
                 _lease: None,
             };
             Self {
@@ -2664,7 +2682,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_poison_transition_waits_for_the_active_fetch_slot() {
+    async fn external_poison_transition_blocks_active_and_later_fetch_success() {
         let fixture = TransportFixture::with_response(
             b"artifact".to_vec(),
             b"artifact".to_vec(),
@@ -2698,7 +2716,8 @@ mod tests {
                 poison_completed.store(true, Ordering::Release);
             }
         );
-        assert!(active.0.is_ok(), "active fetch finishes before poison");
+        let active_error = active.0.expect_err("pending poison denies active success");
+        assert_eq!(active_error.code, "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED");
         assert!(
             !active.1,
             "external poison cannot transition while a fetch holds the slot"
@@ -2716,6 +2735,53 @@ mod tests {
             .await
             .expect_err("later fetch after external poison");
         assert_eq!(later.code, "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn expired_fetch_completion_poisons_before_queued_fetch_admission() {
+        let mut fixture = TransportFixture::new(
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+        )
+        .await;
+        fixture.transport.success_completion_delay = Duration::from_millis(50);
+        let expired_resolution = Uuid::new_v4();
+        let queued_resolution = Uuid::new_v4();
+        let (expired, queued) = tokio::join!(
+            fixture.transport.fetch_plan(
+                expired_resolution,
+                &fixture.plan,
+                Instant::now() + Duration::from_millis(20),
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                fixture
+                    .transport
+                    .fetch_plan(
+                        queued_resolution,
+                        &fixture.plan,
+                        Instant::now() + Duration::from_secs(2),
+                    )
+                    .await
+            }
+        );
+        assert_eq!(
+            expired.expect_err("completion after deadline").code,
+            "DEP_TRANSPORT_DEADLINE"
+        );
+        assert_eq!(
+            queued.expect_err("queued fetch after poison").code,
+            "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED"
+        );
+        assert!(
+            !fixture
+                .transport
+                .transport_root
+                .join(format!(".{queued_resolution}.transport"))
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -2747,9 +2813,11 @@ mod tests {
                 started.elapsed()
             }
         );
-        assert!(
-            active.is_ok(),
-            "active fetch predates the final poison transition"
+        assert_eq!(
+            active
+                .expect_err("pending poison denies active success")
+                .code,
+            "DEP_TRANSPORT_CLEANUP_RESTART_REQUIRED"
         );
         assert!(
             poison_elapsed < Duration::from_millis(75),

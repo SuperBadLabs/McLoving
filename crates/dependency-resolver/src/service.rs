@@ -239,11 +239,6 @@ impl DependencyResolver {
                 return Err(ResolverError::denied(error.code));
             }
         };
-        if Instant::now() >= deadline {
-            self.transport.preserve_cleanup_ambiguity(deadline).await;
-            self.store.release_incomplete_claim(&claim);
-            return Err(ResolverError::denied("DEP_TRANSPORT_DEADLINE"));
-        }
         match self
             .publish_supervised(&claim, frame.request, &admitted, plan, fetched, deadline)
             .await
