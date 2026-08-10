@@ -67,6 +67,9 @@ a pending replay is the only retry path and is bounded. Completed evidence is
 returned even after the request or grant window closes because no new authority
 is exercised. Expired, generation-fenced, explicitly failed, or retry-exhausted
 pending claims become bounded failure tombstones and release the destination;
+if a concurrent in-flight read returns after that transition, its failure
+bookkeeping converges on and returns the stored tombstone instead of replacing
+it or surfacing a replay mismatch;
 terminal authentication, validation, confidentiality, freshness, cursor, body,
 and evidence-envelope size denials do the same immediately. HTTP/2 decoder or
 application header-list overflow is treated as destination unavailability and,

@@ -676,6 +676,25 @@ async fn concurrent_retry_of_the_same_observation_does_not_duplicate_the_get() {
 }
 
 #[tokio::test]
+async fn expired_retry_tombstone_wins_over_an_in_flight_transport_failure() {
+    let rig = Rig::new().await;
+    rig.set_mode(Mode::Timeout);
+    let mut request = rig.request(ObservationPhase::PreAction);
+    request.expires_at_unix_ms = NOW + 50;
+    let request = rig.prepare(request);
+
+    let first_observation = rig.observer.observe_at(request.clone(), NOW);
+    let expired_retry = async {
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        rig.observer.observe_at(request, NOW + 80).await
+    };
+    let (first_result, retry_result) = tokio::join!(first_observation, expired_retry);
+
+    assert_eq!(first_result, Err(ObserverError::ExpiredRequest));
+    assert_eq!(retry_result, Err(ObserverError::ExpiredRequest));
+}
+
+#[tokio::test]
 async fn completed_replay_bypasses_an_unrelated_live_destination_read() {
     let rig = Rig::new().await;
     let completed_request = rig.prepare(rig.request(ObservationPhase::PreAction));

@@ -451,17 +451,23 @@ impl ObserverStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ObserverError::StateUnavailable)?;
         assert_active_transaction(&transaction, config.generation, config_sha256)?;
-        let existing: Option<(String, String, u8)> = transaction
+        let existing: Option<(String, String, u8, Option<String>)> = transaction
             .query_row(
-                "SELECT request_sha256, status, retry_count FROM observations WHERE observation_id=?1",
+                "SELECT request_sha256, status, retry_count, failure_code FROM observations WHERE observation_id=?1",
                 [request.observation_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(|_| ObserverError::StateUnavailable)?;
-        let (stored_request_sha256, status, retry_count) =
+        let (stored_request_sha256, status, retry_count, failure_code) =
             existing.ok_or(ObserverError::ReplayMismatch)?;
-        if stored_request_sha256 != request_sha256 || status != "pending" {
+        if stored_request_sha256 != request_sha256 {
+            return Err(ObserverError::ReplayMismatch);
+        }
+        if status == "failed" {
+            return Err(error_from_code(failure_code.as_deref()));
+        }
+        if status != "pending" {
             return Err(ObserverError::ReplayMismatch);
         }
         let failure_count = retry_count
