@@ -507,6 +507,33 @@ async fn durable_pending_claim_resumes_after_outage_and_process_restart() {
 }
 
 #[tokio::test]
+async fn crash_gap_reservation_does_not_consume_the_destination_retry_budget() {
+    let rig = Rig::new().await;
+    rig.set_mode(Mode::Outage);
+    let request = rig.prepare(rig.request(ObservationPhase::PreAction));
+    assert_eq!(
+        rig.observer.observe_at(request.clone(), NOW).await,
+        Err(ObserverError::DestinationUnavailable)
+    );
+
+    // This is the durable state left by a process that reserved its outbound
+    // intent but exited before a destination-unavailable outcome was recorded.
+    let connection =
+        rusqlite::Connection::open(rig.directory.path().join("observer.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE observations SET retry_count=0 WHERE observation_id=?1 AND status='pending'",
+            [request.observation_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    rig.set_mode(Mode::Good);
+    let receipt = rig.restart().observe_at(request, NOW).await.unwrap();
+    assert_eq!(receipt.retry_count, 0);
+}
+
+#[tokio::test]
 async fn outbound_retries_consume_the_durable_request_rate_budget() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();
@@ -544,7 +571,7 @@ async fn outbound_retries_consume_the_durable_request_rate_budget() {
         .query_row("SELECT retry_count FROM observations", [], |row| row.get(0))
         .unwrap();
     assert_eq!(attempts, 1);
-    assert_eq!(retry_count, 0);
+    assert_eq!(retry_count, 1);
 }
 
 #[tokio::test]

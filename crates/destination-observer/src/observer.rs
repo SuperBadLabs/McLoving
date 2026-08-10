@@ -174,7 +174,14 @@ impl DestinationObserver {
         let (signed, raw, captured_at_ms) = match destination_result {
             Ok(observation) => observation,
             Err(error) => {
-                if is_terminal_destination_error(&error) {
+                if error == ObserverError::DestinationUnavailable {
+                    self.store.record_destination_failure(
+                        &self.config,
+                        &self.config_sha256,
+                        &request,
+                        &request_sha256,
+                    )?;
+                } else if is_terminal_destination_error(&error) {
                     self.store.fail_pending(
                         self.config.generation,
                         &self.config_sha256,

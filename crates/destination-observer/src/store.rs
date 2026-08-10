@@ -355,34 +355,12 @@ impl ObserverStore {
                     .map_err(|_| ObserverError::StateUnavailable)?;
                 return Err(error);
             }
-            let next_retry = existing
-                .retry_count
-                .checked_add(1)
-                .ok_or(ObserverError::CapacityExceeded)?;
-            if next_retry > config.limits.retry_attempts {
-                transaction
-                    .execute(
-                        "UPDATE observations SET status='failed', failure_code='destination_unavailable' WHERE observation_id=?1 AND status='pending'",
-                        [request.observation_id.to_string()],
-                    )
-                    .map_err(|_| ObserverError::StateUnavailable)?;
-                transaction
-                    .commit()
-                    .map_err(|_| ObserverError::StateUnavailable)?;
-                return Err(ObserverError::DestinationUnavailable);
-            }
             reserve_request_attempt(&transaction, config, now_ms)?;
-            transaction
-                .execute(
-                    "UPDATE observations SET retry_count=?2 WHERE observation_id=?1",
-                    params![request.observation_id.to_string(), next_retry],
-                )
-                .map_err(|_| ObserverError::StateUnavailable)?;
             transaction
                 .commit()
                 .map_err(|_| ObserverError::StateUnavailable)?;
             return Ok(ClaimResult::Claimed {
-                retry_count: next_retry,
+                retry_count: existing.retry_count,
             });
         }
 
@@ -443,6 +421,57 @@ impl ObserverStore {
                 params![request.observation_id.to_string(), request_sha256, error.code()],
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
+        transaction
+            .commit()
+            .map_err(|_| ObserverError::StateUnavailable)
+    }
+
+    pub(crate) fn record_destination_failure(
+        &self,
+        config: &ObserverConfig,
+        config_sha256: &str,
+        request: &ObservationRequest,
+        request_sha256: &str,
+    ) -> Result<(), ObserverError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        assert_active_transaction(&transaction, config.generation, config_sha256)?;
+        let existing: Option<(String, String, u8)> = transaction
+            .query_row(
+                "SELECT request_sha256, status, retry_count FROM observations WHERE observation_id=?1",
+                [request.observation_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let (stored_request_sha256, status, retry_count) =
+            existing.ok_or(ObserverError::ReplayMismatch)?;
+        if stored_request_sha256 != request_sha256 || status != "pending" {
+            return Err(ObserverError::ReplayMismatch);
+        }
+        let failure_count = retry_count
+            .checked_add(1)
+            .ok_or(ObserverError::CapacityExceeded)?;
+        if failure_count > config.limits.retry_attempts {
+            transaction
+                .execute(
+                    "UPDATE observations SET retry_count=?2, status='failed', failure_code='destination_unavailable' WHERE observation_id=?1 AND request_sha256=?3 AND status='pending'",
+                    params![request.observation_id.to_string(), failure_count, request_sha256],
+                )
+                .map_err(|_| ObserverError::StateUnavailable)?;
+        } else {
+            transaction
+                .execute(
+                    "UPDATE observations SET retry_count=?2 WHERE observation_id=?1 AND request_sha256=?3 AND status='pending'",
+                    params![request.observation_id.to_string(), failure_count, request_sha256],
+                )
+                .map_err(|_| ObserverError::StateUnavailable)?;
+        }
         transaction
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)

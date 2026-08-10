@@ -71,9 +71,12 @@ bounded pending retry path;
 request and grant validity are checked again at the monotonic GET-completion
 time before any receipt can be signed;
 only complete evidence consumes the receipt-count and evidence-byte quotas.
-Every initial or retrying outbound GET reserves a durable timestamped request
-attempt in the same claim transaction, so retries cannot bypass the per-minute
-rate limit. A
+Every initial or retrying outbound GET reserves a durable timestamped outbound
+intent in the same claim transaction, so process death cannot bypass the
+per-minute rate limit. That conservative reservation expires with the rate
+window, but the retry-failure counter advances only after the transport returns
+an actual destination-unavailable result; a crash between reservation and GET
+therefore cannot falsely exhaust the observation's retry budget. A
 unique pending claim per destination scope prevents competing reads across
 builds and effect fences. A nonblocking kernel lease held for the complete
 observation call also prevents a same-ID retry or overlapping process from
