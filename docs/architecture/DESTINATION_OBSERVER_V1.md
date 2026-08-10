@@ -104,10 +104,10 @@ time before any receipt can be signed. They are also resampled after ledger and
 lease delays immediately before dispatch, so authority that expires while
 waiting cannot cause a GET;
 only complete evidence consumes the receipt-count and evidence-byte quotas.
-Before a new admission enforces those quotas, complete and failed observations
-whose signed request expiry is more than one freshness window old are pruned in
-the claim transaction. Orphaned phase/cursor heads are pruned with them, while
-heads for a still-retained chain remain durable.
+Replay and new-admission transactions prune complete and failed observations
+whose signed request expiry is more than one freshness window old before they
+serve terminal state or enforce quotas. Orphaned phase/cursor heads are pruned
+with them, while heads for a still-retained chain remain durable.
 Every initial or retrying outbound GET reserves a durable timestamped outbound
 intent in the same claim transaction, so process death cannot bypass the
 per-minute rate limit. That conservative reservation expires with the rate

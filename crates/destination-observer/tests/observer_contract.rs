@@ -453,7 +453,7 @@ async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
 
     let expired_replay = rig
         .observer
-        .observe_at(pre_request.clone(), NOW + 70_000)
+        .observe_at(pre_request.clone(), NOW + 2_000)
         .await
         .unwrap();
     assert_eq!(expired_replay, pre);
@@ -1082,6 +1082,26 @@ async fn completed_evidence_is_pruned_after_the_bounded_replay_window() {
     rig.server
         .observed_at_unix_ms
         .store(later, Ordering::SeqCst);
+    let reads = rig.server.reads.load(Ordering::SeqCst);
+    assert_eq!(
+        observer.observe_at(first, later).await,
+        Err(ObserverError::MalformedRequest)
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), reads);
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let pruned: (u64, u64, u64) = connection
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM observations),
+               (SELECT COUNT(*) FROM scope_heads),
+               (SELECT COUNT(*) FROM destination_heads)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(pruned, (0, 0, 0));
+    drop(connection);
+
     let mut second = rig.request(ObservationPhase::PreAction);
     second.effect_fence = 18;
     second.requested_at_unix_ms = later - 1;
@@ -1104,14 +1124,6 @@ async fn completed_evidence_is_pruned_after_the_bounded_replay_window() {
         )
         .unwrap();
     assert_eq!(retained, (1, 1, 1));
-    drop(connection);
-
-    let reads = rig.server.reads.load(Ordering::SeqCst);
-    assert_eq!(
-        observer.observe_at(first, later).await,
-        Err(ObserverError::MalformedRequest)
-    );
-    assert_eq!(rig.server.reads.load(Ordering::SeqCst), reads);
 }
 
 #[tokio::test]

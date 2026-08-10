@@ -246,54 +246,58 @@ impl ObserverStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ObserverError::StateUnavailable)?;
         assert_active_transaction(&transaction, config.generation, config_sha256)?;
-        let existing: Option<ReplayObservation> = transaction
-            .query_row(
-                "SELECT request_sha256, status, receipt_json, failure_code FROM observations WHERE observation_id=?1",
-                [request.observation_id.to_string()],
-                |row| {
-                    Ok(ReplayObservation {
-                        request_sha256: row.get(0)?,
-                        status: row.get(1)?,
-                        receipt_json: row.get(2)?,
-                        failure_code: row.get(3)?,
-                    })
-                },
-            )
-            .optional()
-            .map_err(|_| ObserverError::StateUnavailable)?;
-        let Some(existing) = existing else {
-            return Ok(None);
-        };
-        if existing.request_sha256 != request_sha256 {
-            return Err(ObserverError::ReplayMismatch);
-        }
-        match existing.status.as_str() {
-            "complete" => {
-                let bytes = existing
-                    .receipt_json
-                    .ok_or(ObserverError::StateUnavailable)?;
-                let receipt =
-                    parse_json_no_duplicates(&bytes).map_err(|_| ObserverError::InvalidReceipt)?;
-                Ok(Some(Box::new(receipt)))
+        prune_terminal_observations(&transaction, config, now_ms)?;
+        let outcome = (|| -> Result<Option<Box<ObservationReceipt>>, ObserverError> {
+            let existing: Option<ReplayObservation> = transaction
+                .query_row(
+                    "SELECT request_sha256, status, receipt_json, failure_code FROM observations WHERE observation_id=?1",
+                    [request.observation_id.to_string()],
+                    |row| {
+                        Ok(ReplayObservation {
+                            request_sha256: row.get(0)?,
+                            status: row.get(1)?,
+                            receipt_json: row.get(2)?,
+                            failure_code: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(|_| ObserverError::StateUnavailable)?;
+            let Some(existing) = existing else {
+                return Ok(None);
+            };
+            if existing.request_sha256 != request_sha256 {
+                return Err(ObserverError::ReplayMismatch);
             }
-            "failed" => Err(error_from_code(existing.failure_code.as_deref())),
-            "pending" => {
-                if let Err(error) = validate_temporal(config, request, now_ms) {
-                    transaction
-                        .execute(
-                            "UPDATE observations SET status='failed', failure_code=?2 WHERE observation_id=?1 AND request_sha256=?3 AND status='pending'",
-                            params![request.observation_id.to_string(), error.code(), request_sha256],
-                        )
-                        .map_err(|_| ObserverError::StateUnavailable)?;
-                    transaction
-                        .commit()
-                        .map_err(|_| ObserverError::StateUnavailable)?;
-                    return Err(error);
+            match existing.status.as_str() {
+                "complete" => {
+                    let bytes = existing
+                        .receipt_json
+                        .ok_or(ObserverError::StateUnavailable)?;
+                    let receipt = parse_json_no_duplicates(&bytes)
+                        .map_err(|_| ObserverError::InvalidReceipt)?;
+                    Ok(Some(Box::new(receipt)))
                 }
-                Ok(None)
+                "failed" => Err(error_from_code(existing.failure_code.as_deref())),
+                "pending" => {
+                    if let Err(error) = validate_temporal(config, request, now_ms) {
+                        transaction
+                            .execute(
+                                "UPDATE observations SET status='failed', failure_code=?2 WHERE observation_id=?1 AND request_sha256=?3 AND status='pending'",
+                                params![request.observation_id.to_string(), error.code(), request_sha256],
+                            )
+                            .map_err(|_| ObserverError::StateUnavailable)?;
+                        return Err(error);
+                    }
+                    Ok(None)
+                }
+                _ => Err(ObserverError::StateUnavailable),
             }
-            _ => Err(ObserverError::StateUnavailable),
-        }
+        })();
+        transaction
+            .commit()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        outcome
     }
 
     #[allow(clippy::too_many_arguments)]
