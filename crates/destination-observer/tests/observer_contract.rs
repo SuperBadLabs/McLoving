@@ -18,10 +18,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use mcloving_destination_observer::{
     ActivationMode, CONFIG_SCHEMA_VERSION, Confidentiality, DESTINATION_STATE_SCHEMA_VERSION,
-    DestinationObserver, DestinationStateBody, JsonKind, ObservationPhase, ObservationReceipt,
-    ObservationRequest, ObserverConfig, ObserverError, ObserverLimits, PROTOCOL_VERSION,
-    REQUEST_SCHEMA_VERSION, RequestAuthorization, SignedDestinationState, StateFieldSchema,
-    content_sha256, destination_state_message, sign_observation_request,
+    DestinationObserver, DestinationStateBody, JsonKind, MAX_FRAME_BYTES, ObservationPhase,
+    ObservationReceipt, ObservationRequest, ObserverConfig, ObserverError, ObserverLimits,
+    PROTOCOL_VERSION, REQUEST_SCHEMA_VERSION, RequestAuthorization, SignedDestinationState,
+    StateFieldSchema, content_sha256, destination_state_message, sign_observation_request,
     verify_observation_receipt,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
@@ -51,7 +51,6 @@ enum Mode {
     Outage,
     Timeout,
     Slow,
-    LargeState,
 }
 
 struct DestinationState {
@@ -331,9 +330,6 @@ async fn destination_handler(
         }
         Mode::Substitute => body.resource_identity = "release/substituted".to_owned(),
         Mode::Secret => body.state = json!({"published": true, "leak": BASE64.encode(SECRET)}),
-        Mode::LargeState => {
-            body.state = json!({"published": true, "padding": "x".repeat(275_000)});
-        }
         _ => {}
     }
     let mut signed = SignedDestinationState {
@@ -510,6 +506,50 @@ async fn durable_pending_claim_resumes_after_outage_and_process_restart() {
 }
 
 #[tokio::test]
+async fn expired_pending_replay_is_tombstoned_before_destination_lease_contention() {
+    let rig = Rig::new().await;
+    rig.set_mode(Mode::Outage);
+    let request = rig.prepare(rig.request(ObservationPhase::PreAction));
+    assert_eq!(
+        rig.observer.observe_at(request.clone(), NOW).await,
+        Err(ObserverError::DestinationUnavailable)
+    );
+
+    let lock_path = fs::read_dir(rig.directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("destination-") && name.ends_with(".lock"))
+        })
+        .unwrap();
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .unwrap();
+    lease.lock().unwrap();
+
+    assert_eq!(
+        rig.observer.observe_at(request.clone(), NOW + 2_000).await,
+        Err(ObserverError::ExpiredRequest)
+    );
+    drop(lease);
+
+    let connection =
+        rusqlite::Connection::open(rig.directory.path().join("observer.sqlite3")).unwrap();
+    let status: (String, String) = connection
+        .query_row(
+            "SELECT status, failure_code FROM observations WHERE observation_id=?1",
+            [request.observation_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, ("failed".to_owned(), "expired_request".to_owned()));
+}
+
+#[tokio::test]
 async fn crash_gap_reservation_does_not_consume_the_destination_retry_budget() {
     let rig = Rig::new().await;
     rig.set_mode(Mode::Outage);
@@ -678,7 +718,7 @@ async fn controller_retry_ids_cannot_create_a_second_phase_chain() {
 }
 
 #[tokio::test]
-async fn oversized_success_is_failed_before_receipt_commit() {
+async fn response_limit_must_leave_room_for_the_maximum_receipt_envelope() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();
     #[cfg(unix)]
@@ -688,26 +728,17 @@ async fn oversized_success_is_failed_before_receipt_commit() {
     }
     let mut config = rig.config.clone();
     config.state_dir = state.path().to_path_buf();
-    config.limits.max_response_bytes = 400_000;
+    config.limits.max_response_bytes = MAX_FRAME_BYTES - 1;
     config.response_schema.push(StateFieldSchema {
         name: "padding".to_owned(),
         kind: JsonKind::String,
         required: true,
     });
-    let observer = rig.observer_for_config(config).unwrap();
-    rig.set_mode(Mode::LargeState);
-    let mut request = rig.request(ObservationPhase::PreAction);
-    request.expected_config_sha256 = observer.config_sha256().to_owned();
-    let request = rig.prepare(request);
-    assert_eq!(
-        observer.observe_at(request, NOW).await,
-        Err(ObserverError::OversizedResponse)
-    );
-    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
-    let status: String = connection
-        .query_row("SELECT status FROM observations", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(status, "failed");
+    assert!(matches!(
+        rig.observer_for_config(config),
+        Err(ObserverError::InvalidConfig)
+    ));
+    assert!(!state.path().join("observer.sqlite3").exists());
 }
 
 #[tokio::test]

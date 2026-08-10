@@ -228,26 +228,21 @@ impl ObserverStore {
 
     pub(crate) fn replay(
         &self,
-        generation: u64,
+        config: &ObserverConfig,
         config_sha256: &str,
         request: &ObservationRequest,
         request_sha256: &str,
+        now_ms: i64,
     ) -> Result<Option<Box<ObservationReceipt>>, ObserverError> {
-        let connection = self
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| ObserverError::StateUnavailable)?;
-        let active: (u64, String) = connection
-            .query_row(
-                "SELECT generation, config_sha256 FROM active_runtime WHERE singleton = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ObserverError::StateUnavailable)?;
-        if active.0 != generation || active.1 != config_sha256 {
-            return Err(ObserverError::RuntimeFenced);
-        }
-        let existing: Option<ReplayObservation> = connection
+        assert_active_transaction(&transaction, config.generation, config_sha256)?;
+        let existing: Option<ReplayObservation> = transaction
             .query_row(
                 "SELECT request_sha256, status, receipt_json, failure_code FROM observations WHERE observation_id=?1",
                 [request.observation_id.to_string()],
@@ -278,7 +273,21 @@ impl ObserverStore {
                 Ok(Some(Box::new(receipt)))
             }
             "failed" => Err(error_from_code(existing.failure_code.as_deref())),
-            "pending" => Ok(None),
+            "pending" => {
+                if let Err(error) = validate_temporal(config, request, now_ms) {
+                    transaction
+                        .execute(
+                            "UPDATE observations SET status='failed', failure_code=?2 WHERE observation_id=?1 AND request_sha256=?3 AND status='pending'",
+                            params![request.observation_id.to_string(), error.code(), request_sha256],
+                        )
+                        .map_err(|_| ObserverError::StateUnavailable)?;
+                    transaction
+                        .commit()
+                        .map_err(|_| ObserverError::StateUnavailable)?;
+                    return Err(error);
+                }
+                Ok(None)
+            }
             _ => Err(ObserverError::StateUnavailable),
         }
     }

@@ -61,7 +61,8 @@ The observer persists a pending claim in a `synchronous=FULL` WAL ledger before
 the GET. An observation ID can be replayed only with byte-identical canonical
 request truth. A completed replay returns the same receipt without another GET;
 a stored terminal replay is checked before taking the live destination lease,
-so unrelated destination activity or availability cannot suppress it;
+and a pending replay is temporally fenced and tombstoned there as well, so
+unrelated destination activity or availability cannot suppress either outcome;
 a pending replay is the only retry path and is bounded. Completed evidence is
 returned even after the request or grant window closes because no new authority
 is exercised. Expired, generation-fenced, explicitly failed, or retry-exhausted
@@ -141,8 +142,11 @@ complete raw response digest and destination signature, retry count, audit
 provenance, receipt sequence, key identity, and public-key digest.
 
 The complete signed standalone success envelope must fit the process frame
-before the pending claim can commit. An oversized envelope becomes a failed
-claim, never committed evidence followed by an error-only response. Stored
+before the pending claim can commit. Configuration is rejected before the
+ledger or network opens unless the configured response limit, maximum request
+query and audit fields, and exact static receipt metadata fit that envelope
+together. The runtime check remains defense in depth: an oversized envelope
+becomes a failed claim, never committed evidence followed by an error-only response. Stored
 completed receipts are signature-, binding-, and frame-size-verified again on
 every replay.
 

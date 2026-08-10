@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -7,6 +7,7 @@ use base64::engine::general_purpose::{STANDARD as BASE64, STANDARD_NO_PAD as BAS
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, StatusCode, Url, redirect};
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::crypto::{
     canonical_digest, content_sha256, public_key_from_seed, sign_receipt, verify_destination_state,
@@ -23,6 +24,8 @@ const REQUEST_DIGEST_DOMAIN: &[u8] = b"mcloving-observer-request-digest-v1";
 const QUERY_DOMAIN: &[u8] = b"mcloving-observer-query-v1";
 const SCOPE_DOMAIN: &[u8] = b"mcloving-observer-scope-v1";
 const RECEIPT_DIGEST_DOMAIN: &[u8] = b"mcloving-observer-receipt-digest-v1";
+const MAX_AUDIT_PROVENANCE_BYTES: usize = 4096;
+const MAX_QUERY_VALUE_BYTES: usize = 2048;
 
 pub struct DestinationObserver {
     config: ObserverConfig,
@@ -133,10 +136,11 @@ impl DestinationObserver {
             &DestinationScope::from_request(&request),
         )?;
         if let Some(receipt) = self.store.replay(
-            self.config.generation,
+            &self.config,
             &self.config_sha256,
             &request,
             &request_sha256,
+            now_ms,
         )? {
             self.validate_replayed_receipt(&request, &request_sha256, &receipt)?;
             return Ok(*receipt);
@@ -145,10 +149,11 @@ impl DestinationObserver {
             Ok(lease) => lease,
             Err(ObserverError::ObservationPending) => {
                 if let Some(receipt) = self.store.replay(
-                    self.config.generation,
+                    &self.config,
                     &self.config_sha256,
                     &request,
                     &request_sha256,
+                    now_ms,
                 )? {
                     self.validate_replayed_receipt(&request, &request_sha256, &receipt)?;
                     return Ok(*receipt);
@@ -479,7 +484,7 @@ impl DestinationObserver {
                 .saturating_sub(request.requested_at_unix_ms)
                 > self.config.limits.max_age_ms
             || request.audit_provenance.is_empty()
-            || request.audit_provenance.len() > 4096
+            || request.audit_provenance.len() > MAX_AUDIT_PROVENANCE_BYTES
         {
             return Err(ObserverError::MalformedRequest);
         }
@@ -507,7 +512,10 @@ impl DestinationObserver {
             || request.query.keys().any(|key| {
                 !self.config.allowed_query_keys.contains(key) || key.is_empty() || key.len() > 128
             })
-            || request.query.values().any(|value| value.len() > 2048)
+            || request
+                .query
+                .values()
+                .any(|value| value.len() > MAX_QUERY_VALUE_BYTES)
         {
             return Err(ObserverError::MalformedRequest);
         }
@@ -652,7 +660,7 @@ fn validate_config(
         || !valid_sha(implementation_sha256)
         || !valid_sha(&config.image_sha256)
         || config.limits.max_response_bytes == 0
-        || config.limits.max_response_bytes > 16 * 1024 * 1024
+        || config.limits.max_response_bytes >= crate::standalone::MAX_FRAME_BYTES
         || config.limits.max_header_bytes == 0
         || config.limits.max_requests_per_minute == 0
         || config.limits.max_evidence_bytes == 0
@@ -758,6 +766,7 @@ fn validate_config(
         || config.request_authority_key_id.is_empty()
         || config.destination_attestation_key_id.is_empty()
         || config.receipt_signing_key_id.is_empty()
+        || !maximum_receipt_envelope_fits(config, config_sha256, implementation_sha256)
         || authority_digests
             .iter()
             .any(|digest| config.denied_authority_sha256.contains(digest))
@@ -765,6 +774,75 @@ fn validate_config(
         return Err(ObserverError::InvalidConfig);
     }
     Ok(())
+}
+
+fn maximum_receipt_envelope_fits(
+    config: &ObserverConfig,
+    config_sha256: &str,
+    implementation_sha256: &str,
+) -> bool {
+    let maximum_query_value = "\0".repeat(MAX_QUERY_VALUE_BYTES);
+    let canonical_query: BTreeMap<String, String> = config
+        .allowed_query_keys
+        .iter()
+        .map(|key| (key.clone(), maximum_query_value.clone()))
+        .collect();
+    let maximum = ObservationReceipt {
+        schema_version: RECEIPT_SCHEMA_VERSION.to_owned(),
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        evidence_sequence: u64::MAX,
+        observation_id: Uuid::from_u128(u128::MAX),
+        request_sha256: "f".repeat(64),
+        tenant_id: Uuid::from_u128(u128::MAX),
+        project_id: Uuid::from_u128(u128::MAX),
+        pipeline_id: Uuid::from_u128(u128::MAX),
+        build_id: Uuid::from_u128(u128::MAX),
+        attempt_id: Uuid::from_u128(u128::MAX),
+        effect_fence: u64::MAX,
+        phase: crate::ObservationPhase::Reconciliation,
+        predecessor_receipt_sha256: Some("f".repeat(64)),
+        observer_id: config.observer_id.clone(),
+        observer_implementation_sha256: implementation_sha256.to_owned(),
+        observer_image_sha256: config.image_sha256.clone(),
+        observer_config_sha256: config_sha256.to_owned(),
+        deployment_identity: config.deployment_identity.clone(),
+        operator_trust_identity: config.operator_trust_identity.clone(),
+        runtime_boundary_identity: config.runtime_boundary_identity.clone(),
+        service_identity: config.service_identity.clone(),
+        credential_issuance_path_identity: config.credential_issuance_path_identity.clone(),
+        configuration_authority_identity: config.configuration_authority_identity.clone(),
+        request_authority_identity: config.request_authority_identity.clone(),
+        generation: u64::MAX,
+        activation_mode: config.activation_mode,
+        previous_generation: Some(u64::MAX),
+        rollback_from_generation: Some(u64::MAX),
+        endpoint_identity: config.endpoint_identity.clone(),
+        account_identity: config.account_identity.clone(),
+        resource_identity: config.resource_identity.clone(),
+        effect_class: config.effect_class.clone(),
+        read_grant_id: config.read_grant_id.clone(),
+        read_grant_version: config.read_grant_version.clone(),
+        read_grant_scope: config.read_grant_scope.clone(),
+        canonical_query,
+        destination_cursor: u64::MAX,
+        destination_observed_at_unix_ms: i64::MIN,
+        captured_at_unix_ms: i64::MIN,
+        publication_deadline_unix_ms: i64::MIN,
+        state_schema_version: config.state_schema_version.clone(),
+        confidentiality: Confidentiality::Internal,
+        destination_response_sha256: "f".repeat(64),
+        destination_signature_base64: "A".repeat(88),
+        destination_attestation_key_id: config.destination_attestation_key_id.clone(),
+        // The raw response limit includes the serialized state and its destination envelope, so a
+        // string of this length is a conservative upper bound for state bytes in the receipt.
+        state: serde_json::Value::String("x".repeat(config.limits.max_response_bytes)),
+        retry_count: u8::MAX,
+        audit_provenance: "\0".repeat(MAX_AUDIT_PROVENANCE_BYTES),
+        receipt_signing_key_id: config.receipt_signing_key_id.clone(),
+        receipt_signing_public_key_sha256: config.receipt_signing_public_key_sha256.clone(),
+        signature_base64: "A".repeat(88),
+    };
+    crate::standalone::observed_response_fits(&maximum)
 }
 
 fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
