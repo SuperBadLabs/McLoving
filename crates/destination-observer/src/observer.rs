@@ -250,18 +250,18 @@ impl DestinationObserver {
         let (signed, raw, captured_at_ms) = match destination_result {
             Ok(observation) => observation,
             Err(error) => {
+                let failure_at_ms = elapsed_time_ms(now_ms, started_at)?;
+                if let Err(expiry) = validate_temporal(&self.config, &request, failure_at_ms) {
+                    self.store.fail_pending(
+                        self.config.generation,
+                        &self.config_sha256,
+                        &request,
+                        &request_sha256,
+                        &expiry,
+                    )?;
+                    return Err(expiry);
+                }
                 if error == ObserverError::DestinationUnavailable {
-                    let failure_at_ms = elapsed_time_ms(now_ms, started_at)?;
-                    if let Err(expiry) = validate_temporal(&self.config, &request, failure_at_ms) {
-                        self.store.fail_pending(
-                            self.config.generation,
-                            &self.config_sha256,
-                            &request,
-                            &request_sha256,
-                            &expiry,
-                        )?;
-                        return Err(expiry);
-                    }
                     self.store.record_destination_failure(
                         &self.config,
                         &self.config_sha256,
@@ -438,7 +438,8 @@ impl DestinationObserver {
         }) {
             return Err(ObserverError::ConfidentialityDenied);
         }
-        enforce_header_bound(response.headers(), self.config.limits.max_header_bytes)?;
+        let header_bound =
+            enforce_header_bound(response.headers(), self.config.limits.max_header_bytes);
         let status = response.status();
         let content_types: Vec<_> = response.headers().get_all(CONTENT_TYPE).iter().collect();
         let valid_content_type = content_types.len() == 1
@@ -474,6 +475,7 @@ impl DestinationObserver {
         if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
             return Err(ObserverError::DestinationUnauthorized);
         }
+        header_bound?;
         if status != StatusCode::OK {
             return Err(ObserverError::DestinationUnavailable);
         }

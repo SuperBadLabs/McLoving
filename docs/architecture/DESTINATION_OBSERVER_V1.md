@@ -73,7 +73,10 @@ frame before the ledger opens. Response headers are confidentiality-scanned
 before status or size classification, including non-success responses.
 The HTTP/2 decoder has a fixed 256 KiB hard ceiling above the lower certified
 application header budget, allowing bounded oversized blocks to be scanned
-before they are classified as application overflows.
+before they are classified as application overflows. Confidentiality denial
+therefore dominates all response classification, while a 401/403 remains a
+permanent authentication denial even when it also exceeds the application
+header budget.
 The GET carries reserved non-secret headers for the observation ID, effect
 fence, phase, canonical-query digest, and complete signed-request digest. An
 independently deployed destination therefore receives every fresh binding it
@@ -96,11 +99,14 @@ bookkeeping or successful finalization converges on and returns the stored
 tombstone instead of replacing it, surfacing a replay mismatch, or returning a
 different local terminal error;
 terminal authentication, validation, confidentiality, freshness, cursor, body,
-and evidence-envelope size denials do the same immediately. HTTP/2 decoder or
-application header-list overflow is treated as destination unavailability and,
-like other transport outages, retains the bounded pending retry path;
+and evidence-envelope size denials do the same immediately. HTTP/2 decoder
+overflow is treated as destination unavailability and retains the bounded
+pending retry path. Application header-list overflow does the same unless a
+confidentiality denial or permanent 401/403 authentication denial takes
+precedence;
 request and grant validity are checked again at the monotonic GET-completion
-time before any receipt can be signed. They are also resampled after ledger and
+time before any success or terminal outcome is committed. They are also
+resampled after ledger and
 lease delays immediately before dispatch, so authority that expires while
 waiting cannot cause a GET;
 only complete evidence consumes the receipt-count and evidence-byte quotas.
@@ -197,6 +203,10 @@ together. The runtime check remains defense in depth: an oversized envelope
 becomes a failed claim, never committed evidence followed by an error-only response. Stored
 completed receipts are signature-, binding-, and frame-size-verified again on
 every replay.
+
+The standalone reader accepts LF and CRLF framing. It removes the optional CR
+before applying the logical payload bound, so both encodings admit the same
+maximum JSON payload.
 
 Every claim, sequence allocation, and finalization rereads the active
 generation/configuration fence. An empty ledger bootstraps only generation 1;

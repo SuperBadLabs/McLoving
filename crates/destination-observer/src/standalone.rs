@@ -100,11 +100,11 @@ pub fn read_bounded_frame<R: Read>(input: &mut R) -> Result<Option<Vec<u8>>, Obs
             Ok(0) if frame.is_empty() => return Ok(None),
             Ok(0) => return Err(ObserverError::MalformedRequest),
             Ok(_) if byte[0] == b'\n' => {
-                if frame.len() >= MAX_FRAME_BYTES {
-                    return Err(ObserverError::OversizedRequest);
-                }
                 if frame.last() == Some(&b'\r') {
                     frame.pop();
+                }
+                if frame.len() >= MAX_FRAME_BYTES {
+                    return Err(ObserverError::OversizedRequest);
                 }
                 return Ok(Some(frame));
             }

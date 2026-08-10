@@ -48,6 +48,7 @@ enum Mode {
     Malformed,
     Oversized,
     Unauthorized,
+    UnauthorizedOversizedHeader,
     UnauthorizedSecret,
     Outage,
     OutageSecret,
@@ -283,13 +284,15 @@ async fn destination_handler(
     headers: HeaderMap,
 ) -> Response<Body> {
     let mode = *server.mode.lock().unwrap();
-    if matches!(mode, Mode::Unauthorized | Mode::UnauthorizedSecret)
-        || headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            != Some("Bearer read-only-observer-token")
+    if matches!(
+        mode,
+        Mode::Unauthorized | Mode::UnauthorizedOversizedHeader | Mode::UnauthorizedSecret
+    ) || headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        != Some("Bearer read-only-observer-token")
     {
-        let response = Response::builder()
+        let mut response = Response::builder()
             .status(StatusCode::FORBIDDEN)
             .body(if matches!(mode, Mode::UnauthorizedSecret) {
                 Body::from(TOKEN)
@@ -297,6 +300,12 @@ async fn destination_handler(
                 Body::empty()
             })
             .unwrap();
+        if matches!(mode, Mode::UnauthorizedOversizedHeader) {
+            response.headers_mut().insert(
+                "x-oversized",
+                axum::http::HeaderValue::from_str(&"x".repeat(9 * 1024)).unwrap(),
+            );
+        }
         return response;
     }
     let request = server.request.lock().unwrap().clone().unwrap();
@@ -513,6 +522,10 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         (Mode::Malformed, ObserverError::MalformedResponse),
         (Mode::Oversized, ObserverError::OversizedResponse),
         (Mode::Unauthorized, ObserverError::DestinationUnauthorized),
+        (
+            Mode::UnauthorizedOversizedHeader,
+            ObserverError::DestinationUnauthorized,
+        ),
         (
             Mode::UnauthorizedSecret,
             ObserverError::ConfidentialityDenied,
@@ -1145,6 +1158,29 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
     assert_eq!(
         rig.observer.observe_at(expires_during_read, NOW).await,
         Err(ObserverError::ExpiredRequest)
+    );
+
+    let grant_rig = Rig::new().await;
+    grant_rig.set_mode(Mode::SlowMalformed);
+    let grant_state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(grant_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut grant_config = grant_rig.config.clone();
+    grant_config.state_dir = grant_state.path().to_path_buf();
+    grant_config.read_grant_expires_unix_ms = NOW + 50;
+    let grant_observer = grant_rig.observer_for_config(grant_config).unwrap();
+    let mut expires_grant_during_terminal_read = grant_rig.request(ObservationPhase::PreAction);
+    expires_grant_during_terminal_read.expected_config_sha256 =
+        grant_observer.config_sha256().to_owned();
+    let expires_grant_during_terminal_read = grant_rig.prepare(expires_grant_during_terminal_read);
+    assert_eq!(
+        grant_observer
+            .observe_at(expires_grant_during_terminal_read, NOW)
+            .await,
+        Err(ObserverError::ExpiredGrant)
     );
     rig.set_mode(Mode::Good);
     let replacement = rig.prepare(rig.request(ObservationPhase::PreAction));

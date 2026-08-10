@@ -47,6 +47,14 @@ fn frames_require_termination_and_obey_the_process_bound() {
         Some(vec![b'x'; MAX_FRAME_BYTES - 1])
     );
 
+    let mut exact_crlf_bound = vec![b'x'; MAX_FRAME_BYTES - 1];
+    exact_crlf_bound.extend_from_slice(b"\r\n");
+    let mut exact_crlf_bound = Cursor::new(exact_crlf_bound);
+    assert_eq!(
+        read_bounded_frame(&mut exact_crlf_bound).unwrap(),
+        Some(vec![b'x'; MAX_FRAME_BYTES - 1])
+    );
+
     let mut one_byte_over = vec![b'x'; MAX_FRAME_BYTES];
     one_byte_over.push(b'\n');
     let mut one_byte_over = Cursor::new(one_byte_over);
