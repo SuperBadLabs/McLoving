@@ -7,6 +7,7 @@ use base64::engine::general_purpose::{
     STANDARD as BASE64, STANDARD_NO_PAD as BASE64_NO_PAD, URL_SAFE as BASE64_URL_SAFE,
     URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD,
 };
+use http_body_util::BodyExt as _;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, StatusCode, Url, redirect};
 use serde::Serialize;
@@ -384,6 +385,8 @@ impl DestinationObserver {
             &request_sha256,
             &scope_sha256,
             &destination_scope_sha256,
+            now_ms,
+            started_at,
             &receipt,
             &receipt_sha256,
         ) {
@@ -422,7 +425,7 @@ impl DestinationObserver {
                 query.append_pair(key, value);
             }
         }
-        let mut response = self
+        let response = self
             .client
             .get(url)
             .header(ACCEPT, "application/json")
@@ -454,12 +457,28 @@ impl DestinationObserver {
         let declared_oversized = response
             .content_length()
             .is_some_and(|size| size > self.config.limits.max_response_bytes as u64);
+        let mut response_body: reqwest::Body = response.into();
         let mut raw = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| ObserverError::DestinationUnavailable)?
-        {
+        while let Some(frame) = response_body.frame().await {
+            let frame = frame.map_err(|_| ObserverError::DestinationUnavailable)?;
+            let chunk = match frame.into_data() {
+                Ok(chunk) => chunk,
+                Err(frame) => {
+                    let trailers = frame
+                        .into_trailers()
+                        .map_err(|_| ObserverError::MalformedResponse)?;
+                    if trailers.iter().any(|(name, value)| {
+                        contains_secret(name.as_str().as_bytes(), &self.secret_markers)
+                            || contains_secret(value.as_bytes(), &self.secret_markers)
+                    }) {
+                        return Err(ObserverError::ConfidentialityDenied);
+                    }
+                    // Destination evidence has no trailer authority. Reject every trailing
+                    // header block instead of accepting metadata outside the certified initial
+                    // header budget and confidentiality scan.
+                    return Err(ObserverError::MalformedResponse);
+                }
+            };
             let remaining = self
                 .config
                 .limits
@@ -1292,7 +1311,10 @@ fn unix_time_ms() -> Result<i64, ObserverError> {
     i64::try_from(duration.as_millis()).map_err(|_| ObserverError::StateUnavailable)
 }
 
-fn elapsed_time_ms(started_at_ms: i64, started_at: Instant) -> Result<i64, ObserverError> {
+pub(crate) fn elapsed_time_ms(
+    started_at_ms: i64,
+    started_at: Instant,
+) -> Result<i64, ObserverError> {
     let elapsed_ms = i64::try_from(started_at.elapsed().as_millis())
         .map_err(|_| ObserverError::StateUnavailable)?;
     Ok(started_at_ms.saturating_add(elapsed_ms))

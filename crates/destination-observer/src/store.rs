@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 
@@ -545,6 +545,8 @@ impl ObserverStore {
         request_sha256: &str,
         scope_sha256: &str,
         cursor_scope_sha256: &str,
+        started_at_ms: i64,
+        started_at: Instant,
         receipt: &ObservationReceipt,
         receipt_sha256: &str,
     ) -> Result<(), ObserverError> {
@@ -560,6 +562,8 @@ impl ObserverStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ObserverError::StateUnavailable)?;
         assert_active_transaction(&transaction, config.generation, config_sha256)?;
+        let finalize_at_ms = crate::observer::elapsed_time_ms(started_at_ms, started_at)?;
+        prune_terminal_observations(&transaction, config, finalize_at_ms)?;
         enforce_phase(&transaction, request, scope_sha256)?;
         let destination_cursor: Option<u64> = transaction
             .query_row(

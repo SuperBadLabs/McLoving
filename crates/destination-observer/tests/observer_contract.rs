@@ -11,12 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::get;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use http_body_util::{BodyExt as _, Full};
 use mcloving_destination_observer::{
     ActivationMode, CONFIG_SCHEMA_VERSION, Confidentiality, DESTINATION_STATE_SCHEMA_VERSION,
     DestinationObserver, DestinationStateBody, JsonKind, MAX_FRAME_BYTES, ObservationPhase,
@@ -49,6 +50,8 @@ enum Mode {
     HeaderSecret,
     OversizedHeader,
     DuplicateContentType,
+    Trailer,
+    TrailerSecret,
     Malformed,
     Oversized,
     Unauthorized,
@@ -462,6 +465,24 @@ async fn destination_handler(
     let pair = Ed25519KeyPair::from_seed_unchecked(&server.seed).unwrap();
     signed.signature_base64 =
         BASE64.encode(pair.sign(&destination_state_message(&signed).unwrap()));
+    if matches!(mode, Mode::Trailer | Mode::TrailerSecret) {
+        let mut trailers = HeaderMap::new();
+        trailers.insert(
+            "x-destination-trailer",
+            if matches!(mode, Mode::TrailerSecret) {
+                axum::http::HeaderValue::from_static("read-only-observer-token")
+            } else {
+                axum::http::HeaderValue::from_static("unexpected")
+            },
+        );
+        let body = Full::new(Bytes::from(serde_json::to_vec(&signed).unwrap()))
+            .with_trailers(std::future::ready(Some(Ok::<_, Infallible>(trailers))));
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(Body::new(body))
+            .unwrap();
+    }
     let mut response = json_response(StatusCode::OK, serde_json::to_vec(&signed).unwrap());
     if matches!(mode, Mode::HeaderSecret) {
         response.headers_mut().insert(
@@ -608,6 +629,8 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
             ObserverError::ConfidentialityDenied,
         ),
         (Mode::HeaderSecret, ObserverError::ConfidentialityDenied),
+        (Mode::Trailer, ObserverError::MalformedResponse),
+        (Mode::TrailerSecret, ObserverError::ConfidentialityDenied),
         (Mode::DuplicateContentType, ObserverError::MalformedResponse),
         (Mode::Malformed, ObserverError::MalformedResponse),
         (Mode::Oversized, ObserverError::OversizedResponse),
@@ -1257,6 +1280,58 @@ async fn completed_evidence_is_pruned_after_the_bounded_replay_window() {
         )
         .unwrap();
     assert_eq!(retained, (1, 1, 1));
+}
+
+#[tokio::test]
+async fn finalize_prunes_receipts_that_expire_during_the_destination_read() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_receipts = 2;
+    config.limits.max_evidence_bytes = 8 * 1024;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    let mut first = rig.request(ObservationPhase::PreAction);
+    first.expected_config_sha256 = observer.config_sha256().to_owned();
+    first.audit_provenance = "a".repeat(4096);
+    let first_receipt = observer.observe_at(rig.prepare(first), NOW).await.unwrap();
+
+    let finalization_base = NOW + 10_950;
+    rig.server
+        .observed_at_unix_ms
+        .store(finalization_base, Ordering::SeqCst);
+    rig.set_mode(Mode::Slow);
+    let mut second = rig.request(ObservationPhase::PreAction);
+    second.effect_fence = 18;
+    second.requested_at_unix_ms = finalization_base - 1;
+    second.expires_at_unix_ms = finalization_base + 1_000;
+    second.expected_config_sha256 = observer.config_sha256().to_owned();
+    second.audit_provenance = "b".to_owned();
+    let second_receipt = observer
+        .observe_at(rig.prepare(second), finalization_base)
+        .await
+        .unwrap();
+
+    let first_bytes = serde_json::to_vec(&first_receipt).unwrap().len();
+    let second_bytes = serde_json::to_vec(&second_receipt).unwrap().len();
+    assert!(first_bytes < 8 * 1024);
+    assert!(second_bytes < 8 * 1024);
+    assert!(first_bytes + second_bytes > 8 * 1024);
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let complete: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM observations WHERE status='complete'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(complete, 1);
 }
 
 #[tokio::test]
