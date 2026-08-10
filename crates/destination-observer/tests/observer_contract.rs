@@ -933,6 +933,7 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
     {
         use std::os::unix::fs::PermissionsExt as _;
         for path in [
+            &config_path,
             &token_path,
             &request_key_path,
             &destination_key_path,

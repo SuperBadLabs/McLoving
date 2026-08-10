@@ -52,9 +52,7 @@ pub fn load_observer(
     receipt_seed_path: &Path,
     secret_marker_path: &Path,
 ) -> Result<DestinationObserver, ObserverError> {
-    let config_bytes = read_bounded_regular_file(config_path, MAX_CONFIG_BYTES)?;
-    let config: ObserverConfig =
-        parse_json_no_duplicates(&config_bytes).map_err(|_| ObserverError::InvalidConfig)?;
+    let config = read_config(config_path)?;
     let read_token = read_private_bounded_regular_file(token_path, MAX_AUTHORITY_BYTES)?;
     let request_public_key =
         read_bounded_regular_file(request_public_key_path, MAX_AUTHORITY_BYTES)?;
@@ -82,6 +80,11 @@ pub fn load_observer(
         receipt_seed,
         secret_markers,
     )
+}
+
+fn read_config(path: &Path) -> Result<ObserverConfig, ObserverError> {
+    let bytes = read_private_bounded_regular_file(path, MAX_CONFIG_BYTES)?;
+    parse_json_no_duplicates(&bytes).map_err(|_| ObserverError::InvalidConfig)
 }
 
 pub fn read_bounded_frame<R: Read>(input: &mut R) -> Result<Option<Vec<u8>>, ObserverError> {
@@ -150,4 +153,25 @@ pub(crate) fn observed_response_fits(receipt: &ObservationReceipt) -> bool {
             .checked_add(1)
             .is_some_and(|size| size <= MAX_FRAME_BYTES)
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::read_config;
+    use crate::ObserverError;
+
+    #[test]
+    fn configuration_must_be_owner_private_before_it_is_parsed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observer.json");
+        fs::write(&path, b"{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(read_config(&path), Err(ObserverError::StateUnavailable));
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_config(&path), Err(ObserverError::InvalidConfig));
+    }
 }

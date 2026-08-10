@@ -40,7 +40,8 @@ reopening a replaceable executable pathname. The standalone process accepts
 bounded newline-complete frames from stdin; the newline is included in the
 frame-size limit. It emits generic bounded responses on stdout. Configuration
 and authority files
-are opened without following a final symlink; secret files and the state
+are opened without following a final symlink; the complete configuration,
+secret files, and the state
 directory must be owned by the process user and inaccessible to group or other
 users. The executable, image, complete configuration, read token, three signing
 authorities, CA, and secret-marker set are digest-bound before the ledger opens.
@@ -65,9 +66,10 @@ a pending replay is the only retry path and is bounded. Completed evidence is
 returned even after the request or grant window closes because no new authority
 is exercised. Expired, generation-fenced, explicitly failed, or retry-exhausted
 pending claims become bounded failure tombstones and release the destination;
-terminal authentication, validation, confidentiality, freshness, cursor, and
-size denials do the same immediately, while transport outages retain the
-bounded pending retry path;
+terminal authentication, validation, confidentiality, freshness, cursor, body,
+and evidence-envelope size denials do the same immediately. HTTP/2 decoder or
+application header-list overflow is treated as destination unavailability and,
+like other transport outages, retains the bounded pending retry path;
 request and grant validity are checked again at the monotonic GET-completion
 time before any receipt can be signed;
 only complete evidence consumes the receipt-count and evidence-byte quotas.

@@ -351,9 +351,7 @@ impl DestinationObserver {
         if response.status() != StatusCode::OK {
             return Err(ObserverError::DestinationUnavailable);
         }
-        if header_wire_bytes(response.headers())? > self.config.limits.max_header_bytes {
-            return Err(ObserverError::OversizedResponse);
-        }
+        enforce_header_bound(response.headers(), self.config.limits.max_header_bytes)?;
         if response.headers().iter().any(|(name, value)| {
             contains_secret(name.as_str().as_bytes(), &self.secret_markers)
                 || contains_secret(value.as_bytes(), &self.secret_markers)
@@ -792,6 +790,15 @@ fn header_wire_bytes(headers: &HeaderMap) -> Result<usize, ObserverError> {
     })
 }
 
+fn enforce_header_bound(headers: &HeaderMap, maximum: usize) -> Result<(), ObserverError> {
+    if header_wire_bytes(headers)? > maximum {
+        // Treat an application-level header overflow like an HTTP/2 decoder rejection. Both can
+        // be transient endpoint or intermediary behavior and must retain the bounded retry path.
+        return Err(ObserverError::DestinationUnavailable);
+    }
+    Ok(())
+}
+
 fn is_terminal_destination_error(error: &ObserverError) -> bool {
     matches!(
         error,
@@ -896,6 +903,22 @@ fn unix_time_ms() -> Result<i64, ObserverError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn application_header_overflow_remains_retryable() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-large",
+            reqwest::header::HeaderValue::from_static("12345678"),
+        );
+        assert_eq!(
+            enforce_header_bound(&headers, 8),
+            Err(ObserverError::DestinationUnavailable)
+        );
+        assert!(!is_terminal_destination_error(
+            &ObserverError::DestinationUnavailable
+        ));
+    }
 
     #[test]
     fn encoded_secret_scanner_is_case_complete() {
