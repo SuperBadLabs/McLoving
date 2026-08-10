@@ -32,9 +32,12 @@ secret, connector-control, or external-effect capability. Production requires
 HTTPS with a content-pinned private CA bundle. Plain HTTP is accepted only when
 both the explicit test flag and a literal loopback address are present.
 
-The standalone process accepts bounded newline-complete frames from stdin; the
-newline is included in the frame-size limit. It emits generic bounded responses
-on stdout. Configuration and authority files
+The observer is a fail-closed Linux process: its implementation digest is read
+from the kernel's `/proc/self/exe` handle for the executing inode, never by
+reopening a replaceable executable pathname. The standalone process accepts
+bounded newline-complete frames from stdin; the newline is included in the
+frame-size limit. It emits generic bounded responses on stdout. Configuration
+and authority files
 are opened without following a final symlink; secret files and the state
 directory must be owned by the process user and inaccessible to group or other
 users. The executable, image, complete configuration, read token, three signing
@@ -65,7 +68,10 @@ size denials do the same immediately, while transport outages retain the
 bounded pending retry path;
 request and grant validity are checked again at the monotonic GET-completion
 time before any receipt can be signed;
-only complete evidence consumes the receipt-count and evidence-byte quotas. A
+only complete evidence consumes the receipt-count and evidence-byte quotas.
+Every initial or retrying outbound GET reserves a durable timestamped request
+attempt in the same claim transaction, so retries cannot bypass the per-minute
+rate limit. A
 unique pending claim per destination scope prevents competing reads across
 builds and effect fences. A nonblocking kernel lease held for the complete
 observation call also prevents a same-ID retry or overlapping process from
@@ -136,14 +142,15 @@ configuration generation with a new exact grant and token digest.
 ## Required proof and residual boundary
 
 Contained tests cover signed pre/post/reconciliation reads, exact completed
-replay, durable pending restart/retry, signature and request substitution,
+replay, durable pending restart/retry and retry rate-budget enforcement,
+signature and request substitution,
 phase and cursor rollback, stale, malformed, oversized, resource-substituted,
 secret-bearing body and header, timeout, outage, destination permission denial,
 grant expiry, configuration and credential substitution, receipt verification,
 duplicate protocol fields, and bounded frames. A sealed-inventory test proves
 that none of this contained evidence grants Mario authority.
 
-The trusted Unix host and containing directories, deployment/configuration and
+The trusted Linux host and containing directories, deployment/configuration and
 credential operators, private CA and destination attestation owner, request
 authority, destination implementation, system clock, and independently retained
 receipt verifier remain trusted. Transformed secrets outside the marker set are

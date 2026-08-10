@@ -27,7 +27,6 @@ async fn run() -> Result<(), ObserverError> {
     if arguments.len() != 6 {
         return Err(ObserverError::InvalidConfig);
     }
-    let executable = env::current_exe().map_err(|_| ObserverError::StateUnavailable)?;
     let observer = load_observer(
         &arguments[0],
         &arguments[1],
@@ -35,7 +34,6 @@ async fn run() -> Result<(), ObserverError> {
         &arguments[3],
         &arguments[4],
         &arguments[5],
-        &executable,
     )?;
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();

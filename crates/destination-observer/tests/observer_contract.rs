@@ -459,6 +459,47 @@ async fn durable_pending_claim_resumes_after_outage_and_process_restart() {
 }
 
 #[tokio::test]
+async fn outbound_retries_consume_the_durable_request_rate_budget() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_requests_per_minute = 1;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    rig.set_mode(Mode::Outage);
+    let mut request = rig.request(ObservationPhase::PreAction);
+    request.expected_config_sha256 = observer.config_sha256().to_owned();
+    let request = rig.prepare(request);
+    assert_eq!(
+        observer.observe_at(request.clone(), NOW).await,
+        Err(ObserverError::DestinationUnavailable)
+    );
+
+    rig.set_mode(Mode::Good);
+    assert_eq!(
+        observer.observe_at(request, NOW).await,
+        Err(ObserverError::CapacityExceeded)
+    );
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let attempts: u64 = connection
+        .query_row("SELECT COUNT(*) FROM request_attempts", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let retry_count: u8 = connection
+        .query_row("SELECT retry_count FROM observations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(attempts, 1);
+    assert_eq!(retry_count, 0);
+}
+
+#[tokio::test]
 async fn expired_failed_claim_frees_destination_without_consuming_receipt_capacity() {
     let rig = Rig::new().await;
     rig.set_mode(Mode::Outage);

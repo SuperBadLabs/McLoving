@@ -8,7 +8,8 @@ mod store;
 mod strict_json;
 
 pub use authority::{
-    content_sha256, read_bounded_regular_file, read_private_bounded_regular_file, sha256_file,
+    content_sha256, read_bounded_regular_file, read_private_bounded_regular_file,
+    sha256_running_executable,
 };
 pub use crypto::{
     destination_state_message, observation_request_message, receipt_message,

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     DestinationObserver, ObservationReceipt, ObservationRequest, ObserverConfig, ObserverError,
     parse_json_no_duplicates, read_bounded_regular_file, read_private_bounded_regular_file,
-    sha256_file,
+    sha256_running_executable,
 };
 
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
@@ -51,7 +51,6 @@ pub fn load_observer(
     destination_public_key_path: &Path,
     receipt_seed_path: &Path,
     secret_marker_path: &Path,
-    executable_path: &Path,
 ) -> Result<DestinationObserver, ObserverError> {
     let config_bytes = read_bounded_regular_file(config_path, MAX_CONFIG_BYTES)?;
     let config: ObserverConfig =
@@ -76,7 +75,7 @@ pub fn load_observer(
         .collect::<Result<Vec<_>, _>>()?;
     DestinationObserver::new(
         config,
-        sha256_file(executable_path)?,
+        sha256_running_executable()?,
         read_token,
         request_public_key,
         destination_public_key,

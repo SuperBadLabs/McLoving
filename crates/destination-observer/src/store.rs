@@ -92,6 +92,10 @@ impl ObserverStore {
                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
                    next_value INTEGER NOT NULL
                  );
+                 CREATE TABLE IF NOT EXISTS request_attempts (
+                   attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   attempted_at_ms INTEGER NOT NULL
+                 );
                  INSERT OR IGNORE INTO evidence_sequence(singleton, next_value) VALUES(1, 1);",
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
@@ -361,6 +365,7 @@ impl ObserverStore {
                     .map_err(|_| ObserverError::StateUnavailable)?;
                 return Err(ObserverError::DestinationUnavailable);
             }
+            reserve_request_attempt(&transaction, config, now_ms)?;
             transaction
                 .execute(
                     "UPDATE observations SET retry_count=?2 WHERE observation_id=?1",
@@ -376,8 +381,9 @@ impl ObserverStore {
         }
 
         validate_temporal(config, request, now_ms)?;
-        enforce_capacity(&transaction, config, now_ms)?;
+        enforce_receipt_capacity(&transaction, config)?;
         enforce_phase(&transaction, request, scope_sha256)?;
+        reserve_request_attempt(&transaction, config, now_ms)?;
         transaction
             .execute(
                 "INSERT INTO observations(observation_id, scope_sha256, destination_scope_sha256, request_sha256, phase, status, retry_count, created_at_ms, expires_at_ms)
@@ -576,10 +582,9 @@ fn assert_active_transaction(
     Ok(())
 }
 
-fn enforce_capacity(
+fn enforce_receipt_capacity(
     transaction: &rusqlite::Transaction<'_>,
     config: &ObserverConfig,
-    now_ms: i64,
 ) -> Result<(), ObserverError> {
     let count: usize = transaction
         .query_row(
@@ -591,16 +596,37 @@ fn enforce_capacity(
     if count >= config.limits.max_receipts {
         return Err(ObserverError::CapacityExceeded);
     }
+    Ok(())
+}
+
+fn reserve_request_attempt(
+    transaction: &rusqlite::Transaction<'_>,
+    config: &ObserverConfig,
+    now_ms: i64,
+) -> Result<(), ObserverError> {
+    let cutoff = now_ms.saturating_sub(60_000);
+    transaction
+        .execute(
+            "DELETE FROM request_attempts WHERE attempted_at_ms < ?1",
+            [cutoff],
+        )
+        .map_err(|_| ObserverError::StateUnavailable)?;
     let recent: usize = transaction
         .query_row(
-            "SELECT COUNT(*) FROM observations WHERE created_at_ms >= ?1",
-            [now_ms.saturating_sub(60_000)],
+            "SELECT COUNT(*) FROM request_attempts WHERE attempted_at_ms >= ?1",
+            [cutoff],
             |row| row.get(0),
         )
         .map_err(|_| ObserverError::StateUnavailable)?;
     if recent >= config.limits.max_requests_per_minute {
         return Err(ObserverError::CapacityExceeded);
     }
+    transaction
+        .execute(
+            "INSERT INTO request_attempts(attempted_at_ms) VALUES(?1)",
+            [now_ms],
+        )
+        .map_err(|_| ObserverError::StateUnavailable)?;
     Ok(())
 }
 

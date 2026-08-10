@@ -56,8 +56,24 @@ fn read_file(_path: &Path, _maximum: usize, _private: bool) -> Result<Vec<u8>, O
     Err(ObserverError::StateUnavailable)
 }
 
-pub fn sha256_file(path: &Path) -> Result<String, ObserverError> {
-    let mut file = File::open(path).map_err(|_| ObserverError::StateUnavailable)?;
+#[cfg(target_os = "linux")]
+pub fn sha256_running_executable() -> Result<String, ObserverError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_CLOEXEC)
+        .open("/proc/self/exe")
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    sha256_open_file(file)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn sha256_running_executable() -> Result<String, ObserverError> {
+    Err(ObserverError::StateUnavailable)
+}
+
+fn sha256_open_file(mut file: File) -> Result<String, ObserverError> {
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1_024];
     loop {
