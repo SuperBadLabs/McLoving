@@ -2,8 +2,10 @@
 
 Date: 2026-08-10
 
-Verdict: LOCAL PASS for the architecture-repair candidate at exact
-implementation head `075634f6ce6ee6f1ef5e371cbad313dddab4aaf3`.
+Verdict: PASS. The architecture-repair implementation is bound to exact
+implementation head `075634f6ce6ee6f1ef5e371cbad313dddab4aaf3`, complete PR
+head `5e356449cda88cb43c694cbd6f525f24463e3e89`, and protected-main squash
+commit `82a5108284d0152b57230995dd53a754b0aae5c4`.
 The focused gate passes 123 dependency-resolution tests: 78 unit tests, 44
 ordinary integration tests, and one real exact-capacity
 tmpfs/HTTP/standalone-process test. Strict all-target resolver Clippy,
@@ -14,21 +16,20 @@ prior candidate. Documentation closure head
 `8d15ca537db6ccaea91fe041514f4b6de76bdbf7` additionally passes workspace-wide
 strict Clippy, the complete locked non-source workspace, the exact-capacity
 resolver journey, execution-board verification, and the serialized 19-case
-AppArmor-confined source-acquirer matrix on HeMan. Protected workflows and fresh
-independent exact-head review remain mandatory before this receipt may return to
-a final PASS verdict, before fixed threads may be resolved, and before merge.
+AppArmor-confined source-acquirer matrix on HeMan. Complete PR head `5e356449`
+passed all nine protected checks across Foundation run `31361152526` and Windows
+Agent run `31361152482`; fresh independent exact-head review found no major
+issue. Fifty evidence replies were added, all sixty-seven previously open fixed
+threads were resolved, and a refreshed thread snapshot reported zero unresolved
+threads before merge. Protected `main` at `82a51082` passed Windows Agent run
+`31363485169` and unchanged-head Foundation run `31363485164` attempt 2.
 
-The DEP-001-to-CACHE-001 post-merge execution-board transition entered PR #35 at
-`02a0fac42c94b6624d3874338c23eb09bd319238` and was already present at an
-earlier implementation head. Closure
-commits update this receipt and recertify those existing board rows; they
-do not introduce the transition. The complete PR #35 diff against protected
-`main` includes the resolver implementation, tests, protected workflow change,
-architecture documentation, receipt, board transition, and recertification. The
-complete exact PR head must independently pass protected checks and review before
-merge. The final squash-merge commit is necessarily unknowable from inside its
-own pre-merge contents; immutable complete-PR exact-head checks plus post-merge
-protected-main verification are the final closure attestation.
+The complete PR #35 diff against its protected-main base includes the resolver
+implementation, tests, protected workflow change, architecture documentation,
+receipt, and board pre-closure state. It was squash-merged only after immutable
+complete-PR exact-head checks, review, and thread closure. Post-merge protected
+checks then verified the exact squash commit before the execution board advanced
+from DEP-001 to CACHE-001.
 
 This receipt does not claim a Mario production dependency repository,
 credential, resolution, cache, canary, cutover, rollback, or Jenkins
@@ -188,8 +189,10 @@ formatting, `git diff --check`, all 122 ordinary focused tests, and the real
 exact-capacity contained journey on HeMan. Documentation head `8d15ca5` passes
 workspace-wide strict Clippy, the complete locked non-source workspace, the
 same contained resolver journey, board verification, and the complete
-serialized AppArmor source-acquirer suite. Protected Foundation and Windows
-checks plus fresh exact-head review remain open.
+serialized AppArmor source-acquirer suite. Complete PR head `5e356449` then
+passed Foundation run `31361152526`, Windows Agent run `31361152482`, and fresh
+independent exact-head review before all fixed threads were resolved and PR #35
+was squash-merged as protected-main commit `82a51082`.
 
 Foundation run 31327583362 completed on unchanged-head attempt 2. Attempt 1's
 only failures were three unrelated provisioner timing assertions under shared
@@ -197,6 +200,15 @@ runner load; the exact three tests immediately passed individually on HeMan in
 0.15, 0.07, and 0.31 seconds, and the unchanged rerun then passed the complete
 provisioner and Foundation gates. No DEP-001 code or evidence claim changed in
 response to that runner-only failure.
+
+Post-merge Foundation run `31363485164` also completed on unchanged-head attempt
+2. Attempt 1's only failure was the unrelated INPUT-001 timing assertion
+`request_and_grant_are_rechecked_before_every_source_attempt`: shared-runner
+delay exhausted its 500 ms request window before the fixture observed the first
+GET, producing zero observed reads instead of one. The exact test immediately
+passed three consecutive times on HeMan in 1.26 seconds per run; the unchanged
+rerun then passed the complete Foundation gate. No DEP-001 or INPUT-001 code or
+evidence claim changed in response to that runner-only failure.
 
 ## Review-driven hardening
 
@@ -701,8 +713,8 @@ actionable findings across eighty-six important seams. The later thread-aware
 review, archive conversion, and final exact-cleanup/proof repairs summarized in
 seams 87-145 bring the current audit to 140 actionable findings across 145 important
 seams;
-every fixed thread must be replied to and resolved only after the complete
-closure head passes protected checks and fresh review.
+all fixed threads were replied to where needed and resolved only after the
+complete closure head passed protected checks and fresh review.
 
 One additional review thread predicted that exact-capacity transport pressure
 would return an I/O error rather than the asserted content-mismatch result. The
