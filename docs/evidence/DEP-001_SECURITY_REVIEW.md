@@ -6,13 +6,13 @@ Verdict: PASS. The architecture-repair implementation is bound to exact
 implementation head `075634f6ce6ee6f1ef5e371cbad313dddab4aaf3`, complete PR
 head `5e356449cda88cb43c694cbd6f525f24463e3e89`, and protected-main squash
 commit `82a5108284d0152b57230995dd53a754b0aae5c4`.
-The focused gate passes 123 dependency-resolution tests: 78 unit tests, 44
-ordinary integration tests, and one real exact-capacity
-tmpfs/HTTP/standalone-process test. Strict all-target resolver Clippy,
-formatting, and `git diff --check` also pass on HeMan. This head replaces both
-dynamic per-resolution directory hierarchies with exclusive regular archives,
-closing the two repeated `mkdirat`/`openat` creation windows that blocked the
-prior candidate. Documentation closure head
+At implementation head `075634f6`, the focused gate passes 123
+dependency-resolution tests: 78 unit tests, 44 ordinary integration tests, and
+one real exact-capacity tmpfs/HTTP/standalone-process test. Strict all-target
+resolver Clippy, formatting, and `git diff --check` also pass on HeMan. That
+implementation head replaces both dynamic per-resolution directory hierarchies
+with exclusive regular archives, closing the two repeated `mkdirat`/`openat`
+creation windows that blocked the prior candidate. Documentation closure head
 `8d15ca537db6ccaea91fe041514f4b6de76bdbf7` additionally passes workspace-wide
 strict Clippy, the complete locked non-source workspace, the exact-capacity
 resolver journey, execution-board verification, and the serialized 19-case
