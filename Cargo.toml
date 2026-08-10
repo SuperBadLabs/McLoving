@@ -10,6 +10,7 @@ members = [
   "crates/controller-api",
   "crates/controller-store",
   "crates/dependency-resolver",
+  "crates/destination-observer",
   "crates/domain",
   "crates/execution-spine",
   "crates/input-adapter",

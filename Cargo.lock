@@ -1495,6 +1495,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-destination-observer"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64",
+ "nix",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "mcloving-domain"
 version = "0.0.0"
 
