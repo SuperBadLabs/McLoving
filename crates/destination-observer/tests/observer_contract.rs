@@ -43,6 +43,7 @@ enum Mode {
     PredatesRequest,
     Substitute,
     Secret,
+    EscapedEnvelopeSecret,
     HeaderSecret,
     OversizedHeader,
     DuplicateContentType,
@@ -53,7 +54,9 @@ enum Mode {
     UnauthorizedSecret,
     Outage,
     OutageOversizedChunked,
+    OutageOversizedChunkedSecret,
     OutageOversized,
+    OutageOversizedSecret,
     OutageSecret,
     MalformedContentTypeSecret,
     Timeout,
@@ -346,12 +349,26 @@ async fn destination_handler(
     if matches!(mode, Mode::Malformed) {
         return json_response(StatusCode::OK, b"{\"body\":".to_vec());
     }
+    if matches!(mode, Mode::EscapedEnvelopeSecret) {
+        return json_response(
+            StatusCode::OK,
+            br#"{"unknown":"read-only-observer-\u0074oken","unknown":"safe"}"#.to_vec(),
+        );
+    }
     if matches!(mode, Mode::Oversized) {
         return json_response(StatusCode::OK, vec![b'x'; 32 * 1024]);
     }
-    if matches!(mode, Mode::OutageOversizedChunked) {
+    if matches!(
+        mode,
+        Mode::OutageOversizedChunked | Mode::OutageOversizedChunkedSecret
+    ) {
+        let first = if matches!(mode, Mode::OutageOversizedChunkedSecret) {
+            oversized_escaped_secret_body(12 * 1024)
+        } else {
+            vec![b'x'; 12 * 1024]
+        };
         let stream = tokio_stream::iter([
-            Ok::<_, Infallible>(vec![b'x'; 12 * 1024]),
+            Ok::<_, Infallible>(first),
             Ok::<_, Infallible>(vec![b'x'; 12 * 1024]),
         ]);
         return Response::builder()
@@ -362,12 +379,14 @@ async fn destination_handler(
     }
     if matches!(
         mode,
-        Mode::Outage | Mode::OutageOversized | Mode::OutageSecret
+        Mode::Outage | Mode::OutageOversized | Mode::OutageOversizedSecret | Mode::OutageSecret
     ) {
         return json_response(
             StatusCode::SERVICE_UNAVAILABLE,
             if matches!(mode, Mode::OutageSecret) {
                 TOKEN.to_vec()
+            } else if matches!(mode, Mode::OutageOversizedSecret) {
+                oversized_escaped_secret_body(32 * 1024)
             } else if matches!(mode, Mode::OutageOversized) {
                 vec![b'x'; 32 * 1024]
             } else {
@@ -465,6 +484,12 @@ fn json_response(status: StatusCode, bytes: Vec<u8>) -> Response<Body> {
         .unwrap()
 }
 
+fn oversized_escaped_secret_body(size: usize) -> Vec<u8> {
+    let mut body = br#"{"leak":"read-only-observer-\u0074oken"}"#.to_vec();
+    body.resize(size, b'x');
+    body
+}
+
 #[tokio::test]
 async fn pre_post_reconciliation_receipts_are_ordered_signed_and_replay_safe() {
     let rig = Rig::new().await;
@@ -536,6 +561,10 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         (Mode::PredatesRequest, ObserverError::StaleObservation),
         (Mode::Substitute, ObserverError::MalformedResponse),
         (Mode::Secret, ObserverError::ConfidentialityDenied),
+        (
+            Mode::EscapedEnvelopeSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
         (Mode::HeaderSecret, ObserverError::ConfidentialityDenied),
         (Mode::DuplicateContentType, ObserverError::MalformedResponse),
         (Mode::Malformed, ObserverError::MalformedResponse),
@@ -550,6 +579,14 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
             ObserverError::ConfidentialityDenied,
         ),
         (Mode::OutageSecret, ObserverError::ConfidentialityDenied),
+        (
+            Mode::OutageOversizedSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
+        (
+            Mode::OutageOversizedChunkedSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
         (
             Mode::MalformedContentTypeSecret,
             ObserverError::ConfidentialityDenied,

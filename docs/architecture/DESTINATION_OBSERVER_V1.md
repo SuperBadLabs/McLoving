@@ -104,9 +104,10 @@ overflow is treated as destination unavailability and retains the bounded
 pending retry path. Application header-list overflow does the same unless a
 confidentiality denial or permanent 401/403 authentication denial takes
 precedence;
-an oversized body is consumed only through its certified prefix, but its
-non-200 status remains a retryable unavailable outcome instead of becoming a
-permanent size tombstone regardless of declared-length or chunked framing;
+an oversized body is consumed and confidentiality-scanned only through its
+certified prefix, but its non-200 status remains a retryable unavailable
+outcome instead of becoming a permanent size tombstone regardless of
+declared-length or chunked framing;
 request and grant validity are checked again at the monotonic GET-completion
 time before any success or terminal outcome is committed. They are also
 resampled after ledger and
@@ -162,6 +163,9 @@ percent-encoded, and mixed percent-encoded forms. Marker count and aggregate
 bytes are bounded. Decoded
 JSON string values are scanned directly and after Base64 decoding, including
 strings whose marker bytes require JSON escaping.
+Decoded JSON keys and values across the complete syntactic envelope are scanned
+before duplicate-member, typed-envelope, signature, or binding validation, so
+schema-invalid and substituted envelopes cannot hide escaped confidential data.
 Secret-labelled state is denied. Fields not in the closed response schema,
 wrong JSON types, observations captured before the signed request or stale or
 future observations, substituted signatures or

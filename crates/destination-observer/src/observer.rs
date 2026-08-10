@@ -17,6 +17,7 @@ use crate::crypto::{
     sign_receipt, verify_destination_state, verify_observation_receipt, verify_request,
 };
 use crate::store::{ClaimResult, ObserverStore, validate_temporal};
+use crate::strict_json::collect_decoded_json_strings;
 use crate::{
     CONFIG_SCHEMA_VERSION, Confidentiality, DESTINATION_STATE_SCHEMA_VERSION, ObservationReceipt,
     ObservationRequest, ObserverConfig, ObserverError, PROTOCOL_VERSION, RECEIPT_SCHEMA_VERSION,
@@ -451,16 +452,6 @@ impl DestinationObserver {
         let declared_oversized = response
             .content_length()
             .is_some_and(|size| size > self.config.limits.max_response_bytes as u64);
-        if declared_oversized && matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
-        {
-            return Err(ObserverError::DestinationUnauthorized);
-        }
-        if declared_oversized && status != StatusCode::OK {
-            return Err(ObserverError::DestinationUnavailable);
-        }
-        if declared_oversized {
-            return Err(ObserverError::OversizedResponse);
-        }
         let mut raw = Vec::new();
         while let Some(chunk) = response
             .chunk()
@@ -475,20 +466,23 @@ impl DestinationObserver {
             let admitted = chunk.len().min(remaining);
             raw.extend_from_slice(&chunk[..admitted]);
             if chunk.len() > remaining {
-                if contains_secret(&raw, &self.secret_markers) {
+                if contains_secret_in_response_json(&raw, &self.secret_markers) {
                     return Err(ObserverError::ConfidentialityDenied);
                 }
-                if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-                    return Err(ObserverError::DestinationUnauthorized);
+                return Err(oversized_response_error(status));
+            }
+            if declared_oversized && raw.len() == self.config.limits.max_response_bytes {
+                if contains_secret_in_response_json(&raw, &self.secret_markers) {
+                    return Err(ObserverError::ConfidentialityDenied);
                 }
-                if status != StatusCode::OK {
-                    return Err(ObserverError::DestinationUnavailable);
-                }
-                return Err(ObserverError::OversizedResponse);
+                return Err(oversized_response_error(status));
             }
         }
-        if contains_secret(&raw, &self.secret_markers) {
+        if contains_secret_in_response_json(&raw, &self.secret_markers) {
             return Err(ObserverError::ConfidentialityDenied);
+        }
+        if declared_oversized {
+            return Err(oversized_response_error(status));
         }
         if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
             return Err(ObserverError::DestinationUnauthorized);
@@ -1072,6 +1066,35 @@ fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
             .is_some_and(|decoded| contains_secret_representation(&decoded, markers))
 }
 
+fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
+    contains_secret(raw, markers)
+        || collect_decoded_json_strings(raw)
+            .iter()
+            .any(|value| contains_secret_in_decoded_string(value, markers))
+}
+
+fn contains_secret_in_decoded_string(value: &str, markers: &[Vec<u8>]) -> bool {
+    if contains_secret(value.as_bytes(), markers) {
+        return true;
+    }
+    BASE64
+        .decode(value)
+        .or_else(|_| BASE64_NO_PAD.decode(value))
+        .or_else(|_| BASE64_URL_SAFE.decode(value))
+        .or_else(|_| BASE64_URL_SAFE_NO_PAD.decode(value))
+        .is_ok_and(|decoded| contains_secret(&decoded, markers))
+}
+
+fn oversized_response_error(status: StatusCode) -> ObserverError {
+    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        ObserverError::DestinationUnauthorized
+    } else if status != StatusCode::OK {
+        ObserverError::DestinationUnavailable
+    } else {
+        ObserverError::OversizedResponse
+    }
+}
+
 fn contains_secret_representation(raw: &[u8], markers: &[Vec<u8>]) -> bool {
     markers.iter().any(|marker| {
         let lowercase_hex = hex(marker);
@@ -1126,21 +1149,7 @@ fn contains_secret_in_json(
     markers: &[Vec<u8>],
 ) -> Result<bool, ObserverError> {
     match value {
-        serde_json::Value::String(value) => {
-            if contains_secret(value.as_bytes(), markers) {
-                return Ok(true);
-            }
-            if let Ok(decoded) = BASE64
-                .decode(value)
-                .or_else(|_| BASE64_NO_PAD.decode(value))
-                .or_else(|_| BASE64_URL_SAFE.decode(value))
-                .or_else(|_| BASE64_URL_SAFE_NO_PAD.decode(value))
-            {
-                Ok(contains_secret(&decoded, markers))
-            } else {
-                Ok(false)
-            }
-        }
+        serde_json::Value::String(value) => Ok(contains_secret_in_decoded_string(value, markers)),
         serde_json::Value::Array(values) => {
             for value in values {
                 if contains_secret_in_json(value, markers)? {
