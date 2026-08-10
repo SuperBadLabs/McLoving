@@ -5444,10 +5444,46 @@ mod tests {
     }
 
     #[test]
-    fn generated_archive_markers_are_denied_before_publication() {
+    fn generated_archive_marker_spanning_header_and_payload_is_denied_before_publication() {
         let fixture = Fixture::new();
-        let store =
-            fixture.store_with_markers(vec![fixture.receipt_key.clone(), b"manifest".to_vec()]);
+        let node = &fixture.plan.nodes[0];
+        let retained = RetainedArtifact {
+            node_id: node.node_id.clone(),
+            relative_path: format!("artifacts/{}", node.sha256),
+            size: node.declared_size,
+            sha256: node.sha256.clone(),
+            attestation_sha256: fixture.fetched[0].attestation_sha256.clone(),
+            publication_generation: fixture.fetched[0].publication_generation,
+        };
+        let resolution_id = Uuid::parse_str(&fixture.request.resolution_id).expect("resolution id");
+        let header = ResolutionArchiveHeader {
+            schema_version: ARCHIVE_SCHEMA.to_owned(),
+            manifest: ResolutionManifest {
+                schema_version: MANIFEST_SCHEMA.to_owned(),
+                resolution_id,
+                request_sha256: fixture.admitted.request_sha256.clone(),
+                graph_sha256: fixture.plan.graph_sha256.clone(),
+                artifacts: vec![retained],
+            },
+            entries: vec![ResolutionArchiveEntry {
+                relative_path: format!("artifacts/{}", node.sha256),
+                payload_offset: 0,
+                size: node.declared_size,
+                sha256: node.sha256.clone(),
+            }],
+        };
+        let header_bytes = serde_json::to_vec(&header).expect("archive header");
+        let mut prefix = (header_bytes.len() as u64).to_be_bytes().to_vec();
+        prefix.extend_from_slice(&header_bytes);
+        let body = std::fs::read(
+            PathBuf::from(&fixture.config.transport_root).join(&fixture.fetched[0].transient_path),
+        )
+        .expect("transport archive");
+        let mut marker = prefix[prefix.len() - 16..].to_vec();
+        marker.extend_from_slice(&body[..16]);
+        assert!(!contains_bytes(&prefix, &marker));
+        assert!(!contains_bytes(&body, &marker));
+        let store = fixture.store_with_markers(vec![fixture.receipt_key.clone(), marker]);
         let claim = match store
             .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
             .expect("claim before generated archive")
@@ -5464,7 +5500,7 @@ mod tests {
                 &fixture.fetched,
                 Instant::now() + std::time::Duration::from_secs(60),
             )
-            .expect_err("generated archive marker");
+            .expect_err("marker spanning archive header and payload");
         assert_eq!(error.code, "DEP_STORE_SECRET_MARKER_DETECTED");
         assert!(!store.bundle_path(claim.resolution_id).exists());
         assert!(!store.receipt_path(claim.resolution_id).exists());

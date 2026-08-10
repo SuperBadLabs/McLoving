@@ -307,7 +307,18 @@ impl HttpTransport {
             .await
         {
             Ok(fetched) => {
-                run_before_deadline(deadline, archive.sync_all()).await?;
+                if let Err(error) =
+                    sync_transport_archive_before_deadline(deadline, &archive, &archive_path).await
+                {
+                    drop(archive);
+                    if Instant::now() >= deadline {
+                        self.preserve_cleanup_ambiguity();
+                        return Err(error);
+                    }
+                    self.cleanup_resolution_before_deadline(&pending, deadline)
+                        .await?;
+                    return Err(error);
+                }
                 drop(archive);
                 substitute_transient_after_sync_for_test(&archive_path)?;
                 match verify_transient_archive(&archive_path, &fetched, deadline).await {
@@ -541,6 +552,39 @@ thread_local! {
     static TRANSIENT_FIFO_SUBSTITUTION: std::cell::RefCell<Option<PathBuf>> = const {
         std::cell::RefCell::new(None)
     };
+    static TRANSIENT_SYNC_FAILURE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+async fn sync_transport_archive_before_deadline(
+    deadline: Instant,
+    archive: &tokio::fs::File,
+    path: &Path,
+) -> Result<(), TransportError> {
+    let fail = TRANSIENT_SYNC_FAILURE.with(|target| {
+        target
+            .borrow_mut()
+            .take_if(|configured| configured.file_name() == path.file_name())
+            .is_some()
+    });
+    if fail {
+        return Err(TransportError::new(
+            "DEP_TRANSPORT_IO_FAILED",
+            "transport archive synchronization failed",
+        ));
+    }
+    run_before_deadline(deadline, archive.sync_all()).await
+}
+
+#[cfg(not(test))]
+async fn sync_transport_archive_before_deadline(
+    deadline: Instant,
+    archive: &tokio::fs::File,
+    _path: &Path,
+) -> Result<(), TransportError> {
+    run_before_deadline(deadline, archive.sync_all()).await
 }
 
 #[cfg(test)]
@@ -1856,6 +1900,141 @@ mod tests {
                 server,
             }
         }
+
+        async fn with_cross_artifact_marker() -> Self {
+            let key = Arc::new(
+                Ed25519KeyPair::from_seed_unchecked(&[9_u8; 32]).expect("contained Ed25519 key"),
+            );
+            let artifact_specs = [
+                (
+                    "com.example:first:jar",
+                    "com/example/first/1.0.0/first.jar",
+                    b"first-body-boundary-prefix".to_vec(),
+                ),
+                (
+                    "com.example:second:jar",
+                    "com/example/second/1.0.0/second.jar",
+                    b"second-body-boundary-suffix".to_vec(),
+                ),
+            ];
+            let mut bodies = BTreeMap::new();
+            let mut nodes = artifact_specs
+                .into_iter()
+                .map(|(coordinate, artifact_path, body)| {
+                    let mut node = PackageNode {
+                        node_id: String::new(),
+                        coordinate: coordinate.to_owned(),
+                        exact_version: "1.0.0".to_owned(),
+                        repository_id: "contained-maven".to_owned(),
+                        artifact_path: artifact_path.to_owned(),
+                        declared_size: body.len() as u64,
+                        sha256: format!("{:x}", Sha256::digest(&body)),
+                        attestation_key_id: Some("contained-key".to_owned()),
+                        dependencies: Vec::new(),
+                    };
+                    node.node_id = canonical_node_id(Ecosystem::Maven, &node).expect("node id");
+                    bodies.insert(node.artifact_path.clone(), body);
+                    node
+                })
+                .collect::<Vec<_>>();
+            nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+            let first = bodies
+                .get(&nodes[0].artifact_path)
+                .expect("first sorted artifact body");
+            let second = bodies
+                .get(&nodes[1].artifact_path)
+                .expect("second sorted artifact body");
+            let mut marker = first[first.len() - 8..].to_vec();
+            marker.extend_from_slice(&second[..8]);
+            assert!(!contains_marker(first, std::slice::from_ref(&marker)));
+            assert!(!contains_marker(second, std::slice::from_ref(&marker)));
+
+            let mut app = Router::new();
+            for node in &nodes {
+                let state = RepositoryState {
+                    node: node.clone(),
+                    body: bodies
+                        .get(&node.artifact_path)
+                        .expect("artifact body")
+                        .clone(),
+                    key: Arc::clone(&key),
+                    authorization: b"Bearer contained-credential".to_vec(),
+                    repository_header: "contained-maven".to_owned(),
+                    generation: 7,
+                    corrupt_signature: false,
+                    delay: Duration::ZERO,
+                };
+                app = app.merge(
+                    Router::new()
+                        .route(
+                            &format!("/repository/{}", node.artifact_path),
+                            get(artifact),
+                        )
+                        .with_state(state),
+                );
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("loopback listener");
+            let address = listener.local_addr().expect("listener address");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.expect("repository server");
+            });
+            let root = TempDir::new().expect("transport root");
+            let mut authorization = HeaderValue::from_static("Bearer contained-credential");
+            authorization.set_sensitive(true);
+            let repository = RepositoryRuntime {
+                base_url: Url::parse(&format!("http://{address}/repository/"))
+                    .expect("repository URL"),
+                client: Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .retry(reqwest::retry::never())
+                    .no_proxy()
+                    .build()
+                    .expect("contained client"),
+                authorization: Some(authorization),
+                attestation_key_id: "contained-key".to_owned(),
+                attestation_key: key.public_key().as_ref().to_vec(),
+            };
+            let roots = nodes.iter().map(|node| node.node_id.clone()).collect();
+            let mut plan = CanonicalPlan {
+                schema_version: "mcloving.dependency-plan/v1".to_owned(),
+                ecosystem: Ecosystem::Maven,
+                adapter_id: "maven-v1".to_owned(),
+                adapter_sha256: "a".repeat(64),
+                source_tree_sha256: "b".repeat(64),
+                lock_sha256: "c".repeat(64),
+                resolver_toolchain_id: "contained-toolchain".to_owned(),
+                resolver_toolchain_sha256: "d".repeat(64),
+                source_trust_class: SourceTrustClass::Trusted,
+                repositories: vec![RepositoryBinding {
+                    repository_id: "contained-maven".to_owned(),
+                    credentialed: true,
+                    permits_untrusted_source: false,
+                }],
+                roots,
+                nodes,
+                graph_sha256: String::new(),
+            };
+            plan.graph_sha256 = canonical_graph_sha256(&plan).expect("graph digest");
+            let transport = HttpTransport {
+                generation: 7,
+                max_header_bytes: 16_384,
+                max_artifact_bytes: 1_048_576,
+                max_total_artifact_bytes: 1_048_576,
+                transport_root: root.path().to_path_buf(),
+                markers: vec![marker],
+                repositories: BTreeMap::from([("contained-maven".to_owned(), repository)]),
+                cleanup_poisoned: AtomicBool::new(false),
+                _lease: None,
+            };
+            Self {
+                _root: root,
+                transport,
+                plan,
+                server,
+            }
+        }
     }
 
     impl Drop for TransportFixture {
@@ -2157,15 +2336,63 @@ mod tests {
         assert_eq!(error.code, "DEP_TRANSPORT_HEADER_DENIED");
     }
 
-    #[test]
-    fn secret_marker_spanning_body_chunks_or_artifact_slices_is_denied() {
-        let markers = vec![b"cross-chunk-secret".to_vec()];
-        let mut scanner = MarkerScanner::new(&markers);
-        scanner
-            .scan(b"prefix-cross-chunk-")
-            .expect("partial marker");
-        let error = scanner.scan(b"secret-suffix").expect_err("spanning marker");
+    #[tokio::test]
+    async fn secret_marker_spanning_adjacent_artifacts_is_denied_by_the_real_plan_wiring() {
+        let fixture = TransportFixture::with_cross_artifact_marker().await;
+        let resolution_id = Uuid::new_v4();
+        let transient = fixture
+            ._root
+            .path()
+            .join(format!(".{resolution_id}.transport"));
+        let error = fixture
+            .transport
+            .fetch_plan(
+                resolution_id,
+                &fixture.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("marker spanning adjacent artifacts");
         assert_eq!(error.code, "DEP_TRANSPORT_SECRET_MARKER");
+        assert!(!transient.exists());
+        fixture
+            .transport
+            .ensure_available()
+            .expect("exact cleanup keeps transport available");
+    }
+
+    #[tokio::test]
+    async fn final_archive_sync_failure_removes_the_exact_transport_file() {
+        let fixture = TransportFixture::new(
+            b"artifact".to_vec(),
+            vec![b"unrelated-marker".to_vec()],
+            "contained-maven",
+            false,
+        )
+        .await;
+        let resolution_id = Uuid::new_v4();
+        let transient = fixture
+            ._root
+            .path()
+            .join(format!(".{resolution_id}.transport"));
+        TRANSIENT_SYNC_FAILURE.with(|target| {
+            *target.borrow_mut() = Some(transient.clone());
+        });
+        let error = fixture
+            .transport
+            .fetch_plan(
+                resolution_id,
+                &fixture.plan,
+                Instant::now() + Duration::from_secs(2),
+            )
+            .await
+            .expect_err("final transport sync failure");
+        assert_eq!(error.code, "DEP_TRANSPORT_IO_FAILED");
+        assert!(!transient.exists());
+        fixture
+            .transport
+            .ensure_available()
+            .expect("exact cleanup keeps transport available");
     }
 
     #[tokio::test]
