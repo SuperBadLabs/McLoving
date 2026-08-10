@@ -328,7 +328,10 @@ checks by crossing either boundary. Final archive synchronization failure is
 not a direct return: before the absolute deadline it removes and synchronizes
 the exact retained archive inode; at or beyond the deadline, or if exact cleanup
 cannot be proven, it poisons transport state and requires reconciliation after
-restart.
+restart. Once exclusive creation links the archive, any failure to inspect the
+archive or pinned-root metadata, or any invalid device/inode relationship,
+likewise poisons transport state before returning; an unknown identity is never
+treated as safe to remove or safe for later requests to ignore.
 
 Publication copies the verified slices into one unique regular staging archive,
 synchronizes and seals that inode to mode `0400`, and publishes it by atomic
