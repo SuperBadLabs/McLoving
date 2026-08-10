@@ -1472,6 +1472,10 @@ impl ResolutionStore {
         let mut prefix = Vec::with_capacity(8 + header_bytes.len());
         prefix.extend_from_slice(&(header_bytes.len() as u64).to_be_bytes());
         prefix.extend_from_slice(&header_bytes);
+        let mut archive_guard = SerializedOutputGuard::new(&self.inner.marker_set);
+        if !archive_guard.admit(&prefix) {
+            return Err(secret_marker_error());
+        }
         let mut stage_file = write_new_file(stage, &prefix)?;
         let stage_identity = directory_device_inode(&stage_file)?;
         let staging = (|| {
@@ -1482,6 +1486,7 @@ impl ResolutionStore {
                     &mut stage_file,
                     size,
                     &sha256,
+                    &mut archive_guard,
                 )?;
             }
             #[cfg(unix)]
@@ -1735,10 +1740,7 @@ impl ResolutionStore {
                 || semantic_value_contains_marker(&first_semantic, marker)
                 || semantic_value_contains_marker(&second_semantic, marker)
         }) {
-            return Err(StoreError::new(
-                "DEP_STORE_SECRET_MARKER_DETECTED",
-                "dependency resolution state contains a configured secret marker",
-            ));
+            return Err(secret_marker_error());
         }
         Ok(())
     }
@@ -3497,6 +3499,7 @@ fn append_archive_slice(
     destination: &mut File,
     size: u64,
     expected_sha256: &str,
+    marker_guard: &mut SerializedOutputGuard,
 ) -> Result<(), StoreError> {
     let mut source = source.try_clone().map_err(|_| state_error())?;
     source
@@ -3514,6 +3517,9 @@ fn append_archive_slice(
         if read == 0 {
             return Err(state_error());
         }
+        if !marker_guard.admit(&buffer[..read]) {
+            return Err(secret_marker_error());
+        }
         destination
             .write_all(&buffer[..read])
             .map_err(|_| state_error())?;
@@ -3527,6 +3533,13 @@ fn append_archive_slice(
         ));
     }
     Ok(())
+}
+
+fn secret_marker_error() -> StoreError {
+    StoreError::new(
+        "DEP_STORE_SECRET_MARKER_DETECTED",
+        "dependency resolution state contains a configured secret marker",
+    )
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -5428,6 +5441,34 @@ mod tests {
                 .is_none(),
             "secret-bearing request must not create a durable claim"
         );
+    }
+
+    #[test]
+    fn generated_archive_markers_are_denied_before_publication() {
+        let fixture = Fixture::new();
+        let store =
+            fixture.store_with_markers(vec![fixture.receipt_key.clone(), b"manifest".to_vec()]);
+        let claim = match store
+            .claim_or_replay(&fixture.request, &fixture.admitted, &fixture.plan)
+            .expect("claim before generated archive")
+        {
+            ClaimOutcome::New(claim) => claim,
+            other => panic!("unexpected claim outcome: {other:?}"),
+        };
+        let error = store
+            .publish(
+                &claim,
+                fixture.request.clone(),
+                &fixture.admitted,
+                fixture.plan.clone(),
+                &fixture.fetched,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .expect_err("generated archive marker");
+        assert_eq!(error.code, "DEP_STORE_SECRET_MARKER_DETECTED");
+        assert!(!store.bundle_path(claim.resolution_id).exists());
+        assert!(!store.receipt_path(claim.resolution_id).exists());
+        assert!(!store.completion_path(claim.resolution_id).exists());
     }
 
     #[test]

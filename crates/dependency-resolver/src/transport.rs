@@ -389,6 +389,7 @@ impl HttpTransport {
     ) -> Result<Vec<FetchedArtifact>, TransportError> {
         let mut total = 0_u64;
         let mut fetched = Vec::with_capacity(plan.nodes.len());
+        let mut scanner = MarkerScanner::new(&self.markers);
         for node in &plan.nodes {
             total = total.checked_add(node.declared_size).ok_or_else(|| {
                 TransportError::new(
@@ -407,6 +408,7 @@ impl HttpTransport {
                     plan.ecosystem,
                     node,
                     deadline,
+                    &mut scanner,
                     TransportArchiveWriter {
                         file: archive,
                         name: archive_name,
@@ -425,6 +427,7 @@ impl HttpTransport {
         ecosystem: crate::Ecosystem,
         node: &PackageNode,
         deadline: Instant,
+        scanner: &mut MarkerScanner<'_>,
         archive: TransportArchiveWriter<'_>,
     ) -> Result<FetchedArtifact, TransportError> {
         let repository = self.repositories.get(&node.repository_id).ok_or_else(|| {
@@ -496,7 +499,6 @@ impl HttpTransport {
         let mut response = response;
         let mut hasher = Sha256::new();
         let mut received = 0_u64;
-        let mut scanner = MarkerScanner::new(&self.markers);
         while let Some(chunk) = run_before_deadline(deadline, response.chunk()).await? {
             received = received.checked_add(chunk.len() as u64).ok_or_else(|| {
                 TransportError::new("DEP_TRANSPORT_SIZE_MISMATCH", "artifact size overflowed")
@@ -2156,7 +2158,7 @@ mod tests {
     }
 
     #[test]
-    fn secret_marker_spanning_body_chunks_is_denied() {
+    fn secret_marker_spanning_body_chunks_or_artifact_slices_is_denied() {
         let markers = vec![b"cross-chunk-secret".to_vec()];
         let mut scanner = MarkerScanner::new(&markers);
         scanner
