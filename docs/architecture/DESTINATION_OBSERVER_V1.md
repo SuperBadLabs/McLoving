@@ -81,9 +81,10 @@ substituted bindings, or invalid signatures fail before network access.
 Configuration values that cross the request, destination, or receipt boundary
 are scanned against every secret marker and its encoded forms before the ledger
 opens. Whole configuration, query, audit, header, trailer, JSON-key, and
-JSON-value strings are decoded as standard and URL-safe Base64, padded and
-unpadded, before scanning. Percent decoding repeats for at most 16 nested
-layers; further encoded nesting fails closed.
+JSON-value strings are scanned through at most 16 successive reversible
+decoding layers. Each layer accepts percent encoding or standard and URL-safe
+Base64, padded or unpadded, so mixed and repeatedly Base64-encoded values are
+covered; further reversible nesting fails closed.
 Configuration admission rejects query-key names beyond the request-protocol
 bound and header budgets too small for the mandatory JSON response header.
 It also proves that the largest legal signed request fits the complete NDJSON
@@ -204,9 +205,9 @@ classification, and the complete raw response and decoded JSON are checked
 against the configured secret markers and their standard and URL-safe padded
 and unpadded Base64 plus per-nibble case-insensitive hexadecimal, fully
 percent-encoded, and mixed percent-encoded forms. Marker count and aggregate
-bytes are bounded. Decoded
-JSON string values are scanned directly and after Base64 decoding, including
-strings whose marker bytes require JSON escaping.
+bytes are bounded. Decoded JSON string values are scanned directly and through
+the same bounded reversible-decoding fixed point, including strings whose
+marker bytes require JSON escaping.
 Decoded JSON string literals across the complete bounded buffer are scanned
 even after a prior syntax error or complete JSON value, and keys and values in
 the complete syntactic envelope are scanned
