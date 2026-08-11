@@ -968,15 +968,24 @@ async fn rate_limit_rejection_releases_a_fresh_destination_claim() {
 
     let mut rejected = rig.request(ObservationPhase::PreAction);
     rejected.expected_config_sha256 = observer.config_sha256().to_owned();
+    let rejected = rig.prepare(rejected);
     assert_eq!(
-        observer.observe_at(rig.prepare(rejected), NOW).await,
+        observer.observe_at(rejected.clone(), NOW).await,
         Err(ObserverError::CapacityExceeded)
     );
     let connection = rusqlite::Connection::open(&database_path).unwrap();
-    let pending: u64 = connection
-        .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
+    let status: String = connection
+        .query_row("SELECT status FROM observations", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(pending, 0);
+    assert_eq!(status, "rate_limited");
+
+    let mut substituted = rejected;
+    substituted.audit_provenance = "audit/substituted-after-rate-limit".to_owned();
+    sign_observation_request(&mut substituted, &rig.request_seed).unwrap();
+    assert_eq!(
+        observer.observe_at(substituted, NOW).await,
+        Err(ObserverError::ReplayMismatch)
+    );
     connection
         .execute("DELETE FROM request_attempts", [])
         .unwrap();

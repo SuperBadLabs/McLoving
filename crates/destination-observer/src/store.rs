@@ -77,7 +77,7 @@ impl ObserverStore {
                    destination_scope_sha256 TEXT NOT NULL,
                    request_sha256 TEXT NOT NULL,
                    phase TEXT NOT NULL,
-                   status TEXT NOT NULL CHECK(status IN ('pending', 'complete', 'failed')),
+                   status TEXT NOT NULL CHECK(status IN ('pending', 'rate_limited', 'complete', 'failed')),
                    retry_count INTEGER NOT NULL,
                    created_at_ms INTEGER NOT NULL,
                    expires_at_ms INTEGER NOT NULL,
@@ -192,7 +192,7 @@ impl ObserverStore {
         if had_active && !exact_active && config.activation_mode != ActivationMode::Current {
             transaction
                 .execute(
-                    "UPDATE observations SET status='failed', failure_code='runtime_fenced' WHERE status='pending'",
+                    "UPDATE observations SET status='failed', failure_code='runtime_fenced' WHERE status IN ('pending', 'rate_limited')",
                     [],
                 )
                 .map_err(|_| ObserverError::StateUnavailable)?;
@@ -287,11 +287,11 @@ impl ObserverStore {
                     Ok(Some(Box::new(receipt)))
                 }
                 "failed" => Err(error_from_code(existing.failure_code.as_deref())),
-                "pending" => {
+                "pending" | "rate_limited" => {
                     if let Err(error) = validate_temporal(config, request, now_ms) {
                         transaction
                             .execute(
-                                "UPDATE observations SET status='failed', failure_code=?2 WHERE observation_id=?1 AND request_sha256=?3 AND status='pending'",
+                                "UPDATE observations SET status='failed', failure_code=?2 WHERE observation_id=?1 AND request_sha256=?3 AND status IN ('pending', 'rate_limited')",
                                 params![request.observation_id.to_string(), error.code(), request_sha256],
                             )
                             .map_err(|_| ObserverError::StateUnavailable)?;
@@ -394,7 +394,7 @@ impl ObserverStore {
             if let Err(error) = validate_temporal(config, request, claim_at_ms) {
                 transaction
                     .execute(
-                        "UPDATE observations SET status='failed', failure_code=?2 WHERE observation_id=?1 AND status='pending'",
+                        "UPDATE observations SET status='failed', failure_code=?2 WHERE observation_id=?1 AND status IN ('pending', 'rate_limited')",
                         params![request.observation_id.to_string(), error.code()],
                     )
                     .map_err(|_| ObserverError::StateUnavailable)?;
@@ -403,12 +403,21 @@ impl ObserverStore {
                     .map_err(|_| ObserverError::StateUnavailable)?;
                 return Err(error);
             }
+            let fresh = match existing.status.as_str() {
+                "pending" => false,
+                "rate_limited" => {
+                    enforce_receipt_capacity(&transaction, config)?;
+                    enforce_phase(&transaction, request, scope_sha256)?;
+                    true
+                }
+                _ => return Err(ObserverError::StateUnavailable),
+            };
             transaction
                 .commit()
                 .map_err(|_| ObserverError::StateUnavailable)?;
             return Ok(ClaimResult::Claimed {
                 retry_count: existing.retry_count,
-                fresh: false,
+                fresh,
             });
         }
 
@@ -472,7 +481,7 @@ impl ObserverStore {
         if let Err(error) = validate_temporal(config, request, dispatch_at_ms) {
             let changed = transaction
                 .execute(
-                    "UPDATE observations SET status='failed', failure_code=?3 WHERE observation_id=?1 AND request_sha256=?2 AND status='pending'",
+                    "UPDATE observations SET status='failed', failure_code=?3 WHERE observation_id=?1 AND request_sha256=?2 AND status IN ('pending', 'rate_limited')",
                     params![request.observation_id.to_string(), request_sha256, error.code()],
                 )
                 .map_err(|_| ObserverError::StateUnavailable)?;
@@ -484,11 +493,32 @@ impl ObserverStore {
                 .map_err(|_| ObserverError::StateUnavailable)?;
             return Err(error);
         }
+        if fresh_claim {
+            let changed = transaction
+                .execute(
+                    "UPDATE observations SET status='pending', failure_code=NULL WHERE observation_id=?1 AND request_sha256=?2 AND status IN ('pending', 'rate_limited')",
+                    params![request.observation_id.to_string(), request_sha256],
+                )
+                .map_err(|error| {
+                    if matches!(
+                        &error,
+                        rusqlite::Error::SqliteFailure(failure, _)
+                            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+                    ) {
+                        ObserverError::ObservationPending
+                    } else {
+                        ObserverError::StateUnavailable
+                    }
+                })?;
+            if changed != 1 {
+                return Err(ObserverError::ReplayMismatch);
+            }
+        }
         if let Err(error) = reserve_request_attempt(&transaction, config, dispatch_at_ms) {
             if fresh_claim && matches!(error, ObserverError::CapacityExceeded) {
                 let changed = transaction
                     .execute(
-                        "DELETE FROM observations WHERE observation_id=?1 AND request_sha256=?2 AND status='pending'",
+                        "UPDATE observations SET status='rate_limited', failure_code='capacity_exceeded' WHERE observation_id=?1 AND request_sha256=?2 AND status='pending'",
                         params![request.observation_id.to_string(), request_sha256],
                     )
                     .map_err(|_| ObserverError::StateUnavailable)?;
@@ -811,7 +841,7 @@ fn prune_terminal_observations(
     transaction
         .execute(
             "DELETE FROM observations
-             WHERE status IN ('complete', 'failed') AND expires_at_ms < ?1",
+             WHERE status IN ('rate_limited', 'complete', 'failed') AND expires_at_ms < ?1",
             [cutoff],
         )
         .map_err(|_| ObserverError::StateUnavailable)?;
