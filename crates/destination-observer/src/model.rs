@@ -87,10 +87,18 @@ pub struct ObserverLimits {
     pub max_requests_per_minute: usize,
     pub max_evidence_bytes: u64,
     pub max_receipts: usize,
-    pub max_observations: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_observations: Option<usize>,
     pub timeout_ms: u64,
     pub max_age_ms: i64,
     pub retry_attempts: u8,
+}
+
+impl ObserverLimits {
+    pub(crate) fn effective_max_observations(&self) -> usize {
+        self.max_observations
+            .unwrap_or_else(|| self.max_receipts.saturating_mul(2))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
