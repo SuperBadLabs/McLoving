@@ -1140,6 +1140,8 @@ fn maximum_receipt_envelope_fits(
     config_sha256: &str,
     implementation_sha256: &str,
 ) -> bool {
+    let (previous_generation, rollback_from_generation) =
+        maximum_activation_generations(config.activation_mode);
     let maximum_query_value = "\0".repeat(MAX_QUERY_VALUE_BYTES);
     let canonical_query: BTreeMap<String, String> = config
         .allowed_query_keys
@@ -1173,8 +1175,8 @@ fn maximum_receipt_envelope_fits(
         request_authority_identity: config.request_authority_identity.clone(),
         generation: u64::MAX,
         activation_mode: config.activation_mode,
-        previous_generation: Some(u64::MAX),
-        rollback_from_generation: Some(u64::MAX),
+        previous_generation,
+        rollback_from_generation,
         endpoint_identity: config.endpoint_identity.clone(),
         account_identity: config.account_identity.clone(),
         resource_identity: config.resource_identity.clone(),
@@ -1203,6 +1205,14 @@ fn maximum_receipt_envelope_fits(
         signature_base64: "A".repeat(88),
     };
     crate::standalone::observed_response_fits(&maximum)
+}
+
+const fn maximum_activation_generations(mode: crate::ActivationMode) -> (Option<u64>, Option<u64>) {
+    match mode {
+        crate::ActivationMode::Current => (None, None),
+        crate::ActivationMode::Cutover => (Some(u64::MAX), None),
+        crate::ActivationMode::Rollback => (Some(u64::MAX), Some(u64::MAX)),
+    }
 }
 
 fn maximum_schema_state_for_response(config: &ObserverConfig) -> Option<serde_json::Value> {
@@ -1566,5 +1576,21 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-a", HeaderValue::from_static("bc"));
         assert_eq!(header_wire_bytes(&headers), Ok(11));
+    }
+
+    #[test]
+    fn receipt_size_model_uses_only_mode_legal_generation_fields() {
+        assert_eq!(
+            maximum_activation_generations(crate::ActivationMode::Current),
+            (None, None)
+        );
+        assert_eq!(
+            maximum_activation_generations(crate::ActivationMode::Cutover),
+            (Some(u64::MAX), None)
+        );
+        assert_eq!(
+            maximum_activation_generations(crate::ActivationMode::Rollback),
+            (Some(u64::MAX), Some(u64::MAX))
+        );
     }
 }

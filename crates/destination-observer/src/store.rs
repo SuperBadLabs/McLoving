@@ -57,10 +57,10 @@ impl ObserverStore {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(|_| ObserverError::StateUnavailable)?;
+        enable_wal(&connection)?;
         connection
             .execute_batch(
-                "PRAGMA journal_mode=WAL;
-                 PRAGMA synchronous=FULL;
+                "PRAGMA synchronous=FULL;
                  PRAGMA foreign_keys=ON;
                  CREATE TABLE IF NOT EXISTS active_runtime (
                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -666,6 +666,16 @@ impl ObserverStore {
     }
 }
 
+fn enable_wal(connection: &Connection) -> Result<(), ObserverError> {
+    let journal_mode: String = connection
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        return Err(ObserverError::StateUnavailable);
+    }
+    Ok(())
+}
+
 fn assert_active_transaction(
     transaction: &rusqlite::Transaction<'_>,
     generation: u64,
@@ -955,4 +965,18 @@ fn prepare_private_database(_path: &Path) -> Result<(), ObserverError> {
 #[cfg(not(unix))]
 fn validate_private_sidecars(_database_path: &Path) -> Result<(), ObserverError> {
     Err(ObserverError::StateUnavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wal_mode_must_be_confirmed() {
+        let connection = Connection::open_in_memory().unwrap();
+        assert_eq!(
+            enable_wal(&connection),
+            Err(ObserverError::StateUnavailable)
+        );
+    }
 }
