@@ -87,6 +87,7 @@ pub struct ObserverLimits {
     pub max_requests_per_minute: usize,
     pub max_evidence_bytes: u64,
     pub max_receipts: usize,
+    pub max_observations: usize,
     pub timeout_ms: u64,
     pub max_age_ms: i64,
     pub retry_attempts: u8,

@@ -191,6 +191,7 @@ impl Rig {
                 max_requests_per_minute: 100,
                 max_evidence_bytes: 1024 * 1024,
                 max_receipts: 100,
+                max_observations: 200,
                 timeout_ms: 200,
                 max_age_ms: 10_000,
                 retry_attempts: 3,
@@ -1002,6 +1003,57 @@ async fn rate_limit_rejection_releases_a_fresh_destination_claim() {
 }
 
 #[tokio::test]
+async fn retained_observation_quota_bounds_rate_limit_tombstones() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_requests_per_minute = 1;
+    config.limits.max_receipts = 1;
+    config.limits.max_observations = 2;
+    let observer = rig.observer_for_config(config).unwrap();
+    let database_path = state.path().join("observer.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO request_attempts(attempted_at_ms) VALUES(?1)",
+            [NOW],
+        )
+        .unwrap();
+    drop(connection);
+
+    for effect_fence in [18_u64, 19] {
+        let mut request = rig.request(ObservationPhase::PreAction);
+        request.effect_fence = effect_fence;
+        request.expected_config_sha256 = observer.config_sha256().to_owned();
+        assert_eq!(
+            observer.observe_at(rig.prepare(request), NOW).await,
+            Err(ObserverError::CapacityExceeded)
+        );
+    }
+
+    let reads_before = rig.server.reads.load(Ordering::SeqCst);
+    let mut overflow = rig.request(ObservationPhase::PreAction);
+    overflow.effect_fence = 20;
+    overflow.expected_config_sha256 = observer.config_sha256().to_owned();
+    assert_eq!(
+        observer.observe_at(rig.prepare(overflow), NOW).await,
+        Err(ObserverError::CapacityExceeded)
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), reads_before);
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    let retained: u64 = connection
+        .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(retained, 2);
+}
+
+#[tokio::test]
 async fn legacy_preview_rate_tombstone_is_normalized_on_restart() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();
@@ -1415,6 +1467,11 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
             }];
             config
         },
+        {
+            let mut config = rig.config.clone();
+            config.limits.max_observations = config.limits.max_receipts - 1;
+            config
+        },
     ] {
         let state = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -1757,6 +1814,11 @@ async fn grant_expiry_and_credential_or_configuration_substitution_are_denied() 
 
     let empty_ca = rig.directory.path().join("empty-ca.pem");
     fs::write(&empty_ca, b"").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&empty_ca, fs::Permissions::from_mode(0o600)).unwrap();
+    }
     let mut empty_ca_config = rig.config.clone();
     empty_ca_config.endpoint_url = "https://observer.invalid/state".to_owned();
     empty_ca_config.ca_bundle_path = Some(empty_ca);

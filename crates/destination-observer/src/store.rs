@@ -90,7 +90,7 @@ impl ObserverStore {
                    ON observations(destination_scope_sha256) WHERE status = 'pending';
                  UPDATE observations
                    SET status = 'failed', failure_code = 'rate_limited'
-                   WHERE status = 'rate_limited';
+                   WHERE status = 'rate_limited' AND failure_code = 'capacity_exceeded';
                  CREATE TABLE IF NOT EXISTS scope_heads (
                    scope_sha256 TEXT PRIMARY KEY,
                    phase TEXT NOT NULL,
@@ -431,6 +431,12 @@ impl ObserverStore {
         validate_temporal(config, request, claim_at_ms)?;
         enforce_receipt_capacity(&transaction, config)?;
         enforce_phase(&transaction, request, scope_sha256)?;
+        let observation_count: usize = transaction
+            .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        if observation_count >= config.limits.max_observations {
+            return Err(ObserverError::CapacityExceeded);
+        }
         transaction
             .execute(
                 "INSERT INTO observations(observation_id, scope_sha256, destination_scope_sha256, request_sha256, phase, status, retry_count, created_at_ms, expires_at_ms)

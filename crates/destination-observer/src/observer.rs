@@ -96,7 +96,7 @@ impl DestinationObserver {
             .http2_max_header_list_size(MAX_TRANSPORT_HEADER_BYTES as u32)
             .timeout(std::time::Duration::from_millis(config.limits.timeout_ms));
         if let Some(path) = &config.ca_bundle_path {
-            let pem = crate::read_bounded_regular_file(path, 1024 * 1024)?;
+            let pem = crate::read_private_bounded_regular_file(path, 1024 * 1024)?;
             if config.ca_bundle_sha256.as_deref() != Some(content_sha256(&pem).as_str()) {
                 return Err(ObserverError::InvalidConfig);
             }
@@ -859,6 +859,7 @@ fn validate_config(
         || config.limits.max_requests_per_minute == 0
         || config.limits.max_evidence_bytes == 0
         || config.limits.max_receipts == 0
+        || config.limits.max_observations < config.limits.max_receipts
         || config.limits.timeout_ms == 0
         || config.limits.max_age_ms <= 0
         || u64::try_from(config.limits.max_age_ms)
@@ -1043,7 +1044,8 @@ fn minimum_destination_response_fits(config: &ObserverConfig, observed_at_unix_m
     for field in config.response_schema.iter().filter(|field| field.required) {
         let value = match field.kind {
             crate::JsonKind::Array => serde_json::Value::Array(Vec::new()),
-            crate::JsonKind::Boolean => serde_json::Value::Bool(false),
+            // `true` is the shortest schema-valid Boolean representation.
+            crate::JsonKind::Boolean => serde_json::Value::Bool(true),
             crate::JsonKind::Null => serde_json::Value::Null,
             crate::JsonKind::Number => serde_json::json!(0),
             crate::JsonKind::Object => serde_json::Value::Object(serde_json::Map::new()),
@@ -1181,7 +1183,9 @@ fn maximum_receipt_envelope_fits(
     let maximum = ObservationReceipt {
         schema_version: RECEIPT_SCHEMA_VERSION.to_owned(),
         protocol_version: PROTOCOL_VERSION.to_owned(),
-        evidence_sequence: u64::MAX,
+        // SQLite sequence and cursor columns are signed integers. Model the longest values the
+        // successful production path can actually emit, not wider protocol-domain extrema.
+        evidence_sequence: i64::MAX as u64,
         observation_id: Uuid::from_u128(u128::MAX),
         request_sha256: "f".repeat(64),
         tenant_id: Uuid::from_u128(u128::MAX),
@@ -1215,10 +1219,10 @@ fn maximum_receipt_envelope_fits(
         read_grant_version: config.read_grant_version.clone(),
         read_grant_scope: config.read_grant_scope.clone(),
         canonical_query,
-        destination_cursor: u64::MAX,
-        destination_observed_at_unix_ms: i64::MIN,
-        captured_at_unix_ms: i64::MIN,
-        publication_deadline_unix_ms: i64::MIN,
+        destination_cursor: i64::MAX as u64,
+        destination_observed_at_unix_ms: i64::MAX,
+        captured_at_unix_ms: i64::MAX,
+        publication_deadline_unix_ms: i64::MAX,
         state_schema_version: config.state_schema_version.clone(),
         confidentiality: Confidentiality::Internal,
         destination_response_sha256: "f".repeat(64),
@@ -1229,7 +1233,7 @@ fn maximum_receipt_envelope_fits(
             None => return false,
             _ => return false,
         },
-        retry_count: u8::MAX,
+        retry_count: config.limits.retry_attempts,
         audit_provenance: "\0".repeat(MAX_AUDIT_PROVENANCE_BYTES),
         receipt_signing_key_id: config.receipt_signing_key_id.clone(),
         receipt_signing_public_key_sha256: config.receipt_signing_public_key_sha256.clone(),

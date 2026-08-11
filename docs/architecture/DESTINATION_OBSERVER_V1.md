@@ -140,10 +140,13 @@ lease delays immediately before dispatch, so authority that expires while
 waiting cannot cause a GET. Configuration admission requires the transport
 timeout to fit within the freshness window so no in-flight read can outlive its
 terminal tombstone retention basis;
-only complete evidence consumes the receipt-count and evidence-byte quotas.
+Only complete evidence consumes the receipt-count and evidence-byte quotas.
 When either retained quota is already exhausted, admission fails before a GET;
 the atomic finalization check still handles the exact size of the candidate
-receipt.
+receipt. A separate `max_observations` quota bounds all retained observation
+rows, including nonblocking rate-limit tombstones and other terminal failures;
+it must be at least `max_receipts`, and new IDs fail admission before claim
+insertion when the bound is full.
 Replay and new-admission transactions prune complete and failed observations
 whose signed request expiry is more than one freshness window old before they
 serve terminal state or enforce quotas. Compact phase-chain heads and the

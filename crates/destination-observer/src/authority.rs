@@ -96,6 +96,8 @@ fn sha256_open_file(mut file: File) -> Result<String, ObserverError> {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
     use std::time::{Duration, Instant};
 
@@ -124,5 +126,17 @@ mod tests {
             Err(ObserverError::StateUnavailable)
         );
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn private_authority_reader_rejects_group_readable_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let authority = directory.path().join("ca.pem");
+        fs::write(&authority, b"authority").unwrap();
+        fs::set_permissions(&authority, fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(
+            read_private_bounded_regular_file(&authority, 64),
+            Err(ObserverError::StateUnavailable)
+        );
     }
 }
