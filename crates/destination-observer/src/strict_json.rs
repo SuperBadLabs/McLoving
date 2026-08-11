@@ -89,7 +89,29 @@ fn decode_json_string_lossy(bytes: &[u8]) -> String {
                     .try_fold(0_u32, |value, byte| {
                         hex_nibble(*byte).map(|nibble| (value << 4) | u32::from(nibble))
                     });
-                if let Some(character) = value.and_then(char::from_u32) {
+                let surrogate_pair = value
+                    .filter(|value| (0xD800..=0xDBFF).contains(value))
+                    .and_then(|high| {
+                        let low_escape = bytes.get(index + 6..index + 12)?;
+                        if low_escape.get(..2) != Some(br"\u") {
+                            return None;
+                        }
+                        let low = low_escape[2..]
+                            .iter()
+                            .try_fold(0_u32, |value, byte| {
+                                hex_nibble(*byte).map(|nibble| (value << 4) | u32::from(nibble))
+                            })?
+                            .checked_sub(0xDC00)?;
+                        if low > 0x3FF {
+                            return None;
+                        }
+                        char::from_u32(0x10000 + ((high - 0xD800) << 10) + low)
+                    });
+                if let Some(character) = surrogate_pair {
+                    let mut encoded = [0_u8; 4];
+                    decoded.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+                    index += 12;
+                } else if let Some(character) = value.and_then(char::from_u32) {
                     let mut encoded = [0_u8; 4];
                     decoded.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
                     index += 6;
@@ -149,6 +171,12 @@ impl<'de> Visitor<'de> for DuplicateRejectingVisitor {
     fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E> {
         Ok(())
     }
+    fn visit_i128<E>(self, _value: i128) -> Result<Self::Value, E> {
+        Ok(())
+    }
+    fn visit_u128<E>(self, _value: u128) -> Result<Self::Value, E> {
+        Ok(())
+    }
     fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E> {
         Ok(())
     }
@@ -200,7 +228,7 @@ impl<'de> Visitor<'de> for DuplicateRejectingVisitor {
 
 #[cfg(test)]
 mod string_collection_tests {
-    use super::collect_decoded_json_strings;
+    use super::{collect_decoded_json_strings, parse_json_no_duplicates};
 
     #[test]
     fn scans_duplicate_trailing_and_post_error_string_literals() {
@@ -235,5 +263,31 @@ mod string_collection_tests {
                     .any(|value| value.contains("read-only-observer-token"))
             );
         }
+    }
+
+    #[test]
+    fn decodes_non_bmp_surrogate_pairs_for_marker_scanning() {
+        let escaped = br#"{"state":"prefix-\uD83D\uDD11-suffix"}"#;
+        assert!(
+            collect_decoded_json_strings(escaped)
+                .iter()
+                .any(|value| value.contains('🔑'))
+        );
+    }
+
+    #[test]
+    fn duplicate_prepass_accepts_arbitrary_precision_integers() {
+        let value = parse_json_no_duplicates::<serde_json::Value>(
+            br#"{"positive":340282366920938463463374607431768211455,"negative":-170141183460469231731687303715884105728}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            value["positive"].to_string(),
+            "340282366920938463463374607431768211455"
+        );
+        assert_eq!(
+            value["negative"].to_string(),
+            "-170141183460469231731687303715884105728"
+        );
     }
 }
