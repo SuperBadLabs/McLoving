@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::error::ObserverError;
 
 pub const PROTOCOL_VERSION: &str = "mcloving.destination-observer/v1";
-pub const CONFIG_SCHEMA_VERSION: &str = "mcloving.destination-observer-config/v1";
+pub const CONFIG_SCHEMA_VERSION: &str = "mcloving.destination-observer-config/v2";
 pub const REQUEST_SCHEMA_VERSION: &str = "mcloving.destination-observation-request/v1";
 pub const DESTINATION_STATE_SCHEMA_VERSION: &str = "mcloving.destination-state/v1";
 pub const RECEIPT_SCHEMA_VERSION: &str = "mcloving.destination-observation-receipt/v1";
@@ -87,18 +87,10 @@ pub struct ObserverLimits {
     pub max_requests_per_minute: usize,
     pub max_evidence_bytes: u64,
     pub max_receipts: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_observations: Option<usize>,
+    pub max_observations: usize,
     pub timeout_ms: u64,
     pub max_age_ms: i64,
     pub retry_attempts: u8,
-}
-
-impl ObserverLimits {
-    pub(crate) fn effective_max_observations(&self) -> usize {
-        self.max_observations
-            .unwrap_or_else(|| self.max_receipts.saturating_mul(2))
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

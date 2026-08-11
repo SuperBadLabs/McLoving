@@ -434,7 +434,7 @@ impl ObserverStore {
         let observation_count: usize = transaction
             .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
             .map_err(|_| ObserverError::StateUnavailable)?;
-        if observation_count >= config.limits.effective_max_observations() {
+        if observation_count >= config.limits.max_observations {
             return Err(ObserverError::CapacityExceeded);
         }
         transaction

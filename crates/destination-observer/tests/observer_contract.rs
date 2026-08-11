@@ -191,7 +191,7 @@ impl Rig {
                 max_requests_per_minute: 100,
                 max_evidence_bytes: 1024 * 1024,
                 max_receipts: 100,
-                max_observations: Some(200),
+                max_observations: 200,
                 timeout_ms: 200,
                 max_age_ms: 10_000,
                 retry_attempts: 3,
@@ -1015,7 +1015,7 @@ async fn retained_observation_quota_bounds_rate_limit_tombstones() {
     config.state_dir = state.path().to_path_buf();
     config.limits.max_requests_per_minute = 1;
     config.limits.max_receipts = 1;
-    config.limits.max_observations = Some(2);
+    config.limits.max_observations = 2;
     let observer = rig.observer_for_config(config).unwrap();
     let database_path = state.path().join("observer.sqlite3");
     let connection = rusqlite::Connection::open(&database_path).unwrap();
@@ -1469,7 +1469,7 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
         },
         {
             let mut config = rig.config.clone();
-            config.limits.max_observations = Some(config.limits.max_receipts - 1);
+            config.limits.max_observations = config.limits.max_receipts - 1;
             config
         },
     ] {
@@ -1490,27 +1490,17 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
 }
 
 #[tokio::test]
-async fn v1_config_without_observation_quota_remains_canonical_and_valid() {
+async fn v1_config_without_observation_quota_is_explicitly_incompatible() {
     let rig = Rig::new().await;
     let mut legacy_value = serde_json::to_value(&rig.config).unwrap();
+    legacy_value["schema_version"] =
+        serde_json::Value::String("mcloving.destination-observer-config/v1".to_owned());
     legacy_value
         .get_mut("limits")
         .and_then(serde_json::Value::as_object_mut)
         .unwrap()
         .remove("max_observations");
-    let mut legacy: ObserverConfig = serde_json::from_value(legacy_value).unwrap();
-    assert_eq!(legacy.limits.max_observations, None);
-    let round_trip = serde_json::to_value(&legacy).unwrap();
-    assert!(round_trip["limits"].get("max_observations").is_none());
-
-    let state = tempfile::tempdir().unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    legacy.state_dir = state.path().to_path_buf();
-    assert!(rig.observer_for_config(legacy).is_ok());
+    assert!(serde_json::from_value::<ObserverConfig>(legacy_value).is_err());
 }
 
 #[tokio::test]

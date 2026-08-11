@@ -859,10 +859,7 @@ fn validate_config(
         || config.limits.max_requests_per_minute == 0
         || config.limits.max_evidence_bytes == 0
         || config.limits.max_receipts == 0
-        || config
-            .limits
-            .max_observations
-            .is_some_and(|maximum| maximum < config.limits.max_receipts)
+        || config.limits.max_observations < config.limits.max_receipts
         || config.limits.timeout_ms == 0
         || config.limits.max_age_ms <= 0
         || u64::try_from(config.limits.max_age_ms)

@@ -145,10 +145,10 @@ When either retained quota is already exhausted, admission fails before a GET;
 the atomic finalization check still handles the exact size of the candidate
 receipt. A separate `max_observations` quota bounds all retained observation
 rows, including nonblocking rate-limit tombstones and other terminal failures;
-when supplied, it must be at least `max_receipts`, and new IDs fail admission
-before claim insertion when the bound is full. Existing v1 configurations may
-omit it; omission remains absent from canonical serialization and derives the
-bound as twice `max_receipts`, preserving the v1 config digest and upgrade path.
+it must be at least `max_receipts`, and new IDs fail admission before claim
+insertion when the bound is full. This mandatory bound is carried by
+`mcloving.destination-observer-config/v2`; legacy config v1 is explicitly
+incompatible rather than silently acquiring new ledger semantics.
 Replay and new-admission transactions prune complete and failed observations
 whose signed request expiry is more than one freshness window old before they
 serve terminal state or enforce quotas. Compact phase-chain heads and the
