@@ -1395,15 +1395,35 @@ fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
 }
 
 fn contains_secret_value(raw: &[u8], markers: &[Vec<u8>]) -> bool {
-    if contains_secret(raw, markers) {
-        return true;
+    let mut decoded = raw.to_vec();
+    for depth in 0..=16 {
+        if contains_secret_representation(&decoded, markers) {
+            return true;
+        }
+        let next = percent_decode_once(&decoded).or_else(|| base64_decode_once(&decoded));
+        let Some(next) = next else {
+            return false;
+        };
+        if depth == 16 {
+            // Reversible encodings beyond the work bound are denied rather than silently passed.
+            return true;
+        }
+        decoded = next;
+    }
+    false
+}
+
+fn base64_decode_once(raw: &[u8]) -> Option<Vec<u8>> {
+    if raw.is_empty() {
+        return None;
     }
     BASE64
         .decode(raw)
         .or_else(|_| BASE64_NO_PAD.decode(raw))
         .or_else(|_| BASE64_URL_SAFE.decode(raw))
         .or_else(|_| BASE64_URL_SAFE_NO_PAD.decode(raw))
-        .is_ok_and(|decoded| contains_secret(&decoded, markers))
+        .ok()
+        .filter(|decoded| decoded != raw)
 }
 
 fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
@@ -1628,6 +1648,20 @@ mod tests {
         assert!(contains_secret_value(
             BASE64.encode(b"xread-only-observer-token").as_bytes(),
             &[b"read-only-observer-token".to_vec()]
+        ));
+
+        let marker = b"read-only-observer-token";
+        let twice_encoded = BASE64.encode(BASE64.encode(marker));
+        let three_times_encoded = BASE64.encode(twice_encoded);
+        assert!(contains_secret_value(
+            three_times_encoded.as_bytes(),
+            &[marker.to_vec()]
+        ));
+
+        let mixed_encoded = BASE64.encode(percent_encode(BASE64.encode(marker).as_bytes()));
+        assert!(contains_secret_value(
+            mixed_encoded.as_bytes(),
+            &[marker.to_vec()]
         ));
     }
 
