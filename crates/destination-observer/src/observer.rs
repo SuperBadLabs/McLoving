@@ -453,15 +453,17 @@ impl DestinationObserver {
         }) {
             return Err(ObserverError::ConfidentialityDenied);
         }
-        let header_bound =
-            enforce_header_bound(response.headers(), self.config.limits.max_header_bytes);
         let status = response.status();
-        if let Err(error) = header_bound {
-            if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-                return Err(ObserverError::DestinationUnauthorized);
-            }
-            return Err(error);
-        }
+        let header_error =
+            enforce_header_bound(response.headers(), self.config.limits.max_header_bytes)
+                .err()
+                .map(|error| {
+                    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                        ObserverError::DestinationUnauthorized
+                    } else {
+                        error
+                    }
+                });
         let content_types: Vec<_> = response.headers().get_all(CONTENT_TYPE).iter().collect();
         let valid_content_type = content_types.len() == 1
             && content_types[0]
@@ -488,6 +490,9 @@ impl DestinationObserver {
                     }) {
                         return Err(ObserverError::ConfidentialityDenied);
                     }
+                    if let Some(error) = header_error.clone() {
+                        return Err(error);
+                    }
                     // Destination evidence has no trailer authority. Reject every trailing
                     // header block instead of accepting metadata outside the certified initial
                     // header budget and confidentiality scan.
@@ -505,17 +510,26 @@ impl DestinationObserver {
                 if contains_secret_in_response_json(&raw, &self.secret_markers) {
                     return Err(ObserverError::ConfidentialityDenied);
                 }
+                if let Some(error) = header_error.clone() {
+                    return Err(error);
+                }
                 return Err(oversized_response_error(status));
             }
             if declared_oversized && raw.len() == self.config.limits.max_response_bytes {
                 if contains_secret_in_response_json(&raw, &self.secret_markers) {
                     return Err(ObserverError::ConfidentialityDenied);
                 }
+                if let Some(error) = header_error.clone() {
+                    return Err(error);
+                }
                 return Err(oversized_response_error(status));
             }
         }
         if contains_secret_in_response_json(&raw, &self.secret_markers) {
             return Err(ObserverError::ConfidentialityDenied);
+        }
+        if let Some(error) = header_error {
+            return Err(error);
         }
         if declared_oversized {
             return Err(oversized_response_error(status));
@@ -1178,9 +1192,10 @@ fn maximum_receipt_envelope_fits(
         destination_response_sha256: "f".repeat(64),
         destination_signature_base64: "A".repeat(88),
         destination_attestation_key_id: config.destination_attestation_key_id.clone(),
-        // The raw response limit includes the serialized state and its destination envelope, so a
-        // string of this length is a conservative upper bound for state bytes in the receipt.
-        state: serde_json::Value::String("x".repeat(config.limits.max_response_bytes)),
+        state: match maximum_schema_state_for_response(config) {
+            Some(state) => state,
+            None => return false,
+        },
         retry_count: u8::MAX,
         audit_provenance: "\0".repeat(MAX_AUDIT_PROVENANCE_BYTES),
         receipt_signing_key_id: config.receipt_signing_key_id.clone(),
@@ -1188,6 +1203,115 @@ fn maximum_receipt_envelope_fits(
         signature_base64: "A".repeat(88),
     };
     crate::standalone::observed_response_fits(&maximum)
+}
+
+fn maximum_schema_state_for_response(config: &ObserverConfig) -> Option<serde_json::Value> {
+    let mut state = serde_json::Map::new();
+    let mut expandable = None;
+    for field in &config.response_schema {
+        if !field.required {
+            continue;
+        }
+        state.insert(field.name.clone(), minimum_value(field.kind));
+        if expandable.is_none() && is_expandable(field.kind) {
+            expandable = Some((field.name.clone(), field.kind));
+        }
+    }
+    for field in config
+        .response_schema
+        .iter()
+        .filter(|field| !field.required)
+    {
+        let mut candidate = state.clone();
+        candidate.insert(field.name.clone(), minimum_value(field.kind));
+        if sized_destination_response(config, serde_json::Value::Object(candidate.clone()))
+            .is_some_and(|size| size <= config.limits.max_response_bytes)
+        {
+            state = candidate;
+            if expandable.is_none() && is_expandable(field.kind) {
+                expandable = Some((field.name.clone(), field.kind));
+            }
+        }
+    }
+
+    let base = serde_json::Value::Object(state.clone());
+    let base_size = sized_destination_response(config, base)?;
+    let remaining = config.limits.max_response_bytes.checked_sub(base_size)?;
+    if let Some((name, kind)) = expandable {
+        state.insert(name, expanded_value(kind, remaining)?);
+    }
+    Some(serde_json::Value::Object(state))
+}
+
+fn sized_destination_response(config: &ObserverConfig, state: serde_json::Value) -> Option<usize> {
+    let response = SignedDestinationState {
+        body: crate::DestinationStateBody {
+            schema_version: DESTINATION_STATE_SCHEMA_VERSION.to_owned(),
+            observation_id: Uuid::from_u128(u128::MAX),
+            request_sha256: "f".repeat(64),
+            observer_id: config.observer_id.clone(),
+            service_identity: config.service_identity.clone(),
+            endpoint_identity: config.endpoint_identity.clone(),
+            account_identity: config.account_identity.clone(),
+            resource_identity: config.resource_identity.clone(),
+            effect_class: config.effect_class.clone(),
+            effect_fence: u64::MAX,
+            phase: crate::ObservationPhase::Reconciliation,
+            canonical_query_sha256: "f".repeat(64),
+            cursor: i64::MAX as u64,
+            observed_at_unix_ms: i64::MAX,
+            state_schema_version: config.state_schema_version.clone(),
+            confidentiality: Confidentiality::Internal,
+            state,
+            grant_id: config.read_grant_id.clone(),
+            grant_version: config.read_grant_version.clone(),
+            grant_scope: config.read_grant_scope.clone(),
+            attestation_key_id: config.destination_attestation_key_id.clone(),
+        },
+        signature_base64: "A".repeat(88),
+    };
+    serde_json::to_vec(&response).ok().map(|bytes| bytes.len())
+}
+
+const fn is_expandable(kind: crate::JsonKind) -> bool {
+    matches!(
+        kind,
+        crate::JsonKind::Array
+            | crate::JsonKind::Number
+            | crate::JsonKind::Object
+            | crate::JsonKind::String
+    )
+}
+
+fn minimum_value(kind: crate::JsonKind) -> serde_json::Value {
+    match kind {
+        crate::JsonKind::Array => serde_json::Value::Array(Vec::new()),
+        crate::JsonKind::Boolean => serde_json::Value::Bool(false),
+        crate::JsonKind::Null => serde_json::Value::Null,
+        crate::JsonKind::Number => serde_json::json!(0),
+        crate::JsonKind::Object => serde_json::Value::Object(serde_json::Map::new()),
+        crate::JsonKind::String => serde_json::Value::String(String::new()),
+    }
+}
+
+fn expanded_value(kind: crate::JsonKind, additional_bytes: usize) -> Option<serde_json::Value> {
+    match kind {
+        crate::JsonKind::String => Some(serde_json::Value::String("x".repeat(additional_bytes))),
+        crate::JsonKind::Number => {
+            serde_json::from_str(&"1".repeat(additional_bytes.checked_add(1)?)).ok()
+        }
+        crate::JsonKind::Array if additional_bytes >= 2 => {
+            Some(serde_json::Value::Array(vec![serde_json::Value::String(
+                "x".repeat(additional_bytes - 2),
+            )]))
+        }
+        crate::JsonKind::Object if additional_bytes >= 6 => Some(serde_json::json!({
+            "_": "x".repeat(additional_bytes - 6)
+        })),
+        crate::JsonKind::Array => Some(serde_json::Value::Array(Vec::new())),
+        crate::JsonKind::Object => Some(serde_json::Value::Object(serde_json::Map::new())),
+        _ => None,
+    }
 }
 
 fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {

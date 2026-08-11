@@ -52,6 +52,7 @@ enum Mode {
     UnterminatedEscapedSecret,
     HeaderSecret,
     OversizedHeader,
+    OversizedHeaderBodySecret,
     OversizedHeaderOversizedBody,
     DuplicateContentType,
     Trailer,
@@ -509,14 +510,24 @@ async fn destination_handler(
             .body(Body::new(body))
             .unwrap();
     }
-    let mut response = json_response(StatusCode::OK, serde_json::to_vec(&signed).unwrap());
+    let mut response = json_response(
+        StatusCode::OK,
+        if matches!(mode, Mode::OversizedHeaderBodySecret) {
+            TOKEN.to_vec()
+        } else {
+            serde_json::to_vec(&signed).unwrap()
+        },
+    );
     if matches!(mode, Mode::HeaderSecret) {
         response.headers_mut().insert(
             "x-debug-credential",
             axum::http::HeaderValue::from_static("read-only-observer-token"),
         );
     }
-    if matches!(mode, Mode::OversizedHeader | Mode::OversizedHeaderSecret) {
+    if matches!(
+        mode,
+        Mode::OversizedHeader | Mode::OversizedHeaderBodySecret | Mode::OversizedHeaderSecret
+    ) {
         response.headers_mut().insert(
             "x-oversized",
             axum::http::HeaderValue::from_str(&"x".repeat(9 * 1024)).unwrap(),
@@ -696,6 +707,10 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         ),
         (
             Mode::OversizedHeaderSecret,
+            ObserverError::ConfidentialityDenied,
+        ),
+        (
+            Mode::OversizedHeaderBodySecret,
             ObserverError::ConfidentialityDenied,
         ),
     ] {
@@ -1202,6 +1217,21 @@ async fn response_limit_must_leave_room_for_the_maximum_receipt_envelope() {
         Err(ObserverError::InvalidConfig)
     ));
     assert!(!state.path().join("observer.sqlite3").exists());
+}
+
+#[tokio::test]
+async fn response_limit_does_not_reserve_an_impossible_full_size_state() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_response_bytes = MAX_FRAME_BYTES - 1;
+    assert!(rig.observer_for_config(config).is_ok());
 }
 
 #[tokio::test]

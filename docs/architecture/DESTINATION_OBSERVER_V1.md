@@ -114,7 +114,8 @@ and evidence-envelope size denials do the same immediately. HTTP/2 decoder
 overflow is treated as destination unavailability and retains the bounded
 pending retry path. Application header-list overflow does the same unless a
 confidentiality denial or permanent 401/403 authentication denial takes
-precedence;
+precedence; the observer therefore consumes and scans the bounded body before
+returning either application-header classification;
 an oversized body is consumed and confidentiality-scanned only through its
 certified prefix, but its non-200 status remains a retryable unavailable
 outcome instead of becoming a permanent size tombstone regardless of
@@ -153,6 +154,9 @@ and predecessor history remains separately keyed by the complete chain scope.
 Receipt-count and evidence-byte quotas are rechecked in the atomic finalization
 transaction. Rate, receipt-count, evidence byte, response, header,
 timeout, freshness, and retry limits are configuration authority.
+Standalone-frame admission sizes the largest schema-valid state that can fit
+inside the complete signed destination envelope; it does not count the full
+response limit again as if it were state payload.
 
 ## Destination attestation and state ordering
 
