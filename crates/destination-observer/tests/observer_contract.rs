@@ -1782,6 +1782,41 @@ async fn ledger_is_owner_private_and_rejects_a_preexisting_symlink() {
     ));
     assert!(!dangling_target.exists());
 
+    let hardlink_state = tempfile::tempdir().unwrap();
+    fs::set_permissions(hardlink_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let hardlink_target = outside.path().join("must-not-lock");
+    fs::write(&hardlink_target, b"lease-sentinel").unwrap();
+    fs::set_permissions(&hardlink_target, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::hard_link(
+        &hardlink_target,
+        hardlink_state.path().join("destination-observer.lock"),
+    )
+    .unwrap();
+    let mut hardlink_config = rig.config.clone();
+    hardlink_config.state_dir = hardlink_state.path().to_path_buf();
+    assert!(matches!(
+        rig.observer_for_config(hardlink_config),
+        Err(ObserverError::StateUnavailable)
+    ));
+    assert_eq!(fs::read(&hardlink_target).unwrap(), b"lease-sentinel");
+    assert_eq!(fs::metadata(&hardlink_target).unwrap().nlink(), 2);
+
+    let permissive_state = tempfile::tempdir().unwrap();
+    fs::set_permissions(permissive_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let permissive_lease = permissive_state.path().join("destination-observer.lock");
+    fs::write(&permissive_lease, b"preexisting").unwrap();
+    fs::set_permissions(&permissive_lease, fs::Permissions::from_mode(0o640)).unwrap();
+    let mut permissive_config = rig.config.clone();
+    permissive_config.state_dir = permissive_state.path().to_path_buf();
+    assert!(matches!(
+        rig.observer_for_config(permissive_config),
+        Err(ObserverError::StateUnavailable)
+    ));
+    assert_eq!(
+        fs::metadata(&permissive_lease).unwrap().mode() & 0o777,
+        0o640
+    );
+
     for suffix in ["-wal", "-shm"] {
         let state = tempfile::tempdir().unwrap();
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();

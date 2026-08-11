@@ -252,19 +252,14 @@ impl DestinationObserver {
             }
             ClaimResult::Claimed { retry_count } => retry_count,
         };
-        self.store
-            .assert_active(self.config.generation, &self.config_sha256)?;
-        let dispatch_at_ms = elapsed_time_ms(now_ms, started_at)?;
-        if let Err(error) = validate_temporal(&self.config, &request, dispatch_at_ms) {
-            self.store.fail_pending(
-                self.config.generation,
-                &self.config_sha256,
-                &request,
-                &request_sha256,
-                &error,
-            )?;
-            return Err(error);
-        }
+        self.store.reserve_destination_request(
+            &self.config,
+            &self.config_sha256,
+            &request,
+            &request_sha256,
+            now_ms,
+            started_at,
+        )?;
 
         let destination_result = self.read_destination(&request, now_ms, started_at).await;
         let (signed, raw, captured_at_ms) = match destination_result {
@@ -791,18 +786,35 @@ fn acquire_destination_lease(config: &ObserverConfig) -> Result<File, ObserverEr
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
-    }
-    let file = options
-        .open(path)
-        .map_err(|_| ObserverError::StateUnavailable)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        options
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+        let file = options
+            .open(path)
             .map_err(|_| ObserverError::StateUnavailable)?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        if !metadata.file_type().is_file()
+            || metadata.uid() != nix::unistd::geteuid().as_raw()
+            || metadata.mode() & 0o777 != 0o600
+            || metadata.nlink() != 1
+        {
+            return Err(ObserverError::StateUnavailable);
+        }
+        lock_destination_lease(file)
     }
+    #[cfg(not(unix))]
+    {
+        let file = options
+            .open(path)
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        lock_destination_lease(file)
+    }
+}
+
+fn lock_destination_lease(file: File) -> Result<File, ObserverError> {
     match file.try_lock() {
         Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => Err(ObserverError::ObservationPending),

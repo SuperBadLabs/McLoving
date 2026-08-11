@@ -403,7 +403,6 @@ impl ObserverStore {
                     .map_err(|_| ObserverError::StateUnavailable)?;
                 return Err(error);
             }
-            reserve_request_attempt(&transaction, config, claim_at_ms)?;
             transaction
                 .commit()
                 .map_err(|_| ObserverError::StateUnavailable)?;
@@ -440,11 +439,49 @@ impl ObserverStore {
                     ObserverError::StateUnavailable
                 }
             })?;
-        reserve_request_attempt(&transaction, config, claim_at_ms)?;
         transaction
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)?;
         Ok(ClaimResult::Claimed { retry_count: 0 })
+    }
+
+    pub(crate) fn reserve_destination_request(
+        &self,
+        config: &ObserverConfig,
+        config_sha256: &str,
+        request: &ObservationRequest,
+        request_sha256: &str,
+        started_at_ms: i64,
+        started_at: Instant,
+    ) -> Result<(), ObserverError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let dispatch_at_ms = crate::observer::elapsed_time_ms(started_at_ms, started_at)?;
+        assert_active_transaction(&transaction, config.generation, config_sha256)?;
+        if let Err(error) = validate_temporal(config, request, dispatch_at_ms) {
+            let changed = transaction
+                .execute(
+                    "UPDATE observations SET status='failed', failure_code=?3 WHERE observation_id=?1 AND request_sha256=?2 AND status='pending'",
+                    params![request.observation_id.to_string(), request_sha256, error.code()],
+                )
+                .map_err(|_| ObserverError::StateUnavailable)?;
+            if changed != 1 {
+                return Err(ObserverError::ReplayMismatch);
+            }
+            transaction
+                .commit()
+                .map_err(|_| ObserverError::StateUnavailable)?;
+            return Err(error);
+        }
+        reserve_request_attempt(&transaction, config, dispatch_at_ms)?;
+        transaction
+            .commit()
+            .map_err(|_| ObserverError::StateUnavailable)
     }
 
     pub(crate) fn fail_pending(

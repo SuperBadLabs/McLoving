@@ -59,7 +59,10 @@ authorities, CA, and secret-marker set are digest-bound before the ledger opens.
 The SQLite ledger is pre-created as a no-follow, owner-private, single-link
 regular file before SQLite opens it. Preexisting WAL and shared-memory sidecars
 must satisfy the same owner-private regular-file boundary before WAL is enabled,
-and SQLite-created sidecars are revalidated before startup completes.
+and SQLite-created sidecars are revalidated before startup completes. The fixed
+lineage lease is likewise opened without following a final symlink and must be
+an owner-private, single-link regular file; a preexisting inode is rejected
+rather than chmodded into compliance.
 The startup denylist is applied to every authority digest and to the attested
 executable, image, CA bundle, prior configuration, secret-marker-set, and
 configuration-revocation digests. The configuration-revocation digest is a
@@ -148,13 +151,16 @@ physical-destination cursor high-water remain durable after receipt pruning, so
 an expired chain cannot be restarted and a lower destination cursor cannot be
 accepted merely because its evidence aged out.
 Every initial or retrying outbound GET reserves a durable timestamped outbound
-intent in the same claim transaction, so process death cannot bypass the
-per-minute rate limit. The reservation time is sampled only after the claim
+intent in a dedicated immediate transaction after the active generation and
+request/grant validity are rechecked and immediately before dispatch, so an
+aborted pre-GET claim consumes no rate quota and process death cannot bypass the
+per-minute rate limit. The reservation time is sampled only after that
 transaction acquires the SQLite writer, so database contention cannot age a
 future dispatch out of the real outbound window. That conservative reservation
-expires with the rate window, but the retry-failure counter advances only after the transport returns
-an actual destination-unavailable result; a crash between reservation and GET
-therefore cannot falsely exhaust the observation's retry budget. A
+expires with the rate window, but the retry-failure counter advances only after
+the transport returns an actual destination-unavailable result; a crash between
+reservation and GET therefore cannot falsely exhaust the observation's retry
+budget. A
 unique pending claim per destination scope prevents competing reads across
 builds and effect fences. A nonblocking kernel lease held for the complete
 observation call also prevents a same-ID retry or overlapping process from
@@ -166,9 +172,10 @@ opens and mutates the active-generation ledger. A cutover or rollback racing an
 in-flight GET therefore returns `observation_pending` and must retry after the
 read releases the lease, including when endpoint, account, resource, or effect
 scope changes across generations.
-Temporal and phase admission run before that lineage lease and are rechecked
-inside the claim transaction, so locally invalid requests cannot occupy the
-destination while valid work waits.
+Temporal and phase admission run before that lineage lease; temporal validity is
+rechecked inside both the claim and final dispatch-reservation transactions, so
+locally invalid requests cannot occupy the destination while valid work waits or
+consume outbound rate quota without a GET.
 That physical-destination key also retains the global cursor high-water mark:
 independent tenant/project/pipeline/fence/query chains may attest an equal
 snapshot, while a lower cursor is rejected across all of them. Per-chain phase
