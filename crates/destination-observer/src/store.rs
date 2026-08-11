@@ -88,6 +88,9 @@ impl ObserverStore {
                  );
                  CREATE UNIQUE INDEX IF NOT EXISTS one_pending_per_destination
                    ON observations(destination_scope_sha256) WHERE status = 'pending';
+                 UPDATE observations
+                   SET status = 'failed', failure_code = 'rate_limited'
+                   WHERE status = 'rate_limited';
                  CREATE TABLE IF NOT EXISTS scope_heads (
                    scope_sha256 TEXT PRIMARY KEY,
                    phase TEXT NOT NULL,

@@ -1002,6 +1002,75 @@ async fn rate_limit_rejection_releases_a_fresh_destination_claim() {
 }
 
 #[tokio::test]
+async fn legacy_preview_rate_tombstone_is_normalized_on_restart() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let database_path = state.path().join("observer.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE observations (
+               observation_id TEXT PRIMARY KEY,
+               scope_sha256 TEXT NOT NULL,
+               destination_scope_sha256 TEXT NOT NULL,
+               request_sha256 TEXT NOT NULL,
+               phase TEXT NOT NULL,
+               status TEXT NOT NULL CHECK(status IN ('pending', 'rate_limited', 'complete', 'failed')),
+               retry_count INTEGER NOT NULL,
+               created_at_ms INTEGER NOT NULL,
+               expires_at_ms INTEGER NOT NULL,
+               receipt_sha256 TEXT,
+               receipt_json BLOB,
+               evidence_bytes INTEGER,
+               failure_code TEXT
+             );",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO observations(
+               observation_id, scope_sha256, destination_scope_sha256, request_sha256,
+               phase, status, retry_count, created_at_ms, expires_at_ms, failure_code
+             ) VALUES(?1, ?2, ?3, ?4, 'pre_action', 'rate_limited', 0, ?5, ?6, 'capacity_exceeded')",
+            rusqlite::params![
+                Uuid::new_v4().to_string(),
+                "a".repeat(64),
+                "b".repeat(64),
+                "c".repeat(64),
+                NOW,
+                NOW + 1_000,
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&database_path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    let observer = rig.observer_for_config(config.clone()).unwrap();
+    drop(observer);
+    let restarted = rig.observer_for_config(config).unwrap();
+    drop(restarted);
+
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    let normalized: (String, String) = connection
+        .query_row("SELECT status, failure_code FROM observations", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(normalized, ("failed".to_owned(), "rate_limited".to_owned()));
+}
+
+#[tokio::test]
 async fn outbound_retries_consume_the_durable_request_rate_budget() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();

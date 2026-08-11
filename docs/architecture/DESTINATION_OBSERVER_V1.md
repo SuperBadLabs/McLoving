@@ -159,7 +159,9 @@ becomes a nonblocking replay tombstone represented by the existing `failed`
 status and a dedicated `rate_limited` failure code. It continues to bind the
 observation ID to exact canonical request truth without satisfying the
 one-pending-per-destination index or requiring an on-disk status-schema
-migration; a retrying claim that already records an actual transport attempt
+migration. Startup idempotently normalizes the legacy preview representation
+(`status=rate_limited`, `failure_code=capacity_exceeded`) into this existing
+schema shape. A retrying claim that already records an actual transport attempt
 remains durable. A later byte-identical retry atomically returns the tombstone
 to pending only after it secures a dispatch slot. The reservation time is
 sampled only after that transaction
