@@ -944,6 +944,53 @@ async fn crash_gap_reservation_does_not_consume_the_destination_retry_budget() {
 }
 
 #[tokio::test]
+async fn rate_limit_rejection_releases_a_fresh_destination_claim() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_requests_per_minute = 1;
+    let observer = rig.observer_for_config(config).unwrap();
+    let database_path = state.path().join("observer.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO request_attempts(attempted_at_ms) VALUES(?1)",
+            [NOW],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut rejected = rig.request(ObservationPhase::PreAction);
+    rejected.expected_config_sha256 = observer.config_sha256().to_owned();
+    assert_eq!(
+        observer.observe_at(rig.prepare(rejected), NOW).await,
+        Err(ObserverError::CapacityExceeded)
+    );
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let pending: u64 = connection
+        .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(pending, 0);
+    connection
+        .execute("DELETE FROM request_attempts", [])
+        .unwrap();
+    drop(connection);
+
+    let mut admitted = rig.request(ObservationPhase::PreAction);
+    admitted.expected_config_sha256 = observer.config_sha256().to_owned();
+    observer
+        .observe_at(rig.prepare(admitted), NOW)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn outbound_retries_consume_the_durable_request_rate_budget() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();

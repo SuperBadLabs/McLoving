@@ -236,7 +236,7 @@ impl DestinationObserver {
             }
             Err(error) => return Err(error),
         };
-        let retry_count = match self.store.claim(
+        let (retry_count, fresh_claim) = match self.store.claim(
             &self.config,
             &self.config_sha256,
             &request,
@@ -250,13 +250,14 @@ impl DestinationObserver {
                 self.validate_replayed_receipt(&request, &request_sha256, &receipt)?;
                 return Ok(*receipt);
             }
-            ClaimResult::Claimed { retry_count } => retry_count,
+            ClaimResult::Claimed { retry_count, fresh } => (retry_count, fresh),
         };
         self.store.reserve_destination_request(
             &self.config,
             &self.config_sha256,
             &request,
             &request_sha256,
+            fresh_claim,
             now_ms,
             started_at,
         )?;

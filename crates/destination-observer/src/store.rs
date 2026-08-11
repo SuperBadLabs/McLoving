@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub(crate) enum ClaimResult {
-    Claimed { retry_count: u8 },
+    Claimed { retry_count: u8, fresh: bool },
     Completed(Box<ObservationReceipt>),
 }
 
@@ -408,6 +408,7 @@ impl ObserverStore {
                 .map_err(|_| ObserverError::StateUnavailable)?;
             return Ok(ClaimResult::Claimed {
                 retry_count: existing.retry_count,
+                fresh: false,
             });
         }
 
@@ -442,15 +443,20 @@ impl ObserverStore {
         transaction
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)?;
-        Ok(ClaimResult::Claimed { retry_count: 0 })
+        Ok(ClaimResult::Claimed {
+            retry_count: 0,
+            fresh: true,
+        })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn reserve_destination_request(
         &self,
         config: &ObserverConfig,
         config_sha256: &str,
         request: &ObservationRequest,
         request_sha256: &str,
+        fresh_claim: bool,
         started_at_ms: i64,
         started_at: Instant,
     ) -> Result<(), ObserverError> {
@@ -478,7 +484,23 @@ impl ObserverStore {
                 .map_err(|_| ObserverError::StateUnavailable)?;
             return Err(error);
         }
-        reserve_request_attempt(&transaction, config, dispatch_at_ms)?;
+        if let Err(error) = reserve_request_attempt(&transaction, config, dispatch_at_ms) {
+            if fresh_claim && matches!(error, ObserverError::CapacityExceeded) {
+                let changed = transaction
+                    .execute(
+                        "DELETE FROM observations WHERE observation_id=?1 AND request_sha256=?2 AND status='pending'",
+                        params![request.observation_id.to_string(), request_sha256],
+                    )
+                    .map_err(|_| ObserverError::StateUnavailable)?;
+                if changed != 1 {
+                    return Err(ObserverError::ReplayMismatch);
+                }
+                transaction
+                    .commit()
+                    .map_err(|_| ObserverError::StateUnavailable)?;
+            }
+            return Err(error);
+        }
         transaction
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)
