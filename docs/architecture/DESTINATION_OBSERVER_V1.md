@@ -133,14 +133,19 @@ serve terminal state or enforce quotas. Orphaned phase/cursor heads are pruned
 with them, while heads for a still-retained chain remain durable.
 Every initial or retrying outbound GET reserves a durable timestamped outbound
 intent in the same claim transaction, so process death cannot bypass the
-per-minute rate limit. That conservative reservation expires with the rate
-window, but the retry-failure counter advances only after the transport returns
+per-minute rate limit. The reservation time is sampled only after the claim
+transaction acquires the SQLite writer, so database contention cannot age a
+future dispatch out of the real outbound window. That conservative reservation
+expires with the rate window, but the retry-failure counter advances only after the transport returns
 an actual destination-unavailable result; a crash between reservation and GET
 therefore cannot falsely exhaust the observation's retry budget. A
 unique pending claim per destination scope prevents competing reads across
 builds and effect fences. A nonblocking kernel lease held for the complete
 observation call also prevents a same-ID retry or overlapping process from
 duplicating an in-flight GET; process exit releases the lease for restart.
+Temporal and phase admission run before that physical lease and are rechecked
+inside the claim transaction, so locally invalid requests cannot occupy the
+destination while valid work waits.
 That physical-destination key also retains the global cursor high-water mark:
 independent tenant/project/pipeline/fence/query chains may attest an equal
 snapshot, while a lower cursor is rejected across all of them. Per-chain phase

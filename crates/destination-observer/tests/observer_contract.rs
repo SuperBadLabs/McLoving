@@ -791,6 +791,48 @@ async fn authority_is_rechecked_after_store_delay_before_any_get() {
 }
 
 #[tokio::test]
+async fn outbound_rate_reservation_uses_the_post_database_wait_time() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_requests_per_minute = 1;
+    let observer = rig.observer_for_config(config).unwrap();
+    let database_path = state.path().join("observer.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO request_attempts(attempted_at_ms) VALUES(?1)",
+            [NOW - 59_950],
+        )
+        .unwrap();
+    drop(connection);
+
+    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(database_path).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        ready_sender.send(()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        connection.execute_batch("COMMIT").unwrap();
+    });
+    ready_receiver.recv().unwrap();
+
+    let mut request = rig.request(ObservationPhase::PreAction);
+    request.expected_config_sha256 = observer.config_sha256().to_owned();
+    observer
+        .observe_at(rig.prepare(request), NOW)
+        .await
+        .unwrap();
+    blocker.join().unwrap();
+}
+
+#[tokio::test]
 async fn durable_pending_claim_resumes_after_outage_and_process_restart() {
     let rig = Rig::new().await;
     rig.set_mode(Mode::Outage);
@@ -1884,6 +1926,35 @@ async fn signature_binding_phase_cursor_and_replay_substitution_fail_closed() {
     assert_eq!(
         rig.observer.observe_at(rig.prepare(post), NOW).await,
         Err(ObserverError::CursorRollback)
+    );
+}
+
+#[tokio::test]
+async fn locally_invalid_phase_is_rejected_before_destination_lease_contention() {
+    let rig = Rig::new().await;
+    let pre = rig.prepare(rig.request(ObservationPhase::PreAction));
+    rig.observer.observe_at(pre, NOW).await.unwrap();
+
+    let lock_path = fs::read_dir(rig.directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("destination-") && name.ends_with(".lock"))
+        })
+        .unwrap();
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .unwrap();
+    lease.lock().unwrap();
+
+    let invalid_pre = rig.prepare(rig.request(ObservationPhase::PreAction));
+    assert_eq!(
+        rig.observer.observe_at(invalid_pre, NOW).await,
+        Err(ObserverError::PhaseMismatch)
     );
 }
 

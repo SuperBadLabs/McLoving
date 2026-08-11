@@ -202,6 +202,14 @@ impl DestinationObserver {
             self.validate_replayed_receipt(&request, &request_sha256, &receipt)?;
             return Ok(*receipt);
         }
+        self.store.validate_admission(
+            &self.config,
+            &self.config_sha256,
+            &request,
+            &scope_sha256,
+            now_ms,
+            started_at,
+        )?;
         let _destination_lease = match self.acquire_destination_lease(&destination_scope_sha256) {
             Ok(lease) => lease,
             Err(ObserverError::ObservationPending) => {
@@ -227,6 +235,7 @@ impl DestinationObserver {
             &scope_sha256,
             &destination_scope_sha256,
             now_ms,
+            started_at,
         )? {
             ClaimResult::Completed(receipt) => {
                 self.validate_replayed_receipt(&request, &request_sha256, &receipt)?;

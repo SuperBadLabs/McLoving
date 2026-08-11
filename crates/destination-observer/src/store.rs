@@ -308,6 +308,31 @@ impl ObserverStore {
         outcome
     }
 
+    pub(crate) fn validate_admission(
+        &self,
+        config: &ObserverConfig,
+        config_sha256: &str,
+        request: &ObservationRequest,
+        scope_sha256: &str,
+        started_at_ms: i64,
+        started_at: Instant,
+    ) -> Result<(), ObserverError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        assert_active_transaction(&transaction, config.generation, config_sha256)?;
+        let admission_at_ms = crate::observer::elapsed_time_ms(started_at_ms, started_at)?;
+        validate_temporal(config, request, admission_at_ms)?;
+        enforce_phase(&transaction, request, scope_sha256)?;
+        transaction
+            .commit()
+            .map_err(|_| ObserverError::StateUnavailable)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn claim(
         &self,
@@ -317,7 +342,8 @@ impl ObserverStore {
         request_sha256: &str,
         scope_sha256: &str,
         destination_scope_sha256: &str,
-        now_ms: i64,
+        started_at_ms: i64,
+        started_at: Instant,
     ) -> Result<ClaimResult, ObserverError> {
         let mut connection = self
             .connection
@@ -326,14 +352,15 @@ impl ObserverStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ObserverError::StateUnavailable)?;
+        let claim_at_ms = crate::observer::elapsed_time_ms(started_at_ms, started_at)?;
         assert_active_transaction(&transaction, config.generation, config_sha256)?;
         transaction
             .execute(
                 "UPDATE observations SET status='failed', failure_code='expired_request' WHERE status='pending' AND expires_at_ms < ?1",
-                [now_ms],
+                [claim_at_ms],
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
-        prune_terminal_observations(&transaction, config, now_ms)?;
+        prune_terminal_observations(&transaction, config, claim_at_ms)?;
 
         let existing: Option<ExistingObservation> = transaction
             .query_row(
@@ -364,7 +391,7 @@ impl ObserverStore {
             if existing.status == "failed" {
                 return Err(error_from_code(existing.failure_code.as_deref()));
             }
-            if let Err(error) = validate_temporal(config, request, now_ms) {
+            if let Err(error) = validate_temporal(config, request, claim_at_ms) {
                 transaction
                     .execute(
                         "UPDATE observations SET status='failed', failure_code=?2 WHERE observation_id=?1 AND status='pending'",
@@ -376,7 +403,7 @@ impl ObserverStore {
                     .map_err(|_| ObserverError::StateUnavailable)?;
                 return Err(error);
             }
-            reserve_request_attempt(&transaction, config, now_ms)?;
+            reserve_request_attempt(&transaction, config, claim_at_ms)?;
             transaction
                 .commit()
                 .map_err(|_| ObserverError::StateUnavailable)?;
@@ -385,7 +412,7 @@ impl ObserverStore {
             });
         }
 
-        validate_temporal(config, request, now_ms)?;
+        validate_temporal(config, request, claim_at_ms)?;
         enforce_receipt_capacity(&transaction, config)?;
         enforce_phase(&transaction, request, scope_sha256)?;
         transaction
@@ -398,7 +425,7 @@ impl ObserverStore {
                     destination_scope_sha256,
                     request_sha256,
                     request.phase.as_str(),
-                    now_ms,
+                    claim_at_ms,
                     request.expires_at_unix_ms
                 ],
             )
@@ -413,7 +440,7 @@ impl ObserverStore {
                     ObserverError::StateUnavailable
                 }
             })?;
-        reserve_request_attempt(&transaction, config, now_ms)?;
+        reserve_request_attempt(&transaction, config, claim_at_ms)?;
         transaction
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)?;
