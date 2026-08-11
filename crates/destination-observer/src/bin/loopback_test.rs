@@ -2,14 +2,17 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use mcloving_destination_observer::{ObserverError, load_observer, serve_stdio};
+use mcloving_destination_observer::{ObserverError, load_loopback_test_observer, serve_stdio};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("destination observer terminated: {}", error.code());
+            eprintln!(
+                "destination observer loopback test terminated: {}",
+                error.code()
+            );
             ExitCode::from(2)
         }
     }
@@ -23,7 +26,7 @@ async fn run() -> Result<(), ObserverError> {
     if arguments.len() != 7 {
         return Err(ObserverError::InvalidConfig);
     }
-    let observer = load_observer(
+    let observer = load_loopback_test_observer(
         &arguments[0],
         &arguments[1],
         &arguments[2],

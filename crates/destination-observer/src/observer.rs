@@ -17,7 +17,7 @@ use crate::crypto::{
     canonical_digest, content_sha256, observation_receipt_digest, public_key_from_seed,
     sign_receipt, verify_destination_state, verify_observation_receipt, verify_request,
 };
-use crate::store::{ClaimResult, ObserverStore, validate_temporal};
+use crate::store::{ClaimResult, ObserverStore, validate_state_dir, validate_temporal};
 use crate::strict_json::collect_decoded_json_strings;
 use crate::{
     CONFIG_SCHEMA_VERSION, Confidentiality, DESTINATION_STATE_SCHEMA_VERSION, ObservationReceipt,
@@ -77,6 +77,9 @@ impl DestinationObserver {
             &receipt_seed,
             &secret_markers,
         )?;
+        // The generation lease is state. Validate its containing boundary before creating the
+        // lock file; ObserverStore repeats the check immediately before opening SQLite.
+        validate_state_dir(&config.state_dir)?;
         let mut authorization = HeaderValue::from_bytes(
             [b"Bearer ".as_slice(), read_token.as_slice()]
                 .concat()
@@ -108,6 +111,10 @@ impl DestinationObserver {
             }
         }
         let client = builder.build().map_err(|_| ObserverError::InvalidConfig)?;
+        // One fixed lease protects the complete state lineage across scope-changing cutovers and
+        // rollbacks. A scope-derived lock would let a new generation bypass an in-flight read by
+        // changing its endpoint, account, resource, or effect identity.
+        let _activation_lease = acquire_destination_lease(&config)?;
         let store = ObserverStore::open(&config, &config_sha256)?;
         Ok(Self {
             config,
@@ -127,6 +134,7 @@ impl DestinationObserver {
     ///
     /// Production startup must use `standalone::load_observer`, which measures
     /// the running executable and reads the sealed runtime-image attestation.
+    #[cfg(feature = "loopback-test")]
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn new_for_loopback_test(
@@ -167,6 +175,7 @@ impl DestinationObserver {
     }
 
     /// Deterministic clock entry point for the contained literal-loopback test boundary only.
+    #[cfg(feature = "loopback-test")]
     #[doc(hidden)]
     pub async fn observe_at(
         &self,
@@ -210,7 +219,7 @@ impl DestinationObserver {
             now_ms,
             started_at,
         )?;
-        let _destination_lease = match self.acquire_destination_lease(&destination_scope_sha256) {
+        let _destination_lease = match acquire_destination_lease(&self.config) {
             Ok(lease) => lease,
             Err(ObserverError::ObservationPending) => {
                 if let Some(receipt) = self.store.replay(
@@ -448,8 +457,8 @@ impl DestinationObserver {
             .await
             .map_err(|_| ObserverError::DestinationUnavailable)?;
         if response.headers().iter().any(|(name, value)| {
-            contains_secret(name.as_str().as_bytes(), &self.secret_markers)
-                || contains_secret(value.as_bytes(), &self.secret_markers)
+            contains_secret_value(name.as_str().as_bytes(), &self.secret_markers)
+                || contains_secret_value(value.as_bytes(), &self.secret_markers)
         }) {
             return Err(ObserverError::ConfidentialityDenied);
         }
@@ -477,7 +486,15 @@ impl DestinationObserver {
         let mut response_body: reqwest::Body = response.into();
         let mut raw = Vec::new();
         while let Some(frame) = response_body.frame().await {
-            let frame = frame.map_err(|_| ObserverError::DestinationUnavailable)?;
+            let frame = match frame {
+                Ok(frame) => frame,
+                Err(_) => {
+                    if contains_secret_in_response_json(&raw, &self.secret_markers) {
+                        return Err(ObserverError::ConfidentialityDenied);
+                    }
+                    return Err(ObserverError::DestinationUnavailable);
+                }
+            };
             let chunk = match frame.into_data() {
                 Ok(chunk) => chunk,
                 Err(frame) => {
@@ -485,9 +502,12 @@ impl DestinationObserver {
                         .into_trailers()
                         .map_err(|_| ObserverError::MalformedResponse)?;
                     if trailers.iter().any(|(name, value)| {
-                        contains_secret(name.as_str().as_bytes(), &self.secret_markers)
-                            || contains_secret(value.as_bytes(), &self.secret_markers)
+                        contains_secret_value(name.as_str().as_bytes(), &self.secret_markers)
+                            || contains_secret_value(value.as_bytes(), &self.secret_markers)
                     }) {
+                        return Err(ObserverError::ConfidentialityDenied);
+                    }
+                    if contains_secret_in_response_json(&raw, &self.secret_markers) {
                         return Err(ObserverError::ConfidentialityDenied);
                     }
                     if let Some(error) = header_error.clone() {
@@ -525,6 +545,10 @@ impl DestinationObserver {
                 return Err(oversized_response_error(status));
             }
         }
+        // Capture the destination-read boundary before any CPU-bound validation. Freshness,
+        // request expiry, and future-time checks must describe when the complete response was
+        // received, not how long JSON parsing or signature verification happened to take.
+        let captured_at_ms = elapsed_time_ms(now_ms, started_at)?;
         if contains_secret_in_response_json(&raw, &self.secret_markers) {
             return Err(ObserverError::ConfidentialityDenied);
         }
@@ -545,7 +569,6 @@ impl DestinationObserver {
         }
         let signed: SignedDestinationState = parse_json_no_duplicates(&raw)?;
         verify_destination_state(&signed, &self.destination_public_key)?;
-        let captured_at_ms = elapsed_time_ms(now_ms, started_at)?;
         validate_temporal(&self.config, request, captured_at_ms)?;
         self.validate_destination_state(
             request,
@@ -580,37 +603,6 @@ impl DestinationObserver {
             return Err(ObserverError::InvalidReceipt);
         }
         Ok(())
-    }
-
-    fn acquire_destination_lease(
-        &self,
-        destination_scope_sha256: &str,
-    ) -> Result<File, ObserverError> {
-        let path = self
-            .config
-            .state_dir
-            .join(format!("destination-{destination_scope_sha256}.lock"));
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
-        }
-        let file = options
-            .open(path)
-            .map_err(|_| ObserverError::StateUnavailable)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(|_| ObserverError::StateUnavailable)?;
-        }
-        match file.try_lock() {
-            Ok(()) => Ok(file),
-            Err(std::fs::TryLockError::WouldBlock) => Err(ObserverError::ObservationPending),
-            Err(std::fs::TryLockError::Error(_)) => Err(ObserverError::StateUnavailable),
-        }
     }
 
     fn validate_request(&self, request: &ObservationRequest) -> Result<(), ObserverError> {
@@ -665,10 +657,10 @@ impl DestinationObserver {
             return Err(ObserverError::MalformedRequest);
         }
         verify_request(request, &self.request_public_key)?;
-        if contains_secret(request.audit_provenance.as_bytes(), &self.secret_markers)
+        if contains_secret_value(request.audit_provenance.as_bytes(), &self.secret_markers)
             || request.query.iter().any(|(key, value)| {
-                contains_secret(key.as_bytes(), &self.secret_markers)
-                    || contains_secret(value.as_bytes(), &self.secret_markers)
+                contains_secret_value(key.as_bytes(), &self.secret_markers)
+                    || contains_secret_value(value.as_bytes(), &self.secret_markers)
             })
         {
             return Err(ObserverError::ConfidentialityDenied);
@@ -793,6 +785,31 @@ impl<'a> DestinationScope<'a> {
     }
 }
 
+fn acquire_destination_lease(config: &ObserverConfig) -> Result<File, ObserverError> {
+    let path = config.state_dir.join("destination-observer.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|_| ObserverError::StateUnavailable)?;
+    }
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(ObserverError::ObservationPending),
+        Err(std::fs::TryLockError::Error(_)) => Err(ObserverError::StateUnavailable),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn validate_config(
     config: &ObserverConfig,
@@ -811,6 +828,8 @@ fn validate_config(
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     };
+    let config_revocation_sha256 = config.revocation_digest()?;
+    let minimum_valid_observation_time = unix_time_ms()?;
     if config.schema_version != CONFIG_SCHEMA_VERSION
         || config.protocol_version != PROTOCOL_VERSION
         || config.generation == 0
@@ -924,7 +943,7 @@ fn validate_config(
     let attested_runtime_digests = [
         implementation_sha256,
         runtime_image_sha256,
-        config_sha256,
+        config_revocation_sha256.as_str(),
         marker_set_sha.as_str(),
     ];
     if config.read_token_sha256 != authority_digests[4]
@@ -949,7 +968,7 @@ fn validate_config(
         || config.destination_attestation_key_id.is_empty()
         || config.receipt_signing_key_id.is_empty()
         || !maximum_request_envelope_fits(config, config_sha256, implementation_sha256)
-        || !minimum_destination_response_fits(config)
+        || !minimum_destination_response_fits(config, minimum_valid_observation_time)
         || !maximum_receipt_envelope_fits(config, config_sha256, implementation_sha256)
         || authority_digests
             .iter()
@@ -1003,10 +1022,10 @@ fn config_contains_secret(config: &ObserverConfig, markers: &[Vec<u8>]) -> bool 
                 .iter()
                 .map(|field| field.name.as_str()),
         )
-        .any(|value| contains_secret(value.as_bytes(), markers))
+        .any(|value| contains_secret_value(value.as_bytes(), markers))
 }
 
-fn minimum_destination_response_fits(config: &ObserverConfig) -> bool {
+fn minimum_destination_response_fits(config: &ObserverConfig, observed_at_unix_ms: i64) -> bool {
     let mut state = serde_json::Map::new();
     for field in config.response_schema.iter().filter(|field| field.required) {
         let value = match field.kind {
@@ -1034,7 +1053,7 @@ fn minimum_destination_response_fits(config: &ObserverConfig) -> bool {
             phase: crate::ObservationPhase::PreAction,
             canonical_query_sha256: "0".repeat(64),
             cursor: 0,
-            observed_at_unix_ms: 0,
+            observed_at_unix_ms,
             state_schema_version: config.state_schema_version.clone(),
             confidentiality: Confidentiality::Public,
             state: serde_json::Value::Object(state),
@@ -1140,8 +1159,6 @@ fn maximum_receipt_envelope_fits(
     config_sha256: &str,
     implementation_sha256: &str,
 ) -> bool {
-    let (previous_generation, rollback_from_generation) =
-        maximum_activation_generations(config.activation_mode);
     let maximum_query_value = "\0".repeat(MAX_QUERY_VALUE_BYTES);
     let canonical_query: BTreeMap<String, String> = config
         .allowed_query_keys
@@ -1173,10 +1190,10 @@ fn maximum_receipt_envelope_fits(
         credential_issuance_path_identity: config.credential_issuance_path_identity.clone(),
         configuration_authority_identity: config.configuration_authority_identity.clone(),
         request_authority_identity: config.request_authority_identity.clone(),
-        generation: u64::MAX,
+        generation: config.generation,
         activation_mode: config.activation_mode,
-        previous_generation,
-        rollback_from_generation,
+        previous_generation: config.previous_generation,
+        rollback_from_generation: config.rollback_from_generation,
         endpoint_identity: config.endpoint_identity.clone(),
         account_identity: config.account_identity.clone(),
         resource_identity: config.resource_identity.clone(),
@@ -1194,9 +1211,10 @@ fn maximum_receipt_envelope_fits(
         destination_response_sha256: "f".repeat(64),
         destination_signature_base64: "A".repeat(88),
         destination_attestation_key_id: config.destination_attestation_key_id.clone(),
-        state: match maximum_schema_state_for_response(config) {
-            Some(state) => state,
+        state: match maximum_schema_state_serialized_len(config) {
+            Some(length) if length >= 2 => serde_json::Value::String("x".repeat(length - 2)),
             None => return false,
+            _ => return false,
         },
         retry_count: u8::MAX,
         audit_provenance: "\0".repeat(MAX_AUDIT_PROVENANCE_BYTES),
@@ -1207,50 +1225,105 @@ fn maximum_receipt_envelope_fits(
     crate::standalone::observed_response_fits(&maximum)
 }
 
-const fn maximum_activation_generations(mode: crate::ActivationMode) -> (Option<u64>, Option<u64>) {
-    match mode {
-        crate::ActivationMode::Current => (None, None),
-        crate::ActivationMode::Cutover => (Some(u64::MAX), None),
-        crate::ActivationMode::Rollback => (Some(u64::MAX), Some(u64::MAX)),
-    }
-}
-
-fn maximum_schema_state_for_response(config: &ObserverConfig) -> Option<serde_json::Value> {
+fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize> {
     let mut state = serde_json::Map::new();
-    let mut expandable = None;
+    let mut required_growth_threshold = None;
     for field in &config.response_schema {
         if !field.required {
             continue;
         }
         state.insert(field.name.clone(), minimum_value(field.kind));
-        if expandable.is_none() && is_expandable(field.kind) {
-            expandable = Some((field.name.clone(), field.kind));
+        if let Some(threshold) = growth_threshold(field.kind) {
+            required_growth_threshold = Some(
+                required_growth_threshold
+                    .map_or(threshold, |current: usize| current.min(threshold)),
+            );
         }
     }
+    let base_state = serde_json::Value::Object(state);
+    let base_state_len = serde_json::to_vec(&base_state).ok()?.len();
+    let empty_response_len =
+        sized_destination_response(config, serde_json::Value::Object(serde_json::Map::new()))?;
+    let fixed_response_len = empty_response_len.checked_sub(2)?;
+    let state_budget = config
+        .limits
+        .max_response_bytes
+        .checked_sub(fixed_response_len)?;
+    if base_state_len > state_budget {
+        return None;
+    }
+    let remaining = state_budget.checked_sub(base_state_len)?;
+    if required_growth_threshold.is_some_and(|threshold| remaining >= threshold) {
+        return Some(state_budget);
+    }
+
+    let required_nonempty = base_state_len > 2;
+    let mut optional_fields = Vec::new();
     for field in config
         .response_schema
         .iter()
         .filter(|field| !field.required)
     {
-        let mut candidate = state.clone();
-        candidate.insert(field.name.clone(), minimum_value(field.kind));
-        if sized_destination_response(config, serde_json::Value::Object(candidate.clone()))
-            .is_some_and(|size| size <= config.limits.max_response_bytes)
-        {
-            state = candidate;
-            if expandable.is_none() && is_expandable(field.kind) {
-                expandable = Some((field.name.clone(), field.kind));
+        let key_len = serde_json::to_vec(&field.name).ok()?.len();
+        let value_len = serde_json::to_vec(&minimum_value(field.kind)).ok()?.len();
+        let entry_with_separator = key_len.checked_add(value_len)?.checked_add(2)?;
+        optional_fields.push((entry_with_separator, growth_threshold(field.kind)));
+    }
+
+    let subset_capacity = remaining.checked_add(usize::from(!required_nonempty))?;
+    let (selected, fills_capacity) = maximum_optional_subset(&optional_fields, subset_capacity);
+    if fills_capacity {
+        return Some(state_budget);
+    }
+    let addition = selected.saturating_sub(usize::from(!required_nonempty && selected != 0));
+    base_state_len.checked_add(addition)
+}
+
+fn maximum_optional_subset(fields: &[(usize, Option<usize>)], capacity: usize) -> (usize, bool) {
+    let mut without_expandable = vec![false; capacity.saturating_add(1)];
+    let mut expandable_threshold = vec![0_usize; capacity.saturating_add(1)];
+    without_expandable[0] = true;
+    for &(weight, growth_threshold) in fields {
+        if weight > capacity {
+            continue;
+        }
+        for value in (weight..=capacity).rev() {
+            let prior = value - weight;
+            if without_expandable[prior] {
+                if let Some(threshold) = growth_threshold {
+                    let current = expandable_threshold[value];
+                    expandable_threshold[value] = if current == 0 {
+                        threshold
+                    } else {
+                        current.min(threshold)
+                    };
+                } else {
+                    without_expandable[value] = true;
+                }
+            }
+            let prior_threshold = expandable_threshold[prior];
+            if prior_threshold != 0 {
+                let threshold = growth_threshold
+                    .map_or(prior_threshold, |candidate| prior_threshold.min(candidate));
+                let current = expandable_threshold[value];
+                expandable_threshold[value] = if current == 0 {
+                    threshold
+                } else {
+                    current.min(threshold)
+                };
             }
         }
     }
-
-    let base = serde_json::Value::Object(state.clone());
-    let base_size = sized_destination_response(config, base)?;
-    let remaining = config.limits.max_response_bytes.checked_sub(base_size)?;
-    if let Some((name, kind)) = expandable {
-        state.insert(name, expanded_value(kind, remaining)?);
+    for (value, &threshold) in expandable_threshold.iter().enumerate() {
+        if threshold != 0 && capacity - value >= threshold {
+            return (capacity, true);
+        }
     }
-    Some(serde_json::Value::Object(state))
+    let selected = (0..=capacity)
+        .rev()
+        .find(|&value| without_expandable[value] || expandable_threshold[value] != 0)
+        .unwrap_or(0);
+    (selected, false)
 }
 
 fn sized_destination_response(config: &ObserverConfig, state: serde_json::Value) -> Option<usize> {
@@ -1283,14 +1356,13 @@ fn sized_destination_response(config: &ObserverConfig, state: serde_json::Value)
     serde_json::to_vec(&response).ok().map(|bytes| bytes.len())
 }
 
-const fn is_expandable(kind: crate::JsonKind) -> bool {
-    matches!(
-        kind,
-        crate::JsonKind::Array
-            | crate::JsonKind::Number
-            | crate::JsonKind::Object
-            | crate::JsonKind::String
-    )
+const fn growth_threshold(kind: crate::JsonKind) -> Option<usize> {
+    match kind {
+        crate::JsonKind::Array | crate::JsonKind::Number | crate::JsonKind::String => Some(1),
+        // `{}` is two bytes; the next compact JSON object, `{"":0}`, is six.
+        crate::JsonKind::Object => Some(4),
+        crate::JsonKind::Boolean | crate::JsonKind::Null => None,
+    }
 }
 
 fn minimum_value(kind: crate::JsonKind) -> serde_json::Value {
@@ -1304,30 +1376,34 @@ fn minimum_value(kind: crate::JsonKind) -> serde_json::Value {
     }
 }
 
-fn expanded_value(kind: crate::JsonKind, additional_bytes: usize) -> Option<serde_json::Value> {
-    match kind {
-        crate::JsonKind::String => Some(serde_json::Value::String("x".repeat(additional_bytes))),
-        crate::JsonKind::Number => {
-            serde_json::from_str(&"1".repeat(additional_bytes.checked_add(1)?)).ok()
+fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
+    let mut decoded = raw.to_vec();
+    for depth in 0..=16 {
+        if contains_secret_representation(&decoded, markers) {
+            return true;
         }
-        crate::JsonKind::Array if additional_bytes >= 2 => {
-            Some(serde_json::Value::Array(vec![serde_json::Value::String(
-                "x".repeat(additional_bytes - 2),
-            )]))
+        let Some(next) = percent_decode_once(&decoded) else {
+            return false;
+        };
+        if depth == 16 {
+            // Excessive reversible nesting is denied rather than allowing unbounded scan work.
+            return true;
         }
-        crate::JsonKind::Object if additional_bytes >= 6 => Some(serde_json::json!({
-            "_": "x".repeat(additional_bytes - 6)
-        })),
-        crate::JsonKind::Array => Some(serde_json::Value::Array(Vec::new())),
-        crate::JsonKind::Object => Some(serde_json::Value::Object(serde_json::Map::new())),
-        _ => None,
+        decoded = next;
     }
+    false
 }
 
-fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
-    contains_secret_representation(raw, markers)
-        || percent_decode_once(raw)
-            .is_some_and(|decoded| contains_secret_representation(&decoded, markers))
+fn contains_secret_value(raw: &[u8], markers: &[Vec<u8>]) -> bool {
+    if contains_secret(raw, markers) {
+        return true;
+    }
+    BASE64
+        .decode(raw)
+        .or_else(|_| BASE64_NO_PAD.decode(raw))
+        .or_else(|_| BASE64_URL_SAFE.decode(raw))
+        .or_else(|_| BASE64_URL_SAFE_NO_PAD.decode(raw))
+        .is_ok_and(|decoded| contains_secret(&decoded, markers))
 }
 
 fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
@@ -1338,21 +1414,11 @@ fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
 }
 
 fn contains_secret_in_decoded_string(value: &str, markers: &[Vec<u8>]) -> bool {
-    if contains_secret(value.as_bytes(), markers) {
-        return true;
-    }
-    BASE64
-        .decode(value)
-        .or_else(|_| BASE64_NO_PAD.decode(value))
-        .or_else(|_| BASE64_URL_SAFE.decode(value))
-        .or_else(|_| BASE64_URL_SAFE_NO_PAD.decode(value))
-        .is_ok_and(|decoded| contains_secret(&decoded, markers))
+    contains_secret_value(value.as_bytes(), markers)
 }
 
 fn oversized_response_error(status: StatusCode) -> ObserverError {
-    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        ObserverError::DestinationUnauthorized
-    } else if status != StatusCode::OK {
+    if status != StatusCode::OK {
         ObserverError::DestinationUnavailable
     } else {
         ObserverError::OversizedResponse
@@ -1424,7 +1490,7 @@ fn contains_secret_in_json(
         }
         serde_json::Value::Object(values) => {
             for (key, value) in values {
-                if contains_secret(key.as_bytes(), markers)
+                if contains_secret_value(key.as_bytes(), markers)
                     || contains_secret_in_json(value, markers)?
                 {
                     return Ok(true);
@@ -1555,6 +1621,14 @@ mod tests {
             b"read%2Donly-observer-token",
             &[b"read-only-observer-token".to_vec()]
         ));
+        assert!(contains_secret(
+            b"read%25252Donly-observer-token",
+            &[b"read-only-observer-token".to_vec()]
+        ));
+        assert!(contains_secret_value(
+            BASE64.encode(b"xread-only-observer-token").as_bytes(),
+            &[b"read-only-observer-token".to_vec()]
+        ));
     }
 
     #[test]
@@ -1579,18 +1653,17 @@ mod tests {
     }
 
     #[test]
-    fn receipt_size_model_uses_only_mode_legal_generation_fields() {
-        assert_eq!(
-            maximum_activation_generations(crate::ActivationMode::Current),
-            (None, None)
-        );
-        assert_eq!(
-            maximum_activation_generations(crate::ActivationMode::Cutover),
-            (Some(u64::MAX), None)
-        );
-        assert_eq!(
-            maximum_activation_generations(crate::ActivationMode::Rollback),
-            (Some(u64::MAX), Some(u64::MAX))
-        );
+    fn optional_state_subset_sum_finds_the_true_maximum() {
+        let fixed = [(8, None), (5, None), (5, None)];
+        assert_eq!(maximum_optional_subset(&fixed, 10), (10, false));
+        assert_eq!(maximum_optional_subset(&fixed, 9), (8, false));
+
+        let object = [(5, Some(4))];
+        assert_eq!(maximum_optional_subset(&object, 8), (5, false));
+        assert_eq!(maximum_optional_subset(&object, 9), (9, true));
+
+        let string = [(5, Some(1))];
+        assert_eq!(maximum_optional_subset(&string, 5), (5, false));
+        assert_eq!(maximum_optional_subset(&string, 6), (6, true));
     }
 }

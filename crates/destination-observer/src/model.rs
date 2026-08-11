@@ -148,6 +148,12 @@ impl ObserverConfig {
     pub fn canonical_digest(&self) -> Result<String, ObserverError> {
         crate::crypto::canonical_digest(b"mcloving-observer-config-v1", self)
     }
+
+    pub fn revocation_digest(&self) -> Result<String, ObserverError> {
+        let mut revocable = self.clone();
+        revocable.denied_authority_sha256.clear();
+        crate::crypto::canonical_digest(b"mcloving-observer-config-revocation-v1", &revocable)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

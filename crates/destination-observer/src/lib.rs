@@ -18,8 +18,11 @@ pub use crypto::{
 pub use error::ObserverError;
 pub use model::*;
 pub use observer::DestinationObserver;
+#[cfg(feature = "loopback-test")]
+#[doc(hidden)]
+pub use standalone::load_loopback_test_observer;
 pub use standalone::{
     MAX_FRAME_BYTES, ObserverCommand, ObserverResponse, load_observer, read_bounded_frame,
-    write_response,
+    serve_stdio, write_response,
 };
 pub use strict_json::parse_json_no_duplicates;

@@ -1,8 +1,12 @@
+#![cfg(feature = "loopback-test")]
+
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::io::Write as _;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt as _;
 #[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -61,6 +65,7 @@ enum Mode {
     Oversized,
     Unauthorized,
     UnauthorizedOversizedHeader,
+    UnauthorizedOversizedBody,
     UnauthorizedSecret,
     Outage,
     OutageOversizedChunked,
@@ -302,7 +307,10 @@ async fn destination_handler(
     let mode = *server.mode.lock().unwrap();
     if matches!(
         mode,
-        Mode::Unauthorized | Mode::UnauthorizedOversizedHeader | Mode::UnauthorizedSecret
+        Mode::Unauthorized
+            | Mode::UnauthorizedOversizedHeader
+            | Mode::UnauthorizedOversizedBody
+            | Mode::UnauthorizedSecret
     ) || headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -310,10 +318,10 @@ async fn destination_handler(
     {
         let mut response = Response::builder()
             .status(StatusCode::FORBIDDEN)
-            .body(if matches!(mode, Mode::UnauthorizedSecret) {
-                Body::from(TOKEN)
-            } else {
-                Body::empty()
+            .body(match mode {
+                Mode::UnauthorizedSecret => Body::from(TOKEN),
+                Mode::UnauthorizedOversizedBody => Body::from(vec![b'x'; 32 * 1024]),
+                _ => Body::empty(),
             })
             .unwrap();
         if matches!(mode, Mode::UnauthorizedOversizedHeader) {
@@ -731,6 +739,7 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         Mode::Outage,
         Mode::OutageOversizedChunked,
         Mode::OutageOversized,
+        Mode::UnauthorizedOversizedBody,
         Mode::Timeout,
         Mode::OversizedHeader,
         Mode::OversizedHeaderOversizedBody,
@@ -1332,6 +1341,31 @@ async fn evidence_capacity_failure_releases_the_destination_claim() {
 }
 
 #[tokio::test]
+async fn exhausted_evidence_bytes_are_rejected_before_destination_access() {
+    let rig = Rig::new().await;
+    let first = rig.prepare(rig.request(ObservationPhase::PreAction));
+    rig.observer.observe_at(first, NOW).await.unwrap();
+    let connection =
+        rusqlite::Connection::open(rig.directory.path().join("observer.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE observations SET evidence_bytes=?1 WHERE status='complete'",
+            [rig.config.limits.max_evidence_bytes],
+        )
+        .unwrap();
+    drop(connection);
+
+    let reads_before = rig.server.reads.load(Ordering::SeqCst);
+    let mut second = rig.request(ObservationPhase::PreAction);
+    second.effect_fence = 18;
+    assert_eq!(
+        rig.observer.observe_at(rig.prepare(second), NOW).await,
+        Err(ObserverError::CapacityExceeded)
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), reads_before);
+}
+
+#[tokio::test]
 async fn completed_evidence_is_pruned_after_the_bounded_replay_window() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();
@@ -1371,8 +1405,19 @@ async fn completed_evidence_is_pruned_after_the_bounded_replay_window() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(pruned, (0, 0, 0));
+    assert_eq!(pruned, (0, 1, 1));
     drop(connection);
+
+    let mut duplicate_chain = rig.request(ObservationPhase::PreAction);
+    duplicate_chain.requested_at_unix_ms = later - 1;
+    duplicate_chain.expires_at_unix_ms = later + 1_000;
+    duplicate_chain.expected_config_sha256 = observer.config_sha256().to_owned();
+    assert_eq!(
+        observer
+            .observe_at(rig.prepare(duplicate_chain), later)
+            .await,
+        Err(ObserverError::PhaseMismatch)
+    );
 
     let mut second = rig.request(ObservationPhase::PreAction);
     second.effect_fence = 18;
@@ -1395,7 +1440,25 @@ async fn completed_evidence_is_pruned_after_the_bounded_replay_window() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(retained, (1, 1, 1));
+    assert_eq!(retained, (1, 2, 1));
+    drop(connection);
+
+    let after_second_retention_window = later + 12_000;
+    rig.server
+        .observed_at_unix_ms
+        .store(after_second_retention_window, Ordering::SeqCst);
+    rig.server.cursor.store(9, Ordering::SeqCst);
+    let mut rollback = rig.request(ObservationPhase::PreAction);
+    rollback.effect_fence = 19;
+    rollback.requested_at_unix_ms = after_second_retention_window - 1;
+    rollback.expires_at_unix_ms = after_second_retention_window + 1_000;
+    rollback.expected_config_sha256 = observer.config_sha256().to_owned();
+    assert_eq!(
+        observer
+            .observe_at(rig.prepare(rollback), after_second_retention_window)
+            .await,
+        Err(ObserverError::CursorRollback)
+    );
 }
 
 #[tokio::test]
@@ -1608,6 +1671,24 @@ async fn runtime_attestation_denylist_and_production_constructor_boundary_fail_c
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
     }
+    let mut revoked_config = rig.config.clone();
+    revoked_config.state_dir = state.path().to_path_buf();
+    let revocation_digest = revoked_config.revocation_digest().unwrap();
+    revoked_config
+        .denied_authority_sha256
+        .push(revocation_digest);
+    assert!(matches!(
+        rig.observer_for_config(revoked_config),
+        Err(ObserverError::InvalidConfig)
+    ));
+    assert!(!state.path().join("observer.sqlite3").exists());
+
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let mut non_test_config = rig.config.clone();
     non_test_config.state_dir = state.path().to_path_buf();
     non_test_config.test_allow_http_loopback = false;
@@ -1685,6 +1766,22 @@ async fn ledger_is_owner_private_and_rejects_a_preexisting_symlink() {
     ));
     assert_eq!(fs::read(target).unwrap(), b"sentinel");
 
+    let dangling_state = tempfile::tempdir().unwrap();
+    fs::set_permissions(dangling_state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let dangling_target = outside.path().join("must-not-be-created.sqlite3");
+    symlink(
+        &dangling_target,
+        dangling_state.path().join("observer.sqlite3"),
+    )
+    .unwrap();
+    let mut dangling_config = rig.config.clone();
+    dangling_config.state_dir = dangling_state.path().to_path_buf();
+    assert!(matches!(
+        rig.observer_for_config(dangling_config),
+        Err(ObserverError::StateUnavailable)
+    ));
+    assert!(!dangling_target.exists());
+
     for suffix in ["-wal", "-shm"] {
         let state = tempfile::tempdir().unwrap();
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -1730,6 +1827,27 @@ async fn cutover_fences_old_process_and_rollback_requires_an_exact_historical_ta
     cutover_config.activation_mode = ActivationMode::Cutover;
     cutover_config.previous_generation = Some(1);
     cutover_config.previous_config_sha256 = Some(old_digest.clone());
+    cutover_config.resource_identity = "release/scope-changing-cutover".to_owned();
+    let lock_path = fs::read_dir(rig.directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("destination-") && name.ends_with(".lock"))
+        })
+        .unwrap();
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .unwrap();
+    lease.lock().unwrap();
+    assert!(matches!(
+        rig.observer_for_config(cutover_config.clone()),
+        Err(ObserverError::ObservationPending)
+    ));
+    drop(lease);
     let cutover = rig.observer_for_config(cutover_config.clone()).unwrap();
     let cutover_digest = cutover.config_sha256().to_owned();
     let cutover_restart = rig.observer_for_config(cutover_config).unwrap();
@@ -1773,11 +1891,12 @@ async fn cutover_fences_old_process_and_rollback_requires_an_exact_historical_ta
     assert_eq!(rollback_restart.config_sha256(), rollback.config_sha256());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "loopback-test"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operation() {
     let rig = Rig::new().await;
-    let binary_path = env!("CARGO_BIN_EXE_mcloving-destination-observer");
+    let production_binary_path = env!("CARGO_BIN_EXE_mcloving-destination-observer");
+    let binary_path = env!("CARGO_BIN_EXE_mcloving-destination-observer-loopback-test");
     let binary = fs::read(binary_path).unwrap();
     let process_directory = tempfile::tempdir().unwrap();
     #[cfg(unix)]
@@ -1860,6 +1979,27 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         receipt_seed_path,
         markers_path,
     ];
+
+    for key_index in [3_usize, 4] {
+        fs::set_permissions(&paths[key_index], fs::Permissions::from_mode(0o640)).unwrap();
+        let rejected_key = Command::new(binary_path)
+            .args(paths.clone())
+            .output()
+            .unwrap();
+        assert_eq!(rejected_key.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&rejected_key.stderr).contains("state_unavailable"));
+        assert!(!config.state_dir.join("observer.sqlite3").exists());
+        fs::set_permissions(&paths[key_index], fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    let rejected = Command::new(production_binary_path)
+        .args(paths.clone())
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("invalid_config"));
+    assert!(!config.state_dir.join("observer.sqlite3").exists());
+
     let output = tokio::task::spawn_blocking(move || {
         let mut child = Command::new(binary_path)
             .args(paths)
@@ -2107,6 +2247,19 @@ async fn cursor_outside_the_ledger_range_is_terminal_and_releases_the_destinatio
     rig.server.cursor.store(10, Ordering::SeqCst);
     let replacement = rig.prepare(rig.request(ObservationPhase::PreAction));
     rig.observer.observe_at(replacement, NOW).await.unwrap();
+}
+
+#[tokio::test]
+async fn effect_fence_accepts_the_complete_unsigned_range() {
+    let rig = Rig::new().await;
+    let mut request = rig.request(ObservationPhase::PreAction);
+    request.effect_fence = u64::MAX;
+    let receipt = rig
+        .observer
+        .observe_at(rig.prepare(request), NOW)
+        .await
+        .unwrap();
+    assert_eq!(receipt.effect_fence, u64::MAX);
 }
 
 fn public_key(seed: &[u8]) -> Vec<u8> {

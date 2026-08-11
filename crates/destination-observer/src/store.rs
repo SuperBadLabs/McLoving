@@ -730,6 +730,16 @@ fn enforce_receipt_capacity(
     if count >= config.limits.max_receipts {
         return Err(ObserverError::CapacityExceeded);
     }
+    let total: u64 = transaction
+        .query_row(
+            "SELECT COALESCE(SUM(evidence_bytes), 0) FROM observations WHERE status='complete'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    if total >= config.limits.max_evidence_bytes {
+        return Err(ObserverError::CapacityExceeded);
+    }
     Ok(())
 }
 
@@ -744,28 +754,6 @@ fn prune_terminal_observations(
             "DELETE FROM observations
              WHERE status IN ('complete', 'failed') AND expires_at_ms < ?1",
             [cutoff],
-        )
-        .map_err(|_| ObserverError::StateUnavailable)?;
-    transaction
-        .execute(
-            "DELETE FROM scope_heads
-             WHERE NOT EXISTS (
-               SELECT 1 FROM observations
-               WHERE observations.scope_sha256=scope_heads.scope_sha256
-                 AND observations.status IN ('pending', 'complete')
-             )",
-            [],
-        )
-        .map_err(|_| ObserverError::StateUnavailable)?;
-    transaction
-        .execute(
-            "DELETE FROM destination_heads
-             WHERE NOT EXISTS (
-               SELECT 1 FROM observations
-               WHERE observations.destination_scope_sha256=destination_heads.destination_scope_sha256
-                 AND observations.status IN ('pending', 'complete')
-             )",
-            [],
         )
         .map_err(|_| ObserverError::StateUnavailable)?;
     Ok(())
@@ -890,7 +878,7 @@ fn enforce_phase(
     Ok(())
 }
 
-fn validate_state_dir(path: &Path) -> Result<(), ObserverError> {
+pub(crate) fn validate_state_dir(path: &Path) -> Result<(), ObserverError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| ObserverError::StateUnavailable)?;
     if !metadata.file_type().is_dir() {
         return Err(ObserverError::StateUnavailable);
@@ -915,6 +903,7 @@ fn prepare_private_database(path: &Path) -> Result<(), ObserverError> {
             .write(true)
             .create_new(true)
             .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(path)
             .map_err(|_| ObserverError::StateUnavailable)?;
         file.sync_all()

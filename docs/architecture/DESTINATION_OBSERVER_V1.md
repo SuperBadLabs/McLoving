@@ -31,11 +31,12 @@ when the prior process is completing a transaction. It has no
 write method, redirect or proxy inheritance, implicit HTTP retry, scheduler,
 controller database or filesystem, agent RPC, shell, repository, workload
 secret, connector-control, or external-effect capability. Production requires
-HTTPS with a content-pinned, nonempty private CA bundle. Plain HTTP is accepted only when
-both the explicit test flag and a literal loopback address are present.
-The only public direct constructor is restricted to that literal-loopback test
-boundary. Production construction is crate-internal to the standalone loader,
-which supplies the measured executable digest and sealed runtime-image digest.
+HTTPS with a content-pinned, nonempty private CA bundle and rejects the
+test-only HTTP-loopback flag unconditionally. Plain HTTP is confined to a
+literal-loopback constructor and a separately feature-gated integration-test
+binary that are absent from production builds. Production construction is
+crate-internal to the standalone loader, which supplies the measured executable
+digest and sealed runtime-image digest.
 
 The observer is a fail-closed Linux process: its implementation digest is read
 from the kernel's `/proc/self/exe` handle for the executing inode, never by
@@ -46,9 +47,10 @@ terminates immediately without draining an attacker-controlled tail. It emits
 generic bounded responses on stdout. Configuration and authority files are
 opened nonblocking and without following a final symlink, so a FIFO/device
 substitution fails before data reads; the complete configuration,
-deployment-provided runtime-image attestation file, secret files, and the state
-directory must be owned by the process user and inaccessible to group or other
-users. The executable is measured through `/proc/self/exe`; the separately
+deployment-provided runtime-image attestation file, request-authority and
+destination-attestation public-key files, secret files, and the state directory
+must be owned by the process user and inaccessible to group or other users. The
+executable is measured through `/proc/self/exe`; the separately
 mounted runtime-image digest must match the image identity certified by
 configuration. That attestation is exactly 64 lowercase hexadecimal bytes with
 an optional single LF or CRLF text-file terminator. The executable, image,
@@ -59,8 +61,12 @@ regular file before SQLite opens it. Preexisting WAL and shared-memory sidecars
 must satisfy the same owner-private regular-file boundary before WAL is enabled,
 and SQLite-created sidecars are revalidated before startup completes.
 The startup denylist is applied to every authority digest and to the attested
-executable, image, complete configuration, CA bundle, prior configuration, and
-secret-marker-set digests; duplicate or malformed denylist entries fail closed.
+executable, image, CA bundle, prior configuration, secret-marker-set, and
+configuration-revocation digests. The configuration-revocation digest is a
+domain-separated canonical digest of the complete configuration with only the
+denylist cleared, avoiding a self-referential digest while still allowing an
+exact configuration identity to be revoked. Duplicate or malformed denylist
+entries fail closed.
 
 ## Signed request and canonical read
 
@@ -74,7 +80,10 @@ Unknown fields, duplicate JSON members, unknown query keys, stale requests,
 substituted bindings, or invalid signatures fail before network access.
 Configuration values that cross the request, destination, or receipt boundary
 are scanned against every secret marker and its encoded forms before the ledger
-opens.
+opens. Whole configuration, query, audit, header, trailer, JSON-key, and
+JSON-value strings are decoded as standard and URL-safe Base64, padded and
+unpadded, before scanning. Percent decoding repeats for at most 16 nested
+layers; further encoded nesting fails closed.
 Configuration admission rejects query-key names beyond the request-protocol
 bound and header budgets too small for the mandatory JSON response header.
 It also proves that the largest legal signed request fits the complete NDJSON
@@ -128,10 +137,15 @@ waiting cannot cause a GET. Configuration admission requires the transport
 timeout to fit within the freshness window so no in-flight read can outlive its
 terminal tombstone retention basis;
 only complete evidence consumes the receipt-count and evidence-byte quotas.
+When either retained quota is already exhausted, admission fails before a GET;
+the atomic finalization check still handles the exact size of the candidate
+receipt.
 Replay and new-admission transactions prune complete and failed observations
 whose signed request expiry is more than one freshness window old before they
-serve terminal state or enforce quotas. Orphaned phase/cursor heads are pruned
-with them, while heads for a still-retained chain remain durable.
+serve terminal state or enforce quotas. Compact phase-chain heads and the
+physical-destination cursor high-water remain durable after receipt pruning, so
+an expired chain cannot be restarted and a lower destination cursor cannot be
+accepted merely because its evidence aged out.
 Every initial or retrying outbound GET reserves a durable timestamped outbound
 intent in the same claim transaction, so process death cannot bypass the
 per-minute rate limit. The reservation time is sampled only after the claim
@@ -144,7 +158,14 @@ unique pending claim per destination scope prevents competing reads across
 builds and effect fences. A nonblocking kernel lease held for the complete
 observation call also prevents a same-ID retry or overlapping process from
 duplicating an in-flight GET; process exit releases the lease for restart.
-Temporal and phase admission run before that physical lease and are rechecked
+The lease name is fixed to the private state lineage rather than derived from
+mutable destination scope. Generation activation acquires that same lineage
+lease before it
+opens and mutates the active-generation ledger. A cutover or rollback racing an
+in-flight GET therefore returns `observation_pending` and must retry after the
+read releases the lease, including when endpoint, account, resource, or effect
+scope changes across generations.
+Temporal and phase admission run before that lineage lease and are rechecked
 inside the claim transaction, so locally invalid requests cannot occupy the
 destination while valid work waits.
 That physical-destination key also retains the global cursor high-water mark:
@@ -221,6 +242,10 @@ generation/cutover/rollback fields, grant, destination cursor and observation
 time, capture and publication deadline, typed state and confidentiality,
 complete raw response digest and destination signature, retry count, audit
 provenance, receipt sequence, key identity, and public-key digest.
+Capture time is sampled immediately after the complete bounded response body
+has been read and before JSON parsing, signature verification, or other
+CPU-bound validation, so freshness and expiry decisions describe the network
+read boundary rather than validation latency.
 The publication deadline is the minimum of the freshness bound anchored to the
 signed destination observation timestamp, signed request expiry, and read-grant
 expiry. `observation_receipt_digest` is the supported
@@ -231,20 +256,23 @@ the receipt signature.
 The complete signed standalone success envelope must fit the process frame
 before the pending claim can commit. Configuration is rejected before the
 ledger or network opens unless the configured response limit, maximum request
-query and audit fields, and exact static receipt metadata fit that envelope
-together. The runtime check remains defense in depth: an oversized envelope
+query and audit fields, actual activation-generation fields, and the true
+largest schema-valid optional-state combination fit that envelope together.
+The runtime check remains defense in depth: an oversized envelope
 becomes a failed claim, never committed evidence followed by an error-only response. Stored
 completed receipts are signature-, binding-, and frame-size-verified again on
 every replay.
 
-The standalone reader accepts LF and CRLF framing. It removes the optional CR
-before applying the logical payload bound, so both encodings admit the same
-maximum JSON payload.
+The standalone reader accepts LF and CRLF framing under one wire-frame bound:
+the terminator bytes count toward the 256 KiB limit. An LF frame can therefore
+carry one more payload byte than a CRLF frame. Reaching the bound without a
+complete terminator fails immediately rather than waiting for more input.
 
 Every claim, sequence allocation, and finalization rereads the active
 generation/configuration fence. An empty ledger bootstraps only generation 1;
-a later generation without its durable ancestry is rejected. Cutover requires a greater generation and the
-exact active predecessor. Rollback is also a new greater generation and names
+a later generation without its durable ancestry is rejected. Cutover requires
+a greater generation, the exact active predecessor, and exclusive ownership of
+the fixed state-lineage lease. Rollback is also a new greater generation and names
 the generation it fences; it never resurrects an old process. A process fenced
 during a network call cannot finalize evidence. Credential rotation is a new
 configuration generation with a new exact grant and token digest. Once a
