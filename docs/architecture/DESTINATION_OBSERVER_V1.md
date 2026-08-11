@@ -155,12 +155,14 @@ intent in a dedicated immediate transaction after the active generation and
 request/grant validity are rechecked and immediately before dispatch, so an
 aborted pre-GET claim consumes no rate quota and process death cannot bypass the
 per-minute rate limit. If no dispatch slot is available, a fresh pending claim
-becomes a nonblocking `rate_limited` replay tombstone in that transaction. It
-continues to bind the observation ID to exact canonical request truth without
-satisfying the one-pending-per-destination index; a retrying claim that already
-records an actual transport attempt remains durable. A later byte-identical
-retry atomically returns the tombstone to pending only after it secures a
-dispatch slot. The reservation time is sampled only after that transaction
+becomes a nonblocking replay tombstone represented by the existing `failed`
+status and a dedicated `rate_limited` failure code. It continues to bind the
+observation ID to exact canonical request truth without satisfying the
+one-pending-per-destination index or requiring an on-disk status-schema
+migration; a retrying claim that already records an actual transport attempt
+remains durable. A later byte-identical retry atomically returns the tombstone
+to pending only after it secures a dispatch slot. The reservation time is
+sampled only after that transaction
 acquires the SQLite writer, so database contention cannot age a future dispatch
 out of the real outbound window. That conservative reservation
 expires with the rate window, but the retry-failure counter advances only after

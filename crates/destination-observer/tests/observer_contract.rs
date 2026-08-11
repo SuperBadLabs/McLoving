@@ -974,10 +974,12 @@ async fn rate_limit_rejection_releases_a_fresh_destination_claim() {
         Err(ObserverError::CapacityExceeded)
     );
     let connection = rusqlite::Connection::open(&database_path).unwrap();
-    let status: String = connection
-        .query_row("SELECT status FROM observations", [], |row| row.get(0))
+    let status: (String, String) = connection
+        .query_row("SELECT status, failure_code FROM observations", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .unwrap();
-    assert_eq!(status, "rate_limited");
+    assert_eq!(status, ("failed".to_owned(), "rate_limited".to_owned()));
 
     let mut substituted = rejected;
     substituted.audit_provenance = "audit/substituted-after-rate-limit".to_owned();
