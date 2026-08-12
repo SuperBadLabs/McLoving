@@ -11,7 +11,10 @@ use crate::{
 };
 
 pub(crate) enum ClaimResult {
-    Claimed { retry_count: u8, fresh: bool },
+    Claimed {
+        retry_count: u8,
+        reservation_reached: bool,
+    },
     Completed(Box<ObservationReceipt>),
 }
 
@@ -23,6 +26,7 @@ struct ExistingObservation {
     request_sha256: String,
     status: String,
     retry_count: u8,
+    reservation_reached: bool,
     receipt_json: Option<Vec<u8>>,
     failure_code: Option<String>,
 }
@@ -79,6 +83,8 @@ impl ObserverStore {
                    phase TEXT NOT NULL,
                    status TEXT NOT NULL CHECK(status IN ('pending', 'complete', 'failed')),
                    retry_count INTEGER NOT NULL,
+                   reservation_reached INTEGER NOT NULL DEFAULT 0
+                     CHECK(reservation_reached IN (0, 1)),
                    created_at_ms INTEGER NOT NULL,
                    expires_at_ms INTEGER NOT NULL,
                    receipt_sha256 TEXT,
@@ -113,6 +119,7 @@ impl ObserverStore {
                  INSERT OR IGNORE INTO evidence_sequence(singleton, next_value) VALUES(1, 1);",
             )
             .map_err(|_| ObserverError::StateUnavailable)?;
+        ensure_observation_reservation_column(&connection)?;
         validate_private_sidecars(&database_path)?;
         let store = Self {
             connection: Mutex::new(connection),
@@ -365,14 +372,15 @@ impl ObserverStore {
 
         let existing: Option<ExistingObservation> = transaction
             .query_row(
-                "SELECT request_sha256, status, retry_count, receipt_json, failure_code FROM observations WHERE observation_id=?1",
+                "SELECT request_sha256, status, retry_count, reservation_reached, receipt_json, failure_code FROM observations WHERE observation_id=?1",
                 [request.observation_id.to_string()],
                 |row| Ok(ExistingObservation {
                     request_sha256: row.get(0)?,
                     status: row.get(1)?,
                     retry_count: row.get(2)?,
-                    receipt_json: row.get(3)?,
-                    failure_code: row.get(4)?,
+                    reservation_reached: row.get(3)?,
+                    receipt_json: row.get(4)?,
+                    failure_code: row.get(5)?,
                 }),
             )
             .optional()
@@ -407,12 +415,12 @@ impl ObserverStore {
                 return Err(error);
             }
             enforce_scope_head_capacity(&transaction, config, scope_sha256, claim_at_ms)?;
-            let fresh = match existing.status.as_str() {
-                "pending" => false,
+            let reservation_reached = match existing.status.as_str() {
+                "pending" => existing.reservation_reached,
                 "failed" if rate_limited => {
                     enforce_receipt_capacity(&transaction, config)?;
                     enforce_phase(&transaction, request, scope_sha256)?;
-                    true
+                    false
                 }
                 _ => return Err(ObserverError::StateUnavailable),
             };
@@ -421,7 +429,7 @@ impl ObserverStore {
                 .map_err(|_| ObserverError::StateUnavailable)?;
             return Ok(ClaimResult::Claimed {
                 retry_count: existing.retry_count,
-                fresh,
+                reservation_reached,
             });
         }
 
@@ -437,8 +445,8 @@ impl ObserverStore {
         }
         transaction
             .execute(
-                "INSERT INTO observations(observation_id, scope_sha256, destination_scope_sha256, request_sha256, phase, status, retry_count, created_at_ms, expires_at_ms)
-                 VALUES(?1, ?2, ?3, ?4, ?5, 'pending', 0, ?6, ?7)",
+                "INSERT INTO observations(observation_id, scope_sha256, destination_scope_sha256, request_sha256, phase, status, retry_count, reservation_reached, created_at_ms, expires_at_ms)
+                 VALUES(?1, ?2, ?3, ?4, ?5, 'pending', 0, 0, ?6, ?7)",
                 params![
                     request.observation_id.to_string(),
                     scope_sha256,
@@ -465,7 +473,7 @@ impl ObserverStore {
             .map_err(|_| ObserverError::StateUnavailable)?;
         Ok(ClaimResult::Claimed {
             retry_count: 0,
-            fresh: true,
+            reservation_reached: false,
         })
     }
 
@@ -476,7 +484,7 @@ impl ObserverStore {
         config_sha256: &str,
         request: &ObservationRequest,
         request_sha256: &str,
-        fresh_claim: bool,
+        reservation_reached: bool,
         started_at_ms: i64,
         started_at: Instant,
     ) -> Result<(), ObserverError> {
@@ -504,10 +512,10 @@ impl ObserverStore {
                 .map_err(|_| ObserverError::StateUnavailable)?;
             return Err(error);
         }
-        if fresh_claim {
+        if !reservation_reached {
             let changed = transaction
                 .execute(
-                    "UPDATE observations SET status='pending', failure_code=NULL WHERE observation_id=?1 AND request_sha256=?2 AND (status='pending' OR (status='failed' AND failure_code='rate_limited'))",
+                    "UPDATE observations SET status='pending', failure_code=NULL, reservation_reached=0 WHERE observation_id=?1 AND request_sha256=?2 AND (status='pending' OR (status='failed' AND failure_code='rate_limited'))",
                     params![request.observation_id.to_string(), request_sha256],
                 )
                 .map_err(|error| {
@@ -526,10 +534,10 @@ impl ObserverStore {
             }
         }
         if let Err(error) = reserve_request_attempt(&transaction, config, dispatch_at_ms) {
-            if fresh_claim && matches!(error, ObserverError::CapacityExceeded) {
+            if !reservation_reached && matches!(error, ObserverError::CapacityExceeded) {
                 let changed = transaction
                     .execute(
-                        "UPDATE observations SET status='failed', failure_code='rate_limited' WHERE observation_id=?1 AND request_sha256=?2 AND status='pending'",
+                        "UPDATE observations SET status='failed', failure_code='rate_limited', reservation_reached=0 WHERE observation_id=?1 AND request_sha256=?2 AND status='pending'",
                         params![request.observation_id.to_string(), request_sha256],
                     )
                     .map_err(|_| ObserverError::StateUnavailable)?;
@@ -541,6 +549,15 @@ impl ObserverStore {
                     .map_err(|_| ObserverError::StateUnavailable)?;
             }
             return Err(error);
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE observations SET reservation_reached=1 WHERE observation_id=?1 AND request_sha256=?2 AND status='pending'",
+                params![request.observation_id.to_string(), request_sha256],
+            )
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        if changed != 1 {
+            return Err(ObserverError::ReplayMismatch);
         }
         transaction
             .commit()
@@ -774,6 +791,30 @@ fn enable_wal(connection: &Connection) -> Result<(), ObserverError> {
     if !journal_mode.eq_ignore_ascii_case("wal") {
         return Err(ObserverError::StateUnavailable);
     }
+    Ok(())
+}
+
+fn ensure_observation_reservation_column(connection: &Connection) -> Result<(), ObserverError> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(observations)")
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    for column in columns {
+        if column.map_err(|_| ObserverError::StateUnavailable)? == "reservation_reached" {
+            return Ok(());
+        }
+    }
+    drop(statement);
+    // Conservatively classify pre-upgrade pending rows as having reached reservation: the old
+    // schema cannot distinguish the pre-reservation crash gap from a real attempted request.
+    connection
+        .execute(
+            "ALTER TABLE observations ADD COLUMN reservation_reached INTEGER NOT NULL DEFAULT 1 CHECK(reservation_reached IN (0, 1))",
+            [],
+        )
+        .map_err(|_| ObserverError::StateUnavailable)?;
     Ok(())
 }
 

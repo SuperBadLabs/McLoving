@@ -89,13 +89,17 @@ JSON-value strings are scanned through at most 16 successive reversible
 decoding layers. Each layer accepts percent encoding or standard and URL-safe
 Base64, padded or unpadded, and decodes maximal embedded Base64 alphabet runs,
 plus valid subranges ending at terminal padding so an adjacent alphabetic suffix
-cannot hide the padded payload. A successfully decoded padded token ends its run
-and scanning restarts at the following byte, covering concatenated padded tokens.
-At most the two canonical terminal-padding positions per token are probed, and
-only successfully decoded candidates consume the
-decode-work budget. Delimited, mixed, and repeatedly encoded payloads remain covered. Decode work
-is capped at the larger of 4 KiB or 64 times the original field length; depth
-or work overflow fails closed.
+cannot hide the padded payload. Each candidate checks the four possible Base64
+start phases, restarting those phases after a standard/URL-safe alphabet boundary,
+so an alphabetic or mixed-alphabet prefix cannot mask an interior encoding.
+Padding cannot start a token, and every padding sequence ends its candidate
+after preserving a possible canonical second padding byte even when the prior
+alphabet run was malformed. Scanning then restarts at the following byte,
+covering concatenated padded tokens. At most the two canonical terminal-padding
+positions per token are probed, and every attempted candidate consumes the decode-work budget.
+Delimited, mixed, and repeatedly encoded payloads remain covered. Decode work is
+capped at the larger of 4 KiB or 64 times the original field length; depth or
+work overflow fails closed.
 Configuration admission rejects query-key names beyond the request-protocol
 bound and header budgets too small for the mandatory JSON response header.
 It also proves that the largest legal signed request fits the complete NDJSON
@@ -178,12 +182,17 @@ Every initial or retrying outbound GET reserves a durable timestamped outbound
 intent in a dedicated immediate transaction after the active generation and
 request/grant validity are rechecked and immediately before dispatch, so an
 aborted pre-GET claim consumes no rate quota and process death cannot bypass the
-per-minute rate limit. If no dispatch slot is available, a fresh pending claim
-becomes a nonblocking replay tombstone represented by the existing `failed`
-status and a dedicated `rate_limited` failure code. It continues to bind the
-observation ID to exact canonical request truth without satisfying the
-one-pending-per-destination index or requiring an on-disk status-schema
-migration. Startup idempotently normalizes the legacy preview representation
+per-minute rate limit. The claim row durably records whether that reservation
+transaction was reached; claim creation stores false, while request-attempt
+insertion and setting the bit commit atomically. A restart can therefore
+distinguish an abandoned pre-reservation claim from a retry that already reached
+an actual dispatch reservation. If no dispatch slot is available, a new or
+recovered pre-reservation pending claim becomes a nonblocking replay tombstone
+represented by the existing `failed` status and a dedicated `rate_limited`
+failure code. It continues to bind the observation ID to exact canonical request
+truth without satisfying the one-pending-per-destination index. Existing ledgers
+are upgraded conservatively: indistinguishable pre-upgrade pending rows retain
+the attempted-request classification. Startup also idempotently normalizes the legacy preview representation
 (`status=rate_limited`, `failure_code=capacity_exceeded`) into this existing
 schema shape. A retrying claim that already records an actual transport attempt
 remains durable. A later byte-identical retry atomically returns the tombstone

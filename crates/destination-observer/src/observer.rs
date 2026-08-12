@@ -241,7 +241,7 @@ impl DestinationObserver {
             }
             Err(error) => return Err(error),
         };
-        let (retry_count, fresh_claim) = match self.store.claim(
+        let (retry_count, reservation_reached) = match self.store.claim(
             &self.config,
             &self.config_sha256,
             &request,
@@ -255,14 +255,17 @@ impl DestinationObserver {
                 self.validate_replayed_receipt(&request, &request_sha256, &receipt)?;
                 return Ok(*receipt);
             }
-            ClaimResult::Claimed { retry_count, fresh } => (retry_count, fresh),
+            ClaimResult::Claimed {
+                retry_count,
+                reservation_reached,
+            } => (retry_count, reservation_reached),
         };
         self.store.reserve_destination_request(
             &self.config,
             &self.config_sha256,
             &request,
             &request_sha256,
-            fresh_claim,
+            reservation_reached,
             now_ms,
             started_at,
         )?;
@@ -1580,28 +1583,26 @@ fn contains_secret_value_at(
             .get(index)
             .is_some_and(|byte| is_base64_token_byte(*byte));
         match (token_start, token_byte) {
-            (None, true) => {
+            (None, true) if raw[index] != b'=' => {
                 token_start = Some(index);
                 padding_probes = 0;
             }
             (Some(start), true) if raw[index] == b'=' && padding_probes < 2 => {
                 padding_probes += 1;
-                if let Some(contains_secret) = scan_base64_candidate(
+                if scan_base64_candidate(
                     &raw[start..=index],
                     markers,
                     depth,
                     consumed_work,
                     maximum_work,
-                ) {
-                    if contains_secret {
-                        return true;
-                    }
-                    // A decoded padded candidate terminates this token even when the following
-                    // byte is also in the Base64 alphabet. Preserve a possible second padding
-                    // byte before restarting at the following token.
-                    if padding_probes == 2 || raw.get(index + 1) != Some(&b'=') {
-                        token_start = None;
-                    }
+                ) == Some(true)
+                {
+                    return true;
+                }
+                // Padding is terminal even when the preceding alphabet run was malformed.
+                // Preserve only a possible canonical second padding byte before restarting.
+                if padding_probes == 2 || raw.get(index + 1) != Some(&b'=') {
+                    token_start = None;
                 }
             }
             (Some(start), false) => {
@@ -2044,6 +2045,15 @@ mod tests {
             format!("-----{}", BASE64.encode([b"x".as_slice(), marker].concat()));
         assert!(contains_secret_value(
             mixed_alphabet_prefix_then_secret.as_bytes(),
+            &[marker.to_vec()]
+        ));
+
+        let malformed_padding_then_secret = format!(
+            "=CC={}DC-=-",
+            BASE64.encode([b"x".as_slice(), marker].concat())
+        );
+        assert!(contains_secret_value(
+            malformed_padding_then_secret.as_bytes(),
             &[marker.to_vec()]
         ));
         assert!(!contains_secret_value(

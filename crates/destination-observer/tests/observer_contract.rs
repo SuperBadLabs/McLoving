@@ -978,6 +978,69 @@ async fn crash_gap_reservation_does_not_consume_the_destination_retry_budget() {
 }
 
 #[tokio::test]
+async fn pre_reservation_crash_state_becomes_a_nonblocking_rate_tombstone() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_requests_per_minute = 1;
+    let observer = rig.observer_for_config(config.clone()).unwrap();
+
+    rig.set_mode(Mode::Outage);
+    let mut request = rig.request(ObservationPhase::PreAction);
+    request.expected_config_sha256 = observer.config_sha256().to_owned();
+    let request = rig.prepare(request);
+    assert_eq!(
+        observer.observe_at(request.clone(), NOW).await,
+        Err(ObserverError::DestinationUnavailable)
+    );
+
+    // Rewind only the durable claim state to the exact crash gap after claim commit and before
+    // the rate-reservation transaction. The retained attempt keeps the rate window saturated.
+    let database_path = state.path().join("observer.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute(
+            "UPDATE observations SET retry_count=0, reservation_reached=0 WHERE observation_id=?1 AND status='pending'",
+            [request.observation_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    rig.set_mode(Mode::Good);
+    let restarted = rig.observer_for_config(config).unwrap();
+    assert_eq!(
+        restarted.observe_at(request, NOW).await,
+        Err(ObserverError::CapacityExceeded)
+    );
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let stored: (String, String, bool) = connection
+        .query_row(
+            "SELECT status, failure_code, reservation_reached FROM observations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        ("failed".to_owned(), "rate_limited".to_owned(), false)
+    );
+
+    connection
+        .execute("DELETE FROM request_attempts", [])
+        .unwrap();
+    drop(connection);
+    let mut next = rig.request(ObservationPhase::PreAction);
+    next.expected_config_sha256 = restarted.config_sha256().to_owned();
+    restarted.observe_at(rig.prepare(next), NOW).await.unwrap();
+}
+
+#[tokio::test]
 async fn rate_limit_rejection_releases_a_fresh_destination_claim() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();
