@@ -12,6 +12,7 @@ use mcloving_controller_store::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
+use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
 const SOURCE: &str = r#"version: 1
@@ -80,6 +81,63 @@ async fn database_unix_ms(store: &Store) -> i64 {
         .fetch_one(store.pool())
         .await
         .expect("sample PostgreSQL clock")
+}
+
+async fn lock_audit_head(
+    store: &Store,
+    organization_id: Uuid,
+) -> (Transaction<'static, Postgres>, i32) {
+    let mut tx = store
+        .pool()
+        .begin()
+        .await
+        .expect("begin audit lock fixture");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("scope audit lock fixture");
+    sqlx::query(
+        "INSERT INTO audit_chain_heads (organization_id)
+         VALUES ($1) ON CONFLICT (organization_id) DO NOTHING",
+    )
+    .bind(organization_id)
+    .execute(&mut *tx)
+    .await
+    .expect("ensure audit head fixture");
+    sqlx::query(
+        "SELECT next_sequence FROM audit_chain_heads
+         WHERE organization_id = $1 FOR UPDATE",
+    )
+    .bind(organization_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("lock audit head fixture");
+    let backend_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await
+        .expect("read audit lock backend PID");
+    (tx, backend_pid)
+}
+
+async fn wait_until_blocked_by(store: &Store, backend_pid: i32) {
+    for _ in 0..100 {
+        let blocked = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_stat_activity
+                 WHERE $1 = ANY(pg_blocking_pids(pid))
+             )",
+        )
+        .bind(backend_pid)
+        .fetch_one(store.pool())
+        .await
+        .expect("inspect PostgreSQL lock waiters");
+        if blocked {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("trigger transaction did not reach the held audit-head lock");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -686,6 +744,104 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
     expiring_write.delivery_ttl_seconds = 1;
     expiring_write.idempotency_key = "trigger-expiry-create".to_owned();
     store.put_pipeline_trigger(&expiring_write).await.unwrap();
+
+    let acceptance_contention_now = database_unix_ms(&store).await;
+    let acceptance_contention_delivery = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        expiring_trigger_id,
+        1,
+        "delivery-audit-contention-accept",
+        "event-audit-contention-accept",
+        acceptance_contention_now,
+    );
+    let (audit_lock, audit_backend_pid) = lock_audit_head(&store, organization_id).await;
+    let contention_store = store.clone();
+    let acceptance_task = tokio::spawn(async move {
+        contention_store
+            .accept_trigger_delivery(&acceptance_contention_delivery)
+            .await
+    });
+    wait_until_blocked_by(&store, audit_backend_pid).await;
+    sqlx::query("SELECT pg_sleep(1.1)")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let audit_release_time = database_unix_ms(&store).await;
+    audit_lock.rollback().await.unwrap();
+    let TriggerDeliveryAdmission::Created(accepted_after_audit_wait) =
+        acceptance_task.await.unwrap().unwrap()
+    else {
+        panic!("audit-contention acceptance must create one delivery")
+    };
+    assert!(accepted_after_audit_wait.accepted_at_unix_ms >= audit_release_time);
+    assert_eq!(
+        accepted_after_audit_wait.expires_at_unix_ms,
+        accepted_after_audit_wait.accepted_at_unix_ms + 1_000
+    );
+    assert!(accepted_after_audit_wait.expires_at_unix_ms > database_unix_ms(&store).await);
+
+    let failure_contention_now = database_unix_ms(&store).await;
+    let failure_contention_delivery = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        1,
+        "delivery-audit-contention-failure",
+        "event-audit-contention-failure",
+        failure_contention_now,
+    );
+    store
+        .accept_trigger_delivery(&failure_contention_delivery)
+        .await
+        .unwrap();
+    let failure_contention_claim = match store
+        .claim_trigger_delivery(&TriggerDeliveryClaimRequest {
+            organization_id,
+            trigger_id,
+            delivery_id: "delivery-audit-contention-failure".to_owned(),
+            worker_identity: "worker-audit-contention-failure".to_owned(),
+            now_unix_ms: failure_contention_now,
+            lease_expires_at_unix_ms: failure_contention_now + 1_000,
+        })
+        .await
+        .unwrap()
+    {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        other => panic!("unexpected audit-contention failure claim: {other:?}"),
+    };
+    let (audit_lock, audit_backend_pid) = lock_audit_head(&store, organization_id).await;
+    let contention_store = store.clone();
+    let failure_task = tokio::spawn(async move {
+        contention_store
+            .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
+                organization_id,
+                trigger_id,
+                delivery_id: "delivery-audit-contention-failure".to_owned(),
+                worker_identity: "worker-audit-contention-failure".to_owned(),
+                claim_fence: failure_contention_claim.claim_fence,
+                now_unix_ms: failure_contention_now,
+                retry_at_unix_ms: failure_contention_now + 1_000,
+                retryable: true,
+                reason: "audit-head contention".to_owned(),
+            })
+            .await
+    });
+    wait_until_blocked_by(&store, audit_backend_pid).await;
+    sqlx::query("SELECT pg_sleep(1.1)")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    audit_lock.rollback().await.unwrap();
+    let TriggerDeliveryFailure::LeaseLost(failure_after_audit_wait) =
+        failure_task.await.unwrap().unwrap()
+    else {
+        panic!("audit contention past the claim lease must return typed lease loss")
+    };
+    assert_eq!(failure_after_audit_wait.attempt_count, 0);
+
     let wall_now = database_unix_ms(&store).await;
     let expires_during_admission = delivery(
         organization_id,

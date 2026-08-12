@@ -676,7 +676,7 @@ pub(crate) async fn append_audit_record(
     })
 }
 
-async fn lock_audit_head(
+pub(crate) async fn lock_audit_head(
     tx: &mut Transaction<'_, Postgres>,
     organization_id: Uuid,
 ) -> Result<(i64, Vec<u8>), StoreError> {

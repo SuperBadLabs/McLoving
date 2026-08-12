@@ -1072,6 +1072,9 @@ impl Store {
             )));
         }
 
+        // Acceptance time is sampled only after every later blocking row lock,
+        // including the organization-wide audit head, is already held.
+        let _ = crate::audit::lock_audit_head(&mut tx, input.organization_id).await?;
         let database_accepted_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
         if input.event_time_unix_ms > database_accepted_at_unix_ms.saturating_add(MAX_CLOCK_SKEW_MS)
             || input.event_time_unix_ms
@@ -1599,7 +1602,6 @@ impl Store {
         })?;
         let max_attempts: i32 = row.try_get("max_delivery_attempts")?;
         let current = delivery_from_row(row)?;
-        let database_now_unix_ms = trigger_database_unix_ms(&mut tx).await?;
         if matches!(
             current.status,
             TriggerDeliveryStatus::Admitted | TriggerDeliveryStatus::DeadLettered
@@ -1617,6 +1619,10 @@ impl Store {
                 "delivery failure claim is stale or belongs to another worker".to_owned(),
             ));
         }
+        // Hold the later audit-head lock before sampling lease/TTL authority so
+        // contention cannot make the failure decision stale before it commits.
+        let _ = crate::audit::lock_audit_head(&mut tx, input.organization_id).await?;
+        let database_now_unix_ms = trigger_database_unix_ms(&mut tx).await?;
         if current.claim_expires_at_unix_ms.unwrap_or(0) <= database_now_unix_ms {
             tx.commit().await?;
             return Ok(TriggerDeliveryFailure::LeaseLost(current));
@@ -1904,6 +1910,9 @@ impl Store {
         .bind(&input.dead_letter_delivery_id)
         .fetch_one(&mut *tx)
         .await?;
+        // Redrive uses the same post-lock acceptance-time boundary as first
+        // delivery capture.
+        let _ = crate::audit::lock_audit_head(&mut tx, input.organization_id).await?;
         let database_accepted_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
         let expires_at = database_accepted_at_unix_ms
             .checked_add(ttl_seconds * 1000)
