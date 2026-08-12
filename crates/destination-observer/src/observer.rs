@@ -442,7 +442,7 @@ impl DestinationObserver {
                 query.append_pair(key, value);
             }
         }
-        let response = self
+        let outbound_request = self
             .client
             .get(url)
             .header(ACCEPT, "application/json")
@@ -452,7 +452,15 @@ impl DestinationObserver {
             .header(OBSERVATION_PHASE_HEADER, request.phase.as_str())
             .header(QUERY_SHA256_HEADER, query_sha256.as_str())
             .header(REQUEST_SHA256_HEADER, request_sha256.as_str())
-            .send()
+            .build()
+            .map_err(|_| ObserverError::DestinationUnavailable)?;
+        // Re-sample trusted monotonic time at the transport boundary. Ledger and executor
+        // scheduling after the durable attempt reservation must not exercise expired authority.
+        let dispatch_at_ms = elapsed_time_ms(now_ms, started_at)?;
+        validate_temporal(&self.config, request, dispatch_at_ms)?;
+        let response = self
+            .client
+            .execute(outbound_request)
             .await
             .map_err(|_| ObserverError::DestinationUnavailable)?;
         if response.headers().iter().any(|(name, value)| {
@@ -986,7 +994,12 @@ fn validate_config(
         || config.request_authority_key_id.is_empty()
         || config.destination_attestation_key_id.is_empty()
         || config.receipt_signing_key_id.is_empty()
-        || !maximum_request_envelope_fits(config, config_sha256, implementation_sha256)
+        || !maximum_request_envelope_fits(
+            config,
+            config_sha256,
+            implementation_sha256,
+            minimum_valid_observation_time,
+        )
         || !minimum_destination_response_fits(config, minimum_valid_observation_time)
         || !maximum_receipt_envelope_fits(config, config_sha256, implementation_sha256)
         || authority_digests
@@ -1091,7 +1104,10 @@ fn maximum_request_envelope_fits(
     config: &ObserverConfig,
     config_sha256: &str,
     implementation_sha256: &str,
+    observation_time_ms: i64,
 ) -> bool {
+    let (requested_at_unix_ms, expires_at_unix_ms) =
+        maximum_request_timestamp_pair(observation_time_ms, config.limits.max_age_ms);
     let maximum = ObservationRequest {
         schema_version: REQUEST_SCHEMA_VERSION.to_owned(),
         protocol_version: PROTOCOL_VERSION.to_owned(),
@@ -1122,8 +1138,8 @@ fn maximum_request_envelope_fits(
         query: BTreeMap::new(),
         expected_previous_cursor: Some(u64::MAX),
         predecessor_receipt_sha256: Some("f".repeat(64)),
-        requested_at_unix_ms: i64::MIN,
-        expires_at_unix_ms: i64::MIN,
+        requested_at_unix_ms,
+        expires_at_unix_ms,
         audit_provenance: "\0".repeat(MAX_AUDIT_PROVENANCE_BYTES),
         authorization: crate::RequestAuthorization {
             key_id: config.request_authority_key_id.clone(),
@@ -1160,6 +1176,25 @@ fn maximum_request_envelope_fits(
             .and_then(|size| size.checked_add(1))
             .is_some_and(|size| size <= crate::standalone::MAX_FRAME_BYTES)
     })
+}
+
+fn maximum_request_timestamp_pair(observation_time_ms: i64, max_age_ms: i64) -> (i64, i64) {
+    let candidates = [
+        (
+            observation_time_ms.saturating_sub(max_age_ms),
+            observation_time_ms,
+        ),
+        (
+            observation_time_ms,
+            observation_time_ms.saturating_add(max_age_ms),
+        ),
+    ];
+    candidates
+        .into_iter()
+        .max_by_key(|(requested_at, expires_at)| {
+            requested_at.to_string().len() + expires_at.to_string().len()
+        })
+        .unwrap_or((observation_time_ms, observation_time_ms))
 }
 
 fn is_literal_loopback_test_endpoint(config: &ObserverConfig) -> bool {
@@ -1250,6 +1285,7 @@ fn maximum_receipt_envelope_fits(
 fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize> {
     let mut state = serde_json::Map::new();
     let mut required_growth_threshold = None;
+    let mut required_fixed_growth = 0_usize;
     for field in &config.response_schema {
         if !field.required {
             continue;
@@ -1261,9 +1297,12 @@ fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize>
                     .map_or(threshold, |current: usize| current.min(threshold)),
             );
         }
+        if field.kind == crate::JsonKind::Boolean {
+            required_fixed_growth = required_fixed_growth.checked_add(1)?;
+        }
     }
     let base_state = serde_json::Value::Object(state);
-    let base_state_len = serde_json::to_vec(&base_state).ok()?.len();
+    let mut base_state_len = serde_json::to_vec(&base_state).ok()?.len();
     let empty_response_len =
         sized_destination_response(config, serde_json::Value::Object(serde_json::Map::new()))?;
     let fixed_response_len = empty_response_len.checked_sub(2)?;
@@ -1274,10 +1313,13 @@ fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize>
     if base_state_len > state_budget {
         return None;
     }
-    let remaining = state_budget.checked_sub(base_state_len)?;
+    let mut remaining = state_budget.checked_sub(base_state_len)?;
     if required_growth_threshold.is_some_and(|threshold| remaining >= threshold) {
         return Some(state_budget);
     }
+    let admitted_fixed_growth = remaining.min(required_fixed_growth);
+    base_state_len = base_state_len.checked_add(admitted_fixed_growth)?;
+    remaining = remaining.checked_sub(admitted_fixed_growth)?;
 
     let required_nonempty = base_state_len > 2;
     let mut optional_fields = Vec::new();
@@ -1289,7 +1331,11 @@ fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize>
         let key_len = serde_json::to_vec(&field.name).ok()?.len();
         let value_len = serde_json::to_vec(&minimum_value(field.kind)).ok()?.len();
         let entry_with_separator = key_len.checked_add(value_len)?.checked_add(2)?;
-        optional_fields.push((entry_with_separator, growth_threshold(field.kind)));
+        optional_fields.push((
+            entry_with_separator,
+            growth_threshold(field.kind),
+            usize::from(field.kind == crate::JsonKind::Boolean),
+        ));
     }
 
     let subset_capacity = remaining.checked_add(usize::from(!required_nonempty))?;
@@ -1301,38 +1347,55 @@ fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize>
     base_state_len.checked_add(addition)
 }
 
-fn maximum_optional_subset(fields: &[(usize, Option<usize>)], capacity: usize) -> (usize, bool) {
+fn maximum_optional_subset(
+    fields: &[(usize, Option<usize>, usize)],
+    capacity: usize,
+) -> (usize, bool) {
     let mut without_expandable = vec![false; capacity.saturating_add(1)];
     let mut expandable_threshold = vec![0_usize; capacity.saturating_add(1)];
     without_expandable[0] = true;
-    for &(weight, growth_threshold) in fields {
-        if weight > capacity {
-            continue;
-        }
-        for value in (weight..=capacity).rev() {
-            let prior = value - weight;
-            if without_expandable[prior] {
-                if let Some(threshold) = growth_threshold {
+    for &(weight, growth_threshold, fixed_growth) in fields {
+        let prior_without = without_expandable.clone();
+        let prior_expandable = expandable_threshold.clone();
+        let variants = [
+            Some((weight, growth_threshold)),
+            (fixed_growth != 0)
+                .then(|| {
+                    weight
+                        .checked_add(fixed_growth)
+                        .map(|grown| (grown, growth_threshold))
+                })
+                .flatten(),
+        ];
+        for (variant_weight, variant_threshold) in variants.into_iter().flatten() {
+            if variant_weight > capacity {
+                continue;
+            }
+            for prior in 0..=capacity - variant_weight {
+                let value = prior + variant_weight;
+                if prior_without[prior] {
+                    if let Some(threshold) = variant_threshold {
+                        let current = expandable_threshold[value];
+                        expandable_threshold[value] = if current == 0 {
+                            threshold
+                        } else {
+                            current.min(threshold)
+                        };
+                    } else {
+                        without_expandable[value] = true;
+                    }
+                }
+                let prior_threshold = prior_expandable[prior];
+                if prior_threshold != 0 {
+                    let threshold = variant_threshold
+                        .map_or(prior_threshold, |candidate| prior_threshold.min(candidate));
                     let current = expandable_threshold[value];
                     expandable_threshold[value] = if current == 0 {
                         threshold
                     } else {
                         current.min(threshold)
                     };
-                } else {
-                    without_expandable[value] = true;
                 }
-            }
-            let prior_threshold = expandable_threshold[prior];
-            if prior_threshold != 0 {
-                let threshold = growth_threshold
-                    .map_or(prior_threshold, |candidate| prior_threshold.min(candidate));
-                let current = expandable_threshold[value];
-                expandable_threshold[value] = if current == 0 {
-                    threshold
-                } else {
-                    current.min(threshold)
-                };
             }
         }
     }
@@ -1390,7 +1453,8 @@ const fn growth_threshold(kind: crate::JsonKind) -> Option<usize> {
 fn minimum_value(kind: crate::JsonKind) -> serde_json::Value {
     match kind {
         crate::JsonKind::Array => serde_json::Value::Array(Vec::new()),
-        crate::JsonKind::Boolean => serde_json::Value::Bool(false),
+        // `true` is shortest; Boolean state can grow by one byte to `false`.
+        crate::JsonKind::Boolean => serde_json::Value::Bool(true),
         crate::JsonKind::Null => serde_json::Value::Null,
         crate::JsonKind::Number => serde_json::json!(0),
         crate::JsonKind::Object => serde_json::Value::Object(serde_json::Map::new()),
@@ -1460,25 +1524,31 @@ fn contains_secret_value_at(
             }
             (Some(start), true) if raw[index] == b'=' && padding_probes < 2 => {
                 padding_probes += 1;
-                if contains_secret_in_base64_candidate(
+                if let Some(contains_secret) = scan_base64_candidate(
                     &raw[start..=index],
                     markers,
                     depth,
                     consumed_work,
                     maximum_work,
                 ) {
-                    return true;
+                    if contains_secret {
+                        return true;
+                    }
+                    // A decoded padded candidate terminates this token even when the following
+                    // byte is also in the Base64 alphabet. Restart scanning at that byte.
+                    token_start = None;
                 }
             }
             (Some(start), false) => {
                 token_start = None;
-                if contains_secret_in_base64_candidate(
+                if scan_base64_candidate(
                     &raw[start..index],
                     markers,
                     depth,
                     consumed_work,
                     maximum_work,
-                ) {
+                ) == Some(true)
+                {
                     return true;
                 }
             }
@@ -1488,25 +1558,25 @@ fn contains_secret_value_at(
     false
 }
 
-fn contains_secret_in_base64_candidate(
+fn scan_base64_candidate(
     candidate: &[u8],
     markers: &[Vec<u8>],
     depth: usize,
     consumed_work: &mut usize,
     maximum_work: usize,
-) -> bool {
+) -> Option<bool> {
     if candidate.len() < 4 {
-        return false;
+        return None;
     }
-    let Some(decoded) = base64_decode_once(candidate) else {
-        return false;
-    };
+    let decoded = base64_decode_once(candidate)?;
     *consumed_work = match consumed_work.checked_add(candidate.len()) {
         Some(work) if work <= maximum_work => work,
-        _ => return true,
+        _ => return Some(true),
     };
-    depth == MAX_REVERSIBLE_DECODE_DEPTH
-        || contains_secret_value_at(&decoded, markers, depth + 1, consumed_work, maximum_work)
+    Some(
+        depth == MAX_REVERSIBLE_DECODE_DEPTH
+            || contains_secret_value_at(&decoded, markers, depth + 1, consumed_work, maximum_work),
+    )
 }
 
 const fn is_base64_token_byte(byte: u8) -> bool {
@@ -1847,6 +1917,15 @@ mod tests {
             padded_with_suffix.as_bytes(),
             &[marker.to_vec()]
         ));
+        let safe_padded_then_secret = format!(
+            "{}{}suffix",
+            BASE64.encode(b"a"),
+            BASE64.encode([b"x".as_slice(), marker].concat())
+        );
+        assert!(contains_secret_value(
+            safe_padded_then_secret.as_bytes(),
+            &[marker.to_vec()]
+        ));
         assert!(!contains_secret_value(
             &vec![b'='; 4 * 1024],
             &[marker.to_vec()]
@@ -1963,16 +2042,38 @@ mod tests {
 
     #[test]
     fn optional_state_subset_sum_finds_the_true_maximum() {
-        let fixed = [(8, None), (5, None), (5, None)];
+        let fixed = [(8, None, 0), (5, None, 0), (5, None, 0)];
         assert_eq!(maximum_optional_subset(&fixed, 10), (10, false));
         assert_eq!(maximum_optional_subset(&fixed, 9), (8, false));
 
-        let object = [(5, Some(4))];
+        let object = [(5, Some(4), 0)];
         assert_eq!(maximum_optional_subset(&object, 8), (5, false));
         assert_eq!(maximum_optional_subset(&object, 9), (9, true));
 
-        let string = [(5, Some(1))];
+        let string = [(5, Some(1), 0)];
         assert_eq!(maximum_optional_subset(&string, 5), (5, false));
         assert_eq!(maximum_optional_subset(&string, 6), (6, true));
+
+        let boolean = [(5, None, 1)];
+        assert_eq!(maximum_optional_subset(&boolean, 5), (5, false));
+        assert_eq!(maximum_optional_subset(&boolean, 6), (6, false));
+        assert_eq!(maximum_optional_subset(&boolean, 7), (6, false));
+    }
+
+    #[test]
+    fn request_sizing_uses_only_temporally_admissible_timestamp_pairs() {
+        let now = 1_800_000_000_000_i64;
+        for max_age in [10_000_i64, i64::MAX] {
+            let selected = maximum_request_timestamp_pair(now, max_age);
+            let candidates = [
+                (now.saturating_sub(max_age), now),
+                (now, now.saturating_add(max_age)),
+            ];
+            assert!(candidates.contains(&selected));
+            let selected_len = selected.0.to_string().len() + selected.1.to_string().len();
+            assert!(candidates.iter().all(|candidate| {
+                candidate.0.to_string().len() + candidate.1.to_string().len() <= selected_len
+            }));
+        }
     }
 }

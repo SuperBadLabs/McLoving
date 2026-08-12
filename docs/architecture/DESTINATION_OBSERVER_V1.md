@@ -89,8 +89,10 @@ JSON-value strings are scanned through at most 16 successive reversible
 decoding layers. Each layer accepts percent encoding or standard and URL-safe
 Base64, padded or unpadded, and decodes maximal embedded Base64 alphabet runs,
 plus valid subranges ending at terminal padding so an adjacent alphabetic suffix
-cannot hide the padded payload. At most the two canonical terminal-padding
-positions are probed, and only successfully decoded candidates consume the
+cannot hide the padded payload. A successfully decoded padded token ends its run
+and scanning restarts at the following byte, covering concatenated padded tokens.
+At most the two canonical terminal-padding positions per token are probed, and
+only successfully decoded candidates consume the
 decode-work budget. Delimited, mixed, and repeatedly encoded payloads remain covered. Decode work
 is capped at the larger of 4 KiB or 64 times the original field length; depth
 or work overflow fails closed.
@@ -141,8 +143,8 @@ outcome instead of becoming a permanent size tombstone regardless of
 declared-length or chunked framing;
 request and grant validity are checked again at the monotonic GET-completion
 time before any success or terminal outcome is committed. They are also
-resampled after ledger and
-lease delays immediately before dispatch, so authority that expires while
+resampled after ledger and lease delays at the built-request transport boundary
+immediately before client execution, so authority that expires while
 waiting cannot cause a GET. Configuration admission requires the transport
 timeout to fit within the freshness window so no in-flight read can outlive its
 terminal tombstone retention basis;

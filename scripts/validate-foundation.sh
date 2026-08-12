@@ -77,7 +77,9 @@ podman run --rm \
   'cargo fmt --all -- --check &&
    cargo metadata --locked --no-deps --format-version 1 >/tmp/metadata.json &&
    cargo clippy --locked --workspace --all-targets -- -D warnings &&
-   cargo test --locked --workspace'
+   cargo test --locked --workspace &&
+   cargo clippy --locked -p mcloving-destination-observer --all-targets --all-features -- -D warnings &&
+   cargo test --locked -p mcloving-destination-observer --all-features'
 
 podman run --rm \
   -v "${repo_root}:/work:Z" \
