@@ -3206,6 +3206,13 @@ async fn admit_pipeline_parameters(
                     trigger_delivery: Some(delivery),
                 });
             }
+            TriggerDeliveryDagAdmission::LeaseLost(delivery) => {
+                return Ok(PipelineAdmissionResult {
+                    status: StatusCode::ACCEPTED,
+                    admission: None,
+                    trigger_delivery: Some(delivery),
+                });
+            }
         },
         None => (
             state.store.admit_dag(&dag).await.map_err(admission_error)?,

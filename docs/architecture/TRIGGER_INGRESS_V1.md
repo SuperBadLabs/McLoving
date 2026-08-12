@@ -87,7 +87,10 @@ durable `event_id`, so the caller cannot mint duplicate work for one logical
 request by rotating transport identifiers.
 
 Processing requires a bounded PostgreSQL lease with a monotonically increasing
-claim fence. Active-active workers converge on one claim. A stale worker cannot
+claim fence. After locking the delivery, the store samples PostgreSQL time to
+decide whether the current lease is live and derives the new expiry from that
+same clock plus the bounded requested duration. Active-active workers converge
+on one claim even when controller wall clocks differ. A stale worker cannot
 complete or fail a newer claim, and admission conditionally binds only while
 the matching claim lease is still live according to the PostgreSQL clock.
 Processing enters the JOBSTATE-001 saved-pipeline
@@ -97,7 +100,9 @@ one PostgreSQL transaction. DAG construction runs inside a savepoint; the store
 samples the database clock after all DAG rows are staged. If the delivery TTL
 or claim lease is then expired, the savepoint rolls back every runnable build
 row. Delivery expiry is terminally dead-lettered; claim expiry leaves the
-delivery retryable for a newly fenced worker. A crash therefore leaves either
+delivery retryable for a newly fenced worker and returns a typed lease-lost
+outcome that does not enter admission-failure accounting or spend retry budget.
+A crash therefore leaves either
 no build and a retryable claim transaction, one expired dead letter and no
 build, or one admitted delivery bound to its exact build—never an orphaned
 runnable build or an unbound duplicate-redrive path.
@@ -202,7 +207,9 @@ versus claim lock ordering, active-active claims, exact/divergent delivery
 replay, delayed/future input, bounded outage retry, attempt exhaustion,
 exact-source and conflicting-source dead-letter redrive, stale claim denial,
 parameter pre-capture and corrupt-store terminal failure, completion-time
-expiry with zero persisted DAG, expired-claim handoff reaping, caller rotation,
+delivery/claim expiry with zero persisted DAG and unchanged retry budget,
+database-clock claim ownership under controller-clock skew, unordered filter
+membership, expired-claim handoff reaping, caller rotation,
 pause/resume, disable fencing, restart, atomic schedule
 watermark, slot reorder/substitution, upstream success/failure, unsupported
 plugin denial, RLS/forced-RLS migration, and audit linkage. Public API tests

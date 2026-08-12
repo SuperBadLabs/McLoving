@@ -319,11 +319,12 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         store.put_pipeline_trigger(&unknown_configuration).await,
         Err(StoreError::InvalidTriggerIngress(_))
     ));
+    let unordered_filter_trigger_id = Uuid::new_v4();
     let unordered_unique_filter = trigger_write(
         organization_id,
         project_id,
         pipeline_id,
-        Uuid::new_v4(),
+        unordered_filter_trigger_id,
         0,
         TriggerKind::ScmWebhook,
         PipelineTriggerState::Enabled,
@@ -345,6 +346,22 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .await
             .unwrap(),
         TriggerPutOutcome::Created(_)
+    ));
+    assert!(matches!(
+        store
+            .accept_trigger_delivery(&delivery(
+                organization_id,
+                project_id,
+                pipeline_id,
+                unordered_filter_trigger_id,
+                1,
+                "delivery-unordered-filter",
+                "event-unordered-filter",
+                1_900_000_000_000,
+            ))
+            .await
+            .unwrap(),
+        TriggerDeliveryAdmission::Created(_)
     ));
     let duplicate_filter = trigger_write(
         organization_id,
@@ -474,6 +491,14 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         other => panic!("unexpected first claim: {other:?}"),
     };
     assert_eq!(first_claim.claim_fence, 1);
+    let database_after_claim = sqlx::query_scalar::<_, i64>(
+        "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert!(first_claim.claim_expires_at_unix_ms.unwrap() > database_after_claim);
+    assert!(first_claim.claim_expires_at_unix_ms.unwrap() <= database_after_claim + 60_000);
     assert!(matches!(
         store
             .claim_trigger_delivery(&claim(
@@ -482,6 +507,19 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
                 "delivery-1",
                 "worker-2",
                 now + 1,
+            ))
+            .await
+            .unwrap(),
+        TriggerDeliveryClaimOutcome::Leased(_)
+    ));
+    assert!(matches!(
+        store
+            .claim_trigger_delivery(&claim(
+                organization_id,
+                trigger_id,
+                "delivery-1",
+                "worker-fast-clock",
+                now + 10 * 60_000,
             ))
             .await
             .unwrap(),
@@ -507,7 +545,8 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .due_trigger_deliveries(organization_id, now + 30_000, 128)
             .await
             .unwrap()
-            .is_empty(),
+            .iter()
+            .all(|delivery| delivery.delivery_id != "delivery-1"),
         "retry worker cannot claim before the durable due time"
     );
     assert!(matches!(
@@ -529,6 +568,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         .unwrap();
     assert_eq!(
         due.iter()
+            .filter(|delivery| delivery.trigger_id == trigger_id)
             .map(|delivery| delivery.delivery_id.as_str())
             .collect::<Vec<_>>(),
         vec!["delivery-1"],
@@ -696,41 +736,47 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         TriggerDeliveryAdmission::Created(_)
     ));
     let expired_claim = match store
-        .claim_trigger_delivery(&claim(
+        .claim_trigger_delivery(&TriggerDeliveryClaimRequest {
             organization_id,
             trigger_id,
-            "delivery-expired-claim-admission",
-            "worker-expired-claim-admission",
-            wall_now - 61_000,
-        ))
+            delivery_id: "delivery-expired-claim-admission".to_owned(),
+            worker_identity: "worker-expired-claim-admission".to_owned(),
+            now_unix_ms: wall_now,
+            lease_expires_at_unix_ms: wall_now + 1,
+        })
         .await
         .unwrap()
     {
         TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
         other => panic!("unexpected expired-claim fixture: {other:?}"),
     };
+    sqlx::query("SELECT pg_sleep(0.01)")
+        .execute(store.pool())
+        .await
+        .unwrap();
     let expired_claim_dag = dag(
         organization_id,
         project_id,
         pipeline_id,
         "trigger-delivery-expired-claim-admission",
     );
-    assert!(matches!(
-        store
-            .admit_trigger_delivery_dag(
-                &TriggerDeliveryDagAdmissionRequest {
-                    organization_id,
-                    trigger_id,
-                    delivery_id: "delivery-expired-claim-admission".to_owned(),
-                    worker_identity: "worker-expired-claim-admission".to_owned(),
-                    claim_fence: expired_claim.claim_fence,
-                },
-                &expired_claim_dag,
-            )
-            .await,
-        Err(StoreError::TriggerIngressConflict(message))
-            if message == "delivery admission claim lease expired"
-    ));
+    let TriggerDeliveryDagAdmission::LeaseLost(lease_lost) = store
+        .admit_trigger_delivery_dag(
+            &TriggerDeliveryDagAdmissionRequest {
+                organization_id,
+                trigger_id,
+                delivery_id: "delivery-expired-claim-admission".to_owned(),
+                worker_identity: "worker-expired-claim-admission".to_owned(),
+                claim_fence: expired_claim.claim_fence,
+            },
+            &expired_claim_dag,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("an already-expired claim must return the typed lease-lost outcome")
+    };
+    assert_eq!(lease_lost.attempt_count, 0);
     assert!(
         store
             .dag_replay_binding(
@@ -745,7 +791,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
     );
     assert!(
         store
-            .due_trigger_deliveries(organization_id, wall_now, 128)
+            .due_trigger_deliveries(organization_id, wall_now + 1_000, 128)
             .await
             .unwrap()
             .iter()
@@ -839,11 +885,11 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         .execute(store.pool())
         .await
         .unwrap();
-    assert!(matches!(
-        lease_race_result,
-        Err(StoreError::TriggerIngressConflict(message))
-            if message == "delivery admission claim lease expired"
-    ));
+    let TriggerDeliveryDagAdmission::LeaseLost(lease_lost) = lease_race_result.unwrap() else {
+        panic!("mid-admission lease expiry must return a non-failure-accounting outcome")
+    };
+    assert_eq!(lease_lost.status, TriggerDeliveryStatus::Pending);
+    assert_eq!(lease_lost.attempt_count, 0);
     assert!(
         store
             .dag_replay_binding(
@@ -1281,17 +1327,22 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         .expect("capture expired handoff claim fixture");
     assert!(matches!(
         store
-            .claim_trigger_delivery(&claim(
+            .claim_trigger_delivery(&TriggerDeliveryClaimRequest {
                 organization_id,
                 trigger_id,
-                "expired-handoff-claim",
-                "crashed-handoff-worker",
-                handoff_now - 61_000,
-            ))
+                delivery_id: "expired-handoff-claim".to_owned(),
+                worker_identity: "crashed-handoff-worker".to_owned(),
+                now_unix_ms: handoff_now,
+                lease_expires_at_unix_ms: handoff_now + 1,
+            })
             .await
             .unwrap(),
         TriggerDeliveryClaimOutcome::Claimed(_)
     ));
+    sqlx::query("SELECT pg_sleep(0.01)")
+        .execute(store.pool())
+        .await
+        .unwrap();
     let configuration = json!({"audience": "mcloving:remote-build", "filter": {"event_kinds": ["remote"], "request_methods": ["POST"]}});
     let pause_for_handoff = trigger_write(
         organization_id,

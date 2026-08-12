@@ -245,6 +245,7 @@ pub enum TriggerDeliveryDagAdmission {
         admission: DagAdmission,
     },
     DeadLettered(TriggerDelivery),
+    LeaseLost(TriggerDelivery),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1242,12 +1243,6 @@ impl Store {
             tx.commit().await?;
             return Ok(TriggerDeliveryClaimOutcome::Terminal(delivery));
         }
-        if current.claim_owner.is_some()
-            && current.claim_expires_at_unix_ms.unwrap_or(0) > input.now_unix_ms
-        {
-            tx.commit().await?;
-            return Ok(TriggerDeliveryClaimOutcome::Leased(current));
-        }
         let current_trigger = sqlx::query_as::<_, (i64, String)>(
             "SELECT definition.current_generation, version.state
              FROM pipeline_trigger_definitions AS definition
@@ -1306,7 +1301,20 @@ impl Store {
                 pipeline.1
             )));
         }
+        let database_now_unix_ms = trigger_database_unix_ms(&mut tx).await?;
+        if current.claim_owner.is_some()
+            && current.claim_expires_at_unix_ms.unwrap_or(0) > database_now_unix_ms
+        {
+            tx.commit().await?;
+            return Ok(TriggerDeliveryClaimOutcome::Leased(current));
+        }
         let next_fence = current.claim_fence + 1;
+        let lease_duration_ms = input.lease_expires_at_unix_ms - input.now_unix_ms;
+        let lease_expires_at_unix_ms = database_now_unix_ms
+            .checked_add(lease_duration_ms)
+            .ok_or_else(|| {
+                StoreError::InvalidTriggerIngress("delivery claim lease overflows".to_owned())
+            })?;
         crate::audit::append_audit_record(
             &mut tx,
             input.organization_id,
@@ -1319,7 +1327,7 @@ impl Store {
             ),
             json!({
                 "claim_fence": next_fence,
-                "lease_expires_at_unix_ms": input.lease_expires_at_unix_ms,
+                "lease_expires_at_unix_ms": lease_expires_at_unix_ms,
             }),
         )
         .await?;
@@ -1334,7 +1342,7 @@ impl Store {
         .bind(&input.delivery_id)
         .bind(&input.worker_identity)
         .bind(next_fence)
-        .bind(input.lease_expires_at_unix_ms)
+        .bind(lease_expires_at_unix_ms)
         .execute(&mut *tx)
         .await?;
         let row = sqlx::query(
@@ -1471,10 +1479,8 @@ impl Store {
             return Ok(TriggerDeliveryDagAdmission::DeadLettered(delivery));
         }
         if current.claim_expires_at_unix_ms.unwrap_or(0) <= admitted_at_unix_ms {
-            tx.rollback().await?;
-            return Err(StoreError::TriggerIngressConflict(
-                "delivery admission claim lease expired".to_owned(),
-            ));
+            tx.commit().await?;
+            return Ok(TriggerDeliveryDagAdmission::LeaseLost(current));
         }
         let mut admission_tx = tx.begin().await?;
         let admission = crate::dag::admit_dag_transaction(&mut admission_tx, dag).await?;
@@ -1510,10 +1516,18 @@ impl Store {
                 tx.commit().await?;
                 return Ok(TriggerDeliveryDagAdmission::DeadLettered(delivery));
             }
-            tx.rollback().await?;
-            return Err(StoreError::TriggerIngressConflict(
-                "delivery admission claim lease expired".to_owned(),
-            ));
+            let row = sqlx::query(
+                "SELECT * FROM trigger_deliveries
+                 WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+            )
+            .bind(input.organization_id)
+            .bind(input.trigger_id)
+            .bind(&input.delivery_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let delivery = delivery_from_row(row)?;
+            tx.commit().await?;
+            return Ok(TriggerDeliveryDagAdmission::LeaseLost(delivery));
         }
         crate::audit::append_audit_record(
             &mut admission_tx,
@@ -2736,7 +2750,7 @@ fn filter_allows(
         return Ok(true);
     };
     let allowed = filter_strings(value, field)?;
-    Ok(allowed.is_empty() || allowed.binary_search(&supplied).is_ok())
+    Ok(allowed.is_empty() || allowed.contains(&supplied))
 }
 
 fn filter_strings<'a>(value: &'a Value, field: &str) -> Result<Vec<&'a str>, StoreError> {
