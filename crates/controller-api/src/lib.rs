@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Versioned public HTTP API and its Rust client.
 
 mod oidc;
@@ -124,6 +125,25 @@ impl ApiState {
             publication_claim_cursor: Arc::new(Mutex::new(None)),
             oidc_clients: BTreeMap::new(),
         }
+    }
+
+    pub async fn process_due_trigger_deliveries(
+        &self,
+        organization_id: Uuid,
+        now_unix_ms: i64,
+        limit: i64,
+    ) -> Result<usize, ApiError> {
+        let deliveries = self
+            .store
+            .due_trigger_deliveries(organization_id, now_unix_ms, limit)
+            .await
+            .map_err(trigger_error)?;
+        let mut processed = 0;
+        for delivery in deliveries {
+            process_trigger_delivery(self, delivery, now_unix_ms).await?;
+            processed += 1;
+        }
+        Ok(processed)
     }
 
     /// Adds another independently authenticated API principal.
@@ -486,6 +506,7 @@ pub struct PipelineOperationalStateRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PipelineTriggerRequest {
     pub kind: TriggerKind,
     pub state: PipelineTriggerState,
@@ -522,6 +543,7 @@ pub struct PipelineTriggerResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TriggerEventRequest {
     pub trigger_generation: i64,
     pub delivery_id: String,
@@ -545,6 +567,7 @@ pub struct TriggerEventResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TriggerRedriveRequest {
     pub delivery_id: String,
     pub event_id: String,
@@ -670,6 +693,9 @@ fn openapi_document() -> Value {
         query_parameter("after", "string"),
         query_parameter("after_digest", "sha256"),
     ];
+    let trigger_configuration = trigger_configuration_schema();
+    let trigger_filter = trigger_filter_schema();
+    let trigger_event_payload = trigger_event_payload_schema();
     json!({
         "openapi": "3.1.0",
         "info": {
@@ -780,16 +806,14 @@ fn openapi_document() -> Value {
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events": {
                 "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
-                "post": api_operation(
-                    "submitTriggerEvent", "triggers", "Authenticate, durably capture, and process a typed trigger event", "201",
-                    Vec::new(), Some("TriggerEventRequest")
+                "post": trigger_event_operation(
+                    "submitTriggerEvent", "Authenticate, durably capture, and process a typed trigger event", "TriggerEventRequest"
                 )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive": {
                 "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger, delivery],
-                "post": api_operation(
-                    "redriveTriggerDelivery", "triggers", "Explicitly redrive one dead-lettered trigger delivery", "201",
-                    Vec::new(), Some("TriggerRedriveRequest")
+                "post": trigger_event_operation(
+                    "redriveTriggerDelivery", "Explicitly redrive one dead-lettered trigger delivery", "TriggerRedriveRequest"
                 )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds": {
@@ -1011,7 +1035,7 @@ fn openapi_document() -> Value {
                         "filter_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                         "event_source_identity": {"type": "string", "minLength": 1, "maxLength": 512},
                         "source_generation": {"type": "string", "minLength": 1, "maxLength": 512},
-                        "configuration": {"type": "object", "additionalProperties": true},
+                        "configuration": {"$ref": "#/components/schemas/TriggerConfiguration"},
                         "deduplication_window_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
                         "max_delivery_attempts": {"type": "integer", "minimum": 1, "maximum": 100},
                         "delivery_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
@@ -1028,13 +1052,16 @@ fn openapi_document() -> Value {
                         "event_id": {"type": "string", "minLength": 1, "maxLength": 512},
                         "event_kind": {"type": "string", "minLength": 1, "maxLength": 256},
                         "event_time_unix_ms": {"type": "integer", "minimum": 0},
-                        "payload": {"type": "object", "additionalProperties": true},
+                        "payload": {"$ref": "#/components/schemas/TriggerEventPayload"},
                         "parameters": {"type": "object", "additionalProperties": true},
                         "platform": {"type": "string", "enum": ["linux", "windows"]},
                         "trust_pool": {"type": "string", "minLength": 1, "maxLength": 128}
                     },
                     "additionalProperties": false
                 },
+                "TriggerConfiguration": trigger_configuration,
+                "TriggerFilter": trigger_filter,
+                "TriggerEventPayload": trigger_event_payload,
                 "TriggerRedriveRequest": {
                     "type": "object",
                     "required": ["delivery_id", "event_id"],
@@ -1114,6 +1141,76 @@ fn openapi_document() -> Value {
                 "BinaryArtifact": {"type": "string", "format": "binary"}
             }
         }
+    })
+}
+
+fn trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "provider": {"type": "string", "minLength": 1, "maxLength": 512},
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "timezone": {"type": "string", "minLength": 1, "maxLength": 512},
+            "calendar": {"type": "string", "minLength": 1, "maxLength": 512},
+            "expression": {"type": "string", "minLength": 1, "maxLength": 512},
+            "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolver_implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolved_slots_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolved_slots_unix_ms": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"type": "integer", "minimum": 0}},
+            "jenkins_hash_algorithm_version": {"type": "string", "minLength": 1, "maxLength": 512},
+            "jenkins_full_item_name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "jenkins_hash_inputs_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "upstream_pipeline_id": {"type": "string", "format": "uuid"},
+            "audience": {"type": "string", "minLength": 1, "maxLength": 512},
+            "filter": {"$ref": "#/components/schemas/TriggerFilter"}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn trigger_filter_schema() -> Value {
+    let strings = || {
+        json!({
+            "type": "array",
+            "maxItems": 128,
+            "items": {"type": "string", "minLength": 1, "maxLength": 512}
+        })
+    };
+    json!({
+        "type": "object",
+        "properties": {
+            "event_kinds": strings(),
+            "branches": strings(),
+            "path_prefixes": strings(),
+            "statuses": strings(),
+            "request_methods": strings()
+        },
+        "additionalProperties": false
+    })
+}
+
+fn trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "revision": {"type": "string", "minLength": 1, "maxLength": 512},
+            "branch": {"type": "string", "minLength": 1, "maxLength": 512},
+            "paths": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}},
+            "timezone": {"type": "string", "minLength": 1, "maxLength": 128},
+            "calendar": {"type": "string", "minLength": 1, "maxLength": 128},
+            "expression": {"type": "string", "minLength": 1, "maxLength": 512},
+            "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "expected_last_resolved_slot_unix_ms": {"type": "integer", "minimum": 0},
+            "resolved_slot_unix_ms": {"type": "integer", "minimum": 0},
+            "upstream_pipeline_id": {"type": "string", "format": "uuid"},
+            "upstream_build_id": {"type": "string", "format": "uuid"},
+            "status": {"type": "string", "minLength": 1, "maxLength": 512},
+            "audience": {"type": "string", "minLength": 1, "maxLength": 512},
+            "request_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "request_method": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "additionalProperties": false
     })
 }
 
@@ -1298,6 +1395,26 @@ fn put_pipeline_trigger_operation() -> Value {
     operation["responses"]["412"] = json!({
         "description": "Trigger generation precondition failed",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation
+}
+
+fn trigger_event_operation(operation_id: &str, summary: &str, body_schema: &str) -> Value {
+    let mut operation = api_operation(
+        operation_id,
+        "triggers",
+        summary,
+        "201",
+        Vec::new(),
+        Some(body_schema),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Exact replay of an admitted trigger delivery",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation["responses"]["202"] = json!({
+        "description": "Delivery is durably leased or waiting for its bounded retry",
+        "content": {"application/json": {"schema": {"type": "object"}}}
     });
     operation
 }
@@ -2337,38 +2454,7 @@ async fn process_trigger_delivery(
     now_unix_ms: i64,
 ) -> Result<Response, ApiError> {
     if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::Admitted {
-        let build_id = delivery.build_id.ok_or_else(|| {
-            internal("admitted trigger delivery is missing its bound build identity")
-        })?;
-        let (status, admission) = admit_pipeline_parameters(
-            state,
-            PipelineAdmissionInput {
-                organization_id: delivery.organization_id,
-                project_id: delivery.project_id,
-                pipeline_id: delivery.pipeline_id,
-                idempotency_key: trigger_build_idempotency(
-                    delivery.trigger_id,
-                    &delivery.delivery_id,
-                ),
-                parameters: parameter_values_from_delivery(&delivery)?,
-                required_platform: delivery.requested_platform.clone(),
-                required_trust_pool: delivery.requested_trust_pool.clone(),
-            },
-        )
-        .await?;
-        if admission.build_id != build_id {
-            return Err(internal(
-                "trigger delivery replay resolved to a different build identity",
-            ));
-        }
-        return Ok((
-            status,
-            Json(TriggerEventResponse {
-                delivery,
-                admission: Some(admission),
-            }),
-        )
-            .into_response());
+        return admitted_trigger_response(state, delivery).await;
     }
     if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::DeadLettered {
         return Ok((
@@ -2407,6 +2493,9 @@ async fn process_trigger_delivery(
                 .into_response());
         }
         TriggerDeliveryClaimOutcome::Terminal(delivery) => {
+            if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::Admitted {
+                return admitted_trigger_response(state, delivery).await;
+            }
             return Ok((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(TriggerEventResponse {
@@ -2491,6 +2580,41 @@ async fn process_trigger_delivery(
     }
 }
 
+async fn admitted_trigger_response(
+    state: &ApiState,
+    delivery: TriggerDelivery,
+) -> Result<Response, ApiError> {
+    let build_id = delivery
+        .build_id
+        .ok_or_else(|| internal("admitted trigger delivery is missing its bound build identity"))?;
+    let (status, admission) = admit_pipeline_parameters(
+        state,
+        PipelineAdmissionInput {
+            organization_id: delivery.organization_id,
+            project_id: delivery.project_id,
+            pipeline_id: delivery.pipeline_id,
+            idempotency_key: trigger_build_idempotency(delivery.trigger_id, &delivery.delivery_id),
+            parameters: parameter_values_from_delivery(&delivery)?,
+            required_platform: delivery.requested_platform.clone(),
+            required_trust_pool: delivery.requested_trust_pool.clone(),
+        },
+    )
+    .await?;
+    if admission.build_id != build_id {
+        return Err(internal(
+            "trigger delivery replay resolved to a different build identity",
+        ));
+    }
+    Ok((
+        status,
+        Json(TriggerEventResponse {
+            delivery,
+            admission: Some(admission),
+        }),
+    )
+        .into_response())
+}
+
 fn parameter_values_from_delivery(
     delivery: &TriggerDelivery,
 ) -> Result<BTreeMap<String, ParameterValue>, ApiError> {
@@ -2541,7 +2665,14 @@ fn validate_trigger_event_filter(
     }
     match trigger.kind {
         TriggerKind::ScmWebhook => {
-            trigger_payload_text(request, "repository_identity")?;
+            let configured = trigger
+                .configuration
+                .get("repository_identity")
+                .and_then(Value::as_str)
+                .ok_or_else(|| internal("stored SCM repository identity is missing"))?;
+            if trigger_payload_text(request, "repository_identity")? != configured {
+                return Err(trigger_filtered("SCM repository identity"));
+            }
             trigger_payload_text(request, "revision")?;
             if let Some(branches) = filter.get("branches") {
                 let branches = canonical_string_array(branches, "branches")?;
@@ -2614,7 +2745,9 @@ fn validate_trigger_event_filter(
             if trigger_payload_text(request, "audience")? != configured {
                 return Err(trigger_filtered("remote-build audience"));
             }
-            trigger_payload_text(request, "request_id")?;
+            if trigger_payload_text(request, "request_id")? != request.event_id {
+                return Err(trigger_filtered("remote-build request identity"));
+            }
             let method = trigger_payload_text(request, "request_method")?;
             if let Some(methods) = filter.get("request_methods") {
                 let methods = canonical_string_array(methods, "request_methods")?;

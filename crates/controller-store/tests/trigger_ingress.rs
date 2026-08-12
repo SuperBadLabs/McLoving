@@ -271,6 +271,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         "scm:github:installation:42",
         json!({
             "provider": "github",
+            "repository_identity": "github:superbadlabs/mcloving",
             "filter": {"event_kinds": ["push"], "branches": ["main"]},
         }),
         "trigger-create",
@@ -288,6 +289,34 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .count(),
         1
     );
+    let mut divergent_audit_retry = write.clone();
+    divergent_audit_retry.reason = "different audit reason".to_owned();
+    assert!(matches!(
+        store.put_pipeline_trigger(&divergent_audit_retry).await,
+        Err(StoreError::TriggerIngressConflict(_))
+    ));
+    let unknown_configuration = trigger_write(
+        organization_id,
+        project_id,
+        pipeline_id,
+        Uuid::new_v4(),
+        0,
+        TriggerKind::ScmWebhook,
+        PipelineTriggerState::Enabled,
+        "scm:github:installation:42",
+        json!({
+            "provider": "github",
+            "repository_identity": "github:superbadlabs/mcloving",
+            "filter": {},
+            "unreviewed_extension": true,
+        }),
+        "trigger-unknown-config",
+        3,
+    );
+    assert!(matches!(
+        store.put_pipeline_trigger(&unknown_configuration).await,
+        Err(StoreError::InvalidTriggerIngress(_))
+    ));
     assert_eq!(
         outcomes
             .iter()
@@ -319,6 +348,35 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
     delayed.event_id = "event-delayed".to_owned();
     assert!(matches!(
         store.accept_trigger_delivery(&delayed).await,
+        Err(StoreError::InvalidTriggerIngress(_))
+    ));
+    let mut substituted_repository = input.clone();
+    substituted_repository.delivery_id = "delivery-substituted-repository".to_owned();
+    substituted_repository.event_id = "event-substituted-repository".to_owned();
+    substituted_repository.canonical_payload["payload"]["repository_identity"] =
+        json!("github:superbadlabs/another-repository");
+    substituted_repository.payload_sha256 = Sha256::digest(
+        serde_json::to_vec(&substituted_repository.canonical_payload)
+            .unwrap()
+            .as_slice(),
+    )
+    .into();
+    assert!(matches!(
+        store.accept_trigger_delivery(&substituted_repository).await,
+        Err(StoreError::TriggerIngressConflict(_))
+    ));
+    let mut unknown_payload = input.clone();
+    unknown_payload.delivery_id = "delivery-unknown-payload".to_owned();
+    unknown_payload.event_id = "event-unknown-payload".to_owned();
+    unknown_payload.canonical_payload["payload"]["unreviewed_extension"] = json!(true);
+    unknown_payload.payload_sha256 = Sha256::digest(
+        serde_json::to_vec(&unknown_payload.canonical_payload)
+            .unwrap()
+            .as_slice(),
+    )
+    .into();
+    assert!(matches!(
+        store.accept_trigger_delivery(&unknown_payload).await,
         Err(StoreError::InvalidTriggerIngress(_))
     ));
     assert!(matches!(
@@ -379,6 +437,14 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         .await
         .unwrap();
     assert!(matches!(retry, TriggerDeliveryFailure::RetryScheduled(_)));
+    assert!(
+        store
+            .due_trigger_deliveries(organization_id, now + 30_000, 128)
+            .await
+            .unwrap()
+            .is_empty(),
+        "retry worker cannot claim before the durable due time"
+    );
     assert!(matches!(
         store
             .claim_trigger_delivery(&claim(
@@ -392,6 +458,17 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .unwrap(),
         TriggerDeliveryClaimOutcome::NotDue(_)
     ));
+    let due = store
+        .due_trigger_deliveries(organization_id, now + 60_000, 128)
+        .await
+        .unwrap();
+    assert_eq!(
+        due.iter()
+            .map(|delivery| delivery.delivery_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["delivery-1"],
+        "retry worker discovers the exact durable due delivery"
+    );
     let second_claim = match store
         .claim_trigger_delivery(&claim(
             organization_id,
@@ -1039,6 +1116,22 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
     assert_eq!(
         final_watermark.last_resolved_slot_unix_ms,
         Some(slot1 + 86_400_000)
+    );
+    assert!(
+        sqlx::query(
+            "UPDATE trigger_schedule_watermarks
+             SET last_resolved_slot_unix_ms = $4
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND trigger_generation = $3",
+        )
+        .bind(organization_id)
+        .bind(trigger_id)
+        .bind(1_i64)
+        .bind(slot1)
+        .execute(store.pool())
+        .await
+        .is_err(),
+        "database guard rejects privileged schedule watermark rollback"
     );
 }
 

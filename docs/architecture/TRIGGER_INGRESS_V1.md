@@ -15,8 +15,8 @@ reason, idempotency key, and hash-chained audit event.
 
 The closed trigger-kind schema is:
 
-- `scm_webhook`, with provider, repository, revision, branch, path, and event
-  filtering;
+- `scm_webhook`, with an exact configured provider and repository identity plus
+  revision, branch, path, and event filtering;
 - `schedule`, with timezone, calendar/tzdata identity, expression, exact
   resolver and schedule identities, a bounded pre-resolved slot set, and a
   durable watermark;
@@ -62,6 +62,12 @@ delivery plus its audit event. Delivery and event IDs are each unique per
 trigger. Exact response-loss replay returns the original record; either ID
 reused for different input is a conflict.
 
+Each kind also has a closed payload field set. SCM repository identity must
+equal the configured repository, not merely share an installation credential.
+For remote API ingress, the signed/request payload's `request_id` must equal the
+durable `event_id`, so the caller cannot mint duplicate work for one logical
+request by rotating transport identifiers.
+
 Processing requires a bounded PostgreSQL lease with a monotonically increasing
 claim fence. Active-active workers converge on one claim. A stale worker cannot
 complete or fail a newer claim. Processing enters the JOBSTATE-001 saved-pipeline
@@ -76,11 +82,15 @@ The durable states are:
 - `dead_lettered` — terminal with a bounded reason.
 
 Attempt count, retry due time, expiry, and the original trigger generation are
-durable. Expired or exhausted work dead-letters. A dead letter is never mutated
-back to pending. Project-configure redrive creates a new delivery/event identity
-with immutable lineage and ordinal, then enters the same claim, admission, and
-operational-state fence. Exact redrive replay converges; a paused trigger or
-disabled pipeline rejects recovery before work is minted.
+durable. The shipped controller continuously enumerates bounded due work for its
+organization from PostgreSQL; active-active scans may overlap, but claim fences
+converge them on one worker. Thus an upstream 202 does not make source-side
+redelivery responsible for controller retries. Expired or exhausted work
+dead-letters. A dead letter is never mutated back to pending. Project-configure
+redrive creates a new delivery/event identity with immutable lineage and
+ordinal, then enters the same claim, admission, and operational-state fence.
+Exact redrive replay converges; a paused trigger or disabled pipeline rejects
+recovery before work is minted.
 
 ## Schedule capture and restart
 

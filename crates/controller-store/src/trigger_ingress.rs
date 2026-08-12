@@ -1148,6 +1148,61 @@ impl Store {
         Ok(TriggerDeliveryClaimOutcome::Claimed(delivery))
     }
 
+    pub async fn due_trigger_deliveries(
+        &self,
+        organization_id: Uuid,
+        now_unix_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<TriggerDelivery>, StoreError> {
+        if now_unix_ms < 0 || !(1..=128).contains(&limit) {
+            return Err(StoreError::InvalidTriggerIngress(
+                "due trigger delivery scan requires a non-negative time and limit from 1 to 128"
+                    .to_owned(),
+            ));
+        }
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let rows = sqlx::query(
+            "SELECT delivery.*
+             FROM trigger_deliveries AS delivery
+             JOIN pipeline_trigger_definitions AS trigger
+               ON trigger.organization_id = delivery.organization_id
+              AND trigger.trigger_id = delivery.trigger_id
+             JOIN pipeline_trigger_versions AS trigger_version
+               ON trigger_version.organization_id = trigger.organization_id
+              AND trigger_version.trigger_id = trigger.trigger_id
+              AND trigger_version.generation = trigger.current_generation
+             JOIN pipeline_definitions AS pipeline
+               ON pipeline.organization_id = delivery.organization_id
+              AND pipeline.project_id = delivery.project_id
+              AND pipeline.pipeline_id = delivery.pipeline_id
+             JOIN pipeline_operational_state_history AS pipeline_state
+               ON pipeline_state.organization_id = pipeline.organization_id
+              AND pipeline_state.pipeline_id = pipeline.pipeline_id
+              AND pipeline_state.generation = pipeline.operational_generation
+             WHERE delivery.organization_id = $1
+               AND delivery.status IN ('pending', 'retry_wait')
+               AND delivery.next_attempt_at_unix_ms <= $2
+               AND (delivery.claim_owner IS NULL
+                    OR delivery.claim_expires_at_unix_ms <= $2)
+               AND trigger_version.state = 'enabled'
+               AND pipeline_state.state = 'enabled'
+             ORDER BY delivery.next_attempt_at_unix_ms,
+                      delivery.accepted_at_unix_ms, delivery.delivery_id
+             LIMIT $3",
+        )
+        .bind(organization_id)
+        .bind(now_unix_ms)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        let deliveries = rows
+            .into_iter()
+            .map(delivery_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        tx.commit().await?;
+        Ok(deliveries)
+    }
+
     pub async fn complete_trigger_delivery(
         &self,
         organization_id: Uuid,
@@ -1824,6 +1879,36 @@ fn validate_trigger_write(input: &PipelineTriggerWrite) -> Result<(), StoreError
 }
 
 fn validate_kind_configuration(kind: TriggerKind, configuration: &Value) -> Result<(), StoreError> {
+    let object = configuration.as_object().ok_or_else(|| {
+        StoreError::InvalidTriggerIngress("trigger configuration must be an object".to_owned())
+    })?;
+    let allowed: &[&str] = match kind {
+        TriggerKind::ScmWebhook => &["provider", "repository_identity", "filter"],
+        TriggerKind::Schedule => &[
+            "timezone",
+            "calendar",
+            "expression",
+            "schedule_identity_sha256",
+            "resolver_implementation_sha256",
+            "resolved_slots_sha256",
+            "resolved_slots_unix_ms",
+            "jenkins_hash_algorithm_version",
+            "jenkins_full_item_name",
+            "jenkins_hash_inputs_sha256",
+            "filter",
+        ],
+        TriggerKind::Upstream => &["upstream_pipeline_id", "filter"],
+        TriggerKind::RemoteApi => &["audience", "filter"],
+        TriggerKind::Plugin => &[],
+    };
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(StoreError::InvalidTriggerIngress(format!(
+                "unsupported {} trigger configuration field '{key}'",
+                kind.as_str()
+            )));
+        }
+    }
     let require_text = |field: &str| -> Result<(), StoreError> {
         let value = configuration
             .get(field)
@@ -1837,7 +1922,10 @@ fn validate_kind_configuration(kind: TriggerKind, configuration: &Value) -> Resu
         validate_text(field, value, MAX_TEXT_BYTES)
     };
     match kind {
-        TriggerKind::ScmWebhook => require_text("provider"),
+        TriggerKind::ScmWebhook => {
+            require_text("provider")?;
+            require_text("repository_identity")
+        }
         TriggerKind::Schedule => {
             require_text("timezone")?;
             require_text("calendar")?;
@@ -1903,6 +1991,26 @@ fn validate_kind_configuration(kind: TriggerKind, configuration: &Value) -> Resu
                 return Err(StoreError::InvalidTriggerIngress(
                     "resolved_slots_sha256 does not match resolved_slots_unix_ms".to_owned(),
                 ));
+            }
+            let jenkins_hash_fields = [
+                "jenkins_hash_algorithm_version",
+                "jenkins_full_item_name",
+                "jenkins_hash_inputs_sha256",
+            ];
+            let supplied_hash_fields = jenkins_hash_fields
+                .iter()
+                .filter(|field| configuration.get(**field).is_some())
+                .count();
+            if supplied_hash_fields != 0 && supplied_hash_fields != jenkins_hash_fields.len() {
+                return Err(StoreError::InvalidTriggerIngress(
+                    "Jenkins hash evidence must supply algorithm, full item name, and input digest together"
+                        .to_owned(),
+                ));
+            }
+            if supplied_hash_fields == jenkins_hash_fields.len() {
+                require_text("jenkins_hash_algorithm_version")?;
+                require_text("jenkins_full_item_name")?;
+                parse_configuration_digest(configuration, "jenkins_hash_inputs_sha256")?;
             }
             Ok(())
         }
@@ -2100,6 +2208,28 @@ fn validate_delivery_against_configuration(
         .ok_or_else(|| {
             StoreError::InvalidTriggerIngress("stored trigger filter is invalid".to_owned())
         })?;
+    let allowed_payload: &[&str] = match kind {
+        TriggerKind::ScmWebhook => &["repository_identity", "revision", "branch", "paths"],
+        TriggerKind::Schedule => &[
+            "timezone",
+            "calendar",
+            "expression",
+            "schedule_identity_sha256",
+            "expected_last_resolved_slot_unix_ms",
+            "resolved_slot_unix_ms",
+        ],
+        TriggerKind::Upstream => &["upstream_pipeline_id", "upstream_build_id", "status"],
+        TriggerKind::RemoteApi => &["audience", "request_id", "request_method"],
+        TriggerKind::Plugin => &[],
+    };
+    for key in payload.keys() {
+        if !allowed_payload.contains(&key.as_str()) {
+            return Err(StoreError::InvalidTriggerIngress(format!(
+                "unsupported {} trigger payload field '{key}'",
+                kind.as_str()
+            )));
+        }
+    }
     if !filter_allows(filter, "event_kinds", &input.event_kind)? {
         return Err(StoreError::TriggerIngressConflict(
             "trigger event kind is filtered".to_owned(),
@@ -2117,7 +2247,15 @@ fn validate_delivery_against_configuration(
     };
     match kind {
         TriggerKind::ScmWebhook => {
-            required_payload_text("repository_identity")?;
+            let configured = configuration
+                .get("repository_identity")
+                .and_then(Value::as_str)
+                .expect("validated SCM repository identity");
+            if required_payload_text("repository_identity")? != configured {
+                return Err(StoreError::TriggerIngressConflict(
+                    "SCM repository identity was substituted".to_owned(),
+                ));
+            }
             required_payload_text("revision")?;
             let branch = required_payload_text("branch")?;
             if !filter_allows(filter, "branches", branch)? {
@@ -2191,7 +2329,12 @@ fn validate_delivery_against_configuration(
                     "remote-build audience was substituted".to_owned(),
                 ));
             }
-            required_payload_text("request_id")?;
+            if required_payload_text("request_id")? != input.event_id {
+                return Err(StoreError::TriggerIngressConflict(
+                    "remote-build request identity must equal the durable event identity"
+                        .to_owned(),
+                ));
+            }
             let method = required_payload_text("request_method")?;
             if !filter_allows(filter, "request_methods", method)? {
                 return Err(StoreError::TriggerIngressConflict(
@@ -2343,6 +2486,9 @@ fn trigger_matches_write(trigger: &PipelineTrigger, input: &PipelineTriggerWrite
         && trigger.deduplication_window_seconds == input.deduplication_window_seconds
         && trigger.max_delivery_attempts == input.max_delivery_attempts
         && trigger.delivery_ttl_seconds == input.delivery_ttl_seconds
+        && trigger.actor_subject == input.actor_subject
+        && trigger.reason == input.reason
+        && trigger.idempotency_key == input.idempotency_key
 }
 
 fn delivery_matches(delivery: &TriggerDelivery, input: &NewTriggerDelivery) -> bool {

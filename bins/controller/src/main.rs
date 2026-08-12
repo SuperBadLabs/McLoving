@@ -210,6 +210,8 @@ async fn main() -> Result<()> {
         .context("configure artifact-agent authentication")?
         .with_object_store(object_store)
         .with_staged_upload_ttl(staged_upload_ttl);
+    let trigger_retry_state = state.clone();
+    let trigger_retry_organization = worker.organization_id;
     let server = async {
         axum::serve(
             listener,
@@ -223,10 +225,14 @@ async fn main() -> Result<()> {
     tokio::pin!(agent_server);
     let worker_loop = run_embedded_worker(store, worker);
     tokio::pin!(worker_loop);
+    let trigger_retry_loop =
+        run_trigger_retry_worker(trigger_retry_state, trigger_retry_organization);
+    tokio::pin!(trigger_retry_loop);
     tokio::select! {
         result = &mut server => result,
         result = &mut agent_server => result,
         result = &mut worker_loop => result,
+        result = &mut trigger_retry_loop => result,
     }
 }
 
@@ -1493,6 +1499,24 @@ async fn run_embedded_worker(store: Store, worker: EmbeddedWorker) -> Result<()>
             Err(error) => {
                 eprintln!("scheduler claim failed: {error}");
                 tokio::time::sleep(worker.poll_interval).await;
+            }
+        }
+    }
+}
+
+async fn run_trigger_retry_worker(state: ApiState, organization_id: Uuid) -> Result<()> {
+    const RETRY_SCAN_LIMIT: i64 = 128;
+    const RETRY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+    loop {
+        match state
+            .process_due_trigger_deliveries(organization_id, unix_time_ms(), RETRY_SCAN_LIMIT)
+            .await
+        {
+            Ok(0) => tokio::time::sleep(RETRY_POLL_INTERVAL).await,
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("trigger retry scan failed: {error}");
+                tokio::time::sleep(RETRY_POLL_INTERVAL).await;
             }
         }
     }

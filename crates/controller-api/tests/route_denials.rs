@@ -7,7 +7,9 @@ use mcloving_controller_api::{
     ARTIFACT_NAME_HEADER, ApiState, IDEMPOTENCY_HEADER, PLATFORM_HEADER, TRUST_POOL_HEADER, router,
 };
 use mcloving_controller_store::{
-    PipelinePutOutcome, PipelineWrite, Store,
+    NewTriggerDelivery, PipelinePutOutcome, PipelineWrite, Store, TriggerDeliveryAdmission,
+    TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest, TriggerDeliveryFailureRequest,
+    TriggerDeliveryStatus,
     authz::{Principal, PrincipalKind, ServiceScope},
 };
 use serde_json::json;
@@ -373,12 +375,18 @@ stages:
         mapped_projects: BTreeSet::new(),
         action_grants: BTreeMap::new(),
     };
-    let app = router(ApiState::new(store, TOKEN, principal).expect("construct trigger API"));
+    let state = ApiState::new(store.clone(), TOKEN, principal).expect("construct trigger API");
+    let retry_state = state.clone();
+    let app = router(state);
     let path = format!(
         "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}"
     );
     let filter = json!({"event_kinds": ["push"], "branches": ["main"], "path_prefixes": ["src/"]});
-    let configuration = json!({"provider": "github", "filter": filter.clone()});
+    let configuration = json!({
+        "provider": "github",
+        "repository_identity": "github:superbadlabs/mcloving",
+        "filter": filter.clone()
+    });
     let configuration_sha256 = sha256_hex(&serde_json::to_vec(&configuration).unwrap());
     let filter_sha256 = sha256_hex(&serde_json::to_vec(&filter).unwrap());
     let configured = app
@@ -417,6 +425,86 @@ stages:
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
+    let retry_payload = json!({
+        "trigger_generation": 1,
+        "event_kind": "push",
+        "event_time_unix_ms": now,
+        "payload": {
+            "repository_identity": "github:superbadlabs/mcloving",
+            "revision": "retry-worker-revision",
+            "branch": "main",
+            "paths": ["src/retry.rs"]
+        }
+    });
+    let retry_delivery = NewTriggerDelivery {
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        expected_trigger_generation: 1,
+        delivery_id: "durable-retry-delivery".to_owned(),
+        event_id: "durable-retry-event".to_owned(),
+        event_kind: "push".to_owned(),
+        caller_identity: "scm:github:installation:42".to_owned(),
+        payload_sha256: Sha256::digest(serde_json::to_vec(&retry_payload).unwrap()).into(),
+        canonical_payload: retry_payload,
+        parameters: json!({}),
+        requested_platform: "linux".to_owned(),
+        requested_trust_pool: "trusted-linux".to_owned(),
+        event_time_unix_ms: now,
+        accepted_at_unix_ms: now,
+        schedule_slot: None,
+    };
+    store
+        .accept_trigger_delivery(&retry_delivery)
+        .await
+        .expect("capture delivery before contained outage");
+    let claimed = match store
+        .claim_trigger_delivery(&TriggerDeliveryClaimRequest {
+            organization_id,
+            trigger_id,
+            delivery_id: retry_delivery.delivery_id.clone(),
+            worker_identity: "contained-outage-worker".to_owned(),
+            now_unix_ms: now,
+            lease_expires_at_unix_ms: now + 60_000,
+        })
+        .await
+        .unwrap()
+    {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        other => panic!("unexpected contained-outage claim: {other:?}"),
+    };
+    store
+        .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
+            organization_id,
+            trigger_id,
+            delivery_id: retry_delivery.delivery_id.clone(),
+            worker_identity: "contained-outage-worker".to_owned(),
+            claim_fence: claimed.claim_fence,
+            now_unix_ms: now,
+            retry_at_unix_ms: now + 1,
+            retryable: true,
+            reason: "contained admission outage".to_owned(),
+        })
+        .await
+        .expect("persist bounded retry");
+    assert_eq!(
+        retry_state
+            .process_due_trigger_deliveries(organization_id, now + 1, 128)
+            .await
+            .expect("shipped retry worker processes durable due delivery"),
+        1
+    );
+    let replayed = store
+        .accept_trigger_delivery(&retry_delivery)
+        .await
+        .expect("read durable retry terminal state");
+    let TriggerDeliveryAdmission::Replayed(replayed) = replayed else {
+        panic!("durable retry must replay its original delivery")
+    };
+    assert_eq!(replayed.status, TriggerDeliveryStatus::Admitted);
+    assert!(replayed.build_id.is_some());
+
     let filtered = app
         .clone()
         .oneshot(
@@ -444,6 +532,69 @@ stages:
         .await
         .expect("filter disallowed branch");
     assert_eq!(filtered.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let substituted_repository = app
+        .clone()
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "trigger_generation": 1,
+                        "delivery_id": "substituted-repository-delivery",
+                        "event_id": "substituted-repository-event",
+                        "event_kind": "push",
+                        "event_time_unix_ms": now,
+                        "payload": {
+                            "repository_identity": "github:superbadlabs/another-repository",
+                            "revision": "0123456789abcdef",
+                            "branch": "main",
+                            "paths": ["src/lib.rs"]
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("deny substituted SCM repository");
+    assert_eq!(
+        substituted_repository.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let unknown_request_field = app
+        .clone()
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "trigger_generation": 1,
+                        "delivery_id": "unknown-field-delivery",
+                        "event_id": "unknown-field-event",
+                        "event_kind": "push",
+                        "event_time_unix_ms": now,
+                        "payload": {
+                            "repository_identity": "github:superbadlabs/mcloving",
+                            "revision": "0123456789abcdef",
+                            "branch": "main",
+                            "paths": ["src/lib.rs"]
+                        },
+                        "unreviewed_extension": true,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("deny unknown trigger request field");
+    assert_eq!(
+        unknown_request_field.status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
 
     let accepted_body = json!({
         "trigger_generation": 1,
@@ -486,7 +637,11 @@ stages:
 
     let rotated_filter =
         json!({"event_kinds": ["push"], "branches": ["release"], "path_prefixes": ["src/"]});
-    let rotated_configuration = json!({"provider": "github", "filter": rotated_filter.clone()});
+    let rotated_configuration = json!({
+        "provider": "github",
+        "repository_identity": "github:superbadlabs/mcloving",
+        "filter": rotated_filter.clone()
+    });
     let rotated = app
         .clone()
         .oneshot(

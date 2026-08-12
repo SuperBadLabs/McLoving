@@ -376,6 +376,48 @@ BEFORE UPDATE ON trigger_deliveries
 FOR EACH ROW
 EXECUTE FUNCTION mcloving_guard_trigger_delivery_mutation();
 
+CREATE FUNCTION mcloving_guard_trigger_schedule_watermark()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF NEW.organization_id IS DISTINCT FROM OLD.organization_id
+       OR NEW.project_id IS DISTINCT FROM OLD.project_id
+       OR NEW.pipeline_id IS DISTINCT FROM OLD.pipeline_id
+       OR NEW.trigger_id IS DISTINCT FROM OLD.trigger_id
+       OR NEW.trigger_generation IS DISTINCT FROM OLD.trigger_generation
+       OR NEW.timezone IS DISTINCT FROM OLD.timezone
+       OR NEW.calendar IS DISTINCT FROM OLD.calendar
+       OR NEW.expression IS DISTINCT FROM OLD.expression
+       OR NEW.schedule_identity_sha256 IS DISTINCT FROM OLD.schedule_identity_sha256
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'trigger schedule watermark identity is immutable';
+    END IF;
+    IF OLD.last_resolved_slot_unix_ms IS NULL
+       OR NEW.last_resolved_slot_unix_ms IS NULL
+       OR NEW.last_resolved_slot_unix_ms <= OLD.last_resolved_slot_unix_ms
+       OR NEW.last_delivery_id IS NULL
+       OR NEW.last_delivery_id IS NOT DISTINCT FROM OLD.last_delivery_id
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'trigger schedule watermark must advance to a new delivery';
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+REVOKE ALL ON FUNCTION mcloving_guard_trigger_schedule_watermark()
+FROM PUBLIC;
+
+CREATE TRIGGER trigger_schedule_watermarks_transition_guard
+BEFORE UPDATE ON trigger_schedule_watermarks
+FOR EACH ROW
+EXECUTE FUNCTION mcloving_guard_trigger_schedule_watermark();
+
 GRANT SELECT, INSERT, UPDATE ON pipeline_trigger_definitions TO mcloving_tenant;
 GRANT SELECT, INSERT ON pipeline_trigger_versions TO mcloving_tenant;
 GRANT SELECT, INSERT, UPDATE ON trigger_deliveries TO mcloving_tenant;
