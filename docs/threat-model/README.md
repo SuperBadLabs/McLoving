@@ -118,7 +118,7 @@ For TM-037, config v5 adds an independently enforced `max_runtime_history`
 quota: a new cutover or rollback generation cannot grow the durable ancestry
 table past its certified bound, while an exact-generation restart remains
 available. Request sizing also uses the signed cursor range the ledger can
-persist.
+persist, and response sizing accounts for accepted compact UUID syntax.
 
 `WIN-002` threat-model review closes TM-007 for the supported Windows agent
 lifecycle: explicit mode admission cannot infer a shell, every child starts in

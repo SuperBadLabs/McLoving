@@ -30,6 +30,7 @@ const QUERY_DOMAIN: &[u8] = b"mcloving-observer-query-v1";
 const SCOPE_DOMAIN: &[u8] = b"mcloving-observer-scope-v1";
 const MAX_AUDIT_PROVENANCE_BYTES: usize = 4096;
 const MAX_PERSISTED_CURSOR: u64 = i64::MAX as u64;
+const UUID_HYPHEN_BYTES: usize = 4;
 const MAX_QUERY_VALUE_BYTES: usize = 2048;
 const MAX_SECRET_MARKERS: usize = 32;
 const MAX_TOTAL_SECRET_MARKER_BYTES: usize = 8 * 1024;
@@ -1105,7 +1106,15 @@ fn minimum_destination_response_fits(config: &ObserverConfig, observed_at_unix_m
         },
         signature_base64: "A".repeat(88),
     };
-    serde_json::to_vec(&minimum).is_ok_and(|bytes| bytes.len() <= config.limits.max_response_bytes)
+    // `uuid::Uuid` accepts the compact 32-hex-digit JSON string even though serde emits the
+    // four-byte-longer hyphenated form. Signature verification canonicalizes the parsed typed
+    // body, so the compact wire representation is admissible and must define the true minimum.
+    serde_json::to_vec(&minimum).is_ok_and(|bytes| {
+        bytes
+            .len()
+            .checked_sub(UUID_HYPHEN_BYTES)
+            .is_some_and(|minimum| minimum <= config.limits.max_response_bytes)
+    })
 }
 
 fn maximum_request_envelope_fits(
@@ -1506,7 +1515,9 @@ fn sized_destination_response(config: &ObserverConfig, state: serde_json::Value)
         },
         signature_base64: "A".repeat(88),
     };
-    serde_json::to_vec(&response).ok().map(|bytes| bytes.len())
+    serde_json::to_vec(&response)
+        .ok()
+        .and_then(|bytes| bytes.len().checked_sub(UUID_HYPHEN_BYTES))
 }
 
 const fn growth_threshold(kind: crate::JsonKind) -> Option<usize> {

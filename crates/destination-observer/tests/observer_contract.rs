@@ -1652,6 +1652,55 @@ async fn boolean_response_and_receipt_sizing_admit_the_shorter_true_value() {
 }
 
 #[tokio::test]
+async fn response_sizing_admits_compact_uuid_syntax_at_the_exact_maximum() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let maximum = SignedDestinationState {
+        body: DestinationStateBody {
+            schema_version: DESTINATION_STATE_SCHEMA_VERSION.to_owned(),
+            observation_id: Uuid::from_u128(u128::MAX),
+            request_sha256: "f".repeat(64),
+            observer_id: rig.config.observer_id.clone(),
+            service_identity: rig.config.service_identity.clone(),
+            endpoint_identity: rig.config.endpoint_identity.clone(),
+            account_identity: rig.config.account_identity.clone(),
+            resource_identity: rig.config.resource_identity.clone(),
+            effect_class: rig.config.effect_class.clone(),
+            effect_fence: u64::MAX,
+            phase: ObservationPhase::Reconciliation,
+            canonical_query_sha256: "f".repeat(64),
+            cursor: i64::MAX as u64,
+            observed_at_unix_ms: i64::MAX,
+            state_schema_version: rig.config.state_schema_version.clone(),
+            confidentiality: Confidentiality::Internal,
+            state: json!({"published": true}),
+            grant_id: rig.config.read_grant_id.clone(),
+            grant_version: rig.config.read_grant_version.clone(),
+            grant_scope: rig.config.read_grant_scope.clone(),
+            attestation_key_id: rig.config.destination_attestation_key_id.clone(),
+        },
+        signature_base64: "A".repeat(88),
+    };
+    let hyphenated = serde_json::to_string(&maximum).unwrap();
+    let compact = hyphenated.replacen(
+        &Uuid::from_u128(u128::MAX).hyphenated().to_string(),
+        &Uuid::from_u128(u128::MAX).simple().to_string(),
+        1,
+    );
+    assert_eq!(hyphenated.len(), compact.len() + 4);
+
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_response_bytes = compact.len();
+    assert!(rig.observer_for_config(config).is_ok());
+}
+
+#[tokio::test]
 async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
     let rig = Rig::new().await;
     for invalid_config in [
