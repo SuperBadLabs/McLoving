@@ -2996,12 +2996,12 @@ async fn put_discovery_parent(
             expected_generation,
             kind: request.kind,
             state: request.state,
-            implementation_sha256: parse_hex_digest_named(
+            implementation_sha256: parse_lowercase_hex_digest_named(
                 &request.implementation_sha256,
                 "discovery implementation",
             )?,
             protocol_version: request.protocol_version,
-            expected_configuration_sha256: parse_hex_digest_named(
+            expected_configuration_sha256: parse_lowercase_hex_digest_named(
                 &request.configuration_sha256,
                 "discovery configuration",
             )?,
@@ -3015,28 +3015,28 @@ async fn put_discovery_parent(
             fork_trust_strategy: request.fork_trust_strategy,
             trusted_fork_repositories: request.trusted_fork_repositories,
             jenkinsfile_path: request.jenkinsfile_path,
-            child_configuration_policy_sha256: parse_hex_digest_named(
+            child_configuration_policy_sha256: parse_lowercase_hex_digest_named(
                 &request.child_configuration_policy_sha256,
                 "discovery child configuration policy",
             )?,
             orphan_policy: request.orphan_policy,
             authorization_generation: request.authorization_generation,
-            authorization_policy_sha256: parse_hex_digest_named(
+            authorization_policy_sha256: parse_lowercase_hex_digest_named(
                 &request.authorization_policy_sha256,
                 "discovery authorization policy",
             )?,
             trigger_id: request.trigger_id,
             trigger_generation: request.trigger_generation,
-            trigger_configuration_sha256: parse_hex_digest_named(
+            trigger_configuration_sha256: parse_lowercase_hex_digest_named(
                 &request.trigger_configuration_sha256,
                 "discovery trigger configuration",
             )?,
-            source_implementation_sha256: parse_hex_digest_named(
+            source_implementation_sha256: parse_lowercase_hex_digest_named(
                 &request.source_implementation_sha256,
                 "discovery source implementation",
             )?,
             source_protocol_version: request.source_protocol_version,
-            source_configuration_sha256: parse_hex_digest_named(
+            source_configuration_sha256: parse_lowercase_hex_digest_named(
                 &request.source_configuration_sha256,
                 "discovery source configuration",
             )?,
@@ -3091,16 +3091,16 @@ async fn reconcile_discovery_scan(
                 head_repository_identity: observation.head_repository_identity,
                 present: observation.present,
                 revision: observation.revision,
-                provenance_sha256: parse_hex_digest_named(
+                provenance_sha256: parse_lowercase_hex_digest_named(
                     &observation.provenance_sha256,
                     "discovery observation provenance",
                 )?,
                 jenkinsfile_path: observation.jenkinsfile_path,
-                jenkinsfile_sha256: parse_hex_digest_named(
+                jenkinsfile_sha256: parse_lowercase_hex_digest_named(
                     &observation.jenkinsfile_sha256,
                     "discovery Jenkinsfile",
                 )?,
-                child_configuration_sha256: parse_hex_digest_named(
+                child_configuration_sha256: parse_lowercase_hex_digest_named(
                     &observation.child_configuration_sha256,
                     "discovery child configuration",
                 )?,
@@ -3120,12 +3120,12 @@ async fn reconcile_discovery_scan(
             source_event_id: request.source_event_id,
             source_cursor: request.source_cursor,
             complete_snapshot: request.complete_snapshot,
-            provider_snapshot_sha256: parse_hex_digest_named(
+            provider_snapshot_sha256: parse_lowercase_hex_digest_named(
                 &request.provider_snapshot_sha256,
                 "discovery provider snapshot",
             )?,
             observations,
-            expected_request_sha256: parse_hex_digest_named(
+            expected_request_sha256: parse_lowercase_hex_digest_named(
                 &request.request_sha256,
                 "discovery scan request",
             )?,
@@ -4369,6 +4369,21 @@ fn parse_hex_digest_named(value: &str, kind: &'static str) -> Result<[u8; 32], A
     bytes
         .try_into()
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid_digest", "invalid SHA-256"))
+}
+
+fn parse_lowercase_hex_digest_named(value: &str, kind: &'static str) -> Result<[u8; 32], ApiError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_digest",
+            format!("{kind} SHA-256 must contain exactly 64 lowercase hexadecimal characters"),
+        ));
+    }
+    parse_hex_digest_named(value, kind)
 }
 
 fn parse_hex_bytes(value: &str, kind: &'static str) -> Result<Vec<u8>, ApiError> {
@@ -6341,6 +6356,12 @@ mod tests {
 
     #[test]
     fn discovery_responses_encode_digests_as_hex() {
+        assert!(parse_lowercase_hex_digest_named(&"ab".repeat(32), "discovery").is_ok());
+        let uppercase = parse_lowercase_hex_digest_named(&"AB".repeat(32), "discovery")
+            .expect_err("uppercase discovery digest must fail closed");
+        assert_eq!(uppercase.status, StatusCode::BAD_REQUEST);
+        assert_eq!(uppercase.code, "invalid_digest");
+
         let receipt = DiscoveryScanReceiptResponse::from(DiscoveryScanReceipt {
             organization_id: Uuid::from_u128(1),
             project_id: Uuid::from_u128(2),
