@@ -89,7 +89,9 @@ JSON-value strings are scanned through at most 16 successive reversible
 decoding layers. Each layer accepts percent encoding or standard and URL-safe
 Base64, padded or unpadded, and decodes maximal embedded Base64 alphabet runs,
 plus valid subranges ending at terminal padding so an adjacent alphabetic suffix
-cannot hide the padded payload. Delimited, mixed, and repeatedly encoded payloads remain covered. Decode work
+cannot hide the padded payload. At most the two canonical terminal-padding
+positions are probed, and only successfully decoded candidates consume the
+decode-work budget. Delimited, mixed, and repeatedly encoded payloads remain covered. Decode work
 is capped at the larger of 4 KiB or 64 times the original field length; depth
 or work overflow fails closed.
 Configuration admission rejects query-key names beyond the request-protocol
@@ -152,7 +154,9 @@ rows, including nonblocking rate-limit tombstones and other terminal failures;
 it must be at least `max_receipts`, and new IDs fail admission before claim
 insertion when the bound is full. The same limit independently bounds durable
 phase-chain heads; a new chain scope fails before a GET once that retained-head
-bound is full, while an existing chain can still advance. This mandatory bound is carried by
+bound is full, while an existing chain can still advance. A pending observation
+transactionally reserves its prospective head slot until it completes or becomes
+terminal, so an admitted read cannot lose capacity during finalization. This mandatory bound is carried by
 `mcloving.destination-observer-config/v3`; legacy config v1 lacks the quota and
 config v2 lacks the executable binding, so both are explicitly incompatible
 rather than silently acquiring new ledger or executable-trust semantics.

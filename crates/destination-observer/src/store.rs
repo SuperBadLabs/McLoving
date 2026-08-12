@@ -991,7 +991,11 @@ fn enforce_scope_head_capacity(
 ) -> Result<(), ObserverError> {
     let exists: bool = transaction
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM scope_heads WHERE scope_sha256=?1)",
+            "SELECT EXISTS(
+               SELECT 1 FROM scope_heads WHERE scope_sha256=?1
+               UNION
+               SELECT 1 FROM observations WHERE scope_sha256=?1 AND status='pending'
+             )",
             [scope_sha256],
             |row| row.get(0),
         )
@@ -1000,7 +1004,15 @@ fn enforce_scope_head_capacity(
         return Ok(());
     }
     let count: usize = transaction
-        .query_row("SELECT COUNT(*) FROM scope_heads", [], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM (
+               SELECT scope_sha256 FROM scope_heads
+               UNION
+               SELECT scope_sha256 FROM observations WHERE status='pending'
+             )",
+            [],
+            |row| row.get(0),
+        )
         .map_err(|_| ObserverError::StateUnavailable)?;
     if count >= config.limits.max_observations {
         return Err(ObserverError::CapacityExceeded);

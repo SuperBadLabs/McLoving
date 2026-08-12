@@ -1448,13 +1448,18 @@ fn contains_secret_value_at(
     }
 
     let mut token_start = None;
+    let mut padding_probes = 0_u8;
     for index in 0..=raw.len() {
         let token_byte = raw
             .get(index)
             .is_some_and(|byte| is_base64_token_byte(*byte));
         match (token_start, token_byte) {
-            (None, true) => token_start = Some(index),
-            (Some(start), true) if raw[index] == b'=' => {
+            (None, true) => {
+                token_start = Some(index);
+                padding_probes = 0;
+            }
+            (Some(start), true) if raw[index] == b'=' && padding_probes < 2 => {
+                padding_probes += 1;
                 if contains_secret_in_base64_candidate(
                     &raw[start..=index],
                     markers,
@@ -1493,12 +1498,12 @@ fn contains_secret_in_base64_candidate(
     if candidate.len() < 4 {
         return false;
     }
+    let Some(decoded) = base64_decode_once(candidate) else {
+        return false;
+    };
     *consumed_work = match consumed_work.checked_add(candidate.len()) {
         Some(work) if work <= maximum_work => work,
         _ => return true,
-    };
-    let Some(decoded) = base64_decode_once(candidate) else {
-        return false;
     };
     depth == MAX_REVERSIBLE_DECODE_DEPTH
         || contains_secret_value_at(&decoded, markers, depth + 1, consumed_work, maximum_work)
@@ -1840,6 +1845,10 @@ mod tests {
         );
         assert!(contains_secret_value(
             padded_with_suffix.as_bytes(),
+            &[marker.to_vec()]
+        ));
+        assert!(!contains_secret_value(
+            &vec![b'='; 4 * 1024],
             &[marker.to_vec()]
         ));
 
