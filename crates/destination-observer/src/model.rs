@@ -99,6 +99,7 @@ pub struct ObserverConfig {
     pub schema_version: String,
     pub protocol_version: String,
     pub observer_id: String,
+    pub implementation_sha256: String,
     pub image_sha256: String,
     pub deployment_identity: String,
     pub operator_trust_identity: String,

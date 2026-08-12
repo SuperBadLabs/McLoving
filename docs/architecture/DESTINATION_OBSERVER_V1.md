@@ -50,10 +50,11 @@ substitution fails before data reads; the complete configuration,
 deployment-provided runtime-image attestation file, request-authority and
 destination-attestation public-key files, secret files, and the state directory
 must be owned by the process user and inaccessible to group or other users. The
-executable is measured through `/proc/self/exe`; the separately
-mounted runtime-image digest must match the image identity certified by
-configuration. That attestation is exactly 64 lowercase hexadecimal bytes with
-an optional single LF or CRLF text-file terminator. The executable, image,
+executable is measured through `/proc/self/exe` and must match the exact
+implementation digest authorized by config v2 before state is opened. The
+separately mounted runtime-image digest must match the image identity certified
+by configuration. That attestation is exactly 64 lowercase hexadecimal bytes
+with an optional single LF or CRLF text-file terminator. The executable, image,
 complete configuration, read token, three signing
 authorities, CA, and secret-marker set are digest-bound before the ledger opens.
 The SQLite ledger is pre-created as a no-follow, owner-private, single-link
@@ -86,8 +87,10 @@ are scanned against every secret marker and its encoded forms before the ledger
 opens. Whole configuration, query, audit, header, trailer, JSON-key, and
 JSON-value strings are scanned through at most 16 successive reversible
 decoding layers. Each layer accepts percent encoding or standard and URL-safe
-Base64, padded or unpadded, so mixed and repeatedly Base64-encoded values are
-covered; further reversible nesting fails closed.
+Base64, padded or unpadded, and decodes maximal embedded Base64 alphabet runs,
+so delimited, mixed, and repeatedly encoded payloads remain covered. Decode work
+is capped at the larger of 4 KiB or 64 times the original field length; depth
+or work overflow fails closed.
 Configuration admission rejects query-key names beyond the request-protocol
 bound and header budgets too small for the mandatory JSON response header.
 It also proves that the largest legal signed request fits the complete NDJSON

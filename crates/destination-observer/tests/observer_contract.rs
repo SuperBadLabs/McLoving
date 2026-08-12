@@ -139,6 +139,7 @@ impl Rig {
             schema_version: CONFIG_SCHEMA_VERSION.to_owned(),
             protocol_version: PROTOCOL_VERSION.to_owned(),
             observer_id: "observer-release-state".to_owned(),
+            implementation_sha256: implementation_sha256.clone(),
             image_sha256: image_sha256.clone(),
             deployment_identity: "deployment/observer".to_owned(),
             operator_trust_identity: "operator/security".to_owned(),
@@ -1892,6 +1893,21 @@ async fn runtime_attestation_denylist_and_production_constructor_boundary_fail_c
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
     }
+    let mut substituted_implementation = rig.config.clone();
+    substituted_implementation.state_dir = state.path().to_path_buf();
+    substituted_implementation.implementation_sha256 = "f".repeat(64);
+    assert!(matches!(
+        rig.observer_for_config(substituted_implementation),
+        Err(ObserverError::InvalidConfig)
+    ));
+    assert!(!state.path().join("observer.sqlite3").exists());
+
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let mut non_test_config = rig.config.clone();
     non_test_config.state_dir = state.path().to_path_buf();
     non_test_config.test_allow_http_loopback = false;
@@ -2143,6 +2159,7 @@ async fn standalone_process_emits_a_verified_receipt_and_exposes_no_write_operat
         fs::set_permissions(process_directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
     }
     let mut config = rig.config.clone();
+    config.implementation_sha256 = content_sha256(&binary);
     config.state_dir = process_directory.path().join("state");
     fs::create_dir(&config.state_dir).unwrap();
     #[cfg(unix)]
@@ -2299,6 +2316,20 @@ async fn signature_binding_phase_cursor_and_replay_substitution_fail_closed() {
     assert_eq!(
         rig.observer
             .observe_at(rig.prepare(secret_query), NOW)
+            .await,
+        Err(ObserverError::ConfidentialityDenied)
+    );
+    let mut embedded_secret_query = rig.request(ObservationPhase::PreAction);
+    embedded_secret_query.query.insert(
+        "release_id".to_owned(),
+        format!(
+            "prefix:{}:suffix",
+            BASE64.encode([b"x".as_slice(), SECRET].concat())
+        ),
+    );
+    assert_eq!(
+        rig.observer
+            .observe_at(rig.prepare(embedded_secret_query), NOW)
             .await,
         Err(ObserverError::ConfidentialityDenied)
     );

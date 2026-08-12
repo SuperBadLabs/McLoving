@@ -32,6 +32,9 @@ const MAX_AUDIT_PROVENANCE_BYTES: usize = 4096;
 const MAX_QUERY_VALUE_BYTES: usize = 2048;
 const MAX_SECRET_MARKERS: usize = 32;
 const MAX_TOTAL_SECRET_MARKER_BYTES: usize = 8 * 1024;
+const MAX_REVERSIBLE_DECODE_DEPTH: usize = 16;
+const SECRET_DECODE_WORK_FACTOR: usize = 64;
+const MIN_SECRET_DECODE_WORK_BYTES: usize = 4 * 1024;
 const MIN_SUCCESS_HEADER_BYTES: usize = 34;
 const MAX_TRANSPORT_HEADER_BYTES: usize = 256 * 1024;
 const OBSERVATION_ID_HEADER: &str = "x-mcloving-observation-id";
@@ -849,6 +852,8 @@ fn validate_config(
         || config.observer_id.is_empty()
         || !valid_sha(config_sha256)
         || !valid_sha(implementation_sha256)
+        || !valid_sha(&config.implementation_sha256)
+        || config.implementation_sha256 != implementation_sha256
         || !valid_sha(&config.image_sha256)
         || config.image_sha256 != runtime_image_sha256
         || config.limits.max_response_bytes == 0
@@ -1412,22 +1417,70 @@ fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
 }
 
 fn contains_secret_value(raw: &[u8], markers: &[Vec<u8>]) -> bool {
-    let mut decoded = raw.to_vec();
-    for depth in 0..=16 {
-        if contains_secret_representation(&decoded, markers) {
-            return true;
+    let maximum_work = raw
+        .len()
+        .saturating_mul(SECRET_DECODE_WORK_FACTOR)
+        .max(MIN_SECRET_DECODE_WORK_BYTES);
+    let mut consumed_work = 0_usize;
+    contains_secret_value_at(raw, markers, 0, &mut consumed_work, maximum_work)
+}
+
+fn contains_secret_value_at(
+    raw: &[u8],
+    markers: &[Vec<u8>],
+    depth: usize,
+    consumed_work: &mut usize,
+    maximum_work: usize,
+) -> bool {
+    *consumed_work = match consumed_work.checked_add(raw.len()) {
+        Some(work) if work <= maximum_work => work,
+        _ => return true,
+    };
+    if contains_secret_representation(raw, markers) {
+        return true;
+    }
+
+    if let Some(decoded) = percent_decode_once(raw)
+        && (depth == MAX_REVERSIBLE_DECODE_DEPTH
+            || contains_secret_value_at(&decoded, markers, depth + 1, consumed_work, maximum_work))
+    {
+        return true;
+    }
+
+    let mut token_start = None;
+    for index in 0..=raw.len() {
+        let token_byte = raw
+            .get(index)
+            .is_some_and(|byte| is_base64_token_byte(*byte));
+        match (token_start, token_byte) {
+            (None, true) => token_start = Some(index),
+            (Some(start), false) => {
+                token_start = None;
+                let token = &raw[start..index];
+                if token.len() < 4 {
+                    continue;
+                }
+                if let Some(decoded) = base64_decode_once(token)
+                    && (depth == MAX_REVERSIBLE_DECODE_DEPTH
+                        || contains_secret_value_at(
+                            &decoded,
+                            markers,
+                            depth + 1,
+                            consumed_work,
+                            maximum_work,
+                        ))
+                {
+                    return true;
+                }
+            }
+            _ => {}
         }
-        let next = percent_decode_once(&decoded).or_else(|| base64_decode_once(&decoded));
-        let Some(next) = next else {
-            return false;
-        };
-        if depth == 16 {
-            // Reversible encodings beyond the work bound are denied rather than silently passed.
-            return true;
-        }
-        decoded = next;
     }
     false
+}
+
+const fn is_base64_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'-' | b'_' | b'=')
 }
 
 fn base64_decode_once(raw: &[u8]) -> Option<Vec<u8>> {
@@ -1678,6 +1731,21 @@ mod tests {
         let mixed_encoded = BASE64.encode(percent_encode(BASE64.encode(marker).as_bytes()));
         assert!(contains_secret_value(
             mixed_encoded.as_bytes(),
+            &[marker.to_vec()]
+        ));
+
+        let embedded = format!(
+            "prefix:{}:suffix",
+            BASE64.encode([b"x".as_slice(), marker].concat())
+        );
+        assert!(contains_secret_value(
+            embedded.as_bytes(),
+            &[marker.to_vec()]
+        ));
+
+        let nested_embedded = format!("prefix:{}:suffix", BASE64.encode(embedded));
+        assert!(contains_secret_value(
+            nested_embedded.as_bytes(),
             &[marker.to_vec()]
         ));
     }
