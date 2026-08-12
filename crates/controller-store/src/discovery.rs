@@ -560,6 +560,23 @@ pub fn verify_discovery_transfer_snapshot(
     {
         return conflict("discovery transfer requires a complete lineage ending quiesced");
     }
+    let Some((quiesced, prior_versions)) = snapshot.versions.split_last() else {
+        return conflict("discovery transfer parent lineage is empty");
+    };
+    let Some(enabled) = prior_versions.last() else {
+        return conflict("discovery transfer quiescence has no enabled predecessor");
+    };
+    if enabled.state != DiscoveryParentState::Enabled
+        || !same_parent_behavior(enabled, quiesced)
+        || snapshot
+            .scans
+            .last()
+            .is_none_or(|scan| scan.parent_generation != enabled.generation)
+    {
+        return conflict(
+            "discovery transfer quiescence is not state-only from the latest reconciled enabled generation",
+        );
+    }
     let mut prior_cursor = 0;
     let mut scan_ids = BTreeSet::new();
     for scan in &snapshot.scans {
@@ -840,6 +857,36 @@ impl Store {
                 false,
             ),
         };
+        if input.state == DiscoveryParentState::Quiesced {
+            if created {
+                return invalid("discovery parent must reconcile before it can be quiesced");
+            }
+            let previous_row = sqlx::query(&parent_select("d.current_generation", false))
+                .bind(input.organization_id)
+                .bind(input.project_id)
+                .bind(input.pipeline_id)
+                .bind(input.parent_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            let previous = parent_from_row(previous_row)?;
+            let latest_scan_generation = sqlx::query_scalar::<_, i64>(
+                "SELECT parent_generation FROM discovery_scans
+                 WHERE organization_id = $1 AND parent_id = $2
+                 ORDER BY source_cursor DESC LIMIT 1",
+            )
+            .bind(input.organization_id)
+            .bind(input.parent_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if previous.state != DiscoveryParentState::Enabled
+                || !same_parent_behavior_write(input, &previous)
+                || latest_scan_generation != Some(previous.generation)
+            {
+                return conflict(
+                    "quiescence must be a state-only transition from the latest reconciled enabled generation",
+                );
+            }
+        }
         if let Some(restored) = input.restored_from_generation
             && (restored >= generation
                 || !sqlx::query_scalar::<_, bool>(
@@ -1164,7 +1211,7 @@ impl Store {
             }
             let expected_fork =
                 observation.head_repository_identity != observation.repository_identity;
-            if let Some(existing) =
+            let existing =
                 sqlx::query_as::<_, (Uuid, String, String, String, Option<i64>, String, bool)>(
                     "SELECT child_pipeline_id, repository_identity, ref_kind, ref_name,
                         pull_request_number, head_repository_identity, is_fork
@@ -1176,15 +1223,16 @@ impl Store {
                 .bind(input.parent_id)
                 .bind(&observation.child_key)
                 .fetch_optional(&mut *tx)
-                .await?
-                && (existing.0 != observation.child_pipeline_id
+                .await?;
+            if existing.as_ref().is_some_and(|existing| {
+                existing.0 != observation.child_pipeline_id
                     || existing.1 != observation.repository_identity
                     || existing.2 != observation.ref_kind.as_str()
                     || existing.3 != observation.ref_name
                     || existing.4 != observation.pull_request_number
                     || existing.5 != observation.head_repository_identity
-                    || existing.6 != expected_fork)
-            {
+                    || existing.6 != expected_fork
+            }) {
                 return conflict("discovery child identity was substituted under an existing key");
             }
             let authorized = *disposition == DiscoveryObservationDisposition::Active;
@@ -1231,8 +1279,21 @@ impl Store {
             .bind(observation_sha256.as_slice())
             .execute(&mut *tx)
             .await?;
-            if *disposition != DiscoveryObservationDisposition::Filtered {
-                upsert_child(&mut tx, input, &parent, observation, *disposition).await?;
+            match (*disposition, existing.is_some()) {
+                (DiscoveryObservationDisposition::Filtered, true) => {
+                    upsert_child(
+                        &mut tx,
+                        input,
+                        &parent,
+                        observation,
+                        DiscoveryObservationDisposition::Absent,
+                    )
+                    .await?;
+                }
+                (DiscoveryObservationDisposition::Filtered, false) => {}
+                (disposition, _) => {
+                    upsert_child(&mut tx, input, &parent, observation, disposition).await?;
+                }
             }
         }
 
@@ -1499,6 +1560,60 @@ impl Store {
         tx.commit().await?;
         rows.into_iter().map(child_from_row).collect()
     }
+}
+
+fn same_parent_behavior_write(input: &DiscoveryParentWrite, current: &DiscoveryParent) -> bool {
+    input.kind == current.kind
+        && input.implementation_sha256 == current.implementation_sha256
+        && input.protocol_version == current.protocol_version
+        && input.provider == current.provider
+        && input.provider_identity == current.provider_identity
+        && input.organization_identity == current.organization_identity
+        && sorted_owned(&input.repositories) == current.repositories
+        && sorted_owned(&input.branch_includes) == current.branch_includes
+        && sorted_owned(&input.branch_excludes) == current.branch_excludes
+        && input.pull_request_strategy == current.pull_request_strategy
+        && input.fork_trust_strategy == current.fork_trust_strategy
+        && sorted_owned(&input.trusted_fork_repositories) == current.trusted_fork_repositories
+        && input.jenkinsfile_path == current.jenkinsfile_path
+        && input.child_configuration_policy_sha256 == current.child_configuration_policy_sha256
+        && input.orphan_policy == current.orphan_policy
+        && input.authorization_generation == current.authorization_generation
+        && input.authorization_policy_sha256 == current.authorization_policy_sha256
+        && input.trigger_id == current.trigger_id
+        && input.trigger_generation == current.trigger_generation
+        && input.trigger_configuration_sha256 == current.trigger_configuration_sha256
+        && input.source_implementation_sha256 == current.source_implementation_sha256
+        && input.source_protocol_version == current.source_protocol_version
+        && input.source_configuration_sha256 == current.source_configuration_sha256
+        && input.restored_from_generation == current.restored_from_generation
+}
+
+fn same_parent_behavior(left: &DiscoveryParent, right: &DiscoveryParent) -> bool {
+    left.kind == right.kind
+        && left.implementation_sha256 == right.implementation_sha256
+        && left.protocol_version == right.protocol_version
+        && left.provider == right.provider
+        && left.provider_identity == right.provider_identity
+        && left.organization_identity == right.organization_identity
+        && left.repositories == right.repositories
+        && left.branch_includes == right.branch_includes
+        && left.branch_excludes == right.branch_excludes
+        && left.pull_request_strategy == right.pull_request_strategy
+        && left.fork_trust_strategy == right.fork_trust_strategy
+        && left.trusted_fork_repositories == right.trusted_fork_repositories
+        && left.jenkinsfile_path == right.jenkinsfile_path
+        && left.child_configuration_policy_sha256 == right.child_configuration_policy_sha256
+        && left.orphan_policy == right.orphan_policy
+        && left.authorization_generation == right.authorization_generation
+        && left.authorization_policy_sha256 == right.authorization_policy_sha256
+        && left.trigger_id == right.trigger_id
+        && left.trigger_generation == right.trigger_generation
+        && left.trigger_configuration_sha256 == right.trigger_configuration_sha256
+        && left.source_implementation_sha256 == right.source_implementation_sha256
+        && left.source_protocol_version == right.source_protocol_version
+        && left.source_configuration_sha256 == right.source_configuration_sha256
+        && left.restored_from_generation == right.restored_from_generation
 }
 
 fn validate_parent_write(input: &DiscoveryParentWrite) -> Result<(), StoreError> {

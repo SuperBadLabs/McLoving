@@ -540,6 +540,7 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
     let mut reconfigured = parent.clone();
     reconfigured.expected_generation = 1;
     reconfigured.branch_includes = vec!["release/".to_owned()];
+    reconfigured.orphan_policy = OrphanPolicy::Retain;
     reconfigured.idempotency_key = "discovery-parent-filter-v2".to_owned();
     reconfigured.reason = "narrow discovery to release branches".to_owned();
     reconfigured.expected_configuration_sha256 =
@@ -596,21 +597,22 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
     ));
     store.put_discovery_parent(&parent).await.unwrap();
 
+    let seeded_observation = observation(
+        "mcloving:branch:main",
+        "github:superbadlabs/mcloving",
+        DiscoveredRefKind::Branch,
+        "main",
+        None,
+        "github:superbadlabs/mcloving",
+        "1111111111111111111111111111111111111111",
+    );
     let seeded_scan = scan(
         &parent,
         "scan-before-authority-drift",
         DiscoveryScanSource::Periodic,
         None,
         1,
-        vec![observation(
-            "mcloving:branch:main",
-            "github:superbadlabs/mcloving",
-            DiscoveredRefKind::Branch,
-            "main",
-            None,
-            "github:superbadlabs/mcloving",
-            "1111111111111111111111111111111111111111",
-        )],
+        vec![seeded_observation.clone()],
     );
     store.reconcile_discovery_scan(&seeded_scan).await.unwrap();
 
@@ -650,12 +652,61 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
         Err(StoreError::DiscoveryConflict(_))
     ));
 
-    let mut quiesced = parent.clone();
-    quiesced.expected_generation = 1;
+    let mut rebound = parent.clone();
+    rebound.expected_generation = 1;
+    rebound.authorization_generation = 2;
+    rebound.authorization_policy_sha256 = policy_two.expected_policy_digest;
+    rebound.idempotency_key = "discovery-parent-authority-v2".to_owned();
+    rebound.reason = "bind current reviewed authorization".to_owned();
+    rebound.expected_configuration_sha256 =
+        compute_discovery_parent_configuration_sha256(&rebound).unwrap();
+    assert!(matches!(
+        store.put_discovery_parent(&rebound).await.unwrap(),
+        DiscoveryParentPutOutcome::Revised(_)
+    ));
+
+    let mut unreconciled_quiescence = rebound.clone();
+    unreconciled_quiescence.expected_generation = 2;
+    unreconciled_quiescence.state = DiscoveryParentState::Quiesced;
+    unreconciled_quiescence.idempotency_key = "discovery-parent-unreconciled-quiescence".to_owned();
+    unreconciled_quiescence.reason = "invalid quiescence before reconciliation".to_owned();
+    unreconciled_quiescence.expected_configuration_sha256 =
+        compute_discovery_parent_configuration_sha256(&unreconciled_quiescence).unwrap();
+    assert!(matches!(
+        store.put_discovery_parent(&unreconciled_quiescence).await,
+        Err(StoreError::DiscoveryConflict(_))
+    ));
+
+    let mut premature_quiescence = unreconciled_quiescence;
+    premature_quiescence.expected_generation = 2;
+    premature_quiescence.branch_includes = vec!["release/".to_owned()];
+    premature_quiescence.idempotency_key = "discovery-parent-invalid-quiescence".to_owned();
+    premature_quiescence.reason = "invalid combined reconfiguration and quiescence".to_owned();
+    premature_quiescence.expected_configuration_sha256 =
+        compute_discovery_parent_configuration_sha256(&premature_quiescence).unwrap();
+    assert!(matches!(
+        store.put_discovery_parent(&premature_quiescence).await,
+        Err(StoreError::DiscoveryConflict(_))
+    ));
+
+    let mut rebound_observation = seeded_observation;
+    rebound_observation.revision = "2222222222222222222222222222222222222222".to_owned();
+    rebound_observation.provenance_sha256 = digest("rebound-provenance");
+    rebound_observation.jenkinsfile_sha256 = digest("rebound-jenkinsfile");
+    let rebound_scan = scan(
+        &rebound,
+        "scan-after-authority-rebind",
+        DiscoveryScanSource::Recovery,
+        None,
+        2,
+        vec![rebound_observation],
+    );
+    store.reconcile_discovery_scan(&rebound_scan).await.unwrap();
+
+    let mut quiesced = rebound.clone();
+    quiesced.expected_generation = 2;
     quiesced.state = DiscoveryParentState::Quiesced;
-    quiesced.authorization_generation = 2;
-    quiesced.authorization_policy_sha256 = policy_two.expected_policy_digest;
-    quiesced.idempotency_key = "discovery-parent-quiesced-v2".to_owned();
+    quiesced.idempotency_key = "discovery-parent-quiesced-v3".to_owned();
     quiesced.reason = "quiesce for authority handoff".to_owned();
     quiesced.expected_configuration_sha256 =
         compute_discovery_parent_configuration_sha256(&quiesced).unwrap();
@@ -673,7 +724,7 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
     );
     assert!(matches!(
         store.reconcile_discovery_scan(&quiesced_scan).await,
-        Err(StoreError::DiscoveryQuiesced { generation: 2, .. })
+        Err(StoreError::DiscoveryQuiesced { generation: 3, .. })
     ));
     let transfer = store
         .export_quiesced_discovery_state(
@@ -686,8 +737,8 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
         .await
         .unwrap();
     verify_discovery_transfer_snapshot(&transfer, transfer.audit_event_hash).unwrap();
-    assert_eq!(transfer.scans.len(), 1);
-    assert_eq!(transfer.observations.len(), 1);
+    assert_eq!(transfer.scans.len(), 2);
+    assert_eq!(transfer.observations.len(), 2);
     assert_eq!(transfer.children.len(), 1);
     let mut substituted_transfer = transfer.clone();
     substituted_transfer.observations[0].revision =
@@ -702,10 +753,10 @@ async fn discovery_fails_closed_on_configuration_authority_and_quiescence_drift(
     ));
 
     let mut restored = quiesced.clone();
-    restored.expected_generation = 2;
+    restored.expected_generation = 3;
     restored.state = DiscoveryParentState::Enabled;
     restored.restored_from_generation = Some(1);
-    restored.idempotency_key = "discovery-parent-rollback-v3".to_owned();
+    restored.idempotency_key = "discovery-parent-rollback-v4".to_owned();
     restored.reason = "restore reviewed discovery behavior".to_owned();
     restored.expected_configuration_sha256 =
         compute_discovery_parent_configuration_sha256(&restored).unwrap();

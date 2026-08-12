@@ -50,9 +50,11 @@ preconditions, missing saved pipelines, missing authorization policy, and
 trigger/configuration/provider substitution fail closed.
 
 `enabled` admits reconciliation. `quiesced` denies every new scan and is the
-only state eligible for transfer export. A rollback is a new immutable
-generation that identifies a retained earlier generation; history is never
-rewritten.
+only state eligible for transfer export. Quiescence must be a state-only
+transition from an enabled generation whose scan completed after that generation
+was installed; configuration and quiescence cannot be combined. A rollback is a
+new immutable generation that identifies a retained earlier generation; history
+is never rewritten.
 
 ## Scan and observation ledger
 
@@ -105,12 +107,15 @@ Current child truth has three closed states:
 - `active` — present, policy-matching, trusted, and authorized;
 - `quarantined` — present and policy-matching but untrusted; and
 - `retired` — explicitly absent or missing from a complete snapshot under the
-  `retire` orphan policy.
+  `retire` orphan policy, or explicitly reported but filtered by the current
+  parent policy.
 
 State generations and source cursors advance monotonically. A delta never
 retires an omitted child. A complete snapshot with `retain` also preserves
-omitted children. No discovery path physically deletes a child or creates a
-runnable build, so retention and rollback evidence remain available.
+omitted children. `retain` never preserves a reported child that is known to
+violate the current repository, ref, trust, or Jenkinsfile selection policy.
+No discovery path physically deletes a child or creates a runnable build, so
+retention and rollback evidence remain available.
 
 ## API and tenant boundary
 
@@ -141,6 +146,7 @@ binds that ledger commitment and the complete audit event.
 
 Verification requires the handoff event hash from an independently retained
 audit export or chain head. It rejects a missing generation, non-quiesced tail,
+non-state-only quiescence, a missing scan for the enabled predecessor,
 duplicate or reordered scan, mismatched observation count, orphaned observation,
 duplicate/substituted child identity, recomputed ledger substitution, invalid
 audit hash, or wrong independent anchor. A later authority-transfer ticket must
