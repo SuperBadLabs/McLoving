@@ -1179,22 +1179,13 @@ fn maximum_request_envelope_fits(
 }
 
 fn maximum_request_timestamp_pair(observation_time_ms: i64, max_age_ms: i64) -> (i64, i64) {
-    let candidates = [
-        (
-            observation_time_ms.saturating_sub(max_age_ms),
-            observation_time_ms,
-        ),
-        (
-            observation_time_ms,
-            observation_time_ms.saturating_add(max_age_ms),
-        ),
-    ];
-    candidates
-        .into_iter()
-        .max_by_key(|(requested_at, expires_at)| {
-            requested_at.to_string().len() + expires_at.to_string().len()
-        })
-        .unwrap_or((observation_time_ms, observation_time_ms))
+    // The temporal contract bounds each side independently around the trusted observation time.
+    // Use both extremes together so startup sizes the largest valid pair, including when the
+    // oldest request and latest expiry cross a decimal-width boundary in opposite directions.
+    (
+        observation_time_ms.saturating_sub(max_age_ms),
+        observation_time_ms.saturating_add(max_age_ms),
+    )
 }
 
 fn is_literal_loopback_test_endpoint(config: &ObserverConfig) -> bool {
@@ -2062,18 +2053,15 @@ mod tests {
 
     #[test]
     fn request_sizing_uses_only_temporally_admissible_timestamp_pairs() {
-        let now = 1_800_000_000_000_i64;
-        for max_age in [10_000_i64, i64::MAX] {
-            let selected = maximum_request_timestamp_pair(now, max_age);
-            let candidates = [
-                (now.saturating_sub(max_age), now),
-                (now, now.saturating_add(max_age)),
-            ];
-            assert!(candidates.contains(&selected));
-            let selected_len = selected.0.to_string().len() + selected.1.to_string().len();
-            assert!(candidates.iter().all(|candidate| {
-                candidate.0.to_string().len() + candidate.1.to_string().len() <= selected_len
-            }));
+        for (now, max_age) in [
+            (1_800_000_000_000_i64, 10_000_i64),
+            (0, 10),
+            (1_800_000_000_000, i64::MAX),
+        ] {
+            assert_eq!(
+                maximum_request_timestamp_pair(now, max_age),
+                (now.saturating_sub(max_age), now.saturating_add(max_age))
+            );
         }
     }
 }
