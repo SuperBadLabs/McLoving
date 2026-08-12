@@ -60,7 +60,10 @@ identity and filter, enforces bounded past-replay/future-skew windows, locks the
 current trigger and pipeline operational state, and inserts one `pending`
 delivery plus its audit event. Delivery and event IDs are each unique per
 trigger. Exact response-loss replay returns the original record; either ID
-reused for different input is a conflict.
+reused for different input is a conflict. First acceptance serializes on the
+trigger definition and repeats the ID lookup under that lock, so concurrent
+active-active acceptance returns one creation plus one exact replay rather than
+leaking a database uniqueness failure.
 
 Each kind also has a closed payload field set. SCM repository identity must
 equal the configured repository, not merely share an installation credential.
@@ -86,8 +89,10 @@ durable. The shipped controller continuously enumerates bounded due work for its
 organization from PostgreSQL; active-active scans may overlap, but claim fences
 converge them on one worker. It samples the clock again before each claim, so a
 slow batch cannot admit a later delivery using a stale pre-expiry timestamp or
-write an already-expired lease. Thus an upstream 202 does not make source-side
-redelivery responsible for controller retries. Expired or exhausted work
+write an already-expired lease. A failed admission samples the clock again when
+deciding expiry and the next retry time, so admission latency cannot shorten the
+retry delay or preserve already-expired work. Thus an upstream 202 does not make
+source-side redelivery responsible for controller retries. Expired or exhausted work
 dead-letters. A dead letter is never mutated back to pending. Project-configure
 redrive creates a new delivery/event identity with immutable lineage and
 ordinal, then enters the same claim, admission, and operational-state fence.
@@ -133,7 +138,9 @@ The generated OpenAPI contract exposes:
 
 Trigger configuration is a `kind`-discriminated union with separate closed SCM,
 schedule, upstream, and remote API variants and their exact required fields.
-The rejected plugin class is not advertised as an admitted request variant.
+Event payload is likewise a four-variant closed union with the exact required
+SCM, schedule, upstream, or remote API shape. The rejected plugin class is not
+advertised as an admitted request variant.
 
 The database ledger is the transferable source of truth: append-only trigger
 versions, unique event/delivery deduplication records, pending/retry/dead-letter
@@ -142,6 +149,9 @@ generation-specific schedule watermarks. The quiesced transfer snapshot also
 binds every trigger version's actor, reason, idempotency key, audit sequence and
 event hash; every accepted delivery's audit sequence and event hash; and the
 handoff export audit event into one domain-separated state digest. Verification
+recomputes a separate exact-ledger digest and requires it in the hash-verified
+handoff audit event, so changing ledger state and merely recomputing the unkeyed
+snapshot digest cannot preserve the trusted audit commitment. Verification
 rejects missing lineage, duplicate identifiers, active claims, unlinked
 watermarks, watermarks linked to a delivery from the wrong generation or
 resolved slot, stripped provenance, or any state substitution. A later CUTOVER-001
@@ -160,6 +170,9 @@ RLS/forced-RLS migration, and audit linkage. Public API tests cover missing and
 cross-tenant authorization, configuration preconditions, SCM branch/path
 filtering, durable admission, generation-bound replay after configuration
 rotation, stale-generation denial, kind-discriminated generated schemas, and
-the generated route contract. The deployable-controller suite also proves the
-runtime role's exact least-privilege and 53-table forced-RLS policy surface
-before accepting traffic.
+the generated route contract. Concurrent first-acceptance coverage proves one
+created delivery and one replay rather than a uniqueness error; the handoff
+tamper test changes ledger content, recomputes the snapshot digest, and is still
+rejected by the audited ledger commitment. The deployable-controller suite also
+proves the runtime role's exact least-privilege and 53-table forced-RLS policy
+surface before accepting traffic.

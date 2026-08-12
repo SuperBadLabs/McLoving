@@ -299,6 +299,7 @@ pub struct TriggerTransferSnapshot {
     pub versions: Vec<PipelineTrigger>,
     pub deliveries: Vec<TriggerDelivery>,
     pub schedule_watermarks: Vec<TriggerScheduleWatermark>,
+    pub handoff_audit_event: crate::AuditEvent,
     pub audit_sequence: i64,
     pub audit_event_hash: [u8; 32],
     pub state_sha256: [u8; 32],
@@ -311,11 +312,19 @@ pub fn verify_trigger_transfer_snapshot(
         || snapshot.current_generation <= 0
         || snapshot.audit_sequence <= 0
         || snapshot.audit_event_hash == [0; 32]
+        || snapshot.handoff_audit_event.sequence != snapshot.audit_sequence
+        || snapshot.handoff_audit_event.event_hash != snapshot.audit_event_hash
     {
         return Err(StoreError::InvalidTriggerIngress(
             "trigger transfer snapshot schema or generation is invalid".to_owned(),
         ));
     }
+    crate::audit::verify_audit_event_hash(snapshot.organization_id, &snapshot.handoff_audit_event)
+        .map_err(|_| {
+            StoreError::TriggerIngressConflict(
+                "trigger transfer handoff audit event hash is invalid".to_owned(),
+            )
+        })?;
     for (expected_generation, version) in (1_i64..).zip(snapshot.versions.iter()) {
         if version.organization_id != snapshot.organization_id
             || version.project_id != snapshot.project_id
@@ -432,7 +441,42 @@ pub fn verify_trigger_transfer_snapshot(
             ));
         }
     }
-    let actual = trigger_transfer_digest(snapshot)?;
+    let ledger_sha256 = trigger_transfer_ledger_digest(
+        snapshot.schema_version,
+        snapshot.organization_id,
+        snapshot.project_id,
+        snapshot.pipeline_id,
+        snapshot.trigger_id,
+        snapshot.current_generation,
+        &snapshot.versions,
+        &snapshot.deliveries,
+        &snapshot.schedule_watermarks,
+    )?;
+    let expected_audit_payload = json!({
+        "project_id": snapshot.project_id,
+        "pipeline_id": snapshot.pipeline_id,
+        "trigger_id": snapshot.trigger_id,
+        "current_generation": snapshot.current_generation,
+        "version_count": snapshot.versions.len(),
+        "delivery_count": snapshot.deliveries.len(),
+        "schedule_watermark_count": snapshot.schedule_watermarks.len(),
+        "ledger_sha256": hex::encode(ledger_sha256),
+    });
+    if snapshot.handoff_audit_event.category != "trigger"
+        || snapshot.handoff_audit_event.action != "trigger.handoff_exported"
+        || snapshot.handoff_audit_event.subject
+            != format!(
+                "pipeline:{}:trigger:{}",
+                snapshot.pipeline_id, snapshot.trigger_id
+            )
+        || snapshot.handoff_audit_event.actor_subject.is_empty()
+        || snapshot.handoff_audit_event.payload != expected_audit_payload
+    {
+        return Err(StoreError::TriggerIngressConflict(
+            "trigger transfer handoff audit commitment does not match its ledger".to_owned(),
+        ));
+    }
+    let actual = compute_trigger_transfer_snapshot_digest(snapshot)?;
     if actual != snapshot.state_sha256 {
         return Err(StoreError::TriggerIngressConflict(
             "trigger transfer snapshot digest does not match its state".to_owned(),
@@ -441,7 +485,9 @@ pub fn verify_trigger_transfer_snapshot(
     Ok(())
 }
 
-fn trigger_transfer_digest(snapshot: &TriggerTransferSnapshot) -> Result<[u8; 32], StoreError> {
+pub fn compute_trigger_transfer_snapshot_digest(
+    snapshot: &TriggerTransferSnapshot,
+) -> Result<[u8; 32], StoreError> {
     #[derive(Serialize)]
     struct DigestInput<'a> {
         schema_version: u16,
@@ -453,6 +499,7 @@ fn trigger_transfer_digest(snapshot: &TriggerTransferSnapshot) -> Result<[u8; 32
         versions: &'a [PipelineTrigger],
         deliveries: &'a [TriggerDelivery],
         schedule_watermarks: &'a [TriggerScheduleWatermark],
+        handoff_audit_event: &'a crate::AuditEvent,
         audit_sequence: i64,
         audit_event_hash: [u8; 32],
     }
@@ -466,12 +513,55 @@ fn trigger_transfer_digest(snapshot: &TriggerTransferSnapshot) -> Result<[u8; 32
         versions: &snapshot.versions,
         deliveries: &snapshot.deliveries,
         schedule_watermarks: &snapshot.schedule_watermarks,
+        handoff_audit_event: &snapshot.handoff_audit_event,
         audit_sequence: snapshot.audit_sequence,
         audit_event_hash: snapshot.audit_event_hash,
     })
     .map_err(|error| StoreError::InvalidTriggerIngress(error.to_string()))?;
     let mut hasher = Sha256::new();
     hasher.update(b"mcloving-trigger-transfer-v1\0");
+    hasher.update(canonical);
+    Ok(hasher.finalize().into())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trigger_transfer_ledger_digest(
+    schema_version: u16,
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    trigger_id: Uuid,
+    current_generation: i64,
+    versions: &[PipelineTrigger],
+    deliveries: &[TriggerDelivery],
+    schedule_watermarks: &[TriggerScheduleWatermark],
+) -> Result<[u8; 32], StoreError> {
+    #[derive(Serialize)]
+    struct LedgerDigestInput<'a> {
+        schema_version: u16,
+        organization_id: Uuid,
+        project_id: Uuid,
+        pipeline_id: Uuid,
+        trigger_id: Uuid,
+        current_generation: i64,
+        versions: &'a [PipelineTrigger],
+        deliveries: &'a [TriggerDelivery],
+        schedule_watermarks: &'a [TriggerScheduleWatermark],
+    }
+    let canonical = serde_json::to_vec(&LedgerDigestInput {
+        schema_version,
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        current_generation,
+        versions,
+        deliveries,
+        schedule_watermarks,
+    })
+    .map_err(|error| StoreError::InvalidTriggerIngress(error.to_string()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"mcloving-trigger-transfer-ledger-v1\0");
     hasher.update(canonical);
     Ok(hasher.finalize().into())
 }
@@ -818,6 +908,39 @@ impl Store {
                 "delivery does not identify a configured trigger".to_owned(),
             ));
         };
+        // The first lookup cannot lock an absent unique key. Recheck after the
+        // trigger-definition lock serializes first acceptance so an
+        // active-active waiter observes the committed delivery as replay
+        // instead of surfacing a database uniqueness error.
+        let serialized_existing = sqlx::query(
+            "SELECT * FROM trigger_deliveries
+             WHERE organization_id = $1 AND trigger_id = $2
+               AND (delivery_id = $3 OR event_id = $4)
+             FOR UPDATE",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(&input.delivery_id)
+        .bind(&input.event_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if serialized_existing.len() > 1 {
+            tx.rollback().await?;
+            return Err(StoreError::TriggerIngressConflict(
+                "delivery and event IDs identify different accepted deliveries".to_owned(),
+            ));
+        }
+        if let Some(existing) = serialized_existing.into_iter().next() {
+            let delivery = delivery_from_row(existing)?;
+            if !delivery_matches(&delivery, input) {
+                tx.rollback().await?;
+                return Err(StoreError::TriggerIngressConflict(
+                    "delivery or event ID was reused for different trigger input".to_owned(),
+                ));
+            }
+            tx.commit().await?;
+            return Ok(TriggerDeliveryAdmission::Replayed(delivery));
+        }
         let generation: i64 = trigger_row.try_get("current_generation")?;
         if generation != input.expected_trigger_generation {
             tx.rollback().await?;
@@ -1823,6 +1946,17 @@ impl Store {
             .into_iter()
             .map(schedule_watermark_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        let ledger_sha256 = trigger_transfer_ledger_digest(
+            1,
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            current,
+            &versions,
+            &deliveries,
+            &schedule_watermarks,
+        )?;
         let audit = crate::audit::append_audit_record(
             &mut tx,
             organization_id,
@@ -1838,6 +1972,7 @@ impl Store {
                 "version_count": versions.len(),
                 "delivery_count": deliveries.len(),
                 "schedule_watermark_count": schedule_watermarks.len(),
+                "ledger_sha256": hex::encode(ledger_sha256),
             }),
         )
         .await?;
@@ -1851,11 +1986,12 @@ impl Store {
             versions,
             deliveries,
             schedule_watermarks,
+            handoff_audit_event: audit.clone(),
             audit_sequence: audit.sequence,
             audit_event_hash: audit.event_hash,
             state_sha256: [0; 32],
         };
-        snapshot.state_sha256 = trigger_transfer_digest(&snapshot)?;
+        snapshot.state_sha256 = compute_trigger_transfer_snapshot_digest(&snapshot)?;
         verify_trigger_transfer_snapshot(&snapshot)?;
         tx.commit().await?;
         Ok(snapshot)

@@ -1051,6 +1051,10 @@ fn openapi_document() -> Value {
                 "UpstreamTriggerConfiguration": upstream_trigger_configuration_schema(),
                 "RemoteApiTriggerConfiguration": remote_api_trigger_configuration_schema(),
                 "TriggerEventPayload": trigger_event_payload,
+                "ScmTriggerEventPayload": scm_trigger_event_payload_schema(),
+                "ScheduleTriggerEventPayload": schedule_trigger_event_payload_schema(),
+                "UpstreamTriggerEventPayload": upstream_trigger_event_payload_schema(),
+                "RemoteApiTriggerEventPayload": remote_api_trigger_event_payload_schema(),
                 "TriggerRedriveRequest": {
                     "type": "object",
                     "required": ["delivery_id", "event_id"],
@@ -1272,25 +1276,70 @@ fn trigger_filter_schema(fields: &[&str]) -> Value {
 
 fn trigger_event_payload_schema() -> Value {
     json!({
+        "oneOf": [
+            {"$ref": "#/components/schemas/ScmTriggerEventPayload"},
+            {"$ref": "#/components/schemas/ScheduleTriggerEventPayload"},
+            {"$ref": "#/components/schemas/UpstreamTriggerEventPayload"},
+            {"$ref": "#/components/schemas/RemoteApiTriggerEventPayload"}
+        ]
+    })
+}
+
+fn scm_trigger_event_payload_schema() -> Value {
+    json!({
         "type": "object",
         "properties": {
             "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
             "revision": {"type": "string", "minLength": 1, "maxLength": 512},
             "branch": {"type": "string", "minLength": 1, "maxLength": 512},
-            "paths": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}},
+            "paths": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}}
+        },
+        "required": ["repository_identity", "revision", "branch"],
+        "additionalProperties": false
+    })
+}
+
+fn schedule_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
             "timezone": {"type": "string", "minLength": 1, "maxLength": 128},
             "calendar": {"type": "string", "minLength": 1, "maxLength": 128},
             "expression": {"type": "string", "minLength": 1, "maxLength": 512},
             "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "expected_last_resolved_slot_unix_ms": {"type": "integer", "minimum": 0},
-            "resolved_slot_unix_ms": {"type": "integer", "minimum": 0},
+            "resolved_slot_unix_ms": {"type": "integer", "minimum": 0}
+        },
+        "required": [
+            "timezone", "calendar", "expression", "schedule_identity_sha256",
+            "resolved_slot_unix_ms"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn upstream_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
             "upstream_pipeline_id": {"type": "string", "format": "uuid"},
             "upstream_build_id": {"type": "string", "format": "uuid"},
-            "status": {"type": "string", "minLength": 1, "maxLength": 512},
+            "status": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "required": ["upstream_pipeline_id", "upstream_build_id", "status"],
+        "additionalProperties": false
+    })
+}
+
+fn remote_api_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
             "audience": {"type": "string", "minLength": 1, "maxLength": 512},
             "request_id": {"type": "string", "minLength": 1, "maxLength": 512},
             "request_method": {"type": "string", "minLength": 1, "maxLength": 512}
         },
+        "required": ["audience", "request_id", "request_method"],
         "additionalProperties": false
     })
 }
@@ -2626,6 +2675,7 @@ async fn process_trigger_delivery(
         }
         Err(error) => {
             let retryable = error.status.is_server_error();
+            let failure_unix_ms = unix_time_ms();
             let failed = state
                 .store
                 .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
@@ -2634,8 +2684,8 @@ async fn process_trigger_delivery(
                     delivery_id: claimed.delivery_id.clone(),
                     worker_identity,
                     claim_fence: claimed.claim_fence,
-                    now_unix_ms,
-                    retry_at_unix_ms: now_unix_ms.saturating_add(60_000),
+                    now_unix_ms: failure_unix_ms,
+                    retry_at_unix_ms: failure_unix_ms.saturating_add(60_000),
                     retryable,
                     reason: format!("{}: {}", error.code, error.message),
                 })
@@ -5547,6 +5597,37 @@ mod tests {
         assert!(
             schedule_configuration["properties"]["repository_identity"].is_null(),
             "kind-specific configuration fields must fail closed"
+        );
+        let event_payload = &schemas["TriggerEventPayload"];
+        assert_eq!(
+            event_payload["oneOf"]
+                .as_array()
+                .expect("typed trigger event payload variants")
+                .len(),
+            4
+        );
+        let scm_event = &schemas["ScmTriggerEventPayload"];
+        assert!(
+            scm_event["required"]
+                .as_array()
+                .expect("SCM event payload requirements")
+                .contains(&Value::from("revision"))
+        );
+        assert!(scm_event["properties"]["resolved_slot_unix_ms"].is_null());
+        let schedule_event = &schemas["ScheduleTriggerEventPayload"];
+        assert!(
+            schedule_event["required"]
+                .as_array()
+                .expect("schedule event payload requirements")
+                .contains(&Value::from("resolved_slot_unix_ms"))
+        );
+        assert!(schedule_event["properties"]["repository_identity"].is_null());
+        let remote_event = &schemas["RemoteApiTriggerEventPayload"];
+        assert!(
+            remote_event["required"]
+                .as_array()
+                .expect("remote API event payload requirements")
+                .contains(&Value::from("request_id"))
         );
 
         let approvals = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/approvals"];

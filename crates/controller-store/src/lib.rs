@@ -71,7 +71,7 @@ pub use trigger_ingress::{
     TriggerDeliveryClaimRequest, TriggerDeliveryFailure, TriggerDeliveryFailureRequest,
     TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome,
     TriggerScheduleSlot, TriggerScheduleWatermark, TriggerTransferSnapshot,
-    verify_trigger_transfer_snapshot,
+    compute_trigger_transfer_snapshot_digest, verify_trigger_transfer_snapshot,
 };
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;

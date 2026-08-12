@@ -5,7 +5,7 @@ use mcloving_controller_store::{
     StoreError, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
     TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive,
     TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome, TriggerScheduleSlot,
-    verify_trigger_transfer_snapshot,
+    compute_trigger_transfer_snapshot_digest, verify_trigger_transfer_snapshot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -379,10 +379,25 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         store.accept_trigger_delivery(&unknown_payload).await,
         Err(StoreError::InvalidTriggerIngress(_))
     ));
-    assert!(matches!(
-        store.accept_trigger_delivery(&input).await.unwrap(),
-        TriggerDeliveryAdmission::Created(_)
-    ));
+    let (left, right) = tokio::join!(
+        store.accept_trigger_delivery(&input),
+        store.accept_trigger_delivery(&input)
+    );
+    let concurrent_outcomes = [left.unwrap(), right.unwrap()];
+    assert_eq!(
+        concurrent_outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, TriggerDeliveryAdmission::Created(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        concurrent_outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, TriggerDeliveryAdmission::Replayed(_)))
+            .count(),
+        1
+    );
     assert!(matches!(
         store.accept_trigger_delivery(&input).await.unwrap(),
         TriggerDeliveryAdmission::Replayed(_)
@@ -829,10 +844,15 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
     );
     let mut tampered = handoff.clone();
     tampered.deliveries[0].event_id.push_str("-substituted");
-    assert!(matches!(
-        verify_trigger_transfer_snapshot(&tampered),
-        Err(StoreError::TriggerIngressConflict(_))
-    ));
+    tampered.state_sha256 = compute_trigger_transfer_snapshot_digest(&tampered)
+        .expect("attacker can recompute the unkeyed snapshot digest");
+    assert!(
+        matches!(
+            verify_trigger_transfer_snapshot(&tampered),
+            Err(StoreError::TriggerIngressConflict(_))
+        ),
+        "the audited ledger commitment rejects a recomputed substituted snapshot"
+    );
     let mut provenance_stripped = handoff.clone();
     provenance_stripped.deliveries[0].audit_sequence = 0;
     assert!(matches!(
