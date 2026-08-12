@@ -12,6 +12,7 @@ mod authorization_mapping;
 pub mod authz;
 mod consumer_migration;
 mod dag;
+mod discovery;
 mod identity;
 mod product;
 mod scheduler;
@@ -42,6 +43,16 @@ pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
     DagNodeKind, DagReplayBinding, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode,
     TRIGGER_DAG_IDEMPOTENCY_PREFIX, compile_matrix, validate_dag_contract,
+};
+pub use discovery::{
+    DiscoveredRefKind, DiscoveryChild, DiscoveryChildState, DiscoveryObservation,
+    DiscoveryObservationDisposition, DiscoveryObservationWrite, DiscoveryParent,
+    DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite,
+    DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanRecord, DiscoveryScanSource,
+    DiscoveryScanWrite, DiscoveryTransferSnapshot, ForkTrustStrategy, OrphanPolicy,
+    PullRequestDiscoveryStrategy, compute_discovery_parent_configuration_sha256,
+    compute_discovery_scan_request_sha256, compute_discovery_transfer_ledger_sha256,
+    compute_discovery_transfer_snapshot_sha256, verify_discovery_transfer_snapshot,
 };
 pub use identity::{
     AuthenticatedIdentity, IdentityLifecycle, IdentityProviderConfig, IdentityProviderWrite,
@@ -150,6 +161,8 @@ pub const PIPELINE_OPERATIONAL_STATE_V27: &str =
     include_str!("../migrations/0027_pipeline_operational_state.sql");
 /// Typed authenticated trigger configurations and durable delivery truth.
 pub const TRIGGER_INGRESS_V28: &str = include_str!("../migrations/0028_trigger_ingress.sql");
+/// Versioned multibranch and organization-folder discovery truth.
+pub const DISCOVERY_V29: &str = include_str!("../migrations/0029_discovery.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -491,6 +504,12 @@ pub enum StoreError {
     TriggerIngressConflict(String),
     #[error("trigger {trigger_id} is paused at generation {generation}")]
     TriggerPaused { trigger_id: Uuid, generation: i64 },
+    #[error("invalid discovery operation: {0}")]
+    InvalidDiscovery(String),
+    #[error("discovery conflict: {0}")]
+    DiscoveryConflict(String),
+    #[error("discovery parent {parent_id} is quiesced at generation {generation}")]
+    DiscoveryQuiesced { parent_id: Uuid, generation: i64 },
     #[error("invalid state transfer: {0}")]
     InvalidStateTransfer(String),
     #[error("state-transfer conflict: {0}")]
@@ -690,6 +709,20 @@ impl Store {
                    ('trigger_schedule_watermarks', 'SELECT'),
                    ('trigger_schedule_watermarks', 'INSERT'),
                    ('trigger_schedule_watermarks', 'UPDATE'),
+                   ('discovery_parent_definitions', 'SELECT'),
+                   ('discovery_parent_definitions', 'INSERT'),
+                   ('discovery_parent_definitions', 'UPDATE'),
+                   ('discovery_parent_versions', 'SELECT'),
+                   ('discovery_parent_versions', 'INSERT'),
+                   ('discovery_scans', 'SELECT'),
+                   ('discovery_scans', 'INSERT'),
+                   ('discovery_scan_results', 'SELECT'),
+                   ('discovery_scan_results', 'INSERT'),
+                   ('discovery_observations', 'SELECT'),
+                   ('discovery_observations', 'INSERT'),
+                   ('discovery_children', 'SELECT'),
+                   ('discovery_children', 'INSERT'),
+                   ('discovery_children', 'UPDATE'),
                    ('component_packages', 'SELECT'), ('component_packages', 'INSERT'),
                    ('state_transfer_receipts', 'SELECT'),
                    ('state_transfer_records', 'SELECT'),
@@ -1004,6 +1037,10 @@ impl Store {
                    ('pipeline_trigger_definitions'),
                    ('pipeline_trigger_versions'), ('trigger_deliveries'),
                    ('trigger_schedule_watermarks'),
+                   ('discovery_parent_definitions'),
+                   ('discovery_parent_versions'), ('discovery_scans'),
+                   ('discovery_scan_results'), ('discovery_observations'),
+                   ('discovery_children'),
                    ('component_packages'), ('attempt_log_chunks'),
                    ('attempt_effects'), ('dead_letters'), ('attempt_objects'),
                    ('state_transfer_receipts'), ('state_transfer_records'),
@@ -1046,7 +1083,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 53
+             SELECT COUNT(*) = 59
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1075,7 +1112,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 53
+                    AND (SELECT COUNT(*) FROM policies) = 59
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1184,6 +1221,7 @@ impl Store {
         apply_migration(&mut tx, 26, EXTERNAL_ADMIN_CLIENTS_V26).await?;
         apply_migration(&mut tx, 27, PIPELINE_OPERATIONAL_STATE_V27).await?;
         apply_migration(&mut tx, 28, TRIGGER_INGRESS_V28).await?;
+        apply_migration(&mut tx, 29, DISCOVERY_V29).await?;
         tx.commit().await?;
         Ok(())
     }

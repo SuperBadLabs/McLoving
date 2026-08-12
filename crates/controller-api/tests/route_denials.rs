@@ -83,7 +83,7 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
         node_id,
         &digest,
     );
-    assert_eq!(cases.len(), 32, "route matrix must track the public API");
+    assert_eq!(cases.len(), 36, "route matrix must track the public API");
     for case in cases {
         let unauthenticated = app
             .clone()
@@ -1120,6 +1120,7 @@ fn route_cases(
 ) -> Vec<RouteCase> {
     let project = format!("/api/v1/organizations/{organization_id}/projects/{project_id}");
     let trigger_id = Uuid::new_v4();
+    let discovery_parent_id = Uuid::new_v4();
     let build = format!("{project}/builds/{build_id}");
     let source = r#"{"source":"version: 1\nname: route-contract\nstages: []"}"#;
     let pipeline =
@@ -1140,6 +1141,12 @@ fn route_cases(
         r#"{{"kind":"remote_api","state":"enabled","implementation_sha256":"{digest}","configuration_sha256":"{digest}","filter_sha256":"{digest}","event_source_identity":"service:trigger","source_generation":"source-1","configuration":{{"filter":{{}}}},"deduplication_window_seconds":60,"max_delivery_attempts":3,"delivery_ttl_seconds":300,"reason":"reviewed trigger"}}"#
     );
     let event = r#"{"trigger_generation":1,"delivery_id":"delivery-1","event_id":"event-1","event_kind":"remote","event_time_unix_ms":1800000000000,"payload":{}}"#;
+    let discovery_parent = format!(
+        r#"{{"kind":"multibranch_pipeline","state":"enabled","implementation_sha256":"{digest}","protocol_version":"mcloving.discovery/v1","configuration_sha256":"{digest}","provider":"github","provider_identity":"scm:github:installation:42","organization_identity":null,"repositories":["github:superbadlabs/mcloving"],"branch_includes":[],"branch_excludes":[],"pull_request_strategy":"origin_and_forks","fork_trust_strategy":"none","trusted_fork_repositories":[],"jenkinsfile_path":"Jenkinsfile","child_configuration_policy_sha256":"{digest}","orphan_policy":"retire","authorization_generation":1,"authorization_policy_sha256":"{digest}","trigger_id":"{trigger_id}","trigger_generation":1,"trigger_configuration_sha256":"{digest}","source_implementation_sha256":"{digest}","source_protocol_version":"mcloving.source-acquirer/v1","source_configuration_sha256":"{digest}","restored_from_generation":null,"reason":"reviewed discovery"}}"#
+    );
+    let discovery_scan = format!(
+        r#"{{"parent_generation":1,"scan_id":"scan-1","source":"periodic","source_event_id":null,"source_cursor":1,"complete_snapshot":true,"provider_snapshot_sha256":"{digest}","request_sha256":"{digest}","observations":[]}}"#
+    );
     let commit = format!(
         r#"{{"node_id":"{node_id}","attempt_id":"{attempt_id}","fence":1,"restore_epoch":1,"agent_id":"agent","name":"artifact.bin","media_type":"application/octet-stream","sha256":"{digest}","bytes":1,"retention_seconds":60}}"#
     );
@@ -1207,6 +1214,28 @@ fn route_cases(
             ),
             r#"{"delivery_id":"redrive-1","event_id":"redrive-event-1"}"#,
             json,
+        ),
+        case(
+            Method::GET,
+            format!("{project}/pipelines/{pipeline_id}/discovery/{discovery_parent_id}"),
+        ),
+        body_case(
+            Method::PUT,
+            format!("{project}/pipelines/{pipeline_id}/discovery/{discovery_parent_id}"),
+            &discovery_parent,
+            json,
+        )
+        .with_header(header::IF_MATCH.as_str(), "\"0\"")
+        .with_header(IDEMPOTENCY_HEADER, "route-discovery-create"),
+        body_case(
+            Method::POST,
+            format!("{project}/pipelines/{pipeline_id}/discovery/{discovery_parent_id}/scans"),
+            &discovery_scan,
+            json,
+        ),
+        case(
+            Method::GET,
+            format!("{project}/pipelines/{pipeline_id}/discovery/{discovery_parent_id}/children"),
         ),
         case(Method::GET, format!("{project}/components")),
         case(Method::GET, format!("{project}/components/{digest}")),
