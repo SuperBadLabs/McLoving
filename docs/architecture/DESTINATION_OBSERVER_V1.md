@@ -156,7 +156,10 @@ insertion when the bound is full. The same limit independently bounds durable
 phase-chain heads; a new chain scope fails before a GET once that retained-head
 bound is full, while an existing chain can still advance. A pending observation
 transactionally reserves its prospective head slot until it completes or becomes
-terminal, so an admitted read cannot lose capacity during finalization. This mandatory bound is carried by
+terminal, so an admitted read cannot lose capacity during finalization. Admission
+atomically tombstones expired pending rows and applies terminal retention pruning
+before counting reservations, preventing an abandoned read from leaking head quota.
+This mandatory bound is carried by
 `mcloving.destination-observer-config/v3`; legacy config v1 lacks the quota and
 config v2 lacks the executable binding, so both are explicitly incompatible
 rather than silently acquiring new ledger or executable-trust semantics.

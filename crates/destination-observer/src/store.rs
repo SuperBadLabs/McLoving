@@ -327,10 +327,12 @@ impl ObserverStore {
             .lock()
             .map_err(|_| ObserverError::StateUnavailable)?;
         let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| ObserverError::StateUnavailable)?;
         assert_active_transaction(&transaction, config.generation, config_sha256)?;
         let admission_at_ms = crate::observer::elapsed_time_ms(started_at_ms, started_at)?;
+        expire_pending_observations(&transaction, admission_at_ms)?;
+        prune_terminal_observations(&transaction, config, admission_at_ms)?;
         validate_temporal(config, request, admission_at_ms)?;
         enforce_phase(&transaction, request, scope_sha256)?;
         enforce_scope_head_capacity(&transaction, config, scope_sha256)?;
@@ -360,12 +362,7 @@ impl ObserverStore {
             .map_err(|_| ObserverError::StateUnavailable)?;
         let claim_at_ms = crate::observer::elapsed_time_ms(started_at_ms, started_at)?;
         assert_active_transaction(&transaction, config.generation, config_sha256)?;
-        transaction
-            .execute(
-                "UPDATE observations SET status='failed', failure_code='expired_request' WHERE status='pending' AND expires_at_ms < ?1",
-                [claim_at_ms],
-            )
-            .map_err(|_| ObserverError::StateUnavailable)?;
+        expire_pending_observations(&transaction, claim_at_ms)?;
         prune_terminal_observations(&transaction, config, claim_at_ms)?;
 
         let existing: Option<ExistingObservation> = transaction
@@ -860,6 +857,20 @@ fn prune_terminal_observations(
             "DELETE FROM observations
              WHERE status IN ('complete', 'failed') AND expires_at_ms < ?1",
             [cutoff],
+        )
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    Ok(())
+}
+
+fn expire_pending_observations(
+    transaction: &rusqlite::Transaction<'_>,
+    now_ms: i64,
+) -> Result<(), ObserverError> {
+    transaction
+        .execute(
+            "UPDATE observations SET status='failed', failure_code='expired_request'
+             WHERE status='pending' AND expires_at_ms < ?1",
+            [now_ms],
         )
         .map_err(|_| ObserverError::StateUnavailable)?;
     Ok(())

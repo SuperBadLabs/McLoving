@@ -1814,6 +1814,64 @@ async fn pending_observation_reserves_its_scope_head_until_finalize() {
 }
 
 #[tokio::test]
+async fn expired_pending_head_reservation_is_released_during_admission() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_receipts = 2;
+    config.limits.max_observations = 2;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    let mut first = rig.request(ObservationPhase::PreAction);
+    first.effect_fence = 17;
+    first.expected_config_sha256 = observer.config_sha256().to_owned();
+    observer.observe_at(rig.prepare(first), NOW).await.unwrap();
+
+    rig.set_mode(Mode::Outage);
+    let mut abandoned = rig.request(ObservationPhase::PreAction);
+    abandoned.effect_fence = 18;
+    abandoned.expected_config_sha256 = observer.config_sha256().to_owned();
+    assert_eq!(
+        observer.observe_at(rig.prepare(abandoned), NOW).await,
+        Err(ObserverError::DestinationUnavailable)
+    );
+
+    let later = NOW + 12_000;
+    rig.server
+        .observed_at_unix_ms
+        .store(later, Ordering::SeqCst);
+    rig.set_mode(Mode::Good);
+    let mut replacement = rig.request(ObservationPhase::PreAction);
+    replacement.effect_fence = 19;
+    replacement.requested_at_unix_ms = later - 1;
+    replacement.expires_at_unix_ms = later + 1_000;
+    replacement.expected_config_sha256 = observer.config_sha256().to_owned();
+    observer
+        .observe_at(rig.prepare(replacement), later)
+        .await
+        .unwrap();
+
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let retained: (u64, u64, u64) = connection
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM observations),
+               (SELECT COUNT(*) FROM observations WHERE status='pending'),
+               (SELECT COUNT(*) FROM scope_heads)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(retained, (1, 0, 2));
+}
+
+#[tokio::test]
 async fn finalize_prunes_receipts_that_expire_during_the_destination_read() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();
