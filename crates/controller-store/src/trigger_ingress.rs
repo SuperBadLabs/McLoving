@@ -667,6 +667,7 @@ impl Store {
     ) -> Result<TriggerPutOutcome, StoreError> {
         validate_trigger_write(input)?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_trigger_transaction(&mut tx, input.organization_id, input.trigger_id).await?;
         let pipeline_exists = sqlx::query_scalar::<_, Uuid>(
             "SELECT pipeline_id FROM pipeline_definitions
              WHERE organization_id = $1 AND project_id = $2 AND pipeline_id = $3
@@ -868,6 +869,7 @@ impl Store {
     ) -> Result<TriggerDeliveryAdmission, StoreError> {
         validate_delivery(input)?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_trigger_transaction(&mut tx, input.organization_id, input.trigger_id).await?;
         let existing = sqlx::query(
             "SELECT * FROM trigger_deliveries
              WHERE organization_id = $1 AND trigger_id = $2
@@ -1156,6 +1158,7 @@ impl Store {
             ));
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_trigger_transaction(&mut tx, input.organization_id, input.trigger_id).await?;
         let row = sqlx::query(
             "SELECT * FROM trigger_deliveries
              WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3
@@ -1612,6 +1615,7 @@ impl Store {
             ));
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_trigger_transaction(&mut tx, input.organization_id, input.trigger_id).await?;
         let replay_rows = sqlx::query(
             "SELECT * FROM trigger_deliveries
              WHERE organization_id = $1 AND project_id = $2 AND pipeline_id = $3
@@ -1673,9 +1677,10 @@ impl Store {
             ));
         }
         // As with first delivery acceptance, an absent redrive key cannot be
-        // locked. The source dead-letter lock serializes first redrive, so
-        // repeat the replay lookup after acquiring it and converge a waiter on
-        // the committed redrive rather than leaking a uniqueness error.
+        // locked. The outer trigger scope serializes every first-redrive
+        // identity decision, including different source dead letters, so this
+        // repeated lookup converges exact replay and rejects divergent reuse
+        // rather than leaking a uniqueness error.
         let serialized_replay_rows = sqlx::query(
             "SELECT * FROM trigger_deliveries
              WHERE organization_id = $1 AND project_id = $2 AND pipeline_id = $3
@@ -1903,6 +1908,7 @@ impl Store {
     ) -> Result<TriggerTransferSnapshot, StoreError> {
         validate_text("actor_subject", actor_subject, MAX_TEXT_BYTES)?;
         let mut tx = self.tenant_transaction(organization_id).await?;
+        lock_trigger_transaction(&mut tx, organization_id, trigger_id).await?;
         let current = sqlx::query_scalar::<_, i64>(
             "SELECT definition.current_generation
              FROM pipeline_trigger_definitions AS definition
@@ -2825,6 +2831,22 @@ fn digest_from_row(row: &sqlx::postgres::PgRow, field: &str) -> Result<[u8; 32],
     row.try_get::<Vec<u8>, _>(field)?.try_into().map_err(|_| {
         StoreError::InvalidTriggerIngress(format!("stored {field} is not SHA-256 sized"))
     })
+}
+
+async fn lock_trigger_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    trigger_id: Uuid,
+) -> Result<(), StoreError> {
+    // Every transaction that can combine trigger, delivery, and pipeline row
+    // locks enters through this common scope first. Besides making the row-lock
+    // order acyclic, this supplies the missing-key serialization needed for
+    // delivery/event identities that PostgreSQL cannot lock before insertion.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("mcloving.trigger.{organization_id}.{trigger_id}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
 }
 
 fn validate_text(field: &str, value: &str, maximum: usize) -> Result<(), StoreError> {

@@ -60,10 +60,14 @@ identity and filter, enforces bounded past-replay/future-skew windows, locks the
 current trigger and pipeline operational state, and inserts one `pending`
 delivery plus its audit event. Delivery and event IDs are each unique per
 trigger. Exact response-loss replay returns the original record; either ID
-reused for different input is a conflict. First acceptance serializes on the
-trigger definition and repeats the ID lookup under that lock, so concurrent
-active-active acceptance returns one creation plus one exact replay rather than
-leaking a database uniqueness failure.
+reused for different input is a conflict. Every configuration, acceptance,
+claim, redrive, and quiesced-export transaction first takes the same
+organization/trigger advisory lock. That common outer scope makes trigger,
+delivery, and pipeline row-lock ordering acyclic and supplies missing-key
+serialization before a delivery or event identity exists. First acceptance
+then repeats the ID lookup, so concurrent active-active acceptance returns one
+creation plus one exact replay rather than leaking a database uniqueness
+failure.
 
 Each kind also has a closed payload field set. SCM repository identity must
 equal the configured repository, not merely share an installation credential.
@@ -96,9 +100,11 @@ source-side redelivery responsible for controller retries. Expired or exhausted 
 dead-letters. A dead letter is never mutated back to pending. Project-configure
 redrive creates a new delivery/event identity with immutable lineage and
 ordinal, then enters the same claim, admission, and operational-state fence.
-The source dead-letter lock serializes first redrive and repeats the new-ID
-lookup, so concurrent exact redrive returns one creation plus one replay. A
-paused trigger or disabled pipeline rejects recovery before work is minted.
+The common trigger scope serializes all first-redrive identity decisions and
+repeats the new-ID lookup, so concurrent exact redrive returns one creation plus
+one replay, while different source dead letters racing to reuse an identity
+return one creation plus one explicit conflict. A paused trigger or disabled
+pipeline rejects recovery before work is minted.
 
 ## Schedule capture and restart
 
@@ -165,20 +171,23 @@ does not itself switch any production authority.
 
 ## Required proof
 
-Real-PostgreSQL tests cover concurrent configuration idempotency, active-active
-claims, exact/divergent delivery replay, delayed/future input, bounded outage
-retry, attempt exhaustion, dead-letter redrive, stale claim denial, caller
-rotation, pause/resume, disable fencing, restart, atomic schedule watermark,
-slot reorder/substitution, upstream success/failure, unsupported plugin denial,
-RLS/forced-RLS migration, and audit linkage. Public API tests cover missing and
-cross-tenant authorization, configuration preconditions, SCM branch/path
+Real-PostgreSQL tests cover concurrent configuration idempotency, configuration
+versus claim lock ordering, active-active claims, exact/divergent delivery
+replay, delayed/future input, bounded outage retry, attempt exhaustion,
+exact-source and conflicting-source dead-letter redrive, stale claim denial,
+caller rotation, pause/resume, disable fencing, restart, atomic schedule
+watermark, slot reorder/substitution, upstream success/failure, unsupported
+plugin denial, RLS/forced-RLS migration, and audit linkage. Public API tests
+cover missing and cross-tenant authorization, configuration preconditions,
+SCM branch/path
 filtering, durable admission, generation-bound replay after configuration
 rotation, stale-generation denial, kind-discriminated generated schemas, and
 the generated route contract. Concurrent first-acceptance coverage proves one
 created delivery and one replay rather than a uniqueness error; the handoff
 tamper test changes ledger content and recomputes the ledger, embedded audit
 event, and snapshot digests, but is still rejected by the independently retained
-audit hash. Concurrent first redrive likewise proves one creation plus one
-replay. The deployable-controller suite also
+audit hash. Concurrent first redrive proves one creation plus one replay, and
+different dead letters racing to reuse the same new identity prove one creation
+plus one conflict. The deployable-controller suite also
 proves the runtime role's exact least-privilege and 53-table forced-RLS policy
 surface before accepting traffic.

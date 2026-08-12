@@ -583,6 +583,58 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         1
     );
 
+    let lock_order_delivery = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        1,
+        "delivery-lock-order",
+        "event-lock-order",
+        now + 66_000,
+    );
+    store
+        .accept_trigger_delivery(&lock_order_delivery)
+        .await
+        .expect("capture configuration/claim lock-order fixture");
+    let mut pause_for_lock_order = write.clone();
+    pause_for_lock_order.expected_generation = 1;
+    pause_for_lock_order.state = PipelineTriggerState::Paused;
+    pause_for_lock_order.reason = "lock-order pause".to_owned();
+    pause_for_lock_order.idempotency_key = "trigger-lock-order-pause".to_owned();
+    pause_for_lock_order.source_generation = "source-lock-order-pause".to_owned();
+    let lock_order_claim = claim(
+        organization_id,
+        trigger_id,
+        "delivery-lock-order",
+        "worker-lock-order",
+        now + 66_000,
+    );
+    let (configuration_result, claim_result) = tokio::join!(
+        store.put_pipeline_trigger(&pause_for_lock_order),
+        store.claim_trigger_delivery(&lock_order_claim)
+    );
+    assert!(matches!(
+        configuration_result.unwrap(),
+        TriggerPutOutcome::Revised(_)
+    ));
+    assert!(matches!(
+        claim_result,
+        Ok(TriggerDeliveryClaimOutcome::Claimed(_)) | Err(StoreError::TriggerPaused { .. })
+    ));
+    let mut resume_after_lock_order = write.clone();
+    resume_after_lock_order.expected_generation = 2;
+    resume_after_lock_order.reason = "resume after lock-order proof".to_owned();
+    resume_after_lock_order.idempotency_key = "trigger-lock-order-resume".to_owned();
+    resume_after_lock_order.source_generation = "source-lock-order-resume".to_owned();
+    assert!(matches!(
+        store
+            .put_pipeline_trigger(&resume_after_lock_order)
+            .await
+            .unwrap(),
+        TriggerPutOutcome::Revised(_)
+    ));
+
     let disabled = store
         .transition_pipeline_operational_state(&PipelineOperationalStateTransition {
             organization_id,
@@ -614,7 +666,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         project_id,
         pipeline_id,
         trigger_id,
-        1,
+        3,
         "delivery-disabled",
         "event-disabled",
         now + 80_000,
@@ -733,6 +785,82 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         store.redrive_trigger_delivery(&redrive).await.unwrap(),
         TriggerDeliveryAdmission::Replayed(_)
     ));
+
+    let second_dead_letter = remote_delivery(delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        1,
+        "dead-2",
+        "dead-event-2",
+        now + 3,
+    ));
+    store
+        .accept_trigger_delivery(&second_dead_letter)
+        .await
+        .expect("capture divergent redrive source");
+    let second_claim = match store
+        .claim_trigger_delivery(&claim(
+            organization_id,
+            trigger_id,
+            "dead-2",
+            "worker-dead-2",
+            now + 3,
+        ))
+        .await
+        .unwrap()
+    {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        other => panic!("unexpected second dead-letter claim: {other:?}"),
+    };
+    assert!(matches!(
+        store
+            .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
+                organization_id,
+                trigger_id,
+                delivery_id: "dead-2".to_owned(),
+                worker_identity: "worker-dead-2".to_owned(),
+                claim_fence: second_claim.claim_fence,
+                now_unix_ms: now + 4,
+                retry_at_unix_ms: now + 60_000,
+                retryable: true,
+                reason: "second attempt budget exhausted".to_owned(),
+            })
+            .await
+            .unwrap(),
+        TriggerDeliveryFailure::DeadLettered(_)
+    ));
+    let conflict_from_first = TriggerDeliveryRedrive {
+        dead_letter_delivery_id: "dead-1".to_owned(),
+        new_delivery_id: "redrive-conflicting-id".to_owned(),
+        new_event_id: "redrive-conflicting-event".to_owned(),
+        accepted_at_unix_ms: now + 5,
+        ..redrive.clone()
+    };
+    let conflict_from_second = TriggerDeliveryRedrive {
+        dead_letter_delivery_id: "dead-2".to_owned(),
+        ..conflict_from_first.clone()
+    };
+    let (first_source, second_source) = tokio::join!(
+        store.redrive_trigger_delivery(&conflict_from_first),
+        store.redrive_trigger_delivery(&conflict_from_second)
+    );
+    let conflicting_redrives = [first_source, second_source];
+    assert_eq!(
+        conflicting_redrives
+            .iter()
+            .filter(|outcome| matches!(outcome, Ok(TriggerDeliveryAdmission::Created(_))))
+            .count(),
+        1
+    );
+    assert_eq!(
+        conflicting_redrives
+            .iter()
+            .filter(|outcome| matches!(outcome, Err(StoreError::TriggerIngressConflict(_))))
+            .count(),
+        1
+    );
 
     let paused = trigger_write(
         organization_id,
