@@ -29,6 +29,7 @@ const REQUEST_DIGEST_DOMAIN: &[u8] = b"mcloving-observer-request-digest-v1";
 const QUERY_DOMAIN: &[u8] = b"mcloving-observer-query-v1";
 const SCOPE_DOMAIN: &[u8] = b"mcloving-observer-scope-v1";
 const MAX_AUDIT_PROVENANCE_BYTES: usize = 4096;
+const MAX_PERSISTED_CURSOR: u64 = i64::MAX as u64;
 const MAX_QUERY_VALUE_BYTES: usize = 2048;
 const MAX_SECRET_MARKERS: usize = 32;
 const MAX_TOTAL_SECRET_MARKER_BYTES: usize = 8 * 1024;
@@ -706,7 +707,7 @@ impl DestinationObserver {
             || body.grant_version != self.config.read_grant_version
             || body.grant_scope != self.config.read_grant_scope
             || body.attestation_key_id != self.config.destination_attestation_key_id
-            || body.cursor > i64::MAX as u64
+            || body.cursor > MAX_PERSISTED_CURSOR
         {
             return Err(ObserverError::MalformedResponse);
         }
@@ -879,6 +880,7 @@ fn validate_config(
         || config.limits.max_evidence_bytes == 0
         || config.limits.max_receipts == 0
         || config.limits.max_observations < config.limits.max_receipts
+        || config.limits.max_runtime_history == 0
         || config.limits.timeout_ms == 0
         || config.limits.max_age_ms <= 0
         || u64::try_from(config.limits.max_age_ms)
@@ -1142,7 +1144,8 @@ fn maximum_request_envelope_fits(
         read_grant_version: config.read_grant_version.clone(),
         read_grant_scope: config.read_grant_scope.clone(),
         query: BTreeMap::new(),
-        expected_previous_cursor: Some(u64::MAX),
+        // Phase admission sources this value from the signed SQLite cursor column.
+        expected_previous_cursor: Some(MAX_PERSISTED_CURSOR),
         predecessor_receipt_sha256: Some("f".repeat(64)),
         requested_at_unix_ms,
         expires_at_unix_ms,
@@ -1319,7 +1322,7 @@ fn maximum_receipt_envelope_fits(
         read_grant_version: config.read_grant_version.clone(),
         read_grant_scope: config.read_grant_scope.clone(),
         canonical_query,
-        destination_cursor: i64::MAX as u64,
+        destination_cursor: MAX_PERSISTED_CURSOR,
         destination_observed_at_unix_ms: i64::MAX,
         captured_at_unix_ms: i64::MAX,
         publication_deadline_unix_ms: i64::MAX,
@@ -1491,7 +1494,7 @@ fn sized_destination_response(config: &ObserverConfig, state: serde_json::Value)
             effect_fence: u64::MAX,
             phase: crate::ObservationPhase::Reconciliation,
             canonical_query_sha256: "f".repeat(64),
-            cursor: i64::MAX as u64,
+            cursor: MAX_PERSISTED_CURSOR,
             observed_at_unix_ms: i64::MAX,
             state_schema_version: config.state_schema_version.clone(),
             confidentiality: Confidentiality::Internal,

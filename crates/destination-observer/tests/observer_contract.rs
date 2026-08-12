@@ -195,6 +195,7 @@ impl Rig {
                 max_evidence_bytes: 1024 * 1024,
                 max_receipts: 100,
                 max_observations: 200,
+                max_runtime_history: 100,
                 timeout_ms: 200,
                 max_age_ms: 10_000,
                 retry_attempts: 3,
@@ -1711,6 +1712,11 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
             config.limits.max_observations = config.limits.max_receipts - 1;
             config
         },
+        {
+            let mut config = rig.config.clone();
+            config.limits.max_runtime_history = 0;
+            config
+        },
     ] {
         let state = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -1764,6 +1770,20 @@ async fn v3_config_without_schema_work_bounds_is_explicitly_incompatible() {
         rig.observer_for_config(legacy_config),
         Err(ObserverError::InvalidConfig)
     ));
+}
+
+#[tokio::test]
+async fn v4_config_without_runtime_history_quota_is_explicitly_incompatible() {
+    let rig = Rig::new().await;
+    let mut legacy_value = serde_json::to_value(&rig.config).unwrap();
+    legacy_value["schema_version"] =
+        serde_json::Value::String("mcloving.destination-observer-config/v4".to_owned());
+    legacy_value
+        .get_mut("limits")
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap()
+        .remove("max_runtime_history");
+    assert!(serde_json::from_value::<ObserverConfig>(legacy_value).is_err());
 }
 
 #[tokio::test]
@@ -2571,6 +2591,51 @@ async fn cutover_fences_old_process_and_rollback_requires_an_exact_historical_ta
     assert_ne!(rollback.config_sha256(), cutover.config_sha256());
     let rollback_restart = rig.observer_for_config(rollback_config).unwrap();
     assert_eq!(rollback_restart.config_sha256(), rollback.config_sha256());
+}
+
+#[tokio::test]
+async fn runtime_history_quota_blocks_growth_but_allows_exact_generation_restart() {
+    let rig = Rig::new().await;
+    let old_digest = rig.observer.config_sha256().to_owned();
+
+    let mut cutover_config = rig.config.clone();
+    cutover_config.limits.max_runtime_history = 2;
+    cutover_config.generation = 2;
+    cutover_config.activation_mode = ActivationMode::Cutover;
+    cutover_config.previous_generation = Some(1);
+    cutover_config.previous_config_sha256 = Some(old_digest.clone());
+    cutover_config.resource_identity = "release/history-bounded-cutover".to_owned();
+    let cutover = rig.observer_for_config(cutover_config.clone()).unwrap();
+    let cutover_digest = cutover.config_sha256().to_owned();
+    assert!(rig.observer_for_config(cutover_config).is_ok());
+
+    let mut rollback_config = rig.config.clone();
+    rollback_config.limits.max_runtime_history = 2;
+    rollback_config.generation = 3;
+    rollback_config.activation_mode = ActivationMode::Rollback;
+    rollback_config.previous_generation = Some(1);
+    rollback_config.previous_config_sha256 = Some(old_digest);
+    rollback_config.rollback_from_generation = Some(2);
+    rollback_config.resource_identity = "release/history-bounded-rollback".to_owned();
+    assert!(matches!(
+        rig.observer_for_config(rollback_config),
+        Err(ObserverError::CapacityExceeded)
+    ));
+
+    let connection =
+        rusqlite::Connection::open(rig.directory.path().join("observer.sqlite3")).unwrap();
+    let history_count: usize = connection
+        .query_row("SELECT COUNT(*) FROM runtime_history", [], |row| row.get(0))
+        .unwrap();
+    let active: (u64, String) = connection
+        .query_row(
+            "SELECT generation, config_sha256 FROM active_runtime WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(history_count, 2);
+    assert_eq!(active, (2, cutover_digest));
 }
 
 #[cfg(all(target_os = "linux", feature = "loopback-test"))]

@@ -207,6 +207,21 @@ impl ObserverStore {
                 )
                 .map_err(|_| ObserverError::StateUnavailable)?;
         }
+        let history_contains_generation: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_history WHERE generation=?1)",
+                [config.generation],
+                |row| row.get(0),
+            )
+            .map_err(|_| ObserverError::StateUnavailable)?;
+        if !history_contains_generation {
+            let history_count: usize = transaction
+                .query_row("SELECT COUNT(*) FROM runtime_history", [], |row| row.get(0))
+                .map_err(|_| ObserverError::StateUnavailable)?;
+            if history_count >= config.limits.max_runtime_history {
+                return Err(ObserverError::CapacityExceeded);
+            }
+        }
         transaction
             .execute(
                 "INSERT INTO runtime_history(generation, config_sha256) VALUES(?1, ?2)

@@ -168,11 +168,17 @@ uses a non-mutating trusted-time view that excludes expired pending rows from
 reservation counts. After the state-lineage lease is acquired, claim atomically
 tombstones expired rows and applies retention pruning before insertion, preventing
 an abandoned read from leaking quota without invalidating an in-flight finalization.
+Runtime generation ancestry is separately bounded by `max_runtime_history`;
+activation of a new generation fails transactionally when that durable-row quota
+is full, while an exact active-generation restart remains available. Request
+envelope sizing models the 19-digit signed cursor maximum that the phase ledger
+can actually persist, rather than an unreachable unsigned cursor value.
 These mandatory bounds are carried by
-`mcloving.destination-observer-config/v4`; legacy config v1 lacks the quota,
+`mcloving.destination-observer-config/v5`; legacy config v1 lacks the observation quota,
 config v2 lacks the executable binding, and config v3 lacks the schema-work
-bounds, so all are explicitly incompatible rather than silently acquiring new
-ledger, executable-trust, or resource semantics.
+bounds; config v4 lacks the generation-history quota. All are explicitly
+incompatible rather than silently acquiring new ledger, executable-trust, or
+resource semantics.
 Replay and new-admission transactions prune complete and failed observations
 whose signed request expiry is more than one freshness window old before they
 serve terminal state or enforce quotas. Compact phase-chain heads and the
