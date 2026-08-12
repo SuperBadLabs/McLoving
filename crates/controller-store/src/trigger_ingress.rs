@@ -1192,6 +1192,7 @@ impl Store {
             StoreError::TriggerIngressConflict("trigger delivery does not exist".to_owned())
         })?;
         let current = delivery_from_row(row)?;
+        let database_now_unix_ms = trigger_database_unix_ms(&mut tx).await?;
         if matches!(
             current.status,
             TriggerDeliveryStatus::Admitted | TriggerDeliveryStatus::DeadLettered
@@ -1199,11 +1200,11 @@ impl Store {
             tx.commit().await?;
             return Ok(TriggerDeliveryClaimOutcome::Terminal(current));
         }
-        if current.next_attempt_at_unix_ms > input.now_unix_ms {
+        if current.next_attempt_at_unix_ms > database_now_unix_ms {
             tx.commit().await?;
             return Ok(TriggerDeliveryClaimOutcome::NotDue(current));
         }
-        if current.expires_at_unix_ms <= input.now_unix_ms {
+        if current.expires_at_unix_ms <= database_now_unix_ms {
             crate::audit::append_audit_record(
                 &mut tx,
                 input.organization_id,
@@ -1301,7 +1302,6 @@ impl Store {
                 pipeline.1
             )));
         }
-        let database_now_unix_ms = trigger_database_unix_ms(&mut tx).await?;
         if current.claim_owner.is_some()
             && current.claim_expires_at_unix_ms.unwrap_or(0) > database_now_unix_ms
         {
@@ -1373,8 +1373,12 @@ impl Store {
         }
         let mut tx = self.tenant_transaction(organization_id).await?;
         let rows = sqlx::query(
-            "SELECT delivery.*
+            "WITH timing AS (
+                 SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_unix_ms
+             )
+             SELECT delivery.*
              FROM trigger_deliveries AS delivery
+             CROSS JOIN timing
              JOIN pipeline_trigger_definitions AS trigger
                ON trigger.organization_id = delivery.organization_id
               AND trigger.trigger_id = delivery.trigger_id
@@ -1392,17 +1396,16 @@ impl Store {
               AND pipeline_state.generation = pipeline.operational_generation
              WHERE delivery.organization_id = $1
                AND delivery.status IN ('pending', 'retry_wait')
-               AND delivery.next_attempt_at_unix_ms <= $2
+               AND delivery.next_attempt_at_unix_ms <= timing.now_unix_ms
                AND (delivery.claim_owner IS NULL
-                    OR delivery.claim_expires_at_unix_ms <= $2)
+                    OR delivery.claim_expires_at_unix_ms <= timing.now_unix_ms)
                AND trigger_version.state = 'enabled'
                AND pipeline_state.state = 'enabled'
              ORDER BY delivery.next_attempt_at_unix_ms,
                       delivery.accepted_at_unix_ms, delivery.delivery_id
-             LIMIT $3",
+             LIMIT $2",
         )
         .bind(organization_id)
-        .bind(now_unix_ms)
         .bind(limit)
         .fetch_all(&mut *tx)
         .await?;

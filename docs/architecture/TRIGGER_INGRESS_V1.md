@@ -87,9 +87,11 @@ durable `event_id`, so the caller cannot mint duplicate work for one logical
 request by rotating transport identifiers.
 
 Processing requires a bounded PostgreSQL lease with a monotonically increasing
-claim fence. After locking the delivery, the store samples PostgreSQL time to
-decide whether the current lease is live and derives the new expiry from that
-same clock plus the bounded requested duration. Active-active workers converge
+claim fence. Immediately after locking the delivery, the store samples
+PostgreSQL time to decide durable due time, delivery TTL, and whether the
+current lease is live, and derives the new expiry from that same clock plus the
+bounded requested duration. Due-work enumeration uses PostgreSQL time as well.
+Active-active workers converge
 on one claim even when controller wall clocks differ. A stale worker cannot
 complete or fail a newer claim, and admission conditionally binds only while
 the matching claim lease is still live according to the PostgreSQL clock.
@@ -106,6 +108,14 @@ A crash therefore leaves either
 no build and a retryable claim transaction, one expired dead letter and no
 build, or one admitted delivery bound to its exact build—never an orphaned
 runnable build or an unbound duplicate-redrive path.
+
+Trigger DAG keys occupy the reserved `mcloving-trigger-v1-` namespace. The
+ordinary build API rejects that prefix and the ordinary store admission method
+enforces the same reservation; only the trigger transaction can enter the
+internal DAG primitive with such a key. The replay path can only validate and
+return an already-existing exact trigger DAG; it cannot create one. A caller
+therefore cannot pre-create a normal build that trigger delivery processing
+later mistakes for its replay.
 
 The durable states are:
 
@@ -208,7 +218,8 @@ replay, delayed/future input, bounded outage retry, attempt exhaustion,
 exact-source and conflicting-source dead-letter redrive, stale claim denial,
 parameter pre-capture and corrupt-store terminal failure, completion-time
 delivery/claim expiry with zero persisted DAG and unchanged retry budget,
-database-clock claim ownership under controller-clock skew, unordered filter
+database-clock due/TTL/claim ownership under controller-clock skew, reserved
+trigger-DAG idempotency namespace denial, unordered filter
 membership, expired-claim handoff reaping, caller rotation,
 pause/resume, disable fencing, restart, atomic schedule
 watermark, slot reorder/substitution, upstream success/failure, unsupported

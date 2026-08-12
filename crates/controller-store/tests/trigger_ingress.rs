@@ -2,12 +2,12 @@ use mcloving_controller_store::{
     DagNodeKind, NewDagBuild, NewDagNode, NewTriggerDelivery, PipelineOperationalState,
     PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
     PipelinePutOutcome, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, Store,
-    StoreError, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
-    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
-    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind,
-    TriggerPutOutcome, TriggerScheduleSlot, compute_audit_event_hash,
-    compute_trigger_transfer_snapshot_digest, compute_trigger_transfer_snapshot_ledger_digest,
-    verify_trigger_transfer_snapshot,
+    StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TriggerDeliveryAdmission,
+    TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission,
+    TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure, TriggerDeliveryFailureRequest,
+    TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome,
+    TriggerScheduleSlot, compute_audit_event_hash, compute_trigger_transfer_snapshot_digest,
+    compute_trigger_transfer_snapshot_ledger_digest, verify_trigger_transfer_snapshot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -73,6 +73,13 @@ async fn fixture(store: &Store) -> (Uuid, Uuid, Uuid) {
         PipelinePutOutcome::Created(_)
     ));
     (organization_id, project_id, pipeline_id)
+}
+
+async fn database_unix_ms(store: &Store) -> i64 {
+    sqlx::query_scalar("SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint")
+        .fetch_one(store.pool())
+        .await
+        .expect("sample PostgreSQL clock")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -261,6 +268,17 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         return;
     };
     let (organization_id, project_id, pipeline_id) = fixture(&store).await;
+    let reserved = dag(
+        organization_id,
+        project_id,
+        pipeline_id,
+        &format!("{TRIGGER_DAG_IDEMPOTENCY_PREFIX}forged"),
+    );
+    assert!(matches!(
+        store.admit_dag(&reserved).await,
+        Err(StoreError::InvalidDag(message))
+            if message == "trigger DAG idempotency namespace is reserved"
+    ));
     let trigger_id = Uuid::new_v4();
     let write = trigger_write(
         organization_id,
@@ -392,7 +410,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         1
     );
 
-    let now = 1_900_000_000_000;
+    let now = database_unix_ms(&store).await;
     let input = delivery(
         organization_id,
         project_id,
@@ -525,6 +543,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .unwrap(),
         TriggerDeliveryClaimOutcome::Leased(_)
     ));
+    let retry_clock = database_unix_ms(&store).await;
     let retry = store
         .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
             organization_id,
@@ -532,8 +551,8 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             delivery_id: "delivery-1".to_owned(),
             worker_identity: "worker-1".to_owned(),
             claim_fence: first_claim.claim_fence,
-            now_unix_ms: now + 2,
-            retry_at_unix_ms: now + 60_000,
+            now_unix_ms: retry_clock,
+            retry_at_unix_ms: retry_clock + 500,
             retryable: true,
             reason: "contained outage".to_owned(),
         })
@@ -542,7 +561,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
     assert!(matches!(retry, TriggerDeliveryFailure::RetryScheduled(_)));
     assert!(
         store
-            .due_trigger_deliveries(organization_id, now + 30_000, 128)
+            .due_trigger_deliveries(organization_id, i64::MAX, 128)
             .await
             .unwrap()
             .iter()
@@ -562,8 +581,12 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .unwrap(),
         TriggerDeliveryClaimOutcome::NotDue(_)
     ));
+    sqlx::query("SELECT pg_sleep(0.6)")
+        .execute(store.pool())
+        .await
+        .unwrap();
     let due = store
-        .due_trigger_deliveries(organization_id, now + 60_000, 128)
+        .due_trigger_deliveries(organization_id, 0, 128)
         .await
         .unwrap();
     assert_eq!(
@@ -580,7 +603,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             trigger_id,
             "delivery-1",
             "worker-2",
-            now + 60_000,
+            now - 10 * 60_000,
         ))
         .await
         .unwrap()
@@ -640,10 +663,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
     expiring_write.delivery_ttl_seconds = 1;
     expiring_write.idempotency_key = "trigger-expiry-create".to_owned();
     store.put_pipeline_trigger(&expiring_write).await.unwrap();
-    let wall_now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
+    let wall_now = database_unix_ms(&store).await;
     let expires_during_admission = delivery(
         organization_id,
         project_id,
@@ -652,7 +672,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         1,
         "delivery-expires-during-admission",
         "event-expires-during-admission",
-        wall_now - 2_000,
+        wall_now,
     );
     match store
         .accept_trigger_delivery(&expires_during_admission)
@@ -668,7 +688,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             expiring_trigger_id,
             "delivery-expires-during-admission",
             "worker-expiring-admission",
-            wall_now - 2_000,
+            wall_now,
         ))
         .await
         .unwrap()
@@ -682,6 +702,28 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         pipeline_id,
         "trigger-delivery-expiring-admission",
     );
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION trig001_delay_ttl_build_insert()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.idempotency_key = 'trigger-delivery-expiring-admission' THEN
+             PERFORM pg_sleep(1.1);
+           END IF;
+           RETURN NEW;
+         END
+         $$",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER trig001_delay_ttl_build_insert
+         BEFORE INSERT ON builds
+         FOR EACH ROW EXECUTE FUNCTION trig001_delay_ttl_build_insert()",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
     let expired = store
         .admit_trigger_delivery_dag(
             &TriggerDeliveryDagAdmissionRequest {
@@ -693,6 +735,14 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             },
             &expiring_dag,
         )
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER trig001_delay_ttl_build_insert ON builds")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION trig001_delay_ttl_build_insert()")
+        .execute(store.pool())
         .await
         .unwrap();
     let TriggerDeliveryDagAdmission::DeadLettered(expired) = expired else {
@@ -911,7 +961,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         1,
         "delivery-active-active",
         "event-active-active",
-        now + 65_000,
+        now,
     );
     store
         .accept_trigger_delivery(&active_active)
@@ -922,14 +972,14 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         trigger_id,
         "delivery-active-active",
         "worker-active-left",
-        now + 65_000,
+        now,
     );
     let right_claim = claim(
         organization_id,
         trigger_id,
         "delivery-active-active",
         "worker-active-right",
-        now + 65_000,
+        now,
     );
     let (left, right) = tokio::join!(
         store.claim_trigger_delivery(&left_claim),
@@ -959,7 +1009,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         1,
         "delivery-lock-order",
         "event-lock-order",
-        now + 66_000,
+        now,
     );
     store
         .accept_trigger_delivery(&lock_order_delivery)
@@ -976,7 +1026,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         trigger_id,
         "delivery-lock-order",
         "worker-lock-order",
-        now + 66_000,
+        now,
     );
     let (configuration_result, claim_result) = tokio::join!(
         store.put_pipeline_trigger(&pause_for_lock_order),
@@ -1067,7 +1117,7 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         1,
     );
     store.put_pipeline_trigger(&write).await.unwrap();
-    let now = 1_910_000_000_000;
+    let now = database_unix_ms(&store).await;
     let input = remote_delivery(delivery(
         organization_id,
         project_id,

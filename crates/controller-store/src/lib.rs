@@ -41,7 +41,7 @@ pub use consumer_migration::{
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
     DagNodeKind, DagReplayBinding, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode,
-    compile_matrix, validate_dag_contract,
+    TRIGGER_DAG_IDEMPOTENCY_PREFIX, compile_matrix, validate_dag_contract,
 };
 pub use identity::{
     AuthenticatedIdentity, IdentityLifecycle, IdentityProviderConfig, IdentityProviderWrite,

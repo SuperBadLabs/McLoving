@@ -15,6 +15,7 @@ const MAX_MATRIX_CELLS: usize = 256;
 const MAX_DAG_TEXT_BYTES: usize = 256;
 const MAX_EXECUTION_SPEC_BYTES: usize = 256 * 1024;
 const MAX_DAG_CAPABILITIES: usize = 64;
+pub const TRIGGER_DAG_IDEMPOTENCY_PREFIX: &str = "mcloving-trigger-v1-";
 
 /// Condition under which one dependency is satisfied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -256,9 +257,55 @@ impl Store {
     /// Atomically admits an entire validated DAG, all first attempts,
     /// dependency edges, one event, and one outbox record.
     pub async fn admit_dag(&self, input: &NewDagBuild) -> Result<DagAdmission, StoreError> {
+        if input
+            .idempotency_key
+            .starts_with(TRIGGER_DAG_IDEMPOTENCY_PREFIX)
+        {
+            return Err(StoreError::InvalidDag(
+                "trigger DAG idempotency namespace is reserved".to_owned(),
+            ));
+        }
         validate_dag_contract(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
         let admission = admit_dag_transaction(&mut tx, input).await?;
+        tx.commit().await?;
+        Ok(admission)
+    }
+
+    /// Validates and returns an existing trigger-created DAG without granting
+    /// authority to create a build in the reserved trigger namespace.
+    pub async fn replay_trigger_dag(
+        &self,
+        input: &NewDagBuild,
+    ) -> Result<DagAdmission, StoreError> {
+        if !input
+            .idempotency_key
+            .starts_with(TRIGGER_DAG_IDEMPOTENCY_PREFIX)
+        {
+            return Err(StoreError::InvalidDag(
+                "trigger DAG replay requires the reserved idempotency namespace".to_owned(),
+            ));
+        }
+        validate_dag_contract(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
+        let contract = normalized_dag_contract(input);
+        let mut tx = self.tenant_transaction(input.organization_id).await?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM builds
+                 WHERE project_id = $1 AND idempotency_key = $2
+             )",
+        )
+        .bind(input.project_id)
+        .bind(&input.idempotency_key)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !exists {
+            tx.rollback().await?;
+            return Err(StoreError::IdempotencyConflict(
+                "trigger DAG replay does not identify an existing build".to_owned(),
+            ));
+        }
+        let admission = existing_dag_admission(&mut tx, input, &contract).await?;
         tx.commit().await?;
         Ok(admission)
     }

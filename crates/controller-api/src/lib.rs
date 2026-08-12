@@ -28,10 +28,11 @@ use mcloving_controller_store::{
     PipelineOperationalStateRecord, PipelineOperationalStateTransition,
     PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
     PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, RetryDecision,
-    Store, StoreError, TestReportView, TriggerDelivery, TriggerDeliveryAdmission,
-    TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission,
-    TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure, TriggerDeliveryFailureRequest,
-    TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome, TriggerScheduleSlot, WaitReason,
+    Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TestReportView, TriggerDelivery,
+    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
+    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
+    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome,
+    TriggerScheduleSlot, WaitReason,
     authz::{Action, Principal, authorize as authorize_principal},
 };
 use mcloving_object_store::{
@@ -2697,6 +2698,7 @@ async fn process_trigger_delivery(
                 worker_identity: worker_identity.clone(),
                 claim_fence: claimed.claim_fence,
             }),
+            trigger_replay: false,
         },
     )
     .await
@@ -2775,6 +2777,7 @@ async fn admitted_trigger_response(
             required_platform: delivery.requested_platform.clone(),
             required_trust_pool: delivery.requested_trust_pool.clone(),
             trigger_claim: None,
+            trigger_replay: true,
         },
     )
     .await?;
@@ -3039,7 +3042,10 @@ fn trigger_filtered(field: &str) -> ApiError {
 
 fn trigger_build_idempotency(trigger_id: Uuid, delivery_id: &str) -> String {
     let digest: [u8; 32] = Sha256::digest(delivery_id.as_bytes()).into();
-    format!("trigger-{trigger_id}-{}", hex(&digest))
+    format!(
+        "{TRIGGER_DAG_IDEMPOTENCY_PREFIX}{trigger_id}-{}",
+        hex(&digest)
+    )
 }
 
 fn default_platform() -> String {
@@ -3062,7 +3068,7 @@ async fn submit_pipeline_build(
     .await?;
     let required_trust_pool = submission_trust_pool(&headers)?;
     let required_platform = submission_platform(&headers)?;
-    let idempotency_key = required_idempotency_key(&headers)?;
+    let idempotency_key = ordinary_build_idempotency_key(&headers)?;
     let parameters = parameter_values(request.parameters)?;
     let result = admit_pipeline_parameters(
         &state,
@@ -3075,6 +3081,7 @@ async fn submit_pipeline_build(
             required_platform,
             required_trust_pool,
             trigger_claim: None,
+            trigger_replay: false,
         },
     )
     .await?;
@@ -3093,6 +3100,7 @@ struct PipelineAdmissionInput {
     required_platform: String,
     required_trust_pool: String,
     trigger_claim: Option<TriggerDeliveryDagAdmissionRequest>,
+    trigger_replay: bool,
 }
 
 struct PipelineAdmissionResult {
@@ -3114,6 +3122,7 @@ async fn admit_pipeline_parameters(
         required_platform,
         required_trust_pool,
         trigger_claim,
+        trigger_replay,
     } = input;
     let replay = state
         .store
@@ -3214,6 +3223,14 @@ async fn admit_pipeline_parameters(
                 });
             }
         },
+        None if trigger_replay => (
+            state
+                .store
+                .replay_trigger_dag(&dag)
+                .await
+                .map_err(admission_error)?,
+            None,
+        ),
         None => (
             state.store.admit_dag(&dag).await.map_err(admission_error)?,
             None,
@@ -3259,6 +3276,18 @@ fn required_idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
                 "a canonical non-empty Idempotency-Key header of at most 256 bytes is required",
             )
         })
+}
+
+fn ordinary_build_idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
+    let value = required_idempotency_key(headers)?;
+    if value.starts_with(TRIGGER_DAG_IDEMPOTENCY_PREFIX) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "reserved_idempotency_key",
+            "the trigger DAG idempotency namespace is reserved",
+        ));
+    }
+    Ok(value)
 }
 
 fn submission_trust_pool(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -5382,6 +5411,19 @@ mod tests {
         ));
         assert_eq!(error.status, StatusCode::CONFLICT);
         assert_eq!(error.code, "idempotency_conflict");
+    }
+
+    #[test]
+    fn ordinary_builds_cannot_claim_the_trigger_idempotency_namespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            IDEMPOTENCY_HEADER,
+            HeaderValue::from_static("mcloving-trigger-v1-forged"),
+        );
+        let error = ordinary_build_idempotency_key(&headers).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "reserved_idempotency_key");
+        assert!(required_idempotency_key(&headers).is_ok());
     }
 
     #[test]
