@@ -212,7 +212,10 @@ Trigger configuration is a `kind`-discriminated union with separate closed SCM,
 schedule, upstream, and remote API variants and their exact required fields.
 Event payload is likewise a four-variant closed union with the exact required
 SCM, schedule, upstream, or remote API shape. The rejected plugin class is not
-advertised as an admitted request variant.
+advertised as an admitted request variant. Event and redrive operations bind
+200, 201, 202, and terminal 422 responses to the same closed
+`TriggerEventResponse`, so a generated client retains the durable delivery,
+dead-letter reason, and optional build admission for every normal outcome.
 
 The database ledger is the transferable source of truth: append-only trigger
 versions, unique event/delivery deduplication records, pending/retry/dead-letter

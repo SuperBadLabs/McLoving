@@ -1053,6 +1053,9 @@ fn openapi_document() -> Value {
                     },
                     "additionalProperties": false
                 },
+                "TriggerEventResponse": trigger_event_response_schema(),
+                "TriggerDelivery": trigger_delivery_schema(),
+                "AdmissionResponse": admission_response_schema(),
                 "ScmTriggerConfiguration": scm_trigger_configuration_schema(),
                 "ScheduleTriggerConfiguration": schedule_trigger_configuration_schema(),
                 "UpstreamTriggerConfiguration": upstream_trigger_configuration_schema(),
@@ -1183,6 +1186,87 @@ fn parameter_values_schema() -> Value {
                 {"type": "string", "maxLength": 4096}
             ]
         }
+    })
+}
+
+fn trigger_event_response_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["delivery"],
+        "properties": {
+            "delivery": {"$ref": "#/components/schemas/TriggerDelivery"},
+            "admission": {"$ref": "#/components/schemas/AdmissionResponse"}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn trigger_delivery_schema() -> Value {
+    let digest = json!({
+        "type": "array",
+        "minItems": 32,
+        "maxItems": 32,
+        "items": {"type": "integer", "minimum": 0, "maximum": 255}
+    });
+    json!({
+        "type": "object",
+        "required": [
+            "organization_id", "project_id", "pipeline_id", "trigger_id",
+            "trigger_generation", "delivery_id", "event_id", "event_kind",
+            "caller_identity", "payload_sha256", "canonical_payload", "parameters",
+            "requested_platform", "requested_trust_pool", "event_time_unix_ms",
+            "accepted_at_unix_ms", "expires_at_unix_ms", "status", "attempt_count",
+            "next_attempt_at_unix_ms", "claim_owner", "claim_fence",
+            "claim_expires_at_unix_ms", "redrive_of_delivery_id", "redrive_ordinal",
+            "build_id", "terminal_reason", "audit_sequence", "audit_event_hash"
+        ],
+        "properties": {
+            "organization_id": {"type": "string", "format": "uuid"},
+            "project_id": {"type": "string", "format": "uuid"},
+            "pipeline_id": {"type": "string", "format": "uuid"},
+            "trigger_id": {"type": "string", "format": "uuid"},
+            "trigger_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "delivery_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "event_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "event_kind": {"type": "string", "minLength": 1, "maxLength": 256},
+            "caller_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "payload_sha256": digest.clone(),
+            "canonical_payload": {"type": "object"},
+            "parameters": {"type": "object"},
+            "requested_platform": {"type": "string", "enum": ["linux", "windows"]},
+            "requested_trust_pool": {"type": "string", "minLength": 1, "maxLength": 128},
+            "event_time_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "accepted_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "expires_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "status": {"type": "string", "enum": ["pending", "retry_wait", "admitted", "dead_lettered"]},
+            "attempt_count": {"type": "integer", "format": "int32", "minimum": 0, "maximum": i32::MAX},
+            "next_attempt_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "claim_owner": {"type": ["string", "null"]},
+            "claim_fence": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "claim_expires_at_unix_ms": {"type": ["integer", "null"], "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "redrive_of_delivery_id": {"type": ["string", "null"]},
+            "redrive_ordinal": {"type": ["integer", "null"], "format": "int32", "minimum": 1, "maximum": i32::MAX},
+            "build_id": {"type": ["string", "null"], "format": "uuid"},
+            "terminal_reason": {"type": ["string", "null"], "maxLength": 2048},
+            "audit_sequence": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "audit_event_hash": digest
+        },
+        "additionalProperties": false
+    })
+}
+
+fn admission_response_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["build_id", "node_id", "attempt_id", "created", "pipeline_digest"],
+        "properties": {
+            "build_id": {"type": "string", "format": "uuid"},
+            "node_id": {"type": "string", "format": "uuid"},
+            "attempt_id": {"type": "string", "format": "uuid"},
+            "created": {"type": "boolean"},
+            "pipeline_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
     })
 }
 
@@ -1582,14 +1666,18 @@ fn trigger_event_operation(operation_id: &str, summary: &str, body_schema: &str)
         Vec::new(),
         Some(body_schema),
     );
-    operation["responses"]["200"] = json!({
-        "description": "Exact replay of an admitted trigger delivery",
-        "content": {"application/json": {"schema": {"type": "object"}}}
-    });
-    operation["responses"]["202"] = json!({
-        "description": "Delivery is durably leased or waiting for its bounded retry",
-        "content": {"application/json": {"schema": {"type": "object"}}}
-    });
+    let response = |description: &str| {
+        json!({
+            "description": description,
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TriggerEventResponse"}}}
+        })
+    };
+    operation["responses"]["200"] = response("Exact replay of an admitted trigger delivery");
+    operation["responses"]["201"] = response("New trigger delivery admitted or durably captured");
+    operation["responses"]["202"] =
+        response("Delivery is durably leased or waiting for its bounded retry");
+    operation["responses"]["422"] =
+        response("Delivery is durably dead-lettered and carries its terminal state");
     operation
 }
 
@@ -5760,7 +5848,35 @@ mod tests {
         assert!(state["put"]["responses"]["200"].is_object());
         assert!(state["put"]["responses"]["201"].is_null());
 
+        for operation in [
+            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events"]
+                ["post"],
+            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive"]
+                ["post"],
+        ] {
+            for status in ["200", "201", "202", "422"] {
+                assert_eq!(
+                    operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                    "#/components/schemas/TriggerEventResponse"
+                );
+            }
+        }
+
         let schemas = &document["components"]["schemas"];
+        assert_eq!(
+            schemas["TriggerEventResponse"]["properties"]["delivery"]["$ref"],
+            "#/components/schemas/TriggerDelivery"
+        );
+        assert!(
+            schemas["TriggerEventResponse"]["required"]
+                .as_array()
+                .expect("trigger-event response requirements")
+                .contains(&Value::from("delivery"))
+        );
+        assert_eq!(
+            schemas["TriggerDelivery"]["properties"]["status"]["enum"],
+            json!(["pending", "retry_wait", "admitted", "dead_lettered"])
+        );
         let trigger_request = &schemas["PipelineTriggerRequest"];
         assert_eq!(trigger_request["discriminator"]["propertyName"], "kind");
         assert_eq!(
