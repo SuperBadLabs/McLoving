@@ -1505,6 +1505,19 @@ async fn v1_config_without_observation_quota_is_explicitly_incompatible() {
 }
 
 #[tokio::test]
+async fn v2_config_without_implementation_binding_is_explicitly_incompatible() {
+    let rig = Rig::new().await;
+    let mut legacy_value = serde_json::to_value(&rig.config).unwrap();
+    legacy_value["schema_version"] =
+        serde_json::Value::String("mcloving.destination-observer-config/v2".to_owned());
+    legacy_value
+        .as_object_mut()
+        .unwrap()
+        .remove("implementation_sha256");
+    assert!(serde_json::from_value::<ObserverConfig>(legacy_value).is_err());
+}
+
+#[tokio::test]
 async fn evidence_capacity_failure_releases_the_destination_claim() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();

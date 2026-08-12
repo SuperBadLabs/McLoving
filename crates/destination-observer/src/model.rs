@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::error::ObserverError;
 
 pub const PROTOCOL_VERSION: &str = "mcloving.destination-observer/v1";
-pub const CONFIG_SCHEMA_VERSION: &str = "mcloving.destination-observer-config/v2";
+pub const CONFIG_SCHEMA_VERSION: &str = "mcloving.destination-observer-config/v3";
 pub const REQUEST_SCHEMA_VERSION: &str = "mcloving.destination-observation-request/v1";
 pub const DESTINATION_STATE_SCHEMA_VERSION: &str = "mcloving.destination-state/v1";
 pub const RECEIPT_SCHEMA_VERSION: &str = "mcloving.destination-observation-receipt/v1";

@@ -51,7 +51,7 @@ deployment-provided runtime-image attestation file, request-authority and
 destination-attestation public-key files, secret files, and the state directory
 must be owned by the process user and inaccessible to group or other users. The
 executable is measured through `/proc/self/exe` and must match the exact
-implementation digest authorized by config v2 before state is opened. The
+implementation digest authorized by config v3 before state is opened. The
 separately mounted runtime-image digest must match the image identity certified
 by configuration. That attestation is exactly 64 lowercase hexadecimal bytes
 with an optional single LF or CRLF text-file terminator. The executable, image,
@@ -150,8 +150,9 @@ receipt. A separate `max_observations` quota bounds all retained observation
 rows, including nonblocking rate-limit tombstones and other terminal failures;
 it must be at least `max_receipts`, and new IDs fail admission before claim
 insertion when the bound is full. This mandatory bound is carried by
-`mcloving.destination-observer-config/v2`; legacy config v1 is explicitly
-incompatible rather than silently acquiring new ledger semantics.
+`mcloving.destination-observer-config/v3`; legacy config v1 lacks the quota and
+config v2 lacks the executable binding, so both are explicitly incompatible
+rather than silently acquiring new ledger or executable-trust semantics.
 Replay and new-admission transactions prune complete and failed observations
 whose signed request expiry is more than one freshness window old before they
 serve terminal state or enforce quotas. Compact phase-chain heads and the
