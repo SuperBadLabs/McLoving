@@ -637,14 +637,14 @@ impl ObserverStore {
         if failure_count > config.limits.retry_attempts {
             transaction
                 .execute(
-                    "UPDATE observations SET retry_count=?2, status='failed', failure_code='destination_unavailable' WHERE observation_id=?1 AND request_sha256=?3 AND status='pending'",
+                    "UPDATE observations SET retry_count=?2, reservation_reached=0, status='failed', failure_code='destination_unavailable' WHERE observation_id=?1 AND request_sha256=?3 AND status='pending'",
                     params![request.observation_id.to_string(), failure_count, request_sha256],
                 )
                 .map_err(|_| ObserverError::StateUnavailable)?;
         } else {
             transaction
                 .execute(
-                    "UPDATE observations SET retry_count=?2 WHERE observation_id=?1 AND request_sha256=?3 AND status='pending'",
+                    "UPDATE observations SET retry_count=?2, reservation_reached=0 WHERE observation_id=?1 AND request_sha256=?3 AND status='pending'",
                     params![request.observation_id.to_string(), failure_count, request_sha256],
                 )
                 .map_err(|_| ObserverError::StateUnavailable)?;

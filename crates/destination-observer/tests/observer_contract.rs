@@ -966,7 +966,7 @@ async fn crash_gap_reservation_does_not_consume_the_destination_retry_budget() {
         rusqlite::Connection::open(rig.directory.path().join("observer.sqlite3")).unwrap();
     connection
         .execute(
-            "UPDATE observations SET retry_count=0 WHERE observation_id=?1 AND status='pending'",
+            "UPDATE observations SET retry_count=0, reservation_reached=1 WHERE observation_id=?1 AND status='pending'",
             [request.observation_id.to_string()],
         )
         .unwrap();
@@ -1038,6 +1038,65 @@ async fn pre_reservation_crash_state_becomes_a_nonblocking_rate_tombstone() {
     let mut next = rig.request(ObservationPhase::PreAction);
     next.expected_config_sha256 = restarted.config_sha256().to_owned();
     restarted.observe_at(rig.prepare(next), NOW).await.unwrap();
+}
+
+#[tokio::test]
+async fn completed_failure_resets_reservation_for_the_next_retry_cycle() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_requests_per_minute = 1;
+    let observer = rig.observer_for_config(config.clone()).unwrap();
+
+    rig.set_mode(Mode::Outage);
+    let mut request = rig.request(ObservationPhase::PreAction);
+    request.expected_config_sha256 = observer.config_sha256().to_owned();
+    let request = rig.prepare(request);
+    assert_eq!(
+        observer.observe_at(request.clone(), NOW).await,
+        Err(ObserverError::DestinationUnavailable)
+    );
+
+    let database_path = state.path().join("observer.sqlite3");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let stored: (u8, bool) = connection
+        .query_row(
+            "SELECT retry_count, reservation_reached FROM observations WHERE observation_id=?1",
+            [request.observation_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored, (1, false));
+    drop(connection);
+
+    // A crash after the next idempotent claim leaves this same durable state. The saturated rate
+    // window must therefore convert the replay to a nonblocking tombstone instead of stranding it.
+    rig.set_mode(Mode::Good);
+    assert_eq!(
+        rig.observer_for_config(config)
+            .unwrap()
+            .observe_at(request, NOW)
+            .await,
+        Err(ObserverError::CapacityExceeded)
+    );
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    let stored: (String, String, bool) = connection
+        .query_row(
+            "SELECT status, failure_code, reservation_reached FROM observations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        ("failed".to_owned(), "rate_limited".to_owned(), false)
+    );
 }
 
 #[tokio::test]

@@ -196,8 +196,11 @@ are upgraded conservatively: indistinguishable pre-upgrade pending rows retain
 the attempted-request classification. Startup also idempotently normalizes the legacy preview representation
 (`status=rate_limited`, `failure_code=capacity_exceeded`) into this existing
 schema shape. A retrying claim that already records an actual transport attempt
-remains durable. A later byte-identical retry atomically returns the tombstone
-to pending only after it secures a dispatch slot. The reservation time is
+remains durably marked until that attempt records an outcome; a completed
+destination-unavailable outcome resets the bit for the next retry cycle, while a
+crash after reservation and before outcome retains it. A later byte-identical
+retry atomically returns a rate tombstone to pending only after it secures a
+dispatch slot. The reservation time is
 sampled only after that transaction
 acquires the SQLite writer, so database contention cannot age a future dispatch
 out of the real outbound window. That conservative reservation
