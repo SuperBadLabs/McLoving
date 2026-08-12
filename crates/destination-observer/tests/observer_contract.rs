@@ -1549,6 +1549,17 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
         },
         {
             let mut config = rig.config.clone();
+            config
+                .response_schema
+                .extend((0..256).map(|index| StateFieldSchema {
+                    name: format!("optional_{index:03}"),
+                    kind: JsonKind::Null,
+                    required: false,
+                }));
+            config
+        },
+        {
+            let mut config = rig.config.clone();
             config.limits.max_observations = config.limits.max_receipts - 1;
             config
         },

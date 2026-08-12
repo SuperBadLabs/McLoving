@@ -299,6 +299,10 @@ before the pending claim can commit. Configuration is rejected before the
 ledger or network opens unless the configured response limit, maximum request
 query and audit fields, actual activation-generation fields, and the true
 largest schema-valid optional-state combination fit that envelope together.
+Request sizing uses the oldest or latest valid endpoint pair while preserving
+the signed `max_age_ms` validity-interval bound. Exact optional-state packing is
+limited to 4,194,304 schema-field-by-response-byte work cells; configurations
+above that certified startup-work bound are rejected before state opens.
 The runtime check remains defense in depth: an oversized envelope
 becomes a failed claim, never committed evidence followed by an error-only response. Stored
 completed receipts are signature-, binding-, and frame-size-verified again on

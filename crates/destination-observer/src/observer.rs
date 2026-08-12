@@ -35,6 +35,7 @@ const MAX_TOTAL_SECRET_MARKER_BYTES: usize = 8 * 1024;
 const MAX_REVERSIBLE_DECODE_DEPTH: usize = 16;
 const SECRET_DECODE_WORK_FACTOR: usize = 64;
 const MIN_SECRET_DECODE_WORK_BYTES: usize = 4 * 1024;
+const MAX_SCHEMA_SIZING_WORK_CELLS: usize = 4 * 1024 * 1024;
 const MIN_SUCCESS_HEADER_BYTES: usize = 34;
 const MAX_TRANSPORT_HEADER_BYTES: usize = 256 * 1024;
 const OBSERVATION_ID_HEADER: &str = "x-mcloving-observation-id";
@@ -866,6 +867,11 @@ fn validate_config(
         || config.image_sha256 != runtime_image_sha256
         || config.limits.max_response_bytes == 0
         || config.limits.max_response_bytes >= crate::standalone::MAX_FRAME_BYTES
+        || config
+            .response_schema
+            .len()
+            .checked_mul(config.limits.max_response_bytes.saturating_add(1))
+            .is_none_or(|work| work > MAX_SCHEMA_SIZING_WORK_CELLS)
         || config.limits.max_header_bytes == 0
         || config.limits.max_header_bytes < MIN_SUCCESS_HEADER_BYTES
         || config.limits.max_header_bytes > MAX_TRANSPORT_HEADER_BYTES
@@ -1179,13 +1185,25 @@ fn maximum_request_envelope_fits(
 }
 
 fn maximum_request_timestamp_pair(observation_time_ms: i64, max_age_ms: i64) -> (i64, i64) {
-    // The temporal contract bounds each side independently around the trusted observation time.
-    // Use both extremes together so startup sizes the largest valid pair, including when the
-    // oldest request and latest expiry cross a decimal-width boundary in opposite directions.
-    (
-        observation_time_ms.saturating_sub(max_age_ms),
-        observation_time_ms.saturating_add(max_age_ms),
-    )
+    // A request may be at most `max_age_ms` old or live that far into the future, but its signed
+    // validity interval is itself capped at `max_age_ms`. The two endpoint pairs cover the oldest
+    // and latest admissible extrema without combining them into an invalid double-width window.
+    let candidates = [
+        (
+            observation_time_ms.saturating_sub(max_age_ms),
+            observation_time_ms,
+        ),
+        (
+            observation_time_ms,
+            observation_time_ms.saturating_add(max_age_ms),
+        ),
+    ];
+    candidates
+        .into_iter()
+        .max_by_key(|(requested_at, expires_at)| {
+            requested_at.to_string().len() + expires_at.to_string().len()
+        })
+        .unwrap_or((observation_time_ms, observation_time_ms))
 }
 
 fn is_literal_loopback_test_endpoint(config: &ObserverConfig) -> bool {
@@ -2074,10 +2092,20 @@ mod tests {
             (0, 10),
             (1_800_000_000_000, i64::MAX),
         ] {
-            assert_eq!(
-                maximum_request_timestamp_pair(now, max_age),
-                (now.saturating_sub(max_age), now.saturating_add(max_age))
+            let selected = maximum_request_timestamp_pair(now, max_age);
+            let candidates = [
+                (now.saturating_sub(max_age), now),
+                (now, now.saturating_add(max_age)),
+            ];
+            assert!(candidates.contains(&selected));
+            assert!(
+                selected.1.saturating_sub(selected.0) <= max_age,
+                "sizing pair must pass the signed validity-interval bound"
             );
+            let selected_len = selected.0.to_string().len() + selected.1.to_string().len();
+            assert!(candidates.iter().all(|candidate| {
+                candidate.0.to_string().len() + candidate.1.to_string().len() <= selected_len
+            }));
         }
     }
 }
