@@ -1497,7 +1497,11 @@ fn base64_decode_once(raw: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
-    if contains_secret_textual_representation(raw, markers) {
+    if contains_secret_textual_representation(raw, markers)
+        || collect_decoded_json_strings(raw)
+            .iter()
+            .any(|value| contains_secret_textual_representation(value.as_bytes(), markers))
+    {
         return true;
     }
     match parse_json_no_duplicates::<SignedDestinationState>(raw) {
@@ -1838,6 +1842,21 @@ mod tests {
         };
         let raw = serde_json::to_vec(&response).unwrap();
         assert!(!contains_secret_in_response_json(&raw, &[marker.to_vec()]));
+
+        let mut escaped_signature = response.clone();
+        let encoded_marker = BASE64_NO_PAD.encode(marker);
+        escaped_signature.signature_base64 = encoded_marker.clone();
+        let escaped_marker = encoded_marker
+            .bytes()
+            .map(|byte| format!("\\u{byte:04x}"))
+            .collect::<String>();
+        let escaped_raw = serde_json::to_string(&escaped_signature)
+            .unwrap()
+            .replace(&encoded_marker, &escaped_marker);
+        assert!(contains_secret_in_response_json(
+            escaped_raw.as_bytes(),
+            &[marker.to_vec()]
+        ));
 
         let mut secret_state = response;
         secret_state.body.state = serde_json::json!({
