@@ -1495,6 +1495,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcloving-destination-observer"
+version = "0.0.0"
+dependencies = [
+ "axum",
+ "base64",
+ "http-body-util",
+ "nix",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "mcloving-domain"
 version = "0.0.0"
 
@@ -2440,6 +2463,7 @@ dependencies = [
  "base64",
  "bytes",
  "futures-core",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
