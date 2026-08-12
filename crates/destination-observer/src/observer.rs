@@ -1398,24 +1398,6 @@ fn minimum_value(kind: crate::JsonKind) -> serde_json::Value {
     }
 }
 
-fn contains_secret(raw: &[u8], markers: &[Vec<u8>]) -> bool {
-    let mut decoded = raw.to_vec();
-    for depth in 0..=16 {
-        if contains_secret_representation(&decoded, markers) {
-            return true;
-        }
-        let Some(next) = percent_decode_once(&decoded) else {
-            return false;
-        };
-        if depth == 16 {
-            // Excessive reversible nesting is denied rather than allowing unbounded scan work.
-            return true;
-        }
-        decoded = next;
-    }
-    false
-}
-
 fn contains_secret_value(raw: &[u8], markers: &[Vec<u8>]) -> bool {
     let maximum_work = raw
         .len()
@@ -1497,7 +1479,7 @@ fn base64_decode_once(raw: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
-    contains_secret(raw, markers)
+    contains_secret_value(raw, markers)
         || collect_decoded_json_strings(raw)
             .iter()
             .any(|value| contains_secret_in_decoded_string(value, markers))
@@ -1696,22 +1678,22 @@ mod tests {
     #[test]
     fn encoded_secret_scanner_is_case_complete() {
         let markers = vec![vec![0xab, 0xcd, 0xef, 0x10]];
-        assert!(contains_secret(b"abcdef10", &markers));
-        assert!(contains_secret(b"ABCDEF10", &markers));
-        assert!(contains_secret(b"AbCdEf10", &markers));
-        assert!(contains_secret(b"%AB%CD%EF%10", &markers));
-        assert!(contains_secret(b"%ab%cd%ef%10", &markers));
-        assert!(contains_secret(b"%aB%Cd%eF%10", &markers));
-        assert!(contains_secret(b"q83vEA", &markers));
+        assert!(contains_secret_value(b"abcdef10", &markers));
+        assert!(contains_secret_value(b"ABCDEF10", &markers));
+        assert!(contains_secret_value(b"AbCdEf10", &markers));
+        assert!(contains_secret_value(b"%AB%CD%EF%10", &markers));
+        assert!(contains_secret_value(b"%ab%cd%ef%10", &markers));
+        assert!(contains_secret_value(b"%aB%Cd%eF%10", &markers));
+        assert!(contains_secret_value(b"q83vEA", &markers));
 
         let url_marker = vec![vec![0xfb, 0xff, 0xfe, 0xfd]];
-        assert!(contains_secret(b"-__-_Q==", &url_marker));
-        assert!(contains_secret(b"-__-_Q", &url_marker));
-        assert!(contains_secret(
+        assert!(contains_secret_value(b"-__-_Q==", &url_marker));
+        assert!(contains_secret_value(b"-__-_Q", &url_marker));
+        assert!(contains_secret_value(
             b"read%2Donly-observer-token",
             &[b"read-only-observer-token".to_vec()]
         ));
-        assert!(contains_secret(
+        assert!(contains_secret_value(
             b"read%25252Donly-observer-token",
             &[b"read-only-observer-token".to_vec()]
         ));
@@ -1762,6 +1744,16 @@ mod tests {
             );
             assert!(contains_secret_in_json(&value, &[marker.to_vec()]).unwrap());
         }
+    }
+
+    #[test]
+    fn raw_response_body_is_scanned_through_reversible_encodings() {
+        let marker = b"read-only-observer-token";
+        let encoded = BASE64.encode([b"x".as_slice(), marker].concat());
+        assert!(contains_secret_in_response_json(
+            encoded.as_bytes(),
+            &[marker.to_vec()]
+        ));
     }
 
     #[test]

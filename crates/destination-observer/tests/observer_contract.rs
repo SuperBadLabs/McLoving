@@ -73,6 +73,7 @@ enum Mode {
     OutageOversized,
     OutageOversizedSecret,
     OutageSecret,
+    OutageBase64Secret,
     MalformedContentTypeSecret,
     Timeout,
     Slow,
@@ -431,12 +432,20 @@ async fn destination_handler(
     }
     if matches!(
         mode,
-        Mode::Outage | Mode::OutageOversized | Mode::OutageOversizedSecret | Mode::OutageSecret
+        Mode::Outage
+            | Mode::OutageOversized
+            | Mode::OutageOversizedSecret
+            | Mode::OutageSecret
+            | Mode::OutageBase64Secret
     ) {
         return json_response(
             StatusCode::SERVICE_UNAVAILABLE,
             if matches!(mode, Mode::OutageSecret) {
                 TOKEN.to_vec()
+            } else if matches!(mode, Mode::OutageBase64Secret) {
+                BASE64
+                    .encode([b"x".as_slice(), TOKEN].concat())
+                    .into_bytes()
             } else if matches!(mode, Mode::OutageOversizedSecret) {
                 oversized_escaped_secret_body(32 * 1024)
             } else if matches!(mode, Mode::OutageOversized) {
@@ -703,6 +712,10 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
             ObserverError::ConfidentialityDenied,
         ),
         (Mode::OutageSecret, ObserverError::ConfidentialityDenied),
+        (
+            Mode::OutageBase64Secret,
+            ObserverError::ConfidentialityDenied,
+        ),
         (
             Mode::OutageOversizedSecret,
             ObserverError::ConfidentialityDenied,
