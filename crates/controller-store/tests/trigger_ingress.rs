@@ -350,7 +350,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         json!({
             "provider": "github",
             "repository_identity": "github:superbadlabs/mcloving",
-            "filter": {"event_kinds": ["push"], "branches": ["main"]},
+            "filter": {"event_kinds": ["push"], "branches": ["main"], "path_prefixes": []},
         }),
         "trigger-create",
         3,
@@ -522,6 +522,20 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
     .into();
     assert!(matches!(
         store.accept_trigger_delivery(&unknown_payload).await,
+        Err(StoreError::InvalidTriggerIngress(_))
+    ));
+    let mut malformed_paths = input.clone();
+    malformed_paths.delivery_id = "delivery-malformed-paths".to_owned();
+    malformed_paths.event_id = "event-malformed-paths".to_owned();
+    malformed_paths.canonical_payload["payload"]["paths"] = json!([123]);
+    malformed_paths.payload_sha256 = Sha256::digest(
+        serde_json::to_vec(&malformed_paths.canonical_payload)
+            .unwrap()
+            .as_slice(),
+    )
+    .into();
+    assert!(matches!(
+        store.accept_trigger_delivery(&malformed_paths).await,
         Err(StoreError::InvalidTriggerIngress(_))
     ));
     let database_before_accept = database_unix_ms(&store).await;
@@ -886,6 +900,84 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         panic!("audit contention past the claim lease must return typed lease loss")
     };
     assert_eq!(failure_after_audit_wait.attempt_count, 0);
+
+    let admission_contention_now = database_unix_ms(&store).await;
+    let admission_contention_delivery = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        1,
+        "delivery-audit-contention-admission",
+        "event-audit-contention-admission",
+        admission_contention_now,
+    );
+    store
+        .accept_trigger_delivery(&admission_contention_delivery)
+        .await
+        .unwrap();
+    let admission_contention_claim = match store
+        .claim_trigger_delivery(&TriggerDeliveryClaimRequest {
+            organization_id,
+            trigger_id,
+            delivery_id: "delivery-audit-contention-admission".to_owned(),
+            worker_identity: "worker-audit-contention-admission".to_owned(),
+            now_unix_ms: admission_contention_now,
+            lease_expires_at_unix_ms: admission_contention_now + 1_000,
+        })
+        .await
+        .unwrap()
+    {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        other => panic!("unexpected audit-contention admission claim: {other:?}"),
+    };
+    let admission_contention_dag = dag(
+        organization_id,
+        project_id,
+        pipeline_id,
+        "trigger-delivery-audit-contention-admission",
+    );
+    let (audit_lock, audit_backend_pid) = lock_audit_head(&store, organization_id).await;
+    let contention_store = store.clone();
+    let admission_task = tokio::spawn(async move {
+        contention_store
+            .admit_trigger_delivery_dag(
+                &TriggerDeliveryDagAdmissionRequest {
+                    organization_id,
+                    trigger_id,
+                    delivery_id: "delivery-audit-contention-admission".to_owned(),
+                    worker_identity: "worker-audit-contention-admission".to_owned(),
+                    claim_fence: admission_contention_claim.claim_fence,
+                },
+                &admission_contention_dag,
+            )
+            .await
+    });
+    wait_until_blocked_by(&store, audit_backend_pid).await;
+    sqlx::query("SELECT pg_sleep(1.1)")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    audit_lock.rollback().await.unwrap();
+    let TriggerDeliveryDagAdmission::LeaseLost(admission_after_audit_wait) =
+        admission_task.await.unwrap().unwrap()
+    else {
+        panic!("audit contention past the claim lease must not commit a DAG")
+    };
+    assert_eq!(admission_after_audit_wait.attempt_count, 0);
+    assert!(admission_after_audit_wait.build_id.is_none());
+    assert!(
+        store
+            .dag_replay_binding(
+                organization_id,
+                project_id,
+                "trigger-delivery-audit-contention-admission",
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "audit-contention lease loss must leave no runnable or replayable build"
+    );
 
     let wall_now = database_unix_ms(&store).await;
     let expires_during_admission = delivery(
@@ -1884,6 +1976,26 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
     );
     assert!(matches!(
         store.put_pipeline_trigger(&incomplete).await,
+        Err(StoreError::InvalidTriggerIngress(_))
+    ));
+
+    let mut oversized_watermark_text = schedule_configuration("0 2 * * *", slot1);
+    oversized_watermark_text["timezone"] = json!("x".repeat(129));
+    let oversized_watermark_text = trigger_write(
+        organization_id,
+        project_id,
+        pipeline_id,
+        Uuid::new_v4(),
+        0,
+        TriggerKind::Schedule,
+        PipelineTriggerState::Enabled,
+        "scheduler:mcloving:primary",
+        oversized_watermark_text,
+        "schedule-oversized-watermark-text",
+        3,
+    );
+    assert!(matches!(
+        store.put_pipeline_trigger(&oversized_watermark_text).await,
         Err(StoreError::InvalidTriggerIngress(_))
     ));
 

@@ -660,6 +660,78 @@ stages:
             .all(|delivery| delivery.delivery_id != "invalid-parameters-delivery")
     );
 
+    let malformed_paths = app
+        .clone()
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "trigger_generation": 1,
+                        "delivery_id": "malformed-paths-delivery",
+                        "event_id": "malformed-paths-event",
+                        "event_kind": "push",
+                        "event_time_unix_ms": now,
+                        "payload": {
+                            "repository_identity": "github:superbadlabs/mcloving",
+                            "revision": "0123456789abcdef",
+                            "branch": "main",
+                            "paths": [123]
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("reject malformed supplied paths despite empty path filter");
+    assert_eq!(malformed_paths.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        store
+            .due_trigger_deliveries(organization_id, now + 1, 128)
+            .await
+            .unwrap()
+            .iter()
+            .all(|delivery| delivery.delivery_id != "malformed-paths-delivery")
+    );
+
+    let oversized_parameter_name = "x".repeat(257);
+    let mut invalid_parameter_name_body = json!({
+        "trigger_generation": 1,
+        "delivery_id": "invalid-parameter-name-delivery",
+        "event_id": "invalid-parameter-name-event",
+        "event_kind": "push",
+        "event_time_unix_ms": now,
+        "payload": {
+            "repository_identity": "github:superbadlabs/mcloving",
+            "revision": "0123456789abcdef",
+            "branch": "main"
+        },
+        "parameters": {},
+    });
+    invalid_parameter_name_body["parameters"][&oversized_parameter_name] = json!(true);
+    let invalid_parameter_name = app
+        .clone()
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(invalid_parameter_name_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("reject oversized parameter name before durable capture");
+    assert_eq!(invalid_parameter_name.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        store
+            .due_trigger_deliveries(organization_id, now + 1, 128)
+            .await
+            .unwrap()
+            .iter()
+            .all(|delivery| delivery.delivery_id != "invalid-parameter-name-delivery")
+    );
+
     let accepted_body = json!({
         "trigger_generation": 1,
         "delivery_id": "accepted-delivery",

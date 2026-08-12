@@ -1168,6 +1168,9 @@ fn parameter_values_schema() -> Value {
     json!({
         "type": "object",
         "maxProperties": 128,
+        "propertyNames": {
+            "pattern": "^[A-Za-z0-9_-]{1,256}$"
+        },
         "additionalProperties": {
             "oneOf": [
                 {"type": "boolean"},
@@ -1321,7 +1324,11 @@ fn scm_trigger_event_payload_schema() -> Value {
             "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
             "revision": {"type": "string", "minLength": 1, "maxLength": 512},
             "branch": {"type": "string", "minLength": 1, "maxLength": 512},
-            "paths": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 512}}
+            "paths": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512}
+            }
         },
         "required": ["repository_identity", "revision", "branch"],
         "additionalProperties": false
@@ -2739,7 +2746,7 @@ async fn fail_claimed_trigger_delivery(
             now_unix_ms: failure_unix_ms,
             retry_at_unix_ms: failure_unix_ms.saturating_add(60_000),
             retryable,
-            reason: format!("{}: {}", error.code, error.message),
+            reason: bounded_trigger_failure_reason(&error),
         })
         .await
         .map_err(trigger_error)?;
@@ -2870,20 +2877,39 @@ fn validate_trigger_event_filter(
                     return Err(trigger_filtered("branch"));
                 }
             }
+            let supplied_paths = request
+                .payload
+                .get("paths")
+                .map(|paths| {
+                    let paths = paths
+                        .as_array()
+                        .ok_or_else(|| trigger_filtered("invalid paths"))?;
+                    if paths.len() > 128 {
+                        return Err(trigger_filtered("invalid paths"));
+                    }
+                    paths
+                        .iter()
+                        .map(|path| {
+                            path.as_str()
+                                .filter(|path| {
+                                    !path.is_empty()
+                                        && path.trim() == *path
+                                        && path.len() <= 512
+                                        && !path.chars().any(char::is_control)
+                                })
+                                .ok_or_else(|| trigger_filtered("invalid path"))
+                        })
+                        .collect::<Result<Vec<_>, ApiError>>()
+                })
+                .transpose()?;
             if let Some(prefixes) = filter.get("path_prefixes") {
                 let prefixes = canonical_string_array(prefixes, "path_prefixes")?;
-                let matched = if prefixes.is_empty() {
-                    true
-                } else {
-                    request
-                        .payload
-                        .get("paths")
-                        .and_then(Value::as_array)
+                let matched = prefixes.is_empty()
+                    || supplied_paths
+                        .as_ref()
                         .ok_or_else(|| trigger_filtered("missing paths"))?
                         .iter()
-                        .filter_map(Value::as_str)
-                        .any(|path| prefixes.iter().any(|prefix| path.starts_with(prefix)))
-                };
+                        .any(|path| prefixes.iter().any(|prefix| path.starts_with(prefix)));
                 if !matched {
                     return Err(trigger_filtered("path"));
                 }
@@ -3412,6 +3438,14 @@ fn parameter_values(
     parameters
         .into_iter()
         .map(|(name, value)| {
+            if name.is_empty()
+                || name.len() > 256
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                return Err(invalid_parameter_name());
+            }
             let value = match value {
                 Value::Bool(value) => ParameterValue::Bool(value),
                 Value::Number(value) => value
@@ -3424,6 +3458,37 @@ fn parameter_values(
             Ok((name, value))
         })
         .collect()
+}
+
+fn invalid_parameter_name() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "invalid_parameters",
+        "parameter names must be 1-256 ASCII letters, digits, underscores, or hyphens",
+    )
+}
+
+fn bounded_trigger_failure_reason(error: &ApiError) -> String {
+    const MAX_FAILURE_REASON_BYTES: usize = 2048;
+
+    let mut reason = format!("{}: {}", error.code, error.message)
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    reason = reason.trim().to_owned();
+    if reason.is_empty() {
+        reason = "trigger admission failed".to_owned();
+    }
+    while reason.len() > MAX_FAILURE_REASON_BYTES {
+        reason.pop();
+    }
+    reason
 }
 
 fn invalid_parameter_value() -> ApiError {
@@ -5810,6 +5875,14 @@ mod tests {
         );
         let trigger_parameters = &schemas["TriggerEventRequest"]["properties"]["parameters"];
         assert_eq!(trigger_parameters["maxProperties"], 128);
+        assert_eq!(
+            trigger_parameters["propertyNames"]["pattern"],
+            "^[A-Za-z0-9_-]{1,256}$"
+        );
+        assert_eq!(
+            schemas["ScmTriggerEventPayload"]["properties"]["paths"]["maxItems"],
+            128
+        );
         let parameter_variants = trigger_parameters["additionalProperties"]["oneOf"]
             .as_array()
             .expect("closed trigger parameter value variants");
@@ -5915,6 +5988,32 @@ mod tests {
                 .iter()
                 .any(|parameter| { parameter["name"] == "after_fence" })
         );
+    }
+
+    #[test]
+    fn parameter_names_and_trigger_failure_reasons_are_bounded() {
+        for invalid_name in ["", "bad.name", "bad\nname"] {
+            let parameters = BTreeMap::from([(invalid_name.to_owned(), json!(true))]);
+            let error = parameter_values(parameters).expect_err("reject invalid parameter name");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "invalid_parameters");
+        }
+        let oversized_name = "x".repeat(257);
+        assert!(
+            parameter_values(BTreeMap::from([(oversized_name, json!(true))])).is_err(),
+            "reject names that exceed the OpenAPI/runtime limit"
+        );
+
+        let failure = ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "pipeline_rejected",
+            format!("{}\npoison", "x".repeat(3_000)),
+        );
+        let reason = bounded_trigger_failure_reason(&failure);
+        assert!(!reason.is_empty());
+        assert!(reason.len() <= 2_048);
+        assert!(!reason.chars().any(char::is_control));
+        assert_eq!(reason.trim(), reason);
     }
 
     #[test]

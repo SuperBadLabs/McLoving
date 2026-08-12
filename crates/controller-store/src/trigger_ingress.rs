@@ -1492,6 +1492,11 @@ impl Store {
                 "delivery completion claim is stale or belongs to another worker".to_owned(),
             ));
         }
+        // DAG staging, delivery binding, and the admission audit record form one
+        // atomic mutation. Hold the audit-chain head before the final database
+        // clock predicates so contention cannot let an expired delivery or
+        // claim commit a runnable build.
+        let _ = crate::audit::lock_audit_head(&mut tx, input.organization_id).await?;
         let admitted_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
         if current.expires_at_unix_ms <= admitted_at_unix_ms {
             let delivery =
@@ -2368,6 +2373,22 @@ fn validate_kind_configuration(kind: TriggerKind, configuration: &Value) -> Resu
         TriggerKind::Schedule => {
             require_text("timezone")?;
             require_text("calendar")?;
+            validate_text(
+                "timezone",
+                configuration
+                    .get("timezone")
+                    .and_then(Value::as_str)
+                    .expect("required schedule timezone was validated"),
+                128,
+            )?;
+            validate_text(
+                "calendar",
+                configuration
+                    .get("calendar")
+                    .and_then(Value::as_str)
+                    .expect("required schedule calendar was validated"),
+                128,
+            )?;
             require_text("expression")?;
             require_text("schedule_identity_sha256")?;
             require_text("resolver_implementation_sha256")?;
@@ -2701,28 +2722,44 @@ fn validate_delivery_against_configuration(
                     "SCM branch is filtered".to_owned(),
                 ));
             }
+            let supplied_paths = payload
+                .get("paths")
+                .map(|paths| {
+                    let paths = paths.as_array().ok_or_else(|| {
+                        StoreError::InvalidTriggerIngress(
+                            "SCM trigger paths must be an array".to_owned(),
+                        )
+                    })?;
+                    if paths.len() > 128 {
+                        return Err(StoreError::InvalidTriggerIngress(
+                            "SCM trigger paths exceed 128 entries".to_owned(),
+                        ));
+                    }
+                    paths
+                        .iter()
+                        .map(|path| {
+                            let path = path.as_str().ok_or_else(|| {
+                                StoreError::InvalidTriggerIngress(
+                                    "SCM trigger path must be a string".to_owned(),
+                                )
+                            })?;
+                            validate_text("path", path, MAX_TEXT_BYTES)?;
+                            Ok(path)
+                        })
+                        .collect::<Result<Vec<_>, StoreError>>()
+                })
+                .transpose()?;
             if let Some(prefixes) = filter.get("path_prefixes") {
                 let prefixes = filter_strings(prefixes, "path_prefixes")?;
                 if !prefixes.is_empty() {
-                    let paths =
-                        payload
-                            .get("paths")
-                            .and_then(Value::as_array)
-                            .ok_or_else(|| {
-                                StoreError::InvalidTriggerIngress(
-                                    "SCM trigger payload requires paths".to_owned(),
-                                )
-                            })?;
-                    let mut matched = false;
-                    for path in paths {
-                        let path = path.as_str().ok_or_else(|| {
-                            StoreError::InvalidTriggerIngress(
-                                "SCM trigger path must be a string".to_owned(),
-                            )
-                        })?;
-                        validate_text("path", path, MAX_TEXT_BYTES)?;
-                        matched |= prefixes.iter().any(|prefix| path.starts_with(prefix));
-                    }
+                    let paths = supplied_paths.as_ref().ok_or_else(|| {
+                        StoreError::InvalidTriggerIngress(
+                            "SCM trigger payload requires paths".to_owned(),
+                        )
+                    })?;
+                    let matched = paths
+                        .iter()
+                        .any(|path| prefixes.iter().any(|prefix| path.starts_with(prefix)));
                     if !matched {
                         return Err(StoreError::TriggerIngressConflict(
                             "SCM path is filtered".to_owned(),

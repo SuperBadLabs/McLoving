@@ -73,18 +73,23 @@ creation plus one exact replay rather than leaking a database uniqueness
 failure. Signed integers are explicitly limited to the complete `int64` range
 in both the generated contract and runtime.
 
-Parameter values are limited to 128 bounded booleans, signed integers, or
-strings and are rejected before durable HTTP capture. Processing repeats that
-closed validation after claim so legacy or corrupt stored values consume one
-terminal failed attempt, release their lease, and cannot abort a bounded retry
-scan or starve valid work. The generated API contract exposes the same value
-union, count, and string bound.
+Parameter names are limited to 1-256 ASCII letters, digits, underscores, or
+hyphens. Values are limited to 128 bounded booleans, signed integers, or strings,
+and both names and values are rejected before durable HTTP capture. Processing
+repeats that closed validation after claim so legacy or corrupt stored values
+consume one terminal failed attempt, release their lease, and cannot abort a
+bounded retry scan or starve valid work. Any resulting persisted failure reason
+is control-free and truncated on a UTF-8 boundary to the store's 2,048-byte
+limit. The generated API contract exposes the same name pattern, value union,
+count, and string bound.
 
 Each kind also has a closed payload field set. SCM repository identity must
 equal the configured repository, not merely share an installation credential.
 An explicitly empty path-prefix list is a no-op and does not require the
 optional SCM `paths` payload; a non-empty list requires paths and at least one
-prefix match.
+prefix match. When `paths` is supplied under either filter form, both the API
+and durable store still require at most 128 canonical, non-empty, bounded string
+entries; a no-op filter never turns malformed payload data into accepted truth.
 For remote API ingress, the signed/request payload's `request_id` must equal the
 durable `event_id`, so the caller cannot mint duplicate work for one logical
 request by rotating transport identifiers.
@@ -109,6 +114,10 @@ later audit-head lock before resampling PostgreSQL time, derive retry due time
 from the requested bounded delay, and return typed lease loss without failure
 accounting when the claim has expired. Admission conditionally binds only while
 the matching claim lease is still live according to the PostgreSQL clock.
+Atomic DAG admission holds the organization audit head before its final
+delivery-TTL and claim-lease sample and before staging any DAG row. A later
+audit append therefore cannot introduce a blocking interval after the last
+authority decision.
 Processing enters the JOBSTATE-001 saved-pipeline
 admission primitive using a controller-derived safe idempotency key. DAG rows,
 attempts, outbox publication, and the immutable delivery/build binding commit in
@@ -161,7 +170,9 @@ pipeline rejects recovery before work is minted.
 The authenticated scheduler submits one exact resolved slot. The request binds
 timezone, calendar/tzdata identity, original expression, schedule identity,
 expected prior watermark, and resolved Unix-millisecond slot. The slot must be a
-member of the digest-verified configured slot set.
+member of the digest-verified configured slot set. Configuration-time timezone
+and calendar values use the same 128-byte canonical bound as the durable
+watermark, so an accepted generation cannot become unusable only at capture.
 
 Watermark advancement and delivery insertion commit in the same transaction.
 A deferred foreign key requires the watermark's delivery ID to exist at commit,
@@ -233,8 +244,11 @@ exact-source and conflicting-source dead-letter redrive, stale claim denial,
 parameter pre-capture and corrupt-store terminal failure, completion-time
 delivery/claim expiry with zero persisted DAG and unchanged retry budget,
 database-clock acceptance/redrive TTL, claim TTL/lease issuance, and expired
-failure-claim rejection under deterministic audit-head contention, pathless SCM
-events under an empty path-prefix filter, due/retry/claim ownership under
+failure-claim rejection under deterministic audit-head contention, atomic DAG
+admission lease loss under the same contention, pathless SCM events plus
+malformed supplied-path denial under an empty path-prefix filter, schedule
+watermark configuration bounds, bounded parameter names and failure reasons,
+due/retry/claim ownership under
 controller-clock skew, reserved
 trigger-DAG idempotency namespace denial, unordered filter
 membership, expired-claim handoff reaping, caller rotation,
