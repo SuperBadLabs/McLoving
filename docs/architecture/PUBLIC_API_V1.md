@@ -37,9 +37,13 @@ one-time attempt is allocated.
 Build submission names an already-saved pipeline and sends only typed parameter
 values as JSON to `POST .../pipelines/{pipeline}/builds`. It requires an
 `Idempotency-Key` header scoped to the project; an exact replay returns the
-original durable build. The API loads and compiles the saved current revision,
-then atomically binds pipeline ID, revision, semantic digest, and enabled
-operational generation to the build. Caller-supplied YAML cannot mint work.
+original durable build even if the pipeline was later revised or its
+operational generation changed. Replay validation loads the original bound
+revision before resolving current state and still rejects changed parameters,
+platform, trust pool, or pipeline identity. First admission loads and compiles
+the saved current revision, then atomically binds pipeline ID, revision,
+semantic digest, and enabled operational generation to the build.
+Caller-supplied YAML cannot mint work.
 The optional `McLoving-Platform` and `McLoving-Trust-Pool` headers retain their
 strict platform and certificate-bound pool behavior; the CLI exposes these as
 `submit --platform` and `submit --trust-pool`.

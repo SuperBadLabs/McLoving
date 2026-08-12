@@ -98,6 +98,15 @@ pub struct DagAdmission {
     pub created: bool,
 }
 
+/// Immutable saved-pipeline binding needed to validate an HTTP admission replay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DagReplayBinding {
+    pub pipeline_id: Uuid,
+    pub pipeline_revision: i64,
+    pub pipeline_operational_generation: i64,
+    pub source: String,
+}
+
 /// One deterministic Cartesian-product cell.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MatrixCell {
@@ -188,6 +197,62 @@ pub fn compile_matrix(
 }
 
 impl Store {
+    /// Returns the original pipeline source and fence for an existing DAG
+    /// admission. This lookup deliberately precedes current pipeline resolution
+    /// so an exact HTTP retry remains stable across later revisions and state
+    /// transitions.
+    pub async fn dag_replay_binding(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<Option<DagReplayBinding>, StoreError> {
+        validate_text("$.idempotency_key", idempotency_key)
+            .map_err(|error| StoreError::InvalidDag(error.to_string()))?;
+        let mut tx = self.tenant_transaction(organization_id).await?;
+        let row =
+            sqlx::query_as::<_, (Option<Uuid>, Option<i64>, Option<i64>, Option<String>, bool)>(
+                "SELECT b.pipeline_id, b.pipeline_revision,
+                    b.pipeline_operational_generation, r.source, b.dag_mode
+             FROM builds AS b
+             LEFT JOIN pipeline_revisions AS r
+               ON r.organization_id = b.organization_id
+              AND r.project_id = b.project_id
+              AND r.pipeline_id = b.pipeline_id
+              AND r.revision = b.pipeline_revision
+             WHERE b.organization_id = $1
+               AND b.project_id = $2
+               AND b.idempotency_key = $3",
+            )
+            .bind(organization_id)
+            .bind(project_id)
+            .bind(idempotency_key)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some((pipeline_id, revision, generation, source, dag_mode)) = row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let binding = match (pipeline_id, revision, generation, source, dag_mode) {
+            (Some(pipeline_id), Some(revision), Some(generation), Some(source), true) => {
+                DagReplayBinding {
+                    pipeline_id,
+                    pipeline_revision: revision,
+                    pipeline_operational_generation: generation,
+                    source,
+                }
+            }
+            _ => {
+                tx.rollback().await?;
+                return Err(StoreError::IdempotencyConflict(
+                    "idempotency key belongs to a non-replayable build contract".to_owned(),
+                ));
+            }
+        };
+        tx.commit().await?;
+        Ok(Some(binding))
+    }
+
     /// Atomically admits an entire validated DAG, all first attempts,
     /// dependency edges, one event, and one outbox record.
     pub async fn admit_dag(&self, input: &NewDagBuild) -> Result<DagAdmission, StoreError> {

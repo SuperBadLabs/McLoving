@@ -69,6 +69,12 @@ instantiated-build semantic digest, and enabled operational generation on the
 build before creating any node or attempt. The two digests are intentionally
 distinct when invocation parameters materialize different IR.
 
+An admission idempotency lookup precedes current pipeline resolution. Exact
+replays compile the original bound revision and return its durable admission
+even after a later revision, disable, or re-enable. Reusing the key with
+different parameters, platform, trust pool, or pipeline identity remains an
+explicit conflict.
+
 All manual, API, upstream, webhook, schedule, retry, replay, and administrative
 trigger implementations must enter through that admission/fence primitive.
 Future trigger classes cannot claim JOBSTATE-001 coverage merely by validating

@@ -1951,14 +1951,36 @@ async fn submit_pipeline_build(
     let required_trust_pool = submission_trust_pool(&headers)?;
     let required_platform = submission_platform(&headers)?;
     let idempotency_key = required_idempotency_key(&headers)?;
-    let saved = state
+    let parameters = parameter_values(request.parameters)?;
+    let replay = state
         .store
-        .pipeline(organization_id, project_id, pipeline_id)
+        .dag_replay_binding(organization_id, project_id, idempotency_key)
         .await
-        .map_err(product_error)?
-        .ok_or_else(resource_not_found)?;
-    let pipeline =
-        compile_source_with_parameters(&saved.source, parameter_values(request.parameters)?)?;
+        .map_err(admission_error)?;
+    let (source, pipeline_revision, pipeline_operational_generation) = match replay {
+        Some(binding) => {
+            if binding.pipeline_id != pipeline_id {
+                return Err(admission_error(StoreError::IdempotencyConflict(
+                    "idempotency key already belongs to a different pipeline".to_owned(),
+                )));
+            }
+            (
+                binding.source,
+                binding.pipeline_revision,
+                binding.pipeline_operational_generation,
+            )
+        }
+        None => {
+            let saved = state
+                .store
+                .pipeline(organization_id, project_id, pipeline_id)
+                .await
+                .map_err(product_error)?
+                .ok_or_else(resource_not_found)?;
+            (saved.source, saved.revision, saved.operational_generation)
+        }
+    };
+    let pipeline = compile_source_with_parameters(&source, parameters)?;
     validate_execution_platform(&pipeline, &required_platform)?;
     let digest = pipeline.semantic_digest().map_err(|error| {
         ApiError::new(
@@ -1998,8 +2020,8 @@ async fn submit_pipeline_build(
             organization_id,
             project_id,
             pipeline_id,
-            pipeline_revision: saved.revision,
-            pipeline_operational_generation: saved.operational_generation,
+            pipeline_revision,
+            pipeline_operational_generation,
             idempotency_key: idempotency_key.to_owned(),
             pipeline_digest: digest,
             priority: 0,

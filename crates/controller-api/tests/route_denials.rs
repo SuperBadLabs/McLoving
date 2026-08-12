@@ -377,6 +377,7 @@ stages:
         .expect("save parameterized pipeline");
     assert_eq!(saved.status(), StatusCode::CREATED);
     let admitted = app
+        .clone()
         .oneshot(
             Request::post(format!("{pipeline_path}/builds"))
                 .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
@@ -392,8 +393,146 @@ stages:
         .await
         .expect("submit parameterized saved pipeline");
     assert_eq!(admitted.status(), StatusCode::CREATED);
-    let (revision_digest, instantiated_digest) = sqlx::query_as::<_, (Vec<u8>, Vec<u8>)>(
-        "SELECT pipeline_revision_digest, pipeline_digest
+
+    let revised_source = source.replace("name: Run", "name: Run revised");
+    let revised = app
+        .clone()
+        .oneshot(
+            Request::put(&pipeline_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"1\"")
+                .body(Body::from(
+                    json!({
+                        "slug": "parameterized-admission",
+                        "source": revised_source,
+                        "parameters": {},
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("revise parameterized pipeline after admission");
+    assert_eq!(revised.status(), StatusCode::OK);
+
+    let disabled = app
+        .clone()
+        .oneshot(
+            Request::put(format!("{pipeline_path}/state"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"1\"")
+                .header(IDEMPOTENCY_HEADER, "disable-after-admission")
+                .body(Body::from(
+                    json!({
+                        "state": "disabled",
+                        "reason": "exercise admission replay fence",
+                        "source_identity": "test:idempotent-replay",
+                        "source_generation": "test:disable:1",
+                        "source_effective_at_unix_ms": 1_700_000_000_000_i64,
+                        "source_provenance_sha256": "44".repeat(32),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("disable pipeline after admission");
+    assert_eq!(disabled.status(), StatusCode::OK);
+    let reenabled = app
+        .clone()
+        .oneshot(
+            Request::put(format!("{pipeline_path}/state"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"2\"")
+                .header(IDEMPOTENCY_HEADER, "reenable-after-admission")
+                .body(Body::from(
+                    json!({
+                        "state": "enabled",
+                        "reason": "exercise admission replay generation",
+                        "source_identity": "test:idempotent-replay",
+                        "source_generation": "test:enable:2",
+                        "source_effective_at_unix_ms": 1_700_000_000_001_i64,
+                        "source_provenance_sha256": "45".repeat(32),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("re-enable pipeline after admission");
+    assert_eq!(reenabled.status(), StatusCode::OK);
+
+    let replayed = app
+        .clone()
+        .oneshot(
+            Request::post(format!("{pipeline_path}/builds"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(IDEMPOTENCY_HEADER, "parameterized-admission")
+                .header(PLATFORM_HEADER, "linux")
+                .header(TRUST_POOL_HEADER, "trusted-linux")
+                .body(Body::from(
+                    json!({"parameters": {"message": "instantiated"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("replay original admission after pipeline revision");
+    assert_eq!(replayed.status(), StatusCode::OK);
+
+    let divergent_parameters = app
+        .clone()
+        .oneshot(
+            Request::post(format!("{pipeline_path}/builds"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(IDEMPOTENCY_HEADER, "parameterized-admission")
+                .header(PLATFORM_HEADER, "linux")
+                .header(TRUST_POOL_HEADER, "trusted-linux")
+                .body(Body::from(
+                    json!({"parameters": {"message": "different"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("reject divergent parameter replay");
+    assert_eq!(divergent_parameters.status(), StatusCode::CONFLICT);
+
+    let divergent_pool = app
+        .oneshot(
+            Request::post(format!("{pipeline_path}/builds"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(IDEMPOTENCY_HEADER, "parameterized-admission")
+                .header(PLATFORM_HEADER, "linux")
+                .header(TRUST_POOL_HEADER, "different-pool")
+                .body(Body::from(
+                    json!({"parameters": {"message": "instantiated"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("reject divergent trust-pool replay");
+    assert_eq!(divergent_pool.status(), StatusCode::CONFLICT);
+
+    let (revision, revision_digest, instantiated_digest) =
+        sqlx::query_as::<_, (i64, Vec<u8>, Vec<u8>)>(
+            "SELECT pipeline_revision, pipeline_revision_digest, pipeline_digest
+         FROM builds
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND idempotency_key = 'parameterized-admission'",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("read parameterized build digests");
+    let build_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
          FROM builds
          WHERE organization_id = $1
            AND project_id = $2
@@ -403,7 +542,9 @@ stages:
     .bind(project_id)
     .fetch_one(store.pool())
     .await
-    .expect("read parameterized build digests");
+    .expect("count idempotent build admissions");
+    assert_eq!(revision, 1);
+    assert_eq!(build_count, 1);
     assert_ne!(revision_digest, instantiated_digest);
 }
 
