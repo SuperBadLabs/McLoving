@@ -1,6 +1,7 @@
 # Public API v1
 
-Status: implemented by UX-002 and extended by CONSUMER-001 and ADMIN-001.
+Status: implemented by UX-002 and extended by CONSUMER-001, ADMIN-001, and
+JOBSTATE-001.
 
 The Rust CLI is an HTTP client and has no privileged database or controller
 shortcut. Every protected request requires `Authorization: Bearer <token>`.
@@ -33,15 +34,29 @@ reuse of an already-rotated refresh credential revokes the identity's active
 session family. OIDC start is source-address rate limited before a durable
 one-time attempt is allocated.
 
-Pipeline submission sends strict YAML as `application/yaml` and requires an
-`Idempotency-Key` header. The key is scoped to the project and returns the
-original durable build on replay. The optional `McLoving-Platform` header
-selects the node capability independently as exactly `linux` or `windows`; its
-default is `linux`. The optional `McLoving-Trust-Pool` header selects the exact
-certificate-bound agent pool required by the admitted node; it must be
-non-empty and have no surrounding whitespace. Its default is `trusted-linux`.
-The CLI exposes the same choices as `submit --platform` and
-`submit --trust-pool`. Wave 1 accepts exactly one stage.
+Build submission names an already-saved pipeline and sends only typed parameter
+values as JSON to `POST .../pipelines/{pipeline}/builds`. It requires an
+`Idempotency-Key` header scoped to the project; an exact replay returns the
+original durable build even if the pipeline was later revised or its
+operational generation changed. Replay validation loads the original bound
+revision before resolving current state and still rejects changed parameters,
+platform, trust pool, or pipeline identity. First admission loads and compiles
+the saved current revision, then atomically binds pipeline ID, revision,
+semantic digest, and enabled operational generation to the build.
+Caller-supplied YAML cannot mint work.
+The optional `McLoving-Platform` and `McLoving-Trust-Pool` headers retain their
+strict platform and certificate-bound pool behavior; the CLI exposes these as
+`submit --platform` and `submit --trust-pool`.
+
+Operational state is independent of revisioned pipeline source. `GET
+.../pipelines/{pipeline}/state` returns the current append-only state record and
+ETag. `PUT` to the same route requires project-configure authorization, a
+quoted `If-Match` generation, `Idempotency-Key`, reviewed reason, source
+identity/generation/effective time, and provenance SHA-256. A valid
+`enabled`/`disabled` transition advances exactly one generation. Exact retries
+return the original record, divergent key reuse conflicts, and stale or future
+preconditions fail without changing state. The complete runtime fence is
+defined in `PIPELINE_OPERATIONAL_STATE_V1.md`.
 
 The versioned routes are:
 
@@ -49,7 +64,10 @@ The versioned routes are:
 - `GET /api/v1/organizations/{organization}/auth/oidc/{provider}/callback?code=...&state=...`
 - `POST /api/v1/organizations/{organization}/auth/session/refresh`
 - `POST /api/v1/organizations/{organization}/auth/session/logout`
-- `POST /api/v1/organizations/{organization}/projects/{project}/builds`
+- `GET /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/state`
+- `PUT /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/state`
+- `POST /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/builds`
+- `GET /api/v1/organizations/{organization}/projects/{project}/builds`
 - `GET /api/v1/organizations/{organization}/projects/{project}/builds/{build}`
 - `GET /api/v1/organizations/{organization}/projects/{project}/builds/{build}/logs`
 - `POST /api/v1/organizations/{organization}/projects/{project}/builds/{build}/cancel`
@@ -85,8 +103,11 @@ External administrative migration also uses only this API. `mcloving apply`
 converges a pipeline definition through `PUT .../pipelines/{pipeline}` with a
 mandatory quoted `If-Match` revision; revision zero creates, the current
 revision updates or returns unchanged, and stale revisions fail with the stable
-precondition error. `submit`, `cancel`, `retry`, and `approve` retain their
-separate action authorization, idempotency/fencing, and audit contracts. The
+precondition error. `pipeline-state` reads state and `set-pipeline-state`
+advances it through the same generation precondition and provenance contract.
+`submit` accepts a pipeline UUID plus parameters; it never uploads executable
+source. `cancel`, `retry`, and `approve` retain their separate action
+authorization, idempotency/fencing, and audit contracts. The
 complete supported/retired/pending write-operation denominator is defined in
 `EXTERNAL_ADMIN_CLIENTS_V1.md`; the API does not silently translate unsupported
 Jenkins controller operations.

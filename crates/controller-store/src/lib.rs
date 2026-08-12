@@ -3,7 +3,7 @@
 use aho_corasick::{AhoCorasickBuilder, MatchKind};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{Acquire, PgPool, Postgres, Transaction};
+use sqlx::{Acquire, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 mod admin_migration;
@@ -39,8 +39,8 @@ pub use consumer_migration::{
 };
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
-    DagNodeKind, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode, compile_matrix,
-    validate_dag_contract,
+    DagNodeKind, DagReplayBinding, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode,
+    compile_matrix, validate_dag_contract,
 };
 pub use identity::{
     AuthenticatedIdentity, IdentityLifecycle, IdentityProviderConfig, IdentityProviderWrite,
@@ -50,7 +50,9 @@ pub use identity::{
 pub use product::{
     ApprovalView, AttemptView, BuildCursor, BuildGraph, BuildListItem, BuildPage, ComponentCursor,
     ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
-    DependencyView, MAX_PRODUCT_PAGE, NodeView, PipelinePage, PipelinePutOutcome, PipelineRecord,
+    DependencyView, MAX_PRODUCT_PAGE, NodeView, PipelineOperationalState,
+    PipelineOperationalStateRecord, PipelineOperationalStateTransition,
+    PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
     PipelineWrite, TestReportView,
 };
 pub use scheduler::{ClaimRequest, ClaimedAttempt, WaitReason};
@@ -133,6 +135,9 @@ pub const EXTERNAL_READ_CONSUMERS_V25: &str =
 /// Immutable administrative-writer contract and authority generations.
 pub const EXTERNAL_ADMIN_CLIENTS_V26: &str =
     include_str!("../migrations/0026_external_admin_clients.sql");
+/// Monotonic per-pipeline enabled/disabled truth and build-generation fences.
+pub const PIPELINE_OPERATIONAL_STATE_V27: &str =
+    include_str!("../migrations/0027_pipeline_operational_state.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -179,6 +184,9 @@ pub struct AgentCancellationCompletion<'a> {
 pub struct NewBuild {
     pub organization_id: Uuid,
     pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub pipeline_revision: i64,
+    pub pipeline_operational_generation: i64,
     pub idempotency_key: String,
     pub pipeline_digest: [u8; 32],
     pub node_key: String,
@@ -459,6 +467,12 @@ pub enum StoreError {
     InvalidProductOperation(String),
     #[error("product catalog conflict: {0}")]
     ProductConflict(String),
+    #[error("invalid pipeline operational-state operation: {0}")]
+    InvalidPipelineState(String),
+    #[error("pipeline operational-state conflict: {0}")]
+    PipelineStateConflict(String),
+    #[error("pipeline {pipeline_id} is disabled at operational generation {generation}")]
+    PipelineDisabled { pipeline_id: Uuid, generation: i64 },
     #[error("invalid state transfer: {0}")]
     InvalidStateTransfer(String),
     #[error("state-transfer conflict: {0}")]
@@ -645,6 +659,8 @@ impl Store {
                    ('pipeline_definitions', 'INSERT'),
                    ('pipeline_definitions', 'UPDATE'),
                    ('pipeline_revisions', 'SELECT'), ('pipeline_revisions', 'INSERT'),
+                   ('pipeline_operational_state_history', 'SELECT'),
+                   ('pipeline_operational_state_history', 'INSERT'),
                    ('component_packages', 'SELECT'), ('component_packages', 'INSERT'),
                    ('state_transfer_receipts', 'SELECT'),
                    ('state_transfer_records', 'SELECT'),
@@ -955,6 +971,7 @@ impl Store {
                    ('project_memberships'), ('service_scopes'), ('builds'),
                    ('nodes'), ('attempts'), ('build_events'), ('outbox'),
                    ('pipeline_definitions'), ('pipeline_revisions'),
+                   ('pipeline_operational_state_history'),
                    ('component_packages'), ('attempt_log_chunks'),
                    ('attempt_effects'), ('dead_letters'), ('attempt_objects'),
                    ('state_transfer_receipts'), ('state_transfer_records'),
@@ -997,7 +1014,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 48
+             SELECT COUNT(*) = 49
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1026,7 +1043,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 48
+                    AND (SELECT COUNT(*) FROM policies) = 49
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1133,6 +1150,7 @@ impl Store {
         apply_migration(&mut tx, 24, AUTHORIZATION_MAPPING_V24).await?;
         apply_migration(&mut tx, 25, EXTERNAL_READ_CONSUMERS_V25).await?;
         apply_migration(&mut tx, 26, EXTERNAL_ADMIN_CLIENTS_V26).await?;
+        apply_migration(&mut tx, 27, PIPELINE_OPERATIONAL_STATE_V27).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -1841,19 +1859,39 @@ impl Store {
             return Err(StoreError::InvalidTrustPool);
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_pipeline_transaction(&mut tx, input.organization_id, input.pipeline_id).await?;
+        if let Some(existing) = existing_admission(&mut tx, input).await? {
+            tx.commit().await?;
+            return Ok(existing);
+        }
+        let pipeline_revision_digest = lock_enabled_pipeline_binding(
+            &mut tx,
+            input.organization_id,
+            input.project_id,
+            input.pipeline_id,
+            input.pipeline_revision,
+            input.pipeline_operational_generation,
+        )
+        .await?;
         let build_id = Uuid::new_v4();
         let inserted = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO builds (
-                 id, organization_id, project_id, idempotency_key,
-                 pipeline_digest, status, priority
+                 id, organization_id, project_id,
+                 pipeline_id, pipeline_revision, pipeline_operational_generation,
+                 pipeline_revision_digest,
+                 idempotency_key, pipeline_digest, status, priority
              )
-             VALUES ($1, $2, $3, $4, $5, 'queued', $6)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10)
              ON CONFLICT (project_id, idempotency_key) DO NOTHING
              RETURNING id",
         )
         .bind(build_id)
         .bind(input.organization_id)
         .bind(input.project_id)
+        .bind(input.pipeline_id)
+        .bind(input.pipeline_revision)
+        .bind(input.pipeline_operational_generation)
+        .bind(pipeline_revision_digest.as_slice())
         .bind(&input.idempotency_key)
         .bind(input.pipeline_digest.as_slice())
         .bind(input.priority)
@@ -1861,7 +1899,7 @@ impl Store {
         .await?;
 
         let Some(build_id) = inserted else {
-            let existing = existing_admission(&mut tx, input.project_id, &input.idempotency_key)
+            let existing = existing_admission(&mut tx, input)
                 .await?
                 .ok_or(StoreError::IncompleteAdmission)?;
             tx.commit().await?;
@@ -2646,6 +2684,18 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
+        if let Some((build_id, _, _, _)) = row.as_ref()
+            && let Err(error) =
+                lock_enabled_build_pipeline(&mut tx, organization_id, *build_id).await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(None)
+                }
+                other => Err(other),
+            };
+        }
         tx.commit().await?;
         Ok(row.map(
             |(build_id, project_id, execution_spec, cancellation_requested)| AttemptExecution {
@@ -2744,6 +2794,15 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         };
+        if let Err(error) = lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(false)
+                }
+                other => Err(other),
+            };
+        }
         if status == "running" {
             tx.commit().await?;
             return Ok(true);
@@ -2847,9 +2906,11 @@ impl Store {
         let payload_digest: [u8; 32] = Sha256::digest(payload_bytes).into();
         let mut tx = self.tenant_transaction(organization_id).await?;
         acquire_restore_fence_shared(&mut tx).await?;
-        let attempt_exists = sqlx::query_scalar::<_, i64>(
-            "SELECT a.restore_epoch
+        let attempt_authority = sqlx::query_as::<_, (i64, Uuid)>(
+            "SELECT a.restore_epoch, n.build_id
              FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
              CROSS JOIN controller_metadata AS m
              WHERE a.organization_id = $1
                AND a.id = $2
@@ -2869,10 +2930,10 @@ impl Store {
         .bind(agent_id)
         .fetch_optional(&mut *tx)
         .await?;
-        if attempt_exists.is_none() {
+        let Some((_, build_id)) = attempt_authority else {
             tx.rollback().await?;
             return Ok(false);
-        }
+        };
         let existing = sqlx::query_as::<_, (String, String, Vec<u8>)>(
             "SELECT effect_class, status, payload_digest
              FROM attempt_effects
@@ -2896,27 +2957,51 @@ impl Store {
                 tx.rollback().await?;
                 return Ok(false);
             }
-            if existing_status != status.as_str() {
-                sqlx::query(
-                    "UPDATE attempt_effects
-                     SET status = $5, updated_at = clock_timestamp()
-                     WHERE organization_id = $1
-                       AND attempt_id = $2
-                       AND fence = $3
-                       AND effect_key = $4",
-                )
-                .bind(organization_id)
-                .bind(attempt_id)
-                .bind(fence)
-                .bind(effect_key)
-                .bind(status.as_str())
-                .execute(&mut *tx)
-                .await?;
+            if existing_status == status.as_str() {
+                tx.commit().await?;
+                return Ok(true);
             }
+            if let Err(error) =
+                lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await
+            {
+                tx.rollback().await?;
+                return match error {
+                    StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                        Ok(false)
+                    }
+                    other => Err(other),
+                };
+            }
+            sqlx::query(
+                "UPDATE attempt_effects
+                 SET status = $5, updated_at = clock_timestamp()
+                 WHERE organization_id = $1
+                   AND attempt_id = $2
+                   AND fence = $3
+                   AND effect_key = $4",
+            )
+            .bind(organization_id)
+            .bind(attempt_id)
+            .bind(fence)
+            .bind(effect_key)
+            .bind(status.as_str())
+            .execute(&mut *tx)
+            .await?;
         } else {
             if status != EffectStatus::Prepared {
                 tx.rollback().await?;
                 return Ok(false);
+            }
+            if let Err(error) =
+                lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await
+            {
+                tx.rollback().await?;
+                return match error {
+                    StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                        Ok(false)
+                    }
+                    other => Err(other),
+                };
             }
             sqlx::query(
                 "INSERT INTO attempt_effects (
@@ -3278,6 +3363,32 @@ impl Store {
             tx.rollback().await?;
             return Ok(RetryDecision::Ineligible);
         }
+        if let Some((child_id, child_ordinal)) = sqlx::query_as::<_, (Uuid, i32)>(
+            "SELECT id, ordinal
+             FROM attempts
+             WHERE organization_id = $1 AND retry_of = $2",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            tx.commit().await?;
+            return Ok(RetryDecision::Scheduled {
+                attempt_id: child_id,
+                ordinal: child_ordinal,
+                created: false,
+            });
+        }
+        if let Err(error) = lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(RetryDecision::Ineligible)
+                }
+                other => Err(other),
+            };
+        }
         let has_non_idempotent_effect = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1
@@ -3318,23 +3429,6 @@ impl Store {
             .await?;
             tx.commit().await?;
             return Ok(RetryDecision::DeadLettered);
-        }
-        if let Some((child_id, child_ordinal)) = sqlx::query_as::<_, (Uuid, i32)>(
-            "SELECT id, ordinal
-             FROM attempts
-             WHERE organization_id = $1 AND retry_of = $2",
-        )
-        .bind(organization_id)
-        .bind(attempt_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        {
-            tx.commit().await?;
-            return Ok(RetryDecision::Scheduled {
-                attempt_id: child_id,
-                ordinal: child_ordinal,
-                created: false,
-            });
         }
         if ordinal >= max_attempts {
             let payload = json!({
@@ -5186,30 +5280,194 @@ async fn apply_migration(
 
 async fn existing_admission(
     tx: &mut Transaction<'_, Postgres>,
-    project_id: Uuid,
-    idempotency_key: &str,
-) -> Result<Option<BuildAdmission>, sqlx::Error> {
-    sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
-        "SELECT b.id, n.id, a.id
+    input: &NewBuild,
+) -> Result<Option<BuildAdmission>, StoreError> {
+    let row = sqlx::query(
+        "SELECT b.id AS build_id, n.id AS node_id, a.id AS attempt_id,
+                b.organization_id, b.pipeline_id, b.pipeline_revision,
+                b.pipeline_operational_generation, b.pipeline_digest,
+                b.priority AS build_priority, b.dag_mode,
+                n.node_key, n.required_capabilities, n.required_trust_pool,
+                n.priority AS node_priority, n.execution_spec
          FROM builds AS b
          JOIN nodes AS n ON n.build_id = b.id AND n.organization_id = b.organization_id
          JOIN attempts AS a ON a.node_id = n.id AND a.organization_id = n.organization_id
          WHERE b.project_id = $1
            AND b.idempotency_key = $2
-           AND a.ordinal = 1",
+           AND a.ordinal = 1
+         ORDER BY n.id
+         LIMIT 2",
     )
+    .bind(input.project_id)
+    .bind(&input.idempotency_key)
+    .fetch_all(&mut **tx)
+    .await?;
+    if row.is_empty() {
+        return Ok(None);
+    }
+    if row.len() != 1 {
+        return Err(StoreError::IdempotencyConflict(
+            "idempotent single-node build has a different node contract".to_owned(),
+        ));
+    }
+    let row = &row[0];
+    let exact = row.try_get::<Uuid, _>("organization_id")? == input.organization_id
+        && row.try_get::<Option<Uuid>, _>("pipeline_id")? == Some(input.pipeline_id)
+        && row.try_get::<Option<i64>, _>("pipeline_revision")? == Some(input.pipeline_revision)
+        && row.try_get::<Option<i64>, _>("pipeline_operational_generation")?
+            == Some(input.pipeline_operational_generation)
+        && row.try_get::<Vec<u8>, _>("pipeline_digest")? == input.pipeline_digest
+        && row.try_get::<i32, _>("build_priority")? == input.priority
+        && !row.try_get::<bool, _>("dag_mode")?
+        && row.try_get::<String, _>("node_key")? == input.node_key
+        && row.try_get::<Vec<String>, _>("required_capabilities")? == input.required_capabilities
+        && row.try_get::<String, _>("required_trust_pool")? == input.required_trust_pool
+        && row.try_get::<i32, _>("node_priority")? == input.priority
+        && row.try_get::<Value, _>("execution_spec")? == input.execution_spec;
+    if !exact {
+        return Err(StoreError::IdempotencyConflict(
+            "idempotency key already belongs to a different build contract".to_owned(),
+        ));
+    }
+    Ok(Some(BuildAdmission {
+        build_id: row.try_get("build_id")?,
+        node_id: row.try_get("node_id")?,
+        attempt_id: row.try_get("attempt_id")?,
+        created: false,
+    }))
+}
+
+pub(crate) async fn lock_pipeline_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    pipeline_id: Uuid,
+) -> Result<(), StoreError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("mcloving.pipeline.{organization_id}.{pipeline_id}"))
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn lock_enabled_pipeline_binding(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    pipeline_revision: i64,
+    operational_generation: i64,
+) -> Result<[u8; 32], StoreError> {
+    if pipeline_revision <= 0 || operational_generation <= 0 {
+        return Err(StoreError::InvalidPipelineState(
+            "pipeline admission binding must use positive revision and generation".to_owned(),
+        ));
+    }
+    let current = sqlx::query_as::<_, (i64, i64, String, Vec<u8>)>(
+        "SELECT d.current_revision, d.operational_generation, h.state, r.semantic_digest
+         FROM pipeline_definitions AS d
+         JOIN pipeline_operational_state_history AS h
+           ON h.organization_id = d.organization_id
+          AND h.pipeline_id = d.pipeline_id
+          AND h.generation = d.operational_generation
+         JOIN pipeline_revisions AS r
+           ON r.organization_id = d.organization_id
+          AND r.pipeline_id = d.pipeline_id
+          AND r.revision = d.current_revision
+         WHERE d.organization_id = $1
+           AND d.project_id = $2
+           AND d.pipeline_id = $3
+         FOR UPDATE OF d",
+    )
+    .bind(organization_id)
     .bind(project_id)
-    .bind(idempotency_key)
+    .bind(pipeline_id)
     .fetch_optional(&mut **tx)
-    .await
-    .map(|row| {
-        row.map(|(build_id, node_id, attempt_id)| BuildAdmission {
-            build_id,
-            node_id,
-            attempt_id,
-            created: false,
-        })
+    .await?;
+    let Some((current_revision, current_generation, state, current_digest)) = current else {
+        return Err(StoreError::PipelineStateConflict(
+            "pipeline admission binding does not identify a saved pipeline".to_owned(),
+        ));
+    };
+    if state == "disabled" {
+        return Err(StoreError::PipelineDisabled {
+            pipeline_id,
+            generation: current_generation,
+        });
+    }
+    if state != "enabled" {
+        return Err(StoreError::InvalidPipelineState(format!(
+            "stored pipeline operational state '{state}' is invalid"
+        )));
+    }
+    if current_revision != pipeline_revision || current_generation != operational_generation {
+        return Err(StoreError::PipelineStateConflict(format!(
+            "pipeline admission binding is stale: current revision/generation is \
+             {current_revision}/{current_generation}"
+        )));
+    }
+    current_digest.try_into().map_err(|_| {
+        StoreError::PipelineStateConflict(
+            "saved pipeline revision digest is not SHA-256 sized".to_owned(),
+        )
     })
+}
+
+pub(crate) async fn lock_enabled_build_pipeline(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+) -> Result<(Uuid, i64), StoreError> {
+    let binding = sqlx::query_as::<_, (Option<Uuid>, Option<i64>)>(
+        "SELECT pipeline_id, pipeline_operational_generation
+         FROM builds
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((Some(pipeline_id), Some(admitted_generation))) = binding else {
+        return Err(StoreError::PipelineStateConflict(
+            "build is missing its pipeline operational-state binding".to_owned(),
+        ));
+    };
+    let current = sqlx::query_as::<_, (i64, String)>(
+        "SELECT d.operational_generation, h.state
+         FROM pipeline_definitions AS d
+         JOIN pipeline_operational_state_history AS h
+           ON h.organization_id = d.organization_id
+          AND h.pipeline_id = d.pipeline_id
+          AND h.generation = d.operational_generation
+         WHERE d.organization_id = $1 AND d.pipeline_id = $2
+         FOR UPDATE OF d",
+    )
+    .bind(organization_id)
+    .bind(pipeline_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((current_generation, state)) = current else {
+        return Err(StoreError::PipelineStateConflict(
+            "build pipeline operational-state truth is missing".to_owned(),
+        ));
+    };
+    if state == "disabled" {
+        return Err(StoreError::PipelineDisabled {
+            pipeline_id,
+            generation: current_generation,
+        });
+    }
+    if state != "enabled" {
+        return Err(StoreError::InvalidPipelineState(format!(
+            "stored pipeline operational state '{state}' is invalid"
+        )));
+    }
+    if current_generation != admitted_generation {
+        return Err(StoreError::PipelineStateConflict(format!(
+            "build pipeline generation {admitted_generation} is stale; current generation is \
+             {current_generation}"
+        )));
+    }
+    Ok((pipeline_id, current_generation))
 }
 
 async fn append_event_and_outbox(

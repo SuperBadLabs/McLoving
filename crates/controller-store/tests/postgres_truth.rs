@@ -3,12 +3,13 @@ use std::time::Duration;
 
 use mcloving_controller_store::{
     AgentCancellationCompletion, AgentCancellationDisposition, AgentCancellationOutcome,
-    AgentReconciliationDisposition, ClaimRequest, ComponentPutOutcome, ComponentWrite,
-    DagDependency, DagNodeKind, DependencyCondition, EffectClass, EffectStatus, JunitLimits,
-    MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild, NewCredentialGrant, NewDagBuild,
-    NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind, ObjectStatus, PipelinePutOutcome,
-    PipelineWrite, ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError,
-    TerminalOutcome, TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
+    AgentReconciliationDisposition, BuildAdmission, ClaimRequest, ComponentPutOutcome,
+    ComponentWrite, DagAdmission, DagDependency, DagNodeKind, DependencyCondition, EffectClass,
+    EffectStatus, JunitLimits, MAX_OBJECT_RETENTION_SECONDS, NewAuditEvent, NewBuild,
+    NewCredentialGrant, NewDagBuild, NewDagNode, NewEnvironmentApproval, NewLogChunk, ObjectKind,
+    ObjectStatus, PipelinePutOutcome, PipelineRecord, PipelineWrite,
+    ReconciliationTrustPoolAuthorization, RetryDecision, Store, StoreError, TerminalOutcome,
+    TestOutcome, TestReportSource, WaitReason, parse_junit, verify_audit_page,
 };
 use mcloving_state_transfer::{
     BuildResult as TransferBuildResult, BuildState as TransferBuildState, ConflictPolicy,
@@ -34,6 +35,90 @@ async fn test_store() -> Option<Store> {
     let store = Store::new(pool);
     store.migrate().await.expect("install controller schema");
     Some(store)
+}
+
+trait TestBoundAdmission {
+    async fn admit_test_build(&self, input: &NewBuild) -> Result<BuildAdmission, StoreError>;
+    async fn admit_test_dag(&self, input: &NewDagBuild) -> Result<DagAdmission, StoreError>;
+}
+
+impl TestBoundAdmission for Store {
+    async fn admit_test_build(&self, input: &NewBuild) -> Result<BuildAdmission, StoreError> {
+        let pipeline = bind_test_pipeline(
+            self,
+            input.organization_id,
+            input.project_id,
+            input.pipeline_id,
+            input.pipeline_digest,
+        )
+        .await?;
+        let mut bound = input.clone();
+        bound.pipeline_revision = pipeline.revision;
+        bound.pipeline_operational_generation = pipeline.operational_generation;
+        self.admit_build(&bound).await
+    }
+
+    async fn admit_test_dag(&self, input: &NewDagBuild) -> Result<DagAdmission, StoreError> {
+        let pipeline = bind_test_pipeline(
+            self,
+            input.organization_id,
+            input.project_id,
+            input.pipeline_id,
+            input.pipeline_digest,
+        )
+        .await?;
+        let mut bound = input.clone();
+        bound.pipeline_revision = pipeline.revision;
+        bound.pipeline_operational_generation = pipeline.operational_generation;
+        self.admit_dag(&bound).await
+    }
+}
+
+async fn bind_test_pipeline(
+    store: &Store,
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    semantic_digest: [u8; 32],
+) -> Result<PipelineRecord, StoreError> {
+    let current = store
+        .pipeline(organization_id, project_id, pipeline_id)
+        .await?;
+    if current
+        .as_ref()
+        .is_some_and(|pipeline| pipeline.semantic_digest == semantic_digest)
+    {
+        return Ok(current.expect("matching current pipeline exists"));
+    }
+    let source = format!("test pipeline {}", hex::encode(semantic_digest));
+    let expected_revision = current.as_ref().map_or(0, |pipeline| pipeline.revision);
+    let outcome = store
+        .put_pipeline(
+            &PipelineWrite {
+                organization_id,
+                project_id,
+                pipeline_id,
+                slug: format!("test-{project_id}"),
+                source_sha256: Sha256::digest(source.as_bytes()).into(),
+                source,
+                semantic_digest,
+                schema_major: 1,
+                schema_minor: 0,
+                parameter_schema: json!({}),
+            },
+            Some(expected_revision),
+        )
+        .await?;
+    match outcome {
+        PipelinePutOutcome::Created(record)
+        | PipelinePutOutcome::Updated(record)
+        | PipelinePutOutcome::Unchanged(record) => Ok(record),
+        PipelinePutOutcome::PreconditionFailed { current_revision } => {
+            Err(StoreError::ProductConflict(format!(
+                "test pipeline binding raced at revision {current_revision}"
+            )))
+        }
+    }
 }
 
 #[tokio::test]
@@ -1111,9 +1196,12 @@ async fn work_mutations_are_fenced_inside_the_current_session_transaction() {
         .await
         .expect("create tenant");
     store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "session-fenced-work".into(),
             pipeline_digest: [0x5e; 32],
             node_key: "execute".into(),
@@ -1352,6 +1440,9 @@ async fn admission_is_atomic_and_idempotent() {
     let input = NewBuild {
         organization_id,
         project_id,
+        pipeline_id: project_id,
+        pipeline_revision: 1,
+        pipeline_operational_generation: 1,
         idempotency_key: "submission-1".into(),
         pipeline_digest: [7; 32],
         node_key: "stage-1".into(),
@@ -1361,8 +1452,14 @@ async fn admission_is_atomic_and_idempotent() {
         execution_spec: json!({}),
     };
 
-    let first = store.admit_build(&input).await.expect("first admission");
-    let second = store.admit_build(&input).await.expect("repeat admission");
+    let first = store
+        .admit_test_build(&input)
+        .await
+        .expect("first admission");
+    let second = store
+        .admit_test_build(&input)
+        .await
+        .expect("repeat admission");
     assert!(first.created);
     assert!(!second.created);
     assert_eq!(first.build_id, second.build_id);
@@ -1402,9 +1499,12 @@ async fn queued_cancellation_is_terminal_idempotent_and_unclaimable() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "cancel-before-claim".into(),
             pipeline_digest: [8; 32],
             node_key: "stage-1".into(),
@@ -1502,9 +1602,12 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
             .expect("open agent session")
     );
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-cancellation-complete".into(),
             pipeline_digest: [0xAC; 32],
             node_key: "stage-1".into(),
@@ -1629,9 +1732,12 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     assert_eq!(completions, 1);
 
     let recovered = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-recovery-termination".into(),
             pipeline_digest: [0xAE; 32],
             node_key: "stage-recovery".into(),
@@ -1742,9 +1848,12 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     assert_eq!(recovery_events, 1);
 
     let retained = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-cancellation-unverifiable".into(),
             pipeline_digest: [0xAD; 32],
             node_key: "stage-unverifiable".into(),
@@ -1828,9 +1937,12 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     assert_eq!(retained_events, 1);
 
     let recycled = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-cancellation-recycled-pid".into(),
             pipeline_digest: [0xAE; 32],
             node_key: "stage-recycled".into(),
@@ -1914,9 +2026,12 @@ async fn agent_cancellation_completion_is_fenced_durable_and_idempotent() {
     assert_eq!(recycled_events, 1);
 
     let re_enrolled = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-cancellation-re-enrolled-trust-pool".into(),
             pipeline_digest: [0xAF; 32],
             node_key: "stage-re-enrolled".into(),
@@ -2027,9 +2142,12 @@ async fn cancellation_with_uncertain_effect_is_retained_for_reconciliation() {
             .expect("open agent session")
     );
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "agent-cancellation-reconciliation".into(),
             pipeline_digest: [0xCE; 32],
             node_key: "stage-1".into(),
@@ -2200,9 +2318,12 @@ async fn cancellation_targets_the_latest_retry_attempt() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "cancel-current-retry".into(),
             pipeline_digest: [9; 32],
             node_key: "stage-1".into(),
@@ -2450,9 +2571,12 @@ async fn unprivileged_runtime_role_admits_but_cannot_bootstrap() {
         "runtime role must not bootstrap tenant metadata"
     );
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "runtime-role".into(),
             pipeline_digest: [8; 32],
             node_key: "stage-1".into(),
@@ -2500,9 +2624,12 @@ async fn concurrent_terminal_publication_has_one_winner() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "terminal-race".into(),
             pipeline_digest: [9; 32],
             node_key: "stage-1".into(),
@@ -2609,9 +2736,12 @@ async fn scheduler_requires_the_nodes_designated_trust_pool() {
         .await
         .expect("create tenant");
     let build = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "release-pool".into(),
             pipeline_digest: [0x71; 32],
             node_key: "release".into(),
@@ -2762,9 +2892,12 @@ async fn scheduler_explains_the_offered_pool_before_higher_priority_other_pool_w
         .await
         .expect("create tenant");
     store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "higher-release".into(),
             pipeline_digest: [0x72; 32],
             node_key: "release".into(),
@@ -2776,9 +2909,12 @@ async fn scheduler_explains_the_offered_pool_before_higher_priority_other_pool_w
         .await
         .expect("admit higher-priority release work");
     store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "lower-trusted".into(),
             pipeline_digest: [0x73; 32],
             node_key: "trusted".into(),
@@ -2820,9 +2956,12 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
         .await
         .expect("create tenant");
     let windows = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "windows".into(),
             pipeline_digest: [1; 32],
             node_key: "windows-stage".into(),
@@ -2834,9 +2973,12 @@ async fn scheduler_filters_capabilities_and_explains_the_wait() {
         .await
         .expect("admit Windows work");
     let linux = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "linux".into(),
             pipeline_digest: [2; 32],
             node_key: "linux-stage".into(),
@@ -2921,9 +3063,12 @@ async fn expired_accepted_attempt_is_reclaimed_with_a_new_fence() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "reclaim".into(),
             pipeline_digest: [3; 32],
             node_key: "stage".into(),
@@ -3022,9 +3167,12 @@ async fn expired_non_idempotent_effect_requires_reconciliation() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "effect-expiry".into(),
             pipeline_digest: [39; 32],
             node_key: "deploy".into(),
@@ -3252,9 +3400,12 @@ async fn expired_confirmed_non_idempotent_effect_cannot_be_replayed() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "confirmed-effect-expiry".into(),
             pipeline_digest: [40; 32],
             node_key: "deploy".into(),
@@ -3416,9 +3567,12 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "reconciliation-decision".into(),
             pipeline_digest: [42; 32],
             node_key: "recover".into(),
@@ -3512,9 +3666,12 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
     assert_eq!(child.attempt_id, child_id);
 
     let exhausted = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "reconciliation-dead-letter".into(),
             pipeline_digest: [43; 32],
             node_key: "exhausted".into(),
@@ -3614,9 +3771,12 @@ async fn reconciliation_retry_and_terminal_decisions_are_mutually_exclusive() {
     );
 
     let terminal_first = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "reconciliation-terminal-first".into(),
             pipeline_digest: [44; 32],
             node_key: "terminal-first".into(),
@@ -3741,9 +3901,12 @@ async fn build_logs_exclude_chunks_from_a_superseded_fence() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "fenced-logs".into(),
             pipeline_digest: [19; 32],
             node_key: "stage-1".into(),
@@ -3992,9 +4155,12 @@ async fn effects_are_monotonic_and_uncertain_work_is_explicit() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "effect-ledger".into(),
             pipeline_digest: [23; 32],
             node_key: "stage-1".into(),
@@ -4304,9 +4470,12 @@ async fn retry_history_is_immutable_idempotent_and_bounded() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "bounded-retry".into(),
             pipeline_digest: [24; 32],
             node_key: "stage-1".into(),
@@ -4584,9 +4753,12 @@ async fn object_references_are_fenced_immutable_and_report_gaps() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "object-reference".into(),
             pipeline_digest: [25; 32],
             node_key: "stage-1".into(),
@@ -4751,9 +4923,12 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
         .await
         .expect("create tenant");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "retained-object".into(),
             pipeline_digest: [51; 32],
             node_key: "stage-1".into(),
@@ -4832,9 +5007,12 @@ async fn retention_is_monotonic_and_legal_holds_block_deletion() {
         .await
         .expect("create second tenant");
     let second_admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id: second_organization_id,
             project_id: second_project_id,
+            pipeline_id: second_project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "shared-digest".into(),
             pipeline_digest: [53; 32],
             node_key: "stage-1".into(),
@@ -5231,9 +5409,12 @@ async fn backup_restore_canary_seed() {
         .await
         .expect("create recovery canary");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "backup-restore-canary".into(),
             pipeline_digest: [61; 32],
             node_key: "stage-1".into(),
@@ -5366,9 +5547,12 @@ async fn backup_restore_canary_seed() {
             .expect("prepare recovery effect")
     );
     store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "queued-rewind-canary".into(),
             pipeline_digest: [64; 32],
             node_key: "queued-stage".into(),
@@ -5833,9 +6017,12 @@ async fn protected_credentials_are_approval_bound_fenced_and_one_time() {
         "create and actual policy changes are audited while a no-op is not"
     );
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "protected-deploy".into(),
             pipeline_digest,
             node_key: "deploy".into(),
@@ -6303,9 +6490,12 @@ async fn postgres_rls_hides_and_rejects_cross_tenant_rows() {
         (organization_b, project_b, "tenant-b"),
     ] {
         store
-            .admit_build(&NewBuild {
+            .admit_test_build(&NewBuild {
                 organization_id,
                 project_id,
+                pipeline_id: project_id,
+                pipeline_revision: 1,
+                pipeline_operational_generation: 1,
                 idempotency_key: key.into(),
                 pipeline_digest: [4; 32],
                 node_key: "stage".into(),
@@ -6377,6 +6567,9 @@ async fn dag_idempotency_mismatch_is_an_explicit_conflict() {
     let input = NewDagBuild {
         organization_id,
         project_id,
+        pipeline_id: project_id,
+        pipeline_revision: 1,
+        pipeline_operational_generation: 1,
         idempotency_key: "stable-key".to_owned(),
         pipeline_digest: [0x91; 32],
         priority: 0,
@@ -6388,11 +6581,14 @@ async fn dag_idempotency_mismatch_is_an_explicit_conflict() {
             "build",
         )],
     };
-    store.admit_dag(&input).await.expect("admit original DAG");
+    store
+        .admit_test_dag(&input)
+        .await
+        .expect("admit original DAG");
     let mut conflicting = input.clone();
     conflicting.pipeline_digest = [0x92; 32];
     assert!(matches!(
-        store.admit_dag(&conflicting).await,
+        store.admit_test_dag(&conflicting).await,
         Err(StoreError::IdempotencyConflict(_))
     ));
 }
@@ -6415,9 +6611,12 @@ async fn dag_log_cursor_never_hides_later_node_output() {
         .await
         .expect("create DAG log project");
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "dag-log-cursor".to_owned(),
             pipeline_digest: [0xd2; 32],
             priority: 0,
@@ -6526,9 +6725,12 @@ async fn operator_retry_reopens_fail_fast_skipped_independent_siblings() {
     let mut sibling = dag_node("sibling", DagNodeKind::Work, vec![], "linux", "sibling");
     sibling.priority = 10;
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "dag-fail-fast-retry".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
@@ -6645,9 +6847,12 @@ async fn operator_retry_reopens_a_terminal_dag_and_preserves_attempt_history() {
         .await
         .expect("create DAG retry project");
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "dag-operator-retry".to_owned(),
             pipeline_digest: [0xd3; 32],
             priority: 0,
@@ -6759,9 +6964,12 @@ async fn rolling_upgrade_attempt_inserts_preserve_runnable_and_blocked_readiness
         .await
         .expect("create readiness compatibility project");
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "attempt-readiness-rolling-upgrade".to_owned(),
             pipeline_digest: [0xd5; 32],
             priority: 0,
@@ -6941,9 +7149,12 @@ async fn automatic_retry_waits_for_a_reopened_completed_dependency() {
     );
     child.max_attempts = 2;
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "automatic-retry-readiness".to_owned(),
             pipeline_digest: [0xd6; 32],
             priority: 0,
@@ -7091,9 +7302,12 @@ async fn operator_retry_waits_for_a_reopened_completed_dependency() {
         .await
         .expect("create operator retry readiness project");
     let _admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "operator-retry-readiness".to_owned(),
             pipeline_digest: [0xd7; 32],
             priority: 0,
@@ -7287,9 +7501,12 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
         "post",
     );
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "parallel-retry-join-post".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
@@ -7299,9 +7516,12 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
         .expect("admit DAG");
     assert!(admission.created);
     let replay = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "parallel-retry-join-post".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
@@ -7348,9 +7568,12 @@ async fn dag_parallel_retry_join_post_and_restart_truth_are_transactional() {
     changed_linux.max_attempts = 2;
     changed_linux.execution_spec = json!({"program": "false", "node": "linux"});
     let changed_replay = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "parallel-retry-join-post".to_owned(),
             pipeline_digest: [0xd4; 32],
             priority: 0,
@@ -7612,9 +7835,12 @@ async fn dag_retry_refuses_confirmed_non_idempotent_effects() {
     let mut deploy = dag_node("deploy", DagNodeKind::Work, vec![], "linux", "deploy");
     deploy.max_attempts = 2;
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "dag-non-idempotent".to_owned(),
             pipeline_digest: [0xe4; 32],
             priority: 0,
@@ -7723,9 +7949,12 @@ async fn dag_reconciliation_required_pauses_other_ready_work() {
     let mut after = dag_node("after", DagNodeKind::Work, vec![], "linux", "build");
     after.priority = 0;
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "reconciliation-pauses-dag".to_owned(),
             pipeline_digest: [0xd5; 32],
             priority: 0,
@@ -7888,9 +8117,12 @@ async fn dag_fail_fast_cancels_active_skips_queued_and_still_runs_post() {
         "post",
     );
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "fail-fast".to_owned(),
             pipeline_digest: [0xf4; 32],
             priority: 0,
@@ -8067,9 +8299,12 @@ async fn dag_fail_fast_cooperative_cancellation_and_retry_race_converge() {
         "post",
     );
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "fail-fast-cooperative".to_owned(),
             pipeline_digest: [0xf5; 32],
             priority: 0,
@@ -8216,9 +8451,12 @@ async fn dag_owner_cancellation_is_durable_idempotent_and_monotonic() {
         .await
         .expect("create cancellation project");
     let admission = store
-        .admit_dag(&NewDagBuild {
+        .admit_test_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "cancel-dag".to_owned(),
             pipeline_digest: [0xca; 32],
             priority: 0,
@@ -8331,9 +8569,12 @@ async fn tenant_audit_is_hash_chained_exportable_immutable_and_retained() {
         .await
         .expect("create audited project");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "audit-build".to_owned(),
             pipeline_digest: [0x71; 32],
             node_key: "build".to_owned(),
@@ -8613,9 +8854,12 @@ async fn artifact_metadata_is_exact_fenced_retained_and_no_overwrite() {
         .await
         .expect("create artifact project");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "artifact-build".to_owned(),
             pipeline_digest: [0x81; 32],
             node_key: "package".to_owned(),
@@ -9007,9 +9251,12 @@ async fn junit_evidence_is_bounded_immutable_and_preserves_flaky_history() {
         .await
         .expect("create test-truth project");
     let admission = store
-        .admit_build(&NewBuild {
+        .admit_test_build(&NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "test-truth-build".to_owned(),
             pipeline_digest: [0x91; 32],
             node_key: "test".to_owned(),

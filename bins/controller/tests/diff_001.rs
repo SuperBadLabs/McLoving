@@ -2,7 +2,7 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::time::Duration;
 
-use mcloving_controller_api::Client;
+use mcloving_controller_api::{Client, PipelineBuildRequest, PipelineUpsertRequest};
 use mcloving_controller_store::Store;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -87,14 +87,30 @@ async fn admitted_jenkins_case_executes_with_a_canonical_trace() {
     let client = Client::new(&format!("http://127.0.0.1:{port}"), TOKEN)
         .with_artifact_agent_token(ARTIFACT_TOKEN);
     wait_until_listening(&client, organization_id).await;
-    let admission = client
-        .submit_on_platform_in_pool(
+    let pipeline_id = Uuid::new_v4();
+    client
+        .put_pipeline(
             organization_id,
             project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "diff-001-admitted".to_owned(),
+                source: PIPELINE.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("save exact compiled pipeline");
+    let admission = client
+        .submit_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            pipeline_id,
             "diff-001-admitted",
             "linux",
             "migration-deny-authority",
-            PIPELINE.to_owned(),
+            &PipelineBuildRequest::default(),
         )
         .await
         .expect("submit exact compiled pipeline");

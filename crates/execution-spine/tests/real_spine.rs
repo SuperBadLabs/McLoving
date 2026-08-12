@@ -1,9 +1,12 @@
 use std::time::Duration;
 
 use mcloving_agent_runtime::{Acceptance, AttemptPhase, Journal};
-use mcloving_controller_api::{ApiState, Client, ExplainResponse, router};
+use mcloving_controller_api::{
+    ApiState, Client, ExplainResponse, PipelineBuildRequest, PipelineUpsertRequest, router,
+};
 use mcloving_controller_store::{
-    ClaimRequest, NewBuild, NewLogChunk, Store, TerminalOutcome,
+    BuildAdmission, ClaimRequest, NewBuild, NewLogChunk, PipelinePutOutcome, PipelineWrite, Store,
+    StoreError, TerminalOutcome,
     authz::{Principal, PrincipalKind, ServiceScope},
 };
 use mcloving_execution_spine::{WorkerConfig, run_claim};
@@ -28,6 +31,7 @@ fn api_state(store: Store, organization_id: Uuid) -> ApiState {
                 ServiceScope::ProjectRead,
                 ServiceScope::BuildSubmit,
                 ServiceScope::BuildCancel,
+                ServiceScope::ProjectAdmin,
                 ServiceScope::SchedulerControl,
             ]
             .into(),
@@ -76,6 +80,77 @@ async fn test_store() -> Option<Store> {
     Some(store)
 }
 
+async fn admit_bound_test_build(
+    store: &Store,
+    mut input: NewBuild,
+) -> Result<BuildAdmission, StoreError> {
+    let current = store
+        .pipeline(input.organization_id, input.project_id, input.pipeline_id)
+        .await?;
+    let pipeline = if current
+        .as_ref()
+        .is_some_and(|pipeline| pipeline.semantic_digest == input.pipeline_digest)
+    {
+        current.expect("matching pipeline exists")
+    } else {
+        let source = format!("test pipeline {:?}", input.pipeline_digest);
+        let outcome = store
+            .put_pipeline(
+                &PipelineWrite {
+                    organization_id: input.organization_id,
+                    project_id: input.project_id,
+                    pipeline_id: input.pipeline_id,
+                    slug: format!("test-{}", input.project_id),
+                    source_sha256: Sha256::digest(source.as_bytes()).into(),
+                    source,
+                    semantic_digest: input.pipeline_digest,
+                    schema_major: 1,
+                    schema_minor: 0,
+                    parameter_schema: json!({}),
+                },
+                Some(current.as_ref().map_or(0, |pipeline| pipeline.revision)),
+            )
+            .await?;
+        match outcome {
+            PipelinePutOutcome::Created(record)
+            | PipelinePutOutcome::Updated(record)
+            | PipelinePutOutcome::Unchanged(record) => record,
+            PipelinePutOutcome::PreconditionFailed { current_revision } => {
+                return Err(StoreError::ProductConflict(format!(
+                    "test pipeline raced at revision {current_revision}"
+                )));
+            }
+        }
+    };
+    input.pipeline_revision = pipeline.revision;
+    input.pipeline_operational_generation = pipeline.operational_generation;
+    store.admit_build(&input).await
+}
+
+async fn save_test_pipeline(
+    client: &Client,
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    slug: &str,
+    source: &str,
+) {
+    client
+        .put_pipeline(
+            organization_id,
+            project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: slug.to_owned(),
+                source: source.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("save test pipeline");
+}
+
 #[tokio::test]
 async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
     let Some(store) = test_store().await else {
@@ -100,13 +175,39 @@ async fn strict_yaml_crosses_the_real_public_and_execution_spine() {
         axum::serve(listener, router(api_state(store.clone(), organization_id))).into_future(),
     );
     let client = Client::new(&format!("http://{address}"), TOKEN);
+    let pipeline_id = Uuid::new_v4();
+    save_test_pipeline(
+        &client,
+        organization_id,
+        project_id,
+        pipeline_id,
+        "e2e",
+        PIPELINE,
+    )
+    .await;
     let admission = client
-        .submit(organization_id, project_id, "e2e-001", PIPELINE.to_owned())
+        .submit_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            pipeline_id,
+            "e2e-001",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
         .await
-        .expect("submit strict YAML through HTTP");
+        .expect("submit saved pipeline through HTTP");
     assert!(admission.created);
     let replay = client
-        .submit(organization_id, project_id, "e2e-001", PIPELINE.to_owned())
+        .submit_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            pipeline_id,
+            "e2e-001",
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
+        )
         .await
         .expect("replay idempotent HTTP submission");
     assert!(!replay.created);
@@ -215,6 +316,9 @@ async fn controller_restart_replay_is_logically_exactly_once() {
     let input = NewBuild {
         organization_id,
         project_id,
+        pipeline_id: project_id,
+        pipeline_revision: 1,
+        pipeline_operational_generation: 1,
         idempotency_key: "e2e-002".to_owned(),
         pipeline_digest: [42; 32],
         node_key: "execute".to_owned(),
@@ -232,10 +336,14 @@ async fn controller_restart_replay_is_logically_exactly_once() {
             }]
         }),
     };
-    let admission = initial.admit_build(&input).await.expect("admit");
+    let admission = admit_bound_test_build(&initial, input.clone())
+        .await
+        .expect("admit");
     drop(initial);
     let store = restart();
-    let replay = store.admit_build(&input).await.expect("replay admission");
+    let replay = admit_bound_test_build(&store, input.clone())
+        .await
+        .expect("replay admission");
     assert!(!replay.created);
     assert_eq!(replay.build_id, admission.build_id);
 
@@ -491,12 +599,25 @@ async fn agent_reconnect_reconciles_and_cancellation_removes_descendants() {
         axum::serve(listener, router(api_state(store.clone(), organization_id))).into_future(),
     );
     let client = Client::new(&format!("http://{address}"), TOKEN);
+    let pipeline_id = Uuid::new_v4();
+    save_test_pipeline(
+        &client,
+        organization_id,
+        project_id,
+        pipeline_id,
+        "agent-recovery",
+        CANCELLATION_PIPELINE,
+    )
+    .await;
     let admission = client
-        .submit(
+        .submit_pipeline_on_platform_in_pool(
             organization_id,
             project_id,
+            pipeline_id,
             "e2e-003",
-            CANCELLATION_PIPELINE.to_owned(),
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
         )
         .await
         .expect("submit");
@@ -623,10 +744,14 @@ async fn cancellation_between_offer_and_acceptance_finishes_without_spawning() {
         )
         .await
         .expect("create project");
-    let admission = store
-        .admit_build(&NewBuild {
+    let admission = admit_bound_test_build(
+        &store,
+        NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "pre-accept-cancel".into(),
             pipeline_digest: [21; 32],
             node_key: "execute".into(),
@@ -637,7 +762,8 @@ async fn cancellation_between_offer_and_acceptance_finishes_without_spawning() {
                 r#"{"version":1,"steps":[{"kind":"process","program":"/bin/sh","args":["-c","touch should-not-exist"],"env":{},"timeout_seconds":10}]}"#,
             )
             .unwrap(),
-        })
+        },
+    )
         .await
         .expect("admit build");
     let claim = store
@@ -826,10 +952,14 @@ async fn admitted_claim(
         )
         .await
         .expect("create project");
-    let admission = store
-        .admit_build(&NewBuild {
+    let admission = admit_bound_test_build(
+        store,
+        NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: idempotency_key.into(),
             pipeline_digest: Sha256::digest(idempotency_key).into(),
             node_key: "execute".into(),
@@ -837,9 +967,10 @@ async fn admitted_claim(
             required_trust_pool: "trusted".into(),
             priority: 0,
             execution_spec,
-        })
-        .await
-        .expect("admit build");
+        },
+    )
+    .await
+    .expect("admit build");
     let claim = store
         .claim_next(&ClaimRequest {
             organization_id,

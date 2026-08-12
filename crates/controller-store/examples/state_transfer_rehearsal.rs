@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use mcloving_controller_store::{
     ClaimRequest, DagDependency, DagNodeKind, DependencyCondition, NewDagBuild, NewDagNode,
-    NewLogChunk, ObjectStatus, RetryDecision, ScmCheckoutEvidenceRef, StateTransferReceipt, Store,
-    StoreError, TerminalOutcome,
+    NewLogChunk, ObjectStatus, PipelinePutOutcome, PipelineWrite, RetryDecision,
+    ScmCheckoutEvidenceRef, StateTransferReceipt, Store, StoreError, TerminalOutcome,
 };
 use mcloving_state_transfer::{
     AttemptRetryReason, AttemptRetryState, AttemptState, AttemptTerminalReason, BuildResult,
@@ -1190,10 +1190,42 @@ async fn run_effect_free_build(
             max_attempts: 1,
         })
         .collect();
+    let pipeline_id = project_id;
+    let source = "version: 1\nname: mig005a-effect-free\nstages: []\n".to_owned();
+    let pipeline = match store
+        .put_pipeline(
+            &PipelineWrite {
+                organization_id,
+                project_id,
+                pipeline_id,
+                slug: "mig005a-effect-free".to_owned(),
+                source_sha256: sha256(source.as_bytes()),
+                source,
+                semantic_digest: receipt.bundle_digest,
+                schema_major: 1,
+                schema_minor: 0,
+                parameter_schema: json!({}),
+            },
+            Some(0),
+        )
+        .await?
+    {
+        PipelinePutOutcome::Created(record)
+        | PipelinePutOutcome::Updated(record)
+        | PipelinePutOutcome::Unchanged(record) => record,
+        PipelinePutOutcome::PreconditionFailed { current_revision } => {
+            return Err(StoreError::ProductConflict(format!(
+                "effect-free rehearsal pipeline raced at revision {current_revision}"
+            )));
+        }
+    };
     let admission = store
         .admit_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id,
+            pipeline_revision: pipeline.revision,
+            pipeline_operational_generation: pipeline.operational_generation,
             idempotency_key: "mig005a-effect-free-build-3".to_owned(),
             pipeline_digest: receipt.bundle_digest,
             priority: 0,

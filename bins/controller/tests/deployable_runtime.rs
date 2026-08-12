@@ -1,7 +1,9 @@
 use std::net::TcpListener;
 use std::time::Duration;
 
-use mcloving_controller_api::{ArtifactCommitRequest, Client};
+use mcloving_controller_api::{
+    ArtifactCommitRequest, Client, PipelineBuildRequest, PipelineUpsertRequest,
+};
 use mcloving_controller_store::Store;
 use sqlx::postgres::PgPoolOptions;
 use tokio::process::Command;
@@ -87,14 +89,30 @@ async fn shipped_controller_uses_split_credentials_and_executes_submissions() {
     let client = Client::new(&format!("http://127.0.0.1:{port}"), TOKEN)
         .with_artifact_agent_token(artifact_agent_token);
     wait_until_listening(&client, organization_id).await;
-    let admission = client
-        .submit_on_platform_in_pool(
+    let pipeline_id = Uuid::new_v4();
+    client
+        .put_pipeline(
             organization_id,
             project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "binary-e2e".to_owned(),
+                source: PIPELINE.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("save pipeline through shipped controller");
+    let admission = client
+        .submit_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            pipeline_id,
             "binary-e2e",
             "windows",
             "trusted-windows",
-            PIPELINE.to_owned(),
+            &PipelineBuildRequest::default(),
         )
         .await
         .expect("submit through shipped controller");

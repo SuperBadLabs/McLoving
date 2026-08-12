@@ -1,7 +1,7 @@
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use mcloving_controller_api::static_ui_router;
 use serde_json::{Value, json};
 
@@ -15,10 +15,17 @@ const TOKEN: &str = "browser-token";
 async fn main() {
     let project = format!("/api/v1/organizations/{ORGANIZATION}/projects/{PROJECT}");
     let build = format!("{project}/builds/{BUILD}");
+    let pipeline = format!("{project}/pipelines/{{pipeline_id}}");
     let app = static_ui_router::<()>()
-        .route(&format!("{project}/builds"), get(builds).post(submit))
+        .route(&format!("{project}/builds"), get(builds))
         .route(&format!("{project}/pipelines/validate"), post(validate))
         .route(&format!("{project}/pipelines/plan"), post(plan))
+        .route(&pipeline, put(save_pipeline))
+        .route(
+            &format!("{pipeline}/state"),
+            get(pipeline_state).put(set_pipeline_state),
+        )
+        .route(&format!("{pipeline}/builds"), post(submit))
         .route(&build, get(status))
         .route(&format!("{build}/graph"), get(graph))
         .route(&format!("{build}/logs"), get(logs))
@@ -68,6 +75,57 @@ async fn submit(headers: HeaderMap) -> impl IntoResponse {
             "pipeline_digest": "ab".repeat(32)
         }),
     )
+}
+
+async fn save_pipeline(headers: HeaderMap) -> impl IntoResponse {
+    authorized(
+        &headers,
+        json!({
+            "organization_id": ORGANIZATION,
+            "project_id": PROJECT,
+            "pipeline_id": "66666666-6666-4666-8666-666666666666",
+            "slug": "browser-pipeline",
+            "revision": 1,
+            "source": "version: 1",
+            "source_sha256": vec![0_u8; 32],
+            "semantic_digest": vec![1_u8; 32],
+            "schema_major": 1,
+            "schema_minor": 0,
+            "parameter_schema": {},
+            "operational_generation": 1,
+            "operational_state": "enabled",
+            "created_at_unix_ms": 1,
+            "updated_at_unix_ms": 1
+        }),
+    )
+}
+
+async fn pipeline_state(headers: HeaderMap) -> impl IntoResponse {
+    authorized(&headers, state_record("enabled", 1))
+}
+
+async fn set_pipeline_state(headers: HeaderMap) -> impl IntoResponse {
+    authorized(&headers, state_record("disabled", 2))
+}
+
+fn state_record(state: &str, generation: i64) -> Value {
+    json!({
+        "organization_id": ORGANIZATION,
+        "project_id": PROJECT,
+        "pipeline_id": "66666666-6666-4666-8666-666666666666",
+        "generation": generation,
+        "state": state,
+        "reason": "browser state",
+        "actor_subject": "service:browser",
+        "source_identity": "browser:fixture",
+        "source_generation": format!("fixture:{generation}"),
+        "source_effective_at_unix_ms": 1_800_000_000_000_i64,
+        "source_provenance_sha256": vec![0x42_u8; 32],
+        "idempotency_key": format!("fixture:{generation}"),
+        "effective_at_unix_ms": 1_800_000_000_001_i64,
+        "audit_sequence": generation,
+        "audit_event_hash": vec![0x24_u8; 32]
+    })
 }
 
 async fn validate(headers: HeaderMap) -> impl IntoResponse {

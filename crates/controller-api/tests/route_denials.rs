@@ -7,9 +7,11 @@ use mcloving_controller_api::{
     ARTIFACT_NAME_HEADER, ApiState, IDEMPOTENCY_HEADER, PLATFORM_HEADER, TRUST_POOL_HEADER, router,
 };
 use mcloving_controller_store::{
-    Store,
+    PipelinePutOutcome, PipelineWrite, Store,
     authz::{Principal, PrincipalKind, ServiceScope},
 };
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -72,7 +74,7 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
         node_id,
         &digest,
     );
-    assert_eq!(cases.len(), 26, "route matrix must track the public API");
+    assert_eq!(cases.len(), 28, "route matrix must track the public API");
     for case in cases {
         let unauthenticated = app
             .clone()
@@ -146,6 +148,11 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(html.contains("<option value=\"aborted\">cancelled</option>"));
     assert!(html.contains("<input id=\"approval-id\" required"));
     assert!(html.contains("<input id=\"idempotency-key\" required>"));
+    assert!(html.contains(
+        "id=\"pipeline-id\" required autocomplete=\"off\" inputmode=\"text\" pattern=\"[0-9a-fA-F]{8}-"
+    ));
+    assert!(html.contains("Submit saved pipeline"));
+    assert!(html.contains("Advance state"));
     assert!(html.contains("stages:\n  - id: hello"));
     assert!(!html.contains("stages: []"));
     assert!(!html.contains("browser-submit"));
@@ -184,6 +191,361 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(app_js.contains("entry.content_hex"));
     assert!(app_js.contains("async function loadAllAudit()"));
     assert!(app_js.contains("page.next_after_sequence"));
+    assert!(app_js.contains("`${pipelinePath()}/builds`"));
+    assert!(app_js.contains("`${pipelinePath()}/state`"));
+    assert!(app_js.contains("const pipelineStateRetry ="));
+    assert!(
+        app_js.contains("source_effective_at_unix_ms: pipelineStateRetry.sourceEffectiveAtUnixMs")
+    );
+}
+
+#[tokio::test]
+async fn pipeline_state_transition_requires_project_configure_authority() {
+    let Ok(url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .expect("connect PostgreSQL state authorization test");
+    let store = Store::new(pool);
+    store.migrate().await.expect("install controller schema");
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let pipeline_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "state-authz",
+        )
+        .await
+        .expect("create state authorization project");
+    let source = "version: 1\nname: state-authz\nstages: []\n";
+    assert!(matches!(
+        store
+            .put_pipeline(
+                &PipelineWrite {
+                    organization_id,
+                    project_id,
+                    pipeline_id,
+                    slug: "state-authz".to_owned(),
+                    source: source.to_owned(),
+                    source_sha256: Sha256::digest(source.as_bytes()).into(),
+                    semantic_digest: Sha256::digest(b"state-authz-semantic").into(),
+                    schema_major: 1,
+                    schema_minor: 0,
+                    parameter_schema: json!({}),
+                },
+                Some(0),
+            )
+            .await
+            .expect("create state authorization pipeline"),
+        PipelinePutOutcome::Created(_)
+    ));
+    let principal = Principal {
+        subject: "service:state-reader".to_owned(),
+        kind: PrincipalKind::Service,
+        organization_id,
+        project_roles: BTreeMap::new(),
+        service_scopes: [ServiceScope::ProjectRead].into_iter().collect(),
+        mapped_projects: BTreeSet::new(),
+        action_grants: BTreeMap::new(),
+    };
+    let app =
+        router(ApiState::new(store, TOKEN, principal).expect("construct state authorization API"));
+    let path = format!(
+        "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state"
+    );
+    let read = app
+        .clone()
+        .oneshot(
+            Request::get(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("read current state");
+    assert_eq!(read.status(), StatusCode::OK);
+    let transition = app
+        .oneshot(
+            Request::put(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"1\"")
+                .header(IDEMPOTENCY_HEADER, "state-reader-denied")
+                .body(Body::from(
+                    json!({
+                        "state": "disabled",
+                        "reason": "must be denied",
+                        "source_identity": "test:reader",
+                        "source_generation": "test:1",
+                        "source_effective_at_unix_ms": 1_800_000_000_000_i64,
+                        "source_provenance_sha256": "42".repeat(32),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("deny state transition");
+    assert_eq!(transition.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn saved_pipeline_submission_keeps_revision_and_instantiated_digests_distinct() {
+    let Ok(url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .expect("connect PostgreSQL parameterized admission test");
+    let store = Store::new(pool);
+    store.migrate().await.expect("install controller schema");
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let pipeline_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "parameterized-admission",
+        )
+        .await
+        .expect("create parameterized admission project");
+    let principal = Principal {
+        subject: "service:parameterized-admission".to_owned(),
+        kind: PrincipalKind::Service,
+        organization_id,
+        project_roles: BTreeMap::new(),
+        service_scopes: [
+            ServiceScope::ProjectAdmin,
+            ServiceScope::BuildSubmit,
+            ServiceScope::ProjectRead,
+        ]
+        .into_iter()
+        .collect(),
+        mapped_projects: BTreeSet::new(),
+        action_grants: BTreeMap::new(),
+    };
+    let app = router(
+        ApiState::new(store.clone(), TOKEN, principal)
+            .expect("construct parameterized admission API"),
+    );
+    let source = r#"version: 1
+name: parameterized-admission
+parameters:
+  message:
+    type: string
+    default: saved
+stages:
+  - id: run
+    name: Run
+    steps:
+      - process:
+          program: echo
+          args:
+            - expression: parameters.message
+"#;
+    let pipeline_path = format!(
+        "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}"
+    );
+    let saved = app
+        .clone()
+        .oneshot(
+            Request::put(&pipeline_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"0\"")
+                .body(Body::from(
+                    json!({
+                        "slug": "parameterized-admission",
+                        "source": source,
+                        "parameters": {},
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("save parameterized pipeline");
+    assert_eq!(saved.status(), StatusCode::CREATED);
+    let admitted = app
+        .clone()
+        .oneshot(
+            Request::post(format!("{pipeline_path}/builds"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(IDEMPOTENCY_HEADER, "parameterized-admission")
+                .header(PLATFORM_HEADER, "linux")
+                .header(TRUST_POOL_HEADER, "trusted-linux")
+                .body(Body::from(
+                    json!({"parameters": {"message": "instantiated"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("submit parameterized saved pipeline");
+    assert_eq!(admitted.status(), StatusCode::CREATED);
+
+    let revised_source = source.replace("name: Run", "name: Run revised");
+    let revised = app
+        .clone()
+        .oneshot(
+            Request::put(&pipeline_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"1\"")
+                .body(Body::from(
+                    json!({
+                        "slug": "parameterized-admission",
+                        "source": revised_source,
+                        "parameters": {},
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("revise parameterized pipeline after admission");
+    assert_eq!(revised.status(), StatusCode::OK);
+
+    let disabled = app
+        .clone()
+        .oneshot(
+            Request::put(format!("{pipeline_path}/state"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"1\"")
+                .header(IDEMPOTENCY_HEADER, "disable-after-admission")
+                .body(Body::from(
+                    json!({
+                        "state": "disabled",
+                        "reason": "exercise admission replay fence",
+                        "source_identity": "test:idempotent-replay",
+                        "source_generation": "test:disable:1",
+                        "source_effective_at_unix_ms": 1_700_000_000_000_i64,
+                        "source_provenance_sha256": "44".repeat(32),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("disable pipeline after admission");
+    assert_eq!(disabled.status(), StatusCode::OK);
+    let reenabled = app
+        .clone()
+        .oneshot(
+            Request::put(format!("{pipeline_path}/state"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"2\"")
+                .header(IDEMPOTENCY_HEADER, "reenable-after-admission")
+                .body(Body::from(
+                    json!({
+                        "state": "enabled",
+                        "reason": "exercise admission replay generation",
+                        "source_identity": "test:idempotent-replay",
+                        "source_generation": "test:enable:2",
+                        "source_effective_at_unix_ms": 1_700_000_000_001_i64,
+                        "source_provenance_sha256": "45".repeat(32),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("re-enable pipeline after admission");
+    assert_eq!(reenabled.status(), StatusCode::OK);
+
+    let replayed = app
+        .clone()
+        .oneshot(
+            Request::post(format!("{pipeline_path}/builds"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(IDEMPOTENCY_HEADER, "parameterized-admission")
+                .header(PLATFORM_HEADER, "linux")
+                .header(TRUST_POOL_HEADER, "trusted-linux")
+                .body(Body::from(
+                    json!({"parameters": {"message": "instantiated"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("replay original admission after pipeline revision");
+    assert_eq!(replayed.status(), StatusCode::OK);
+
+    let divergent_parameters = app
+        .clone()
+        .oneshot(
+            Request::post(format!("{pipeline_path}/builds"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(IDEMPOTENCY_HEADER, "parameterized-admission")
+                .header(PLATFORM_HEADER, "linux")
+                .header(TRUST_POOL_HEADER, "trusted-linux")
+                .body(Body::from(
+                    json!({"parameters": {"message": "different"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("reject divergent parameter replay");
+    assert_eq!(divergent_parameters.status(), StatusCode::CONFLICT);
+
+    let divergent_pool = app
+        .oneshot(
+            Request::post(format!("{pipeline_path}/builds"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(IDEMPOTENCY_HEADER, "parameterized-admission")
+                .header(PLATFORM_HEADER, "linux")
+                .header(TRUST_POOL_HEADER, "different-pool")
+                .body(Body::from(
+                    json!({"parameters": {"message": "instantiated"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("reject divergent trust-pool replay");
+    assert_eq!(divergent_pool.status(), StatusCode::CONFLICT);
+
+    let (revision, revision_digest, instantiated_digest) =
+        sqlx::query_as::<_, (i64, Vec<u8>, Vec<u8>)>(
+            "SELECT pipeline_revision, pipeline_revision_digest, pipeline_digest
+         FROM builds
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND idempotency_key = 'parameterized-admission'",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .fetch_one(store.pool())
+        .await
+        .expect("read parameterized build digests");
+    let build_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)
+         FROM builds
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND idempotency_key = 'parameterized-admission'",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("count idempotent build admissions");
+    assert_eq!(revision, 1);
+    assert_eq!(build_count, 1);
+    assert_ne!(revision_digest, instantiated_digest);
 }
 
 fn request(case: &RouteCase, token: Option<&str>) -> Request<Body> {
@@ -228,6 +590,10 @@ fn route_cases(
         r#"{{"approval_id":"{approval_id}","environment":"production","action":"deploy","ttl_seconds":60}}"#
     );
     let retry = r#"{"max_attempts":3,"reason":"operator retry"}"#;
+    let state = format!(
+        r#"{{"state":"disabled","reason":"reviewed freeze","source_identity":"jenkins:jobstate-import","source_generation":"jenkins:42","source_effective_at_unix_ms":1800000000000,"source_provenance_sha256":"{}"}}"#,
+        "42".repeat(32)
+    );
     let commit = format!(
         r#"{{"node_id":"{node_id}","attempt_id":"{attempt_id}","fence":1,"restore_epoch":1,"agent_id":"agent","name":"artifact.bin","media_type":"application/octet-stream","sha256":"{digest}","bytes":1,"retention_seconds":60}}"#
     );
@@ -258,6 +624,18 @@ fn route_cases(
             json,
         )
         .with_header(header::IF_MATCH.as_str(), "\"0\""),
+        case(
+            Method::GET,
+            format!("{project}/pipelines/{pipeline_id}/state"),
+        ),
+        body_case(
+            Method::PUT,
+            format!("{project}/pipelines/{pipeline_id}/state"),
+            state,
+            json,
+        )
+        .with_header(header::IF_MATCH.as_str(), "\"1\"")
+        .with_header(IDEMPOTENCY_HEADER, "route-state-disable"),
         case(Method::GET, format!("{project}/components")),
         case(Method::GET, format!("{project}/components/{digest}")),
         body_case(
@@ -269,9 +647,9 @@ fn route_cases(
         case(Method::GET, format!("{project}/builds")),
         body_case(
             Method::POST,
-            format!("{project}/builds"),
-            "version: 1\nname: route-contract\nstages: []",
-            Some("application/yaml"),
+            format!("{project}/pipelines/{pipeline_id}/builds"),
+            r#"{"parameters":{}}"#,
+            json,
         )
         .with_header(IDEMPOTENCY_HEADER, "route-contract")
         .with_header(PLATFORM_HEADER, "linux")

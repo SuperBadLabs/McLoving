@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio};
 use std::time::Duration;
 
-use mcloving_controller_api::{BuildResponse, Client};
+use mcloving_controller_api::{
+    AdmissionResponse, BuildResponse, Client, PipelineBuildRequest, PipelineUpsertRequest,
+};
 use mcloving_controller_store::Store;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -141,17 +143,14 @@ async fn persistent_windows_agent_executes_every_explicit_mode() {
     assert!(joined_logs(&powershell_logs).contains("ps-ok"));
 
     let cancellation_path = format!(r"{script_root}\cancel-tree.ps1");
-    let cancellation = client
-        .submit_on_platform_in_pool(
-            organization_id,
-            project_id,
-            "win002-cancel",
-            "windows",
-            TRUST_POOL,
-            pipeline("powershell", &cancellation_path, &[]),
-        )
-        .await
-        .expect("submit cancellation tree");
+    let cancellation = submit_windows(
+        &client,
+        organization_id,
+        project_id,
+        "win002-cancel",
+        &pipeline("powershell", &cancellation_path, &[]),
+    )
+    .await;
     wait_running(&client, organization_id, project_id, cancellation.build_id).await;
     // The controller publishes logs when the attempt finalizes, so give the
     // Windows workload a bounded opportunity to spawn its descendant before
@@ -265,17 +264,14 @@ async fn run_recovery_gate(
     let recovery_path = format!(r"{script_root}\recovery.ps1");
     let verify_path = format!(r"{script_root}\verify-recovery.ps1");
 
-    let interrupted = client
-        .submit_on_platform_in_pool(
-            organization_id,
-            project_id,
-            "win003-controller-interruption",
-            "windows",
-            TRUST_POOL,
-            pipeline("powershell", &recovery_path, &["controller"]),
-        )
-        .await
-        .expect("submit controller-interruption workload");
+    let interrupted = submit_windows(
+        client,
+        organization_id,
+        project_id,
+        "win003-controller-interruption",
+        &pipeline("powershell", &recovery_path, &["controller"]),
+    )
+    .await;
     wait_running(client, organization_id, project_id, interrupted.build_id).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     stop(controller).await;
@@ -314,17 +310,14 @@ async fn run_recovery_gate(
     )
     .await;
 
-    let rebooted = client
-        .submit_on_platform_in_pool(
-            organization_id,
-            project_id,
-            "win003-machine-reboot",
-            "windows",
-            TRUST_POOL,
-            pipeline("powershell", &recovery_path, &["reboot"]),
-        )
-        .await
-        .expect("submit machine-reboot workload");
+    let rebooted = submit_windows(
+        client,
+        organization_id,
+        project_id,
+        "win003-machine-reboot",
+        &pipeline("powershell", &recovery_path, &["reboot"]),
+    )
+    .await;
     wait_running(client, organization_id, project_id, rebooted.build_id).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let reboot_completion = root.join("WIN003_REBOOT_COMPLETE.json");
@@ -471,23 +464,49 @@ async fn submit_and_wait(
     key: &str,
     source: &str,
 ) -> BuildResponse {
-    let admission = client
-        .submit_on_platform_in_pool(
-            organization_id,
-            project_id,
-            key,
-            "windows",
-            TRUST_POOL,
-            source.to_owned(),
-        )
-        .await
-        .expect("submit Windows work");
+    let admission = submit_windows(client, organization_id, project_id, key, source).await;
     let status = wait_terminal(client, organization_id, project_id, admission.build_id).await;
     assert_eq!(
         status.status, "succeeded",
         "{key} did not succeed: {status:?}"
     );
     status
+}
+
+async fn submit_windows(
+    client: &Client,
+    organization_id: Uuid,
+    project_id: Uuid,
+    key: &str,
+    source: &str,
+) -> AdmissionResponse {
+    let pipeline_id = Uuid::new_v4();
+    client
+        .put_pipeline(
+            organization_id,
+            project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: key.to_owned(),
+                source: source.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("save Windows pipeline");
+    client
+        .submit_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            pipeline_id,
+            key,
+            "windows",
+            TRUST_POOL,
+            &PipelineBuildRequest::default(),
+        )
+        .await
+        .expect("submit saved Windows pipeline")
 }
 
 async fn wait_running(client: &Client, organization_id: Uuid, project_id: Uuid, build_id: Uuid) {
