@@ -1185,25 +1185,76 @@ fn maximum_request_envelope_fits(
 }
 
 fn maximum_request_timestamp_pair(observation_time_ms: i64, max_age_ms: i64) -> (i64, i64) {
-    // A request may be at most `max_age_ms` old or live that far into the future, but its signed
-    // validity interval is itself capped at `max_age_ms`. The two endpoint pairs cover the oldest
-    // and latest admissible extrema without combining them into an invalid double-width window.
-    let candidates = [
-        (
-            observation_time_ms.saturating_sub(max_age_ms),
-            observation_time_ms,
-        ),
-        (
-            observation_time_ms,
-            observation_time_ms.saturating_add(max_age_ms),
-        ),
-    ];
-    candidates
-        .into_iter()
-        .max_by_key(|(requested_at, expires_at)| {
-            requested_at.to_string().len() + expires_at.to_string().len()
+    // Serialized integer width changes only at the 39 signed decimal bands. Search those bands
+    // exactly: this captures interior pairs around zero (for example `-10, 10`) without scanning
+    // an arbitrarily large age window or combining endpoints into an invalid validity interval.
+    let requested_bands = timestamp_decimal_bands(
+        observation_time_ms.saturating_sub(max_age_ms),
+        observation_time_ms,
+    );
+    let expiry_bands = timestamp_decimal_bands(
+        observation_time_ms,
+        observation_time_ms.saturating_add(max_age_ms),
+    );
+    requested_bands
+        .iter()
+        .flat_map(|&(_requested_low, requested_high, requested_len)| {
+            expiry_bands
+                .iter()
+                .filter_map(move |&(expiry_low, _expiry_high, expiry_len)| {
+                    (expiry_low.saturating_sub(requested_high) <= max_age_ms).then_some((
+                        requested_high,
+                        expiry_low,
+                        requested_len + expiry_len,
+                    ))
+                })
         })
+        .max_by_key(|&(_, _, serialized_len)| serialized_len)
+        .map(|(requested_at, expires_at, _)| (requested_at, expires_at))
         .unwrap_or((observation_time_ms, observation_time_ms))
+}
+
+fn timestamp_decimal_bands(lower: i64, upper: i64) -> Vec<(i64, i64, usize)> {
+    let mut bands = Vec::with_capacity(39);
+    let lower = i128::from(lower);
+    let upper = i128::from(upper);
+    let mut power = 1_i128;
+    for digits in 1..=19 {
+        let next_power = power * 10;
+        let positive_low = if digits == 1 { 0 } else { power };
+        let positive_high = (next_power - 1).min(i128::from(i64::MAX));
+        if let Some((band_low, band_high)) =
+            intersect_i64_band(lower, upper, positive_low, positive_high)
+        {
+            bands.push((band_low, band_high, digits));
+        }
+
+        let negative_low = (-(next_power - 1)).max(i128::from(i64::MIN));
+        let negative_high = -power;
+        if let Some((band_low, band_high)) =
+            intersect_i64_band(lower, upper, negative_low, negative_high)
+        {
+            bands.push((band_low, band_high, digits + 1));
+        }
+        power = next_power;
+    }
+    bands
+}
+
+fn intersect_i64_band(
+    lower: i128,
+    upper: i128,
+    band_low: i128,
+    band_high: i128,
+) -> Option<(i64, i64)> {
+    let intersection_low = lower.max(band_low);
+    let intersection_high = upper.min(band_high);
+    (intersection_low <= intersection_high).then(|| {
+        (
+            i64::try_from(intersection_low).expect("band is clamped to i64"),
+            i64::try_from(intersection_high).expect("band is clamped to i64"),
+        )
+    })
 }
 
 fn is_literal_loopback_test_endpoint(config: &ObserverConfig) -> bool {
@@ -2093,19 +2144,30 @@ mod tests {
             (1_800_000_000_000, i64::MAX),
         ] {
             let selected = maximum_request_timestamp_pair(now, max_age);
-            let candidates = [
-                (now.saturating_sub(max_age), now),
-                (now, now.saturating_add(max_age)),
-            ];
-            assert!(candidates.contains(&selected));
+            assert!(selected.0 >= now.saturating_sub(max_age) && selected.0 <= now);
+            assert!(selected.1 >= now && selected.1 <= now.saturating_add(max_age));
             assert!(
                 selected.1.saturating_sub(selected.0) <= max_age,
                 "sizing pair must pass the signed validity-interval bound"
             );
-            let selected_len = selected.0.to_string().len() + selected.1.to_string().len();
-            assert!(candidates.iter().all(|candidate| {
-                candidate.0.to_string().len() + candidate.1.to_string().len() <= selected_len
-            }));
+        }
+
+        for now in -20_i64..=20 {
+            for max_age in 1_i64..=20 {
+                let selected = maximum_request_timestamp_pair(now, max_age);
+                let selected_len = selected.0.to_string().len() + selected.1.to_string().len();
+                let exhaustive_maximum = (now - max_age..=now)
+                    .flat_map(|requested_at| {
+                        (now..=now.saturating_add(max_age).min(requested_at + max_age)).map(
+                            move |expires_at| {
+                                requested_at.to_string().len() + expires_at.to_string().len()
+                            },
+                        )
+                    })
+                    .max()
+                    .expect("the admissible window is nonempty");
+                assert_eq!(selected_len, exhaustive_maximum, "now={now} age={max_age}");
+            }
         }
     }
 }
