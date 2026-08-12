@@ -1,0 +1,145 @@
+# Typed trigger ingress v1
+
+Status: TRIG-001 implementation contract. Production trigger authority, canary,
+cutover, rollback, and decommissioning remain gated by their own execution-board
+tickets and exact population evidence.
+
+## Boundary and eligibility
+
+Every non-manual trigger enters through one authenticated, tenant-scoped public
+API and one PostgreSQL delivery state machine. A trigger generation binds the
+organization, project, saved pipeline, trigger kind, implementation digest,
+canonical configuration and filter digests, exact event-source identity, source
+generation, replay/deduplication window, delivery expiry, retry budget, actor,
+reason, idempotency key, and hash-chained audit event.
+
+The closed trigger-kind schema is:
+
+- `scm_webhook`, with provider, repository, revision, branch, path, and event
+  filtering;
+- `schedule`, with timezone, calendar/tzdata identity, expression, exact
+  resolver and schedule identities, a bounded pre-resolved slot set, and a
+  durable watermark;
+- `upstream`, with exact upstream pipeline/build identity and result filtering;
+- `remote_api`, with exact authenticated caller, audience, request identity,
+  method, and event filtering; and
+- `plugin`, which is typed but currently always rejected because no
+  plugin-specific source implementation in the sealed production denominator
+  has earned an admission receipt.
+
+Unknown fields, filter classes, kinds, and plugin sources fail closed. The
+sealed Mario inventory names `hudson.triggers.SCMTrigger` and
+`hudson.triggers.TimerTrigger`, but does not preserve the schedule expressions,
+Jenkins hash inputs, algorithm/version, timezone, or resolved slots required to
+prove `H` equivalence. Those production TimerTrigger declarations remain
+ineligible. Trigger ingress v1 unconditionally rejects expressions containing
+`H`; even supplied metadata cannot substitute for an installed, differentially
+certified Jenkins hash resolver. It does not invent a stable-but-different hash.
+
+## Configuration generations
+
+Configuration writes require project-configure authorization, quoted
+`If-Match`, and `Idempotency-Key`. Writers serialize on the saved pipeline row.
+An exact concurrent retry returns the original generation; divergent key reuse
+is a conflict; stale/future generation is a precondition failure. Every revision
+is append-only and the current pointer advances exactly one generation.
+
+`paused` is a trigger state, not deletion. It rejects new delivery capture and
+new delivery claims. Resume is a separately authorized monotonic generation.
+Event-source rotation changes the exact caller identity and immediately rejects
+new input from the old identity. An already accepted event remains immutable and
+can be exactly replayed against its original trigger generation after later
+configuration, filter, pause, or caller changes.
+
+## Durable delivery state machine
+
+An event request names its exact trigger generation, delivery ID, event ID,
+event kind/time, typed source payload, parameters, platform, and trust pool.
+Capture canonicalizes and hashes the payload, rechecks the configured source
+identity and filter, enforces bounded past-replay/future-skew windows, locks the
+current trigger and pipeline operational state, and inserts one `pending`
+delivery plus its audit event. Delivery and event IDs are each unique per
+trigger. Exact response-loss replay returns the original record; either ID
+reused for different input is a conflict.
+
+Processing requires a bounded PostgreSQL lease with a monotonically increasing
+claim fence. Active-active workers converge on one claim. A stale worker cannot
+complete or fail a newer claim. Processing enters the JOBSTATE-001 saved-pipeline
+admission primitive using a controller-derived safe idempotency key, so a crash
+after build commit and before delivery completion converges on the same build.
+
+The durable states are:
+
+- `pending` — captured and immediately claimable;
+- `retry_wait` — a retryable failure with a future due time;
+- `admitted` — terminal and immutably bound to one build; and
+- `dead_lettered` — terminal with a bounded reason.
+
+Attempt count, retry due time, expiry, and the original trigger generation are
+durable. Expired or exhausted work dead-letters. A dead letter is never mutated
+back to pending. Project-configure redrive creates a new delivery/event identity
+with immutable lineage and ordinal, then enters the same claim, admission, and
+operational-state fence. Exact redrive replay converges; a paused trigger or
+disabled pipeline rejects recovery before work is minted.
+
+## Schedule capture and restart
+
+The authenticated scheduler submits one exact resolved slot. The request binds
+timezone, calendar/tzdata identity, original expression, schedule identity,
+expected prior watermark, and resolved Unix-millisecond slot. The slot must be a
+member of the digest-verified configured slot set.
+
+Watermark advancement and delivery insertion commit in the same transaction.
+A deferred foreign key requires the watermark's delivery ID to exist at commit,
+so a crash cannot skip a slot by persisting only the cursor. The watermark is
+strictly monotonic per trigger generation; duplicate, reordered, substituted,
+or stale-expected slots fail closed. A restarted or active-active controller
+reads the same PostgreSQL watermark. A new schedule configuration gets a new
+generation-specific watermark while older generations remain immutable for
+replay and transfer evidence.
+
+## Operational-state and authority fence
+
+Capture and every later claim lock and re-read the current saved-pipeline
+operational state. A committed disable rejects webhook, schedule, upstream,
+remote, retry, replay-to-new-work, and redrive paths before queue or build
+materialization. Exact replay of an already terminal admission remains readable
+and cannot mint a second build. Trigger pause and pipeline disable are distinct,
+audited fences.
+
+The trigger controller holds no connector, deployment, workload-secret, or
+production-effect grant merely because it captured an event. Downstream build
+and effect authority remains governed by its own tickets and fences.
+
+## Public API and transfer truth
+
+The generated OpenAPI contract exposes:
+
+- `GET/PUT .../pipelines/{pipeline}/triggers/{trigger}`;
+- `POST .../triggers/{trigger}/events`; and
+- `POST .../triggers/{trigger}/deliveries/{delivery}/redrive`.
+
+The database ledger is the transferable source of truth: append-only trigger
+versions, unique event/delivery deduplication records, pending/retry/dead-letter
+sets, admitted build bindings, claim fences, redrive lineage, and
+generation-specific schedule watermarks. The quiesced transfer snapshot also
+binds every trigger version's actor, reason, idempotency key, audit sequence and
+event hash; every accepted delivery's audit sequence and event hash; and the
+handoff export audit event into one domain-separated state digest. Verification
+rejects missing lineage, duplicate identifiers, active claims, unlinked
+watermarks, stripped provenance, or any state substitution. A later CUTOVER-001
+or ROLLBACK-001 transaction must quiesce ingress and transfer/reconcile that
+complete set under the exact implementation/configuration digests. This ticket
+does not itself switch any production authority.
+
+## Required proof
+
+Real-PostgreSQL tests cover concurrent configuration idempotency, active-active
+claims, exact/divergent delivery replay, delayed/future input, bounded outage
+retry, attempt exhaustion, dead-letter redrive, stale claim denial, caller
+rotation, pause/resume, disable fencing, restart, atomic schedule watermark,
+slot reorder/substitution, upstream success/failure, unsupported plugin denial,
+RLS/forced-RLS migration, and audit linkage. Public API tests cover missing and
+cross-tenant authorization, configuration preconditions, SCM branch/path
+filtering, durable admission, generation-bound replay after configuration
+rotation, stale-generation denial, and the generated route contract.

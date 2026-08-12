@@ -157,6 +157,18 @@ jobs:
           -p mcloving-controller-store
           --test pipeline_operational_state
           -- --test-threads=1
+      - name: Run typed trigger ingress, delivery, and schedule tests
+        run: >-
+          cargo +1.97.1 test --locked
+          -p mcloving-controller-store
+          --test trigger_ingress
+          -- --test-threads=1
+      - name: Run trigger API authorization, filtering, and replay tests
+        run: >-
+          cargo +1.97.1 test --locked
+          -p mcloving-controller-api
+          --test route_denials
+          -- --test-threads=1
       - name: Run durable identity lifecycle and tenant-isolation tests
         run: cargo +1.97.1 test --locked -p mcloving-controller-store --test identity_lifecycle
       - name: Run external read consumer cutover and rollback tests

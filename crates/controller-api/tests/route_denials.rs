@@ -18,6 +18,13 @@ use uuid::Uuid;
 
 const TOKEN: &str = "route-denial-contract-token-32-bytes";
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[derive(Clone)]
 struct RouteCase {
     method: Method,
@@ -74,7 +81,7 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
         node_id,
         &digest,
     );
-    assert_eq!(cases.len(), 28, "route matrix must track the public API");
+    assert_eq!(cases.len(), 32, "route matrix must track the public API");
     for case in cases {
         let unauthenticated = app
             .clone()
@@ -293,6 +300,250 @@ async fn pipeline_state_transition_requires_project_configure_authority() {
         .await
         .expect("deny state transition");
     assert_eq!(transition.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn authenticated_trigger_configuration_filters_and_replay_share_durable_admission() {
+    let Ok(url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .expect("connect PostgreSQL trigger API test");
+    let store = Store::new(pool);
+    store.migrate().await.expect("install controller schema");
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let pipeline_id = Uuid::new_v4();
+    let trigger_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "trigger-api",
+        )
+        .await
+        .expect("create trigger API project");
+    let source = r#"version: 1
+name: trigger-api
+stages:
+  - id: run
+    name: Run
+    steps:
+      - process:
+          program: echo
+          args: [ok]
+"#;
+    assert!(matches!(
+        store
+            .put_pipeline(
+                &PipelineWrite {
+                    organization_id,
+                    project_id,
+                    pipeline_id,
+                    slug: "trigger-api".to_owned(),
+                    source: source.to_owned(),
+                    source_sha256: Sha256::digest(source.as_bytes()).into(),
+                    semantic_digest: Sha256::digest(b"trigger-api-semantic").into(),
+                    schema_major: 1,
+                    schema_minor: 0,
+                    parameter_schema: json!({}),
+                },
+                Some(0),
+            )
+            .await
+            .expect("create trigger API pipeline"),
+        PipelinePutOutcome::Created(_)
+    ));
+    let principal = Principal {
+        subject: "scm:github:installation:42".to_owned(),
+        kind: PrincipalKind::Service,
+        organization_id,
+        project_roles: BTreeMap::new(),
+        service_scopes: [
+            ServiceScope::ProjectAdmin,
+            ServiceScope::ProjectRead,
+            ServiceScope::BuildSubmit,
+        ]
+        .into_iter()
+        .collect(),
+        mapped_projects: BTreeSet::new(),
+        action_grants: BTreeMap::new(),
+    };
+    let app = router(ApiState::new(store, TOKEN, principal).expect("construct trigger API"));
+    let path = format!(
+        "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}"
+    );
+    let filter = json!({"event_kinds": ["push"], "branches": ["main"], "path_prefixes": ["src/"]});
+    let configuration = json!({"provider": "github", "filter": filter.clone()});
+    let configuration_sha256 = sha256_hex(&serde_json::to_vec(&configuration).unwrap());
+    let filter_sha256 = sha256_hex(&serde_json::to_vec(&filter).unwrap());
+    let configured = app
+        .clone()
+        .oneshot(
+            Request::put(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"0\"")
+                .header(IDEMPOTENCY_HEADER, "trigger-api-create")
+                .body(Body::from(
+                    json!({
+                        "kind": "scm_webhook",
+                        "state": "enabled",
+                        "implementation_sha256": sha256_hex(b"trigger-api-v1"),
+                        "configuration_sha256": configuration_sha256,
+                        "filter_sha256": filter_sha256,
+                        "event_source_identity": "scm:github:installation:42",
+                        "source_generation": "github-installation-generation-1",
+                        "configuration": configuration,
+                        "deduplication_window_seconds": 3600,
+                        "max_delivery_attempts": 3,
+                        "delivery_ttl_seconds": 7200,
+                        "reason": "reviewed GitHub trigger",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("configure typed trigger");
+    assert_eq!(configured.status(), StatusCode::CREATED);
+
+    let event_path = format!("{path}/events");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let filtered = app
+        .clone()
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "trigger_generation": 1,
+                        "delivery_id": "filtered-delivery",
+                        "event_id": "filtered-event",
+                        "event_kind": "push",
+                        "event_time_unix_ms": now,
+                        "payload": {
+                            "repository_identity": "github:superbadlabs/mcloving",
+                            "revision": "0123456789abcdef",
+                            "branch": "release",
+                            "paths": ["src/lib.rs"]
+                        },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("filter disallowed branch");
+    assert_eq!(filtered.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let accepted_body = json!({
+        "trigger_generation": 1,
+        "delivery_id": "accepted-delivery",
+        "event_id": "accepted-event",
+        "event_kind": "push",
+        "event_time_unix_ms": now,
+        "payload": {
+            "repository_identity": "github:superbadlabs/mcloving",
+            "revision": "0123456789abcdef",
+            "branch": "main",
+            "paths": ["src/lib.rs"]
+        },
+    })
+    .to_string();
+    let accepted = app
+        .clone()
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(accepted_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .expect("accept authenticated trigger event");
+    assert_eq!(accepted.status(), StatusCode::CREATED);
+    let replay = app
+        .clone()
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(accepted_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .expect("replay authenticated trigger event");
+    assert_eq!(replay.status(), StatusCode::OK);
+
+    let rotated_filter =
+        json!({"event_kinds": ["push"], "branches": ["release"], "path_prefixes": ["src/"]});
+    let rotated_configuration = json!({"provider": "github", "filter": rotated_filter.clone()});
+    let rotated = app
+        .clone()
+        .oneshot(
+            Request::put(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"1\"")
+                .header(IDEMPOTENCY_HEADER, "trigger-api-rotate")
+                .body(Body::from(
+                    json!({
+                        "kind": "scm_webhook",
+                        "state": "enabled",
+                        "implementation_sha256": sha256_hex(b"trigger-api-v2"),
+                        "configuration_sha256": sha256_hex(&serde_json::to_vec(&rotated_configuration).unwrap()),
+                        "filter_sha256": sha256_hex(&serde_json::to_vec(&rotated_filter).unwrap()),
+                        "event_source_identity": "scm:github:installation:42",
+                        "source_generation": "github-installation-generation-2",
+                        "configuration": rotated_configuration,
+                        "deduplication_window_seconds": 3600,
+                        "max_delivery_attempts": 3,
+                        "delivery_ttl_seconds": 7200,
+                        "reason": "reviewed GitHub trigger rotation",
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("rotate trigger configuration");
+    assert_eq!(rotated.status(), StatusCode::OK);
+    let replay_after_rotation = app
+        .clone()
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(accepted_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .expect("replay accepted event after trigger rotation");
+    assert_eq!(replay_after_rotation.status(), StatusCode::OK);
+    let stale_new_event = app
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    accepted_body
+                        .replace("accepted-delivery", "stale-delivery")
+                        .replace("accepted-event", "stale-event"),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("reject new event against stale trigger generation");
+    assert_eq!(stale_new_event.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -578,6 +829,7 @@ fn route_cases(
     digest: &str,
 ) -> Vec<RouteCase> {
     let project = format!("/api/v1/organizations/{organization_id}/projects/{project_id}");
+    let trigger_id = Uuid::new_v4();
     let build = format!("{project}/builds/{build_id}");
     let source = r#"{"source":"version: 1\nname: route-contract\nstages: []"}"#;
     let pipeline =
@@ -594,6 +846,10 @@ fn route_cases(
         r#"{{"state":"disabled","reason":"reviewed freeze","source_identity":"jenkins:jobstate-import","source_generation":"jenkins:42","source_effective_at_unix_ms":1800000000000,"source_provenance_sha256":"{}"}}"#,
         "42".repeat(32)
     );
+    let trigger = format!(
+        r#"{{"kind":"remote_api","state":"enabled","implementation_sha256":"{digest}","configuration_sha256":"{digest}","filter_sha256":"{digest}","event_source_identity":"service:trigger","source_generation":"source-1","configuration":{{"filter":{{}}}},"deduplication_window_seconds":60,"max_delivery_attempts":3,"delivery_ttl_seconds":300,"reason":"reviewed trigger"}}"#
+    );
+    let event = r#"{"trigger_generation":1,"delivery_id":"delivery-1","event_id":"event-1","event_kind":"remote","event_time_unix_ms":1800000000000,"payload":{}}"#;
     let commit = format!(
         r#"{{"node_id":"{node_id}","attempt_id":"{attempt_id}","fence":1,"restore_epoch":1,"agent_id":"agent","name":"artifact.bin","media_type":"application/octet-stream","sha256":"{digest}","bytes":1,"retention_seconds":60}}"#
     );
@@ -636,6 +892,32 @@ fn route_cases(
         )
         .with_header(header::IF_MATCH.as_str(), "\"1\"")
         .with_header(IDEMPOTENCY_HEADER, "route-state-disable"),
+        case(
+            Method::GET,
+            format!("{project}/pipelines/{pipeline_id}/triggers/{trigger_id}"),
+        ),
+        body_case(
+            Method::PUT,
+            format!("{project}/pipelines/{pipeline_id}/triggers/{trigger_id}"),
+            &trigger,
+            json,
+        )
+        .with_header(header::IF_MATCH.as_str(), "\"0\"")
+        .with_header(IDEMPOTENCY_HEADER, "route-trigger-create"),
+        body_case(
+            Method::POST,
+            format!("{project}/pipelines/{pipeline_id}/triggers/{trigger_id}/events"),
+            event,
+            json,
+        ),
+        body_case(
+            Method::POST,
+            format!(
+                "{project}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/dead-1/redrive"
+            ),
+            r#"{"delivery_id":"redrive-1","event_id":"redrive-event-1"}"#,
+            json,
+        ),
         case(Method::GET, format!("{project}/components")),
         case(Method::GET, format!("{project}/components/{digest}")),
         body_case(

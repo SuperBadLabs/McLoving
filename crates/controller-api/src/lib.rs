@@ -23,10 +23,14 @@ use mcloving_controller_store::{
     ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, ComponentCursor,
     ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
     DagDependency, DagNodeKind, DependencyCondition, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild,
-    NewDagNode, NewEnvironmentApproval, ObjectKind, ObjectStatus, PipelineOperationalStateRecord,
-    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome, PipelinePage,
-    PipelinePutOutcome, PipelineRecord, PipelineWrite, RetryDecision, Store, StoreError,
-    TestReportView, WaitReason,
+    NewDagNode, NewEnvironmentApproval, NewTriggerDelivery, ObjectKind, ObjectStatus,
+    PipelineOperationalStateRecord, PipelineOperationalStateTransition,
+    PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
+    PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, RetryDecision,
+    Store, StoreError, TestReportView, TriggerDelivery, TriggerDeliveryAdmission,
+    TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest, TriggerDeliveryFailure,
+    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome,
+    TriggerScheduleSlot, WaitReason,
     authz::{Action, Principal, authorize as authorize_principal},
 };
 use mcloving_object_store::{
@@ -329,6 +333,18 @@ pub fn router(state: ApiState) -> Router {
             post(submit_pipeline_build),
         )
         .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}",
+            get(get_pipeline_trigger).put(put_pipeline_trigger),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events",
+            post(submit_trigger_event),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive",
+            post(redrive_trigger_event),
+        )
+        .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/components",
             get(list_components),
         )
@@ -470,6 +486,71 @@ pub struct PipelineOperationalStateRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineTriggerRequest {
+    pub kind: TriggerKind,
+    pub state: PipelineTriggerState,
+    pub implementation_sha256: String,
+    pub configuration_sha256: String,
+    pub filter_sha256: String,
+    pub event_source_identity: String,
+    pub source_generation: String,
+    pub configuration: Value,
+    pub deduplication_window_seconds: i64,
+    pub max_delivery_attempts: i32,
+    pub delivery_ttl_seconds: i64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineTriggerResponse {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub trigger_id: Uuid,
+    pub generation: i64,
+    pub kind: TriggerKind,
+    pub state: PipelineTriggerState,
+    pub implementation_sha256: String,
+    pub configuration_sha256: String,
+    pub filter_sha256: String,
+    pub event_source_identity: String,
+    pub source_generation: String,
+    pub configuration: Value,
+    pub deduplication_window_seconds: i64,
+    pub max_delivery_attempts: i32,
+    pub delivery_ttl_seconds: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TriggerEventRequest {
+    pub trigger_generation: i64,
+    pub delivery_id: String,
+    pub event_id: String,
+    pub event_kind: String,
+    pub event_time_unix_ms: i64,
+    pub payload: Value,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, Value>,
+    #[serde(default = "default_platform")]
+    pub platform: String,
+    #[serde(default = "default_trust_pool")]
+    pub trust_pool: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TriggerEventResponse {
+    pub delivery: TriggerDelivery,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AdmissionResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TriggerRedriveRequest {
+    pub delivery_id: String,
+    pub event_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PipelineUpsertRequest {
     pub slug: String,
     pub source: String,
@@ -568,6 +649,8 @@ fn openapi_document() -> Value {
     let provider = path_parameter("provider_id", "uuid");
     let project = path_parameter("project_id", "uuid");
     let pipeline = path_parameter("pipeline_id", "uuid");
+    let trigger = path_parameter("trigger_id", "uuid");
+    let delivery = path_parameter("delivery_id", "string");
     let digest = path_parameter("digest", "sha256");
     let build = path_parameter("build_id", "uuid");
     let attempt = path_parameter("attempt_id", "uuid");
@@ -598,6 +681,7 @@ fn openapi_document() -> Value {
         "tags": [
             {"name": "authentication"},
             {"name": "pipelines"},
+            {"name": "triggers"},
             {"name": "components"},
             {"name": "builds"},
             {"name": "evidence"},
@@ -685,6 +769,28 @@ fn openapi_document() -> Value {
                     Vec::new(), None
                 ),
                 "put": put_pipeline_state_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
+                "get": api_operation(
+                    "getPipelineTrigger", "triggers", "Read the current typed trigger generation", "200",
+                    Vec::new(), None
+                ),
+                "put": put_pipeline_trigger_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
+                "post": api_operation(
+                    "submitTriggerEvent", "triggers", "Authenticate, durably capture, and process a typed trigger event", "201",
+                    Vec::new(), Some("TriggerEventRequest")
+                )
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger, delivery],
+                "post": api_operation(
+                    "redriveTriggerDelivery", "triggers", "Explicitly redrive one dead-lettered trigger delivery", "201",
+                    Vec::new(), Some("TriggerRedriveRequest")
+                )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds": {
                 "parameters": [organization.clone(), project.clone(), pipeline],
@@ -886,6 +992,55 @@ fn openapi_document() -> Value {
                         "source_generation": {"type": "string", "minLength": 1, "maxLength": 512},
                         "source_effective_at_unix_ms": {"type": "integer", "minimum": 0},
                         "source_provenance_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                    },
+                    "additionalProperties": false
+                },
+                "PipelineTriggerRequest": {
+                    "type": "object",
+                    "required": [
+                        "kind", "state", "implementation_sha256", "configuration_sha256",
+                        "filter_sha256", "event_source_identity", "source_generation",
+                        "configuration", "deduplication_window_seconds",
+                        "max_delivery_attempts", "delivery_ttl_seconds", "reason"
+                    ],
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["scm_webhook", "schedule", "upstream", "remote_api", "plugin"]},
+                        "state": {"type": "string", "enum": ["enabled", "paused"]},
+                        "implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "configuration_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "filter_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                        "event_source_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "source_generation": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "configuration": {"type": "object", "additionalProperties": true},
+                        "deduplication_window_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
+                        "max_delivery_attempts": {"type": "integer", "minimum": 1, "maximum": 100},
+                        "delivery_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
+                        "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
+                    },
+                    "additionalProperties": false
+                },
+                "TriggerEventRequest": {
+                    "type": "object",
+                    "required": ["trigger_generation", "delivery_id", "event_id", "event_kind", "event_time_unix_ms", "payload"],
+                    "properties": {
+                        "trigger_generation": {"type": "integer", "minimum": 1},
+                        "delivery_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "event_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "event_kind": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "event_time_unix_ms": {"type": "integer", "minimum": 0},
+                        "payload": {"type": "object", "additionalProperties": true},
+                        "parameters": {"type": "object", "additionalProperties": true},
+                        "platform": {"type": "string", "enum": ["linux", "windows"]},
+                        "trust_pool": {"type": "string", "minLength": 1, "maxLength": 128}
+                    },
+                    "additionalProperties": false
+                },
+                "TriggerRedriveRequest": {
+                    "type": "object",
+                    "required": ["delivery_id", "event_id"],
+                    "properties": {
+                        "delivery_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "event_id": {"type": "string", "minLength": 1, "maxLength": 512}
                     },
                     "additionalProperties": false
                 },
@@ -1119,6 +1274,29 @@ fn put_pipeline_state_operation() -> Value {
     );
     operation["responses"]["412"] = json!({
         "description": "Operational-state generation precondition failed",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation
+}
+
+fn put_pipeline_trigger_operation() -> Value {
+    let mut operation = api_operation(
+        "putPipelineTrigger",
+        "triggers",
+        "Create, pause, resume, rotate, or revise a typed trigger",
+        "201",
+        vec![
+            header_parameter("If-Match", true),
+            header_parameter(IDEMPOTENCY_HEADER, true),
+        ],
+        Some("PipelineTriggerRequest"),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Updated trigger generation or idempotent replay",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation["responses"]["412"] = json!({
+        "description": "Trigger generation precondition failed",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
     operation
@@ -1934,6 +2112,626 @@ impl IntoResponse for ApiError {
 type ProjectPath = (Uuid, Uuid);
 type BuildPath = (Uuid, Uuid, Uuid);
 
+async fn get_pipeline_trigger(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectView,
+    )
+    .await?;
+    let trigger = state
+        .store
+        .pipeline_trigger(organization_id, project_id, pipeline_id, trigger_id)
+        .await
+        .map_err(trigger_error)?
+        .ok_or_else(resource_not_found)?;
+    trigger_response(StatusCode::OK, trigger)
+}
+
+async fn put_pipeline_trigger(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<PipelineTriggerRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let expected_generation = expected_revision(&headers)?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let outcome = state
+        .store
+        .put_pipeline_trigger(&PipelineTriggerWrite {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            expected_generation,
+            kind: request.kind,
+            state: request.state,
+            implementation_sha256: parse_hex_digest_named(
+                &request.implementation_sha256,
+                "trigger implementation",
+            )?,
+            configuration_sha256: parse_hex_digest_named(
+                &request.configuration_sha256,
+                "trigger configuration",
+            )?,
+            filter_sha256: parse_hex_digest_named(&request.filter_sha256, "trigger filter")?,
+            event_source_identity: request.event_source_identity,
+            source_generation: request.source_generation,
+            configuration: request.configuration,
+            deduplication_window_seconds: request.deduplication_window_seconds,
+            max_delivery_attempts: request.max_delivery_attempts,
+            delivery_ttl_seconds: request.delivery_ttl_seconds,
+            actor_subject: principal.subject,
+            reason: request.reason,
+            idempotency_key: idempotency_key.to_owned(),
+        })
+        .await
+        .map_err(trigger_error)?;
+    match outcome {
+        TriggerPutOutcome::Created(trigger) => trigger_response(StatusCode::CREATED, trigger),
+        TriggerPutOutcome::Revised(trigger) | TriggerPutOutcome::Replayed(trigger) => {
+            trigger_response(StatusCode::OK, trigger)
+        }
+        TriggerPutOutcome::PreconditionFailed { current_generation } => Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "trigger_generation_precondition_failed",
+            format!("current trigger generation is {current_generation}"),
+        )),
+    }
+}
+
+fn trigger_response(status: StatusCode, trigger: PipelineTrigger) -> Result<Response, ApiError> {
+    let generation = trigger.generation;
+    let mut response = (
+        status,
+        Json(PipelineTriggerResponse {
+            organization_id: trigger.organization_id,
+            project_id: trigger.project_id,
+            pipeline_id: trigger.pipeline_id,
+            trigger_id: trigger.trigger_id,
+            generation,
+            kind: trigger.kind,
+            state: trigger.state,
+            implementation_sha256: hex(&trigger.implementation_sha256),
+            configuration_sha256: hex(&trigger.configuration_sha256),
+            filter_sha256: hex(&trigger.filter_sha256),
+            event_source_identity: trigger.event_source_identity,
+            source_generation: trigger.source_generation,
+            configuration: trigger.configuration,
+            deduplication_window_seconds: trigger.deduplication_window_seconds,
+            max_delivery_attempts: trigger.max_delivery_attempts,
+            delivery_ttl_seconds: trigger.delivery_ttl_seconds,
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{generation}\"")).map_err(internal)?,
+    );
+    Ok(response)
+}
+
+async fn submit_trigger_event(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<TriggerEventRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::BuildTrigger,
+    )
+    .await?;
+    let trigger = state
+        .store
+        .pipeline_trigger_generation(
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            request.trigger_generation,
+        )
+        .await
+        .map_err(trigger_error)?
+        .ok_or_else(resource_not_found)?;
+    validate_trigger_event_filter(&trigger, &request)?;
+    let accepted_at_unix_ms = unix_time_ms();
+    let canonical_payload = canonical_trigger_payload(&request)?;
+    let payload_bytes = serde_json::to_vec(&canonical_payload).map_err(internal)?;
+    let payload_sha256: [u8; 32] = Sha256::digest(&payload_bytes).into();
+    let parameters = Value::Object(request.parameters.clone().into_iter().collect());
+    let schedule_slot = trigger_schedule_slot(&trigger, &request)?;
+    let delivery = state
+        .store
+        .accept_trigger_delivery(&NewTriggerDelivery {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            expected_trigger_generation: request.trigger_generation,
+            delivery_id: request.delivery_id.clone(),
+            event_id: request.event_id.clone(),
+            event_kind: request.event_kind.clone(),
+            caller_identity: principal.subject.clone(),
+            payload_sha256,
+            canonical_payload,
+            parameters,
+            requested_platform: request.platform.clone(),
+            requested_trust_pool: request.trust_pool.clone(),
+            event_time_unix_ms: request.event_time_unix_ms,
+            accepted_at_unix_ms,
+            schedule_slot,
+        })
+        .await
+        .map_err(trigger_error)?;
+    let delivery = match delivery {
+        TriggerDeliveryAdmission::Created(delivery)
+        | TriggerDeliveryAdmission::Replayed(delivery) => delivery,
+    };
+    process_trigger_delivery(&state, delivery, accepted_at_unix_ms).await
+}
+
+async fn redrive_trigger_event(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id, dead_letter_delivery_id)): Path<(
+        Uuid,
+        Uuid,
+        Uuid,
+        Uuid,
+        String,
+    )>,
+    headers: HeaderMap,
+    Json(request): Json<TriggerRedriveRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let accepted_at_unix_ms = unix_time_ms();
+    let delivery = state
+        .store
+        .redrive_trigger_delivery(&TriggerDeliveryRedrive {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            dead_letter_delivery_id,
+            new_delivery_id: request.delivery_id,
+            new_event_id: request.event_id,
+            actor_subject: principal.subject,
+            accepted_at_unix_ms,
+        })
+        .await
+        .map_err(trigger_error)?;
+    let delivery = match delivery {
+        TriggerDeliveryAdmission::Created(delivery)
+        | TriggerDeliveryAdmission::Replayed(delivery) => delivery,
+    };
+    process_trigger_delivery(&state, delivery, accepted_at_unix_ms).await
+}
+
+async fn process_trigger_delivery(
+    state: &ApiState,
+    delivery: TriggerDelivery,
+    now_unix_ms: i64,
+) -> Result<Response, ApiError> {
+    if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::Admitted {
+        let build_id = delivery.build_id.ok_or_else(|| {
+            internal("admitted trigger delivery is missing its bound build identity")
+        })?;
+        let (status, admission) = admit_pipeline_parameters(
+            state,
+            PipelineAdmissionInput {
+                organization_id: delivery.organization_id,
+                project_id: delivery.project_id,
+                pipeline_id: delivery.pipeline_id,
+                idempotency_key: trigger_build_idempotency(
+                    delivery.trigger_id,
+                    &delivery.delivery_id,
+                ),
+                parameters: parameter_values_from_delivery(&delivery)?,
+                required_platform: delivery.requested_platform.clone(),
+                required_trust_pool: delivery.requested_trust_pool.clone(),
+            },
+        )
+        .await?;
+        if admission.build_id != build_id {
+            return Err(internal(
+                "trigger delivery replay resolved to a different build identity",
+            ));
+        }
+        return Ok((
+            status,
+            Json(TriggerEventResponse {
+                delivery,
+                admission: Some(admission),
+            }),
+        )
+            .into_response());
+    }
+    if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::DeadLettered {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(TriggerEventResponse {
+                delivery,
+                admission: None,
+            }),
+        )
+            .into_response());
+    }
+    let worker_identity = format!("trigger-api:{}", Uuid::new_v4());
+    let claim = state
+        .store
+        .claim_trigger_delivery(&TriggerDeliveryClaimRequest {
+            organization_id: delivery.organization_id,
+            trigger_id: delivery.trigger_id,
+            delivery_id: delivery.delivery_id.clone(),
+            worker_identity: worker_identity.clone(),
+            now_unix_ms,
+            lease_expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
+        })
+        .await
+        .map_err(trigger_error)?;
+    let claimed = match claim {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        TriggerDeliveryClaimOutcome::NotDue(delivery)
+        | TriggerDeliveryClaimOutcome::Leased(delivery) => {
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(TriggerEventResponse {
+                    delivery,
+                    admission: None,
+                }),
+            )
+                .into_response());
+        }
+        TriggerDeliveryClaimOutcome::Terminal(delivery) => {
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(TriggerEventResponse {
+                    delivery,
+                    admission: None,
+                }),
+            )
+                .into_response());
+        }
+    };
+    let build_idempotency = trigger_build_idempotency(claimed.trigger_id, &claimed.delivery_id);
+    match admit_pipeline_parameters(
+        state,
+        PipelineAdmissionInput {
+            organization_id: claimed.organization_id,
+            project_id: claimed.project_id,
+            pipeline_id: claimed.pipeline_id,
+            idempotency_key: build_idempotency,
+            parameters: parameter_values_from_delivery(&claimed)?,
+            required_platform: claimed.requested_platform.clone(),
+            required_trust_pool: claimed.requested_trust_pool.clone(),
+        },
+    )
+    .await
+    {
+        Ok((status, admission)) => {
+            let delivery = state
+                .store
+                .complete_trigger_delivery(
+                    claimed.organization_id,
+                    claimed.trigger_id,
+                    &claimed.delivery_id,
+                    admission.build_id,
+                    &worker_identity,
+                    claimed.claim_fence,
+                )
+                .await
+                .map_err(trigger_error)?;
+            Ok((
+                status,
+                Json(TriggerEventResponse {
+                    delivery,
+                    admission: Some(admission),
+                }),
+            )
+                .into_response())
+        }
+        Err(error) => {
+            let retryable = error.status.is_server_error();
+            let failed = state
+                .store
+                .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
+                    organization_id: claimed.organization_id,
+                    trigger_id: claimed.trigger_id,
+                    delivery_id: claimed.delivery_id.clone(),
+                    worker_identity,
+                    claim_fence: claimed.claim_fence,
+                    now_unix_ms,
+                    retry_at_unix_ms: now_unix_ms.saturating_add(60_000),
+                    retryable,
+                    reason: format!("{}: {}", error.code, error.message),
+                })
+                .await
+                .map_err(trigger_error)?;
+            let (status, delivery) = match failed {
+                TriggerDeliveryFailure::RetryScheduled(delivery) => {
+                    (StatusCode::ACCEPTED, delivery)
+                }
+                TriggerDeliveryFailure::DeadLettered(delivery) => {
+                    (StatusCode::UNPROCESSABLE_ENTITY, delivery)
+                }
+            };
+            Ok((
+                status,
+                Json(TriggerEventResponse {
+                    delivery,
+                    admission: None,
+                }),
+            )
+                .into_response())
+        }
+    }
+}
+
+fn parameter_values_from_delivery(
+    delivery: &TriggerDelivery,
+) -> Result<BTreeMap<String, ParameterValue>, ApiError> {
+    let parameters: BTreeMap<String, Value> = serde_json::from_value(delivery.parameters.clone())
+        .map_err(|_| {
+        internal("stored trigger delivery parameters are not a canonical object")
+    })?;
+    parameter_values(parameters)
+}
+
+fn canonical_trigger_payload(request: &TriggerEventRequest) -> Result<Value, ApiError> {
+    if !request.payload.is_object() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_trigger_payload",
+            "trigger payload must be an object",
+        ));
+    }
+    Ok(json!({
+        "trigger_generation": request.trigger_generation,
+        "event_kind": request.event_kind.clone(),
+        "event_time_unix_ms": request.event_time_unix_ms,
+        "payload": request.payload.clone(),
+    }))
+}
+
+fn validate_trigger_event_filter(
+    trigger: &PipelineTrigger,
+    request: &TriggerEventRequest,
+) -> Result<(), ApiError> {
+    if trigger.state == PipelineTriggerState::Paused {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "trigger_paused",
+            format!("trigger is paused at generation {}", trigger.generation),
+        ));
+    }
+    let filter = trigger
+        .configuration
+        .get("filter")
+        .and_then(Value::as_object)
+        .ok_or_else(|| internal("stored trigger filter is not an object"))?;
+    if let Some(events) = filter.get("event_kinds") {
+        let events = canonical_string_array(events, "event_kinds")?;
+        if !events.is_empty() && !events.iter().any(|event| event == &request.event_kind) {
+            return Err(trigger_filtered("event kind"));
+        }
+    }
+    match trigger.kind {
+        TriggerKind::ScmWebhook => {
+            trigger_payload_text(request, "repository_identity")?;
+            trigger_payload_text(request, "revision")?;
+            if let Some(branches) = filter.get("branches") {
+                let branches = canonical_string_array(branches, "branches")?;
+                let branch = request
+                    .payload
+                    .get("branch")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| trigger_filtered("missing branch"))?;
+                if !branches.is_empty() && !branches.iter().any(|allowed| allowed == branch) {
+                    return Err(trigger_filtered("branch"));
+                }
+            }
+            if let Some(prefixes) = filter.get("path_prefixes") {
+                let prefixes = canonical_string_array(prefixes, "path_prefixes")?;
+                let paths = request
+                    .payload
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| trigger_filtered("missing paths"))?;
+                let matched = prefixes.is_empty()
+                    || paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|path| prefixes.iter().any(|prefix| path.starts_with(prefix)));
+                if !matched {
+                    return Err(trigger_filtered("path"));
+                }
+            }
+        }
+        TriggerKind::Upstream => {
+            let configured = trigger
+                .configuration
+                .get("upstream_pipeline_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| internal("stored upstream pipeline identity is missing"))?;
+            let supplied = request
+                .payload
+                .get("upstream_pipeline_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| trigger_filtered("missing upstream pipeline identity"))?;
+            if supplied != configured {
+                return Err(trigger_filtered("upstream pipeline identity"));
+            }
+            let upstream_build = trigger_payload_text(request, "upstream_build_id")?;
+            Uuid::parse_str(upstream_build)
+                .map_err(|_| trigger_filtered("invalid upstream build identity"))?;
+            if let Some(statuses) = filter.get("statuses") {
+                let statuses = canonical_string_array(statuses, "statuses")?;
+                let status = request
+                    .payload
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| trigger_filtered("missing upstream status"))?;
+                if !statuses.is_empty() && !statuses.iter().any(|allowed| allowed == status) {
+                    return Err(trigger_filtered("upstream status"));
+                }
+            }
+        }
+        TriggerKind::Schedule => {
+            if request.event_kind != "schedule" {
+                return Err(trigger_filtered("schedule event kind"));
+            }
+        }
+        TriggerKind::RemoteApi => {
+            let configured = trigger
+                .configuration
+                .get("audience")
+                .and_then(Value::as_str)
+                .ok_or_else(|| internal("stored remote-build audience is missing"))?;
+            if trigger_payload_text(request, "audience")? != configured {
+                return Err(trigger_filtered("remote-build audience"));
+            }
+            trigger_payload_text(request, "request_id")?;
+            let method = trigger_payload_text(request, "request_method")?;
+            if let Some(methods) = filter.get("request_methods") {
+                let methods = canonical_string_array(methods, "request_methods")?;
+                if !methods.is_empty() && !methods.iter().any(|allowed| allowed == method) {
+                    return Err(trigger_filtered("request method"));
+                }
+            }
+        }
+        TriggerKind::Plugin => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "trigger_class_ineligible",
+                "plugin trigger class has no installed admitted implementation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn trigger_payload_text<'a>(
+    request: &'a TriggerEventRequest,
+    field: &str,
+) -> Result<&'a str, ApiError> {
+    request
+        .payload
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.trim() == *value && value.len() <= 512)
+        .ok_or_else(|| trigger_filtered(&format!("missing or invalid {field}")))
+}
+
+fn trigger_schedule_slot(
+    trigger: &PipelineTrigger,
+    request: &TriggerEventRequest,
+) -> Result<Option<TriggerScheduleSlot>, ApiError> {
+    if trigger.kind != TriggerKind::Schedule {
+        return Ok(None);
+    }
+    let required_text = |field: &str| {
+        request
+            .payload
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| trigger_filtered(&format!("missing schedule {field}")))
+    };
+    let resolved_slot_unix_ms = request
+        .payload
+        .get("resolved_slot_unix_ms")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| trigger_filtered("missing resolved schedule slot"))?;
+    let expected_last_resolved_slot_unix_ms = request
+        .payload
+        .get("expected_last_resolved_slot_unix_ms")
+        .map(|value| {
+            value.as_i64().ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_schedule_watermark",
+                    "expected schedule watermark must be an integer",
+                )
+            })
+        })
+        .transpose()?;
+    Ok(Some(TriggerScheduleSlot {
+        timezone: required_text("timezone")?,
+        calendar: required_text("calendar")?,
+        expression: required_text("expression")?,
+        schedule_identity_sha256: parse_hex_digest_named(
+            &required_text("schedule_identity_sha256")?,
+            "schedule identity",
+        )?,
+        expected_last_resolved_slot_unix_ms,
+        resolved_slot_unix_ms,
+    }))
+}
+
+fn canonical_string_array(value: &Value, field: &str) -> Result<Vec<String>, ApiError> {
+    let values = value.as_array().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid_trigger_configuration",
+            format!("stored trigger filter '{field}' must be an array"),
+        )
+    })?;
+    let strings = values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid_trigger_configuration",
+                    format!("stored trigger filter '{field}' contains a non-string"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(strings)
+}
+
+fn trigger_filtered(field: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "trigger_filtered",
+        format!("trigger event did not pass the configured {field} filter"),
+    )
+}
+
+fn trigger_build_idempotency(trigger_id: Uuid, delivery_id: &str) -> String {
+    let digest: [u8; 32] = Sha256::digest(delivery_id.as_bytes()).into();
+    format!("trigger-{trigger_id}-{}", hex(&digest))
+}
+
+fn default_platform() -> String {
+    DEFAULT_PLATFORM.to_owned()
+}
+
 async fn submit_pipeline_build(
     State(state): State<Arc<ApiState>>,
     Path((organization_id, project_id, pipeline_id)): Path<(Uuid, Uuid, Uuid)>,
@@ -1952,9 +2750,48 @@ async fn submit_pipeline_build(
     let required_platform = submission_platform(&headers)?;
     let idempotency_key = required_idempotency_key(&headers)?;
     let parameters = parameter_values(request.parameters)?;
+    let (status, response) = admit_pipeline_parameters(
+        &state,
+        PipelineAdmissionInput {
+            organization_id,
+            project_id,
+            pipeline_id,
+            idempotency_key: idempotency_key.to_owned(),
+            parameters,
+            required_platform,
+            required_trust_pool,
+        },
+    )
+    .await?;
+    Ok((status, Json(response)))
+}
+
+struct PipelineAdmissionInput {
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    idempotency_key: String,
+    parameters: BTreeMap<String, ParameterValue>,
+    required_platform: String,
+    required_trust_pool: String,
+}
+
+async fn admit_pipeline_parameters(
+    state: &ApiState,
+    input: PipelineAdmissionInput,
+) -> Result<(StatusCode, AdmissionResponse), ApiError> {
+    let PipelineAdmissionInput {
+        organization_id,
+        project_id,
+        pipeline_id,
+        idempotency_key,
+        parameters,
+        required_platform,
+        required_trust_pool,
+    } = input;
     let replay = state
         .store
-        .dag_replay_binding(organization_id, project_id, idempotency_key)
+        .dag_replay_binding(organization_id, project_id, &idempotency_key)
         .await
         .map_err(admission_error)?;
     let (source, pipeline_revision, pipeline_operational_generation) = match replay {
@@ -2041,13 +2878,13 @@ async fn submit_pipeline_build(
     };
     Ok((
         status,
-        Json(AdmissionResponse {
+        AdmissionResponse {
             build_id: admission.build_id,
             node_id: first.node_id,
             attempt_id: first.attempt_id,
             created: admission.created,
             pipeline_digest: hex(&digest),
-        }),
+        },
     ))
 }
 
@@ -2360,6 +3197,37 @@ fn pipeline_state_error(error: StoreError) -> ApiError {
         StoreError::InvalidPipelineState(message) => {
             ApiError::new(StatusCode::BAD_REQUEST, "invalid_pipeline_state", message)
         }
+        StoreError::PipelineStateConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "pipeline_state_conflict", message)
+        }
+        other => internal(other),
+    }
+}
+
+fn trigger_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::InvalidTriggerIngress(message) => {
+            ApiError::new(StatusCode::BAD_REQUEST, "invalid_trigger_ingress", message)
+        }
+        StoreError::TriggerIngressConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "trigger_ingress_conflict", message)
+        }
+        StoreError::TriggerPaused {
+            trigger_id,
+            generation,
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "trigger_paused",
+            format!("trigger {trigger_id} is paused at generation {generation}"),
+        ),
+        StoreError::PipelineDisabled {
+            pipeline_id,
+            generation,
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "pipeline_disabled",
+            format!("pipeline {pipeline_id} is disabled at operational generation {generation}"),
+        ),
         StoreError::PipelineStateConflict(message) => {
             ApiError::new(StatusCode::CONFLICT, "pipeline_state_conflict", message)
         }
@@ -4269,6 +5137,22 @@ mod tests {
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state",
                 "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}",
+                "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events",
+                "post",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive",
+                "post",
             ),
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds",
