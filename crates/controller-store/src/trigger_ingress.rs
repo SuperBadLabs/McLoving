@@ -1492,13 +1492,23 @@ impl Store {
                 "delivery completion claim is stale or belongs to another worker".to_owned(),
             ));
         }
-        // Match ordinary admission and pipeline-state transitions by entering
-        // the shared pipeline scope before the organization audit-chain head.
-        // DAG staging, delivery binding, and the admission audit record form
-        // one atomic mutation, so hold both before the final database clock
-        // predicates. Contention then cannot deadlock the inverse order or let
-        // an expired delivery or claim commit a runnable build.
+        // Match ordinary admission and every trigger path that reads the saved
+        // pipeline by entering the shared pipeline scope and locking the exact
+        // enabled definition generation before the organization audit-chain
+        // head. DAG staging, delivery binding, and the admission audit record
+        // form one atomic mutation, so hold all three before the final database
+        // clock predicates. Contention then cannot deadlock the inverse order
+        // or let an expired delivery or claim commit a runnable build.
         crate::lock_pipeline_transaction(&mut tx, input.organization_id, dag.pipeline_id).await?;
+        let _ = crate::lock_enabled_pipeline_binding(
+            &mut tx,
+            dag.organization_id,
+            dag.project_id,
+            dag.pipeline_id,
+            dag.pipeline_revision,
+            dag.pipeline_operational_generation,
+        )
+        .await?;
         let _ = crate::audit::lock_audit_head(&mut tx, input.organization_id).await?;
         let admitted_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
         if current.expires_at_unix_ms <= admitted_at_unix_ms {

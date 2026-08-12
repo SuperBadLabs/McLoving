@@ -1062,6 +1062,93 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         TriggerDeliveryDagAdmission::Admitted { .. }
     ));
 
+    let definition_order_now = database_unix_ms(&store).await;
+    let definition_order_delivery = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        1,
+        "delivery-definition-audit-order",
+        "event-definition-audit-order",
+        definition_order_now,
+    );
+    store
+        .accept_trigger_delivery(&definition_order_delivery)
+        .await
+        .unwrap();
+    let definition_order_claim = match store
+        .claim_trigger_delivery(&claim(
+            organization_id,
+            trigger_id,
+            "delivery-definition-audit-order",
+            "worker-definition-audit-order",
+            definition_order_now,
+        ))
+        .await
+        .unwrap()
+    {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        other => panic!("unexpected pipeline-definition/audit-order claim: {other:?}"),
+    };
+    let definition_order_dag = dag(
+        organization_id,
+        project_id,
+        pipeline_id,
+        "trigger-delivery-definition-audit-order",
+    );
+    let mut definition_lock = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *definition_lock)
+        .await
+        .unwrap();
+    sqlx::query(
+        "SELECT pipeline_id FROM pipeline_definitions
+         WHERE organization_id = $1 AND pipeline_id = $2 FOR UPDATE",
+    )
+    .bind(organization_id)
+    .bind(pipeline_id)
+    .fetch_one(&mut *definition_lock)
+    .await
+    .unwrap();
+    let definition_backend_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *definition_lock)
+        .await
+        .unwrap();
+    let definition_order_store = store.clone();
+    let definition_order_task = tokio::spawn(async move {
+        definition_order_store
+            .admit_trigger_delivery_dag(
+                &TriggerDeliveryDagAdmissionRequest {
+                    organization_id,
+                    trigger_id,
+                    delivery_id: "delivery-definition-audit-order".to_owned(),
+                    worker_identity: "worker-definition-audit-order".to_owned(),
+                    claim_fence: definition_order_claim.claim_fence,
+                },
+                &definition_order_dag,
+            )
+            .await
+    });
+    wait_until_blocked_by(&store, definition_backend_pid).await;
+    // A different trigger on this pipeline can hold the definition row before
+    // appending its audit record. Trigger DAG admission must wait here without
+    // already owning the audit head, or these two transactions form a cycle.
+    sqlx::query(
+        "SELECT next_sequence FROM audit_chain_heads
+         WHERE organization_id = $1 FOR UPDATE",
+    )
+    .bind(organization_id)
+    .fetch_one(&mut *definition_lock)
+    .await
+    .expect("definition holder acquires audit head without trigger deadlock");
+    definition_lock.rollback().await.unwrap();
+    assert!(matches!(
+        definition_order_task.await.unwrap().unwrap(),
+        TriggerDeliveryDagAdmission::Admitted { .. }
+    ));
+
     let wall_now = database_unix_ms(&store).await;
     let expires_during_admission = delivery(
         organization_id,

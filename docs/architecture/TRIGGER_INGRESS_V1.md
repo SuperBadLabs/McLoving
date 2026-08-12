@@ -115,9 +115,11 @@ from the requested bounded delay, and return typed lease loss without failure
 accounting when the claim has expired. Admission conditionally binds only while
 the matching claim lease is still live according to the PostgreSQL clock.
 Atomic DAG admission enters the shared pipeline advisory scope before the
-organization audit head, matching ordinary admission and pipeline-state
-transitions, then performs its final delivery-TTL and claim-lease sample before
-staging any DAG row. This avoids a pipeline/audit lock cycle, and a later audit
+exact enabled pipeline-definition row and organization audit head. This matches
+ordinary admission, pipeline-state transitions, and different-trigger paths
+that read the definition before auditing. It then performs its final
+delivery-TTL and claim-lease sample before staging any DAG row. This avoids both
+advisory-pipeline/audit and definition-row/audit lock cycles, and a later audit
 append cannot introduce a blocking interval after the last authority decision.
 Processing enters the JOBSTATE-001 saved-pipeline
 admission primitive using a controller-derived safe idempotency key. DAG rows,
@@ -255,6 +257,7 @@ failure-claim rejection under deterministic audit-head contention, atomic DAG
 admission lease loss under the same contention, pathless SCM events plus
 malformed supplied-path denial under an empty path-prefix filter, schedule
 watermark configuration bounds, bounded parameter names and failure reasons,
+pipeline-advisory/audit and cross-trigger pipeline-definition/audit ordering,
 due/retry/claim ownership under
 controller-clock skew, reserved
 trigger-DAG idempotency namespace denial, unordered filter
