@@ -1407,6 +1407,24 @@ fn contains_secret_value(raw: &[u8], markers: &[Vec<u8>]) -> bool {
     contains_secret_value_at(raw, markers, 0, &mut consumed_work, maximum_work)
 }
 
+fn contains_secret_textual_representation(raw: &[u8], markers: &[Vec<u8>]) -> bool {
+    let mut decoded = raw.to_vec();
+    for depth in 0..=MAX_REVERSIBLE_DECODE_DEPTH {
+        if contains_secret_representation(&decoded, markers) {
+            return true;
+        }
+        let Some(next) = percent_decode_once(&decoded) else {
+            return false;
+        };
+        if depth == MAX_REVERSIBLE_DECODE_DEPTH {
+            // Excessive reversible nesting is denied rather than allowing unbounded scan work.
+            return true;
+        }
+        decoded = next;
+    }
+    false
+}
+
 fn contains_secret_value_at(
     raw: &[u8],
     markers: &[Vec<u8>],
@@ -1479,10 +1497,43 @@ fn base64_decode_once(raw: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
-    contains_secret_value(raw, markers)
-        || collect_decoded_json_strings(raw)
-            .iter()
-            .any(|value| contains_secret_in_decoded_string(value, markers))
+    if contains_secret_textual_representation(raw, markers) {
+        return true;
+    }
+    match parse_json_no_duplicates::<SignedDestinationState>(raw) {
+        Ok(signed) => contains_secret_in_destination_body(&signed.body, markers),
+        Err(_) => {
+            // An opaque error body or malformed envelope has no trusted protocol structure.
+            // Decode the complete bounded buffer and every recoverable JSON string fail closed.
+            contains_secret_value(raw, markers)
+                || collect_decoded_json_strings(raw)
+                    .iter()
+                    .any(|value| contains_secret_in_decoded_string(value, markers))
+        }
+    }
+}
+
+fn contains_secret_in_destination_body(
+    body: &crate::DestinationStateBody,
+    markers: &[Vec<u8>],
+) -> bool {
+    [
+        body.schema_version.as_str(),
+        body.observer_id.as_str(),
+        body.service_identity.as_str(),
+        body.endpoint_identity.as_str(),
+        body.account_identity.as_str(),
+        body.resource_identity.as_str(),
+        body.effect_class.as_str(),
+        body.state_schema_version.as_str(),
+        body.grant_id.as_str(),
+        body.grant_version.as_str(),
+        body.grant_scope.as_str(),
+        body.attestation_key_id.as_str(),
+    ]
+    .into_iter()
+    .any(|value| contains_secret_value(value.as_bytes(), markers))
+        || contains_secret_in_json(&body.state, markers).unwrap_or(true)
 }
 
 fn contains_secret_in_decoded_string(value: &str, markers: &[Vec<u8>]) -> bool {
@@ -1752,6 +1803,49 @@ mod tests {
         let encoded = BASE64.encode([b"x".as_slice(), marker].concat());
         assert!(contains_secret_in_response_json(
             encoded.as_bytes(),
+            &[marker.to_vec()]
+        ));
+    }
+
+    #[test]
+    fn valid_envelope_does_not_decode_opaque_signature_bytes() {
+        let marker = [0xde, 0xad, 0xbe, 0xef];
+        let response = SignedDestinationState {
+            body: crate::DestinationStateBody {
+                schema_version: DESTINATION_STATE_SCHEMA_VERSION.to_owned(),
+                observation_id: Uuid::nil(),
+                request_sha256: "0".repeat(64),
+                observer_id: "observer/release-state".to_owned(),
+                service_identity: "service/destination-read-api".to_owned(),
+                endpoint_identity: "endpoint/release-state".to_owned(),
+                account_identity: "account/customer-a".to_owned(),
+                resource_identity: "release/app-a".to_owned(),
+                effect_class: "release_publication".to_owned(),
+                effect_fence: 1,
+                phase: crate::ObservationPhase::PreAction,
+                canonical_query_sha256: "1".repeat(64),
+                cursor: 1,
+                observed_at_unix_ms: 1,
+                state_schema_version: "release-state/v1".to_owned(),
+                confidentiality: Confidentiality::Internal,
+                state: serde_json::json!({"published": true}),
+                grant_id: "grant/observer".to_owned(),
+                grant_version: "1".to_owned(),
+                grant_scope: "release:read".to_owned(),
+                attestation_key_id: "destination-key/1".to_owned(),
+            },
+            signature_base64: BASE64.encode([b"x".as_slice(), marker.as_slice()].concat()),
+        };
+        let raw = serde_json::to_vec(&response).unwrap();
+        assert!(!contains_secret_in_response_json(&raw, &[marker.to_vec()]));
+
+        let mut secret_state = response;
+        secret_state.body.state = serde_json::json!({
+            "published": true,
+            "opaque": BASE64.encode([b"x".as_slice(), marker.as_slice()].concat()),
+        });
+        assert!(contains_secret_in_response_json(
+            &serde_json::to_vec(&secret_state).unwrap(),
             &[marker.to_vec()]
         ));
     }
