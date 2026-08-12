@@ -701,11 +701,6 @@ pub struct DiscoveryScanResponse {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct DiscoveryChildrenResponse {
-    pub children: Vec<DiscoveryChildResponse>,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub struct DiscoveryScanReceiptResponse {
     pub organization_id: Uuid,
     pub project_id: Uuid,
@@ -3170,9 +3165,12 @@ async fn list_discovery_children(
         .discovery_children(organization_id, project_id, pipeline_id, parent_id)
         .await
         .map_err(discovery_error)?;
-    Ok(Json(DiscoveryChildrenResponse {
-        children: children.into_iter().map(Into::into).collect(),
-    })
+    Ok(Json(
+        children
+            .into_iter()
+            .map(DiscoveryChildResponse::from)
+            .collect::<Vec<_>>(),
+    )
     .into_response())
 }
 
@@ -6395,6 +6393,10 @@ mod tests {
         assert_eq!(child.provenance_sha256, "0a".repeat(32));
         assert_eq!(child.jenkinsfile_sha256, "0b".repeat(32));
         assert_eq!(child.child_configuration_sha256, "0c".repeat(32));
+        assert!(
+            serde_json::to_value(vec![child]).unwrap().is_array(),
+            "the child-list handler and OpenAPI contract both expose an array"
+        );
     }
 
     #[test]
