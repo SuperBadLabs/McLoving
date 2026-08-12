@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{Acquire, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use crate::{Store, StoreError};
+use crate::{DagAdmission, NewDagBuild, Store, StoreError};
 
 const MAX_TEXT_BYTES: usize = 512;
 const MAX_REASON_BYTES: usize = 2048;
@@ -230,14 +230,21 @@ pub enum TriggerDeliveryFailure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TriggerDeliveryCompletionRequest {
+pub struct TriggerDeliveryDagAdmissionRequest {
     pub organization_id: Uuid,
     pub trigger_id: Uuid,
     pub delivery_id: String,
-    pub build_id: Uuid,
     pub worker_identity: String,
     pub claim_fence: i64,
-    pub completed_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TriggerDeliveryDagAdmission {
+    Admitted {
+        delivery: TriggerDelivery,
+        admission: DagAdmission,
+    },
+    DeadLettered(TriggerDelivery),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1399,19 +1406,25 @@ impl Store {
         Ok(deliveries)
     }
 
-    pub async fn complete_trigger_delivery(
+    pub async fn admit_trigger_delivery_dag(
         &self,
-        input: &TriggerDeliveryCompletionRequest,
-    ) -> Result<TriggerDelivery, StoreError> {
+        input: &TriggerDeliveryDagAdmissionRequest,
+        dag: &NewDagBuild,
+    ) -> Result<TriggerDeliveryDagAdmission, StoreError> {
         validate_text("delivery_id", &input.delivery_id, MAX_TEXT_BYTES)?;
         validate_text("worker_identity", &input.worker_identity, MAX_TEXT_BYTES)?;
-        if input.claim_fence <= 0 || input.completed_at_unix_ms < 0 {
+        if input.claim_fence <= 0 {
             return Err(StoreError::InvalidTriggerIngress(
-                "delivery completion requires a positive claim fence and valid completion time"
-                    .to_owned(),
+                "trigger DAG admission requires a positive claim fence".to_owned(),
+            ));
+        }
+        if dag.organization_id != input.organization_id {
+            return Err(StoreError::TriggerIngressConflict(
+                "trigger delivery and DAG organizations differ".to_owned(),
             ));
         }
         let mut tx = self.tenant_transaction(input.organization_id).await?;
+        lock_trigger_transaction(&mut tx, input.organization_id, input.trigger_id).await?;
         let row = sqlx::query(
             "SELECT * FROM trigger_deliveries
              WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3
@@ -1426,20 +1439,19 @@ impl Store {
             StoreError::TriggerIngressConflict("trigger delivery does not exist".to_owned())
         })?;
         let current = delivery_from_row(row)?;
-        if current.status == TriggerDeliveryStatus::Admitted {
-            if current.build_id == Some(input.build_id) {
-                tx.commit().await?;
-                return Ok(current);
-            }
+        if matches!(
+            current.status,
+            TriggerDeliveryStatus::Admitted | TriggerDeliveryStatus::DeadLettered
+        ) {
             tx.rollback().await?;
             return Err(StoreError::TriggerIngressConflict(
-                "trigger delivery already admitted a different build".to_owned(),
+                "terminal trigger delivery cannot admit another DAG".to_owned(),
             ));
         }
-        if current.status == TriggerDeliveryStatus::DeadLettered {
+        if current.project_id != dag.project_id || current.pipeline_id != dag.pipeline_id {
             tx.rollback().await?;
             return Err(StoreError::TriggerIngressConflict(
-                "dead-lettered delivery requires an explicit redrive".to_owned(),
+                "trigger delivery and DAG pipeline bindings differ".to_owned(),
             ));
         }
         if current.claim_owner.as_deref() != Some(input.worker_identity.as_str())
@@ -1450,49 +1462,47 @@ impl Store {
                 "delivery completion claim is stale or belongs to another worker".to_owned(),
             ));
         }
-        if current.expires_at_unix_ms <= input.completed_at_unix_ms {
-            let reason = "delivery expired during pipeline admission";
-            crate::audit::append_audit_record(
-                &mut tx,
-                input.organization_id,
-                "trigger",
-                &input.worker_identity,
-                "trigger.delivery_dead_lettered",
-                &format!(
-                    "trigger:{}:delivery:{}",
-                    input.trigger_id, input.delivery_id
-                ),
-                json!({"reason": reason, "completed_at_unix_ms": input.completed_at_unix_ms}),
-            )
-            .await?;
-            sqlx::query(
-                "UPDATE trigger_deliveries
-                 SET status = 'dead_lettered', attempt_count = attempt_count + 1,
-                     terminal_reason = $4, claim_owner = NULL,
-                     claim_expires_at_unix_ms = NULL, updated_at = clock_timestamp()
-                 WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
-            )
-            .bind(input.organization_id)
-            .bind(input.trigger_id)
-            .bind(&input.delivery_id)
-            .bind(reason)
-            .execute(&mut *tx)
-            .await?;
-            let row = sqlx::query(
-                "SELECT * FROM trigger_deliveries
-                 WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
-            )
-            .bind(input.organization_id)
-            .bind(input.trigger_id)
-            .bind(&input.delivery_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            let delivery = delivery_from_row(row)?;
+        let admitted_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
+        if current.expires_at_unix_ms <= admitted_at_unix_ms {
+            let delivery =
+                dead_letter_expired_trigger_dag_admission(&mut tx, input, admitted_at_unix_ms)
+                    .await?;
             tx.commit().await?;
-            return Ok(delivery);
+            return Ok(TriggerDeliveryDagAdmission::DeadLettered(delivery));
+        }
+        let mut admission_tx = tx.begin().await?;
+        let admission = crate::dag::admit_dag_transaction(&mut admission_tx, dag).await?;
+        let bound = sqlx::query_scalar::<_, String>(
+            "UPDATE trigger_deliveries
+             SET status = 'admitted', build_id = $4,
+                 attempt_count = attempt_count + 1,
+                 claim_owner = NULL, claim_expires_at_unix_ms = NULL,
+                 updated_at = clock_timestamp()
+             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3
+               AND claim_owner = $5 AND claim_fence = $6
+               AND expires_at_unix_ms >
+                   floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+             RETURNING delivery_id",
+        )
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(&input.delivery_id)
+        .bind(admission.build_id)
+        .bind(&input.worker_identity)
+        .bind(input.claim_fence)
+        .fetch_optional(&mut *admission_tx)
+        .await?;
+        if bound.is_none() {
+            let admitted_at_unix_ms = trigger_database_unix_ms(&mut admission_tx).await?;
+            admission_tx.rollback().await?;
+            let delivery =
+                dead_letter_expired_trigger_dag_admission(&mut tx, input, admitted_at_unix_ms)
+                    .await?;
+            tx.commit().await?;
+            return Ok(TriggerDeliveryDagAdmission::DeadLettered(delivery));
         }
         crate::audit::append_audit_record(
-            &mut tx,
+            &mut admission_tx,
             input.organization_id,
             "trigger",
             &input.worker_identity,
@@ -1501,23 +1511,10 @@ impl Store {
                 "trigger:{}:delivery:{}",
                 input.trigger_id, input.delivery_id
             ),
-            json!({"build_id": input.build_id}),
+            json!({"build_id": admission.build_id}),
         )
         .await?;
-        sqlx::query(
-            "UPDATE trigger_deliveries
-             SET status = 'admitted', build_id = $4,
-                 attempt_count = attempt_count + 1,
-                 claim_owner = NULL, claim_expires_at_unix_ms = NULL,
-                 updated_at = clock_timestamp()
-             WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
-        )
-        .bind(input.organization_id)
-        .bind(input.trigger_id)
-        .bind(&input.delivery_id)
-        .bind(input.build_id)
-        .execute(&mut *tx)
-        .await?;
+        admission_tx.commit().await?;
         let row = sqlx::query(
             "SELECT * FROM trigger_deliveries
              WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
@@ -1529,7 +1526,10 @@ impl Store {
         .await?;
         let delivery = delivery_from_row(row)?;
         tx.commit().await?;
-        Ok(delivery)
+        Ok(TriggerDeliveryDagAdmission::Admitted {
+            delivery,
+            admission,
+        })
     }
 
     pub async fn fail_trigger_delivery(
@@ -1983,6 +1983,26 @@ impl Store {
                 "trigger handoff requires the exact current generation to be paused".to_owned(),
             )
         })?;
+        // A paused trigger has no worker path that may safely steal an expired
+        // lease. Reap only database-clock-expired claims under the same trigger
+        // scope and definition lock used by the export; a genuinely live claim
+        // remains a hard quiescence failure below.
+        sqlx::query(
+            "UPDATE trigger_deliveries
+             SET claim_owner = NULL, claim_expires_at_unix_ms = NULL,
+                 updated_at = clock_timestamp()
+             WHERE organization_id = $1 AND project_id = $2
+               AND pipeline_id = $3 AND trigger_id = $4
+               AND claim_owner IS NOT NULL
+               AND claim_expires_at_unix_ms <=
+                   floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+        )
+        .bind(organization_id)
+        .bind(project_id)
+        .bind(pipeline_id)
+        .bind(trigger_id)
+        .execute(&mut *tx)
+        .await?;
         let version_rows = sqlx::query(
             "SELECT definition.organization_id, definition.project_id,
                     definition.pipeline_id, definition.trigger_id,
@@ -2106,6 +2126,58 @@ impl Store {
         tx.commit().await?;
         Ok(snapshot)
     }
+}
+
+async fn trigger_database_unix_ms(tx: &mut Transaction<'_, Postgres>) -> Result<i64, StoreError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+    )
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+async fn dead_letter_expired_trigger_dag_admission(
+    tx: &mut Transaction<'_, Postgres>,
+    input: &TriggerDeliveryDagAdmissionRequest,
+    admitted_at_unix_ms: i64,
+) -> Result<TriggerDelivery, StoreError> {
+    let reason = "delivery expired before atomic DAG admission";
+    crate::audit::append_audit_record(
+        tx,
+        input.organization_id,
+        "trigger",
+        &input.worker_identity,
+        "trigger.delivery_dead_lettered",
+        &format!(
+            "trigger:{}:delivery:{}",
+            input.trigger_id, input.delivery_id
+        ),
+        json!({"reason": reason, "admitted_at_unix_ms": admitted_at_unix_ms}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE trigger_deliveries
+         SET status = 'dead_lettered', attempt_count = attempt_count + 1,
+             terminal_reason = $4, claim_owner = NULL,
+             claim_expires_at_unix_ms = NULL, updated_at = clock_timestamp()
+         WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+    )
+    .bind(input.organization_id)
+    .bind(input.trigger_id)
+    .bind(&input.delivery_id)
+    .bind(reason)
+    .execute(&mut **tx)
+    .await?;
+    let row = sqlx::query(
+        "SELECT * FROM trigger_deliveries
+         WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+    )
+    .bind(input.organization_id)
+    .bind(input.trigger_id)
+    .bind(&input.delivery_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    delivery_from_row(row)
 }
 
 fn validate_trigger_write(input: &PipelineTriggerWrite) -> Result<(), StoreError> {

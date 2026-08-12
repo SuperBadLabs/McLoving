@@ -29,9 +29,9 @@ use mcloving_controller_store::{
     PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
     PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, RetryDecision,
     Store, StoreError, TestReportView, TriggerDelivery, TriggerDeliveryAdmission,
-    TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest, TriggerDeliveryCompletionRequest,
-    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind,
-    TriggerPutOutcome, TriggerScheduleSlot, WaitReason,
+    TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission,
+    TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure, TriggerDeliveryFailureRequest,
+    TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome, TriggerScheduleSlot, WaitReason,
     authz::{Action, Principal, authorize as authorize_principal},
 };
 use mcloving_object_store::{
@@ -1164,7 +1164,12 @@ fn parameter_values_schema() -> Value {
         "additionalProperties": {
             "oneOf": [
                 {"type": "boolean"},
-                {"type": "integer"},
+                {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": i64::MIN,
+                    "maximum": i64::MAX
+                },
                 {"type": "string", "maxLength": 4096}
             ]
         }
@@ -2670,40 +2675,26 @@ async fn process_trigger_delivery(
             parameters,
             required_platform: claimed.requested_platform.clone(),
             required_trust_pool: claimed.requested_trust_pool.clone(),
+            trigger_claim: Some(TriggerDeliveryDagAdmissionRequest {
+                organization_id: claimed.organization_id,
+                trigger_id: claimed.trigger_id,
+                delivery_id: claimed.delivery_id.clone(),
+                worker_identity: worker_identity.clone(),
+                claim_fence: claimed.claim_fence,
+            }),
         },
     )
     .await
     {
-        Ok((status, admission)) => {
-            let completed_at_unix_ms = unix_time_ms();
-            let delivery = state
-                .store
-                .complete_trigger_delivery(&TriggerDeliveryCompletionRequest {
-                    organization_id: claimed.organization_id,
-                    trigger_id: claimed.trigger_id,
-                    delivery_id: claimed.delivery_id.clone(),
-                    build_id: admission.build_id,
-                    worker_identity: worker_identity.clone(),
-                    claim_fence: claimed.claim_fence,
-                    completed_at_unix_ms,
-                })
-                .await
-                .map_err(trigger_error)?;
-            if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::DeadLettered {
-                return Ok((
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    Json(TriggerEventResponse {
-                        delivery,
-                        admission: None,
-                    }),
-                )
-                    .into_response());
-            }
+        Ok(result) => {
+            let delivery = result
+                .trigger_delivery
+                .ok_or_else(|| internal("trigger admission omitted its atomic delivery result"))?;
             Ok((
-                status,
+                result.status,
                 Json(TriggerEventResponse {
                     delivery,
-                    admission: Some(admission),
+                    admission: result.admission,
                 }),
             )
                 .into_response())
@@ -2758,7 +2749,7 @@ async fn admitted_trigger_response(
     let build_id = delivery
         .build_id
         .ok_or_else(|| internal("admitted trigger delivery is missing its bound build identity"))?;
-    let (status, admission) = admit_pipeline_parameters(
+    let result = admit_pipeline_parameters(
         state,
         PipelineAdmissionInput {
             organization_id: delivery.organization_id,
@@ -2768,16 +2759,20 @@ async fn admitted_trigger_response(
             parameters: parameter_values_from_delivery(&delivery)?,
             required_platform: delivery.requested_platform.clone(),
             required_trust_pool: delivery.requested_trust_pool.clone(),
+            trigger_claim: None,
         },
     )
     .await?;
+    let admission = result
+        .admission
+        .ok_or_else(|| internal("admitted trigger replay omitted its build admission"))?;
     if admission.build_id != build_id {
         return Err(internal(
             "trigger delivery replay resolved to a different build identity",
         ));
     }
     Ok((
-        status,
+        result.status,
         Json(TriggerEventResponse {
             delivery,
             admission: Some(admission),
@@ -3054,7 +3049,7 @@ async fn submit_pipeline_build(
     let required_platform = submission_platform(&headers)?;
     let idempotency_key = required_idempotency_key(&headers)?;
     let parameters = parameter_values(request.parameters)?;
-    let (status, response) = admit_pipeline_parameters(
+    let result = admit_pipeline_parameters(
         &state,
         PipelineAdmissionInput {
             organization_id,
@@ -3064,10 +3059,14 @@ async fn submit_pipeline_build(
             parameters,
             required_platform,
             required_trust_pool,
+            trigger_claim: None,
         },
     )
     .await?;
-    Ok((status, Json(response)))
+    let response = result
+        .admission
+        .ok_or_else(|| internal("pipeline admission omitted its build response"))?;
+    Ok((result.status, Json(response)))
 }
 
 struct PipelineAdmissionInput {
@@ -3078,12 +3077,19 @@ struct PipelineAdmissionInput {
     parameters: BTreeMap<String, ParameterValue>,
     required_platform: String,
     required_trust_pool: String,
+    trigger_claim: Option<TriggerDeliveryDagAdmissionRequest>,
+}
+
+struct PipelineAdmissionResult {
+    status: StatusCode,
+    admission: Option<AdmissionResponse>,
+    trigger_delivery: Option<TriggerDelivery>,
 }
 
 async fn admit_pipeline_parameters(
     state: &ApiState,
     input: PipelineAdmissionInput,
-) -> Result<(StatusCode, AdmissionResponse), ApiError> {
+) -> Result<PipelineAdmissionResult, ApiError> {
     let PipelineAdmissionInput {
         organization_id,
         project_id,
@@ -3092,6 +3098,7 @@ async fn admit_pipeline_parameters(
         parameters,
         required_platform,
         required_trust_pool,
+        trigger_claim,
     } = input;
     let replay = state
         .store
@@ -3155,21 +3162,41 @@ async fn admit_pipeline_parameters(
             max_attempts: 1,
         })
         .collect();
-    let admission = state
-        .store
-        .admit_dag(&NewDagBuild {
-            organization_id,
-            project_id,
-            pipeline_id,
-            pipeline_revision,
-            pipeline_operational_generation,
-            idempotency_key: idempotency_key.to_owned(),
-            pipeline_digest: digest,
-            priority: 0,
-            nodes,
-        })
-        .await
-        .map_err(admission_error)?;
+    let dag = NewDagBuild {
+        organization_id,
+        project_id,
+        pipeline_id,
+        pipeline_revision,
+        pipeline_operational_generation,
+        idempotency_key: idempotency_key.to_owned(),
+        pipeline_digest: digest,
+        priority: 0,
+        nodes,
+    };
+    let (admission, trigger_delivery) = match trigger_claim {
+        Some(claim) => match state
+            .store
+            .admit_trigger_delivery_dag(&claim, &dag)
+            .await
+            .map_err(admission_error)?
+        {
+            TriggerDeliveryDagAdmission::Admitted {
+                delivery,
+                admission,
+            } => (admission, Some(delivery)),
+            TriggerDeliveryDagAdmission::DeadLettered(delivery) => {
+                return Ok(PipelineAdmissionResult {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    admission: None,
+                    trigger_delivery: Some(delivery),
+                });
+            }
+        },
+        None => (
+            state.store.admit_dag(&dag).await.map_err(admission_error)?,
+            None,
+        ),
+    };
     let first = pipeline
         .stages
         .first()
@@ -3180,16 +3207,17 @@ async fn admit_pipeline_parameters(
     } else {
         StatusCode::OK
     };
-    Ok((
+    Ok(PipelineAdmissionResult {
         status,
-        AdmissionResponse {
+        admission: Some(AdmissionResponse {
             build_id: admission.build_id,
             node_id: first.node_id,
             attempt_id: first.attempt_id,
             created: admission.created,
             pipeline_digest: hex(&digest),
-        },
-    ))
+        }),
+        trigger_delivery,
+    })
 }
 
 fn required_idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -5680,11 +5708,12 @@ mod tests {
                 .iter()
                 .any(|variant| variant["type"] == "boolean")
         );
-        assert!(
-            parameter_variants
-                .iter()
-                .any(|variant| variant["type"] == "integer")
-        );
+        assert!(parameter_variants.iter().any(|variant| {
+            variant["type"] == "integer"
+                && variant["format"] == "int64"
+                && variant["minimum"] == i64::MIN
+                && variant["maximum"] == i64::MAX
+        }));
         assert!(
             parameter_variants
                 .iter()

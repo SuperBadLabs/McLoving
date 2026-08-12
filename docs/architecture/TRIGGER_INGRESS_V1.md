@@ -67,7 +67,8 @@ delivery, and pipeline row-lock ordering acyclic and supplies missing-key
 serialization before a delivery or event identity exists. First acceptance
 then repeats the ID lookup, so concurrent active-active acceptance returns one
 creation plus one exact replay rather than leaking a database uniqueness
-failure.
+failure. Signed integers are explicitly limited to the complete `int64` range
+in both the generated contract and runtime.
 
 Parameter values are limited to 128 bounded booleans, signed integers, or
 strings and are rejected before durable HTTP capture. Processing repeats that
@@ -85,12 +86,15 @@ request by rotating transport identifiers.
 Processing requires a bounded PostgreSQL lease with a monotonically increasing
 claim fence. Active-active workers converge on one claim. A stale worker cannot
 complete or fail a newer claim. Processing enters the JOBSTATE-001 saved-pipeline
-admission primitive using a controller-derived safe idempotency key, so a crash
-after build commit and before delivery completion converges on the same build.
-Completion samples a fresh clock inside the fenced transaction; if admission
-returns at or after delivery expiry, the delivery becomes terminal
-`dead_lettered` with no admitted build binding rather than laundering expired
-work into a successful trigger result.
+admission primitive using a controller-derived safe idempotency key. DAG rows,
+attempts, outbox publication, and the immutable delivery/build binding commit in
+one PostgreSQL transaction. DAG construction runs inside a savepoint; the store
+samples the database clock after all DAG rows are staged. If the delivery is
+then expired, the savepoint rolls back every runnable build row before the
+outer transaction records the terminal dead letter. A crash therefore leaves
+either no build and a retryable claim transaction, one expired dead letter and
+no build, or one admitted delivery bound to its exact build—never an orphaned
+runnable build or an unbound duplicate-redrive path.
 
 The durable states are:
 
@@ -180,6 +184,11 @@ or ROLLBACK-001 transaction must quiesce ingress and transfer/reconcile that
 complete set under the exact implementation/configuration digests. This ticket
 does not itself switch any production authority.
 
+Quiesced export holds the common trigger scope and paused definition lock. It
+clears only claims whose lease is already expired according to the PostgreSQL
+clock, then rejects any genuinely live claim. Thus a crashed worker cannot
+strand handoff forever, while pause cannot steal an active lease.
+
 ## Required proof
 
 Real-PostgreSQL tests cover concurrent configuration idempotency, configuration
@@ -187,7 +196,8 @@ versus claim lock ordering, active-active claims, exact/divergent delivery
 replay, delayed/future input, bounded outage retry, attempt exhaustion,
 exact-source and conflicting-source dead-letter redrive, stale claim denial,
 parameter pre-capture and corrupt-store terminal failure, completion-time
-expiry, caller rotation, pause/resume, disable fencing, restart, atomic schedule
+expiry with zero persisted DAG, expired-claim handoff reaping, caller rotation,
+pause/resume, disable fencing, restart, atomic schedule
 watermark, slot reorder/substitution, upstream success/failure, unsupported
 plugin denial, RLS/forced-RLS migration, and audit linkage. Public API tests
 cover missing and cross-tenant authorization, configuration preconditions, SCM branch/path

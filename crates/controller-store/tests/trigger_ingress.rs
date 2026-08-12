@@ -3,10 +3,11 @@ use mcloving_controller_store::{
     PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
     PipelinePutOutcome, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, Store,
     StoreError, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
-    TriggerDeliveryCompletionRequest, TriggerDeliveryFailure, TriggerDeliveryFailureRequest,
-    TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome,
-    TriggerScheduleSlot, compute_audit_event_hash, compute_trigger_transfer_snapshot_digest,
-    compute_trigger_transfer_snapshot_ledger_digest, verify_trigger_transfer_snapshot,
+    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
+    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind,
+    TriggerPutOutcome, TriggerScheduleSlot, compute_audit_event_hash,
+    compute_trigger_transfer_snapshot_digest, compute_trigger_transfer_snapshot_ledger_digest,
+    verify_trigger_transfer_snapshot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -500,68 +501,86 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         other => panic!("unexpected second claim: {other:?}"),
     };
     assert_eq!(second_claim.claim_fence, 2);
-    let admission = store
-        .admit_dag(&dag(
-            organization_id,
-            project_id,
-            pipeline_id,
-            "trigger-delivery-1",
-        ))
-        .await
-        .unwrap();
+    let trigger_dag = dag(
+        organization_id,
+        project_id,
+        pipeline_id,
+        "trigger-delivery-1",
+    );
     assert!(matches!(
         store
-            .complete_trigger_delivery(&TriggerDeliveryCompletionRequest {
-                organization_id,
-                trigger_id,
-                delivery_id: "delivery-1".to_owned(),
-                build_id: admission.build_id,
-                worker_identity: "worker-1".to_owned(),
-                claim_fence: 1,
-                completed_at_unix_ms: now + 60_001,
-            })
+            .admit_trigger_delivery_dag(
+                &TriggerDeliveryDagAdmissionRequest {
+                    organization_id,
+                    trigger_id,
+                    delivery_id: "delivery-1".to_owned(),
+                    worker_identity: "worker-1".to_owned(),
+                    claim_fence: 1,
+                },
+                &trigger_dag,
+            )
             .await,
         Err(StoreError::TriggerIngressConflict(_))
     ));
     let completed = store
-        .complete_trigger_delivery(&TriggerDeliveryCompletionRequest {
-            organization_id,
-            trigger_id,
-            delivery_id: "delivery-1".to_owned(),
-            build_id: admission.build_id,
-            worker_identity: "worker-2".to_owned(),
-            claim_fence: second_claim.claim_fence,
-            completed_at_unix_ms: now + 60_001,
-        })
+        .admit_trigger_delivery_dag(
+            &TriggerDeliveryDagAdmissionRequest {
+                organization_id,
+                trigger_id,
+                delivery_id: "delivery-1".to_owned(),
+                worker_identity: "worker-2".to_owned(),
+                claim_fence: second_claim.claim_fence,
+            },
+            &trigger_dag,
+        )
         .await
         .unwrap();
+    let TriggerDeliveryDagAdmission::Admitted {
+        delivery: completed,
+        admission,
+    } = completed
+    else {
+        panic!("valid trigger DAG admission must be atomic")
+    };
     assert_eq!(completed.status, TriggerDeliveryStatus::Admitted);
+    assert_eq!(completed.build_id, Some(admission.build_id));
 
+    let expiring_trigger_id = Uuid::new_v4();
+    let mut expiring_write = write.clone();
+    expiring_write.trigger_id = expiring_trigger_id;
+    expiring_write.expected_generation = 0;
+    expiring_write.delivery_ttl_seconds = 1;
+    expiring_write.idempotency_key = "trigger-expiry-create".to_owned();
+    store.put_pipeline_trigger(&expiring_write).await.unwrap();
+    let wall_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
     let expires_during_admission = delivery(
         organization_id,
         project_id,
         pipeline_id,
-        trigger_id,
+        expiring_trigger_id,
         1,
         "delivery-expires-during-admission",
         "event-expires-during-admission",
-        now + 62_000,
+        wall_now - 2_000,
     );
-    let captured_expiring = match store
+    match store
         .accept_trigger_delivery(&expires_during_admission)
         .await
         .unwrap()
     {
-        TriggerDeliveryAdmission::Created(delivery) => delivery,
+        TriggerDeliveryAdmission::Created(_) => {}
         other => panic!("unexpected expiring delivery capture: {other:?}"),
-    };
+    }
     let expiring_claim = match store
         .claim_trigger_delivery(&claim(
             organization_id,
-            trigger_id,
+            expiring_trigger_id,
             "delivery-expires-during-admission",
             "worker-expiring-admission",
-            now + 62_000,
+            wall_now - 2_000,
         ))
         .await
         .unwrap()
@@ -569,33 +588,46 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
         other => panic!("unexpected expiring delivery claim: {other:?}"),
     };
-    let expiring_admission = store
-        .admit_dag(&dag(
-            organization_id,
-            project_id,
-            pipeline_id,
-            "trigger-delivery-expiring-admission",
-        ))
-        .await
-        .unwrap();
+    let expiring_dag = dag(
+        organization_id,
+        project_id,
+        pipeline_id,
+        "trigger-delivery-expiring-admission",
+    );
     let expired = store
-        .complete_trigger_delivery(&TriggerDeliveryCompletionRequest {
-            organization_id,
-            trigger_id,
-            delivery_id: "delivery-expires-during-admission".to_owned(),
-            build_id: expiring_admission.build_id,
-            worker_identity: "worker-expiring-admission".to_owned(),
-            claim_fence: expiring_claim.claim_fence,
-            completed_at_unix_ms: captured_expiring.expires_at_unix_ms,
-        })
+        .admit_trigger_delivery_dag(
+            &TriggerDeliveryDagAdmissionRequest {
+                organization_id,
+                trigger_id: expiring_trigger_id,
+                delivery_id: "delivery-expires-during-admission".to_owned(),
+                worker_identity: "worker-expiring-admission".to_owned(),
+                claim_fence: expiring_claim.claim_fence,
+            },
+            &expiring_dag,
+        )
         .await
         .unwrap();
+    let TriggerDeliveryDagAdmission::DeadLettered(expired) = expired else {
+        panic!("expired trigger must not admit a DAG")
+    };
     assert_eq!(expired.status, TriggerDeliveryStatus::DeadLettered);
     assert_eq!(expired.attempt_count, 1);
     assert!(expired.build_id.is_none());
     assert_eq!(
         expired.terminal_reason.as_deref(),
-        Some("delivery expired during pipeline admission")
+        Some("delivery expired before atomic DAG admission")
+    );
+    assert!(
+        store
+            .dag_replay_binding(
+                organization_id,
+                project_id,
+                "trigger-delivery-expiring-admission",
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "expired admission must leave no runnable or replayable build"
     );
 
     let active_active = delivery(
@@ -1001,6 +1033,38 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
             .await,
         Err(StoreError::TriggerIngressConflict(_))
     ));
+    let handoff_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut expired_handoff_claim = remote_delivery(delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        3,
+        "expired-handoff-claim",
+        "expired-handoff-event",
+        handoff_now - 120_000,
+    ));
+    expired_handoff_claim.caller_identity = "remote:caller:rotated".to_owned();
+    store
+        .accept_trigger_delivery(&expired_handoff_claim)
+        .await
+        .expect("capture expired handoff claim fixture");
+    assert!(matches!(
+        store
+            .claim_trigger_delivery(&claim(
+                organization_id,
+                trigger_id,
+                "expired-handoff-claim",
+                "crashed-handoff-worker",
+                handoff_now - 61_000,
+            ))
+            .await
+            .unwrap(),
+        TriggerDeliveryClaimOutcome::Claimed(_)
+    ));
     let configuration = json!({"audience": "mcloving:remote-build", "filter": {"event_kinds": ["remote"], "request_methods": ["POST"]}});
     let pause_for_handoff = trigger_write(
         organization_id,
@@ -1058,6 +1122,13 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
             .iter()
             .any(|delivery| { delivery.redrive_of_delivery_id.as_deref() == Some("dead-1") })
     );
+    let reaped_handoff_claim = handoff
+        .deliveries
+        .iter()
+        .find(|delivery| delivery.delivery_id == "expired-handoff-claim")
+        .expect("expired claimed delivery remains in the exported ledger");
+    assert!(reaped_handoff_claim.claim_owner.is_none());
+    assert!(reaped_handoff_claim.claim_expires_at_unix_ms.is_none());
     let mut tampered = handoff.clone();
     tampered.deliveries[0].event_id.push_str("-substituted");
     let tampered_ledger = compute_trigger_transfer_snapshot_ledger_digest(&tampered)
