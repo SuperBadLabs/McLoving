@@ -1473,7 +1473,7 @@ async fn schema_work_cap_does_not_reject_linear_growable_required_sizing() {
     }];
     config
         .response_schema
-        .extend((0..512).map(|index| StateFieldSchema {
+        .extend((0..256).map(|index| StateFieldSchema {
             name: format!("optional_{index:03}"),
             kind: JsonKind::Null,
             required: false,

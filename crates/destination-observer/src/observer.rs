@@ -35,6 +35,7 @@ const MAX_TOTAL_SECRET_MARKER_BYTES: usize = 8 * 1024;
 const MAX_REVERSIBLE_DECODE_DEPTH: usize = 16;
 const SECRET_DECODE_WORK_FACTOR: usize = 64;
 const MIN_SECRET_DECODE_WORK_BYTES: usize = 4 * 1024;
+const MAX_RESPONSE_SCHEMA_FIELDS: usize = 512;
 const MAX_SCHEMA_SIZING_WORK_CELLS: usize = 4 * 1024 * 1024;
 const MIN_SUCCESS_HEADER_BYTES: usize = 34;
 const MAX_TRANSPORT_HEADER_BYTES: usize = 256 * 1024;
@@ -867,6 +868,7 @@ fn validate_config(
         || config.image_sha256 != runtime_image_sha256
         || config.limits.max_response_bytes == 0
         || config.limits.max_response_bytes >= crate::standalone::MAX_FRAME_BYTES
+        || config.response_schema.len() > MAX_RESPONSE_SCHEMA_FIELDS
         || config.limits.max_header_bytes == 0
         || config.limits.max_header_bytes < MIN_SUCCESS_HEADER_BYTES
         || config.limits.max_header_bytes > MAX_TRANSPORT_HEADER_BYTES
