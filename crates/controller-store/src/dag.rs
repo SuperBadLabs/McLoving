@@ -15,6 +15,7 @@ const MAX_MATRIX_CELLS: usize = 256;
 const MAX_DAG_TEXT_BYTES: usize = 256;
 const MAX_EXECUTION_SPEC_BYTES: usize = 256 * 1024;
 const MAX_DAG_CAPABILITIES: usize = 64;
+pub const TRIGGER_DAG_IDEMPOTENCY_PREFIX: &str = "mcloving-trigger-v1-";
 
 /// Condition under which one dependency is satisfied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -256,11 +257,39 @@ impl Store {
     /// Atomically admits an entire validated DAG, all first attempts,
     /// dependency edges, one event, and one outbox record.
     pub async fn admit_dag(&self, input: &NewDagBuild) -> Result<DagAdmission, StoreError> {
+        if input
+            .idempotency_key
+            .starts_with(TRIGGER_DAG_IDEMPOTENCY_PREFIX)
+        {
+            return Err(StoreError::InvalidDag(
+                "trigger DAG idempotency namespace is reserved".to_owned(),
+            ));
+        }
         validate_dag_contract(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
-        crate::lock_pipeline_transaction(&mut tx, input.organization_id, input.pipeline_id).await?;
+        let admission = admit_dag_transaction(&mut tx, input).await?;
+        tx.commit().await?;
+        Ok(admission)
+    }
+
+    /// Validates and returns an existing trigger-created DAG without granting
+    /// authority to create a build in the reserved trigger namespace.
+    pub async fn replay_trigger_dag(
+        &self,
+        input: &NewDagBuild,
+    ) -> Result<DagAdmission, StoreError> {
+        if !input
+            .idempotency_key
+            .starts_with(TRIGGER_DAG_IDEMPOTENCY_PREFIX)
+        {
+            return Err(StoreError::InvalidDag(
+                "trigger DAG replay requires the reserved idempotency namespace".to_owned(),
+            ));
+        }
+        validate_dag_contract(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
         let contract = normalized_dag_contract(input);
-        if sqlx::query_scalar::<_, bool>(
+        let mut tx = self.tenant_transaction(input.organization_id).await?;
+        let exists = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1 FROM builds
                  WHERE project_id = $1 AND idempotency_key = $2
@@ -269,24 +298,51 @@ impl Store {
         .bind(input.project_id)
         .bind(&input.idempotency_key)
         .fetch_one(&mut *tx)
-        .await?
-        {
-            let admission = existing_dag_admission(&mut tx, input, &contract).await?;
-            tx.commit().await?;
-            return Ok(admission);
-        }
-        let pipeline_revision_digest = crate::lock_enabled_pipeline_binding(
-            &mut tx,
-            input.organization_id,
-            input.project_id,
-            input.pipeline_id,
-            input.pipeline_revision,
-            input.pipeline_operational_generation,
-        )
         .await?;
-        let build_id = Uuid::new_v4();
-        let inserted = sqlx::query_scalar::<_, Uuid>(
-            "INSERT INTO builds (
+        if !exists {
+            tx.rollback().await?;
+            return Err(StoreError::IdempotencyConflict(
+                "trigger DAG replay does not identify an existing build".to_owned(),
+            ));
+        }
+        let admission = existing_dag_admission(&mut tx, input, &contract).await?;
+        tx.commit().await?;
+        Ok(admission)
+    }
+}
+
+pub(crate) async fn admit_dag_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    input: &NewDagBuild,
+) -> Result<DagAdmission, StoreError> {
+    validate_dag_contract(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
+    crate::lock_pipeline_transaction(tx, input.organization_id, input.pipeline_id).await?;
+    let contract = normalized_dag_contract(input);
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+                 SELECT 1 FROM builds
+                 WHERE project_id = $1 AND idempotency_key = $2
+             )",
+    )
+    .bind(input.project_id)
+    .bind(&input.idempotency_key)
+    .fetch_one(&mut **tx)
+    .await?
+    {
+        return existing_dag_admission(tx, input, &contract).await;
+    }
+    let pipeline_revision_digest = crate::lock_enabled_pipeline_binding(
+        tx,
+        input.organization_id,
+        input.project_id,
+        input.pipeline_id,
+        input.pipeline_revision,
+        input.pipeline_operational_generation,
+    )
+    .await?;
+    let build_id = Uuid::new_v4();
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO builds (
                  id, organization_id, project_id,
                  pipeline_id, pipeline_revision, pipeline_operational_generation,
                  pipeline_revision_digest,
@@ -296,42 +352,40 @@ impl Store {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, true, $11)
              ON CONFLICT (project_id, idempotency_key) DO NOTHING
              RETURNING id",
-        )
-        .bind(build_id)
-        .bind(input.organization_id)
-        .bind(input.project_id)
-        .bind(input.pipeline_id)
-        .bind(input.pipeline_revision)
-        .bind(input.pipeline_operational_generation)
-        .bind(pipeline_revision_digest.as_slice())
-        .bind(&input.idempotency_key)
-        .bind(input.pipeline_digest.as_slice())
-        .bind(input.priority)
-        .bind(&contract)
-        .fetch_optional(&mut *tx)
-        .await?;
+    )
+    .bind(build_id)
+    .bind(input.organization_id)
+    .bind(input.project_id)
+    .bind(input.pipeline_id)
+    .bind(input.pipeline_revision)
+    .bind(input.pipeline_operational_generation)
+    .bind(pipeline_revision_digest.as_slice())
+    .bind(&input.idempotency_key)
+    .bind(input.pipeline_digest.as_slice())
+    .bind(input.priority)
+    .bind(&contract)
+    .fetch_optional(&mut **tx)
+    .await?;
 
-        let Some(build_id) = inserted else {
-            let admission = existing_dag_admission(&mut tx, input, &contract).await?;
-            tx.commit().await?;
-            return Ok(admission);
+    let Some(build_id) = inserted else {
+        return existing_dag_admission(tx, input, &contract).await;
+    };
+
+    let mut nodes = BTreeMap::new();
+    for node in &input.nodes {
+        let node_id = Uuid::new_v4();
+        let attempt_id = Uuid::new_v4();
+        let status = if node.dependencies.is_empty() {
+            "queued"
+        } else {
+            "blocked"
         };
-
-        let mut nodes = BTreeMap::new();
-        for node in &input.nodes {
-            let node_id = Uuid::new_v4();
-            let attempt_id = Uuid::new_v4();
-            let status = if node.dependencies.is_empty() {
-                "queued"
-            } else {
-                "blocked"
-            };
-            let mut capabilities = node.required_capabilities.clone();
-            capabilities.push(format!("platform:{}", node.required_platform));
-            capabilities.sort();
-            capabilities.dedup();
-            sqlx::query(
-                "INSERT INTO nodes (
+        let mut capabilities = node.required_capabilities.clone();
+        capabilities.push(format!("platform:{}", node.required_platform));
+        capabilities.sort();
+        capabilities.dedup();
+        sqlx::query(
+            "INSERT INTO nodes (
                      id, organization_id, build_id, node_key, status,
                      required_capabilities, required_trust_pool, priority,
                      execution_spec, node_kind, fail_fast, max_attempts
@@ -339,23 +393,23 @@ impl Store {
                  VALUES (
                      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
                  )",
-            )
-            .bind(node_id)
-            .bind(input.organization_id)
-            .bind(build_id)
-            .bind(&node.node_key)
-            .bind(status)
-            .bind(&capabilities)
-            .bind(&node.required_trust_pool)
-            .bind(node.priority)
-            .bind(&node.execution_spec)
-            .bind(node.kind.as_str())
-            .bind(node.fail_fast)
-            .bind(node.max_attempts)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
+        )
+        .bind(node_id)
+        .bind(input.organization_id)
+        .bind(build_id)
+        .bind(&node.node_key)
+        .bind(status)
+        .bind(&capabilities)
+        .bind(&node.required_trust_pool)
+        .bind(node.priority)
+        .bind(&node.execution_spec)
+        .bind(node.kind.as_str())
+        .bind(node.fail_fast)
+        .bind(node.max_attempts)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            "WITH timing AS (SELECT clock_timestamp() AS admitted_at)
                  INSERT INTO attempts (
                      id, organization_id, node_id, ordinal, status,
                      created_at, ready_at
@@ -363,60 +417,58 @@ impl Store {
                  SELECT $1, $2, $3, 1, 'queued', admitted_at,
                         CASE WHEN $4 THEN admitted_at ELSE NULL END
                  FROM timing",
-            )
-            .bind(attempt_id)
-            .bind(input.organization_id)
-            .bind(node_id)
-            .bind(node.dependencies.is_empty())
-            .execute(&mut *tx)
-            .await?;
-            nodes.insert(
-                node.node_key.clone(),
-                DagNodeAdmission {
-                    node_id,
-                    attempt_id,
-                },
-            );
-        }
-        for node in &input.nodes {
-            let child = nodes[&node.node_key].node_id;
-            for dependency in &node.dependencies {
-                let parent = nodes[&dependency.node_key].node_id;
-                sqlx::query(
-                    "INSERT INTO node_dependencies (
+        )
+        .bind(attempt_id)
+        .bind(input.organization_id)
+        .bind(node_id)
+        .bind(node.dependencies.is_empty())
+        .execute(&mut **tx)
+        .await?;
+        nodes.insert(
+            node.node_key.clone(),
+            DagNodeAdmission {
+                node_id,
+                attempt_id,
+            },
+        );
+    }
+    for node in &input.nodes {
+        let child = nodes[&node.node_key].node_id;
+        for dependency in &node.dependencies {
+            let parent = nodes[&dependency.node_key].node_id;
+            sqlx::query(
+                "INSERT INTO node_dependencies (
                          organization_id, build_id, parent_node_id,
                          child_node_id, condition
                      )
                      VALUES ($1, $2, $3, $4, $5)",
-                )
-                .bind(input.organization_id)
-                .bind(build_id)
-                .bind(parent)
-                .bind(child)
-                .bind(dependency.condition.as_str())
-                .execute(&mut *tx)
-                .await?;
-            }
+            )
+            .bind(input.organization_id)
+            .bind(build_id)
+            .bind(parent)
+            .bind(child)
+            .bind(dependency.condition.as_str())
+            .execute(&mut **tx)
+            .await?;
         }
-        append_event_and_outbox(
-            &mut tx,
-            input.organization_id,
-            build_id,
-            "dag.admitted",
-            json!({
-                "build_id": build_id,
-                "nodes": nodes.len(),
-                "edges": input.nodes.iter().map(|node| node.dependencies.len()).sum::<usize>(),
-            }),
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(DagAdmission {
-            build_id,
-            nodes,
-            created: true,
-        })
     }
+    append_event_and_outbox(
+        tx,
+        input.organization_id,
+        build_id,
+        "dag.admitted",
+        json!({
+            "build_id": build_id,
+            "nodes": nodes.len(),
+            "edges": input.nodes.iter().map(|node| node.dependencies.len()).sum::<usize>(),
+        }),
+    )
+    .await?;
+    Ok(DagAdmission {
+        build_id,
+        nodes,
+        created: true,
+    })
 }
 
 pub(crate) async fn advance_dag_after_attempt(

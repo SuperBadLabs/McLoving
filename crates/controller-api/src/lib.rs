@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Versioned public HTTP API and its Rust client.
 
 mod oidc;
@@ -23,10 +24,15 @@ use mcloving_controller_store::{
     ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, ComponentCursor,
     ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
     DagDependency, DagNodeKind, DependencyCondition, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild,
-    NewDagNode, NewEnvironmentApproval, ObjectKind, ObjectStatus, PipelineOperationalStateRecord,
-    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome, PipelinePage,
-    PipelinePutOutcome, PipelineRecord, PipelineWrite, RetryDecision, Store, StoreError,
-    TestReportView, WaitReason,
+    NewDagNode, NewEnvironmentApproval, NewTriggerDelivery, ObjectKind, ObjectStatus,
+    PipelineOperationalStateRecord, PipelineOperationalStateTransition,
+    PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
+    PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, RetryDecision,
+    Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TestReportView, TriggerDelivery,
+    TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
+    TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
+    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome,
+    TriggerScheduleSlot, WaitReason,
     authz::{Action, Principal, authorize as authorize_principal},
 };
 use mcloving_object_store::{
@@ -120,6 +126,25 @@ impl ApiState {
             publication_claim_cursor: Arc::new(Mutex::new(None)),
             oidc_clients: BTreeMap::new(),
         }
+    }
+
+    pub async fn process_due_trigger_deliveries(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+    ) -> Result<usize, ApiError> {
+        let scan_unix_ms = unix_time_ms();
+        let deliveries = self
+            .store
+            .due_trigger_deliveries(organization_id, scan_unix_ms, limit)
+            .await
+            .map_err(trigger_error)?;
+        let mut processed = 0;
+        for delivery in deliveries {
+            process_trigger_delivery(self, delivery, unix_time_ms()).await?;
+            processed += 1;
+        }
+        Ok(processed)
     }
 
     /// Adds another independently authenticated API principal.
@@ -329,6 +354,18 @@ pub fn router(state: ApiState) -> Router {
             post(submit_pipeline_build),
         )
         .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}",
+            get(get_pipeline_trigger).put(put_pipeline_trigger),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events",
+            post(submit_trigger_event),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive",
+            post(redrive_trigger_event),
+        )
+        .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/components",
             get(list_components),
         )
@@ -470,6 +507,74 @@ pub struct PipelineOperationalStateRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipelineTriggerRequest {
+    pub kind: TriggerKind,
+    pub state: PipelineTriggerState,
+    pub implementation_sha256: String,
+    pub configuration_sha256: String,
+    pub filter_sha256: String,
+    pub event_source_identity: String,
+    pub source_generation: String,
+    pub configuration: Value,
+    pub deduplication_window_seconds: i64,
+    pub max_delivery_attempts: i32,
+    pub delivery_ttl_seconds: i64,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineTriggerResponse {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub trigger_id: Uuid,
+    pub generation: i64,
+    pub kind: TriggerKind,
+    pub state: PipelineTriggerState,
+    pub implementation_sha256: String,
+    pub configuration_sha256: String,
+    pub filter_sha256: String,
+    pub event_source_identity: String,
+    pub source_generation: String,
+    pub configuration: Value,
+    pub deduplication_window_seconds: i64,
+    pub max_delivery_attempts: i32,
+    pub delivery_ttl_seconds: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerEventRequest {
+    pub trigger_generation: i64,
+    pub delivery_id: String,
+    pub event_id: String,
+    pub event_kind: String,
+    pub event_time_unix_ms: i64,
+    pub payload: Value,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, Value>,
+    #[serde(default = "default_platform")]
+    pub platform: String,
+    #[serde(default = "default_trust_pool")]
+    pub trust_pool: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TriggerEventResponse {
+    pub delivery: TriggerDelivery,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admission: Option<AdmissionResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerRedriveRequest {
+    pub delivery_id: String,
+    pub event_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PipelineUpsertRequest {
     pub slug: String,
     pub source: String,
@@ -568,6 +673,8 @@ fn openapi_document() -> Value {
     let provider = path_parameter("provider_id", "uuid");
     let project = path_parameter("project_id", "uuid");
     let pipeline = path_parameter("pipeline_id", "uuid");
+    let trigger = path_parameter("trigger_id", "uuid");
+    let delivery = path_parameter("delivery_id", "string");
     let digest = path_parameter("digest", "sha256");
     let build = path_parameter("build_id", "uuid");
     let attempt = path_parameter("attempt_id", "uuid");
@@ -587,6 +694,7 @@ fn openapi_document() -> Value {
         query_parameter("after", "string"),
         query_parameter("after_digest", "sha256"),
     ];
+    let trigger_event_payload = trigger_event_payload_schema();
     json!({
         "openapi": "3.1.0",
         "info": {
@@ -598,6 +706,7 @@ fn openapi_document() -> Value {
         "tags": [
             {"name": "authentication"},
             {"name": "pipelines"},
+            {"name": "triggers"},
             {"name": "components"},
             {"name": "builds"},
             {"name": "evidence"},
@@ -685,6 +794,26 @@ fn openapi_document() -> Value {
                     Vec::new(), None
                 ),
                 "put": put_pipeline_state_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
+                "get": api_operation(
+                    "getPipelineTrigger", "triggers", "Read the current typed trigger generation", "200",
+                    Vec::new(), None
+                ),
+                "put": put_pipeline_trigger_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger.clone()],
+                "post": trigger_event_operation(
+                    "submitTriggerEvent", "Authenticate, durably capture, and process a typed trigger event", "TriggerEventRequest"
+                )
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), trigger, delivery],
+                "post": trigger_event_operation(
+                    "redriveTriggerDelivery", "Explicitly redrive one dead-lettered trigger delivery", "TriggerRedriveRequest"
+                )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds": {
                 "parameters": [organization.clone(), project.clone(), pipeline],
@@ -862,14 +991,14 @@ fn openapi_document() -> Value {
                     "required": ["source"],
                     "properties": {
                         "source": {"type": "string"},
-                        "parameters": {"type": "object", "additionalProperties": true}
+                        "parameters": parameter_values_schema()
                     },
                     "additionalProperties": false
                 },
                 "PipelineBuildRequest": {
                     "type": "object",
                     "properties": {
-                        "parameters": {"type": "object", "additionalProperties": true}
+                        "parameters": parameter_values_schema()
                     },
                     "additionalProperties": false
                 },
@@ -889,6 +1018,62 @@ fn openapi_document() -> Value {
                     },
                     "additionalProperties": false
                 },
+                "PipelineTriggerRequest": pipeline_trigger_request_schema(),
+                "ScmPipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "scm_webhook", "ScmTriggerConfiguration"
+                ),
+                "SchedulePipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "schedule", "ScheduleTriggerConfiguration"
+                ),
+                "UpstreamPipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "upstream", "UpstreamTriggerConfiguration"
+                ),
+                "RemoteApiPipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "remote_api", "RemoteApiTriggerConfiguration"
+                ),
+                "TriggerEventRequest": {
+                    "type": "object",
+                    "required": ["trigger_generation", "delivery_id", "event_id", "event_kind", "event_time_unix_ms", "payload"],
+                    "properties": {
+                        "trigger_generation": {
+                            "type": "integer", "format": "int64",
+                            "minimum": 1, "maximum": i64::MAX
+                        },
+                        "delivery_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "event_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "event_kind": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "event_time_unix_ms": {
+                            "type": "integer", "format": "int64",
+                            "minimum": 0, "maximum": i64::MAX
+                        },
+                        "payload": {"$ref": "#/components/schemas/TriggerEventPayload"},
+                        "parameters": parameter_values_schema(),
+                        "platform": {"type": "string", "enum": ["linux", "windows"]},
+                        "trust_pool": {"type": "string", "minLength": 1, "maxLength": 128}
+                    },
+                    "additionalProperties": false
+                },
+                "TriggerEventResponse": trigger_event_response_schema(),
+                "TriggerDelivery": trigger_delivery_schema(),
+                "AdmissionResponse": admission_response_schema(),
+                "ScmTriggerConfiguration": scm_trigger_configuration_schema(),
+                "ScheduleTriggerConfiguration": schedule_trigger_configuration_schema(),
+                "UpstreamTriggerConfiguration": upstream_trigger_configuration_schema(),
+                "RemoteApiTriggerConfiguration": remote_api_trigger_configuration_schema(),
+                "TriggerEventPayload": trigger_event_payload,
+                "ScmTriggerEventPayload": scm_trigger_event_payload_schema(),
+                "ScheduleTriggerEventPayload": schedule_trigger_event_payload_schema(),
+                "UpstreamTriggerEventPayload": upstream_trigger_event_payload_schema(),
+                "RemoteApiTriggerEventPayload": remote_api_trigger_event_payload_schema(),
+                "TriggerRedriveRequest": {
+                    "type": "object",
+                    "required": ["delivery_id", "event_id"],
+                    "properties": {
+                        "delivery_id": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "event_id": {"type": "string", "minLength": 1, "maxLength": 512}
+                    },
+                    "additionalProperties": false
+                },
                 "RefreshRequest": {
                     "type": "object",
                     "required": ["refresh_token"],
@@ -903,7 +1088,7 @@ fn openapi_document() -> Value {
                     "properties": {
                         "slug": {"type": "string"},
                         "source": {"type": "string"},
-                        "parameters": {"type": "object", "additionalProperties": true}
+                        "parameters": parameter_values_schema()
                     },
                     "additionalProperties": false
                 },
@@ -959,6 +1144,331 @@ fn openapi_document() -> Value {
                 "BinaryArtifact": {"type": "string", "format": "binary"}
             }
         }
+    })
+}
+
+fn pipeline_trigger_request_schema() -> Value {
+    json!({
+        "oneOf": [
+            {"$ref": "#/components/schemas/ScmPipelineTriggerRequest"},
+            {"$ref": "#/components/schemas/SchedulePipelineTriggerRequest"},
+            {"$ref": "#/components/schemas/UpstreamPipelineTriggerRequest"},
+            {"$ref": "#/components/schemas/RemoteApiPipelineTriggerRequest"}
+        ],
+        "discriminator": {
+            "propertyName": "kind",
+            "mapping": {
+                "scm_webhook": "#/components/schemas/ScmPipelineTriggerRequest",
+                "schedule": "#/components/schemas/SchedulePipelineTriggerRequest",
+                "upstream": "#/components/schemas/UpstreamPipelineTriggerRequest",
+                "remote_api": "#/components/schemas/RemoteApiPipelineTriggerRequest"
+            }
+        }
+    })
+}
+
+fn parameter_values_schema() -> Value {
+    json!({
+        "type": "object",
+        "maxProperties": 128,
+        "propertyNames": {
+            "pattern": "^[A-Za-z0-9_-]{1,256}$"
+        },
+        "additionalProperties": {
+            "oneOf": [
+                {"type": "boolean"},
+                {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": i64::MIN,
+                    "maximum": i64::MAX
+                },
+                {"type": "string", "maxLength": 4096}
+            ]
+        }
+    })
+}
+
+fn trigger_event_response_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["delivery"],
+        "properties": {
+            "delivery": {"$ref": "#/components/schemas/TriggerDelivery"},
+            "admission": {"$ref": "#/components/schemas/AdmissionResponse"}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn trigger_delivery_schema() -> Value {
+    let digest = json!({
+        "type": "array",
+        "minItems": 32,
+        "maxItems": 32,
+        "items": {"type": "integer", "minimum": 0, "maximum": 255}
+    });
+    json!({
+        "type": "object",
+        "required": [
+            "organization_id", "project_id", "pipeline_id", "trigger_id",
+            "trigger_generation", "delivery_id", "event_id", "event_kind",
+            "caller_identity", "payload_sha256", "canonical_payload", "parameters",
+            "requested_platform", "requested_trust_pool", "event_time_unix_ms",
+            "accepted_at_unix_ms", "expires_at_unix_ms", "status", "attempt_count",
+            "next_attempt_at_unix_ms", "claim_owner", "claim_fence",
+            "claim_expires_at_unix_ms", "redrive_of_delivery_id", "redrive_ordinal",
+            "build_id", "terminal_reason", "audit_sequence", "audit_event_hash"
+        ],
+        "properties": {
+            "organization_id": {"type": "string", "format": "uuid"},
+            "project_id": {"type": "string", "format": "uuid"},
+            "pipeline_id": {"type": "string", "format": "uuid"},
+            "trigger_id": {"type": "string", "format": "uuid"},
+            "trigger_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "delivery_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "event_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "event_kind": {"type": "string", "minLength": 1, "maxLength": 256},
+            "caller_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "payload_sha256": digest.clone(),
+            "canonical_payload": {"type": "object"},
+            "parameters": {"type": "object"},
+            "requested_platform": {"type": "string", "enum": ["linux", "windows"]},
+            "requested_trust_pool": {"type": "string", "minLength": 1, "maxLength": 128},
+            "event_time_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "accepted_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "expires_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "status": {"type": "string", "enum": ["pending", "retry_wait", "admitted", "dead_lettered"]},
+            "attempt_count": {"type": "integer", "format": "int32", "minimum": 0, "maximum": i32::MAX},
+            "next_attempt_at_unix_ms": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "claim_owner": {"type": ["string", "null"]},
+            "claim_fence": {"type": "integer", "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "claim_expires_at_unix_ms": {"type": ["integer", "null"], "format": "int64", "minimum": 0, "maximum": i64::MAX},
+            "redrive_of_delivery_id": {"type": ["string", "null"]},
+            "redrive_ordinal": {"type": ["integer", "null"], "format": "int32", "minimum": 1, "maximum": i32::MAX},
+            "build_id": {"type": ["string", "null"], "format": "uuid"},
+            "terminal_reason": {"type": ["string", "null"], "maxLength": 2048},
+            "audit_sequence": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "audit_event_hash": digest
+        },
+        "additionalProperties": false
+    })
+}
+
+fn admission_response_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["build_id", "node_id", "attempt_id", "created", "pipeline_digest"],
+        "properties": {
+            "build_id": {"type": "string", "format": "uuid"},
+            "node_id": {"type": "string", "format": "uuid"},
+            "attempt_id": {"type": "string", "format": "uuid"},
+            "created": {"type": "boolean"},
+            "pipeline_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn pipeline_trigger_request_variant_schema(kind: &str, configuration_schema: &str) -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "kind", "state", "implementation_sha256", "configuration_sha256",
+            "filter_sha256", "event_source_identity", "source_generation",
+            "configuration", "deduplication_window_seconds",
+            "max_delivery_attempts", "delivery_ttl_seconds", "reason"
+        ],
+        "properties": {
+            "kind": {"type": "string", "const": kind},
+            "state": {"type": "string", "enum": ["enabled", "paused"]},
+            "implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "configuration_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "filter_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "event_source_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "source_generation": {"type": "string", "minLength": 1, "maxLength": 512},
+            "configuration": {"$ref": format!("#/components/schemas/{configuration_schema}")},
+            "deduplication_window_seconds": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 2592000},
+            "max_delivery_attempts": {"type": "integer", "format": "int32", "minimum": 1, "maximum": 100},
+            "delivery_ttl_seconds": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 2592000},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn scm_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "provider": {"type": "string", "minLength": 1, "maxLength": 512},
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "filter": trigger_filter_schema(&["event_kinds", "branches", "path_prefixes"])
+        },
+        "required": ["provider", "repository_identity", "filter"],
+        "additionalProperties": false
+    })
+}
+
+fn schedule_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "timezone": {"type": "string", "minLength": 1, "maxLength": 128},
+            "calendar": {"type": "string", "minLength": 1, "maxLength": 128},
+            "expression": {"type": "string", "minLength": 1, "maxLength": 512},
+            "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolver_implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolved_slots_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolved_slots_unix_ms": {
+                "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true,
+                "description": "Resolved Unix-millisecond slots in strictly increasing order; the digest binds this exact ordered array.",
+                "x-mcloving-ordering": "strictly_increasing",
+                "items": {
+                    "type": "integer", "format": "int64",
+                    "minimum": 0, "maximum": i64::MAX
+                }
+            },
+            "jenkins_hash_algorithm_version": {"type": "string", "minLength": 1, "maxLength": 512},
+            "jenkins_full_item_name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "jenkins_hash_inputs_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "filter": trigger_filter_schema(&["event_kinds"])
+        },
+        "required": [
+            "timezone", "calendar", "expression", "schedule_identity_sha256",
+            "resolver_implementation_sha256", "resolved_slots_sha256",
+            "resolved_slots_unix_ms", "filter"
+        ],
+        "dependentRequired": {
+            "jenkins_hash_algorithm_version": ["jenkins_full_item_name", "jenkins_hash_inputs_sha256"],
+            "jenkins_full_item_name": ["jenkins_hash_algorithm_version", "jenkins_hash_inputs_sha256"],
+            "jenkins_hash_inputs_sha256": ["jenkins_hash_algorithm_version", "jenkins_full_item_name"]
+        },
+        "additionalProperties": false
+    })
+}
+
+fn upstream_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "upstream_pipeline_id": {"type": "string", "format": "uuid"},
+            "filter": trigger_filter_schema(&["event_kinds", "statuses"])
+        },
+        "required": ["upstream_pipeline_id", "filter"],
+        "additionalProperties": false
+    })
+}
+
+fn remote_api_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "audience": {"type": "string", "minLength": 1, "maxLength": 512},
+            "filter": trigger_filter_schema(&["event_kinds", "request_methods"])
+        },
+        "required": ["audience", "filter"],
+        "additionalProperties": false
+    })
+}
+
+fn trigger_filter_schema(fields: &[&str]) -> Value {
+    let mut properties = serde_json::Map::new();
+    for field in fields {
+        properties.insert(
+            (*field).to_owned(),
+            json!({
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512}
+            }),
+        );
+    }
+    json!({
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": false
+    })
+}
+
+fn trigger_event_payload_schema() -> Value {
+    json!({
+        "oneOf": [
+            {"$ref": "#/components/schemas/ScmTriggerEventPayload"},
+            {"$ref": "#/components/schemas/ScheduleTriggerEventPayload"},
+            {"$ref": "#/components/schemas/UpstreamTriggerEventPayload"},
+            {"$ref": "#/components/schemas/RemoteApiTriggerEventPayload"}
+        ]
+    })
+}
+
+fn scm_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "revision": {"type": "string", "minLength": 1, "maxLength": 512},
+            "branch": {"type": "string", "minLength": 1, "maxLength": 512},
+            "paths": {
+                "type": "array",
+                "maxItems": 128,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512}
+            }
+        },
+        "required": ["repository_identity", "revision", "branch"],
+        "additionalProperties": false
+    })
+}
+
+fn schedule_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "timezone": {"type": "string", "minLength": 1, "maxLength": 128},
+            "calendar": {"type": "string", "minLength": 1, "maxLength": 128},
+            "expression": {"type": "string", "minLength": 1, "maxLength": 512},
+            "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "expected_last_resolved_slot_unix_ms": {
+                "type": "integer", "format": "int64",
+                "minimum": 0, "maximum": i64::MAX
+            },
+            "resolved_slot_unix_ms": {
+                "type": "integer", "format": "int64",
+                "minimum": 0, "maximum": i64::MAX
+            }
+        },
+        "required": [
+            "timezone", "calendar", "expression", "schedule_identity_sha256",
+            "resolved_slot_unix_ms"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn upstream_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "upstream_pipeline_id": {"type": "string", "format": "uuid"},
+            "upstream_build_id": {"type": "string", "format": "uuid"},
+            "status": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "required": ["upstream_pipeline_id", "upstream_build_id", "status"],
+        "additionalProperties": false
+    })
+}
+
+fn remote_api_trigger_event_payload_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "audience": {"type": "string", "minLength": 1, "maxLength": 512},
+            "request_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "request_method": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "required": ["audience", "request_id", "request_method"],
+        "additionalProperties": false
     })
 }
 
@@ -1121,6 +1631,53 @@ fn put_pipeline_state_operation() -> Value {
         "description": "Operational-state generation precondition failed",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
+    operation
+}
+
+fn put_pipeline_trigger_operation() -> Value {
+    let mut operation = api_operation(
+        "putPipelineTrigger",
+        "triggers",
+        "Create, pause, resume, rotate, or revise a typed trigger",
+        "201",
+        vec![
+            header_parameter("If-Match", true),
+            header_parameter(IDEMPOTENCY_HEADER, true),
+        ],
+        Some("PipelineTriggerRequest"),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Updated trigger generation or idempotent replay",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation["responses"]["412"] = json!({
+        "description": "Trigger generation precondition failed",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation
+}
+
+fn trigger_event_operation(operation_id: &str, summary: &str, body_schema: &str) -> Value {
+    let mut operation = api_operation(
+        operation_id,
+        "triggers",
+        summary,
+        "201",
+        Vec::new(),
+        Some(body_schema),
+    );
+    let response = |description: &str| {
+        json!({
+            "description": description,
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TriggerEventResponse"}}}
+        })
+    };
+    operation["responses"]["200"] = response("Exact replay of an admitted trigger delivery");
+    operation["responses"]["201"] = response("New trigger delivery admitted or durably captured");
+    operation["responses"]["202"] =
+        response("Delivery is durably leased or waiting for its bounded retry");
+    operation["responses"]["422"] =
+        response("Delivery is durably dead-lettered and carries its terminal state");
     operation
 }
 
@@ -1934,6 +2491,686 @@ impl IntoResponse for ApiError {
 type ProjectPath = (Uuid, Uuid);
 type BuildPath = (Uuid, Uuid, Uuid);
 
+async fn get_pipeline_trigger(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectView,
+    )
+    .await?;
+    let trigger = state
+        .store
+        .pipeline_trigger(organization_id, project_id, pipeline_id, trigger_id)
+        .await
+        .map_err(trigger_error)?
+        .ok_or_else(resource_not_found)?;
+    trigger_response(StatusCode::OK, trigger)
+}
+
+async fn put_pipeline_trigger(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<PipelineTriggerRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let expected_generation = expected_revision(&headers)?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let outcome = state
+        .store
+        .put_pipeline_trigger(&PipelineTriggerWrite {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            expected_generation,
+            kind: request.kind,
+            state: request.state,
+            implementation_sha256: parse_hex_digest_named(
+                &request.implementation_sha256,
+                "trigger implementation",
+            )?,
+            configuration_sha256: parse_hex_digest_named(
+                &request.configuration_sha256,
+                "trigger configuration",
+            )?,
+            filter_sha256: parse_hex_digest_named(&request.filter_sha256, "trigger filter")?,
+            event_source_identity: request.event_source_identity,
+            source_generation: request.source_generation,
+            configuration: request.configuration,
+            deduplication_window_seconds: request.deduplication_window_seconds,
+            max_delivery_attempts: request.max_delivery_attempts,
+            delivery_ttl_seconds: request.delivery_ttl_seconds,
+            actor_subject: principal.subject,
+            reason: request.reason,
+            idempotency_key: idempotency_key.to_owned(),
+        })
+        .await
+        .map_err(trigger_error)?;
+    match outcome {
+        TriggerPutOutcome::Created(trigger) => trigger_response(StatusCode::CREATED, trigger),
+        TriggerPutOutcome::Revised(trigger) | TriggerPutOutcome::Replayed(trigger) => {
+            trigger_response(StatusCode::OK, trigger)
+        }
+        TriggerPutOutcome::PreconditionFailed { current_generation } => Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "trigger_generation_precondition_failed",
+            format!("current trigger generation is {current_generation}"),
+        )),
+    }
+}
+
+fn trigger_response(status: StatusCode, trigger: PipelineTrigger) -> Result<Response, ApiError> {
+    let generation = trigger.generation;
+    let mut response = (
+        status,
+        Json(PipelineTriggerResponse {
+            organization_id: trigger.organization_id,
+            project_id: trigger.project_id,
+            pipeline_id: trigger.pipeline_id,
+            trigger_id: trigger.trigger_id,
+            generation,
+            kind: trigger.kind,
+            state: trigger.state,
+            implementation_sha256: hex(&trigger.implementation_sha256),
+            configuration_sha256: hex(&trigger.configuration_sha256),
+            filter_sha256: hex(&trigger.filter_sha256),
+            event_source_identity: trigger.event_source_identity,
+            source_generation: trigger.source_generation,
+            configuration: trigger.configuration,
+            deduplication_window_seconds: trigger.deduplication_window_seconds,
+            max_delivery_attempts: trigger.max_delivery_attempts,
+            delivery_ttl_seconds: trigger.delivery_ttl_seconds,
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{generation}\"")).map_err(internal)?,
+    );
+    Ok(response)
+}
+
+async fn submit_trigger_event(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<TriggerEventRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::BuildTrigger,
+    )
+    .await?;
+    let trigger = state
+        .store
+        .pipeline_trigger_generation(
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            request.trigger_generation,
+        )
+        .await
+        .map_err(trigger_error)?
+        .ok_or_else(resource_not_found)?;
+    validate_trigger_event_filter(&trigger, &request)?;
+    // Reject parameter shapes before durable capture. The processing path
+    // repeats this validation for crash/restart and legacy-corruption safety.
+    parameter_values(request.parameters.clone())?;
+    let accepted_at_unix_ms = unix_time_ms();
+    let canonical_payload = canonical_trigger_payload(&request)?;
+    let payload_bytes = serde_json::to_vec(&canonical_payload).map_err(internal)?;
+    let payload_sha256: [u8; 32] = Sha256::digest(&payload_bytes).into();
+    let parameters = Value::Object(request.parameters.clone().into_iter().collect());
+    let schedule_slot = trigger_schedule_slot(&trigger, &request)?;
+    let delivery = state
+        .store
+        .accept_trigger_delivery(&NewTriggerDelivery {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            expected_trigger_generation: request.trigger_generation,
+            delivery_id: request.delivery_id.clone(),
+            event_id: request.event_id.clone(),
+            event_kind: request.event_kind.clone(),
+            caller_identity: principal.subject.clone(),
+            payload_sha256,
+            canonical_payload,
+            parameters,
+            requested_platform: request.platform.clone(),
+            requested_trust_pool: request.trust_pool.clone(),
+            event_time_unix_ms: request.event_time_unix_ms,
+            accepted_at_unix_ms,
+            schedule_slot,
+        })
+        .await
+        .map_err(trigger_error)?;
+    let delivery = match delivery {
+        TriggerDeliveryAdmission::Created(delivery)
+        | TriggerDeliveryAdmission::Replayed(delivery) => delivery,
+    };
+    process_trigger_delivery(&state, delivery, accepted_at_unix_ms).await
+}
+
+async fn redrive_trigger_event(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, trigger_id, dead_letter_delivery_id)): Path<(
+        Uuid,
+        Uuid,
+        Uuid,
+        Uuid,
+        String,
+    )>,
+    headers: HeaderMap,
+    Json(request): Json<TriggerRedriveRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let accepted_at_unix_ms = unix_time_ms();
+    let delivery = state
+        .store
+        .redrive_trigger_delivery(&TriggerDeliveryRedrive {
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            dead_letter_delivery_id,
+            new_delivery_id: request.delivery_id,
+            new_event_id: request.event_id,
+            actor_subject: principal.subject,
+            accepted_at_unix_ms,
+        })
+        .await
+        .map_err(trigger_error)?;
+    let delivery = match delivery {
+        TriggerDeliveryAdmission::Created(delivery)
+        | TriggerDeliveryAdmission::Replayed(delivery) => delivery,
+    };
+    process_trigger_delivery(&state, delivery, accepted_at_unix_ms).await
+}
+
+async fn process_trigger_delivery(
+    state: &ApiState,
+    delivery: TriggerDelivery,
+    now_unix_ms: i64,
+) -> Result<Response, ApiError> {
+    if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::Admitted {
+        return admitted_trigger_response(state, delivery).await;
+    }
+    if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::DeadLettered {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(TriggerEventResponse {
+                delivery,
+                admission: None,
+            }),
+        )
+            .into_response());
+    }
+    let worker_identity = format!("trigger-api:{}", Uuid::new_v4());
+    let claim = state
+        .store
+        .claim_trigger_delivery(&TriggerDeliveryClaimRequest {
+            organization_id: delivery.organization_id,
+            trigger_id: delivery.trigger_id,
+            delivery_id: delivery.delivery_id.clone(),
+            worker_identity: worker_identity.clone(),
+            now_unix_ms,
+            lease_expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
+        })
+        .await
+        .map_err(trigger_error)?;
+    let claimed = match claim {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        TriggerDeliveryClaimOutcome::NotDue(delivery)
+        | TriggerDeliveryClaimOutcome::Leased(delivery) => {
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(TriggerEventResponse {
+                    delivery,
+                    admission: None,
+                }),
+            )
+                .into_response());
+        }
+        TriggerDeliveryClaimOutcome::Terminal(delivery) => {
+            if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::Admitted {
+                return admitted_trigger_response(state, delivery).await;
+            }
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(TriggerEventResponse {
+                    delivery,
+                    admission: None,
+                }),
+            )
+                .into_response());
+        }
+    };
+    let build_idempotency = trigger_build_idempotency(claimed.trigger_id, &claimed.delivery_id);
+    let parameters = match parameter_values_from_delivery(&claimed) {
+        Ok(parameters) => parameters,
+        Err(error) => {
+            return fail_claimed_trigger_delivery(state, claimed, worker_identity, error).await;
+        }
+    };
+    match admit_pipeline_parameters(
+        state,
+        PipelineAdmissionInput {
+            organization_id: claimed.organization_id,
+            project_id: claimed.project_id,
+            pipeline_id: claimed.pipeline_id,
+            idempotency_key: build_idempotency,
+            parameters,
+            required_platform: claimed.requested_platform.clone(),
+            required_trust_pool: claimed.requested_trust_pool.clone(),
+            trigger_claim: Some(TriggerDeliveryDagAdmissionRequest {
+                organization_id: claimed.organization_id,
+                trigger_id: claimed.trigger_id,
+                delivery_id: claimed.delivery_id.clone(),
+                worker_identity: worker_identity.clone(),
+                claim_fence: claimed.claim_fence,
+            }),
+            trigger_replay: false,
+        },
+    )
+    .await
+    {
+        Ok(result) => {
+            let delivery = result
+                .trigger_delivery
+                .ok_or_else(|| internal("trigger admission omitted its atomic delivery result"))?;
+            Ok((
+                result.status,
+                Json(TriggerEventResponse {
+                    delivery,
+                    admission: result.admission,
+                }),
+            )
+                .into_response())
+        }
+        Err(error) => fail_claimed_trigger_delivery(state, claimed, worker_identity, error).await,
+    }
+}
+
+async fn fail_claimed_trigger_delivery(
+    state: &ApiState,
+    claimed: TriggerDelivery,
+    worker_identity: String,
+    error: ApiError,
+) -> Result<Response, ApiError> {
+    let retryable = error.status.is_server_error();
+    let failure_unix_ms = unix_time_ms();
+    let failed = state
+        .store
+        .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
+            organization_id: claimed.organization_id,
+            trigger_id: claimed.trigger_id,
+            delivery_id: claimed.delivery_id,
+            worker_identity,
+            claim_fence: claimed.claim_fence,
+            now_unix_ms: failure_unix_ms,
+            retry_at_unix_ms: failure_unix_ms.saturating_add(60_000),
+            retryable,
+            reason: bounded_trigger_failure_reason(&error),
+        })
+        .await
+        .map_err(trigger_error)?;
+    let (status, delivery) = match failed {
+        TriggerDeliveryFailure::RetryScheduled(delivery) => (StatusCode::ACCEPTED, delivery),
+        TriggerDeliveryFailure::DeadLettered(delivery) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, delivery)
+        }
+        TriggerDeliveryFailure::LeaseLost(delivery) => (StatusCode::ACCEPTED, delivery),
+    };
+    Ok((
+        status,
+        Json(TriggerEventResponse {
+            delivery,
+            admission: None,
+        }),
+    )
+        .into_response())
+}
+
+async fn admitted_trigger_response(
+    state: &ApiState,
+    delivery: TriggerDelivery,
+) -> Result<Response, ApiError> {
+    let build_id = delivery
+        .build_id
+        .ok_or_else(|| internal("admitted trigger delivery is missing its bound build identity"))?;
+    let result = admit_pipeline_parameters(
+        state,
+        PipelineAdmissionInput {
+            organization_id: delivery.organization_id,
+            project_id: delivery.project_id,
+            pipeline_id: delivery.pipeline_id,
+            idempotency_key: trigger_build_idempotency(delivery.trigger_id, &delivery.delivery_id),
+            parameters: parameter_values_from_delivery(&delivery)?,
+            required_platform: delivery.requested_platform.clone(),
+            required_trust_pool: delivery.requested_trust_pool.clone(),
+            trigger_claim: None,
+            trigger_replay: true,
+        },
+    )
+    .await?;
+    let admission = result
+        .admission
+        .ok_or_else(|| internal("admitted trigger replay omitted its build admission"))?;
+    if admission.build_id != build_id {
+        return Err(internal(
+            "trigger delivery replay resolved to a different build identity",
+        ));
+    }
+    Ok((
+        result.status,
+        Json(TriggerEventResponse {
+            delivery,
+            admission: Some(admission),
+        }),
+    )
+        .into_response())
+}
+
+fn parameter_values_from_delivery(
+    delivery: &TriggerDelivery,
+) -> Result<BTreeMap<String, ParameterValue>, ApiError> {
+    let parameters: BTreeMap<String, Value> = serde_json::from_value(delivery.parameters.clone())
+        .map_err(|_| {
+        internal("stored trigger delivery parameters are not a canonical object")
+    })?;
+    parameter_values(parameters)
+}
+
+fn canonical_trigger_payload(request: &TriggerEventRequest) -> Result<Value, ApiError> {
+    if !request.payload.is_object() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_trigger_payload",
+            "trigger payload must be an object",
+        ));
+    }
+    Ok(json!({
+        "trigger_generation": request.trigger_generation,
+        "event_kind": request.event_kind.clone(),
+        "event_time_unix_ms": request.event_time_unix_ms,
+        "payload": request.payload.clone(),
+    }))
+}
+
+fn validate_trigger_event_filter(
+    trigger: &PipelineTrigger,
+    request: &TriggerEventRequest,
+) -> Result<(), ApiError> {
+    if trigger.state == PipelineTriggerState::Paused {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "trigger_paused",
+            format!("trigger is paused at generation {}", trigger.generation),
+        ));
+    }
+    let filter = trigger
+        .configuration
+        .get("filter")
+        .and_then(Value::as_object)
+        .ok_or_else(|| internal("stored trigger filter is not an object"))?;
+    if let Some(events) = filter.get("event_kinds") {
+        let events = canonical_string_array(events, "event_kinds")?;
+        if !events.is_empty() && !events.iter().any(|event| event == &request.event_kind) {
+            return Err(trigger_filtered("event kind"));
+        }
+    }
+    match trigger.kind {
+        TriggerKind::ScmWebhook => {
+            let configured = trigger
+                .configuration
+                .get("repository_identity")
+                .and_then(Value::as_str)
+                .ok_or_else(|| internal("stored SCM repository identity is missing"))?;
+            if trigger_payload_text(request, "repository_identity")? != configured {
+                return Err(trigger_filtered("SCM repository identity"));
+            }
+            trigger_payload_text(request, "revision")?;
+            if let Some(branches) = filter.get("branches") {
+                let branches = canonical_string_array(branches, "branches")?;
+                let branch = request
+                    .payload
+                    .get("branch")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| trigger_filtered("missing branch"))?;
+                if !branches.is_empty() && !branches.iter().any(|allowed| allowed == branch) {
+                    return Err(trigger_filtered("branch"));
+                }
+            }
+            let supplied_paths = request
+                .payload
+                .get("paths")
+                .map(|paths| {
+                    let paths = paths
+                        .as_array()
+                        .ok_or_else(|| trigger_filtered("invalid paths"))?;
+                    if paths.len() > 128 {
+                        return Err(trigger_filtered("invalid paths"));
+                    }
+                    paths
+                        .iter()
+                        .map(|path| {
+                            path.as_str()
+                                .filter(|path| {
+                                    !path.is_empty()
+                                        && path.trim() == *path
+                                        && path.len() <= 512
+                                        && !path.chars().any(char::is_control)
+                                })
+                                .ok_or_else(|| trigger_filtered("invalid path"))
+                        })
+                        .collect::<Result<Vec<_>, ApiError>>()
+                })
+                .transpose()?;
+            if let Some(prefixes) = filter.get("path_prefixes") {
+                let prefixes = canonical_string_array(prefixes, "path_prefixes")?;
+                let matched = prefixes.is_empty()
+                    || supplied_paths
+                        .as_ref()
+                        .ok_or_else(|| trigger_filtered("missing paths"))?
+                        .iter()
+                        .any(|path| prefixes.iter().any(|prefix| path.starts_with(prefix)));
+                if !matched {
+                    return Err(trigger_filtered("path"));
+                }
+            }
+        }
+        TriggerKind::Upstream => {
+            let configured = trigger
+                .configuration
+                .get("upstream_pipeline_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| internal("stored upstream pipeline identity is missing"))?;
+            let supplied = request
+                .payload
+                .get("upstream_pipeline_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| trigger_filtered("missing upstream pipeline identity"))?;
+            if supplied != configured {
+                return Err(trigger_filtered("upstream pipeline identity"));
+            }
+            let upstream_build = trigger_payload_text(request, "upstream_build_id")?;
+            Uuid::parse_str(upstream_build)
+                .map_err(|_| trigger_filtered("invalid upstream build identity"))?;
+            if let Some(statuses) = filter.get("statuses") {
+                let statuses = canonical_string_array(statuses, "statuses")?;
+                let status = request
+                    .payload
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| trigger_filtered("missing upstream status"))?;
+                if !statuses.is_empty() && !statuses.iter().any(|allowed| allowed == status) {
+                    return Err(trigger_filtered("upstream status"));
+                }
+            }
+        }
+        TriggerKind::Schedule => {
+            if request.event_kind != "schedule" {
+                return Err(trigger_filtered("schedule event kind"));
+            }
+        }
+        TriggerKind::RemoteApi => {
+            let configured = trigger
+                .configuration
+                .get("audience")
+                .and_then(Value::as_str)
+                .ok_or_else(|| internal("stored remote-build audience is missing"))?;
+            if trigger_payload_text(request, "audience")? != configured {
+                return Err(trigger_filtered("remote-build audience"));
+            }
+            if trigger_payload_text(request, "request_id")? != request.event_id {
+                return Err(trigger_filtered("remote-build request identity"));
+            }
+            let method = trigger_payload_text(request, "request_method")?;
+            if let Some(methods) = filter.get("request_methods") {
+                let methods = canonical_string_array(methods, "request_methods")?;
+                if !methods.is_empty() && !methods.iter().any(|allowed| allowed == method) {
+                    return Err(trigger_filtered("request method"));
+                }
+            }
+        }
+        TriggerKind::Plugin => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "trigger_class_ineligible",
+                "plugin trigger class has no installed admitted implementation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn trigger_payload_text<'a>(
+    request: &'a TriggerEventRequest,
+    field: &str,
+) -> Result<&'a str, ApiError> {
+    request
+        .payload
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.trim() == *value && value.len() <= 512)
+        .ok_or_else(|| trigger_filtered(&format!("missing or invalid {field}")))
+}
+
+fn trigger_schedule_slot(
+    trigger: &PipelineTrigger,
+    request: &TriggerEventRequest,
+) -> Result<Option<TriggerScheduleSlot>, ApiError> {
+    if trigger.kind != TriggerKind::Schedule {
+        return Ok(None);
+    }
+    let required_text = |field: &str| {
+        request
+            .payload
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| trigger_filtered(&format!("missing schedule {field}")))
+    };
+    let resolved_slot_unix_ms = request
+        .payload
+        .get("resolved_slot_unix_ms")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| trigger_filtered("missing resolved schedule slot"))?;
+    let expected_last_resolved_slot_unix_ms = request
+        .payload
+        .get("expected_last_resolved_slot_unix_ms")
+        .map(|value| {
+            value.as_i64().ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_schedule_watermark",
+                    "expected schedule watermark must be an integer",
+                )
+            })
+        })
+        .transpose()?;
+    Ok(Some(TriggerScheduleSlot {
+        timezone: required_text("timezone")?,
+        calendar: required_text("calendar")?,
+        expression: required_text("expression")?,
+        schedule_identity_sha256: parse_hex_digest_named(
+            &required_text("schedule_identity_sha256")?,
+            "schedule identity",
+        )?,
+        expected_last_resolved_slot_unix_ms,
+        resolved_slot_unix_ms,
+    }))
+}
+
+fn canonical_string_array(value: &Value, field: &str) -> Result<Vec<String>, ApiError> {
+    let values = value.as_array().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid_trigger_configuration",
+            format!("stored trigger filter '{field}' must be an array"),
+        )
+    })?;
+    let strings = values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid_trigger_configuration",
+                    format!("stored trigger filter '{field}' contains a non-string"),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(strings)
+}
+
+fn trigger_filtered(field: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "trigger_filtered",
+        format!("trigger event did not pass the configured {field} filter"),
+    )
+}
+
+fn trigger_build_idempotency(trigger_id: Uuid, delivery_id: &str) -> String {
+    let digest: [u8; 32] = Sha256::digest(delivery_id.as_bytes()).into();
+    format!(
+        "{TRIGGER_DAG_IDEMPOTENCY_PREFIX}{trigger_id}-{}",
+        hex(&digest)
+    )
+}
+
+fn default_platform() -> String {
+    DEFAULT_PLATFORM.to_owned()
+}
+
 async fn submit_pipeline_build(
     State(state): State<Arc<ApiState>>,
     Path((organization_id, project_id, pipeline_id)): Path<(Uuid, Uuid, Uuid)>,
@@ -1950,11 +3187,65 @@ async fn submit_pipeline_build(
     .await?;
     let required_trust_pool = submission_trust_pool(&headers)?;
     let required_platform = submission_platform(&headers)?;
-    let idempotency_key = required_idempotency_key(&headers)?;
+    let idempotency_key = ordinary_build_idempotency_key(&headers)?;
     let parameters = parameter_values(request.parameters)?;
+    let result = admit_pipeline_parameters(
+        &state,
+        PipelineAdmissionInput {
+            organization_id,
+            project_id,
+            pipeline_id,
+            idempotency_key: idempotency_key.to_owned(),
+            parameters,
+            required_platform,
+            required_trust_pool,
+            trigger_claim: None,
+            trigger_replay: false,
+        },
+    )
+    .await?;
+    let response = result
+        .admission
+        .ok_or_else(|| internal("pipeline admission omitted its build response"))?;
+    Ok((result.status, Json(response)))
+}
+
+struct PipelineAdmissionInput {
+    organization_id: Uuid,
+    project_id: Uuid,
+    pipeline_id: Uuid,
+    idempotency_key: String,
+    parameters: BTreeMap<String, ParameterValue>,
+    required_platform: String,
+    required_trust_pool: String,
+    trigger_claim: Option<TriggerDeliveryDagAdmissionRequest>,
+    trigger_replay: bool,
+}
+
+struct PipelineAdmissionResult {
+    status: StatusCode,
+    admission: Option<AdmissionResponse>,
+    trigger_delivery: Option<TriggerDelivery>,
+}
+
+async fn admit_pipeline_parameters(
+    state: &ApiState,
+    input: PipelineAdmissionInput,
+) -> Result<PipelineAdmissionResult, ApiError> {
+    let PipelineAdmissionInput {
+        organization_id,
+        project_id,
+        pipeline_id,
+        idempotency_key,
+        parameters,
+        required_platform,
+        required_trust_pool,
+        trigger_claim,
+        trigger_replay,
+    } = input;
     let replay = state
         .store
-        .dag_replay_binding(organization_id, project_id, idempotency_key)
+        .dag_replay_binding(organization_id, project_id, &idempotency_key)
         .await
         .map_err(admission_error)?;
     let (source, pipeline_revision, pipeline_operational_generation) = match replay {
@@ -2014,21 +3305,56 @@ async fn submit_pipeline_build(
             max_attempts: 1,
         })
         .collect();
-    let admission = state
-        .store
-        .admit_dag(&NewDagBuild {
-            organization_id,
-            project_id,
-            pipeline_id,
-            pipeline_revision,
-            pipeline_operational_generation,
-            idempotency_key: idempotency_key.to_owned(),
-            pipeline_digest: digest,
-            priority: 0,
-            nodes,
-        })
-        .await
-        .map_err(admission_error)?;
+    let dag = NewDagBuild {
+        organization_id,
+        project_id,
+        pipeline_id,
+        pipeline_revision,
+        pipeline_operational_generation,
+        idempotency_key: idempotency_key.to_owned(),
+        pipeline_digest: digest,
+        priority: 0,
+        nodes,
+    };
+    let (admission, trigger_delivery) = match trigger_claim {
+        Some(claim) => match state
+            .store
+            .admit_trigger_delivery_dag(&claim, &dag)
+            .await
+            .map_err(admission_error)?
+        {
+            TriggerDeliveryDagAdmission::Admitted {
+                delivery,
+                admission,
+            } => (admission, Some(delivery)),
+            TriggerDeliveryDagAdmission::DeadLettered(delivery) => {
+                return Ok(PipelineAdmissionResult {
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    admission: None,
+                    trigger_delivery: Some(delivery),
+                });
+            }
+            TriggerDeliveryDagAdmission::LeaseLost(delivery) => {
+                return Ok(PipelineAdmissionResult {
+                    status: StatusCode::ACCEPTED,
+                    admission: None,
+                    trigger_delivery: Some(delivery),
+                });
+            }
+        },
+        None if trigger_replay => (
+            state
+                .store
+                .replay_trigger_dag(&dag)
+                .await
+                .map_err(admission_error)?,
+            None,
+        ),
+        None => (
+            state.store.admit_dag(&dag).await.map_err(admission_error)?,
+            None,
+        ),
+    };
     let first = pipeline
         .stages
         .first()
@@ -2039,16 +3365,17 @@ async fn submit_pipeline_build(
     } else {
         StatusCode::OK
     };
-    Ok((
+    Ok(PipelineAdmissionResult {
         status,
-        Json(AdmissionResponse {
+        admission: Some(AdmissionResponse {
             build_id: admission.build_id,
             node_id: first.node_id,
             attempt_id: first.attempt_id,
             created: admission.created,
             pipeline_digest: hex(&digest),
         }),
-    ))
+        trigger_delivery,
+    })
 }
 
 fn required_idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -2068,6 +3395,18 @@ fn required_idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
                 "a canonical non-empty Idempotency-Key header of at most 256 bytes is required",
             )
         })
+}
+
+fn ordinary_build_idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
+    let value = required_idempotency_key(headers)?;
+    if value.starts_with(TRIGGER_DAG_IDEMPOTENCY_PREFIX) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "reserved_idempotency_key",
+            "the trigger DAG idempotency namespace is reserved",
+        ));
+    }
+    Ok(value)
 }
 
 fn submission_trust_pool(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -2189,6 +3528,14 @@ fn parameter_values(
     parameters
         .into_iter()
         .map(|(name, value)| {
+            if name.is_empty()
+                || name.len() > 256
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            {
+                return Err(invalid_parameter_name());
+            }
             let value = match value {
                 Value::Bool(value) => ParameterValue::Bool(value),
                 Value::Number(value) => value
@@ -2201,6 +3548,37 @@ fn parameter_values(
             Ok((name, value))
         })
         .collect()
+}
+
+fn invalid_parameter_name() -> ApiError {
+    ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "invalid_parameters",
+        "parameter names must be 1-256 ASCII letters, digits, underscores, or hyphens",
+    )
+}
+
+fn bounded_trigger_failure_reason(error: &ApiError) -> String {
+    const MAX_FAILURE_REASON_BYTES: usize = 2048;
+
+    let mut reason = format!("{}: {}", error.code, error.message)
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    reason = reason.trim().to_owned();
+    if reason.is_empty() {
+        reason = "trigger admission failed".to_owned();
+    }
+    while reason.len() > MAX_FAILURE_REASON_BYTES {
+        reason.pop();
+    }
+    reason
 }
 
 fn invalid_parameter_value() -> ApiError {
@@ -2360,6 +3738,37 @@ fn pipeline_state_error(error: StoreError) -> ApiError {
         StoreError::InvalidPipelineState(message) => {
             ApiError::new(StatusCode::BAD_REQUEST, "invalid_pipeline_state", message)
         }
+        StoreError::PipelineStateConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "pipeline_state_conflict", message)
+        }
+        other => internal(other),
+    }
+}
+
+fn trigger_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::InvalidTriggerIngress(message) => {
+            ApiError::new(StatusCode::BAD_REQUEST, "invalid_trigger_ingress", message)
+        }
+        StoreError::TriggerIngressConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "trigger_ingress_conflict", message)
+        }
+        StoreError::TriggerPaused {
+            trigger_id,
+            generation,
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "trigger_paused",
+            format!("trigger {trigger_id} is paused at generation {generation}"),
+        ),
+        StoreError::PipelineDisabled {
+            pipeline_id,
+            generation,
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "pipeline_disabled",
+            format!("pipeline {pipeline_id} is disabled at operational generation {generation}"),
+        ),
         StoreError::PipelineStateConflict(message) => {
             ApiError::new(StatusCode::CONFLICT, "pipeline_state_conflict", message)
         }
@@ -4163,6 +5572,19 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_builds_cannot_claim_the_trigger_idempotency_namespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            IDEMPOTENCY_HEADER,
+            HeaderValue::from_static("mcloving-trigger-v1-forged"),
+        );
+        let error = ordinary_build_idempotency_key(&headers).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.code, "reserved_idempotency_key");
+        assert!(required_idempotency_key(&headers).is_ok());
+    }
+
+    #[test]
     fn artifact_retention_is_bounded_before_publication_claim() {
         for seconds in [0, MAX_OBJECT_RETENTION_SECONDS] {
             validate_artifact_retention(seconds).expect("retention boundary accepted");
@@ -4269,6 +5691,22 @@ mod tests {
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state",
                 "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}",
+                "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events",
+                "post",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive",
+                "post",
             ),
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds",
@@ -4410,6 +5848,190 @@ mod tests {
         assert!(state["put"]["responses"]["200"].is_object());
         assert!(state["put"]["responses"]["201"].is_null());
 
+        for operation in [
+            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/events"]
+                ["post"],
+            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive"]
+                ["post"],
+        ] {
+            for status in ["200", "201", "202", "422"] {
+                assert_eq!(
+                    operation["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                    "#/components/schemas/TriggerEventResponse"
+                );
+            }
+        }
+
+        let schemas = &document["components"]["schemas"];
+        assert_eq!(
+            schemas["TriggerEventResponse"]["properties"]["delivery"]["$ref"],
+            "#/components/schemas/TriggerDelivery"
+        );
+        assert!(
+            schemas["TriggerEventResponse"]["required"]
+                .as_array()
+                .expect("trigger-event response requirements")
+                .contains(&Value::from("delivery"))
+        );
+        assert_eq!(
+            schemas["TriggerDelivery"]["properties"]["status"]["enum"],
+            json!(["pending", "retry_wait", "admitted", "dead_lettered"])
+        );
+        let trigger_request = &schemas["PipelineTriggerRequest"];
+        assert_eq!(trigger_request["discriminator"]["propertyName"], "kind");
+        assert_eq!(
+            trigger_request["oneOf"]
+                .as_array()
+                .expect("typed trigger request variants")
+                .len(),
+            4
+        );
+        assert!(
+            trigger_request["discriminator"]["mapping"]["plugin"].is_null(),
+            "unimplemented plugin triggers must not be advertised as accepted"
+        );
+        let scm_request = &schemas["ScmPipelineTriggerRequest"];
+        assert_eq!(scm_request["properties"]["kind"]["const"], "scm_webhook");
+        assert_eq!(
+            scm_request["properties"]["configuration"]["$ref"],
+            "#/components/schemas/ScmTriggerConfiguration"
+        );
+        assert_eq!(
+            scm_request["properties"]["deduplication_window_seconds"]["format"],
+            "int64"
+        );
+        assert_eq!(
+            scm_request["properties"]["max_delivery_attempts"]["format"],
+            "int32"
+        );
+        assert_eq!(
+            scm_request["properties"]["delivery_ttl_seconds"]["format"],
+            "int64"
+        );
+        let scm_configuration = &schemas["ScmTriggerConfiguration"];
+        assert!(
+            scm_configuration["required"]
+                .as_array()
+                .expect("SCM configuration requirements")
+                .contains(&Value::from("repository_identity"))
+        );
+        assert!(scm_configuration["properties"]["expression"].is_null());
+        assert!(scm_configuration["properties"]["filter"]["properties"]["statuses"].is_null());
+        assert_eq!(
+            scm_configuration["properties"]["filter"]["properties"]["event_kinds"]["uniqueItems"],
+            true
+        );
+        let schedule_configuration = &schemas["ScheduleTriggerConfiguration"];
+        assert!(
+            schedule_configuration["required"]
+                .as_array()
+                .expect("schedule configuration requirements")
+                .contains(&Value::from("resolved_slots_unix_ms"))
+        );
+        assert!(
+            schedule_configuration["properties"]["repository_identity"].is_null(),
+            "kind-specific configuration fields must fail closed"
+        );
+        let resolved_slots =
+            &schedule_configuration["properties"]["resolved_slots_unix_ms"]["items"];
+        assert_eq!(resolved_slots["format"], "int64");
+        assert_eq!(resolved_slots["maximum"], i64::MAX);
+        assert_eq!(
+            schedule_configuration["properties"]["resolved_slots_unix_ms"]["x-mcloving-ordering"],
+            "strictly_increasing"
+        );
+        assert!(
+            schedule_configuration["properties"]["resolved_slots_unix_ms"]["description"]
+                .as_str()
+                .expect("resolved-slot ordering description")
+                .contains("strictly increasing")
+        );
+        let trigger_event = &schemas["TriggerEventRequest"];
+        assert_eq!(
+            trigger_event["properties"]["trigger_generation"]["format"],
+            "int64"
+        );
+        assert_eq!(
+            trigger_event["properties"]["trigger_generation"]["maximum"],
+            i64::MAX
+        );
+        assert_eq!(
+            trigger_event["properties"]["event_time_unix_ms"]["format"],
+            "int64"
+        );
+        assert_eq!(
+            trigger_event["properties"]["event_time_unix_ms"]["maximum"],
+            i64::MAX
+        );
+        let event_payload = &schemas["TriggerEventPayload"];
+        assert_eq!(
+            event_payload["oneOf"]
+                .as_array()
+                .expect("typed trigger event payload variants")
+                .len(),
+            4
+        );
+        let scm_event = &schemas["ScmTriggerEventPayload"];
+        assert!(
+            scm_event["required"]
+                .as_array()
+                .expect("SCM event payload requirements")
+                .contains(&Value::from("revision"))
+        );
+        assert!(scm_event["properties"]["resolved_slot_unix_ms"].is_null());
+        let schedule_event = &schemas["ScheduleTriggerEventPayload"];
+        assert!(
+            schedule_event["required"]
+                .as_array()
+                .expect("schedule event payload requirements")
+                .contains(&Value::from("resolved_slot_unix_ms"))
+        );
+        for field in [
+            "expected_last_resolved_slot_unix_ms",
+            "resolved_slot_unix_ms",
+        ] {
+            assert_eq!(schedule_event["properties"][field]["format"], "int64");
+            assert_eq!(schedule_event["properties"][field]["maximum"], i64::MAX);
+        }
+        assert!(schedule_event["properties"]["repository_identity"].is_null());
+        let remote_event = &schemas["RemoteApiTriggerEventPayload"];
+        assert!(
+            remote_event["required"]
+                .as_array()
+                .expect("remote API event payload requirements")
+                .contains(&Value::from("request_id"))
+        );
+        let trigger_parameters = &schemas["TriggerEventRequest"]["properties"]["parameters"];
+        assert_eq!(trigger_parameters["maxProperties"], 128);
+        assert_eq!(
+            trigger_parameters["propertyNames"]["pattern"],
+            "^[A-Za-z0-9_-]{1,256}$"
+        );
+        assert_eq!(
+            schemas["ScmTriggerEventPayload"]["properties"]["paths"]["maxItems"],
+            128
+        );
+        let parameter_variants = trigger_parameters["additionalProperties"]["oneOf"]
+            .as_array()
+            .expect("closed trigger parameter value variants");
+        assert_eq!(parameter_variants.len(), 3);
+        assert!(
+            parameter_variants
+                .iter()
+                .any(|variant| variant["type"] == "boolean")
+        );
+        assert!(parameter_variants.iter().any(|variant| {
+            variant["type"] == "integer"
+                && variant["format"] == "int64"
+                && variant["minimum"] == i64::MIN
+                && variant["maximum"] == i64::MAX
+        }));
+        assert!(
+            parameter_variants
+                .iter()
+                .any(|variant| { variant["type"] == "string" && variant["maxLength"] == 4096 })
+        );
+
         let approvals = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/approvals"];
         assert!(approvals["post"]["responses"]["200"].is_object());
         assert!(approvals["post"]["responses"]["201"].is_object());
@@ -4494,6 +6116,32 @@ mod tests {
                 .iter()
                 .any(|parameter| { parameter["name"] == "after_fence" })
         );
+    }
+
+    #[test]
+    fn parameter_names_and_trigger_failure_reasons_are_bounded() {
+        for invalid_name in ["", "bad.name", "bad\nname"] {
+            let parameters = BTreeMap::from([(invalid_name.to_owned(), json!(true))]);
+            let error = parameter_values(parameters).expect_err("reject invalid parameter name");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "invalid_parameters");
+        }
+        let oversized_name = "x".repeat(257);
+        assert!(
+            parameter_values(BTreeMap::from([(oversized_name, json!(true))])).is_err(),
+            "reject names that exceed the OpenAPI/runtime limit"
+        );
+
+        let failure = ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "pipeline_rejected",
+            format!("{}\npoison", "x".repeat(3_000)),
+        );
+        let reason = bounded_trigger_failure_reason(&failure);
+        assert!(!reason.is_empty());
+        assert!(reason.len() <= 2_048);
+        assert!(!reason.chars().any(char::is_control));
+        assert_eq!(reason.trim(), reason);
     }
 
     #[test]

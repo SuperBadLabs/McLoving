@@ -18,6 +18,7 @@ mod scheduler;
 mod security;
 mod state_transfer;
 mod test_results;
+mod trigger_ingress;
 
 pub use admin_migration::{
     ExternalAdminAuthority, ExternalAdminClientReceipt, ExternalAdminClientWrite,
@@ -26,7 +27,7 @@ pub use admin_migration::{
 };
 pub use audit::{
     AuditEvent, AuditExport, AuditPage, AuditRetentionPolicy, MAX_AUDIT_PAGE, NewAuditEvent,
-    verify_audit_export, verify_audit_page,
+    compute_audit_event_hash, verify_audit_export, verify_audit_page,
 };
 pub use authorization_mapping::{
     AuthorizationPolicyReceipt, AuthorizationPolicyWrite, AuthorizationPrincipalMappingWrite,
@@ -40,7 +41,7 @@ pub use consumer_migration::{
 pub use dag::{
     DagAdmission, DagContractError, DagContractErrorCode, DagDependency, DagNodeAdmission,
     DagNodeKind, DagReplayBinding, DependencyCondition, MatrixCell, NewDagBuild, NewDagNode,
-    compile_matrix, validate_dag_contract,
+    TRIGGER_DAG_IDEMPOTENCY_PREFIX, compile_matrix, validate_dag_contract,
 };
 pub use identity::{
     AuthenticatedIdentity, IdentityLifecycle, IdentityProviderConfig, IdentityProviderWrite,
@@ -63,6 +64,15 @@ pub use test_results::{
     NormalizedTestCase, NormalizedTestReport, NormalizedTestSuite,
     TEST_RESULT_RAW_RETENTION_SECONDS, TEST_RESULT_SCHEMA_VERSION, TestAggregate, TestCaseHistory,
     TestCaseObservation, TestOutcome, TestReportSource, TestResultError, parse_junit,
+};
+pub use trigger_ingress::{
+    NewTriggerDelivery, PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite,
+    TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
+    TriggerDeliveryClaimRequest, TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest,
+    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive,
+    TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome, TriggerScheduleSlot,
+    TriggerScheduleWatermark, TriggerTransferSnapshot, compute_trigger_transfer_snapshot_digest,
+    compute_trigger_transfer_snapshot_ledger_digest, verify_trigger_transfer_snapshot,
 };
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;
@@ -138,6 +148,8 @@ pub const EXTERNAL_ADMIN_CLIENTS_V26: &str =
 /// Monotonic per-pipeline enabled/disabled truth and build-generation fences.
 pub const PIPELINE_OPERATIONAL_STATE_V27: &str =
     include_str!("../migrations/0027_pipeline_operational_state.sql");
+/// Typed authenticated trigger configurations and durable delivery truth.
+pub const TRIGGER_INGRESS_V28: &str = include_str!("../migrations/0028_trigger_ingress.sql");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentReconciliationDisposition {
@@ -473,6 +485,12 @@ pub enum StoreError {
     PipelineStateConflict(String),
     #[error("pipeline {pipeline_id} is disabled at operational generation {generation}")]
     PipelineDisabled { pipeline_id: Uuid, generation: i64 },
+    #[error("invalid trigger ingress operation: {0}")]
+    InvalidTriggerIngress(String),
+    #[error("trigger ingress conflict: {0}")]
+    TriggerIngressConflict(String),
+    #[error("trigger {trigger_id} is paused at generation {generation}")]
+    TriggerPaused { trigger_id: Uuid, generation: i64 },
     #[error("invalid state transfer: {0}")]
     InvalidStateTransfer(String),
     #[error("state-transfer conflict: {0}")]
@@ -661,6 +679,17 @@ impl Store {
                    ('pipeline_revisions', 'SELECT'), ('pipeline_revisions', 'INSERT'),
                    ('pipeline_operational_state_history', 'SELECT'),
                    ('pipeline_operational_state_history', 'INSERT'),
+                   ('pipeline_trigger_definitions', 'SELECT'),
+                   ('pipeline_trigger_definitions', 'INSERT'),
+                   ('pipeline_trigger_definitions', 'UPDATE'),
+                   ('pipeline_trigger_versions', 'SELECT'),
+                   ('pipeline_trigger_versions', 'INSERT'),
+                   ('trigger_deliveries', 'SELECT'),
+                   ('trigger_deliveries', 'INSERT'),
+                   ('trigger_deliveries', 'UPDATE'),
+                   ('trigger_schedule_watermarks', 'SELECT'),
+                   ('trigger_schedule_watermarks', 'INSERT'),
+                   ('trigger_schedule_watermarks', 'UPDATE'),
                    ('component_packages', 'SELECT'), ('component_packages', 'INSERT'),
                    ('state_transfer_receipts', 'SELECT'),
                    ('state_transfer_records', 'SELECT'),
@@ -972,6 +1001,9 @@ impl Store {
                    ('nodes'), ('attempts'), ('build_events'), ('outbox'),
                    ('pipeline_definitions'), ('pipeline_revisions'),
                    ('pipeline_operational_state_history'),
+                   ('pipeline_trigger_definitions'),
+                   ('pipeline_trigger_versions'), ('trigger_deliveries'),
+                   ('trigger_schedule_watermarks'),
                    ('component_packages'), ('attempt_log_chunks'),
                    ('attempt_effects'), ('dead_letters'), ('attempt_objects'),
                    ('state_transfer_receipts'), ('state_transfer_records'),
@@ -1014,7 +1046,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 49
+             SELECT COUNT(*) = 53
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1043,7 +1075,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 49
+                    AND (SELECT COUNT(*) FROM policies) = 53
                FROM relations",
         )
         .fetch_one(&mut *tx)
@@ -1151,6 +1183,7 @@ impl Store {
         apply_migration(&mut tx, 25, EXTERNAL_READ_CONSUMERS_V25).await?;
         apply_migration(&mut tx, 26, EXTERNAL_ADMIN_CLIENTS_V26).await?;
         apply_migration(&mut tx, 27, PIPELINE_OPERATIONAL_STATE_V27).await?;
+        apply_migration(&mut tx, 28, TRIGGER_INGRESS_V28).await?;
         tx.commit().await?;
         Ok(())
     }
