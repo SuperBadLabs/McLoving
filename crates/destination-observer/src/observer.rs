@@ -1500,10 +1500,20 @@ fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
     match parse_json_no_duplicates::<SignedDestinationState>(raw) {
         Ok(mut signed) => {
             let state = std::mem::replace(&mut signed.body.state, serde_json::Value::Null);
-            let envelope_contains_secret = serde_json::to_vec(&signed).map_or(true, |envelope| {
-                contains_secret_textual_representation(&envelope, markers)
-            });
+            let mut envelope = serde_json::to_value(&signed).ok();
             signed.body.state = state;
+            let envelope_contains_secret = envelope.as_mut().is_none_or(|envelope| {
+                let Some(body) = envelope
+                    .get_mut("body")
+                    .and_then(serde_json::Value::as_object_mut)
+                else {
+                    return true;
+                };
+                if body.remove("state").is_none() {
+                    return true;
+                }
+                contains_secret_textual_in_json(envelope, markers)
+            });
             envelope_contains_secret || contains_secret_in_destination_body(&signed.body, markers)
         }
         Err(_) => {
@@ -1542,6 +1552,22 @@ fn contains_secret_in_destination_body(
 
 fn contains_secret_in_decoded_string(value: &str, markers: &[Vec<u8>]) -> bool {
     contains_secret_value(value.as_bytes(), markers)
+}
+
+fn contains_secret_textual_in_json(value: &serde_json::Value, markers: &[Vec<u8>]) -> bool {
+    match value {
+        serde_json::Value::String(value) => {
+            contains_secret_textual_representation(value.as_bytes(), markers)
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| contains_secret_textual_in_json(value, markers)),
+        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
+            contains_secret_textual_representation(key.as_bytes(), markers)
+                || contains_secret_textual_in_json(value, markers)
+        }),
+        _ => false,
+    }
 }
 
 fn oversized_response_error(status: StatusCode) -> ObserverError {
@@ -1842,6 +1868,7 @@ mod tests {
         };
         let raw = serde_json::to_vec(&response).unwrap();
         assert!(!contains_secret_in_response_json(&raw, &[marker.to_vec()]));
+        assert!(!contains_secret_in_response_json(&raw, &[b"null".to_vec()]));
 
         let mut escaped_signature = response.clone();
         let encoded_marker = BASE64_NO_PAD.encode(marker);
