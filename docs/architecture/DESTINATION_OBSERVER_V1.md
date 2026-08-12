@@ -88,7 +88,8 @@ opens. Whole configuration, query, audit, header, trailer, JSON-key, and
 JSON-value strings are scanned through at most 16 successive reversible
 decoding layers. Each layer accepts percent encoding or standard and URL-safe
 Base64, padded or unpadded, and decodes maximal embedded Base64 alphabet runs,
-so delimited, mixed, and repeatedly encoded payloads remain covered. Decode work
+plus valid subranges ending at terminal padding so an adjacent alphabetic suffix
+cannot hide the padded payload. Delimited, mixed, and repeatedly encoded payloads remain covered. Decode work
 is capped at the larger of 4 KiB or 64 times the original field length; depth
 or work overflow fails closed.
 Configuration admission rejects query-key names beyond the request-protocol
@@ -102,7 +103,7 @@ application header budget, allowing bounded oversized blocks to be scanned
 before they are classified as application overflows. Confidentiality denial
 therefore dominates all response classification, while a 401/403 remains a
 permanent authentication denial even when it also exceeds the application
-header budget.
+header budget or the bounded body stream resets after the status is received.
 The GET carries reserved non-secret headers for the observation ID, effect
 fence, phase, canonical-query digest, and complete signed-request digest. The
 destination repeats that complete request digest inside its signed response
@@ -149,7 +150,9 @@ the atomic finalization check still handles the exact size of the candidate
 receipt. A separate `max_observations` quota bounds all retained observation
 rows, including nonblocking rate-limit tombstones and other terminal failures;
 it must be at least `max_receipts`, and new IDs fail admission before claim
-insertion when the bound is full. This mandatory bound is carried by
+insertion when the bound is full. The same limit independently bounds durable
+phase-chain heads; a new chain scope fails before a GET once that retained-head
+bound is full, while an existing chain can still advance. This mandatory bound is carried by
 `mcloving.destination-observer-config/v3`; legacy config v1 lacks the quota and
 config v2 lacks the executable binding, so both are explicitly incompatible
 rather than silently acquiring new ledger or executable-trust semantics.

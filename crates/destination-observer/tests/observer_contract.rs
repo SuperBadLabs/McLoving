@@ -67,6 +67,7 @@ enum Mode {
     UnauthorizedOversizedHeader,
     UnauthorizedOversizedBody,
     UnauthorizedSecret,
+    UnauthorizedStreamError,
     Outage,
     OutageOversizedChunked,
     OutageOversizedChunkedSecret,
@@ -314,6 +315,7 @@ async fn destination_handler(
             | Mode::UnauthorizedOversizedHeader
             | Mode::UnauthorizedOversizedBody
             | Mode::UnauthorizedSecret
+            | Mode::UnauthorizedStreamError
     ) || headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -324,6 +326,19 @@ async fn destination_handler(
             .body(match mode {
                 Mode::UnauthorizedSecret => Body::from(TOKEN),
                 Mode::UnauthorizedOversizedBody => Body::from(vec![b'x'; 32 * 1024]),
+                Mode::UnauthorizedStreamError => {
+                    let (sender, receiver) =
+                        tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(2);
+                    tokio::spawn(async move {
+                        sender.send(Ok(Bytes::from_static(b"{"))).await.unwrap();
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        sender
+                            .send(Err(std::io::Error::other("unauthorized stream reset")))
+                            .await
+                            .unwrap();
+                    });
+                    Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(receiver))
+                }
                 _ => Body::empty(),
             })
             .unwrap();
@@ -710,6 +725,10 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         (
             Mode::UnauthorizedSecret,
             ObserverError::ConfidentialityDenied,
+        ),
+        (
+            Mode::UnauthorizedStreamError,
+            ObserverError::DestinationUnauthorized,
         ),
         (Mode::OutageSecret, ObserverError::ConfidentialityDenied),
         (
@@ -1684,6 +1703,58 @@ async fn completed_evidence_is_pruned_after_the_bounded_replay_window() {
             .await,
         Err(ObserverError::CursorRollback)
     );
+}
+
+#[tokio::test]
+async fn durable_scope_heads_obey_the_observation_quota_after_receipt_pruning() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.limits.max_receipts = 2;
+    config.limits.max_observations = 2;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    for effect_fence in [17, 18] {
+        let mut request = rig.request(ObservationPhase::PreAction);
+        request.effect_fence = effect_fence;
+        request.expected_config_sha256 = observer.config_sha256().to_owned();
+        observer
+            .observe_at(rig.prepare(request), NOW)
+            .await
+            .unwrap();
+    }
+
+    let later = NOW + 12_000;
+    rig.server
+        .observed_at_unix_ms
+        .store(later, Ordering::SeqCst);
+    let reads_before = rig.server.reads.load(Ordering::SeqCst);
+    let mut third = rig.request(ObservationPhase::PreAction);
+    third.effect_fence = 19;
+    third.requested_at_unix_ms = later - 1;
+    third.expires_at_unix_ms = later + 1_000;
+    third.expected_config_sha256 = observer.config_sha256().to_owned();
+    assert_eq!(
+        observer.observe_at(rig.prepare(third), later).await,
+        Err(ObserverError::CapacityExceeded)
+    );
+    assert_eq!(rig.server.reads.load(Ordering::SeqCst), reads_before);
+
+    let connection = rusqlite::Connection::open(state.path().join("observer.sqlite3")).unwrap();
+    let retained: (u64, u64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM observations), (SELECT COUNT(*) FROM scope_heads)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(retained, (0, 2));
 }
 
 #[tokio::test]

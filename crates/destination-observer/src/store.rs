@@ -333,6 +333,7 @@ impl ObserverStore {
         let admission_at_ms = crate::observer::elapsed_time_ms(started_at_ms, started_at)?;
         validate_temporal(config, request, admission_at_ms)?;
         enforce_phase(&transaction, request, scope_sha256)?;
+        enforce_scope_head_capacity(&transaction, config, scope_sha256)?;
         transaction
             .commit()
             .map_err(|_| ObserverError::StateUnavailable)
@@ -410,6 +411,7 @@ impl ObserverStore {
                     .map_err(|_| ObserverError::StateUnavailable)?;
                 return Err(error);
             }
+            enforce_scope_head_capacity(&transaction, config, scope_sha256)?;
             let fresh = match existing.status.as_str() {
                 "pending" => false,
                 "failed" if rate_limited => {
@@ -431,6 +433,7 @@ impl ObserverStore {
         validate_temporal(config, request, claim_at_ms)?;
         enforce_receipt_capacity(&transaction, config)?;
         enforce_phase(&transaction, request, scope_sha256)?;
+        enforce_scope_head_capacity(&transaction, config, scope_sha256)?;
         let observation_count: usize = transaction
             .query_row("SELECT COUNT(*) FROM observations", [], |row| row.get(0))
             .map_err(|_| ObserverError::StateUnavailable)?;
@@ -702,6 +705,7 @@ impl ObserverStore {
         let finalize_at_ms = crate::observer::elapsed_time_ms(started_at_ms, started_at)?;
         prune_terminal_observations(&transaction, config, finalize_at_ms)?;
         enforce_phase(&transaction, request, scope_sha256)?;
+        enforce_scope_head_capacity(&transaction, config, scope_sha256)?;
         let destination_cursor: Option<u64> = transaction
             .query_row(
                 "SELECT cursor FROM destination_heads WHERE destination_scope_sha256=?1",
@@ -976,6 +980,30 @@ fn enforce_phase(
             }
         }
         _ => return Err(ObserverError::PhaseMismatch),
+    }
+    Ok(())
+}
+
+fn enforce_scope_head_capacity(
+    transaction: &rusqlite::Transaction<'_>,
+    config: &ObserverConfig,
+    scope_sha256: &str,
+) -> Result<(), ObserverError> {
+    let exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM scope_heads WHERE scope_sha256=?1)",
+            [scope_sha256],
+            |row| row.get(0),
+        )
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    if exists {
+        return Ok(());
+    }
+    let count: usize = transaction
+        .query_row("SELECT COUNT(*) FROM scope_heads", [], |row| row.get(0))
+        .map_err(|_| ObserverError::StateUnavailable)?;
+    if count >= config.limits.max_observations {
+        return Err(ObserverError::CapacityExceeded);
     }
     Ok(())
 }

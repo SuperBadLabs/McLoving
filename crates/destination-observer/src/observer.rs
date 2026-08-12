@@ -491,6 +491,9 @@ impl DestinationObserver {
                     if contains_secret_in_response_json(&raw, &self.secret_markers) {
                         return Err(ObserverError::ConfidentialityDenied);
                     }
+                    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                        return Err(ObserverError::DestinationUnauthorized);
+                    }
                     return Err(ObserverError::DestinationUnavailable);
                 }
             };
@@ -1451,22 +1454,26 @@ fn contains_secret_value_at(
             .is_some_and(|byte| is_base64_token_byte(*byte));
         match (token_start, token_byte) {
             (None, true) => token_start = Some(index),
+            (Some(start), true) if raw[index] == b'=' => {
+                if contains_secret_in_base64_candidate(
+                    &raw[start..=index],
+                    markers,
+                    depth,
+                    consumed_work,
+                    maximum_work,
+                ) {
+                    return true;
+                }
+            }
             (Some(start), false) => {
                 token_start = None;
-                let token = &raw[start..index];
-                if token.len() < 4 {
-                    continue;
-                }
-                if let Some(decoded) = base64_decode_once(token)
-                    && (depth == MAX_REVERSIBLE_DECODE_DEPTH
-                        || contains_secret_value_at(
-                            &decoded,
-                            markers,
-                            depth + 1,
-                            consumed_work,
-                            maximum_work,
-                        ))
-                {
+                if contains_secret_in_base64_candidate(
+                    &raw[start..index],
+                    markers,
+                    depth,
+                    consumed_work,
+                    maximum_work,
+                ) {
                     return true;
                 }
             }
@@ -1474,6 +1481,27 @@ fn contains_secret_value_at(
         }
     }
     false
+}
+
+fn contains_secret_in_base64_candidate(
+    candidate: &[u8],
+    markers: &[Vec<u8>],
+    depth: usize,
+    consumed_work: &mut usize,
+    maximum_work: usize,
+) -> bool {
+    if candidate.len() < 4 {
+        return false;
+    }
+    *consumed_work = match consumed_work.checked_add(candidate.len()) {
+        Some(work) if work <= maximum_work => work,
+        _ => return true,
+    };
+    let Some(decoded) = base64_decode_once(candidate) else {
+        return false;
+    };
+    depth == MAX_REVERSIBLE_DECODE_DEPTH
+        || contains_secret_value_at(&decoded, markers, depth + 1, consumed_work, maximum_work)
 }
 
 const fn is_base64_token_byte(byte: u8) -> bool {
@@ -1803,6 +1831,15 @@ mod tests {
         );
         assert!(contains_secret_value(
             embedded.as_bytes(),
+            &[marker.to_vec()]
+        ));
+
+        let padded_with_suffix = format!(
+            "{}suffix",
+            BASE64.encode([b"x".as_slice(), marker].concat())
+        );
+        assert!(contains_secret_value(
+            padded_with_suffix.as_bytes(),
             &[marker.to_vec()]
         ));
 
