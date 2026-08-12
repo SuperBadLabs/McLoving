@@ -1276,7 +1276,7 @@ fn maximum_receipt_envelope_fits(
 fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize> {
     let mut state = serde_json::Map::new();
     let mut required_growth_threshold = None;
-    let mut required_fixed_growth = 0_usize;
+    let mut variable_fields = Vec::new();
     for field in &config.response_schema {
         if !field.required {
             continue;
@@ -1289,11 +1289,14 @@ fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize>
             );
         }
         if field.kind == crate::JsonKind::Boolean {
-            required_fixed_growth = required_fixed_growth.checked_add(1)?;
+            // The one-byte `true` -> `false` choice competes with optional fields for the same
+            // response budget. Model it in the exact packing calculation instead of spending it
+            // greedily before optional entries are considered.
+            variable_fields.push((0, None, 1));
         }
     }
     let base_state = serde_json::Value::Object(state);
-    let mut base_state_len = serde_json::to_vec(&base_state).ok()?.len();
+    let base_state_len = serde_json::to_vec(&base_state).ok()?.len();
     let empty_response_len =
         sized_destination_response(config, serde_json::Value::Object(serde_json::Map::new()))?;
     let fixed_response_len = empty_response_len.checked_sub(2)?;
@@ -1304,16 +1307,11 @@ fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize>
     if base_state_len > state_budget {
         return None;
     }
-    let mut remaining = state_budget.checked_sub(base_state_len)?;
+    let remaining = state_budget.checked_sub(base_state_len)?;
     if required_growth_threshold.is_some_and(|threshold| remaining >= threshold) {
         return Some(state_budget);
     }
-    let admitted_fixed_growth = remaining.min(required_fixed_growth);
-    base_state_len = base_state_len.checked_add(admitted_fixed_growth)?;
-    remaining = remaining.checked_sub(admitted_fixed_growth)?;
-
     let required_nonempty = base_state_len > 2;
-    let mut optional_fields = Vec::new();
     for field in config
         .response_schema
         .iter()
@@ -1322,7 +1320,7 @@ fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize>
         let key_len = serde_json::to_vec(&field.name).ok()?.len();
         let value_len = serde_json::to_vec(&minimum_value(field.kind)).ok()?.len();
         let entry_with_separator = key_len.checked_add(value_len)?.checked_add(2)?;
-        optional_fields.push((
+        variable_fields.push((
             entry_with_separator,
             growth_threshold(field.kind),
             usize::from(field.kind == crate::JsonKind::Boolean),
@@ -1330,7 +1328,7 @@ fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize>
     }
 
     let subset_capacity = remaining.checked_add(usize::from(!required_nonempty))?;
-    let (selected, fills_capacity) = maximum_optional_subset(&optional_fields, subset_capacity);
+    let (selected, fills_capacity) = maximum_optional_subset(&variable_fields, subset_capacity);
     if fills_capacity {
         return Some(state_budget);
     }
@@ -2049,6 +2047,24 @@ mod tests {
         assert_eq!(maximum_optional_subset(&boolean, 5), (5, false));
         assert_eq!(maximum_optional_subset(&boolean, 6), (6, false));
         assert_eq!(maximum_optional_subset(&boolean, 7), (6, false));
+
+        let required_and_optional_boolean = [(0, None, 1), (5, None, 1)];
+        assert_eq!(
+            maximum_optional_subset(&required_and_optional_boolean, 5),
+            (5, false)
+        );
+        assert_eq!(
+            maximum_optional_subset(&required_and_optional_boolean, 6),
+            (6, false)
+        );
+        assert_eq!(
+            maximum_optional_subset(&required_and_optional_boolean, 7),
+            (7, false)
+        );
+        assert_eq!(
+            maximum_optional_subset(&required_and_optional_boolean, 8),
+            (7, false)
+        );
     }
 
     #[test]
