@@ -576,9 +576,6 @@ impl DestinationObserver {
             &query_sha256,
             captured_at_ms,
         )?;
-        if contains_secret_in_json(&signed.body.state, &self.secret_markers)? {
-            return Err(ObserverError::ConfidentialityDenied);
-        }
         Ok((signed, raw, captured_at_ms))
     }
 
@@ -1501,15 +1498,13 @@ fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
         return true;
     }
     match parse_json_no_duplicates::<SignedDestinationState>(raw) {
-        Ok(signed) => {
-            contains_secret_in_destination_body(&signed.body, markers)
-                || [
-                    signed.body.request_sha256.as_str(),
-                    signed.body.canonical_query_sha256.as_str(),
-                    signed.signature_base64.as_str(),
-                ]
-                .into_iter()
-                .any(|value| contains_secret_textual_representation(value.as_bytes(), markers))
+        Ok(mut signed) => {
+            let state = std::mem::replace(&mut signed.body.state, serde_json::Value::Null);
+            let envelope_contains_secret = serde_json::to_vec(&signed).map_or(true, |envelope| {
+                contains_secret_textual_representation(&envelope, markers)
+            });
+            signed.body.state = state;
+            envelope_contains_secret || contains_secret_in_destination_body(&signed.body, markers)
         }
         Err(_) => {
             // An opaque error body or malformed envelope has no trusted protocol structure.
@@ -1860,6 +1855,18 @@ mod tests {
             .replace(&encoded_marker, &escaped_marker);
         assert!(contains_secret_in_response_json(
             escaped_raw.as_bytes(),
+            &[marker.to_vec()]
+        ));
+
+        let mut escaped_uuid = response.clone();
+        escaped_uuid.body.observation_id =
+            Uuid::parse_str("deadbeef-0000-0000-0000-000000000000").unwrap();
+        let escaped_uuid_raw = serde_json::to_string(&escaped_uuid).unwrap().replace(
+            "deadbeef",
+            "\\u0064\\u0065\\u0061\\u0064\\u0062\\u0065\\u0065\\u0066",
+        );
+        assert!(contains_secret_in_response_json(
+            escaped_uuid_raw.as_bytes(),
             &[marker.to_vec()]
         ));
 
