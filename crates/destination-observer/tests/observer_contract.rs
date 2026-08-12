@@ -44,6 +44,7 @@ const SECRET: &[u8] = b"never-publish-this-secret";
 #[derive(Clone, Copy)]
 enum Mode {
     Good,
+    CompactUuid,
     Stale,
     PredatesRequest,
     Substitute,
@@ -545,14 +546,20 @@ async fn destination_handler(
             .body(Body::new(body))
             .unwrap();
     }
-    let mut response = json_response(
-        StatusCode::OK,
-        if matches!(mode, Mode::OversizedHeaderBodySecret) {
-            TOKEN.to_vec()
-        } else {
-            serde_json::to_vec(&signed).unwrap()
-        },
-    );
+    let mut response_bytes = if matches!(mode, Mode::OversizedHeaderBodySecret) {
+        TOKEN.to_vec()
+    } else {
+        serde_json::to_vec(&signed).unwrap()
+    };
+    if matches!(mode, Mode::CompactUuid) {
+        let hyphenated = signed.body.observation_id.hyphenated().to_string();
+        let compact = signed.body.observation_id.simple().to_string();
+        response_bytes = String::from_utf8(response_bytes)
+            .unwrap()
+            .replacen(&hyphenated, &compact, 1)
+            .into_bytes();
+    }
+    let mut response = json_response(StatusCode::OK, response_bytes);
     if matches!(mode, Mode::HeaderSecret) {
         response.headers_mut().insert(
             "x-debug-credential",
@@ -1654,6 +1661,7 @@ async fn boolean_response_and_receipt_sizing_admit_the_shorter_true_value() {
 #[tokio::test]
 async fn response_sizing_admits_compact_uuid_syntax_at_the_exact_maximum() {
     let rig = Rig::new().await;
+    const LATE_NOW: i64 = i64::MAX - 20_000;
     let state = tempfile::tempdir().unwrap();
     #[cfg(unix)]
     {
@@ -1675,7 +1683,7 @@ async fn response_sizing_admits_compact_uuid_syntax_at_the_exact_maximum() {
             phase: ObservationPhase::Reconciliation,
             canonical_query_sha256: "f".repeat(64),
             cursor: i64::MAX as u64,
-            observed_at_unix_ms: i64::MAX,
+            observed_at_unix_ms: LATE_NOW,
             state_schema_version: rig.config.state_schema_version.clone(),
             confidentiality: Confidentiality::Internal,
             state: json!({"published": true}),
@@ -1697,7 +1705,52 @@ async fn response_sizing_admits_compact_uuid_syntax_at_the_exact_maximum() {
     let mut config = rig.config.clone();
     config.state_dir = state.path().to_path_buf();
     config.limits.max_response_bytes = compact.len();
-    assert!(rig.observer_for_config(config).is_ok());
+    config.read_grant_expires_unix_ms = i64::MAX;
+    let observer = rig.observer_for_config(config).unwrap();
+
+    rig.server
+        .cursor
+        .store(i64::MAX as u64 - 2, Ordering::SeqCst);
+    rig.server
+        .observed_at_unix_ms
+        .store(LATE_NOW, Ordering::SeqCst);
+    rig.set_mode(Mode::CompactUuid);
+    let request_for_phase = |phase| {
+        let mut request = rig.request(phase);
+        request.effect_fence = u64::MAX;
+        request.expected_config_sha256 = observer.config_sha256().to_owned();
+        request.requested_at_unix_ms = LATE_NOW - 1;
+        request.expires_at_unix_ms = LATE_NOW + 1_000;
+        request
+    };
+    let pre = observer
+        .observe_at(
+            rig.prepare(request_for_phase(ObservationPhase::PreAction)),
+            LATE_NOW,
+        )
+        .await
+        .unwrap();
+
+    rig.server
+        .cursor
+        .store(i64::MAX as u64 - 1, Ordering::SeqCst);
+    let mut post = request_for_phase(ObservationPhase::PostAction);
+    post.expected_previous_cursor = Some(pre.destination_cursor);
+    post.predecessor_receipt_sha256 = Some(observation_receipt_digest(&pre).unwrap());
+    let post = observer
+        .observe_at(rig.prepare(post), LATE_NOW)
+        .await
+        .unwrap();
+
+    rig.server.cursor.store(i64::MAX as u64, Ordering::SeqCst);
+    let mut reconciliation = request_for_phase(ObservationPhase::Reconciliation);
+    reconciliation.expected_previous_cursor = Some(post.destination_cursor);
+    reconciliation.predecessor_receipt_sha256 = Some(observation_receipt_digest(&post).unwrap());
+    let receipt = observer
+        .observe_at(rig.prepare(reconciliation), LATE_NOW)
+        .await
+        .unwrap();
+    assert_eq!(receipt.destination_cursor, i64::MAX as u64);
 }
 
 #[tokio::test]
