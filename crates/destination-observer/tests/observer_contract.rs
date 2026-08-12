@@ -1634,6 +1634,17 @@ async fn v2_config_without_implementation_binding_is_explicitly_incompatible() {
 }
 
 #[tokio::test]
+async fn v3_config_without_schema_work_bounds_is_explicitly_incompatible() {
+    let rig = Rig::new().await;
+    let mut legacy_config = rig.config.clone();
+    legacy_config.schema_version = "mcloving.destination-observer-config/v3".to_owned();
+    assert!(matches!(
+        rig.observer_for_config(legacy_config),
+        Err(ObserverError::InvalidConfig)
+    ));
+}
+
+#[tokio::test]
 async fn evidence_capacity_failure_releases_the_destination_claim() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();

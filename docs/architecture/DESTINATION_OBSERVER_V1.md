@@ -163,10 +163,11 @@ uses a non-mutating trusted-time view that excludes expired pending rows from
 reservation counts. After the state-lineage lease is acquired, claim atomically
 tombstones expired rows and applies retention pruning before insertion, preventing
 an abandoned read from leaking quota without invalidating an in-flight finalization.
-This mandatory bound is carried by
-`mcloving.destination-observer-config/v3`; legacy config v1 lacks the quota and
-config v2 lacks the executable binding, so both are explicitly incompatible
-rather than silently acquiring new ledger or executable-trust semantics.
+These mandatory bounds are carried by
+`mcloving.destination-observer-config/v4`; legacy config v1 lacks the quota,
+config v2 lacks the executable binding, and config v3 lacks the schema-work
+bounds, so all are explicitly incompatible rather than silently acquiring new
+ledger, executable-trust, or resource semantics.
 Replay and new-admission transactions prune complete and failed observations
 whose signed request expiry is more than one freshness window old before they
 serve terminal state or enforce quotas. Compact phase-chain heads and the
