@@ -1497,15 +1497,20 @@ fn base64_decode_once(raw: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
-    if contains_secret_textual_representation(raw, markers)
-        || collect_decoded_json_strings(raw)
-            .iter()
-            .any(|value| contains_secret_textual_representation(value.as_bytes(), markers))
-    {
+    if contains_secret_textual_representation(raw, markers) {
         return true;
     }
     match parse_json_no_duplicates::<SignedDestinationState>(raw) {
-        Ok(signed) => contains_secret_in_destination_body(&signed.body, markers),
+        Ok(signed) => {
+            contains_secret_in_destination_body(&signed.body, markers)
+                || [
+                    signed.body.request_sha256.as_str(),
+                    signed.body.canonical_query_sha256.as_str(),
+                    signed.signature_base64.as_str(),
+                ]
+                .into_iter()
+                .any(|value| contains_secret_textual_representation(value.as_bytes(), markers))
+        }
         Err(_) => {
             // An opaque error body or malformed envelope has no trusted protocol structure.
             // Decode the complete bounded buffer and every recoverable JSON string fail closed.
