@@ -803,6 +803,16 @@ impl Store {
                  JOIN builds AS b
                    ON b.id = n.build_id
                   AND b.organization_id = n.organization_id
+                 JOIN pipeline_definitions AS d
+                   ON d.organization_id = b.organization_id
+                  AND d.project_id = b.project_id
+                  AND d.pipeline_id = b.pipeline_id
+                  AND d.operational_generation = b.pipeline_operational_generation
+                 JOIN pipeline_operational_state_history AS h
+                   ON h.organization_id = d.organization_id
+                  AND h.pipeline_id = d.pipeline_id
+                  AND h.generation = d.operational_generation
+                  AND h.state = 'enabled'
                  WHERE n.organization_id = $1
                    AND n.status = 'queued'
                    AND (
@@ -854,6 +864,16 @@ impl Store {
              JOIN builds AS b
                ON b.id = n.build_id
               AND b.organization_id = n.organization_id
+             JOIN pipeline_definitions AS d
+               ON d.organization_id = b.organization_id
+              AND d.project_id = b.project_id
+              AND d.pipeline_id = b.pipeline_id
+              AND d.operational_generation = b.pipeline_operational_generation
+             JOIN pipeline_operational_state_history AS h
+               ON h.organization_id = d.organization_id
+              AND h.pipeline_id = d.pipeline_id
+              AND h.generation = d.operational_generation
+              AND h.state = 'enabled'
              WHERE n.organization_id = $1
                AND n.status = 'queued'
                AND (

@@ -210,14 +210,13 @@ impl Store {
             tx.commit().await?;
             return Ok(admission);
         }
-        crate::lock_enabled_pipeline_binding(
+        let pipeline_revision_digest = crate::lock_enabled_pipeline_binding(
             &mut tx,
             input.organization_id,
             input.project_id,
             input.pipeline_id,
             input.pipeline_revision,
             input.pipeline_operational_generation,
-            &input.pipeline_digest,
         )
         .await?;
         let build_id = Uuid::new_v4();
@@ -225,10 +224,11 @@ impl Store {
             "INSERT INTO builds (
                  id, organization_id, project_id,
                  pipeline_id, pipeline_revision, pipeline_operational_generation,
+                 pipeline_revision_digest,
                  idempotency_key, pipeline_digest, status, priority,
                  dag_mode, dag_contract
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'queued', $9, true, $10)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10, true, $11)
              ON CONFLICT (project_id, idempotency_key) DO NOTHING
              RETURNING id",
         )
@@ -238,6 +238,7 @@ impl Store {
         .bind(input.pipeline_id)
         .bind(input.pipeline_revision)
         .bind(input.pipeline_operational_generation)
+        .bind(pipeline_revision_digest.as_slice())
         .bind(&input.idempotency_key)
         .bind(input.pipeline_digest.as_slice())
         .bind(input.priority)

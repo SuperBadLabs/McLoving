@@ -191,6 +191,10 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(app_js.contains("page.next_after_sequence"));
     assert!(app_js.contains("`${pipelinePath()}/builds`"));
     assert!(app_js.contains("`${pipelinePath()}/state`"));
+    assert!(app_js.contains("const pipelineStateRetry ="));
+    assert!(
+        app_js.contains("source_effective_at_unix_ms: pipelineStateRetry.sourceEffectiveAtUnixMs")
+    );
 }
 
 #[tokio::test]
@@ -287,6 +291,118 @@ async fn pipeline_state_transition_requires_project_configure_authority() {
         .await
         .expect("deny state transition");
     assert_eq!(transition.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn saved_pipeline_submission_keeps_revision_and_instantiated_digests_distinct() {
+    let Ok(url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .expect("connect PostgreSQL parameterized admission test");
+    let store = Store::new(pool);
+    store.migrate().await.expect("install controller schema");
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let pipeline_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "parameterized-admission",
+        )
+        .await
+        .expect("create parameterized admission project");
+    let principal = Principal {
+        subject: "service:parameterized-admission".to_owned(),
+        kind: PrincipalKind::Service,
+        organization_id,
+        project_roles: BTreeMap::new(),
+        service_scopes: [
+            ServiceScope::ProjectAdmin,
+            ServiceScope::BuildSubmit,
+            ServiceScope::ProjectRead,
+        ]
+        .into_iter()
+        .collect(),
+        mapped_projects: BTreeSet::new(),
+        action_grants: BTreeMap::new(),
+    };
+    let app = router(
+        ApiState::new(store.clone(), TOKEN, principal)
+            .expect("construct parameterized admission API"),
+    );
+    let source = r#"version: 1
+name: parameterized-admission
+parameters:
+  message:
+    type: string
+    default: saved
+stages:
+  - id: run
+    name: Run
+    steps:
+      - process:
+          program: echo
+          args:
+            - expression: parameters.message
+"#;
+    let pipeline_path = format!(
+        "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}"
+    );
+    let saved = app
+        .clone()
+        .oneshot(
+            Request::put(&pipeline_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"0\"")
+                .body(Body::from(
+                    json!({
+                        "slug": "parameterized-admission",
+                        "source": source,
+                        "parameters": {},
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("save parameterized pipeline");
+    assert_eq!(saved.status(), StatusCode::CREATED);
+    let admitted = app
+        .oneshot(
+            Request::post(format!("{pipeline_path}/builds"))
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(IDEMPOTENCY_HEADER, "parameterized-admission")
+                .header(PLATFORM_HEADER, "linux")
+                .header(TRUST_POOL_HEADER, "trusted-linux")
+                .body(Body::from(
+                    json!({"parameters": {"message": "instantiated"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("submit parameterized saved pipeline");
+    assert_eq!(admitted.status(), StatusCode::CREATED);
+    let (revision_digest, instantiated_digest) = sqlx::query_as::<_, (Vec<u8>, Vec<u8>)>(
+        "SELECT pipeline_revision_digest, pipeline_digest
+         FROM builds
+         WHERE organization_id = $1
+           AND project_id = $2
+           AND idempotency_key = 'parameterized-admission'",
+    )
+    .bind(organization_id)
+    .bind(project_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read parameterized build digests");
+    assert_ne!(revision_digest, instantiated_digest);
 }
 
 fn request(case: &RouteCase, token: Option<&str>) -> Request<Body> {

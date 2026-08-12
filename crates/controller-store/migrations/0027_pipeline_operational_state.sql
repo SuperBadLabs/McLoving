@@ -87,16 +87,22 @@ ALTER TABLE builds
     ADD COLUMN pipeline_id uuid,
     ADD COLUMN pipeline_revision bigint,
     ADD COLUMN pipeline_operational_generation bigint,
+    ADD COLUMN pipeline_revision_digest bytea CHECK (
+        pipeline_revision_digest IS NULL
+        OR octet_length(pipeline_revision_digest) = 32
+    ),
     ADD CONSTRAINT builds_pipeline_binding_complete CHECK (
         (pipeline_id IS NULL
          AND pipeline_revision IS NULL
-         AND pipeline_operational_generation IS NULL)
+         AND pipeline_operational_generation IS NULL
+         AND pipeline_revision_digest IS NULL)
         OR
         (pipeline_id IS NOT NULL
          AND pipeline_revision IS NOT NULL
          AND pipeline_revision > 0
          AND pipeline_operational_generation IS NOT NULL
-         AND pipeline_operational_generation > 0)
+         AND pipeline_operational_generation > 0
+         AND pipeline_revision_digest IS NOT NULL)
     ),
     ADD CONSTRAINT builds_pipeline_identity_fkey
         FOREIGN KEY (organization_id, project_id, pipeline_id)

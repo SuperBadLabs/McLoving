@@ -64,8 +64,10 @@ source. Validation and planning may still accept unpersisted source, but they
 mint no work. In one tenant transaction, admission locks and re-reads the saved
 pipeline's current revision and operational history, rejects `disabled`,
 compiles the saved revision with the submitted typed parameter values, and
-persists the exact pipeline ID, revision, semantic digest, and enabled
-operational generation on the build before creating any node or attempt.
+persists the exact pipeline ID, revision, saved-revision semantic digest,
+instantiated-build semantic digest, and enabled operational generation on the
+build before creating any node or attempt. The two digests are intentionally
+distinct when invocation parameters materialize different IR.
 
 All manual, API, upstream, webhook, schedule, retry, replay, and administrative
 trigger implementations must enter through that admission/fence primitive.

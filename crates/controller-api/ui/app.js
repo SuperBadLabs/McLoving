@@ -319,9 +319,15 @@ byId("load-pipeline-state").addEventListener("click", () => action(async () => {
   return result;
 }));
 
+const pipelineStateRetry = { idempotencyKey: "", sourceEffectiveAtUnixMs: null };
+
 byId("pipeline-state-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const idempotencyKey = byId("pipeline-state-idempotency").value.trim();
+  if (pipelineStateRetry.idempotencyKey !== idempotencyKey) {
+    pipelineStateRetry.idempotencyKey = idempotencyKey;
+    pipelineStateRetry.sourceEffectiveAtUnixMs = Date.now();
+  }
   action(async () => {
     const result = await api(`${pipelinePath()}/state`, {
       method: "PUT",
@@ -334,12 +340,14 @@ byId("pipeline-state-form").addEventListener("submit", (event) => {
         reason: byId("pipeline-state-reason").value,
         source_identity: byId("pipeline-state-source").value,
         source_generation: byId("pipeline-state-source-generation").value,
-        source_effective_at_unix_ms: Date.now(),
+        source_effective_at_unix_ms: pipelineStateRetry.sourceEffectiveAtUnixMs,
         source_provenance_sha256: byId("pipeline-state-provenance").value.toLowerCase()
       })
     });
     byId("pipeline-state-generation").value = String(result.generation);
     byId("pipeline-state-idempotency").value = newUuid();
+    pipelineStateRetry.idempotencyKey = "";
+    pipelineStateRetry.sourceEffectiveAtUnixMs = null;
     return result;
   });
 });

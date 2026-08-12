@@ -12,7 +12,7 @@ use mcloving_controller_store::{
     PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
     PipelinePutOutcome, PipelineWrite, RECOVERY_OPERATIONS_V6, RUNTIME_FUNCTION_BOUNDARY_V23,
     RetryDecision, STATE_TRANSFER_V17, Store, StoreError, TENANT_AUDIT_V11, TENANT_SECURITY_V2,
-    TerminalOutcome,
+    TerminalOutcome, WaitReason,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -156,18 +156,33 @@ async fn transitions_admission_scheduler_restart_and_audit_are_generation_fenced
     assert_eq!(initial.generation, 1);
     assert!(initial.audit_sequence.is_some());
     assert!(initial.audit_event_hash.is_some());
-    let mut wrong_digest = dag(
+    let mut instantiated = dag(
         organization_id,
         project_id,
         pipeline_id,
         1,
-        "wrong-saved-revision-digest",
+        "parameterized-instantiation-digest",
     );
-    wrong_digest.pipeline_digest = Sha256::digest(b"counterfeit semantic digest").into();
-    assert!(matches!(
-        store.admit_dag(&wrong_digest).await,
-        Err(StoreError::PipelineStateConflict(_))
-    ));
+    instantiated.pipeline_digest = Sha256::digest(b"parameterized semantic digest").into();
+    let instantiated_admission = store
+        .admit_dag(&instantiated)
+        .await
+        .expect("admit an instantiated digest distinct from its saved revision");
+    let bound_digests = sqlx::query_as::<_, (Vec<u8>, Vec<u8>)>(
+        "SELECT pipeline_revision_digest, pipeline_digest
+         FROM builds
+         WHERE organization_id = $1 AND id = $2",
+    )
+    .bind(organization_id)
+    .bind(instantiated_admission.build_id)
+    .fetch_one(store.pool())
+    .await
+    .expect("read saved and instantiated digests");
+    assert_eq!(
+        bound_digests.0,
+        Sha256::digest(b"pipeline-semantic-v1").as_slice()
+    );
+    assert_eq!(bound_digests.1, instantiated.pipeline_digest);
 
     let disable = transition(
         organization_id,
@@ -239,6 +254,17 @@ async fn transitions_admission_scheduler_restart_and_audit_are_generation_fenced
             generation: 2
         }) if denied_pipeline == pipeline_id
     ));
+    assert_eq!(
+        store
+            .explain_wait(
+                organization_id,
+                &["platform:linux".to_owned()],
+                "trusted-linux",
+            )
+            .await
+            .expect("disabled scheduler explanation"),
+        WaitReason::NoQueuedWork
+    );
 
     let enable = transition(
         organization_id,
@@ -866,15 +892,16 @@ async fn migration_0027_backfills_existing_enabled_pipelines_and_freezes_unbound
         backfilled,
         (1, "enabled".to_owned(), "migration:v27".to_owned(), None)
     );
-    let binding = sqlx::query_as::<_, (Option<Uuid>, Option<i64>, Option<i64>)>(
-        "SELECT pipeline_id, pipeline_revision, pipeline_operational_generation
+    let binding = sqlx::query_as::<_, (Option<Uuid>, Option<i64>, Option<i64>, Option<Vec<u8>>)>(
+        "SELECT pipeline_id, pipeline_revision, pipeline_operational_generation,
+                pipeline_revision_digest
          FROM builds WHERE id = $1",
     )
     .bind(build_id)
     .fetch_one(&pool)
     .await
     .expect("read historic build binding");
-    assert_eq!(binding, (None, None, None));
+    assert_eq!(binding, (None, None, None, None));
     let migrated_store = Store::new(pool.clone());
     assert!(
         migrated_store

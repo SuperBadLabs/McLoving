@@ -1864,14 +1864,13 @@ impl Store {
             tx.commit().await?;
             return Ok(existing);
         }
-        lock_enabled_pipeline_binding(
+        let pipeline_revision_digest = lock_enabled_pipeline_binding(
             &mut tx,
             input.organization_id,
             input.project_id,
             input.pipeline_id,
             input.pipeline_revision,
             input.pipeline_operational_generation,
-            &input.pipeline_digest,
         )
         .await?;
         let build_id = Uuid::new_v4();
@@ -1879,9 +1878,10 @@ impl Store {
             "INSERT INTO builds (
                  id, organization_id, project_id,
                  pipeline_id, pipeline_revision, pipeline_operational_generation,
+                 pipeline_revision_digest,
                  idempotency_key, pipeline_digest, status, priority
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'queued', $9)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', $10)
              ON CONFLICT (project_id, idempotency_key) DO NOTHING
              RETURNING id",
         )
@@ -1891,6 +1891,7 @@ impl Store {
         .bind(input.pipeline_id)
         .bind(input.pipeline_revision)
         .bind(input.pipeline_operational_generation)
+        .bind(pipeline_revision_digest.as_slice())
         .bind(&input.idempotency_key)
         .bind(input.pipeline_digest.as_slice())
         .bind(input.priority)
@@ -5355,8 +5356,7 @@ pub(crate) async fn lock_enabled_pipeline_binding(
     pipeline_id: Uuid,
     pipeline_revision: i64,
     operational_generation: i64,
-    pipeline_digest: &[u8; 32],
-) -> Result<(), StoreError> {
+) -> Result<[u8; 32], StoreError> {
     if pipeline_revision <= 0 || operational_generation <= 0 {
         return Err(StoreError::InvalidPipelineState(
             "pipeline admission binding must use positive revision and generation".to_owned(),
@@ -5405,12 +5405,11 @@ pub(crate) async fn lock_enabled_pipeline_binding(
              {current_revision}/{current_generation}"
         )));
     }
-    if current_digest.as_slice() != pipeline_digest {
-        return Err(StoreError::PipelineStateConflict(
-            "pipeline admission digest does not match the saved revision".to_owned(),
-        ));
-    }
-    Ok(())
+    current_digest.try_into().map_err(|_| {
+        StoreError::PipelineStateConflict(
+            "saved pipeline revision digest is not SHA-256 sized".to_owned(),
+        )
+    })
 }
 
 pub(crate) async fn lock_enabled_build_pipeline(
