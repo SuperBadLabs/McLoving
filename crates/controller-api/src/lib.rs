@@ -2748,6 +2748,7 @@ async fn fail_claimed_trigger_delivery(
         TriggerDeliveryFailure::DeadLettered(delivery) => {
             (StatusCode::UNPROCESSABLE_ENTITY, delivery)
         }
+        TriggerDeliveryFailure::LeaseLost(delivery) => (StatusCode::ACCEPTED, delivery),
     };
     Ok((
         status,

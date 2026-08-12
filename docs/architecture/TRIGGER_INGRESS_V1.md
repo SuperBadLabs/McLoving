@@ -86,6 +86,12 @@ For remote API ingress, the signed/request payload's `request_id` must equal the
 durable `event_id`, so the caller cannot mint duplicate work for one logical
 request by rotating transport identifiers.
 
+New acceptance and explicit redrive sample PostgreSQL time inside the locked
+transaction. The acceptance timestamp and delivery TTL are derived from that
+authority, and the replay/skew window compares event time with the same sample;
+a controller clock cannot create an already-expired delivery or extend its
+lifetime.
+
 Processing requires a bounded PostgreSQL lease with a monotonically increasing
 claim fence. Immediately after locking the delivery, the store samples
 PostgreSQL time to decide durable due time, delivery TTL, and whether the
@@ -93,8 +99,11 @@ current lease is live, and derives the new expiry from that same clock plus the
 bounded requested duration. Due-work enumeration uses PostgreSQL time as well.
 Active-active workers converge
 on one claim even when controller wall clocks differ. A stale worker cannot
-complete or fail a newer claim, and admission conditionally binds only while
-the matching claim lease is still live according to the PostgreSQL clock.
+complete or fail a newer claim. Failure transitions resample PostgreSQL time
+under the delivery lock, derive retry due time from the requested bounded
+delay, and return typed lease loss without failure accounting when the claim
+has expired. Admission conditionally binds only while the matching claim lease
+is still live according to the PostgreSQL clock.
 Processing enters the JOBSTATE-001 saved-pipeline
 admission primitive using a controller-derived safe idempotency key. DAG rows,
 attempts, outbox publication, and the immutable delivery/build binding commit in
@@ -218,7 +227,8 @@ replay, delayed/future input, bounded outage retry, attempt exhaustion,
 exact-source and conflicting-source dead-letter redrive, stale claim denial,
 parameter pre-capture and corrupt-store terminal failure, completion-time
 delivery/claim expiry with zero persisted DAG and unchanged retry budget,
-database-clock due/TTL/claim ownership under controller-clock skew, reserved
+database-clock acceptance/redrive TTL, due/retry/claim ownership, and expired
+failure-claim rejection under controller-clock skew, reserved
 trigger-DAG idempotency namespace denial, unordered filter
 membership, expired-claim handoff reaping, caller rotation,
 pause/resume, disable fencing, restart, atomic schedule

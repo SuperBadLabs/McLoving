@@ -365,6 +365,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .unwrap(),
         TriggerPutOutcome::Created(_)
     ));
+    let unordered_filter_now = database_unix_ms(&store).await;
     assert!(matches!(
         store
             .accept_trigger_delivery(&delivery(
@@ -375,7 +376,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
                 1,
                 "delivery-unordered-filter",
                 "event-unordered-filter",
-                1_900_000_000_000,
+                unordered_filter_now,
             ))
             .await
             .unwrap(),
@@ -411,7 +412,7 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
     );
 
     let now = database_unix_ms(&store).await;
-    let input = delivery(
+    let mut input = delivery(
         organization_id,
         project_id,
         pipeline_id,
@@ -421,14 +422,15 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         "event-1",
         now,
     );
-    let mut future = delivery_with_event_time(input.clone(), now + 300_001);
+    input.accepted_at_unix_ms = now + 10 * 60_000;
+    let mut future = delivery_with_event_time(input.clone(), now + 310_000);
     future.delivery_id = "delivery-future".to_owned();
     future.event_id = "event-future".to_owned();
     assert!(matches!(
         store.accept_trigger_delivery(&future).await,
         Err(StoreError::InvalidTriggerIngress(_))
     ));
-    let mut delayed = delivery_with_event_time(input.clone(), now - 3_600_001);
+    let mut delayed = delivery_with_event_time(input.clone(), now - 3_610_000);
     delayed.delivery_id = "delivery-delayed".to_owned();
     delayed.event_id = "event-delayed".to_owned();
     assert!(matches!(
@@ -464,11 +466,26 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         store.accept_trigger_delivery(&unknown_payload).await,
         Err(StoreError::InvalidTriggerIngress(_))
     ));
+    let database_before_accept = database_unix_ms(&store).await;
     let (left, right) = tokio::join!(
         store.accept_trigger_delivery(&input),
         store.accept_trigger_delivery(&input)
     );
+    let database_after_accept = database_unix_ms(&store).await;
     let concurrent_outcomes = [left.unwrap(), right.unwrap()];
+    let accepted = concurrent_outcomes
+        .iter()
+        .find_map(|outcome| match outcome {
+            TriggerDeliveryAdmission::Created(delivery) => Some(delivery),
+            TriggerDeliveryAdmission::Replayed(_) => None,
+        })
+        .expect("one active-active accept creates the delivery");
+    assert!(accepted.accepted_at_unix_ms >= database_before_accept);
+    assert!(accepted.accepted_at_unix_ms <= database_after_accept);
+    assert_eq!(
+        accepted.expires_at_unix_ms,
+        accepted.accepted_at_unix_ms + 7_200_000
+    );
     assert_eq!(
         concurrent_outcomes
             .iter()
@@ -543,7 +560,8 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .unwrap(),
         TriggerDeliveryClaimOutcome::Leased(_)
     ));
-    let retry_clock = database_unix_ms(&store).await;
+    let retry_database_before = database_unix_ms(&store).await;
+    let retry_caller_clock = retry_database_before + 10 * 60_000;
     let retry = store
         .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
             organization_id,
@@ -551,14 +569,19 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             delivery_id: "delivery-1".to_owned(),
             worker_identity: "worker-1".to_owned(),
             claim_fence: first_claim.claim_fence,
-            now_unix_ms: retry_clock,
-            retry_at_unix_ms: retry_clock + 500,
+            now_unix_ms: retry_caller_clock,
+            retry_at_unix_ms: retry_caller_clock + 500,
             retryable: true,
             reason: "contained outage".to_owned(),
         })
         .await
         .unwrap();
-    assert!(matches!(retry, TriggerDeliveryFailure::RetryScheduled(_)));
+    let TriggerDeliveryFailure::RetryScheduled(retry) = retry else {
+        panic!("a fast caller clock must not dead-letter a live delivery")
+    };
+    let retry_database_after = database_unix_ms(&store).await;
+    assert!(retry.next_attempt_at_unix_ms >= retry_database_before + 500);
+    assert!(retry.next_attempt_at_unix_ms <= retry_database_after + 500);
     assert!(
         store
             .due_trigger_deliveries(organization_id, i64::MAX, 128)
@@ -827,6 +850,24 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         panic!("an already-expired claim must return the typed lease-lost outcome")
     };
     assert_eq!(lease_lost.attempt_count, 0);
+    let expired_failure = store
+        .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
+            organization_id,
+            trigger_id,
+            delivery_id: "delivery-expired-claim-admission".to_owned(),
+            worker_identity: "worker-expired-claim-admission".to_owned(),
+            claim_fence: expired_claim.claim_fence,
+            now_unix_ms: wall_now,
+            retry_at_unix_ms: wall_now + 1_000,
+            retryable: true,
+            reason: "stale worker failure".to_owned(),
+        })
+        .await
+        .unwrap();
+    let TriggerDeliveryFailure::LeaseLost(expired_failure) = expired_failure else {
+        panic!("an expired claim cannot spend failure accounting")
+    };
+    assert_eq!(expired_failure.attempt_count, 0);
     assert!(
         store
             .dag_replay_binding(
@@ -1168,12 +1209,14 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         new_delivery_id: "redrive-1".to_owned(),
         new_event_id: "redrive-event-1".to_owned(),
         actor_subject: "recovery@example.test".to_owned(),
-        accepted_at_unix_ms: now + 2,
+        accepted_at_unix_ms: now + 10 * 60_000,
     };
+    let database_before_redrive = database_unix_ms(&store).await;
     let (left, right) = tokio::join!(
         store.redrive_trigger_delivery(&redrive),
         store.redrive_trigger_delivery(&redrive)
     );
+    let database_after_redrive = database_unix_ms(&store).await;
     let redrive_outcomes = [left.unwrap(), right.unwrap()];
     assert_eq!(
         redrive_outcomes
@@ -1197,6 +1240,12 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         })
         .expect("one concurrent first redrive creates the delivery");
     assert_eq!(redriven.status, TriggerDeliveryStatus::Pending);
+    assert!(redriven.accepted_at_unix_ms >= database_before_redrive);
+    assert!(redriven.accepted_at_unix_ms <= database_after_redrive);
+    assert_eq!(
+        redriven.expires_at_unix_ms,
+        redriven.accepted_at_unix_ms + 7_200_000
+    );
     assert_eq!(redriven.redrive_of_delivery_id.as_deref(), Some("dead-1"));
     assert_eq!(redriven.redrive_ordinal, Some(1));
     assert!(matches!(
@@ -1587,11 +1636,11 @@ fn digest_hex(value: &[u8]) -> String {
     hex::encode(Sha256::digest(value))
 }
 
-fn schedule_configuration(expression: &str) -> Value {
+fn schedule_configuration(expression: &str, first_slot_unix_ms: i64) -> Value {
     let resolved_slots = json!([
-        1_920_000_000_000_i64,
-        1_920_086_400_000_i64,
-        1_920_172_800_000_i64
+        first_slot_unix_ms,
+        first_slot_unix_ms + 1_000,
+        first_slot_unix_ms + 2_000
     ]);
     let resolved_slots_sha256 = digest_hex(&serde_json::to_vec(&resolved_slots).unwrap());
     json!({
@@ -1617,7 +1666,8 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
     };
     let (organization_id, project_id, pipeline_id) = fixture(&store).await;
     let trigger_id = Uuid::new_v4();
-    let incomplete = schedule_configuration("H H * * *");
+    let slot1 = database_unix_ms(&store).await;
+    let incomplete = schedule_configuration("H H * * *", slot1);
     let incomplete = trigger_write(
         organization_id,
         project_id,
@@ -1636,7 +1686,7 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         Err(StoreError::InvalidTriggerIngress(_))
     ));
 
-    let configuration = schedule_configuration("0 2 * * *");
+    let configuration = schedule_configuration("0 2 * * *", slot1);
     let write = trigger_write(
         organization_id,
         project_id,
@@ -1652,7 +1702,6 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
     );
     store.put_pipeline_trigger(&write).await.unwrap();
     let identity: [u8; 32] = Sha256::digest(b"schedule-identity").into();
-    let slot1 = 1_920_000_000_000;
     let schedule_delivery = |delivery_id: &str,
                              event_id: &str,
                              expected: Option<i64>,
@@ -1733,7 +1782,7 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         "schedule-slot-2",
         "schedule-event-2",
         Some(slot1),
-        slot1 + 86_400_000,
+        slot1 + 1_000,
         identity,
     );
     assert!(matches!(
@@ -1743,8 +1792,8 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
     let substituted = schedule_delivery(
         "schedule-slot-substituted",
         "schedule-event-substituted",
-        Some(slot1 + 86_400_000),
-        slot1 + 2 * 86_400_000,
+        Some(slot1 + 1_000),
+        slot1 + 2_000,
         Sha256::digest(b"substituted").into(),
     );
     assert!(matches!(
@@ -1758,7 +1807,7 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         .expect("schedule watermark remains readable");
     assert_eq!(
         final_watermark.last_resolved_slot_unix_ms,
-        Some(slot1 + 86_400_000)
+        Some(slot1 + 1_000)
     );
     assert!(
         sqlx::query(
@@ -1786,7 +1835,7 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         TriggerKind::Schedule,
         PipelineTriggerState::Paused,
         "scheduler:mcloving:primary",
-        schedule_configuration("0 2 * * *"),
+        schedule_configuration("0 2 * * *", slot1),
         "schedule-handoff-pause",
         3,
     );
@@ -1844,7 +1893,7 @@ async fn upstream_identity_status_filters_and_unimplemented_plugin_classes_fail_
         3,
     );
     store.put_pipeline_trigger(&upstream).await.unwrap();
-    let now = 1_930_000_000_000;
+    let now = database_unix_ms(&store).await;
     let upstream_delivery = |delivery_id: &str, event_id: &str, status: &str| {
         let canonical_payload = json!({
             "event_kind": "upstream",

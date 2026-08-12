@@ -227,6 +227,7 @@ pub enum TriggerDeliveryAdmission {
 pub enum TriggerDeliveryFailure {
     RetryScheduled(TriggerDelivery),
     DeadLettered(TriggerDelivery),
+    LeaseLost(TriggerDelivery),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1007,17 +1008,6 @@ impl Store {
         }
         let window_seconds: i64 = trigger_row.try_get("deduplication_window_seconds")?;
         let ttl_seconds: i64 = trigger_row.try_get("delivery_ttl_seconds")?;
-        if input.event_time_unix_ms > input.accepted_at_unix_ms + MAX_CLOCK_SKEW_MS
-            || input.event_time_unix_ms
-                < input
-                    .accepted_at_unix_ms
-                    .saturating_sub(window_seconds * 1000)
-        {
-            tx.rollback().await?;
-            return Err(StoreError::InvalidTriggerIngress(
-                "trigger event is outside its configured replay/skew window".to_owned(),
-            ));
-        }
         let trigger_kind = TriggerKind::parse(trigger_row.try_get("trigger_kind")?)?;
         let trigger_configuration: Value = trigger_row.try_get("configuration")?;
         validate_delivery_against_configuration(trigger_kind, input, &trigger_configuration)?;
@@ -1082,8 +1072,17 @@ impl Store {
             )));
         }
 
-        let expires_at = input
-            .accepted_at_unix_ms
+        let database_accepted_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
+        if input.event_time_unix_ms > database_accepted_at_unix_ms.saturating_add(MAX_CLOCK_SKEW_MS)
+            || input.event_time_unix_ms
+                < database_accepted_at_unix_ms.saturating_sub(window_seconds * 1000)
+        {
+            tx.rollback().await?;
+            return Err(StoreError::InvalidTriggerIngress(
+                "trigger event is outside its configured replay/skew window".to_owned(),
+            ));
+        }
+        let expires_at = database_accepted_at_unix_ms
             .checked_add(ttl_seconds * 1000)
             .ok_or_else(|| {
                 StoreError::InvalidTriggerIngress("trigger delivery expiry overflows".to_owned())
@@ -1108,7 +1107,7 @@ impl Store {
                 "event_kind": input.event_kind,
                 "payload_sha256": hex::encode(input.payload_sha256),
                 "event_time_unix_ms": input.event_time_unix_ms,
-                "accepted_at_unix_ms": input.accepted_at_unix_ms,
+                "accepted_at_unix_ms": database_accepted_at_unix_ms,
                 "expires_at_unix_ms": expires_at,
                 "schedule_slot": input.schedule_slot.as_ref(),
             }),
@@ -1142,7 +1141,7 @@ impl Store {
         .bind(&input.requested_platform)
         .bind(&input.requested_trust_pool)
         .bind(input.event_time_unix_ms)
-        .bind(input.accepted_at_unix_ms)
+        .bind(database_accepted_at_unix_ms)
         .bind(expires_at)
         .bind(audit.sequence)
         .bind(audit.event_hash.as_slice())
@@ -1600,6 +1599,7 @@ impl Store {
         })?;
         let max_attempts: i32 = row.try_get("max_delivery_attempts")?;
         let current = delivery_from_row(row)?;
+        let database_now_unix_ms = trigger_database_unix_ms(&mut tx).await?;
         if matches!(
             current.status,
             TriggerDeliveryStatus::Admitted | TriggerDeliveryStatus::DeadLettered
@@ -1617,10 +1617,29 @@ impl Store {
                 "delivery failure claim is stale or belongs to another worker".to_owned(),
             ));
         }
+        if current.claim_expires_at_unix_ms.unwrap_or(0) <= database_now_unix_ms {
+            tx.commit().await?;
+            return Ok(TriggerDeliveryFailure::LeaseLost(current));
+        }
+        let retry_at_unix_ms = if input.retryable {
+            let retry_delay_ms = input
+                .retry_at_unix_ms
+                .checked_sub(input.now_unix_ms)
+                .ok_or_else(|| {
+                    StoreError::InvalidTriggerIngress("delivery retry time overflows".to_owned())
+                })?;
+            database_now_unix_ms
+                .checked_add(retry_delay_ms)
+                .ok_or_else(|| {
+                    StoreError::InvalidTriggerIngress("delivery retry time overflows".to_owned())
+                })?
+        } else {
+            current.next_attempt_at_unix_ms
+        };
         let next_attempt = current.attempt_count + 1;
         let dead_letter = !input.retryable
             || next_attempt >= max_attempts
-            || input.now_unix_ms >= current.expires_at_unix_ms;
+            || database_now_unix_ms >= current.expires_at_unix_ms;
         crate::audit::append_audit_record(
             &mut tx,
             input.organization_id,
@@ -1638,7 +1657,7 @@ impl Store {
             json!({
                 "attempt_count": next_attempt,
                 "reason": input.reason,
-                "retry_at_unix_ms": if dead_letter { Value::Null } else { json!(input.retry_at_unix_ms) },
+                "retry_at_unix_ms": if dead_letter { Value::Null } else { json!(retry_at_unix_ms) },
             }),
         )
         .await?;
@@ -1657,7 +1676,7 @@ impl Store {
         .bind(&input.delivery_id)
         .bind(dead_letter)
         .bind(next_attempt)
-        .bind(input.retry_at_unix_ms)
+        .bind(retry_at_unix_ms)
         .bind(&input.reason)
         .execute(&mut *tx)
         .await?;
@@ -1874,12 +1893,6 @@ impl Store {
         .bind(original.trigger_generation)
         .fetch_one(&mut *tx)
         .await?;
-        let expires_at = input
-            .accepted_at_unix_ms
-            .checked_add(ttl_seconds * 1000)
-            .ok_or_else(|| {
-                StoreError::InvalidTriggerIngress("redrive expiry overflows".to_owned())
-            })?;
         let ordinal: i32 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(redrive_ordinal), 0) + 1
              FROM trigger_deliveries
@@ -1891,6 +1904,12 @@ impl Store {
         .bind(&input.dead_letter_delivery_id)
         .fetch_one(&mut *tx)
         .await?;
+        let database_accepted_at_unix_ms = trigger_database_unix_ms(&mut tx).await?;
+        let expires_at = database_accepted_at_unix_ms
+            .checked_add(ttl_seconds * 1000)
+            .ok_or_else(|| {
+                StoreError::InvalidTriggerIngress("redrive expiry overflows".to_owned())
+            })?;
         let audit = crate::audit::append_audit_record(
             &mut tx,
             input.organization_id,
@@ -1937,7 +1956,7 @@ impl Store {
         .bind(&original.requested_platform)
         .bind(&original.requested_trust_pool)
         .bind(original.event_time_unix_ms)
-        .bind(input.accepted_at_unix_ms)
+        .bind(database_accepted_at_unix_ms)
         .bind(expires_at)
         .bind(&input.dead_letter_delivery_id)
         .bind(ordinal)
