@@ -307,16 +307,24 @@ pub struct TriggerTransferSnapshot {
 
 pub fn verify_trigger_transfer_snapshot(
     snapshot: &TriggerTransferSnapshot,
+    trusted_handoff_audit_event_hash: [u8; 32],
 ) -> Result<(), StoreError> {
     if snapshot.schema_version != 1
         || snapshot.current_generation <= 0
         || snapshot.audit_sequence <= 0
         || snapshot.audit_event_hash == [0; 32]
-        || snapshot.handoff_audit_event.sequence != snapshot.audit_sequence
-        || snapshot.handoff_audit_event.event_hash != snapshot.audit_event_hash
+        || trusted_handoff_audit_event_hash == [0; 32]
     {
         return Err(StoreError::InvalidTriggerIngress(
             "trigger transfer snapshot schema or generation is invalid".to_owned(),
+        ));
+    }
+    if snapshot.audit_event_hash != trusted_handoff_audit_event_hash
+        || snapshot.handoff_audit_event.sequence != snapshot.audit_sequence
+        || snapshot.handoff_audit_event.event_hash != trusted_handoff_audit_event_hash
+    {
+        return Err(StoreError::TriggerIngressConflict(
+            "trigger transfer does not match the independently retained audit anchor".to_owned(),
         ));
     }
     crate::audit::verify_audit_event_hash(snapshot.organization_id, &snapshot.handoff_audit_event)
@@ -441,17 +449,7 @@ pub fn verify_trigger_transfer_snapshot(
             ));
         }
     }
-    let ledger_sha256 = trigger_transfer_ledger_digest(
-        snapshot.schema_version,
-        snapshot.organization_id,
-        snapshot.project_id,
-        snapshot.pipeline_id,
-        snapshot.trigger_id,
-        snapshot.current_generation,
-        &snapshot.versions,
-        &snapshot.deliveries,
-        &snapshot.schedule_watermarks,
-    )?;
+    let ledger_sha256 = compute_trigger_transfer_snapshot_ledger_digest(snapshot)?;
     let expected_audit_payload = json!({
         "project_id": snapshot.project_id,
         "pipeline_id": snapshot.pipeline_id,
@@ -564,6 +562,22 @@ fn trigger_transfer_ledger_digest(
     hasher.update(b"mcloving-trigger-transfer-ledger-v1\0");
     hasher.update(canonical);
     Ok(hasher.finalize().into())
+}
+
+pub fn compute_trigger_transfer_snapshot_ledger_digest(
+    snapshot: &TriggerTransferSnapshot,
+) -> Result<[u8; 32], StoreError> {
+    trigger_transfer_ledger_digest(
+        snapshot.schema_version,
+        snapshot.organization_id,
+        snapshot.project_id,
+        snapshot.pipeline_id,
+        snapshot.trigger_id,
+        snapshot.current_generation,
+        &snapshot.versions,
+        &snapshot.deliveries,
+        &snapshot.schedule_watermarks,
+    )
 }
 
 impl Store {
@@ -1658,6 +1672,45 @@ impl Store {
                 "only a dead-lettered delivery can be redriven".to_owned(),
             ));
         }
+        // As with first delivery acceptance, an absent redrive key cannot be
+        // locked. The source dead-letter lock serializes first redrive, so
+        // repeat the replay lookup after acquiring it and converge a waiter on
+        // the committed redrive rather than leaking a uniqueness error.
+        let serialized_replay_rows = sqlx::query(
+            "SELECT * FROM trigger_deliveries
+             WHERE organization_id = $1 AND project_id = $2 AND pipeline_id = $3
+               AND trigger_id = $4 AND (delivery_id = $5 OR event_id = $6)
+             FOR UPDATE",
+        )
+        .bind(input.organization_id)
+        .bind(input.project_id)
+        .bind(input.pipeline_id)
+        .bind(input.trigger_id)
+        .bind(&input.new_delivery_id)
+        .bind(&input.new_event_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        if serialized_replay_rows.len() > 1 {
+            tx.rollback().await?;
+            return Err(StoreError::TriggerIngressConflict(
+                "redrive delivery and event IDs identify different deliveries".to_owned(),
+            ));
+        }
+        if let Some(row) = serialized_replay_rows.into_iter().next() {
+            let replay = delivery_from_row(row)?;
+            if replay.delivery_id != input.new_delivery_id
+                || replay.event_id != input.new_event_id
+                || replay.redrive_of_delivery_id.as_deref()
+                    != Some(input.dead_letter_delivery_id.as_str())
+            {
+                tx.rollback().await?;
+                return Err(StoreError::TriggerIngressConflict(
+                    "redrive delivery or event identity was reused".to_owned(),
+                ));
+            }
+            tx.commit().await?;
+            return Ok(TriggerDeliveryAdmission::Replayed(replay));
+        }
         let trigger = sqlx::query(
             "SELECT definition.current_generation, version.state,
                     version.event_source_identity
@@ -1992,7 +2045,7 @@ impl Store {
             state_sha256: [0; 32],
         };
         snapshot.state_sha256 = compute_trigger_transfer_snapshot_digest(&snapshot)?;
-        verify_trigger_transfer_snapshot(&snapshot)?;
+        verify_trigger_transfer_snapshot(&snapshot, audit.event_hash)?;
         tx.commit().await?;
         Ok(snapshot)
     }

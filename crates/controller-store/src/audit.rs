@@ -520,7 +520,21 @@ pub(crate) fn verify_audit_event_hash(
     organization_id: Uuid,
     event: &AuditEvent,
 ) -> Result<(), StoreError> {
-    let expected_hash = hash_event(
+    let expected_hash = compute_audit_event_hash(organization_id, event)?;
+    if event.event_hash != expected_hash {
+        return Err(StoreError::CorruptAuditChain {
+            organization_id,
+            sequence: event.sequence,
+        });
+    }
+    Ok(())
+}
+
+pub fn compute_audit_event_hash(
+    organization_id: Uuid,
+    event: &AuditEvent,
+) -> Result<[u8; 32], StoreError> {
+    hash_event(
         organization_id,
         event.sequence,
         event.event_id,
@@ -531,14 +545,7 @@ pub(crate) fn verify_audit_event_hash(
         &event.payload,
         event.occurred_at_unix_ms,
         event.previous_hash,
-    )?;
-    if event.event_hash != expected_hash {
-        return Err(StoreError::CorruptAuditChain {
-            organization_id,
-            sequence: event.sequence,
-        });
-    }
-    Ok(())
+    )
 }
 
 type AuditRow = (

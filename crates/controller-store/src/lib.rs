@@ -27,7 +27,7 @@ pub use admin_migration::{
 };
 pub use audit::{
     AuditEvent, AuditExport, AuditPage, AuditRetentionPolicy, MAX_AUDIT_PAGE, NewAuditEvent,
-    verify_audit_export, verify_audit_page,
+    compute_audit_event_hash, verify_audit_export, verify_audit_page,
 };
 pub use authorization_mapping::{
     AuthorizationPolicyReceipt, AuthorizationPolicyWrite, AuthorizationPrincipalMappingWrite,
@@ -71,7 +71,8 @@ pub use trigger_ingress::{
     TriggerDeliveryClaimRequest, TriggerDeliveryFailure, TriggerDeliveryFailureRequest,
     TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome,
     TriggerScheduleSlot, TriggerScheduleWatermark, TriggerTransferSnapshot,
-    compute_trigger_transfer_snapshot_digest, verify_trigger_transfer_snapshot,
+    compute_trigger_transfer_snapshot_digest, compute_trigger_transfer_snapshot_ledger_digest,
+    verify_trigger_transfer_snapshot,
 };
 
 pub(crate) const RESTORE_FENCE_LOCK_KEY: i64 = 0x4d_63_4c_6f_76_72_65_63;

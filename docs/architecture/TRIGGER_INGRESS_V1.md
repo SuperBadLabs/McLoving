@@ -96,8 +96,9 @@ source-side redelivery responsible for controller retries. Expired or exhausted 
 dead-letters. A dead letter is never mutated back to pending. Project-configure
 redrive creates a new delivery/event identity with immutable lineage and
 ordinal, then enters the same claim, admission, and operational-state fence.
-Exact redrive replay converges; a paused trigger or disabled pipeline rejects
-recovery before work is minted.
+The source dead-letter lock serializes first redrive and repeats the new-ID
+lookup, so concurrent exact redrive returns one creation plus one replay. A
+paused trigger or disabled pipeline rejects recovery before work is minted.
 
 ## Schedule capture and restart
 
@@ -150,8 +151,11 @@ binds every trigger version's actor, reason, idempotency key, audit sequence and
 event hash; every accepted delivery's audit sequence and event hash; and the
 handoff export audit event into one domain-separated state digest. Verification
 recomputes a separate exact-ledger digest and requires it in the hash-verified
-handoff audit event, so changing ledger state and merely recomputing the unkeyed
-snapshot digest cannot preserve the trusted audit commitment. Verification
+handoff audit event. Its caller must also supply that event hash from an
+independently retained audit export or chain head; the snapshot cannot establish
+its own trust anchor. Therefore, changing ledger state and recomputing the
+ledger, audit-event, and snapshot hashes cannot preserve the independent audit
+commitment. Verification
 rejects missing lineage, duplicate identifiers, active claims, unlinked
 watermarks, watermarks linked to a delivery from the wrong generation or
 resolved slot, stripped provenance, or any state substitution. A later CUTOVER-001
@@ -172,7 +176,9 @@ filtering, durable admission, generation-bound replay after configuration
 rotation, stale-generation denial, kind-discriminated generated schemas, and
 the generated route contract. Concurrent first-acceptance coverage proves one
 created delivery and one replay rather than a uniqueness error; the handoff
-tamper test changes ledger content, recomputes the snapshot digest, and is still
-rejected by the audited ledger commitment. The deployable-controller suite also
+tamper test changes ledger content and recomputes the ledger, embedded audit
+event, and snapshot digests, but is still rejected by the independently retained
+audit hash. Concurrent first redrive likewise proves one creation plus one
+replay. The deployable-controller suite also
 proves the runtime role's exact least-privilege and 53-table forced-RLS policy
 surface before accepting traffic.

@@ -5,7 +5,8 @@ use mcloving_controller_store::{
     StoreError, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
     TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive,
     TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome, TriggerScheduleSlot,
-    compute_trigger_transfer_snapshot_digest, verify_trigger_transfer_snapshot,
+    compute_audit_event_hash, compute_trigger_transfer_snapshot_digest,
+    compute_trigger_transfer_snapshot_ledger_digest, verify_trigger_transfer_snapshot,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -699,10 +700,32 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         actor_subject: "recovery@example.test".to_owned(),
         accepted_at_unix_ms: now + 2,
     };
-    let redriven = match store.redrive_trigger_delivery(&redrive).await.unwrap() {
-        TriggerDeliveryAdmission::Created(delivery) => delivery,
-        other => panic!("unexpected redrive: {other:?}"),
-    };
+    let (left, right) = tokio::join!(
+        store.redrive_trigger_delivery(&redrive),
+        store.redrive_trigger_delivery(&redrive)
+    );
+    let redrive_outcomes = [left.unwrap(), right.unwrap()];
+    assert_eq!(
+        redrive_outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, TriggerDeliveryAdmission::Created(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        redrive_outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, TriggerDeliveryAdmission::Replayed(_)))
+            .count(),
+        1
+    );
+    let redriven = redrive_outcomes
+        .into_iter()
+        .find_map(|outcome| match outcome {
+            TriggerDeliveryAdmission::Created(delivery) => Some(delivery),
+            TriggerDeliveryAdmission::Replayed(_) => None,
+        })
+        .expect("one concurrent first redrive creates the delivery");
     assert_eq!(redriven.status, TriggerDeliveryStatus::Pending);
     assert_eq!(redriven.redrive_of_delivery_id.as_deref(), Some("dead-1"));
     assert_eq!(redriven.redrive_ordinal, Some(1));
@@ -815,7 +838,9 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         )
         .await
         .expect("export complete paused trigger ledger");
-    verify_trigger_transfer_snapshot(&handoff).expect("verify handoff snapshot");
+    let trusted_handoff_audit_hash = handoff.audit_event_hash;
+    verify_trigger_transfer_snapshot(&handoff, trusted_handoff_audit_hash)
+        .expect("verify handoff snapshot against independently retained audit hash");
     assert!(handoff.audit_sequence > 0);
     assert_ne!(handoff.audit_event_hash, [0; 32]);
     assert!(handoff.versions.iter().all(|version| {
@@ -844,19 +869,26 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
     );
     let mut tampered = handoff.clone();
     tampered.deliveries[0].event_id.push_str("-substituted");
+    let tampered_ledger = compute_trigger_transfer_snapshot_ledger_digest(&tampered)
+        .expect("attacker recomputes the exported ledger digest");
+    tampered.handoff_audit_event.payload["ledger_sha256"] = json!(hex::encode(tampered_ledger));
+    tampered.handoff_audit_event.event_hash =
+        compute_audit_event_hash(tampered.organization_id, &tampered.handoff_audit_event)
+            .expect("attacker recomputes the self-contained audit event hash");
+    tampered.audit_event_hash = tampered.handoff_audit_event.event_hash;
     tampered.state_sha256 = compute_trigger_transfer_snapshot_digest(&tampered)
         .expect("attacker can recompute the unkeyed snapshot digest");
     assert!(
         matches!(
-            verify_trigger_transfer_snapshot(&tampered),
+            verify_trigger_transfer_snapshot(&tampered, trusted_handoff_audit_hash),
             Err(StoreError::TriggerIngressConflict(_))
         ),
-        "the audited ledger commitment rejects a recomputed substituted snapshot"
+        "the independent audit anchor rejects a fully recomputed substituted snapshot"
     );
     let mut provenance_stripped = handoff.clone();
     provenance_stripped.deliveries[0].audit_sequence = 0;
     assert!(matches!(
-        verify_trigger_transfer_snapshot(&provenance_stripped),
+        verify_trigger_transfer_snapshot(&provenance_stripped, trusted_handoff_audit_hash),
         Err(StoreError::TriggerIngressConflict(_))
     ));
 
@@ -901,7 +933,8 @@ async fn dead_letters_require_explicit_fenced_redrive_and_caller_rotation_denies
         )
         .await
         .expect("export rollback-restored trigger ledger");
-    verify_trigger_transfer_snapshot(&restored).expect("verify rollback snapshot");
+    verify_trigger_transfer_snapshot(&restored, restored.audit_event_hash)
+        .expect("verify rollback snapshot against its retained audit hash");
     let before = handoff.versions.last().unwrap();
     let after = restored.versions.last().unwrap();
     assert_eq!(after.kind, before.kind);
@@ -1178,17 +1211,19 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         )
         .await
         .expect("export schedule handoff with exact watermark lineage");
-    verify_trigger_transfer_snapshot(&handoff).expect("verify schedule handoff watermark lineage");
+    let trusted_schedule_audit_hash = handoff.audit_event_hash;
+    verify_trigger_transfer_snapshot(&handoff, trusted_schedule_audit_hash)
+        .expect("verify schedule handoff watermark lineage");
     let mut stripped_link = handoff.clone();
     stripped_link.schedule_watermarks[0].last_delivery_id = None;
     assert!(matches!(
-        verify_trigger_transfer_snapshot(&stripped_link),
+        verify_trigger_transfer_snapshot(&stripped_link, trusted_schedule_audit_hash),
         Err(StoreError::TriggerIngressConflict(_))
     ));
     let mut substituted_link = handoff.clone();
     substituted_link.schedule_watermarks[0].last_delivery_id = Some("schedule-slot-1".to_owned());
     assert!(matches!(
-        verify_trigger_transfer_snapshot(&substituted_link),
+        verify_trigger_transfer_snapshot(&substituted_link, trusted_schedule_audit_hash),
         Err(StoreError::TriggerIngressConflict(_))
     ));
 }
