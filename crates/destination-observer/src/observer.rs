@@ -1597,8 +1597,11 @@ fn contains_secret_value_at(
                         return true;
                     }
                     // A decoded padded candidate terminates this token even when the following
-                    // byte is also in the Base64 alphabet. Restart scanning at that byte.
-                    token_start = None;
+                    // byte is also in the Base64 alphabet. Preserve a possible second padding
+                    // byte before restarting at the following token.
+                    if padding_probes == 2 || raw.get(index + 1) != Some(&b'=') {
+                        token_start = None;
+                    }
                 }
             }
             (Some(start), false) => {
@@ -1630,15 +1633,56 @@ fn scan_base64_candidate(
     if candidate.len() < 4 {
         return None;
     }
-    let decoded = base64_decode_once(candidate)?;
-    *consumed_work = match consumed_work.checked_add(candidate.len()) {
-        Some(work) if work <= maximum_work => work,
-        _ => return Some(true),
-    };
-    Some(
-        depth == MAX_REVERSIBLE_DECODE_DEPTH
-            || contains_secret_value_at(&decoded, markers, depth + 1, consumed_work, maximum_work),
-    )
+
+    // An encoded value can begin inside a longer alphabet run. There are only four Base64
+    // character phases: decoding an earlier start in the same phase merely prepends complete
+    // decoded triples and preserves the later payload. Also restart the four phases after the
+    // last character that is exclusive to the other alphabet so a mixed prefix cannot mask a
+    // valid standard or URL-safe suffix.
+    let mut starts = BTreeSet::new();
+    add_base64_phase_starts(&mut starts, 0, candidate.len());
+    if let Some(boundary) = candidate
+        .iter()
+        .rposition(|byte| matches!(byte, b'-' | b'_'))
+    {
+        add_base64_phase_starts(&mut starts, boundary + 1, candidate.len());
+    }
+    if let Some(boundary) = candidate
+        .iter()
+        .rposition(|byte| matches!(byte, b'+' | b'/'))
+    {
+        add_base64_phase_starts(&mut starts, boundary + 1, candidate.len());
+    }
+
+    let mut decoded_any = false;
+    for start in starts {
+        let suffix = &candidate[start..];
+        if suffix.len() < 4 || suffix[0] == b'=' {
+            continue;
+        }
+        *consumed_work = match consumed_work.checked_add(suffix.len()) {
+            Some(work) if work <= maximum_work => work,
+            _ => return Some(true),
+        };
+        let Some(decoded) = base64_decode_once(suffix) else {
+            continue;
+        };
+        decoded_any = true;
+        if depth == MAX_REVERSIBLE_DECODE_DEPTH
+            || contains_secret_value_at(&decoded, markers, depth + 1, consumed_work, maximum_work)
+        {
+            return Some(true);
+        }
+    }
+    decoded_any.then_some(false)
+}
+
+fn add_base64_phase_starts(starts: &mut BTreeSet<usize>, base: usize, candidate_len: usize) {
+    for start in base..base.saturating_add(4).min(candidate_len) {
+        if candidate_len - start >= 4 {
+            starts.insert(start);
+        }
+    }
 }
 
 const fn is_base64_token_byte(byte: u8) -> bool {
@@ -1986,6 +2030,20 @@ mod tests {
         );
         assert!(contains_secret_value(
             safe_padded_then_secret.as_bytes(),
+            &[marker.to_vec()]
+        ));
+
+        let alphabet_prefix_then_secret =
+            format!("A{}", BASE64.encode([b"x".as_slice(), marker].concat()));
+        assert!(contains_secret_value(
+            alphabet_prefix_then_secret.as_bytes(),
+            &[marker.to_vec()]
+        ));
+
+        let mixed_alphabet_prefix_then_secret =
+            format!("-----{}", BASE64.encode([b"x".as_slice(), marker].concat()));
+        assert!(contains_secret_value(
+            mixed_alphabet_prefix_then_secret.as_bytes(),
             &[marker.to_vec()]
         ));
         assert!(!contains_secret_value(
