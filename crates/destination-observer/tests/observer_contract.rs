@@ -1456,6 +1456,32 @@ async fn response_limit_does_not_reserve_an_impossible_full_size_state() {
 }
 
 #[tokio::test]
+async fn schema_work_cap_does_not_reject_linear_growable_required_sizing() {
+    let rig = Rig::new().await;
+    let state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut config = rig.config.clone();
+    config.state_dir = state.path().to_path_buf();
+    config.response_schema = vec![StateFieldSchema {
+        name: "required_padding".to_owned(),
+        kind: JsonKind::String,
+        required: true,
+    }];
+    config
+        .response_schema
+        .extend((0..512).map(|index| StateFieldSchema {
+            name: format!("optional_{index:03}"),
+            kind: JsonKind::Null,
+            required: false,
+        }));
+    assert!(rig.observer_for_config(config).is_ok());
+}
+
+#[tokio::test]
 async fn boolean_response_and_receipt_sizing_admit_the_shorter_true_value() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();
@@ -1551,7 +1577,7 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
             let mut config = rig.config.clone();
             config
                 .response_schema
-                .extend((0..256).map(|index| StateFieldSchema {
+                .extend((0..512).map(|index| StateFieldSchema {
                     name: format!("optional_{index:03}"),
                     kind: JsonKind::Null,
                     required: false,

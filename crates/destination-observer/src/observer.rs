@@ -867,11 +867,6 @@ fn validate_config(
         || config.image_sha256 != runtime_image_sha256
         || config.limits.max_response_bytes == 0
         || config.limits.max_response_bytes >= crate::standalone::MAX_FRAME_BYTES
-        || config
-            .response_schema
-            .len()
-            .checked_mul(config.limits.max_response_bytes.saturating_add(1))
-            .is_none_or(|work| work > MAX_SCHEMA_SIZING_WORK_CELLS)
         || config.limits.max_header_bytes == 0
         || config.limits.max_header_bytes < MIN_SUCCESS_HEADER_BYTES
         || config.limits.max_header_bytes > MAX_TRANSPORT_HEADER_BYTES
@@ -1397,6 +1392,13 @@ fn maximum_schema_state_serialized_len(config: &ObserverConfig) -> Option<usize>
     }
 
     let subset_capacity = remaining.checked_add(usize::from(!required_nonempty))?;
+    if variable_fields
+        .len()
+        .checked_mul(subset_capacity.saturating_add(1))
+        .is_none_or(|work| work > MAX_SCHEMA_SIZING_WORK_CELLS)
+    {
+        return None;
+    }
     let (selected, fills_capacity) = maximum_optional_subset(&variable_fields, subset_capacity);
     if fills_capacity {
         return Some(state_budget);
