@@ -148,7 +148,9 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(html.contains("<option value=\"aborted\">cancelled</option>"));
     assert!(html.contains("<input id=\"approval-id\" required"));
     assert!(html.contains("<input id=\"idempotency-key\" required>"));
-    assert!(html.contains("<input id=\"pipeline-id\" required"));
+    assert!(html.contains(
+        "id=\"pipeline-id\" required autocomplete=\"off\" inputmode=\"text\" pattern=\"[0-9a-fA-F]{8}-"
+    ));
     assert!(html.contains("Submit saved pipeline"));
     assert!(html.contains("Advance state"));
     assert!(html.contains("stages:\n  - id: hello"));

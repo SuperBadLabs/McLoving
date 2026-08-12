@@ -60,7 +60,7 @@
     <section id="pipeline-view" class="view panel hidden" aria-labelledby="pipeline-heading">
       <h2 id="pipeline-heading">Strict YAML pipeline</h2>
       <form id="pipeline-form">
-        <label>Pipeline ID <input id="pipeline-id" required autocomplete="off"></label>
+        <label>Pipeline ID <input id="pipeline-id" required autocomplete="off" inputmode="text" pattern="[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" title="UUID"></label>
         <label>Pipeline slug <input id="pipeline-slug" value="hello" required></label>
         <label>Expected source revision <input id="pipeline-revision" type="number" min="0" value="0" required></label>
         <label>Pipeline source
