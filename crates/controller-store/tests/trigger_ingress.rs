@@ -1133,6 +1133,44 @@ async fn schedule_identity_watermark_restart_and_generation_changes_fail_closed(
         .is_err(),
         "database guard rejects privileged schedule watermark rollback"
     );
+
+    let paused = trigger_write(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        1,
+        TriggerKind::Schedule,
+        PipelineTriggerState::Paused,
+        "scheduler:mcloving:primary",
+        schedule_configuration("0 2 * * *"),
+        "schedule-handoff-pause",
+        3,
+    );
+    store.put_pipeline_trigger(&paused).await.unwrap();
+    let handoff = store
+        .export_quiesced_trigger_state(
+            organization_id,
+            project_id,
+            pipeline_id,
+            trigger_id,
+            "schedule-handoff@example.test",
+        )
+        .await
+        .expect("export schedule handoff with exact watermark lineage");
+    verify_trigger_transfer_snapshot(&handoff).expect("verify schedule handoff watermark lineage");
+    let mut stripped_link = handoff.clone();
+    stripped_link.schedule_watermarks[0].last_delivery_id = None;
+    assert!(matches!(
+        verify_trigger_transfer_snapshot(&stripped_link),
+        Err(StoreError::TriggerIngressConflict(_))
+    ));
+    let mut substituted_link = handoff.clone();
+    substituted_link.schedule_watermarks[0].last_delivery_id = Some("schedule-slot-1".to_owned());
+    assert!(matches!(
+        verify_trigger_transfer_snapshot(&substituted_link),
+        Err(StoreError::TriggerIngressConflict(_))
+    ));
 }
 
 #[tokio::test]

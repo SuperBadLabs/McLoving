@@ -344,7 +344,7 @@ pub fn verify_trigger_transfer_snapshot(
             "trigger transfer requires a complete lineage ending in a paused generation".to_owned(),
         ));
     }
-    let mut delivery_ids = std::collections::BTreeSet::new();
+    let mut deliveries_by_id = std::collections::BTreeMap::new();
     let mut event_ids = std::collections::BTreeSet::new();
     for delivery in &snapshot.deliveries {
         if delivery.organization_id != snapshot.organization_id
@@ -355,7 +355,9 @@ pub fn verify_trigger_transfer_snapshot(
                 .versions
                 .iter()
                 .any(|version| version.generation == delivery.trigger_generation)
-            || !delivery_ids.insert(delivery.delivery_id.as_str())
+            || deliveries_by_id
+                .insert(delivery.delivery_id.as_str(), delivery)
+                .is_some()
             || !event_ids.insert(delivery.event_id.as_str())
             || delivery.claim_owner.is_some()
             || delivery.claim_expires_at_unix_ms.is_some()
@@ -368,6 +370,7 @@ pub fn verify_trigger_transfer_snapshot(
             ));
         }
     }
+    let mut watermark_generations = std::collections::BTreeSet::new();
     for watermark in &snapshot.schedule_watermarks {
         if watermark.organization_id != snapshot.organization_id
             || watermark.project_id != snapshot.project_id
@@ -377,13 +380,55 @@ pub fn verify_trigger_transfer_snapshot(
                 .versions
                 .iter()
                 .any(|version| version.generation == watermark.trigger_generation)
-            || watermark
-                .last_delivery_id
-                .as_ref()
-                .is_some_and(|delivery_id| !delivery_ids.contains(delivery_id.as_str()))
+            || !watermark_generations.insert(watermark.trigger_generation)
         {
             return Err(StoreError::TriggerIngressConflict(
                 "trigger transfer schedule watermark is incomplete or substituted".to_owned(),
+            ));
+        }
+        let Some(last_delivery_id) = watermark.last_delivery_id.as_deref() else {
+            return Err(StoreError::TriggerIngressConflict(
+                "trigger transfer schedule watermark omits its delivery lineage".to_owned(),
+            ));
+        };
+        let Some(last_resolved_slot_unix_ms) = watermark.last_resolved_slot_unix_ms else {
+            return Err(StoreError::TriggerIngressConflict(
+                "trigger transfer schedule watermark omits its resolved slot".to_owned(),
+            ));
+        };
+        let Some(delivery) = deliveries_by_id.get(last_delivery_id) else {
+            return Err(StoreError::TriggerIngressConflict(
+                "trigger transfer schedule watermark references an unknown delivery".to_owned(),
+            ));
+        };
+        let payload = delivery
+            .canonical_payload
+            .get("payload")
+            .and_then(Value::as_object);
+        if delivery.trigger_generation != watermark.trigger_generation
+            || delivery.event_kind != "schedule"
+            || delivery.event_time_unix_ms != last_resolved_slot_unix_ms
+            || payload.and_then(|value| value.get("resolved_slot_unix_ms"))
+                != Some(&Value::from(last_resolved_slot_unix_ms))
+            || payload
+                .and_then(|value| value.get("schedule_identity_sha256"))
+                .and_then(Value::as_str)
+                != Some(hex::encode(watermark.schedule_identity_sha256).as_str())
+            || payload
+                .and_then(|value| value.get("timezone"))
+                .and_then(Value::as_str)
+                != Some(watermark.timezone.as_str())
+            || payload
+                .and_then(|value| value.get("calendar"))
+                .and_then(Value::as_str)
+                != Some(watermark.calendar.as_str())
+            || payload
+                .and_then(|value| value.get("expression"))
+                .and_then(Value::as_str)
+                != Some(watermark.expression.as_str())
+        {
+            return Err(StoreError::TriggerIngressConflict(
+                "trigger transfer schedule watermark does not match its exact delivery".to_owned(),
             ));
         }
     }

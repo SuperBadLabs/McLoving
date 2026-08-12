@@ -84,7 +84,9 @@ The durable states are:
 Attempt count, retry due time, expiry, and the original trigger generation are
 durable. The shipped controller continuously enumerates bounded due work for its
 organization from PostgreSQL; active-active scans may overlap, but claim fences
-converge them on one worker. Thus an upstream 202 does not make source-side
+converge them on one worker. It samples the clock again before each claim, so a
+slow batch cannot admit a later delivery using a stale pre-expiry timestamp or
+write an already-expired lease. Thus an upstream 202 does not make source-side
 redelivery responsible for controller retries. Expired or exhausted work
 dead-letters. A dead letter is never mutated back to pending. Project-configure
 redrive creates a new delivery/event identity with immutable lineage and
@@ -129,6 +131,10 @@ The generated OpenAPI contract exposes:
 - `POST .../triggers/{trigger}/events`; and
 - `POST .../triggers/{trigger}/deliveries/{delivery}/redrive`.
 
+Trigger configuration is a `kind`-discriminated union with separate closed SCM,
+schedule, upstream, and remote API variants and their exact required fields.
+The rejected plugin class is not advertised as an admitted request variant.
+
 The database ledger is the transferable source of truth: append-only trigger
 versions, unique event/delivery deduplication records, pending/retry/dead-letter
 sets, admitted build bindings, claim fences, redrive lineage, and
@@ -137,7 +143,8 @@ binds every trigger version's actor, reason, idempotency key, audit sequence and
 event hash; every accepted delivery's audit sequence and event hash; and the
 handoff export audit event into one domain-separated state digest. Verification
 rejects missing lineage, duplicate identifiers, active claims, unlinked
-watermarks, stripped provenance, or any state substitution. A later CUTOVER-001
+watermarks, watermarks linked to a delivery from the wrong generation or
+resolved slot, stripped provenance, or any state substitution. A later CUTOVER-001
 or ROLLBACK-001 transaction must quiesce ingress and transfer/reconcile that
 complete set under the exact implementation/configuration digests. This ticket
 does not itself switch any production authority.
@@ -152,4 +159,7 @@ slot reorder/substitution, upstream success/failure, unsupported plugin denial,
 RLS/forced-RLS migration, and audit linkage. Public API tests cover missing and
 cross-tenant authorization, configuration preconditions, SCM branch/path
 filtering, durable admission, generation-bound replay after configuration
-rotation, stale-generation denial, and the generated route contract.
+rotation, stale-generation denial, kind-discriminated generated schemas, and
+the generated route contract. The deployable-controller suite also proves the
+runtime role's exact least-privilege and 53-table forced-RLS policy surface
+before accepting traffic.

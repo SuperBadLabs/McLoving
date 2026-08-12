@@ -1074,7 +1074,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 49
+                    AND (SELECT COUNT(*) FROM policies) = 53
                FROM relations",
         )
         .fetch_one(&mut *tx)

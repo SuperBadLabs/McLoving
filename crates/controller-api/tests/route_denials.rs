@@ -488,9 +488,10 @@ stages:
         })
         .await
         .expect("persist bounded retry");
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
     assert_eq!(
         retry_state
-            .process_due_trigger_deliveries(organization_id, now + 1, 128)
+            .process_due_trigger_deliveries(organization_id, 128)
             .await
             .expect("shipped retry worker processes durable due delivery"),
         1

@@ -130,17 +130,17 @@ impl ApiState {
     pub async fn process_due_trigger_deliveries(
         &self,
         organization_id: Uuid,
-        now_unix_ms: i64,
         limit: i64,
     ) -> Result<usize, ApiError> {
+        let scan_unix_ms = unix_time_ms();
         let deliveries = self
             .store
-            .due_trigger_deliveries(organization_id, now_unix_ms, limit)
+            .due_trigger_deliveries(organization_id, scan_unix_ms, limit)
             .await
             .map_err(trigger_error)?;
         let mut processed = 0;
         for delivery in deliveries {
-            process_trigger_delivery(self, delivery, now_unix_ms).await?;
+            process_trigger_delivery(self, delivery, unix_time_ms()).await?;
             processed += 1;
         }
         Ok(processed)
@@ -693,8 +693,6 @@ fn openapi_document() -> Value {
         query_parameter("after", "string"),
         query_parameter("after_digest", "sha256"),
     ];
-    let trigger_configuration = trigger_configuration_schema();
-    let trigger_filter = trigger_filter_schema();
     let trigger_event_payload = trigger_event_payload_schema();
     json!({
         "openapi": "3.1.0",
@@ -1019,30 +1017,19 @@ fn openapi_document() -> Value {
                     },
                     "additionalProperties": false
                 },
-                "PipelineTriggerRequest": {
-                    "type": "object",
-                    "required": [
-                        "kind", "state", "implementation_sha256", "configuration_sha256",
-                        "filter_sha256", "event_source_identity", "source_generation",
-                        "configuration", "deduplication_window_seconds",
-                        "max_delivery_attempts", "delivery_ttl_seconds", "reason"
-                    ],
-                    "properties": {
-                        "kind": {"type": "string", "enum": ["scm_webhook", "schedule", "upstream", "remote_api", "plugin"]},
-                        "state": {"type": "string", "enum": ["enabled", "paused"]},
-                        "implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                        "configuration_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                        "filter_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                        "event_source_identity": {"type": "string", "minLength": 1, "maxLength": 512},
-                        "source_generation": {"type": "string", "minLength": 1, "maxLength": 512},
-                        "configuration": {"$ref": "#/components/schemas/TriggerConfiguration"},
-                        "deduplication_window_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
-                        "max_delivery_attempts": {"type": "integer", "minimum": 1, "maximum": 100},
-                        "delivery_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
-                        "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
-                    },
-                    "additionalProperties": false
-                },
+                "PipelineTriggerRequest": pipeline_trigger_request_schema(),
+                "ScmPipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "scm_webhook", "ScmTriggerConfiguration"
+                ),
+                "SchedulePipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "schedule", "ScheduleTriggerConfiguration"
+                ),
+                "UpstreamPipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "upstream", "UpstreamTriggerConfiguration"
+                ),
+                "RemoteApiPipelineTriggerRequest": pipeline_trigger_request_variant_schema(
+                    "remote_api", "RemoteApiTriggerConfiguration"
+                ),
                 "TriggerEventRequest": {
                     "type": "object",
                     "required": ["trigger_generation", "delivery_id", "event_id", "event_kind", "event_time_unix_ms", "payload"],
@@ -1059,8 +1046,10 @@ fn openapi_document() -> Value {
                     },
                     "additionalProperties": false
                 },
-                "TriggerConfiguration": trigger_configuration,
-                "TriggerFilter": trigger_filter,
+                "ScmTriggerConfiguration": scm_trigger_configuration_schema(),
+                "ScheduleTriggerConfiguration": schedule_trigger_configuration_schema(),
+                "UpstreamTriggerConfiguration": upstream_trigger_configuration_schema(),
+                "RemoteApiTriggerConfiguration": remote_api_trigger_configuration_schema(),
                 "TriggerEventPayload": trigger_event_payload,
                 "TriggerRedriveRequest": {
                     "type": "object",
@@ -1144,47 +1133,139 @@ fn openapi_document() -> Value {
     })
 }
 
-fn trigger_configuration_schema() -> Value {
+fn pipeline_trigger_request_schema() -> Value {
+    json!({
+        "oneOf": [
+            {"$ref": "#/components/schemas/ScmPipelineTriggerRequest"},
+            {"$ref": "#/components/schemas/SchedulePipelineTriggerRequest"},
+            {"$ref": "#/components/schemas/UpstreamPipelineTriggerRequest"},
+            {"$ref": "#/components/schemas/RemoteApiPipelineTriggerRequest"}
+        ],
+        "discriminator": {
+            "propertyName": "kind",
+            "mapping": {
+                "scm_webhook": "#/components/schemas/ScmPipelineTriggerRequest",
+                "schedule": "#/components/schemas/SchedulePipelineTriggerRequest",
+                "upstream": "#/components/schemas/UpstreamPipelineTriggerRequest",
+                "remote_api": "#/components/schemas/RemoteApiPipelineTriggerRequest"
+            }
+        }
+    })
+}
+
+fn pipeline_trigger_request_variant_schema(kind: &str, configuration_schema: &str) -> Value {
     json!({
         "type": "object",
+        "required": [
+            "kind", "state", "implementation_sha256", "configuration_sha256",
+            "filter_sha256", "event_source_identity", "source_generation",
+            "configuration", "deduplication_window_seconds",
+            "max_delivery_attempts", "delivery_ttl_seconds", "reason"
+        ],
         "properties": {
-            "provider": {"type": "string", "minLength": 1, "maxLength": 512},
-            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
-            "timezone": {"type": "string", "minLength": 1, "maxLength": 512},
-            "calendar": {"type": "string", "minLength": 1, "maxLength": 512},
-            "expression": {"type": "string", "minLength": 1, "maxLength": 512},
-            "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "resolver_implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "resolved_slots_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "resolved_slots_unix_ms": {"type": "array", "minItems": 1, "maxItems": 4096, "items": {"type": "integer", "minimum": 0}},
-            "jenkins_hash_algorithm_version": {"type": "string", "minLength": 1, "maxLength": 512},
-            "jenkins_full_item_name": {"type": "string", "minLength": 1, "maxLength": 512},
-            "jenkins_hash_inputs_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "upstream_pipeline_id": {"type": "string", "format": "uuid"},
-            "audience": {"type": "string", "minLength": 1, "maxLength": 512},
-            "filter": {"$ref": "#/components/schemas/TriggerFilter"}
+            "kind": {"type": "string", "const": kind},
+            "state": {"type": "string", "enum": ["enabled", "paused"]},
+            "implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "configuration_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "filter_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "event_source_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "source_generation": {"type": "string", "minLength": 1, "maxLength": 512},
+            "configuration": {"$ref": format!("#/components/schemas/{configuration_schema}")},
+            "deduplication_window_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
+            "max_delivery_attempts": {"type": "integer", "minimum": 1, "maximum": 100},
+            "delivery_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
         },
         "additionalProperties": false
     })
 }
 
-fn trigger_filter_schema() -> Value {
-    let strings = || {
-        json!({
-            "type": "array",
-            "maxItems": 128,
-            "items": {"type": "string", "minLength": 1, "maxLength": 512}
-        })
-    };
+fn scm_trigger_configuration_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "event_kinds": strings(),
-            "branches": strings(),
-            "path_prefixes": strings(),
-            "statuses": strings(),
-            "request_methods": strings()
+            "provider": {"type": "string", "minLength": 1, "maxLength": 512},
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "filter": trigger_filter_schema(&["event_kinds", "branches", "path_prefixes"])
         },
+        "required": ["provider", "repository_identity", "filter"],
+        "additionalProperties": false
+    })
+}
+
+fn schedule_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "timezone": {"type": "string", "minLength": 1, "maxLength": 128},
+            "calendar": {"type": "string", "minLength": 1, "maxLength": 128},
+            "expression": {"type": "string", "minLength": 1, "maxLength": 512},
+            "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolver_implementation_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolved_slots_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "resolved_slots_unix_ms": {
+                "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true,
+                "items": {"type": "integer", "minimum": 0}
+            },
+            "jenkins_hash_algorithm_version": {"type": "string", "minLength": 1, "maxLength": 512},
+            "jenkins_full_item_name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "jenkins_hash_inputs_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "filter": trigger_filter_schema(&["event_kinds"])
+        },
+        "required": [
+            "timezone", "calendar", "expression", "schedule_identity_sha256",
+            "resolver_implementation_sha256", "resolved_slots_sha256",
+            "resolved_slots_unix_ms", "filter"
+        ],
+        "dependentRequired": {
+            "jenkins_hash_algorithm_version": ["jenkins_full_item_name", "jenkins_hash_inputs_sha256"],
+            "jenkins_full_item_name": ["jenkins_hash_algorithm_version", "jenkins_hash_inputs_sha256"],
+            "jenkins_hash_inputs_sha256": ["jenkins_hash_algorithm_version", "jenkins_full_item_name"]
+        },
+        "additionalProperties": false
+    })
+}
+
+fn upstream_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "upstream_pipeline_id": {"type": "string", "format": "uuid"},
+            "filter": trigger_filter_schema(&["event_kinds", "statuses"])
+        },
+        "required": ["upstream_pipeline_id", "filter"],
+        "additionalProperties": false
+    })
+}
+
+fn remote_api_trigger_configuration_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "audience": {"type": "string", "minLength": 1, "maxLength": 512},
+            "filter": trigger_filter_schema(&["event_kinds", "request_methods"])
+        },
+        "required": ["audience", "filter"],
+        "additionalProperties": false
+    })
+}
+
+fn trigger_filter_schema(fields: &[&str]) -> Value {
+    let mut properties = serde_json::Map::new();
+    for field in fields {
+        properties.insert(
+            (*field).to_owned(),
+            json!({
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {"type": "string", "minLength": 1, "maxLength": 512}
+            }),
+        );
+    }
+    json!({
+        "type": "object",
+        "properties": properties,
         "additionalProperties": false
     })
 }
@@ -5426,6 +5507,47 @@ mod tests {
         assert!(state["get"]["responses"]["200"].is_object());
         assert!(state["put"]["responses"]["200"].is_object());
         assert!(state["put"]["responses"]["201"].is_null());
+
+        let schemas = &document["components"]["schemas"];
+        let trigger_request = &schemas["PipelineTriggerRequest"];
+        assert_eq!(trigger_request["discriminator"]["propertyName"], "kind");
+        assert_eq!(
+            trigger_request["oneOf"]
+                .as_array()
+                .expect("typed trigger request variants")
+                .len(),
+            4
+        );
+        assert!(
+            trigger_request["discriminator"]["mapping"]["plugin"].is_null(),
+            "unimplemented plugin triggers must not be advertised as accepted"
+        );
+        let scm_request = &schemas["ScmPipelineTriggerRequest"];
+        assert_eq!(scm_request["properties"]["kind"]["const"], "scm_webhook");
+        assert_eq!(
+            scm_request["properties"]["configuration"]["$ref"],
+            "#/components/schemas/ScmTriggerConfiguration"
+        );
+        let scm_configuration = &schemas["ScmTriggerConfiguration"];
+        assert!(
+            scm_configuration["required"]
+                .as_array()
+                .expect("SCM configuration requirements")
+                .contains(&Value::from("repository_identity"))
+        );
+        assert!(scm_configuration["properties"]["expression"].is_null());
+        assert!(scm_configuration["properties"]["filter"]["properties"]["statuses"].is_null());
+        let schedule_configuration = &schemas["ScheduleTriggerConfiguration"];
+        assert!(
+            schedule_configuration["required"]
+                .as_array()
+                .expect("schedule configuration requirements")
+                .contains(&Value::from("resolved_slots_unix_ms"))
+        );
+        assert!(
+            schedule_configuration["properties"]["repository_identity"].is_null(),
+            "kind-specific configuration fields must fail closed"
+        );
 
         let approvals = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/approvals"];
         assert!(approvals["post"]["responses"]["200"].is_object());

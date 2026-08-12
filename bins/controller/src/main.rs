@@ -1509,7 +1509,7 @@ async fn run_trigger_retry_worker(state: ApiState, organization_id: Uuid) -> Res
     const RETRY_POLL_INTERVAL: Duration = Duration::from_secs(1);
     loop {
         match state
-            .process_due_trigger_deliveries(organization_id, unix_time_ms(), RETRY_SCAN_LIMIT)
+            .process_due_trigger_deliveries(organization_id, RETRY_SCAN_LIMIT)
             .await
         {
             Ok(0) => tokio::time::sleep(RETRY_POLL_INTERVAL).await,
