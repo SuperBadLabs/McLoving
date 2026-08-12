@@ -114,10 +114,11 @@ later audit-head lock before resampling PostgreSQL time, derive retry due time
 from the requested bounded delay, and return typed lease loss without failure
 accounting when the claim has expired. Admission conditionally binds only while
 the matching claim lease is still live according to the PostgreSQL clock.
-Atomic DAG admission holds the organization audit head before its final
-delivery-TTL and claim-lease sample and before staging any DAG row. A later
-audit append therefore cannot introduce a blocking interval after the last
-authority decision.
+Atomic DAG admission enters the shared pipeline advisory scope before the
+organization audit head, matching ordinary admission and pipeline-state
+transitions, then performs its final delivery-TTL and claim-lease sample before
+staging any DAG row. This avoids a pipeline/audit lock cycle, and a later audit
+append cannot introduce a blocking interval after the last authority decision.
 Processing enters the JOBSTATE-001 saved-pipeline
 admission primitive using a controller-derived safe idempotency key. DAG rows,
 attempts, outbox publication, and the immutable delivery/build binding commit in

@@ -979,6 +979,89 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         "audit-contention lease loss must leave no runnable or replayable build"
     );
 
+    let pipeline_order_now = database_unix_ms(&store).await;
+    let pipeline_order_delivery = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        1,
+        "delivery-pipeline-audit-order",
+        "event-pipeline-audit-order",
+        pipeline_order_now,
+    );
+    store
+        .accept_trigger_delivery(&pipeline_order_delivery)
+        .await
+        .unwrap();
+    let pipeline_order_claim = match store
+        .claim_trigger_delivery(&claim(
+            organization_id,
+            trigger_id,
+            "delivery-pipeline-audit-order",
+            "worker-pipeline-audit-order",
+            pipeline_order_now,
+        ))
+        .await
+        .unwrap()
+    {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        other => panic!("unexpected pipeline/audit-order claim: {other:?}"),
+    };
+    let pipeline_order_dag = dag(
+        organization_id,
+        project_id,
+        pipeline_id,
+        "trigger-delivery-pipeline-audit-order",
+    );
+    let mut pipeline_lock = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *pipeline_lock)
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("mcloving.pipeline.{organization_id}.{pipeline_id}"))
+        .execute(&mut *pipeline_lock)
+        .await
+        .unwrap();
+    let pipeline_backend_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *pipeline_lock)
+        .await
+        .unwrap();
+    let order_store = store.clone();
+    let order_task = tokio::spawn(async move {
+        order_store
+            .admit_trigger_delivery_dag(
+                &TriggerDeliveryDagAdmissionRequest {
+                    organization_id,
+                    trigger_id,
+                    delivery_id: "delivery-pipeline-audit-order".to_owned(),
+                    worker_identity: "worker-pipeline-audit-order".to_owned(),
+                    claim_fence: pipeline_order_claim.claim_fence,
+                },
+                &pipeline_order_dag,
+            )
+            .await
+    });
+    wait_until_blocked_by(&store, pipeline_backend_pid).await;
+    // A pipeline transition takes this same order: pipeline scope, then audit
+    // head. If trigger admission held the audit head while waiting above, this
+    // statement would form the former lock cycle instead of succeeding.
+    sqlx::query(
+        "SELECT next_sequence FROM audit_chain_heads
+         WHERE organization_id = $1 FOR UPDATE",
+    )
+    .bind(organization_id)
+    .fetch_one(&mut *pipeline_lock)
+    .await
+    .expect("pipeline holder acquires audit head without trigger deadlock");
+    pipeline_lock.rollback().await.unwrap();
+    assert!(matches!(
+        order_task.await.unwrap().unwrap(),
+        TriggerDeliveryDagAdmission::Admitted { .. }
+    ));
+
     let wall_now = database_unix_ms(&store).await;
     let expires_during_admission = delivery(
         organization_id,
