@@ -506,6 +506,32 @@ stages:
     assert_eq!(replayed.status, TriggerDeliveryStatus::Admitted);
     assert!(replayed.build_id.is_some());
 
+    let mut corrupt_parameters_delivery = retry_delivery.clone();
+    corrupt_parameters_delivery.delivery_id = "corrupt-parameters-delivery".to_owned();
+    corrupt_parameters_delivery.event_id = "corrupt-parameters-event".to_owned();
+    corrupt_parameters_delivery.parameters = json!({"invalid": ["array"]});
+    store
+        .accept_trigger_delivery(&corrupt_parameters_delivery)
+        .await
+        .expect("capture stored invalid-parameter recovery fixture");
+    assert_eq!(
+        retry_state
+            .process_due_trigger_deliveries(organization_id, 128)
+            .await
+            .expect("invalid stored parameters consume one terminal attempt"),
+        1
+    );
+    let corrupt_replay = store
+        .accept_trigger_delivery(&corrupt_parameters_delivery)
+        .await
+        .expect("read invalid-parameter terminal state");
+    let TriggerDeliveryAdmission::Replayed(corrupt_replay) = corrupt_replay else {
+        panic!("invalid-parameter delivery must replay its terminal state")
+    };
+    assert_eq!(corrupt_replay.status, TriggerDeliveryStatus::DeadLettered);
+    assert_eq!(corrupt_replay.attempt_count, 1);
+    assert!(corrupt_replay.claim_owner.is_none());
+
     let filtered = app
         .clone()
         .oneshot(
@@ -595,6 +621,43 @@ stages:
     assert_eq!(
         unknown_request_field.status(),
         StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    let invalid_parameters = app
+        .clone()
+        .oneshot(
+            Request::post(&event_path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "trigger_generation": 1,
+                        "delivery_id": "invalid-parameters-delivery",
+                        "event_id": "invalid-parameters-event",
+                        "event_kind": "push",
+                        "event_time_unix_ms": now,
+                        "payload": {
+                            "repository_identity": "github:superbadlabs/mcloving",
+                            "revision": "0123456789abcdef",
+                            "branch": "main",
+                            "paths": ["src/lib.rs"]
+                        },
+                        "parameters": {"invalid": ["array"]},
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("reject invalid parameters before durable capture");
+    assert_eq!(invalid_parameters.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        store
+            .due_trigger_deliveries(organization_id, now + 1, 128)
+            .await
+            .unwrap()
+            .iter()
+            .all(|delivery| delivery.delivery_id != "invalid-parameters-delivery")
     );
 
     let accepted_body = json!({

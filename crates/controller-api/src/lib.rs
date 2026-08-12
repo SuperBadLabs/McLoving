@@ -29,9 +29,9 @@ use mcloving_controller_store::{
     PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
     PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, RetryDecision,
     Store, StoreError, TestReportView, TriggerDelivery, TriggerDeliveryAdmission,
-    TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest, TriggerDeliveryFailure,
-    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome,
-    TriggerScheduleSlot, WaitReason,
+    TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest, TriggerDeliveryCompletionRequest,
+    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind,
+    TriggerPutOutcome, TriggerScheduleSlot, WaitReason,
     authz::{Action, Principal, authorize as authorize_principal},
 };
 use mcloving_object_store::{
@@ -990,14 +990,14 @@ fn openapi_document() -> Value {
                     "required": ["source"],
                     "properties": {
                         "source": {"type": "string"},
-                        "parameters": {"type": "object", "additionalProperties": true}
+                        "parameters": parameter_values_schema()
                     },
                     "additionalProperties": false
                 },
                 "PipelineBuildRequest": {
                     "type": "object",
                     "properties": {
-                        "parameters": {"type": "object", "additionalProperties": true}
+                        "parameters": parameter_values_schema()
                     },
                     "additionalProperties": false
                 },
@@ -1040,7 +1040,7 @@ fn openapi_document() -> Value {
                         "event_kind": {"type": "string", "minLength": 1, "maxLength": 256},
                         "event_time_unix_ms": {"type": "integer", "minimum": 0},
                         "payload": {"$ref": "#/components/schemas/TriggerEventPayload"},
-                        "parameters": {"type": "object", "additionalProperties": true},
+                        "parameters": parameter_values_schema(),
                         "platform": {"type": "string", "enum": ["linux", "windows"]},
                         "trust_pool": {"type": "string", "minLength": 1, "maxLength": 128}
                     },
@@ -1078,7 +1078,7 @@ fn openapi_document() -> Value {
                     "properties": {
                         "slug": {"type": "string"},
                         "source": {"type": "string"},
-                        "parameters": {"type": "object", "additionalProperties": true}
+                        "parameters": parameter_values_schema()
                     },
                     "additionalProperties": false
                 },
@@ -1153,6 +1153,20 @@ fn pipeline_trigger_request_schema() -> Value {
                 "upstream": "#/components/schemas/UpstreamPipelineTriggerRequest",
                 "remote_api": "#/components/schemas/RemoteApiPipelineTriggerRequest"
             }
+        }
+    })
+}
+
+fn parameter_values_schema() -> Value {
+    json!({
+        "type": "object",
+        "maxProperties": 128,
+        "additionalProperties": {
+            "oneOf": [
+                {"type": "boolean"},
+                {"type": "integer"},
+                {"type": "string", "maxLength": 4096}
+            ]
         }
     })
 }
@@ -2499,6 +2513,9 @@ async fn submit_trigger_event(
         .map_err(trigger_error)?
         .ok_or_else(resource_not_found)?;
     validate_trigger_event_filter(&trigger, &request)?;
+    // Reject parameter shapes before durable capture. The processing path
+    // repeats this validation for crash/restart and legacy-corruption safety.
+    parameter_values(request.parameters.clone())?;
     let accepted_at_unix_ms = unix_time_ms();
     let canonical_payload = canonical_trigger_payload(&request)?;
     let payload_bytes = serde_json::to_vec(&canonical_payload).map_err(internal)?;
@@ -2637,6 +2654,12 @@ async fn process_trigger_delivery(
         }
     };
     let build_idempotency = trigger_build_idempotency(claimed.trigger_id, &claimed.delivery_id);
+    let parameters = match parameter_values_from_delivery(&claimed) {
+        Ok(parameters) => parameters,
+        Err(error) => {
+            return fail_claimed_trigger_delivery(state, claimed, worker_identity, error).await;
+        }
+    };
     match admit_pipeline_parameters(
         state,
         PipelineAdmissionInput {
@@ -2644,7 +2667,7 @@ async fn process_trigger_delivery(
             project_id: claimed.project_id,
             pipeline_id: claimed.pipeline_id,
             idempotency_key: build_idempotency,
-            parameters: parameter_values_from_delivery(&claimed)?,
+            parameters,
             required_platform: claimed.requested_platform.clone(),
             required_trust_pool: claimed.requested_trust_pool.clone(),
         },
@@ -2652,18 +2675,30 @@ async fn process_trigger_delivery(
     .await
     {
         Ok((status, admission)) => {
+            let completed_at_unix_ms = unix_time_ms();
             let delivery = state
                 .store
-                .complete_trigger_delivery(
-                    claimed.organization_id,
-                    claimed.trigger_id,
-                    &claimed.delivery_id,
-                    admission.build_id,
-                    &worker_identity,
-                    claimed.claim_fence,
-                )
+                .complete_trigger_delivery(&TriggerDeliveryCompletionRequest {
+                    organization_id: claimed.organization_id,
+                    trigger_id: claimed.trigger_id,
+                    delivery_id: claimed.delivery_id.clone(),
+                    build_id: admission.build_id,
+                    worker_identity: worker_identity.clone(),
+                    claim_fence: claimed.claim_fence,
+                    completed_at_unix_ms,
+                })
                 .await
                 .map_err(trigger_error)?;
+            if delivery.status == mcloving_controller_store::TriggerDeliveryStatus::DeadLettered {
+                return Ok((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(TriggerEventResponse {
+                        delivery,
+                        admission: None,
+                    }),
+                )
+                    .into_response());
+            }
             Ok((
                 status,
                 Json(TriggerEventResponse {
@@ -2673,42 +2708,47 @@ async fn process_trigger_delivery(
             )
                 .into_response())
         }
-        Err(error) => {
-            let retryable = error.status.is_server_error();
-            let failure_unix_ms = unix_time_ms();
-            let failed = state
-                .store
-                .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
-                    organization_id: claimed.organization_id,
-                    trigger_id: claimed.trigger_id,
-                    delivery_id: claimed.delivery_id.clone(),
-                    worker_identity,
-                    claim_fence: claimed.claim_fence,
-                    now_unix_ms: failure_unix_ms,
-                    retry_at_unix_ms: failure_unix_ms.saturating_add(60_000),
-                    retryable,
-                    reason: format!("{}: {}", error.code, error.message),
-                })
-                .await
-                .map_err(trigger_error)?;
-            let (status, delivery) = match failed {
-                TriggerDeliveryFailure::RetryScheduled(delivery) => {
-                    (StatusCode::ACCEPTED, delivery)
-                }
-                TriggerDeliveryFailure::DeadLettered(delivery) => {
-                    (StatusCode::UNPROCESSABLE_ENTITY, delivery)
-                }
-            };
-            Ok((
-                status,
-                Json(TriggerEventResponse {
-                    delivery,
-                    admission: None,
-                }),
-            )
-                .into_response())
-        }
+        Err(error) => fail_claimed_trigger_delivery(state, claimed, worker_identity, error).await,
     }
+}
+
+async fn fail_claimed_trigger_delivery(
+    state: &ApiState,
+    claimed: TriggerDelivery,
+    worker_identity: String,
+    error: ApiError,
+) -> Result<Response, ApiError> {
+    let retryable = error.status.is_server_error();
+    let failure_unix_ms = unix_time_ms();
+    let failed = state
+        .store
+        .fail_trigger_delivery(&TriggerDeliveryFailureRequest {
+            organization_id: claimed.organization_id,
+            trigger_id: claimed.trigger_id,
+            delivery_id: claimed.delivery_id,
+            worker_identity,
+            claim_fence: claimed.claim_fence,
+            now_unix_ms: failure_unix_ms,
+            retry_at_unix_ms: failure_unix_ms.saturating_add(60_000),
+            retryable,
+            reason: format!("{}: {}", error.code, error.message),
+        })
+        .await
+        .map_err(trigger_error)?;
+    let (status, delivery) = match failed {
+        TriggerDeliveryFailure::RetryScheduled(delivery) => (StatusCode::ACCEPTED, delivery),
+        TriggerDeliveryFailure::DeadLettered(delivery) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, delivery)
+        }
+    };
+    Ok((
+        status,
+        Json(TriggerEventResponse {
+            delivery,
+            admission: None,
+        }),
+    )
+        .into_response())
 }
 
 async fn admitted_trigger_response(
@@ -5628,6 +5668,27 @@ mod tests {
                 .as_array()
                 .expect("remote API event payload requirements")
                 .contains(&Value::from("request_id"))
+        );
+        let trigger_parameters = &schemas["TriggerEventRequest"]["properties"]["parameters"];
+        assert_eq!(trigger_parameters["maxProperties"], 128);
+        let parameter_variants = trigger_parameters["additionalProperties"]["oneOf"]
+            .as_array()
+            .expect("closed trigger parameter value variants");
+        assert_eq!(parameter_variants.len(), 3);
+        assert!(
+            parameter_variants
+                .iter()
+                .any(|variant| variant["type"] == "boolean")
+        );
+        assert!(
+            parameter_variants
+                .iter()
+                .any(|variant| variant["type"] == "integer")
+        );
+        assert!(
+            parameter_variants
+                .iter()
+                .any(|variant| { variant["type"] == "string" && variant["maxLength"] == 4096 })
         );
 
         let approvals = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/approvals"];

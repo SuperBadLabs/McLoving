@@ -69,6 +69,13 @@ then repeats the ID lookup, so concurrent active-active acceptance returns one
 creation plus one exact replay rather than leaking a database uniqueness
 failure.
 
+Parameter values are limited to 128 bounded booleans, signed integers, or
+strings and are rejected before durable HTTP capture. Processing repeats that
+closed validation after claim so legacy or corrupt stored values consume one
+terminal failed attempt, release their lease, and cannot abort a bounded retry
+scan or starve valid work. The generated API contract exposes the same value
+union, count, and string bound.
+
 Each kind also has a closed payload field set. SCM repository identity must
 equal the configured repository, not merely share an installation credential.
 For remote API ingress, the signed/request payload's `request_id` must equal the
@@ -80,6 +87,10 @@ claim fence. Active-active workers converge on one claim. A stale worker cannot
 complete or fail a newer claim. Processing enters the JOBSTATE-001 saved-pipeline
 admission primitive using a controller-derived safe idempotency key, so a crash
 after build commit and before delivery completion converges on the same build.
+Completion samples a fresh clock inside the fenced transaction; if admission
+returns at or after delivery expiry, the delivery becomes terminal
+`dead_lettered` with no admitted build binding rather than laundering expired
+work into a successful trigger result.
 
 The durable states are:
 
@@ -175,11 +186,11 @@ Real-PostgreSQL tests cover concurrent configuration idempotency, configuration
 versus claim lock ordering, active-active claims, exact/divergent delivery
 replay, delayed/future input, bounded outage retry, attempt exhaustion,
 exact-source and conflicting-source dead-letter redrive, stale claim denial,
-caller rotation, pause/resume, disable fencing, restart, atomic schedule
+parameter pre-capture and corrupt-store terminal failure, completion-time
+expiry, caller rotation, pause/resume, disable fencing, restart, atomic schedule
 watermark, slot reorder/substitution, upstream success/failure, unsupported
 plugin denial, RLS/forced-RLS migration, and audit linkage. Public API tests
-cover missing and cross-tenant authorization, configuration preconditions,
-SCM branch/path
+cover missing and cross-tenant authorization, configuration preconditions, SCM branch/path
 filtering, durable admission, generation-bound replay after configuration
 rotation, stale-generation denial, kind-discriminated generated schemas, and
 the generated route contract. Concurrent first-acceptance coverage proves one

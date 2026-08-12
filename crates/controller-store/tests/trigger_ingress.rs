@@ -3,9 +3,9 @@ use mcloving_controller_store::{
     PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome,
     PipelinePutOutcome, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, Store,
     StoreError, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
-    TriggerDeliveryFailure, TriggerDeliveryFailureRequest, TriggerDeliveryRedrive,
-    TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome, TriggerScheduleSlot,
-    compute_audit_event_hash, compute_trigger_transfer_snapshot_digest,
+    TriggerDeliveryCompletionRequest, TriggerDeliveryFailure, TriggerDeliveryFailureRequest,
+    TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome,
+    TriggerScheduleSlot, compute_audit_event_hash, compute_trigger_transfer_snapshot_digest,
     compute_trigger_transfer_snapshot_ledger_digest, verify_trigger_transfer_snapshot,
 };
 use serde_json::{Value, json};
@@ -511,29 +511,92 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         .unwrap();
     assert!(matches!(
         store
-            .complete_trigger_delivery(
+            .complete_trigger_delivery(&TriggerDeliveryCompletionRequest {
                 organization_id,
                 trigger_id,
-                "delivery-1",
-                admission.build_id,
-                "worker-1",
-                1,
-            )
+                delivery_id: "delivery-1".to_owned(),
+                build_id: admission.build_id,
+                worker_identity: "worker-1".to_owned(),
+                claim_fence: 1,
+                completed_at_unix_ms: now + 60_001,
+            })
             .await,
         Err(StoreError::TriggerIngressConflict(_))
     ));
     let completed = store
-        .complete_trigger_delivery(
+        .complete_trigger_delivery(&TriggerDeliveryCompletionRequest {
             organization_id,
             trigger_id,
-            "delivery-1",
-            admission.build_id,
-            "worker-2",
-            second_claim.claim_fence,
-        )
+            delivery_id: "delivery-1".to_owned(),
+            build_id: admission.build_id,
+            worker_identity: "worker-2".to_owned(),
+            claim_fence: second_claim.claim_fence,
+            completed_at_unix_ms: now + 60_001,
+        })
         .await
         .unwrap();
     assert_eq!(completed.status, TriggerDeliveryStatus::Admitted);
+
+    let expires_during_admission = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        1,
+        "delivery-expires-during-admission",
+        "event-expires-during-admission",
+        now + 62_000,
+    );
+    let captured_expiring = match store
+        .accept_trigger_delivery(&expires_during_admission)
+        .await
+        .unwrap()
+    {
+        TriggerDeliveryAdmission::Created(delivery) => delivery,
+        other => panic!("unexpected expiring delivery capture: {other:?}"),
+    };
+    let expiring_claim = match store
+        .claim_trigger_delivery(&claim(
+            organization_id,
+            trigger_id,
+            "delivery-expires-during-admission",
+            "worker-expiring-admission",
+            now + 62_000,
+        ))
+        .await
+        .unwrap()
+    {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        other => panic!("unexpected expiring delivery claim: {other:?}"),
+    };
+    let expiring_admission = store
+        .admit_dag(&dag(
+            organization_id,
+            project_id,
+            pipeline_id,
+            "trigger-delivery-expiring-admission",
+        ))
+        .await
+        .unwrap();
+    let expired = store
+        .complete_trigger_delivery(&TriggerDeliveryCompletionRequest {
+            organization_id,
+            trigger_id,
+            delivery_id: "delivery-expires-during-admission".to_owned(),
+            build_id: expiring_admission.build_id,
+            worker_identity: "worker-expiring-admission".to_owned(),
+            claim_fence: expiring_claim.claim_fence,
+            completed_at_unix_ms: captured_expiring.expires_at_unix_ms,
+        })
+        .await
+        .unwrap();
+    assert_eq!(expired.status, TriggerDeliveryStatus::DeadLettered);
+    assert_eq!(expired.attempt_count, 1);
+    assert!(expired.build_id.is_none());
+    assert_eq!(
+        expired.terminal_reason.as_deref(),
+        Some("delivery expired during pipeline admission")
+    );
 
     let active_active = delivery(
         organization_id,

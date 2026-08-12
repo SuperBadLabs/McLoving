@@ -68,9 +68,9 @@ pub use test_results::{
 pub use trigger_ingress::{
     NewTriggerDelivery, PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite,
     TriggerDelivery, TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome,
-    TriggerDeliveryClaimRequest, TriggerDeliveryFailure, TriggerDeliveryFailureRequest,
-    TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind, TriggerPutOutcome,
-    TriggerScheduleSlot, TriggerScheduleWatermark, TriggerTransferSnapshot,
+    TriggerDeliveryClaimRequest, TriggerDeliveryCompletionRequest, TriggerDeliveryFailure,
+    TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerDeliveryStatus, TriggerKind,
+    TriggerPutOutcome, TriggerScheduleSlot, TriggerScheduleWatermark, TriggerTransferSnapshot,
     compute_trigger_transfer_snapshot_digest, compute_trigger_transfer_snapshot_ledger_digest,
     verify_trigger_transfer_snapshot,
 };

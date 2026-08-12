@@ -230,6 +230,17 @@ pub enum TriggerDeliveryFailure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TriggerDeliveryCompletionRequest {
+    pub organization_id: Uuid,
+    pub trigger_id: Uuid,
+    pub delivery_id: String,
+    pub build_id: Uuid,
+    pub worker_identity: String,
+    pub claim_fence: i64,
+    pub completed_at_unix_ms: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TriggerDeliveryFailureRequest {
     pub organization_id: Uuid,
     pub trigger_id: Uuid,
@@ -1390,29 +1401,25 @@ impl Store {
 
     pub async fn complete_trigger_delivery(
         &self,
-        organization_id: Uuid,
-        trigger_id: Uuid,
-        delivery_id: &str,
-        build_id: Uuid,
-        worker_identity: &str,
-        claim_fence: i64,
+        input: &TriggerDeliveryCompletionRequest,
     ) -> Result<TriggerDelivery, StoreError> {
-        validate_text("delivery_id", delivery_id, MAX_TEXT_BYTES)?;
-        validate_text("worker_identity", worker_identity, MAX_TEXT_BYTES)?;
-        if claim_fence <= 0 {
+        validate_text("delivery_id", &input.delivery_id, MAX_TEXT_BYTES)?;
+        validate_text("worker_identity", &input.worker_identity, MAX_TEXT_BYTES)?;
+        if input.claim_fence <= 0 || input.completed_at_unix_ms < 0 {
             return Err(StoreError::InvalidTriggerIngress(
-                "delivery completion requires a positive claim fence".to_owned(),
+                "delivery completion requires a positive claim fence and valid completion time"
+                    .to_owned(),
             ));
         }
-        let mut tx = self.tenant_transaction(organization_id).await?;
+        let mut tx = self.tenant_transaction(input.organization_id).await?;
         let row = sqlx::query(
             "SELECT * FROM trigger_deliveries
              WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3
              FOR UPDATE",
         )
-        .bind(organization_id)
-        .bind(trigger_id)
-        .bind(delivery_id)
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(&input.delivery_id)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| {
@@ -1420,7 +1427,7 @@ impl Store {
         })?;
         let current = delivery_from_row(row)?;
         if current.status == TriggerDeliveryStatus::Admitted {
-            if current.build_id == Some(build_id) {
+            if current.build_id == Some(input.build_id) {
                 tx.commit().await?;
                 return Ok(current);
             }
@@ -1435,22 +1442,66 @@ impl Store {
                 "dead-lettered delivery requires an explicit redrive".to_owned(),
             ));
         }
-        if current.claim_owner.as_deref() != Some(worker_identity)
-            || current.claim_fence != claim_fence
+        if current.claim_owner.as_deref() != Some(input.worker_identity.as_str())
+            || current.claim_fence != input.claim_fence
         {
             tx.rollback().await?;
             return Err(StoreError::TriggerIngressConflict(
                 "delivery completion claim is stale or belongs to another worker".to_owned(),
             ));
         }
+        if current.expires_at_unix_ms <= input.completed_at_unix_ms {
+            let reason = "delivery expired during pipeline admission";
+            crate::audit::append_audit_record(
+                &mut tx,
+                input.organization_id,
+                "trigger",
+                &input.worker_identity,
+                "trigger.delivery_dead_lettered",
+                &format!(
+                    "trigger:{}:delivery:{}",
+                    input.trigger_id, input.delivery_id
+                ),
+                json!({"reason": reason, "completed_at_unix_ms": input.completed_at_unix_ms}),
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE trigger_deliveries
+                 SET status = 'dead_lettered', attempt_count = attempt_count + 1,
+                     terminal_reason = $4, claim_owner = NULL,
+                     claim_expires_at_unix_ms = NULL, updated_at = clock_timestamp()
+                 WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+            )
+            .bind(input.organization_id)
+            .bind(input.trigger_id)
+            .bind(&input.delivery_id)
+            .bind(reason)
+            .execute(&mut *tx)
+            .await?;
+            let row = sqlx::query(
+                "SELECT * FROM trigger_deliveries
+                 WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+            )
+            .bind(input.organization_id)
+            .bind(input.trigger_id)
+            .bind(&input.delivery_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let delivery = delivery_from_row(row)?;
+            tx.commit().await?;
+            return Ok(delivery);
+        }
         crate::audit::append_audit_record(
             &mut tx,
-            organization_id,
+            input.organization_id,
             "trigger",
-            worker_identity,
+            &input.worker_identity,
             "trigger.delivery_admitted",
-            &format!("trigger:{trigger_id}:delivery:{delivery_id}"),
-            json!({"build_id": build_id}),
+            &format!(
+                "trigger:{}:delivery:{}",
+                input.trigger_id, input.delivery_id
+            ),
+            json!({"build_id": input.build_id}),
         )
         .await?;
         sqlx::query(
@@ -1461,19 +1512,19 @@ impl Store {
                  updated_at = clock_timestamp()
              WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
         )
-        .bind(organization_id)
-        .bind(trigger_id)
-        .bind(delivery_id)
-        .bind(build_id)
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(&input.delivery_id)
+        .bind(input.build_id)
         .execute(&mut *tx)
         .await?;
         let row = sqlx::query(
             "SELECT * FROM trigger_deliveries
              WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
         )
-        .bind(organization_id)
-        .bind(trigger_id)
-        .bind(delivery_id)
+        .bind(input.organization_id)
+        .bind(input.trigger_id)
+        .bind(&input.delivery_id)
         .fetch_one(&mut *tx)
         .await?;
         let delivery = delivery_from_row(row)?;
