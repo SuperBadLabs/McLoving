@@ -849,10 +849,11 @@ state-transfer, core differential, identity lifecycle, authorization mapping,
 external-client read/write migration gates, isolated external-input adapter,
 scoped dynamic-agent provisioner, source-acquisition boundary, dependency
 resolver, contained cache and destination-observer boundaries, first-class
-pipeline operational-state fence, and persistent-Windows work. JOBSTATE-001's
-exact PR head passed all protected checks and the exact-head independent-review
-chain; all six review threads were resolved, and the squash commit passed
-post-merge Foundation and Windows verification. Mario's sealed inventories
+pipeline operational-state fence, typed trigger-ingress boundary, and
+persistent-Windows work. TRIG-001's exact PR head passed all nine protected
+checks and the exact-head independent-review chain; all forty-five review
+threads were resolved, and the squash commit passed post-merge Foundation and
+Windows verification. Mario's sealed inventories
 contain no admitted dynamic provisioner, workload dependency, production cache
 mapping, production destination-observer mapping, or production trigger
 mapping and grant no live SCM, dependency repository, cache, observer,
