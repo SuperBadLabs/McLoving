@@ -31,6 +31,7 @@ const SCOPE_DOMAIN: &[u8] = b"mcloving-observer-scope-v1";
 const MAX_AUDIT_PROVENANCE_BYTES: usize = 4096;
 const MAX_PERSISTED_CURSOR: u64 = i64::MAX as u64;
 const UUID_HYPHEN_BYTES: usize = 4;
+const REQUEST_UUID_FIELDS: usize = 6;
 const MAX_QUERY_VALUE_BYTES: usize = 2048;
 const MAX_SECRET_MARKERS: usize = 32;
 const MAX_TOTAL_SECRET_MARKER_BYTES: usize = 8 * 1024;
@@ -1188,9 +1189,13 @@ fn maximum_request_envelope_fits(
                     .and_then(|size| size.checked_add(maximum_value.len()))
             });
     query_bytes.is_some_and(|query_bytes| {
+        // All six request UUIDs accept the compact 32-hex-digit JSON syntax. Request
+        // verification signs the parsed canonical typed value, so compact wire syntax is a
+        // valid way to fit the command frame even though serde emits hyphenated UUIDs here.
         base_bytes
             .len()
-            .checked_add(query_bytes)
+            .checked_sub(UUID_HYPHEN_BYTES * REQUEST_UUID_FIELDS)
+            .and_then(|size| size.checked_add(query_bytes))
             .and_then(|size| size.checked_add(1))
             .is_some_and(|size| size <= crate::standalone::MAX_FRAME_BYTES)
     })
@@ -1741,11 +1746,22 @@ fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
     }
     match parse_json_no_duplicates::<SignedDestinationState>(raw) {
         Ok(mut signed) => {
+            let signature_contains_secret =
+                contains_secret_textual_representation(signed.signature_base64.as_bytes(), markers);
             let state = std::mem::replace(&mut signed.body.state, serde_json::Value::Null);
             let mut envelope = serde_json::to_value(&signed).ok();
             signed.body.state = state;
             let envelope_contains_secret = envelope.as_mut().is_none_or(|envelope| {
-                let Some(body) = envelope
+                let Some(envelope_fields) = envelope.as_object_mut() else {
+                    return true;
+                };
+                // Destination signatures are intentionally opaque bytes. Their decoded value is
+                // not destination content, but every other typed envelope string is content and
+                // must receive the complete Base64/percent/hex scan.
+                if envelope_fields.remove("signature_base64").is_none() {
+                    return true;
+                }
+                let Some(body) = envelope_fields
                     .get_mut("body")
                     .and_then(serde_json::Value::as_object_mut)
                 else {
@@ -1754,9 +1770,11 @@ fn contains_secret_in_response_json(raw: &[u8], markers: &[Vec<u8>]) -> bool {
                 if body.remove("state").is_none() {
                     return true;
                 }
-                contains_secret_textual_in_json(envelope, markers)
+                contains_secret_in_json(envelope, markers).unwrap_or(true)
             });
-            envelope_contains_secret || contains_secret_in_destination_body(&signed.body, markers)
+            signature_contains_secret
+                || envelope_contains_secret
+                || contains_secret_in_destination_body(&signed.body, markers)
         }
         Err(_) => {
             // An opaque error body or malformed envelope has no trusted protocol structure.
@@ -1794,22 +1812,6 @@ fn contains_secret_in_destination_body(
 
 fn contains_secret_in_decoded_string(value: &str, markers: &[Vec<u8>]) -> bool {
     contains_secret_value(value.as_bytes(), markers)
-}
-
-fn contains_secret_textual_in_json(value: &serde_json::Value, markers: &[Vec<u8>]) -> bool {
-    match value {
-        serde_json::Value::String(value) => {
-            contains_secret_textual_representation(value.as_bytes(), markers)
-        }
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| contains_secret_textual_in_json(value, markers)),
-        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
-            contains_secret_textual_representation(key.as_bytes(), markers)
-                || contains_secret_textual_in_json(value, markers)
-        }),
-        _ => false,
-    }
 }
 
 fn oversized_response_error(status: StatusCode) -> ObserverError {

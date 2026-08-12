@@ -172,12 +172,14 @@ Runtime generation ancestry is separately bounded by `max_runtime_history`;
 activation of a new generation fails transactionally when that durable-row quota
 is full, while an exact active-generation restart remains available. Request
 envelope sizing models the 19-digit signed cursor maximum that the phase ledger
-can actually persist, rather than an unreachable unsigned cursor value. Minimum
-and maximum response sizing use the accepted compact UUID wire syntax;
+can actually persist, rather than an unreachable unsigned cursor value. It also
+models compact wire syntax for all six accepted request UUIDs. Minimum and
+maximum response sizing use the accepted compact UUID wire syntax;
 destination signatures still bind the canonical parsed typed body. A destination
 whose configured byte budget relies on those four bytes must emit the compact
-wire form; the observer enforces the actual configured raw-byte limit before
-parsing, regardless of serializer choice.
+wire form; likewise, a request whose command-frame budget relies on the six
+four-byte savings must encode all six UUIDs compactly. The observer enforces the
+actual raw-byte limits before parsing, regardless of serializer choice.
 These mandatory bounds are carried by
 `mcloving.destination-observer-config/v5`; legacy config v1 lacks the observation quota,
 config v2 lacks the executable binding, and config v3 lacks the schema-work

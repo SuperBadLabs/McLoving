@@ -25,10 +25,10 @@ use http_body_util::{BodyExt as _, Full};
 use mcloving_destination_observer::{
     ActivationMode, CONFIG_SCHEMA_VERSION, Confidentiality, DESTINATION_STATE_SCHEMA_VERSION,
     DestinationObserver, DestinationStateBody, JsonKind, MAX_FRAME_BYTES, ObservationPhase,
-    ObservationReceipt, ObservationRequest, ObserverConfig, ObserverError, ObserverLimits,
-    PROTOCOL_VERSION, REQUEST_SCHEMA_VERSION, RequestAuthorization, SignedDestinationState,
-    StateFieldSchema, content_sha256, destination_state_message, observation_receipt_digest,
-    sign_observation_request, verify_observation_receipt,
+    ObservationReceipt, ObservationRequest, ObserverCommand, ObserverConfig, ObserverError,
+    ObserverLimits, PROTOCOL_VERSION, REQUEST_SCHEMA_VERSION, RequestAuthorization,
+    SignedDestinationState, StateFieldSchema, content_sha256, destination_state_message,
+    observation_receipt_digest, sign_observation_request, verify_observation_receipt,
 };
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 use serde::Serialize;
@@ -76,6 +76,7 @@ enum Mode {
     OutageOversizedSecret,
     OutageSecret,
     OutageBase64Secret,
+    OutageTypedEnvelopeBase64Secret,
     MalformedContentTypeSecret,
     Timeout,
     Slow,
@@ -518,6 +519,9 @@ async fn destination_handler(
         }
         Mode::Substitute => body.resource_identity = "release/substituted".to_owned(),
         Mode::RequestDigestSubstitute => body.request_sha256 = "f".repeat(64),
+        Mode::OutageTypedEnvelopeBase64Secret => {
+            body.request_sha256 = BASE64.encode([b"x".as_slice(), TOKEN].concat());
+        }
         Mode::Secret => body.state = json!({"published": true, "leak": BASE64.encode(SECRET)}),
         _ => {}
     }
@@ -558,6 +562,9 @@ async fn destination_handler(
             .unwrap()
             .replacen(&hyphenated, &compact, 1)
             .into_bytes();
+    }
+    if matches!(mode, Mode::OutageTypedEnvelopeBase64Secret) {
+        return json_response(StatusCode::SERVICE_UNAVAILABLE, response_bytes);
     }
     let mut response = json_response(StatusCode::OK, response_bytes);
     if matches!(mode, Mode::HeaderSecret) {
@@ -741,6 +748,10 @@ async fn stale_substituted_secret_malformed_oversized_and_permission_denials_fai
         (Mode::OutageSecret, ObserverError::ConfidentialityDenied),
         (
             Mode::OutageBase64Secret,
+            ObserverError::ConfidentialityDenied,
+        ),
+        (
+            Mode::OutageTypedEnvelopeBase64Secret,
             ObserverError::ConfidentialityDenied,
         ),
         (
@@ -1834,6 +1845,88 @@ async fn impossible_header_and_query_budgets_fail_before_ledger_creation() {
         ));
         assert!(!state.path().join("observer.sqlite3").exists());
     }
+}
+
+#[tokio::test]
+async fn request_sizing_admits_all_six_compact_uuids_at_the_frame_boundary() {
+    let rig = Rig::new().await;
+    let accepts_key_length = |key_length| {
+        let mut config = rig.config.clone();
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(state.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        config.state_dir = state.path().to_path_buf();
+        config.request_authority_key_id = "k".repeat(key_length);
+        rig.observer_for_config(config).is_ok()
+    };
+
+    // Find the exact configuration-admission boundary. The accepted wire contract has six UUID
+    // fields, each four bytes shorter in compact syntax; the next byte must still fail closed.
+    let mut accepted = 1_usize;
+    let mut rejected = MAX_FRAME_BYTES;
+    while accepted + 1 < rejected {
+        let candidate = accepted + (rejected - accepted) / 2;
+        if accepts_key_length(candidate) {
+            accepted = candidate;
+        } else {
+            rejected = candidate;
+        }
+    }
+    assert!(accepts_key_length(accepted));
+    assert!(!accepts_key_length(rejected));
+    assert_eq!(rejected, accepted + 1);
+
+    let mut config = rig.config.clone();
+    config.request_authority_key_id = "k".repeat(accepted);
+    let maximum = ObservationRequest {
+        schema_version: REQUEST_SCHEMA_VERSION.to_owned(),
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        observation_id: Uuid::from_u128(u128::MAX),
+        tenant_id: Uuid::from_u128(u128::MAX),
+        project_id: Uuid::from_u128(u128::MAX),
+        pipeline_id: Uuid::from_u128(u128::MAX),
+        build_id: Uuid::from_u128(u128::MAX),
+        attempt_id: Uuid::from_u128(u128::MAX),
+        effect_fence: u64::MAX,
+        phase: ObservationPhase::Reconciliation,
+        observer_id: config.observer_id.clone(),
+        request_authority_identity: config.request_authority_identity.clone(),
+        expected_implementation_sha256: rig.implementation_sha256.clone(),
+        expected_image_sha256: config.image_sha256.clone(),
+        expected_config_sha256: "f".repeat(64),
+        expected_generation: config.generation,
+        activation_mode: config.activation_mode,
+        previous_generation: config.previous_generation,
+        rollback_from_generation: config.rollback_from_generation,
+        endpoint_identity: config.endpoint_identity.clone(),
+        account_identity: config.account_identity.clone(),
+        resource_identity: config.resource_identity.clone(),
+        effect_class: config.effect_class.clone(),
+        read_grant_id: config.read_grant_id.clone(),
+        read_grant_version: config.read_grant_version.clone(),
+        read_grant_scope: config.read_grant_scope.clone(),
+        query: BTreeMap::from([("release_id".to_owned(), "\0".repeat(2048))]),
+        expected_previous_cursor: Some(i64::MAX as u64),
+        predecessor_receipt_sha256: Some("f".repeat(64)),
+        requested_at_unix_ms: NOW,
+        expires_at_unix_ms: NOW,
+        audit_provenance: "\0".repeat(4096),
+        authorization: RequestAuthorization {
+            key_id: config.request_authority_key_id,
+            signature_base64: "A".repeat(88),
+        },
+    };
+    let hyphenated = serde_json::to_string(&ObserverCommand::Observe { request: maximum }).unwrap();
+    let compact = hyphenated.replace(
+        &Uuid::from_u128(u128::MAX).hyphenated().to_string(),
+        &Uuid::from_u128(u128::MAX).simple().to_string(),
+    );
+    assert_eq!(hyphenated.len(), compact.len() + 6 * 4);
+    assert_eq!(compact.len() + 1, MAX_FRAME_BYTES);
+    assert!(hyphenated.len() + 1 > MAX_FRAME_BYTES);
 }
 
 #[tokio::test]
