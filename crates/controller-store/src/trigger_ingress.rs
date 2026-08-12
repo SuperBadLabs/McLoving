@@ -1194,57 +1194,12 @@ impl Store {
             StoreError::TriggerIngressConflict("trigger delivery does not exist".to_owned())
         })?;
         let current = delivery_from_row(row)?;
-        let database_now_unix_ms = trigger_database_unix_ms(&mut tx).await?;
         if matches!(
             current.status,
             TriggerDeliveryStatus::Admitted | TriggerDeliveryStatus::DeadLettered
         ) {
             tx.commit().await?;
             return Ok(TriggerDeliveryClaimOutcome::Terminal(current));
-        }
-        if current.next_attempt_at_unix_ms > database_now_unix_ms {
-            tx.commit().await?;
-            return Ok(TriggerDeliveryClaimOutcome::NotDue(current));
-        }
-        if current.expires_at_unix_ms <= database_now_unix_ms {
-            crate::audit::append_audit_record(
-                &mut tx,
-                input.organization_id,
-                "trigger",
-                &input.worker_identity,
-                "trigger.delivery_dead_lettered",
-                &format!(
-                    "trigger:{}:delivery:{}",
-                    input.trigger_id, input.delivery_id
-                ),
-                json!({"reason": "delivery expired before claim"}),
-            )
-            .await?;
-            sqlx::query(
-                "UPDATE trigger_deliveries
-                 SET status = 'dead_lettered',
-                     terminal_reason = 'delivery expired before claim',
-                     claim_owner = NULL, claim_expires_at_unix_ms = NULL,
-                     updated_at = clock_timestamp()
-                 WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
-            )
-            .bind(input.organization_id)
-            .bind(input.trigger_id)
-            .bind(&input.delivery_id)
-            .execute(&mut *tx)
-            .await?;
-            let row = sqlx::query(
-                "SELECT * FROM trigger_deliveries
-                 WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
-            )
-            .bind(input.organization_id)
-            .bind(input.trigger_id)
-            .bind(&input.delivery_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            let delivery = delivery_from_row(row)?;
-            tx.commit().await?;
-            return Ok(TriggerDeliveryClaimOutcome::Terminal(delivery));
         }
         let current_trigger = sqlx::query_as::<_, (i64, String)>(
             "SELECT definition.current_generation, version.state
@@ -1303,6 +1258,68 @@ impl Store {
                 "stored pipeline operational state '{}' is invalid",
                 pipeline.1
             )));
+        }
+        // Read-only not-due and live-lease outcomes need no audit mutation and
+        // therefore cannot become stale behind a later audit-head wait.
+        let preliminary_database_now_unix_ms = trigger_database_unix_ms(&mut tx).await?;
+        if current.next_attempt_at_unix_ms > preliminary_database_now_unix_ms {
+            tx.commit().await?;
+            return Ok(TriggerDeliveryClaimOutcome::NotDue(current));
+        }
+        if current.expires_at_unix_ms > preliminary_database_now_unix_ms
+            && current.claim_owner.is_some()
+            && current.claim_expires_at_unix_ms.unwrap_or(0) > preliminary_database_now_unix_ms
+        {
+            tx.commit().await?;
+            return Ok(TriggerDeliveryClaimOutcome::Leased(current));
+        }
+        // Claim due/TTL/lease authority is sampled only after the trigger,
+        // pipeline, and organization audit-head locks are all held.
+        let _ = crate::audit::lock_audit_head(&mut tx, input.organization_id).await?;
+        let database_now_unix_ms = trigger_database_unix_ms(&mut tx).await?;
+        if current.next_attempt_at_unix_ms > database_now_unix_ms {
+            tx.commit().await?;
+            return Ok(TriggerDeliveryClaimOutcome::NotDue(current));
+        }
+        if current.expires_at_unix_ms <= database_now_unix_ms {
+            crate::audit::append_audit_record(
+                &mut tx,
+                input.organization_id,
+                "trigger",
+                &input.worker_identity,
+                "trigger.delivery_dead_lettered",
+                &format!(
+                    "trigger:{}:delivery:{}",
+                    input.trigger_id, input.delivery_id
+                ),
+                json!({"reason": "delivery expired before claim"}),
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE trigger_deliveries
+                 SET status = 'dead_lettered',
+                     terminal_reason = 'delivery expired before claim',
+                     claim_owner = NULL, claim_expires_at_unix_ms = NULL,
+                     updated_at = clock_timestamp()
+                 WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+            )
+            .bind(input.organization_id)
+            .bind(input.trigger_id)
+            .bind(&input.delivery_id)
+            .execute(&mut *tx)
+            .await?;
+            let row = sqlx::query(
+                "SELECT * FROM trigger_deliveries
+                 WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3",
+            )
+            .bind(input.organization_id)
+            .bind(input.trigger_id)
+            .bind(&input.delivery_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let delivery = delivery_from_row(row)?;
+            tx.commit().await?;
+            return Ok(TriggerDeliveryClaimOutcome::Terminal(delivery));
         }
         if current.claim_owner.is_some()
             && current.claim_expires_at_unix_ms.unwrap_or(0) > database_now_unix_ms
@@ -2686,28 +2703,31 @@ fn validate_delivery_against_configuration(
             }
             if let Some(prefixes) = filter.get("path_prefixes") {
                 let prefixes = filter_strings(prefixes, "path_prefixes")?;
-                let paths = payload
-                    .get("paths")
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| {
-                        StoreError::InvalidTriggerIngress(
-                            "SCM trigger payload requires paths".to_owned(),
-                        )
-                    })?;
-                let mut matched = prefixes.is_empty();
-                for path in paths {
-                    let path = path.as_str().ok_or_else(|| {
-                        StoreError::InvalidTriggerIngress(
-                            "SCM trigger path must be a string".to_owned(),
-                        )
-                    })?;
-                    validate_text("path", path, MAX_TEXT_BYTES)?;
-                    matched |= prefixes.iter().any(|prefix| path.starts_with(prefix));
-                }
-                if !matched {
-                    return Err(StoreError::TriggerIngressConflict(
-                        "SCM path is filtered".to_owned(),
-                    ));
+                if !prefixes.is_empty() {
+                    let paths =
+                        payload
+                            .get("paths")
+                            .and_then(Value::as_array)
+                            .ok_or_else(|| {
+                                StoreError::InvalidTriggerIngress(
+                                    "SCM trigger payload requires paths".to_owned(),
+                                )
+                            })?;
+                    let mut matched = false;
+                    for path in paths {
+                        let path = path.as_str().ok_or_else(|| {
+                            StoreError::InvalidTriggerIngress(
+                                "SCM trigger path must be a string".to_owned(),
+                            )
+                        })?;
+                        validate_text("path", path, MAX_TEXT_BYTES)?;
+                        matched |= prefixes.iter().any(|prefix| path.starts_with(prefix));
+                    }
+                    if !matched {
+                        return Err(StoreError::TriggerIngressConflict(
+                            "SCM path is filtered".to_owned(),
+                        ));
+                    }
                 }
             }
         }

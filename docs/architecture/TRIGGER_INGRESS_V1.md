@@ -82,6 +82,9 @@ union, count, and string bound.
 
 Each kind also has a closed payload field set. SCM repository identity must
 equal the configured repository, not merely share an installation credential.
+An explicitly empty path-prefix list is a no-op and does not require the
+optional SCM `paths` payload; a non-empty list requires paths and at least one
+prefix match.
 For remote API ingress, the signed/request payload's `request_id` must equal the
 durable `event_id`, so the caller cannot mint duplicate work for one logical
 request by rotating transport identifiers.
@@ -94,10 +97,11 @@ controller clock nor audit-head contention can create an already-expired
 delivery or extend its lifetime.
 
 Processing requires a bounded PostgreSQL lease with a monotonically increasing
-claim fence. Immediately after locking the delivery, the store samples
-PostgreSQL time to decide durable due time, delivery TTL, and whether the
-current lease is live, and derives the new expiry from that same clock plus the
-bounded requested duration. Due-work enumeration uses PostgreSQL time as well.
+claim fence. Claiming acquires the delivery, trigger, pipeline, and audit-head
+locks before sampling PostgreSQL time to decide durable due time, delivery TTL,
+and whether the current lease is live, and derives the new expiry from that
+same clock plus the bounded requested duration. Due-work enumeration uses
+PostgreSQL time as well.
 Active-active workers converge
 on one claim even when controller wall clocks differ. A stale worker cannot
 complete or fail a newer claim. Failure transitions hold both the delivery and
@@ -228,8 +232,9 @@ replay, delayed/future input, bounded outage retry, attempt exhaustion,
 exact-source and conflicting-source dead-letter redrive, stale claim denial,
 parameter pre-capture and corrupt-store terminal failure, completion-time
 delivery/claim expiry with zero persisted DAG and unchanged retry budget,
-database-clock acceptance/redrive TTL and expired failure-claim rejection under
-deterministic audit-head contention, due/retry/claim ownership under
+database-clock acceptance/redrive TTL, claim TTL/lease issuance, and expired
+failure-claim rejection under deterministic audit-head contention, pathless SCM
+events under an empty path-prefix filter, due/retry/claim ownership under
 controller-clock skew, reserved
 trigger-DAG idempotency namespace denial, unordered filter
 membership, expired-claim handoff reaping, caller rotation,

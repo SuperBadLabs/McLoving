@@ -2872,16 +2872,18 @@ fn validate_trigger_event_filter(
             }
             if let Some(prefixes) = filter.get("path_prefixes") {
                 let prefixes = canonical_string_array(prefixes, "path_prefixes")?;
-                let paths = request
-                    .payload
-                    .get("paths")
-                    .and_then(Value::as_array)
-                    .ok_or_else(|| trigger_filtered("missing paths"))?;
-                let matched = prefixes.is_empty()
-                    || paths
+                let matched = if prefixes.is_empty() {
+                    true
+                } else {
+                    request
+                        .payload
+                        .get("paths")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| trigger_filtered("missing paths"))?
                         .iter()
                         .filter_map(Value::as_str)
-                        .any(|path| prefixes.iter().any(|prefix| path.starts_with(prefix)));
+                        .any(|path| prefixes.iter().any(|prefix| path.starts_with(prefix)))
+                };
                 if !matched {
                     return Err(trigger_filtered("path"));
                 }

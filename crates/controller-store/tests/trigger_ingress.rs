@@ -782,6 +782,51 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
     );
     assert!(accepted_after_audit_wait.expires_at_unix_ms > database_unix_ms(&store).await);
 
+    let claim_contention_now = database_unix_ms(&store).await;
+    let claim_contention_delivery = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        expiring_trigger_id,
+        1,
+        "delivery-audit-contention-claim",
+        "event-audit-contention-claim",
+        claim_contention_now,
+    );
+    store
+        .accept_trigger_delivery(&claim_contention_delivery)
+        .await
+        .unwrap();
+    let (audit_lock, audit_backend_pid) = lock_audit_head(&store, organization_id).await;
+    let contention_store = store.clone();
+    let claim_task = tokio::spawn(async move {
+        contention_store
+            .claim_trigger_delivery(&claim(
+                organization_id,
+                expiring_trigger_id,
+                "delivery-audit-contention-claim",
+                "worker-audit-contention-claim",
+                claim_contention_now,
+            ))
+            .await
+    });
+    wait_until_blocked_by(&store, audit_backend_pid).await;
+    sqlx::query("SELECT pg_sleep(1.1)")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    audit_lock.rollback().await.unwrap();
+    let TriggerDeliveryClaimOutcome::Terminal(claim_after_audit_wait) =
+        claim_task.await.unwrap().unwrap()
+    else {
+        panic!("audit contention past delivery TTL must not commit a claim")
+    };
+    assert_eq!(
+        claim_after_audit_wait.status,
+        TriggerDeliveryStatus::DeadLettered
+    );
+    assert!(claim_after_audit_wait.claim_owner.is_none());
+
     let failure_contention_now = database_unix_ms(&store).await;
     let failure_contention_delivery = delivery(
         organization_id,

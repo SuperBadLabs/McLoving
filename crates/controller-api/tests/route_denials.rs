@@ -381,7 +381,7 @@ stages:
     let path = format!(
         "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}"
     );
-    let filter = json!({"event_kinds": ["push"], "branches": ["main"], "path_prefixes": ["src/"]});
+    let filter = json!({"event_kinds": ["push"], "branches": ["main"], "path_prefixes": []});
     let configuration = json!({
         "provider": "github",
         "repository_identity": "github:superbadlabs/mcloving",
@@ -669,8 +669,7 @@ stages:
         "payload": {
             "repository_identity": "github:superbadlabs/mcloving",
             "revision": "0123456789abcdef",
-            "branch": "main",
-            "paths": ["src/lib.rs"]
+            "branch": "main"
         },
     })
     .to_string();
