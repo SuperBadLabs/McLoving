@@ -90,8 +90,9 @@ decoding layers. Each layer accepts percent encoding or standard and URL-safe
 Base64, padded or unpadded, and decodes maximal embedded Base64 alphabet runs,
 plus valid subranges ending at terminal padding so an adjacent alphabetic suffix
 cannot hide the padded payload. Each candidate checks the four possible Base64
-start phases, restarting those phases after a standard/URL-safe alphabet boundary,
-so an alphabetic or mixed-alphabet prefix cannot mask an interior encoding.
+start and end phases within every maximal standard and URL-safe alphabet segment,
+so alphabetic or mixed-alphabet prefixes and suffixes cannot mask an interior
+padded or unpadded encoding.
 Padding cannot start a token, and every padding sequence ends its candidate
 after preserving a possible canonical second padding byte even when the prior
 alphabet run was malformed. Scanning then restarts at the following byte,

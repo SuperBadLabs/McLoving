@@ -1635,55 +1635,73 @@ fn scan_base64_candidate(
         return None;
     }
 
-    // An encoded value can begin inside a longer alphabet run. There are only four Base64
-    // character phases: decoding an earlier start in the same phase merely prepends complete
-    // decoded triples and preserves the later payload. Also restart the four phases after the
-    // last character that is exclusive to the other alphabet so a mixed prefix cannot mask a
-    // valid standard or URL-safe suffix.
-    let mut starts = BTreeSet::new();
-    add_base64_phase_starts(&mut starts, 0, candidate.len());
-    if let Some(boundary) = candidate
-        .iter()
-        .rposition(|byte| matches!(byte, b'-' | b'_'))
-    {
-        add_base64_phase_starts(&mut starts, boundary + 1, candidate.len());
-    }
-    if let Some(boundary) = candidate
-        .iter()
-        .rposition(|byte| matches!(byte, b'+' | b'/'))
-    {
-        add_base64_phase_starts(&mut starts, boundary + 1, candidate.len());
-    }
+    // An encoded value can begin and end inside a longer alphabet run. There are only four
+    // Base64 character phases: retaining complete four-character groups before or after the
+    // payload preserves its decoded bytes. Scan those phases within every maximal standard and
+    // URL-safe segment so an incompatible mixed-alphabet prefix or suffix cannot mask it.
+    let mut ranges = BTreeSet::new();
+    add_base64_alphabet_ranges(candidate, is_standard_base64_byte, &mut ranges);
+    add_base64_alphabet_ranges(candidate, is_url_safe_base64_byte, &mut ranges);
 
     let mut decoded_any = false;
-    for start in starts {
-        let suffix = &candidate[start..];
-        if suffix.len() < 4 || suffix[0] == b'=' {
-            continue;
-        }
-        *consumed_work = match consumed_work.checked_add(suffix.len()) {
-            Some(work) if work <= maximum_work => work,
-            _ => return Some(true),
-        };
-        let Some(decoded) = base64_decode_once(suffix) else {
-            continue;
-        };
-        decoded_any = true;
-        if depth == MAX_REVERSIBLE_DECODE_DEPTH
-            || contains_secret_value_at(&decoded, markers, depth + 1, consumed_work, maximum_work)
-        {
-            return Some(true);
+    for (range_start, range_end) in ranges {
+        for start in range_start..range_start.saturating_add(4).min(range_end) {
+            for end_trim in 0..4 {
+                let Some(end) = range_end.checked_sub(end_trim) else {
+                    continue;
+                };
+                if end <= start || end - start < 4 || candidate[start] == b'=' {
+                    continue;
+                }
+                let bounded_candidate = &candidate[start..end];
+                *consumed_work = match consumed_work.checked_add(bounded_candidate.len()) {
+                    Some(work) if work <= maximum_work => work,
+                    _ => return Some(true),
+                };
+                let Some(decoded) = base64_decode_once(bounded_candidate) else {
+                    continue;
+                };
+                decoded_any = true;
+                if depth == MAX_REVERSIBLE_DECODE_DEPTH
+                    || contains_secret_value_at(
+                        &decoded,
+                        markers,
+                        depth + 1,
+                        consumed_work,
+                        maximum_work,
+                    )
+                {
+                    return Some(true);
+                }
+            }
         }
     }
     decoded_any.then_some(false)
 }
 
-fn add_base64_phase_starts(starts: &mut BTreeSet<usize>, base: usize, candidate_len: usize) {
-    for start in base..base.saturating_add(4).min(candidate_len) {
-        if candidate_len - start >= 4 {
-            starts.insert(start);
+fn add_base64_alphabet_ranges(
+    candidate: &[u8],
+    admitted: fn(u8) -> bool,
+    ranges: &mut BTreeSet<(usize, usize)>,
+) {
+    let mut start = None;
+    for index in 0..=candidate.len() {
+        if candidate.get(index).is_some_and(|byte| admitted(*byte)) {
+            start.get_or_insert(index);
+        } else if let Some(range_start) = start.take()
+            && index - range_start >= 4
+        {
+            ranges.insert((range_start, index));
         }
     }
+}
+
+const fn is_standard_base64_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
+}
+
+const fn is_url_safe_base64_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'=')
 }
 
 const fn is_base64_token_byte(byte: u8) -> bool {
@@ -2054,6 +2072,24 @@ mod tests {
         );
         assert!(contains_secret_value(
             malformed_padding_then_secret.as_bytes(),
+            &[marker.to_vec()]
+        ));
+
+        let unpadded_secret_with_alphabet_suffix = format!(
+            "{}ABC",
+            BASE64_NO_PAD.encode([b"x".as_slice(), marker].concat())
+        );
+        assert!(contains_secret_value(
+            unpadded_secret_with_alphabet_suffix.as_bytes(),
+            &[marker.to_vec()]
+        ));
+
+        let unpadded_secret_with_mixed_suffix = format!(
+            "{}-----",
+            BASE64_NO_PAD.encode([b"x".as_slice(), marker].concat())
+        );
+        assert!(contains_secret_value(
+            unpadded_secret_with_mixed_suffix.as_bytes(),
             &[marker.to_vec()]
         ));
         assert!(!contains_secret_value(
