@@ -174,6 +174,9 @@ expected prior watermark, and resolved Unix-millisecond slot. The slot must be a
 member of the digest-verified configured slot set. Configuration-time timezone
 and calendar values use the same 128-byte canonical bound as the durable
 watermark, so an accepted generation cannot become unusable only at capture.
+The generated contract marks `resolved_slots_unix_ms` with the machine-visible
+`x-mcloving-ordering: strictly_increasing` extension and a matching description;
+the slot digest binds that exact ordered array.
 
 Watermark advancement and delivery insertion commit in the same transaction.
 A deferred foreign key requires the watermark's delivery ID to exist at commit,

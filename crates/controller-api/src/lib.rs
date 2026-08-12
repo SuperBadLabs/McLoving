@@ -1238,6 +1238,8 @@ fn schedule_trigger_configuration_schema() -> Value {
             "resolved_slots_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "resolved_slots_unix_ms": {
                 "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true,
+                "description": "Resolved Unix-millisecond slots in strictly increasing order; the digest binds this exact ordered array.",
+                "x-mcloving-ordering": "strictly_increasing",
                 "items": {
                     "type": "integer", "format": "int64",
                     "minimum": 0, "maximum": i64::MAX
@@ -5818,6 +5820,16 @@ mod tests {
             &schedule_configuration["properties"]["resolved_slots_unix_ms"]["items"];
         assert_eq!(resolved_slots["format"], "int64");
         assert_eq!(resolved_slots["maximum"], i64::MAX);
+        assert_eq!(
+            schedule_configuration["properties"]["resolved_slots_unix_ms"]["x-mcloving-ordering"],
+            "strictly_increasing"
+        );
+        assert!(
+            schedule_configuration["properties"]["resolved_slots_unix_ms"]["description"]
+                .as_str()
+                .expect("resolved-slot ordering description")
+                .contains("strictly increasing")
+        );
         let trigger_event = &schemas["TriggerEventRequest"];
         assert_eq!(
             trigger_event["properties"]["trigger_generation"]["format"],
