@@ -1814,7 +1814,7 @@ async fn pending_observation_reserves_its_scope_head_until_finalize() {
 }
 
 #[tokio::test]
-async fn expired_pending_head_reservation_is_released_during_admission() {
+async fn expired_pending_head_reservation_does_not_block_admission() {
     let rig = Rig::new().await;
     let state = tempfile::tempdir().unwrap();
     #[cfg(unix)]
