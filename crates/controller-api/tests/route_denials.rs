@@ -7,9 +7,11 @@ use mcloving_controller_api::{
     ARTIFACT_NAME_HEADER, ApiState, IDEMPOTENCY_HEADER, PLATFORM_HEADER, TRUST_POOL_HEADER, router,
 };
 use mcloving_controller_store::{
-    Store,
+    PipelinePutOutcome, PipelineWrite, Store,
     authz::{Principal, PrincipalKind, ServiceScope},
 };
+use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -72,7 +74,7 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
         node_id,
         &digest,
     );
-    assert_eq!(cases.len(), 26, "route matrix must track the public API");
+    assert_eq!(cases.len(), 28, "route matrix must track the public API");
     for case in cases {
         let unauthenticated = app
             .clone()
@@ -146,6 +148,9 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(html.contains("<option value=\"aborted\">cancelled</option>"));
     assert!(html.contains("<input id=\"approval-id\" required"));
     assert!(html.contains("<input id=\"idempotency-key\" required>"));
+    assert!(html.contains("<input id=\"pipeline-id\" required"));
+    assert!(html.contains("Submit saved pipeline"));
+    assert!(html.contains("Advance state"));
     assert!(html.contains("stages:\n  - id: hello"));
     assert!(!html.contains("stages: []"));
     assert!(!html.contains("browser-submit"));
@@ -184,6 +189,104 @@ async fn static_ui_is_csp_locked_external_only_and_accessibility_structured() {
     assert!(app_js.contains("entry.content_hex"));
     assert!(app_js.contains("async function loadAllAudit()"));
     assert!(app_js.contains("page.next_after_sequence"));
+    assert!(app_js.contains("`${pipelinePath()}/builds`"));
+    assert!(app_js.contains("`${pipelinePath()}/state`"));
+}
+
+#[tokio::test]
+async fn pipeline_state_transition_requires_project_configure_authority() {
+    let Ok(url) = std::env::var("MCLOVING_TEST_DATABASE_URL") else {
+        eprintln!("skipped: MCLOVING_TEST_DATABASE_URL is not configured");
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .connect(&url)
+        .await
+        .expect("connect PostgreSQL state authorization test");
+    let store = Store::new(pool);
+    store.migrate().await.expect("install controller schema");
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let pipeline_id = Uuid::new_v4();
+    store
+        .create_project(
+            organization_id,
+            &format!("org-{organization_id}"),
+            project_id,
+            "state-authz",
+        )
+        .await
+        .expect("create state authorization project");
+    let source = "version: 1\nname: state-authz\nstages: []\n";
+    assert!(matches!(
+        store
+            .put_pipeline(
+                &PipelineWrite {
+                    organization_id,
+                    project_id,
+                    pipeline_id,
+                    slug: "state-authz".to_owned(),
+                    source: source.to_owned(),
+                    source_sha256: Sha256::digest(source.as_bytes()).into(),
+                    semantic_digest: Sha256::digest(b"state-authz-semantic").into(),
+                    schema_major: 1,
+                    schema_minor: 0,
+                    parameter_schema: json!({}),
+                },
+                Some(0),
+            )
+            .await
+            .expect("create state authorization pipeline"),
+        PipelinePutOutcome::Created(_)
+    ));
+    let principal = Principal {
+        subject: "service:state-reader".to_owned(),
+        kind: PrincipalKind::Service,
+        organization_id,
+        project_roles: BTreeMap::new(),
+        service_scopes: [ServiceScope::ProjectRead].into_iter().collect(),
+        mapped_projects: BTreeSet::new(),
+        action_grants: BTreeMap::new(),
+    };
+    let app =
+        router(ApiState::new(store, TOKEN, principal).expect("construct state authorization API"));
+    let path = format!(
+        "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state"
+    );
+    let read = app
+        .clone()
+        .oneshot(
+            Request::get(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("read current state");
+    assert_eq!(read.status(), StatusCode::OK);
+    let transition = app
+        .oneshot(
+            Request::put(&path)
+                .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::IF_MATCH, "\"1\"")
+                .header(IDEMPOTENCY_HEADER, "state-reader-denied")
+                .body(Body::from(
+                    json!({
+                        "state": "disabled",
+                        "reason": "must be denied",
+                        "source_identity": "test:reader",
+                        "source_generation": "test:1",
+                        "source_effective_at_unix_ms": 1_800_000_000_000_i64,
+                        "source_provenance_sha256": "42".repeat(32),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .expect("deny state transition");
+    assert_eq!(transition.status(), StatusCode::FORBIDDEN);
 }
 
 fn request(case: &RouteCase, token: Option<&str>) -> Request<Body> {
@@ -228,6 +331,10 @@ fn route_cases(
         r#"{{"approval_id":"{approval_id}","environment":"production","action":"deploy","ttl_seconds":60}}"#
     );
     let retry = r#"{"max_attempts":3,"reason":"operator retry"}"#;
+    let state = format!(
+        r#"{{"state":"disabled","reason":"reviewed freeze","source_identity":"jenkins:jobstate-import","source_generation":"jenkins:42","source_effective_at_unix_ms":1800000000000,"source_provenance_sha256":"{}"}}"#,
+        "42".repeat(32)
+    );
     let commit = format!(
         r#"{{"node_id":"{node_id}","attempt_id":"{attempt_id}","fence":1,"restore_epoch":1,"agent_id":"agent","name":"artifact.bin","media_type":"application/octet-stream","sha256":"{digest}","bytes":1,"retention_seconds":60}}"#
     );
@@ -258,6 +365,18 @@ fn route_cases(
             json,
         )
         .with_header(header::IF_MATCH.as_str(), "\"0\""),
+        case(
+            Method::GET,
+            format!("{project}/pipelines/{pipeline_id}/state"),
+        ),
+        body_case(
+            Method::PUT,
+            format!("{project}/pipelines/{pipeline_id}/state"),
+            state,
+            json,
+        )
+        .with_header(header::IF_MATCH.as_str(), "\"1\"")
+        .with_header(IDEMPOTENCY_HEADER, "route-state-disable"),
         case(Method::GET, format!("{project}/components")),
         case(Method::GET, format!("{project}/components/{digest}")),
         body_case(
@@ -269,9 +388,9 @@ fn route_cases(
         case(Method::GET, format!("{project}/builds")),
         body_case(
             Method::POST,
-            format!("{project}/builds"),
-            "version: 1\nname: route-contract\nstages: []",
-            Some("application/yaml"),
+            format!("{project}/pipelines/{pipeline_id}/builds"),
+            r#"{"parameters":{}}"#,
+            json,
         )
         .with_header(IDEMPOTENCY_HEADER, "route-contract")
         .with_header(PLATFORM_HEADER, "linux")

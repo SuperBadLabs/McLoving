@@ -67,9 +67,16 @@ fn contracts(retire_unsupported: bool) -> Vec<ExternalAdminOperationContract> {
             ExternalAdminOperation::BuildSubmit => mapped_contract(
                 operation,
                 "POST",
-                "/api/v1/organizations/{organization}/projects/{project}/builds",
-                "pipeline_digest",
-                "idempotency_key",
+                "/api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/builds",
+                "saved_revision+enabled_operational_generation",
+                "parameters+idempotency_key",
+            ),
+            ExternalAdminOperation::PipelineDisable => mapped_contract(
+                operation,
+                "PUT",
+                "/api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/state",
+                "if_match_operational_generation",
+                "transition_provenance+idempotency_key",
             ),
             ExternalAdminOperation::BuildCancel => mapped_contract(
                 operation,
@@ -193,7 +200,12 @@ async fn fixture(store: &Store, slug: &str, scopes: BTreeSet<ServiceScope>) -> (
     let project_id = Uuid::new_v4();
     let identity_id = Uuid::new_v4();
     store
-        .create_project(organization_id, slug, project_id, "admin migration fixture")
+        .create_project(
+            organization_id,
+            &format!("{slug}-{organization_id}"),
+            project_id,
+            "admin migration fixture",
+        )
         .await
         .expect("create admin migration tenant");
     store
@@ -501,7 +513,7 @@ async fn substitution_omission_stale_generation_and_cross_tenant_reads_fail_clos
     store
         .create_project(
             foreign_organization,
-            "admin-foreign",
+            &format!("admin-foreign-{foreign_organization}"),
             foreign_project,
             "foreign admin migration tenant",
         )

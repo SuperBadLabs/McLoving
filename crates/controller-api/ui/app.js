@@ -20,6 +20,8 @@ function newUuid() {
 
 byId("approval-id").value = newUuid();
 byId("idempotency-key").value = newUuid();
+byId("pipeline-id").value = newUuid();
+byId("pipeline-state-idempotency").value = newUuid();
 
 function projectPath() {
   requireContext();
@@ -30,6 +32,12 @@ function buildPath() {
   const build = byId("build-id").value.trim();
   if (!build) throw new Error("Build ID is required");
   return `${projectPath()}/builds/${encodeURIComponent(build)}`;
+}
+
+function pipelinePath() {
+  const pipeline = byId("pipeline-id").value.trim();
+  if (!pipeline) throw new Error("Pipeline ID is required");
+  return `${projectPath()}/pipelines/${encodeURIComponent(pipeline)}`;
 }
 
 function requireContext() {
@@ -271,20 +279,67 @@ byId("validate-pipeline").addEventListener("click", () =>
   action(() => api(`${projectPath()}/pipelines/validate`, { method: "POST", body: pretty(submission()) })));
 byId("plan-pipeline").addEventListener("click", () =>
   action(() => api(`${projectPath()}/pipelines/plan`, { method: "POST", body: pretty(submission()) })));
+byId("save-pipeline").addEventListener("click", () => action(async () => {
+  const result = await api(pipelinePath(), {
+    method: "PUT",
+    headers: { "if-match": `"${Number(byId("pipeline-revision").value)}"` },
+    body: pretty({
+      slug: byId("pipeline-slug").value,
+      source: byId("pipeline-source").value,
+      parameters: submission().parameters
+    })
+  });
+  byId("pipeline-revision").value = String(result.revision);
+  byId("pipeline-state-generation").value = String(result.operational_generation);
+  byId("pipeline-state").value = result.operational_state;
+  return result;
+}));
 byId("pipeline-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const idempotencyKey = byId("idempotency-key").value.trim();
   action(async () => {
-    const result = await api(`${projectPath()}/builds`, {
+    const result = await api(`${pipelinePath()}/builds`, {
       method: "POST",
       headers: {
         "idempotency-key": idempotencyKey,
         "mcloving-platform": byId("platform").value,
         "mcloving-trust-pool": byId("trust-pool").value
       },
-      body: pretty(submission())
+      body: pretty({ parameters: submission().parameters })
     });
     byId("idempotency-key").value = newUuid();
+    return result;
+  });
+});
+
+byId("load-pipeline-state").addEventListener("click", () => action(async () => {
+  const result = await api(`${pipelinePath()}/state`);
+  byId("pipeline-state-generation").value = String(result.generation);
+  byId("pipeline-state").value = result.state;
+  return result;
+}));
+
+byId("pipeline-state-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const idempotencyKey = byId("pipeline-state-idempotency").value.trim();
+  action(async () => {
+    const result = await api(`${pipelinePath()}/state`, {
+      method: "PUT",
+      headers: {
+        "if-match": `"${Number(byId("pipeline-state-generation").value)}"`,
+        "idempotency-key": idempotencyKey
+      },
+      body: pretty({
+        state: byId("pipeline-state").value,
+        reason: byId("pipeline-state-reason").value,
+        source_identity: byId("pipeline-state-source").value,
+        source_generation: byId("pipeline-state-source-generation").value,
+        source_effective_at_unix_ms: Date.now(),
+        source_provenance_sha256: byId("pipeline-state-provenance").value.toLowerCase()
+      })
+    });
+    byId("pipeline-state-generation").value = String(result.generation);
+    byId("pipeline-state-idempotency").value = newUuid();
     return result;
   });
 });

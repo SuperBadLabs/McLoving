@@ -76,6 +76,9 @@ pub struct NewDagNode {
 pub struct NewDagBuild {
     pub organization_id: Uuid,
     pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub pipeline_revision: i64,
+    pub pipeline_operational_generation: i64,
     pub idempotency_key: String,
     pub pipeline_digest: [u8; 32],
     pub priority: i32,
@@ -190,20 +193,51 @@ impl Store {
     pub async fn admit_dag(&self, input: &NewDagBuild) -> Result<DagAdmission, StoreError> {
         validate_dag_contract(input).map_err(|error| StoreError::InvalidDag(error.to_string()))?;
         let mut tx = self.tenant_transaction(input.organization_id).await?;
-        let build_id = Uuid::new_v4();
+        crate::lock_pipeline_transaction(&mut tx, input.organization_id, input.pipeline_id).await?;
         let contract = normalized_dag_contract(input);
+        if sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (
+                 SELECT 1 FROM builds
+                 WHERE project_id = $1 AND idempotency_key = $2
+             )",
+        )
+        .bind(input.project_id)
+        .bind(&input.idempotency_key)
+        .fetch_one(&mut *tx)
+        .await?
+        {
+            let admission = existing_dag_admission(&mut tx, input, &contract).await?;
+            tx.commit().await?;
+            return Ok(admission);
+        }
+        crate::lock_enabled_pipeline_binding(
+            &mut tx,
+            input.organization_id,
+            input.project_id,
+            input.pipeline_id,
+            input.pipeline_revision,
+            input.pipeline_operational_generation,
+            &input.pipeline_digest,
+        )
+        .await?;
+        let build_id = Uuid::new_v4();
         let inserted = sqlx::query_scalar::<_, Uuid>(
             "INSERT INTO builds (
-                 id, organization_id, project_id, idempotency_key,
-                 pipeline_digest, status, priority, dag_mode, dag_contract
+                 id, organization_id, project_id,
+                 pipeline_id, pipeline_revision, pipeline_operational_generation,
+                 idempotency_key, pipeline_digest, status, priority,
+                 dag_mode, dag_contract
              )
-             VALUES ($1, $2, $3, $4, $5, 'queued', $6, true, $7)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'queued', $9, true, $10)
              ON CONFLICT (project_id, idempotency_key) DO NOTHING
              RETURNING id",
         )
         .bind(build_id)
         .bind(input.organization_id)
         .bind(input.project_id)
+        .bind(input.pipeline_id)
+        .bind(input.pipeline_revision)
+        .bind(input.pipeline_operational_generation)
         .bind(&input.idempotency_key)
         .bind(input.pipeline_digest.as_slice())
         .bind(input.priority)
@@ -359,13 +393,24 @@ pub(crate) async fn advance_dag_after_attempt(
         .bind(format!("mcloving.dag.retry.{build_id}"))
         .execute(&mut **tx)
         .await?;
+    let pipeline_enabled = match crate::lock_enabled_build_pipeline(tx, organization_id, build_id)
+        .await
+    {
+        Ok(_) => true,
+        Err(StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_)) => false,
+        Err(error) => return Err(error),
+    };
     let cancelled: bool = row.try_get("cancelled")?;
     let node_key: String = row.try_get("node_key")?;
     let fail_fast: bool = row.try_get("fail_fast")?;
     let max_attempts: i32 = row.try_get("max_attempts")?;
     let ordinal: i32 = row.try_get("ordinal")?;
 
-    if outcome == TerminalOutcome::Failed && ordinal < max_attempts && !cancelled {
+    if pipeline_enabled
+        && outcome == TerminalOutcome::Failed
+        && ordinal < max_attempts
+        && !cancelled
+    {
         let has_non_idempotent_effect = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (
                  SELECT 1
@@ -474,6 +519,25 @@ pub(crate) async fn advance_dag_after_attempt(
         return Ok(true);
     }
 
+    if !pipeline_enabled {
+        fence_unstarted_dag_work(tx, organization_id, build_id, node_id).await?;
+        derive_build_outcome(tx, organization_id, build_id).await?;
+        append_event_and_outbox(
+            tx,
+            organization_id,
+            build_id,
+            "dag.pipeline_generation_fenced",
+            json!({
+                "node_id": node_id,
+                "node_key": node_key,
+                "attempt_id": attempt_id,
+                "outcome": node_outcome,
+            }),
+        )
+        .await?;
+        return Ok(true);
+    }
+
     if outcome == TerminalOutcome::Failed && fail_fast {
         sqlx::query(
             "UPDATE nodes
@@ -525,6 +589,80 @@ pub(crate) async fn advance_dag_after_attempt(
     )
     .await?;
     Ok(true)
+}
+
+async fn fence_unstarted_dag_work(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    build_id: Uuid,
+    completed_node_id: Uuid,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "UPDATE attempts AS a
+         SET status = 'aborted',
+             terminal_summary = $4,
+             completed_at = clock_timestamp(),
+             lease_expires_at = NULL
+         FROM nodes AS n
+         WHERE a.organization_id = $1
+           AND n.organization_id = a.organization_id
+           AND n.build_id = $2
+           AND n.id = a.node_id
+           AND n.id <> $3
+           AND a.status IN ('queued', 'offered')",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .bind(completed_node_id)
+    .bind(json!({"reason": "pipeline_operational_generation_fenced"}))
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE nodes
+         SET status = 'aborted',
+             logical_outcome = 'aborted'
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND id <> $3
+           AND status IN ('blocked', 'queued', 'offered')
+           AND logical_outcome IS NULL",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .bind(completed_node_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE nodes
+         SET cancellation_requested_at = clock_timestamp()
+         WHERE organization_id = $1
+           AND build_id = $2
+           AND id <> $3
+           AND status = 'running'",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .bind(completed_node_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "UPDATE attempts AS a
+         SET status = 'cancelling'
+         FROM nodes AS n
+         WHERE a.organization_id = $1
+           AND n.organization_id = a.organization_id
+           AND n.build_id = $2
+           AND n.id = a.node_id
+           AND n.id <> $3
+           AND n.status = 'running'
+           AND a.status IN ('accepted', 'running', 'finalizing')",
+    )
+    .bind(organization_id)
+    .bind(build_id)
+    .bind(completed_node_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn cancel_dag_build(
@@ -848,8 +986,20 @@ async fn existing_dag_admission(
     input: &NewDagBuild,
     contract: &Value,
 ) -> Result<DagAdmission, StoreError> {
-    let row = sqlx::query_as::<_, (Uuid, Vec<u8>, bool, bool)>(
-        "SELECT id, pipeline_digest, dag_mode,
+    let row = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Option<Uuid>,
+            Option<i64>,
+            Option<i64>,
+            Vec<u8>,
+            bool,
+            bool,
+        ),
+    >(
+        "SELECT id, pipeline_id, pipeline_revision,
+                pipeline_operational_generation, pipeline_digest, dag_mode,
                 dag_contract IS NOT DISTINCT FROM $3 AS contract_matches
          FROM builds
          WHERE project_id = $1 AND idempotency_key = $2",
@@ -859,8 +1009,14 @@ async fn existing_dag_admission(
     .bind(contract)
     .fetch_one(&mut **tx)
     .await?;
-    let (build_id, digest, dag_mode, contract_matches) = row;
-    if !dag_mode || digest != input.pipeline_digest || !contract_matches {
+    let (build_id, pipeline_id, revision, generation, digest, dag_mode, contract_matches) = row;
+    if pipeline_id != Some(input.pipeline_id)
+        || revision != Some(input.pipeline_revision)
+        || generation != Some(input.pipeline_operational_generation)
+        || !dag_mode
+        || digest != input.pipeline_digest
+        || !contract_matches
+    {
         return Err(StoreError::IdempotencyConflict(
             "idempotency key already belongs to a different build contract".to_owned(),
         ));

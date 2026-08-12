@@ -112,6 +112,16 @@ impl Store {
                ON a.node_id = n.id
               AND a.organization_id = n.organization_id
               AND a.status = 'queued'
+             JOIN pipeline_definitions AS d
+               ON d.organization_id = b.organization_id
+              AND d.project_id = b.project_id
+              AND d.pipeline_id = b.pipeline_id
+              AND d.operational_generation = b.pipeline_operational_generation
+             JOIN pipeline_operational_state_history AS h
+               ON h.organization_id = d.organization_id
+              AND h.pipeline_id = d.pipeline_id
+              AND h.generation = d.operational_generation
+              AND h.state = 'enabled'
              WHERE n.organization_id = $1
                AND n.status = 'queued'
                AND (
@@ -167,6 +177,17 @@ impl Store {
         let node_id: Uuid = candidate.try_get("node_id")?;
         let build_id: Uuid = candidate.try_get("build_id")?;
         let attempt_id: Uuid = candidate.try_get("attempt_id")?;
+        if let Err(error) =
+            crate::lock_enabled_build_pipeline(&mut tx, request.organization_id, build_id).await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(None)
+                }
+                other => Err(other),
+            };
+        }
 
         let fence = sqlx::query_scalar::<_, i64>(
             "UPDATE attempts
@@ -321,6 +342,17 @@ impl Store {
             tx.rollback().await?;
             return Ok(false);
         };
+        if let Err(error) =
+            crate::lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(false)
+                }
+                other => Err(other),
+            };
+        }
         if status != "offered" {
             tx.commit().await?;
             return Ok(true);
@@ -429,6 +461,37 @@ impl Store {
             .bind(RESTORE_FENCE_LOCK_KEY)
             .execute(&mut *tx)
             .await?;
+        let active_build = sqlx::query_scalar::<_, Uuid>(
+            "SELECT n.build_id
+             FROM attempts AS a
+             JOIN nodes AS n
+               ON n.id = a.node_id AND n.organization_id = a.organization_id
+             WHERE a.organization_id = $1
+               AND a.id = $2
+               AND a.fence = $3
+               AND a.restore_epoch = $4
+               AND a.lease_owner = $5
+               AND a.status IN ('accepted', 'running', 'finalizing', 'cancelling')",
+        )
+        .bind(organization_id)
+        .bind(attempt_id)
+        .bind(fence)
+        .bind(restore_epoch)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(build_id) = active_build
+            && let Err(error) =
+                crate::lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(Some(true))
+                }
+                other => Err(other),
+            };
+        }
         let cancellation_requested = sqlx::query_scalar::<_, bool>(
             "UPDATE attempts AS a
              SET lease_expires_at =
@@ -541,6 +604,14 @@ impl Store {
         let node_id: Uuid = expired.try_get("node_id")?;
         let build_id: Uuid = expired.try_get("build_id")?;
         let cancellation_requested: bool = expired.try_get("cancellation_requested")?;
+        let pipeline_enabled =
+            match crate::lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await {
+                Ok(_) => true,
+                Err(StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_)) => {
+                    false
+                }
+                Err(error) => return Err(error),
+            };
         let protected_effects = sqlx::query_as::<_, (String, String)>(
             "SELECT effect_key, status
              FROM attempt_effects
@@ -577,7 +648,12 @@ impl Store {
             .filter(|(_, status)| status != "confirmed")
             .count();
         let confirmed_effects = protected_effects.len() - uncertain_effects;
-        if cancellation_requested && !requires_reconciliation {
+        if (cancellation_requested || !pipeline_enabled) && !requires_reconciliation {
+            let terminal_reason = if pipeline_enabled {
+                "cancellation_lease_expired"
+            } else {
+                "pipeline_operational_generation_fenced"
+            };
             sqlx::query(
                 "UPDATE attempts
                  SET status = 'aborted',
@@ -588,7 +664,7 @@ impl Store {
             )
             .bind(attempt_id)
             .bind(organization_id)
-            .bind(json!({"reason": "cancellation_lease_expired"}))
+            .bind(json!({"reason": terminal_reason}))
             .execute(&mut *tx)
             .await?;
             if !crate::dag::advance_dag_after_attempt(
@@ -624,7 +700,11 @@ impl Store {
                 &mut tx,
                 organization_id,
                 build_id,
-                "attempt.cancellation_lease_expired",
+                if pipeline_enabled {
+                    "attempt.cancellation_lease_expired"
+                } else {
+                    "attempt.pipeline_generation_fenced"
+                },
                 json!({
                     "attempt_id": attempt_id,
                     "node_id": node_id,

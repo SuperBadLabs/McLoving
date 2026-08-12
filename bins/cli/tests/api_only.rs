@@ -7,7 +7,7 @@ use axum::Router;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post, put};
-use mcloving_cli::{Arguments, Command, CommandOutput, OutputMode, execute};
+use mcloving_cli::{Arguments, Command, CommandOutput, OutputMode, PipelineStateArg, execute};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -31,6 +31,18 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
                 "/api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline_id}"
             ),
             put(apply_pipeline),
+        )
+        .route(
+            &format!(
+                "/api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline_id}/state"
+            ),
+            get(pipeline_state).put(set_pipeline_state),
+        )
+        .route(
+            &format!(
+                "/api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline_id}/builds"
+            ),
+            post(submit_pipeline),
         )
         .route(
             &format!("/api/v1/organizations/{organization}/projects/{project}/builds"),
@@ -104,6 +116,70 @@ async fn validate_and_resumable_watch_use_only_the_public_api() {
     let applied = structured(applied);
     assert_eq!(applied["pipeline_id"], pipeline_id.to_string());
     assert_eq!(applied["revision"], 8);
+
+    let (server_url, organization, project) = common();
+    let state = structured(
+        execute(&Arguments {
+            server: server_url,
+            token: TOKEN.to_owned(),
+            organization,
+            project,
+            output: OutputMode::Json,
+            command: Command::PipelineState { pipeline_id },
+        })
+        .await
+        .unwrap(),
+    );
+    assert_eq!(state["state"], "enabled");
+    assert_eq!(state["generation"], 1);
+
+    let provenance = "42".repeat(32);
+    let (server_url, organization, project) = common();
+    let state = structured(
+        execute(&Arguments {
+            server: server_url,
+            token: TOKEN.to_owned(),
+            organization,
+            project,
+            output: OutputMode::Json,
+            command: Command::SetPipelineState {
+                pipeline_id,
+                state: PipelineStateArg::Disabled,
+                expected_generation: 1,
+                idempotency_key: "cli-state-disable".to_owned(),
+                reason: "reviewed freeze".to_owned(),
+                source_identity: "jenkins:jobstate-import".to_owned(),
+                source_generation: "jenkins:42".to_owned(),
+                source_effective_at_unix_ms: 1_800_000_000_000,
+                source_provenance_sha256: provenance,
+            },
+        })
+        .await
+        .unwrap(),
+    );
+    assert_eq!(state["state"], "disabled");
+    assert_eq!(state["generation"], 2);
+
+    let (server_url, organization, project) = common();
+    let admission = structured(
+        execute(&Arguments {
+            server: server_url,
+            token: TOKEN.to_owned(),
+            organization,
+            project,
+            output: OutputMode::Json,
+            command: Command::Submit {
+                pipeline_id,
+                idempotency_key: "cli-saved-pipeline".to_owned(),
+                parameters: vec!["count=3".to_owned()],
+                trust_pool: "trusted-linux".to_owned(),
+                platform: "linux".to_owned(),
+            },
+        })
+        .await
+        .unwrap(),
+    );
+    assert_eq!(admission["build_id"], build.to_string());
 
     let (server_url, organization, project) = common();
     let build_page = execute(&Arguments {
@@ -220,6 +296,8 @@ async fn pipelines(
             "schema_major": 1,
             "schema_minor": 0,
             "parameter_schema": {},
+            "operational_generation": 1,
+            "operational_state": "enabled",
             "created_at_unix_ms": 1,
             "updated_at_unix_ms": 1
         }],
@@ -253,9 +331,78 @@ async fn apply_pipeline(
         "schema_major": 1,
         "schema_minor": 0,
         "parameter_schema": {},
+        "operational_generation": 1,
+        "operational_state": "enabled",
         "created_at_unix_ms": 1,
         "updated_at_unix_ms": 2
     }))
+}
+
+async fn pipeline_state(headers: HeaderMap) -> Json<Value> {
+    require_token(&headers);
+    Json(state_record("enabled", 1, "created"))
+}
+
+async fn set_pipeline_state(headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
+    require_token(&headers);
+    assert_eq!(
+        headers
+            .get("if-match")
+            .and_then(|value| value.to_str().ok()),
+        Some("\"1\"")
+    );
+    assert_eq!(
+        headers
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok()),
+        Some("cli-state-disable")
+    );
+    assert_eq!(body["state"], "disabled");
+    assert_eq!(body["reason"], "reviewed freeze");
+    assert_eq!(body["source_identity"], "jenkins:jobstate-import");
+    Json(state_record("disabled", 2, "cli-state-disable"))
+}
+
+async fn submit_pipeline(
+    State(mock): State<MockState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    require_token(&headers);
+    assert_eq!(
+        headers
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok()),
+        Some("cli-saved-pipeline")
+    );
+    assert_eq!(body, json!({"parameters": {"count": 3}}));
+    Json(json!({
+        "build_id": mock.build,
+        "node_id": Uuid::new_v4(),
+        "attempt_id": Uuid::new_v4(),
+        "created": true,
+        "pipeline_digest": "ab".repeat(32),
+    }))
+}
+
+fn state_record(state: &str, generation: i64, idempotency_key: &str) -> Value {
+    json!({
+        "organization_id": Uuid::nil(),
+        "project_id": Uuid::nil(),
+        "pipeline_id": Uuid::nil(),
+        "generation": generation,
+        "state": state,
+        "reason": "reviewed state",
+        "actor_subject": "service:cli",
+        "source_identity": "test:cli",
+        "source_generation": format!("generation:{generation}"),
+        "source_effective_at_unix_ms": 1_800_000_000_000_i64,
+        "source_provenance_sha256": vec![0x42_u8; 32],
+        "idempotency_key": idempotency_key,
+        "effective_at_unix_ms": 1_800_000_000_001_i64,
+        "audit_sequence": 1,
+        "audit_event_hash": vec![0x24_u8; 32],
+    })
 }
 
 async fn builds(

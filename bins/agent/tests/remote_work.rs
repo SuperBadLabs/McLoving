@@ -4,8 +4,11 @@ use std::process::Command as StdCommand;
 use std::process::Stdio;
 use std::time::Duration;
 
-use mcloving_controller_api::Client;
-use mcloving_controller_store::{NewBuild, NewCredentialGrant, NewEnvironmentApproval, Store};
+use mcloving_controller_api::{Client, PipelineBuildRequest, PipelineUpsertRequest};
+use mcloving_controller_store::{
+    BuildAdmission, NewBuild, NewCredentialGrant, NewEnvironmentApproval, PipelinePutOutcome,
+    PipelineWrite, Store, StoreError,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
@@ -25,6 +28,46 @@ stages:
           args: [-c, "printf 'remote-agent-ran\n'; printf 'remote-agent-stderr\n' >&2"]
           timeout_seconds: 10
 "#;
+
+async fn admit_bound_test_build(
+    store: &Store,
+    mut input: NewBuild,
+) -> Result<BuildAdmission, StoreError> {
+    let current = store
+        .pipeline(input.organization_id, input.project_id, input.pipeline_id)
+        .await?;
+    let source = format!("test pipeline {:?}", input.pipeline_digest);
+    let outcome = store
+        .put_pipeline(
+            &PipelineWrite {
+                organization_id: input.organization_id,
+                project_id: input.project_id,
+                pipeline_id: input.pipeline_id,
+                slug: format!("test-{}", input.pipeline_id),
+                source_sha256: Sha256::digest(source.as_bytes()).into(),
+                source,
+                semantic_digest: input.pipeline_digest,
+                schema_major: 1,
+                schema_minor: 0,
+                parameter_schema: json!({}),
+            },
+            Some(current.as_ref().map_or(0, |pipeline| pipeline.revision)),
+        )
+        .await?;
+    let pipeline = match outcome {
+        PipelinePutOutcome::Created(record)
+        | PipelinePutOutcome::Updated(record)
+        | PipelinePutOutcome::Unchanged(record) => record,
+        PipelinePutOutcome::PreconditionFailed { current_revision } => {
+            return Err(StoreError::ProductConflict(format!(
+                "test pipeline raced at revision {current_revision}"
+            )));
+        }
+    };
+    input.pipeline_revision = pipeline.revision;
+    input.pipeline_operational_generation = pipeline.operational_generation;
+    store.admit_build(&input).await
+}
 
 #[tokio::test]
 async fn shipped_agent_executes_fenced_work_over_mtls() {
@@ -118,12 +161,30 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .spawn()
         .expect("start shipped remote agent");
 
-    let admission = client
-        .submit(
+    let pipeline_id = Uuid::new_v4();
+    client
+        .put_pipeline(
             organization_id,
             project_id,
+            pipeline_id,
+            0,
+            &PipelineUpsertRequest {
+                slug: "remote-agent-e2e".to_owned(),
+                source: PIPELINE.to_owned(),
+                parameters: Default::default(),
+            },
+        )
+        .await
+        .expect("save remote-agent pipeline");
+    let admission = client
+        .submit_pipeline_on_platform_in_pool(
+            organization_id,
+            project_id,
+            pipeline_id,
             "remote-agent-e2e",
-            PIPELINE.to_owned(),
+            "linux",
+            "trusted-linux",
+            &PipelineBuildRequest::default(),
         )
         .await
         .expect("submit work");
@@ -229,10 +290,14 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
         .expect("configure protected environment");
     let protected_digest = [0xc3; 32];
     let secret = ["mcloving", "e2e", "redaction", "probe"].join("-");
-    let protected = store
-        .admit_build(&NewBuild {
+    let protected = admit_bound_test_build(
+        &store,
+        NewBuild {
             organization_id,
             project_id,
+            pipeline_id: project_id,
+            pipeline_revision: 1,
+            pipeline_operational_generation: 1,
             idempotency_key: "remote-agent-protected-e2e".to_owned(),
             pipeline_digest: protected_digest,
             node_key: "protected-deploy".to_owned(),
@@ -252,7 +317,8 @@ async fn shipped_agent_executes_fenced_work_over_mtls() {
                     "timeout_seconds": 10
                 }]
             }),
-        })
+        },
+    )
         .await
         .expect("admit protected remote work");
     let approval_ids = [Uuid::new_v4(), Uuid::new_v4()];

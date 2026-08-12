@@ -25,12 +25,13 @@ Every source generation classifies these 15 operation families exactly once:
 - input/protected-environment approval submission.
 
 An operation is `mcloving_v1`, `owner_retired`, or `pending`. The v1 replacement
-currently admits five exact authenticated contracts:
+currently admits six exact authenticated contracts:
 
 | Operation | Contract | Precondition and idempotency |
 |---|---|---|
 | Pipeline create/update | `PUT .../pipelines/{pipeline}`; `mcloving apply` | quoted `If-Match`; desired-state digest plus revision |
-| Build submit | `POST .../builds`; `mcloving submit` | pipeline digest; caller `Idempotency-Key` |
+| Pipeline enable/disable | `PUT .../pipelines/{pipeline}/state`; `mcloving set-pipeline-state` | quoted generation `If-Match`; reviewed source/provenance plus caller `Idempotency-Key` |
+| Build submit | `POST .../pipelines/{pipeline}/builds`; `mcloving submit` | saved revision and enabled operational generation; typed parameters plus caller `Idempotency-Key` |
 | Build cancel | `POST .../builds/{build}/cancel`; `mcloving cancel` | durable build-state fence; build ID plus cancellation state |
 | Build retry | `POST .../builds/{build}/attempts/{attempt}/retry`; `mcloving retry` | attempt fence; attempt ID plus request digest |
 | Protected-environment approval | `POST .../builds/{build}/approvals`; `mcloving approve` | environment/action/expiry; caller-stable approval UUID |
@@ -48,6 +49,14 @@ the desired strict-YAML source, sends only the public API request, and exposes
 the same deterministic create/update/unchanged and stale-revision behavior as
 the Rust client. A negative revision fails locally. The CLI has no database or
 migration-role shortcut.
+
+`mcloving submit PIPELINE_ID --parameter NAME=VALUE` submits parameters against
+the saved pipeline. The raw-source project build route is retired, not aliased:
+an admin client cannot bypass the current operational-state generation by
+supplying executable YAML with a build request. `mcloving pipeline-state` and
+`mcloving set-pipeline-state` expose the same read and compare-and-swap state
+contract as the public API; re-enable is a new authorized generation rather
+than a pointer rollback.
 
 ## Authority ledger
 
@@ -101,6 +110,10 @@ concurrent first-generation and lifecycle-transition serialization, rollback,
 immutable history, constrained-role RLS, and hash-chained audit.
 `bins/cli/tests/api_only.rs` proves `mcloving apply` sends the bearer token,
 quoted revision precondition, desired source, slug, and typed parameters to the
-public route without a privileged shortcut. Existing PostgreSQL/API suites
-retain concurrent pipeline convergence, stale-revision conflict, build
-idempotency, cancel/retry/approval durability, privilege denial, and audit.
+public route without a privileged shortcut. JOBSTATE-001 suites additionally
+prove saved-revision admission, disabled and stale-generation denial, state
+authorization, transition idempotency, disable races,
+scheduler/lease/retry/approval/grant/effect fencing, migration, and audit.
+Existing PostgreSQL/API suites retain concurrent pipeline convergence,
+stale-revision conflict, build idempotency, cancellation, retry and approval
+durability, privilege denial, and audit.

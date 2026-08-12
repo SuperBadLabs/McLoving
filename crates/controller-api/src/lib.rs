@@ -2,7 +2,7 @@
 
 mod oidc;
 
-pub use mcloving_controller_store::BuildCursor;
+pub use mcloving_controller_store::{BuildCursor, PipelineOperationalState};
 pub use oidc::{
     MAX_OIDC_CLOCK_SKEW_SECONDS, MAX_OIDC_JWKS_BYTES, MAX_OIDC_REFRESH_TTL_SECONDS,
     MAX_OIDC_REQUEST_TIMEOUT_SECONDS, MAX_OIDC_SESSION_TTL_SECONDS, OidcClientConfig,
@@ -23,8 +23,10 @@ use mcloving_controller_store::{
     ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, ComponentCursor,
     ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
     DagDependency, DagNodeKind, DependencyCondition, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild,
-    NewDagNode, NewEnvironmentApproval, ObjectKind, ObjectStatus, PipelinePage, PipelinePutOutcome,
-    PipelineRecord, PipelineWrite, RetryDecision, Store, StoreError, TestReportView, WaitReason,
+    NewDagNode, NewEnvironmentApproval, ObjectKind, ObjectStatus, PipelineOperationalStateRecord,
+    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome, PipelinePage,
+    PipelinePutOutcome, PipelineRecord, PipelineWrite, RetryDecision, Store, StoreError,
+    TestReportView, WaitReason,
     authz::{Action, Principal, authorize as authorize_principal},
 };
 use mcloving_object_store::{
@@ -319,6 +321,14 @@ pub fn router(state: ApiState) -> Router {
             get(get_pipeline).put(put_pipeline),
         )
         .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state",
+            get(get_pipeline_state).put(put_pipeline_state),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds",
+            post(submit_pipeline_build),
+        )
+        .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/components",
             get(list_components),
         )
@@ -328,7 +338,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds",
-            post(submit).get(list_builds),
+            get(list_builds),
         )
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}",
@@ -441,6 +451,22 @@ pub struct SubmissionRequest {
     pub source: String,
     #[serde(default)]
     pub parameters: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PipelineBuildRequest {
+    #[serde(default)]
+    pub parameters: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PipelineOperationalStateRequest {
+    pub state: PipelineOperationalState,
+    pub reason: String,
+    pub source_identity: String,
+    pub source_generation: String,
+    pub source_effective_at_unix_ms: i64,
+    pub source_provenance_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -645,12 +671,24 @@ fn openapi_document() -> Value {
                 )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}": {
-                "parameters": [organization.clone(), project.clone(), pipeline],
+                "parameters": [organization.clone(), project.clone(), pipeline.clone()],
                 "get": api_operation(
                     "getPipeline", "pipelines", "Read one pipeline revision", "200",
                     Vec::new(), None
                 ),
                 "put": put_pipeline_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone()],
+                "get": api_operation(
+                    "getPipelineState", "pipelines", "Read current pipeline operational state", "200",
+                    Vec::new(), None
+                ),
+                "put": put_pipeline_state_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds": {
+                "parameters": [organization.clone(), project.clone(), pipeline],
+                "post": submit_build_operation()
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/components": {
                 "parameters": [organization.clone(), project.clone()],
@@ -672,8 +710,7 @@ fn openapi_document() -> Value {
                 "get": api_operation(
                     "listBuilds", "builds", "List builds with a stable cursor", "200",
                     build_page, None
-                ),
-                "post": submit_build_operation()
+                )
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}": {
                 "parameters": [organization.clone(), project.clone(), build.clone()],
@@ -826,6 +863,29 @@ fn openapi_document() -> Value {
                     "properties": {
                         "source": {"type": "string"},
                         "parameters": {"type": "object", "additionalProperties": true}
+                    },
+                    "additionalProperties": false
+                },
+                "PipelineBuildRequest": {
+                    "type": "object",
+                    "properties": {
+                        "parameters": {"type": "object", "additionalProperties": true}
+                    },
+                    "additionalProperties": false
+                },
+                "PipelineOperationalStateRequest": {
+                    "type": "object",
+                    "required": [
+                        "state", "reason", "source_identity", "source_generation",
+                        "source_effective_at_unix_ms", "source_provenance_sha256"
+                    ],
+                    "properties": {
+                        "state": {"type": "string", "enum": ["enabled", "disabled"]},
+                        "reason": {"type": "string", "minLength": 1, "maxLength": 2048},
+                        "source_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "source_generation": {"type": "string", "minLength": 1, "maxLength": 512},
+                        "source_effective_at_unix_ms": {"type": "integer", "minimum": 0},
+                        "source_provenance_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
                     },
                     "additionalProperties": false
                 },
@@ -1029,18 +1089,37 @@ fn submit_build_operation() -> Value {
     let mut operation = api_operation(
         "submitBuild",
         "builds",
-        "Submit strict YAML for idempotent admission",
+        "Submit parameters to an enabled saved pipeline",
         "201",
         vec![
             header_parameter(IDEMPOTENCY_HEADER, true),
             header_parameter(PLATFORM_HEADER, false),
             header_parameter(TRUST_POOL_HEADER, false),
         ],
-        Some("SubmissionRequest"),
+        Some("PipelineBuildRequest"),
     );
     operation["responses"]["200"] = json!({
         "description": "Idempotent replay of an existing build",
         "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation
+}
+
+fn put_pipeline_state_operation() -> Value {
+    let mut operation = api_operation(
+        "putPipelineState",
+        "pipelines",
+        "Advance enabled or disabled operational state",
+        "200",
+        vec![
+            header_parameter("If-Match", true),
+            header_parameter(IDEMPOTENCY_HEADER, true),
+        ],
+        Some("PipelineOperationalStateRequest"),
+    );
+    operation["responses"]["412"] = json!({
+        "description": "Operational-state generation precondition failed",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
     operation
 }
@@ -1276,6 +1355,104 @@ async fn get_pipeline(
     response.headers_mut().insert(
         header::ETAG,
         HeaderValue::from_str(&format!("\"{}\"", record.revision)).map_err(internal)?,
+    );
+    Ok(response)
+}
+
+async fn get_pipeline_state(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id)): Path<(Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectView,
+    )
+    .await?;
+    let record = state
+        .store
+        .pipeline_operational_state(organization_id, project_id, pipeline_id)
+        .await
+        .map_err(pipeline_state_error)?
+        .ok_or_else(resource_not_found)?;
+    pipeline_state_response(StatusCode::OK, record)
+}
+
+async fn put_pipeline_state(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id)): Path<(Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<PipelineOperationalStateRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let expected_generation = expected_revision(&headers)?;
+    if expected_generation == 0 {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_state_precondition",
+            "pipeline operational-state If-Match generation must be positive",
+        ));
+    }
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let source_provenance_sha256 = parse_hex_digest_named(
+        &request.source_provenance_sha256,
+        "pipeline state provenance",
+    )?;
+    let outcome = state
+        .store
+        .transition_pipeline_operational_state(&PipelineOperationalStateTransition {
+            organization_id,
+            project_id,
+            pipeline_id,
+            expected_generation,
+            state: request.state,
+            reason: request.reason,
+            actor_subject: principal.subject,
+            source_identity: request.source_identity,
+            source_generation: request.source_generation,
+            source_effective_at_unix_ms: request.source_effective_at_unix_ms,
+            source_provenance_sha256,
+            idempotency_key: idempotency_key.to_owned(),
+        })
+        .await
+        .map_err(pipeline_state_error)?;
+    match outcome {
+        PipelineOperationalStateTransitionOutcome::Applied(record) => {
+            pipeline_state_response(StatusCode::OK, record)
+        }
+        PipelineOperationalStateTransitionOutcome::Idempotent(record) => {
+            pipeline_state_response(StatusCode::OK, record)
+        }
+        PipelineOperationalStateTransitionOutcome::NotFound => Err(resource_not_found()),
+        PipelineOperationalStateTransitionOutcome::PreconditionFailed { current_generation } => {
+            Err(ApiError::new(
+                StatusCode::PRECONDITION_FAILED,
+                "state_generation_precondition_failed",
+                format!("current pipeline operational-state generation is {current_generation}"),
+            ))
+        }
+    }
+}
+
+fn pipeline_state_response(
+    status: StatusCode,
+    record: PipelineOperationalStateRecord,
+) -> Result<Response, ApiError> {
+    let generation = record.generation;
+    let mut response = (status, Json(record)).into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{generation}\"")).map_err(internal)?,
     );
     Ok(response)
 }
@@ -1757,11 +1934,11 @@ impl IntoResponse for ApiError {
 type ProjectPath = (Uuid, Uuid);
 type BuildPath = (Uuid, Uuid, Uuid);
 
-async fn submit(
+async fn submit_pipeline_build(
     State(state): State<Arc<ApiState>>,
-    Path((organization_id, project_id)): Path<ProjectPath>,
+    Path((organization_id, project_id, pipeline_id)): Path<(Uuid, Uuid, Uuid)>,
     headers: HeaderMap,
-    source: Bytes,
+    Json(request): Json<PipelineBuildRequest>,
 ) -> Result<(StatusCode, Json<AdmissionResponse>), ApiError> {
     authorize(
         &state,
@@ -1773,19 +1950,15 @@ async fn submit(
     .await?;
     let required_trust_pool = submission_trust_pool(&headers)?;
     let required_platform = submission_platform(&headers)?;
-    let idempotency_key = headers
-        .get(IDEMPOTENCY_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty() && value.len() <= 256)
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "idempotency_key_required",
-                "a non-empty Idempotency-Key header of at most 256 bytes is required",
-            )
-        })?;
-    let (source, parameters) = submission_payload(&headers, &source)?;
-    let pipeline = compile_source_with_parameters(&source, parameters)?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let saved = state
+        .store
+        .pipeline(organization_id, project_id, pipeline_id)
+        .await
+        .map_err(product_error)?
+        .ok_or_else(resource_not_found)?;
+    let pipeline =
+        compile_source_with_parameters(&saved.source, parameter_values(request.parameters)?)?;
     validate_execution_platform(&pipeline, &required_platform)?;
     let digest = pipeline.semantic_digest().map_err(|error| {
         ApiError::new(
@@ -1824,6 +1997,9 @@ async fn submit(
         .admit_dag(&NewDagBuild {
             organization_id,
             project_id,
+            pipeline_id,
+            pipeline_revision: saved.revision,
+            pipeline_operational_generation: saved.operational_generation,
             idempotency_key: idempotency_key.to_owned(),
             pipeline_digest: digest,
             priority: 0,
@@ -1851,6 +2027,25 @@ async fn submit(
             pipeline_digest: hex(&digest),
         }),
     ))
+}
+
+fn required_idempotency_key(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get(IDEMPOTENCY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value.trim() == *value
+                && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "idempotency_key_required",
+                "a canonical non-empty Idempotency-Key header of at most 256 bytes is required",
+            )
+        })
 }
 
 fn submission_trust_pool(headers: &HeaderMap) -> Result<String, ApiError> {
@@ -1957,35 +2152,6 @@ fn compile_source_with_parameters(
     }
     compile_strict_yaml_with_parameters("public-api", source, ParseLimits::default(), parameters)
         .map_err(pipeline_rejected)
-}
-
-fn submission_payload(
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<(String, BTreeMap<String, ParameterValue>), ApiError> {
-    let is_json = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(';').next() == Some("application/json"));
-    if !is_json {
-        let source = std::str::from_utf8(body).map_err(|_| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_utf8",
-                "pipeline source must be UTF-8",
-            )
-        })?;
-        return Ok((source.to_owned(), BTreeMap::new()));
-    }
-    let request: SubmissionRequest = serde_json::from_slice(body).map_err(|error| {
-        ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_submission",
-            format!("submission JSON is invalid: {error}"),
-        )
-    })?;
-    let parameters = parameter_values(request.parameters)?;
-    Ok((request.source, parameters))
 }
 
 fn parameter_values(
@@ -2167,6 +2333,18 @@ fn product_error(error: StoreError) -> ApiError {
     }
 }
 
+fn pipeline_state_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::InvalidPipelineState(message) => {
+            ApiError::new(StatusCode::BAD_REQUEST, "invalid_pipeline_state", message)
+        }
+        StoreError::PipelineStateConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "pipeline_state_conflict", message)
+        }
+        other => internal(other),
+    }
+}
+
 fn admission_error(error: StoreError) -> ApiError {
     match error {
         StoreError::IdempotencyConflict(message) => {
@@ -2177,6 +2355,20 @@ fn admission_error(error: StoreError) -> ApiError {
             "pipeline_rejected",
             message,
         ),
+        StoreError::PipelineDisabled {
+            pipeline_id,
+            generation,
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "pipeline_disabled",
+            format!("pipeline {pipeline_id} is disabled at operational generation {generation}"),
+        ),
+        StoreError::PipelineStateConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "pipeline_state_conflict", message)
+        }
+        StoreError::InvalidPipelineState(message) => {
+            ApiError::new(StatusCode::BAD_REQUEST, "invalid_pipeline_state", message)
+        }
         other => internal(other),
     }
 }
@@ -3177,81 +3369,61 @@ impl Client {
         self
     }
 
-    pub async fn submit(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn submit_pipeline_on_platform_in_pool(
         &self,
         organization_id: Uuid,
         project_id: Uuid,
-        idempotency_key: &str,
-        source: String,
-    ) -> Result<AdmissionResponse, ClientError> {
-        self.submit_in_pool(
-            organization_id,
-            project_id,
-            idempotency_key,
-            DEFAULT_TRUST_POOL,
-            source,
-        )
-        .await
-    }
-
-    pub async fn submit_in_pool(
-        &self,
-        organization_id: Uuid,
-        project_id: Uuid,
-        idempotency_key: &str,
-        trust_pool: &str,
-        source: String,
-    ) -> Result<AdmissionResponse, ClientError> {
-        self.submit_on_platform_in_pool(
-            organization_id,
-            project_id,
-            idempotency_key,
-            DEFAULT_PLATFORM,
-            trust_pool,
-            source,
-        )
-        .await
-    }
-
-    pub async fn submit_on_platform_in_pool(
-        &self,
-        organization_id: Uuid,
-        project_id: Uuid,
+        pipeline_id: Uuid,
         idempotency_key: &str,
         platform: &str,
         trust_pool: &str,
-        source: String,
+        request: &PipelineBuildRequest,
     ) -> Result<AdmissionResponse, ClientError> {
         self.send(
             self.inner
                 .post(format!(
-                    "{}/api/v1/organizations/{organization_id}/projects/{project_id}/builds",
-                    self.base_url
+                    "{}/pipelines/{pipeline_id}/builds",
+                    self.project_url(organization_id, project_id)
                 ))
                 .header(IDEMPOTENCY_HEADER, idempotency_key)
                 .header(PLATFORM_HEADER, platform)
                 .header(TRUST_POOL_HEADER, trust_pool)
-                .header("content-type", "application/yaml")
-                .body(source),
+                .json(request),
         )
         .await
     }
 
-    pub async fn submit_request_on_platform_in_pool(
+    pub async fn pipeline_operational_state(
         &self,
         organization_id: Uuid,
         project_id: Uuid,
+        pipeline_id: Uuid,
+    ) -> Result<PipelineOperationalStateRecord, ClientError> {
+        self.send(self.inner.get(format!(
+            "{}/pipelines/{pipeline_id}/state",
+            self.project_url(organization_id, project_id)
+        )))
+        .await
+    }
+
+    pub async fn transition_pipeline_operational_state(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        pipeline_id: Uuid,
+        expected_generation: i64,
         idempotency_key: &str,
-        platform: &str,
-        trust_pool: &str,
-        request: &SubmissionRequest,
-    ) -> Result<AdmissionResponse, ClientError> {
+        request: &PipelineOperationalStateRequest,
+    ) -> Result<PipelineOperationalStateRecord, ClientError> {
         self.send(
             self.inner
-                .post(self.builds_url(organization_id, project_id))
+                .put(format!(
+                    "{}/pipelines/{pipeline_id}/state",
+                    self.project_url(organization_id, project_id)
+                ))
+                .header(header::IF_MATCH, format!("\"{expected_generation}\""))
                 .header(IDEMPOTENCY_HEADER, idempotency_key)
-                .header(PLATFORM_HEADER, platform)
-                .header(TRUST_POOL_HEADER, trust_pool)
                 .json(request),
         )
         .await
@@ -4069,6 +4241,18 @@ mod tests {
                 "put",
             ),
             (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state",
+                "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds",
+                "post",
+            ),
+            (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/components",
                 "get",
             ),
@@ -4083,10 +4267,6 @@ mod tests {
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/builds",
                 "get",
-            ),
-            (
-                "/api/v1/organizations/{organization_id}/projects/{project_id}/builds",
-                "post",
             ),
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}",
@@ -4192,8 +4372,8 @@ mod tests {
         assert!(component["responses"]["200"].is_object());
         assert!(component["responses"]["201"].is_object());
 
-        let submission =
-            &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds"]["post"];
+        let submission = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds"]
+            ["post"];
         assert!(submission["responses"]["200"].is_object());
         assert!(submission["responses"]["201"].is_object());
         assert!(submission["responses"]["202"].is_null());
@@ -4202,6 +4382,11 @@ mod tests {
             ["put"];
         assert!(pipeline["responses"]["200"].is_object());
         assert!(pipeline["responses"]["201"].is_object());
+
+        let state = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/state"];
+        assert!(state["get"]["responses"]["200"].is_object());
+        assert!(state["put"]["responses"]["200"].is_object());
+        assert!(state["put"]["responses"]["201"].is_null());
 
         let approvals = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}/approvals"];
         assert!(approvals["post"]["responses"]["200"].is_object());

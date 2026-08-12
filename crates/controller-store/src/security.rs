@@ -117,6 +117,18 @@ impl Store {
     ) -> Result<bool, StoreError> {
         validate_approval(approval)?;
         let mut tx = self.tenant_transaction(approval.organization_id).await?;
+        if let Err(error) =
+            crate::lock_enabled_build_pipeline(&mut tx, approval.organization_id, approval.build_id)
+                .await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(false)
+                }
+                other => Err(other),
+            };
+        }
         let inserted = sqlx::query_scalar::<_, Uuid>(
             "WITH locked_build AS MATERIALIZED (
                  SELECT b.organization_id, b.project_id, b.id,
@@ -232,6 +244,17 @@ impl Store {
     ) -> Result<bool, StoreError> {
         validate_grant(grant)?;
         let mut tx = self.tenant_transaction(grant.organization_id).await?;
+        if let Err(error) =
+            crate::lock_enabled_build_pipeline(&mut tx, grant.organization_id, grant.build_id).await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(false)
+                }
+                other => Err(other),
+            };
+        }
         let policy = sqlx::query(
             "SELECT e.required_approvals
              FROM attempts AS a
@@ -519,6 +542,21 @@ impl Store {
             tx.commit().await?;
             return Ok(None);
         }
+        let build_id = rows
+            .first()
+            .map(|row| row.3)
+            .expect("an exact non-empty target set has at least one grant");
+        if let Err(error) =
+            crate::lock_enabled_build_pipeline(&mut tx, organization_id, build_id).await
+        {
+            tx.rollback().await?;
+            return match error {
+                StoreError::PipelineDisabled { .. } | StoreError::PipelineStateConflict(_) => {
+                    Ok(None)
+                }
+                other => Err(other),
+            };
+        }
         let delivered_count = rows.iter().filter(|row| row.4).count();
         if delivered_count != 0 && delivered_count != rows.len() {
             return Err(StoreError::InvalidSecurityOperation(
@@ -546,13 +584,10 @@ impl Store {
             }
         }
         if delivered_count == 0 {
-            let (_, _, _, build_id, _) = rows
-                .first()
-                .expect("an exact non-empty target set has at least one grant");
             append_event_and_outbox(
                 &mut tx,
                 organization_id,
-                *build_id,
+                build_id,
                 "credential.grants_delivered",
                 json!({
                     "attempt_id": attempt_id,
