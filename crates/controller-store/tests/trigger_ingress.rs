@@ -319,6 +319,54 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
         store.put_pipeline_trigger(&unknown_configuration).await,
         Err(StoreError::InvalidTriggerIngress(_))
     ));
+    let unordered_unique_filter = trigger_write(
+        organization_id,
+        project_id,
+        pipeline_id,
+        Uuid::new_v4(),
+        0,
+        TriggerKind::ScmWebhook,
+        PipelineTriggerState::Enabled,
+        "scm:github:installation:42",
+        json!({
+            "provider": "github",
+            "repository_identity": "github:superbadlabs/mcloving",
+            "filter": {
+                "event_kinds": ["push", "pull_request"],
+                "branches": ["release", "main"]
+            },
+        }),
+        "trigger-unordered-unique-filter",
+        3,
+    );
+    assert!(matches!(
+        store
+            .put_pipeline_trigger(&unordered_unique_filter)
+            .await
+            .unwrap(),
+        TriggerPutOutcome::Created(_)
+    ));
+    let duplicate_filter = trigger_write(
+        organization_id,
+        project_id,
+        pipeline_id,
+        Uuid::new_v4(),
+        0,
+        TriggerKind::ScmWebhook,
+        PipelineTriggerState::Enabled,
+        "scm:github:installation:42",
+        json!({
+            "provider": "github",
+            "repository_identity": "github:superbadlabs/mcloving",
+            "filter": {"event_kinds": ["push", "push"]},
+        }),
+        "trigger-duplicate-filter",
+        3,
+    );
+    assert!(matches!(
+        store.put_pipeline_trigger(&duplicate_filter).await,
+        Err(StoreError::InvalidTriggerIngress(_))
+    ));
     assert_eq!(
         outcomes
             .iter()
@@ -628,6 +676,185 @@ async fn delivery_dedup_claim_retry_and_operational_fences_are_durable() {
             .unwrap()
             .is_none(),
         "expired admission must leave no runnable or replayable build"
+    );
+
+    let expired_claim_delivery = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        1,
+        "delivery-expired-claim-admission",
+        "event-expired-claim-admission",
+        wall_now - 120_000,
+    );
+    assert!(matches!(
+        store
+            .accept_trigger_delivery(&expired_claim_delivery)
+            .await
+            .unwrap(),
+        TriggerDeliveryAdmission::Created(_)
+    ));
+    let expired_claim = match store
+        .claim_trigger_delivery(&claim(
+            organization_id,
+            trigger_id,
+            "delivery-expired-claim-admission",
+            "worker-expired-claim-admission",
+            wall_now - 61_000,
+        ))
+        .await
+        .unwrap()
+    {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        other => panic!("unexpected expired-claim fixture: {other:?}"),
+    };
+    let expired_claim_dag = dag(
+        organization_id,
+        project_id,
+        pipeline_id,
+        "trigger-delivery-expired-claim-admission",
+    );
+    assert!(matches!(
+        store
+            .admit_trigger_delivery_dag(
+                &TriggerDeliveryDagAdmissionRequest {
+                    organization_id,
+                    trigger_id,
+                    delivery_id: "delivery-expired-claim-admission".to_owned(),
+                    worker_identity: "worker-expired-claim-admission".to_owned(),
+                    claim_fence: expired_claim.claim_fence,
+                },
+                &expired_claim_dag,
+            )
+            .await,
+        Err(StoreError::TriggerIngressConflict(message))
+            if message == "delivery admission claim lease expired"
+    ));
+    assert!(
+        store
+            .dag_replay_binding(
+                organization_id,
+                project_id,
+                "trigger-delivery-expired-claim-admission",
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "expired claim admission must roll back every staged DAG row"
+    );
+    assert!(
+        store
+            .due_trigger_deliveries(organization_id, wall_now, 128)
+            .await
+            .unwrap()
+            .iter()
+            .any(|delivery| delivery.delivery_id == "delivery-expired-claim-admission"),
+        "claim expiry leaves the durable delivery retryable by a newly fenced worker"
+    );
+
+    sqlx::query("DROP TRIGGER IF EXISTS trig001_delay_build_insert ON builds")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION trig001_delay_build_insert()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.idempotency_key = 'trigger-delivery-claim-expires-during-admission' THEN
+             PERFORM pg_sleep(1);
+           END IF;
+           RETURN NEW;
+         END
+         $$",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER trig001_delay_build_insert
+         BEFORE INSERT ON builds
+         FOR EACH ROW EXECUTE FUNCTION trig001_delay_build_insert()",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let lease_race_now = sqlx::query_scalar::<_, i64>(
+        "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let lease_race_delivery = delivery(
+        organization_id,
+        project_id,
+        pipeline_id,
+        trigger_id,
+        1,
+        "delivery-claim-expires-during-admission",
+        "event-claim-expires-during-admission",
+        lease_race_now - 1_000,
+    );
+    store
+        .accept_trigger_delivery(&lease_race_delivery)
+        .await
+        .unwrap();
+    let lease_race_claim = match store
+        .claim_trigger_delivery(&TriggerDeliveryClaimRequest {
+            organization_id,
+            trigger_id,
+            delivery_id: "delivery-claim-expires-during-admission".to_owned(),
+            worker_identity: "worker-claim-expires-during-admission".to_owned(),
+            now_unix_ms: lease_race_now,
+            lease_expires_at_unix_ms: lease_race_now + 500,
+        })
+        .await
+        .unwrap()
+    {
+        TriggerDeliveryClaimOutcome::Claimed(delivery) => delivery,
+        other => panic!("unexpected lease-race claim: {other:?}"),
+    };
+    let lease_race_result = store
+        .admit_trigger_delivery_dag(
+            &TriggerDeliveryDagAdmissionRequest {
+                organization_id,
+                trigger_id,
+                delivery_id: "delivery-claim-expires-during-admission".to_owned(),
+                worker_identity: "worker-claim-expires-during-admission".to_owned(),
+                claim_fence: lease_race_claim.claim_fence,
+            },
+            &dag(
+                organization_id,
+                project_id,
+                pipeline_id,
+                "trigger-delivery-claim-expires-during-admission",
+            ),
+        )
+        .await;
+    sqlx::query("DROP TRIGGER trig001_delay_build_insert ON builds")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION trig001_delay_build_insert()")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert!(matches!(
+        lease_race_result,
+        Err(StoreError::TriggerIngressConflict(message))
+            if message == "delivery admission claim lease expired"
+    ));
+    assert!(
+        store
+            .dag_replay_binding(
+                organization_id,
+                project_id,
+                "trigger-delivery-claim-expires-during-admission",
+            )
+            .await
+            .unwrap()
+            .is_none(),
+        "a claim that expires during DAG staging must leave no persisted DAG rows"
     );
 
     let active_active = delivery(

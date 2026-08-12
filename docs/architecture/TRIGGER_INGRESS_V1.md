@@ -28,6 +28,9 @@ The closed trigger-kind schema is:
   has earned an admission receipt.
 
 Unknown fields, filter classes, kinds, and plugin sources fail closed. The
+generated trigger request contract declares the exact Rust `int32` or `int64`
+transport width and runtime bounds for every integer field. Filter arrays
+accept any ordering while requiring unique, bounded string values. The
 sealed Mario inventory names `hudson.triggers.SCMTrigger` and
 `hudson.triggers.TimerTrigger`, but does not preserve the schedule expressions,
 Jenkins hash inputs, algorithm/version, timezone, or resolved slots required to
@@ -85,15 +88,18 @@ request by rotating transport identifiers.
 
 Processing requires a bounded PostgreSQL lease with a monotonically increasing
 claim fence. Active-active workers converge on one claim. A stale worker cannot
-complete or fail a newer claim. Processing enters the JOBSTATE-001 saved-pipeline
+complete or fail a newer claim, and admission conditionally binds only while
+the matching claim lease is still live according to the PostgreSQL clock.
+Processing enters the JOBSTATE-001 saved-pipeline
 admission primitive using a controller-derived safe idempotency key. DAG rows,
 attempts, outbox publication, and the immutable delivery/build binding commit in
 one PostgreSQL transaction. DAG construction runs inside a savepoint; the store
-samples the database clock after all DAG rows are staged. If the delivery is
-then expired, the savepoint rolls back every runnable build row before the
-outer transaction records the terminal dead letter. A crash therefore leaves
-either no build and a retryable claim transaction, one expired dead letter and
-no build, or one admitted delivery bound to its exact build—never an orphaned
+samples the database clock after all DAG rows are staged. If the delivery TTL
+or claim lease is then expired, the savepoint rolls back every runnable build
+row. Delivery expiry is terminally dead-lettered; claim expiry leaves the
+delivery retryable for a newly fenced worker. A crash therefore leaves either
+no build and a retryable claim transaction, one expired dead letter and no
+build, or one admitted delivery bound to its exact build—never an orphaned
 runnable build or an unbound duplicate-redrive path.
 
 The durable states are:

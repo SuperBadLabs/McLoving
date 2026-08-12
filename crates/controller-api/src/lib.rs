@@ -1034,11 +1034,17 @@ fn openapi_document() -> Value {
                     "type": "object",
                     "required": ["trigger_generation", "delivery_id", "event_id", "event_kind", "event_time_unix_ms", "payload"],
                     "properties": {
-                        "trigger_generation": {"type": "integer", "minimum": 1},
+                        "trigger_generation": {
+                            "type": "integer", "format": "int64",
+                            "minimum": 1, "maximum": i64::MAX
+                        },
                         "delivery_id": {"type": "string", "minLength": 1, "maxLength": 512},
                         "event_id": {"type": "string", "minLength": 1, "maxLength": 512},
                         "event_kind": {"type": "string", "minLength": 1, "maxLength": 256},
-                        "event_time_unix_ms": {"type": "integer", "minimum": 0},
+                        "event_time_unix_ms": {
+                            "type": "integer", "format": "int64",
+                            "minimum": 0, "maximum": i64::MAX
+                        },
                         "payload": {"$ref": "#/components/schemas/TriggerEventPayload"},
                         "parameters": parameter_values_schema(),
                         "platform": {"type": "string", "enum": ["linux", "windows"]},
@@ -1194,9 +1200,9 @@ fn pipeline_trigger_request_variant_schema(kind: &str, configuration_schema: &st
             "event_source_identity": {"type": "string", "minLength": 1, "maxLength": 512},
             "source_generation": {"type": "string", "minLength": 1, "maxLength": 512},
             "configuration": {"$ref": format!("#/components/schemas/{configuration_schema}")},
-            "deduplication_window_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
-            "max_delivery_attempts": {"type": "integer", "minimum": 1, "maximum": 100},
-            "delivery_ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 2592000},
+            "deduplication_window_seconds": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 2592000},
+            "max_delivery_attempts": {"type": "integer", "format": "int32", "minimum": 1, "maximum": 100},
+            "delivery_ttl_seconds": {"type": "integer", "format": "int64", "minimum": 1, "maximum": 2592000},
             "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
         },
         "additionalProperties": false
@@ -1228,7 +1234,10 @@ fn schedule_trigger_configuration_schema() -> Value {
             "resolved_slots_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "resolved_slots_unix_ms": {
                 "type": "array", "minItems": 1, "maxItems": 4096, "uniqueItems": true,
-                "items": {"type": "integer", "minimum": 0}
+                "items": {
+                    "type": "integer", "format": "int64",
+                    "minimum": 0, "maximum": i64::MAX
+                }
             },
             "jenkins_hash_algorithm_version": {"type": "string", "minLength": 1, "maxLength": 512},
             "jenkins_full_item_name": {"type": "string", "minLength": 1, "maxLength": 512},
@@ -1326,8 +1335,14 @@ fn schedule_trigger_event_payload_schema() -> Value {
             "calendar": {"type": "string", "minLength": 1, "maxLength": 128},
             "expression": {"type": "string", "minLength": 1, "maxLength": 512},
             "schedule_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-            "expected_last_resolved_slot_unix_ms": {"type": "integer", "minimum": 0},
-            "resolved_slot_unix_ms": {"type": "integer", "minimum": 0}
+            "expected_last_resolved_slot_unix_ms": {
+                "type": "integer", "format": "int64",
+                "minimum": 0, "maximum": i64::MAX
+            },
+            "resolved_slot_unix_ms": {
+                "type": "integer", "format": "int64",
+                "minimum": 0, "maximum": i64::MAX
+            }
         },
         "required": [
             "timezone", "calendar", "expression", "schedule_identity_sha256",
@@ -5646,6 +5661,18 @@ mod tests {
             scm_request["properties"]["configuration"]["$ref"],
             "#/components/schemas/ScmTriggerConfiguration"
         );
+        assert_eq!(
+            scm_request["properties"]["deduplication_window_seconds"]["format"],
+            "int64"
+        );
+        assert_eq!(
+            scm_request["properties"]["max_delivery_attempts"]["format"],
+            "int32"
+        );
+        assert_eq!(
+            scm_request["properties"]["delivery_ttl_seconds"]["format"],
+            "int64"
+        );
         let scm_configuration = &schemas["ScmTriggerConfiguration"];
         assert!(
             scm_configuration["required"]
@@ -5655,6 +5682,10 @@ mod tests {
         );
         assert!(scm_configuration["properties"]["expression"].is_null());
         assert!(scm_configuration["properties"]["filter"]["properties"]["statuses"].is_null());
+        assert_eq!(
+            scm_configuration["properties"]["filter"]["properties"]["event_kinds"]["uniqueItems"],
+            true
+        );
         let schedule_configuration = &schemas["ScheduleTriggerConfiguration"];
         assert!(
             schedule_configuration["required"]
@@ -5665,6 +5696,27 @@ mod tests {
         assert!(
             schedule_configuration["properties"]["repository_identity"].is_null(),
             "kind-specific configuration fields must fail closed"
+        );
+        let resolved_slots =
+            &schedule_configuration["properties"]["resolved_slots_unix_ms"]["items"];
+        assert_eq!(resolved_slots["format"], "int64");
+        assert_eq!(resolved_slots["maximum"], i64::MAX);
+        let trigger_event = &schemas["TriggerEventRequest"];
+        assert_eq!(
+            trigger_event["properties"]["trigger_generation"]["format"],
+            "int64"
+        );
+        assert_eq!(
+            trigger_event["properties"]["trigger_generation"]["maximum"],
+            i64::MAX
+        );
+        assert_eq!(
+            trigger_event["properties"]["event_time_unix_ms"]["format"],
+            "int64"
+        );
+        assert_eq!(
+            trigger_event["properties"]["event_time_unix_ms"]["maximum"],
+            i64::MAX
         );
         let event_payload = &schemas["TriggerEventPayload"];
         assert_eq!(
@@ -5689,6 +5741,13 @@ mod tests {
                 .expect("schedule event payload requirements")
                 .contains(&Value::from("resolved_slot_unix_ms"))
         );
+        for field in [
+            "expected_last_resolved_slot_unix_ms",
+            "resolved_slot_unix_ms",
+        ] {
+            assert_eq!(schedule_event["properties"][field]["format"], "int64");
+            assert_eq!(schedule_event["properties"][field]["maximum"], i64::MAX);
+        }
         assert!(schedule_event["properties"]["repository_identity"].is_null());
         let remote_event = &schemas["RemoteApiTriggerEventPayload"];
         assert!(

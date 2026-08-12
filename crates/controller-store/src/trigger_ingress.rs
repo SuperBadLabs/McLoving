@@ -1470,6 +1470,12 @@ impl Store {
             tx.commit().await?;
             return Ok(TriggerDeliveryDagAdmission::DeadLettered(delivery));
         }
+        if current.claim_expires_at_unix_ms.unwrap_or(0) <= admitted_at_unix_ms {
+            tx.rollback().await?;
+            return Err(StoreError::TriggerIngressConflict(
+                "delivery admission claim lease expired".to_owned(),
+            ));
+        }
         let mut admission_tx = tx.begin().await?;
         let admission = crate::dag::admit_dag_transaction(&mut admission_tx, dag).await?;
         let bound = sqlx::query_scalar::<_, String>(
@@ -1481,6 +1487,8 @@ impl Store {
              WHERE organization_id = $1 AND trigger_id = $2 AND delivery_id = $3
                AND claim_owner = $5 AND claim_fence = $6
                AND expires_at_unix_ms >
+                   floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+               AND claim_expires_at_unix_ms >
                    floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
              RETURNING delivery_id",
         )
@@ -1495,11 +1503,17 @@ impl Store {
         if bound.is_none() {
             let admitted_at_unix_ms = trigger_database_unix_ms(&mut admission_tx).await?;
             admission_tx.rollback().await?;
-            let delivery =
-                dead_letter_expired_trigger_dag_admission(&mut tx, input, admitted_at_unix_ms)
-                    .await?;
-            tx.commit().await?;
-            return Ok(TriggerDeliveryDagAdmission::DeadLettered(delivery));
+            if current.expires_at_unix_ms <= admitted_at_unix_ms {
+                let delivery =
+                    dead_letter_expired_trigger_dag_admission(&mut tx, input, admitted_at_unix_ms)
+                        .await?;
+                tx.commit().await?;
+                return Ok(TriggerDeliveryDagAdmission::DeadLettered(delivery));
+            }
+            tx.rollback().await?;
+            return Err(StoreError::TriggerIngressConflict(
+                "delivery admission claim lease expired".to_owned(),
+            ));
         }
         crate::audit::append_audit_record(
             &mut admission_tx,
@@ -2423,7 +2437,7 @@ fn validate_filter_configuration(kind: TriggerKind, filter: &Value) -> Result<()
                 "trigger filter '{field}' exceeds 128 entries"
             )));
         }
-        let mut previous: Option<&str> = None;
+        let mut seen = std::collections::BTreeSet::new();
         for value in values {
             let value = value.as_str().ok_or_else(|| {
                 StoreError::InvalidTriggerIngress(format!(
@@ -2431,12 +2445,11 @@ fn validate_filter_configuration(kind: TriggerKind, filter: &Value) -> Result<()
                 ))
             })?;
             validate_text(&format!("filter.{field}"), value, MAX_TEXT_BYTES)?;
-            if previous.is_some_and(|prior| value <= prior) {
+            if !seen.insert(value) {
                 return Err(StoreError::InvalidTriggerIngress(format!(
-                    "trigger filter '{field}' must be sorted and unique"
+                    "trigger filter '{field}' must contain unique values"
                 )));
             }
-            previous = Some(value);
         }
     }
     Ok(())
