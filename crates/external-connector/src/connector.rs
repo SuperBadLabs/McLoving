@@ -386,6 +386,11 @@ impl ExternalConnector {
         {
             return Err(ConnectorError::InvalidObservation);
         }
+        let serialized =
+            serde_json::to_vec(&request).map_err(|_| ConnectorError::InvalidObservation)?;
+        if serialized.len() > self.config.limits.max_request_bytes {
+            return Err(ConnectorError::OversizedRequest);
+        }
         mcloving_destination_observer::verify_observation_receipt(
             &request.observation_receipt,
             &self.observer_receipt_key,
@@ -1000,6 +1005,7 @@ fn validate_config(
         || config.limits.max_attempts > 8
         || config.limits.timeout_ms == 0
         || config.limits.max_authority_window_ms <= 0
+        || config.limits.timeout_ms > config.limits.max_authority_window_ms as u64
         || unique.len() != identities.len()
         || identities.iter().any(|identity| {
             identity.is_empty()
@@ -1030,6 +1036,7 @@ fn validate_config(
             .len()
             != authority_material_digests.len()
         || config.observer_binding.generation == 0
+        || !valid_observer_activation_lineage(&config.observer_binding)
         || !is_sha256(&config.observer_binding.implementation_sha256)
         || !is_sha256(&config.observer_binding.image_sha256)
         || !is_sha256(&config.observer_binding.config_sha256)
@@ -1074,6 +1081,9 @@ fn validate_config(
     {
         return Err(ConnectorError::InvalidConfig);
     }
+    if !maximum_receipt_envelope_fits(config, &signing_public) {
+        return Err(ConnectorError::InvalidConfig);
+    }
     let config_bytes = serde_json::to_vec(config).map_err(|_| ConnectorError::InvalidConfig)?;
     if contains_secret_value(&config_bytes, secret_markers) {
         return Err(ConnectorError::ConfidentialityDenied);
@@ -1102,6 +1112,111 @@ fn validate_config(
         return Err(ConnectorError::InvalidConfig);
     }
     Ok(())
+}
+
+fn valid_observer_activation_lineage(binding: &crate::ObserverReceiptBinding) -> bool {
+    match binding.activation_mode {
+        mcloving_destination_observer::ActivationMode::Current => {
+            binding.generation == 1
+                && binding.previous_generation.is_none()
+                && binding.rollback_from_generation.is_none()
+        }
+        mcloving_destination_observer::ActivationMode::Cutover => {
+            binding.generation > 1
+                && binding
+                    .previous_generation
+                    .is_some_and(|previous| previous < binding.generation)
+                && binding.rollback_from_generation.is_none()
+        }
+        mcloving_destination_observer::ActivationMode::Rollback => {
+            binding.generation > 1
+                && matches!(
+                    (binding.previous_generation, binding.rollback_from_generation),
+                    (Some(target), Some(source))
+                        if target < source && source < binding.generation
+                )
+        }
+    }
+}
+
+fn maximum_receipt_envelope_fits(config: &ConnectorConfig, signing_public: &[u8]) -> bool {
+    let Ok(config_sha256) = config.canonical_digest() else {
+        return false;
+    };
+    let maximum = OutcomeReceipt {
+        schema_version: OUTCOME_RECEIPT_SCHEMA_VERSION.to_owned(),
+        protocol_version: PROTOCOL_VERSION.to_owned(),
+        evidence_sequence: u64::MAX,
+        request_id: uuid::Uuid::from_u128(u128::MAX),
+        request_sha256: "f".repeat(64),
+        tenant_id: uuid::Uuid::from_u128(u128::MAX),
+        project_id: uuid::Uuid::from_u128(u128::MAX),
+        pipeline_id: uuid::Uuid::from_u128(u128::MAX),
+        build_id: uuid::Uuid::from_u128(u128::MAX),
+        attempt_id: uuid::Uuid::from_u128(u128::MAX),
+        effect_fence: u64::MAX,
+        effect_key: String::new(),
+        connector_id: config.connector_id.clone(),
+        connector_implementation_sha256: config.implementation_sha256.clone(),
+        connector_image_sha256: config.image_sha256.clone(),
+        connector_config_sha256: config_sha256,
+        deployment_identity: config.deployment_identity.clone(),
+        operator_trust_identity: config.operator_trust_identity.clone(),
+        runtime_boundary_identity: config.runtime_boundary_identity.clone(),
+        service_identity: config.service_identity.clone(),
+        configuration_authority_identity: config.configuration_authority_identity.clone(),
+        request_authority_identity: config.request_authority_identity.clone(),
+        credential_issuance_path_identity: config.credential_issuance_path_identity.clone(),
+        generation: config.generation,
+        activation_mode: config.activation_mode,
+        previous_generation: config.previous_generation,
+        previous_config_sha256: config.previous_config_sha256.clone(),
+        rollback_from_generation: config.rollback_from_generation,
+        endpoint_identity: config.endpoint_identity.clone(),
+        account_identity: config.account_identity.clone(),
+        resource_identity: config.resource_identity.clone(),
+        effect_class: config.effect_class.clone(),
+        idempotency_class: crate::IdempotencyClass::ExternallyIdempotent,
+        action_name: config.action_name.clone(),
+        action_schema_version: config.action_schema_version.clone(),
+        credential_grant_id: config.credential_grant_id.clone(),
+        credential_grant_version: config.credential_grant_version.clone(),
+        credential_grant_scope: config.credential_grant_scope.clone(),
+        request_payload_sha256: "f".repeat(64),
+        status: OutcomeStatus::RetryableFailure,
+        status_code: String::new(),
+        public_values: BTreeMap::new(),
+        protected_secret_refs: Vec::new(),
+        external_ids: BTreeMap::new(),
+        downstream_control_digest: "f".repeat(64),
+        later_intents_digest: "f".repeat(64),
+        destination_response_sha256: Some("f".repeat(64)),
+        destination_signature_base64: Some("A".repeat(88)),
+        destination_attestation_key_id: Some(config.destination_attestation_key_id.clone()),
+        attempt_count: config.limits.max_attempts,
+        ambiguous_requires_observation: true,
+        observation_receipt_sha256: Some("f".repeat(64)),
+        captured_at_unix_ms: i64::MIN,
+        audit_provenance: String::new(),
+        outcome_signing_key_id: config.outcome_signing_key_id.clone(),
+        outcome_signing_public_key_sha256: content_sha256(signing_public),
+        signature_base64: "A".repeat(88),
+    };
+    let Ok(base_bytes) = serde_json::to_vec(&crate::ConnectorResponse::Ok {
+        receipt: Box::new(maximum),
+    }) else {
+        return false;
+    };
+    // A valid request contributes no more than max_request_bytes of request-controlled wire
+    // material, and a valid destination outcome contributes no more than max_public_output_bytes
+    // across the public fields copied into the receipt. Adding both complete limits to a receipt
+    // with empty variable fields is deliberately conservative and proves replay is writable.
+    base_bytes
+        .len()
+        .checked_add(config.limits.max_request_bytes)
+        .and_then(|size| size.checked_add(config.limits.max_public_output_bytes))
+        .and_then(|size| size.checked_add(1))
+        .is_some_and(|size| size <= crate::MAX_FRAME_BYTES)
 }
 
 fn contains_secret_value(raw: &[u8], markers: &[Vec<u8>]) -> bool {

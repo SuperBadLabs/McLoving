@@ -75,6 +75,7 @@ impl ShadowReplayer {
             || config.connector_binding.outcome_signing_key_id.is_empty()
             || config.connector_binding.outcome_signing_public_key_sha256
                 != content_sha256(&connector_receipt_key)
+            || connector_receipt_key.len() != 32
             || config.max_receipts == 0
             || config.connector_receipt_key_sha256 != content_sha256(&connector_receipt_key)
             || content_sha256(&replay_public) == config.connector_receipt_key_sha256

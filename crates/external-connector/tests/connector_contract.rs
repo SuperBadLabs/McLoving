@@ -619,6 +619,87 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
         Err(ConnectorError::InvalidConfig)
     ));
 
+    let timeout_state = tempfile::tempdir().unwrap();
+    make_private(timeout_state.path());
+    let mut unrepresentable_timeout = rig.config.clone();
+    unrepresentable_timeout.state_dir = timeout_state.path().to_path_buf();
+    unrepresentable_timeout.limits.timeout_ms = 60_001;
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            unrepresentable_timeout,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            TOKEN.to_vec(),
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+    assert!(
+        !timeout_state
+            .path()
+            .join("external-connector.sqlite3")
+            .exists()
+    );
+
+    for invalid_observer_lineage in [
+        (ObserverActivationMode::Current, 2, None, None),
+        (ObserverActivationMode::Cutover, 2, None, None),
+        (ObserverActivationMode::Rollback, 3, Some(2), Some(2)),
+    ] {
+        let observer_state = tempfile::tempdir().unwrap();
+        make_private(observer_state.path());
+        let mut config = rig.config.clone();
+        config.state_dir = observer_state.path().to_path_buf();
+        config.observer_binding.activation_mode = invalid_observer_lineage.0;
+        config.observer_binding.generation = invalid_observer_lineage.1;
+        config.observer_binding.previous_generation = invalid_observer_lineage.2;
+        config.observer_binding.rollback_from_generation = invalid_observer_lineage.3;
+        assert!(matches!(
+            ExternalConnector::new_loopback_test(
+                config,
+                public_key_from_seed(&rig.request_seed).unwrap(),
+                public_key_from_seed(&rig.destination_seed).unwrap(),
+                rig.outcome_seed.clone(),
+                public_key_from_seed(&rig.observer_seed).unwrap(),
+                TOKEN.to_vec(),
+                vec![TOKEN.to_vec(), SECRET.to_vec()],
+            ),
+            Err(ConnectorError::InvalidConfig)
+        ));
+        assert!(
+            !observer_state
+                .path()
+                .join("external-connector.sqlite3")
+                .exists()
+        );
+    }
+
+    let frame_state = tempfile::tempdir().unwrap();
+    make_private(frame_state.path());
+    let mut oversized_receipt = rig.config.clone();
+    oversized_receipt.state_dir = frame_state.path().to_path_buf();
+    oversized_receipt.limits.max_request_bytes = MAX_FRAME_BYTES;
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            oversized_receipt,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            TOKEN.to_vec(),
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+    assert!(
+        !frame_state
+            .path()
+            .join("external-connector.sqlite3")
+            .exists()
+    );
+
     let reused_credential = rig.outcome_seed.clone();
     let mut shared_secret_roles = rig.config.clone();
     shared_secret_roles.credential_token_sha256 = content_sha256(&reused_credential);
@@ -797,6 +878,24 @@ async fn signed_reconciliation_is_the_only_ambiguous_unfreeze_path() {
     let action = rig.request(IdempotencyClass::NonIdempotent);
     let ambiguous = rig.connector.execute_at(action.clone(), NOW).await.unwrap();
     let ambiguous_digest = outcome_receipt_digest(&ambiguous).unwrap();
+    let mut oversized_observation = observation_for(&rig, &ambiguous, true);
+    mcloving_destination_observer::sign_receipt(&mut oversized_observation, &rig.observer_seed)
+        .unwrap();
+    assert_eq!(
+        rig.connector.reconcile_at(
+            ReconcileRequest {
+                schema_version: RECONCILE_REQUEST_SCHEMA_VERSION.to_owned(),
+                request_id: action.request_id,
+                expected_request_sha256: ambiguous.request_sha256.clone(),
+                expected_ambiguous_receipt_sha256: ambiguous_digest.clone(),
+                observed_effect: true,
+                observation_receipt: oversized_observation,
+                audit_provenance: "x".repeat(rig.config.limits.max_request_bytes),
+            },
+            NOW + 500,
+        ),
+        Err(ConnectorError::OversizedRequest)
+    );
     let mut stale_observation = observation_for(&rig, &ambiguous, true);
     stale_observation.destination_observed_at_unix_ms = NOW;
     stale_observation.captured_at_unix_ms = NOW;
@@ -947,6 +1046,25 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
     let replayer =
         ShadowReplayer::new_loopback_test(config.clone(), outcome_key.clone(), replay_seed.clone())
             .unwrap();
+    let malformed_key = vec![7; 31];
+    let malformed_state = tempfile::tempdir().unwrap();
+    make_private(malformed_state.path());
+    let mut malformed_key_config = config.clone();
+    malformed_key_config.state_dir = malformed_state.path().to_path_buf();
+    malformed_key_config.connector_receipt_key_sha256 = content_sha256(&malformed_key);
+    malformed_key_config
+        .connector_binding
+        .outcome_signing_public_key_sha256 = content_sha256(&malformed_key);
+    assert!(matches!(
+        ShadowReplayer::new_loopback_test(malformed_key_config, malformed_key, replay_seed.clone(),),
+        Err(ConnectorError::InvalidConfig)
+    ));
+    assert!(
+        !malformed_state
+            .path()
+            .join("external-shadow-replay.sqlite3")
+            .exists()
+    );
     let mut shared_key_config = config.clone();
     shared_key_config.replay_signing_seed_sha256 = content_sha256(&rig.outcome_seed);
     shared_key_config.replay_signing_public_key_sha256 = content_sha256(&outcome_key);
