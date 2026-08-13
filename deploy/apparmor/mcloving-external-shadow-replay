@@ -1,10 +1,13 @@
 # The shadow replay process must consume only signed connector evidence. It is
-# intentionally otherwise unconfined by this profile so deployment filesystem
-# policy remains independent, but all network families are explicitly denied.
-# Deployment opts in with aa-exec and the protected gate proves denial live.
+# uses an enforcing profile that leaves file access and inherited execution to
+# deployment filesystem policy while explicitly denying every network family.
+# Deployment opts in with aa-exec and the protected gate proves the live label
+# and denial.
 abi <abi/4.0>,
 #include <tunables/global>
 
-profile mcloving-external-shadow-replay flags=(unconfined) {
+profile mcloving-external-shadow-replay {
+  file,
+  /** ix,
   deny network,
 }

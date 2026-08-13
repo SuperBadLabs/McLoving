@@ -23,7 +23,10 @@ The package ships two distinct standalone strict-NDJSON processes:
   replays its confidentiality-safe typed truth exactly once into the
   deny-authority shadow. Deployment enters the named
   `mcloving-external-shadow-replay` AppArmor profile, whose explicit network
-  denial is exercised by a protected live probe.
+  denial is exercised by a protected live probe. The profile is enforcing—not
+  AppArmor's allow-everything `unconfined`, `default_allow`, or `complain`
+  mode—and grants broad file/inherited-execution access only so filesystem
+  policy remains a separate deployment boundary.
 
 The effectful connector, independently deployed `OBS-001` destination observer,
 and shadow replayer use distinct service, configuration, request, credential,
@@ -213,8 +216,9 @@ connector is rejected.
 
 The shadow loader applies the same short-lived signed live-runtime attestation
 check as the effectful loader before reading its replay signing seed or opening
-state. The AppArmor policy remains an independent kernel-enforced denial of all
-network families. Shadow construction requires its connector-receipt,
+state. The AppArmor probe first verifies the live named non-complain label and
+then requires the kernel to reject an IPv4 stream socket with permission denied;
+the policy source denies all network families. Shadow construction requires its connector-receipt,
 replay-signing, and runtime-attestation public keys to be pairwise distinct, so
 deny-authority compromise cannot mint connector outcomes or attest a substituted
 runtime. The shadow ledger is fenced to the complete canonical shadow
