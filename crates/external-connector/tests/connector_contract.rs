@@ -34,6 +34,7 @@ enum Mode {
     Secret,
     PercentEncodedSecret,
     PercentEncodedBase64Secret,
+    Base64AliasSecret,
     Malformed,
     Denied,
     SignedFailure,
@@ -347,6 +348,22 @@ async fn destination(
             Value::String("b%6DV2ZXItcHVibGlzaC1jb25uZWN0b3Itc2VjcmV0".to_owned()),
         );
     }
+    if matches!(state.mode, Mode::Base64AliasSecret) {
+        let mut alias = BASE64.encode(TOKEN).into_bytes();
+        let content_end = alias.iter().position(|byte| *byte == b'=').unwrap();
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let last = content_end - 1;
+        let canonical_index = alphabet
+            .iter()
+            .position(|byte| *byte == alias[last])
+            .unwrap();
+        assert_eq!(canonical_index & 0b11, 0);
+        alias[last] = alphabet[canonical_index | 0b01];
+        body.public_values.insert(
+            "url".to_owned(),
+            Value::String(String::from_utf8(alias).unwrap()),
+        );
+    }
     let mut response = SignedDestinationOutcome {
         body,
         signature_base64: String::new(),
@@ -468,6 +485,7 @@ async fn malformed_substituted_and_secret_bearing_outcomes_fail_closed() {
         (Mode::Secret, "confidentiality_denied"),
         (Mode::PercentEncodedSecret, "confidentiality_denied"),
         (Mode::PercentEncodedBase64Secret, "confidentiality_denied"),
+        (Mode::Base64AliasSecret, "confidentiality_denied"),
     ] {
         let rig = Rig::new(mode, IdempotencyClass::ExternallyIdempotent).await;
         let receipt = rig

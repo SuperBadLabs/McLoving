@@ -3,13 +3,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{
-    Engine as _,
-    engine::general_purpose::{
-        STANDARD as BASE64, STANDARD_NO_PAD as BASE64_NO_PAD, URL_SAFE as BASE64_URL_SAFE,
-        URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD,
-    },
-};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde_json::Value;
 use url::Url;
@@ -1306,11 +1299,44 @@ fn contains_secret_representation(raw: &[u8], marker: &[u8]) -> bool {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     contains(raw, marker)
-        || contains(raw, BASE64.encode(marker).as_bytes())
-        || contains(raw, BASE64_NO_PAD.encode(marker).as_bytes())
-        || contains(raw, BASE64_URL_SAFE.encode(marker).as_bytes())
-        || contains(raw, BASE64_URL_SAFE_NO_PAD.encode(marker).as_bytes())
+        || contains_base64_alias(raw, marker)
         || contains_ascii_case_insensitive(raw, hex.as_bytes())
+}
+
+fn contains_base64_alias(raw: &[u8], marker: &[u8]) -> bool {
+    let Some(bit_len) = marker.len().checked_mul(8) else {
+        return false;
+    };
+    let Some(content_len) = bit_len.checked_add(5).map(|bits| bits / 6) else {
+        return false;
+    };
+    content_len != 0
+        && raw
+            .windows(content_len)
+            .any(|window| base64_alias_decodes_to(window, marker))
+}
+
+fn base64_alias_decodes_to(encoded: &[u8], expected: &[u8]) -> bool {
+    let mut pending = 0_u32;
+    let mut pending_bits = 0_u8;
+    let mut output_index = 0_usize;
+    for byte in encoded {
+        let Some(value) = base64_value(*byte) else {
+            return false;
+        };
+        pending = (pending << 6) | u32::from(value);
+        pending_bits += 6;
+        if pending_bits >= 8 {
+            pending_bits -= 8;
+            if expected.get(output_index).copied() != Some(((pending >> pending_bits) & 0xff) as u8)
+            {
+                return false;
+            }
+            output_index += 1;
+            pending &= (1_u32 << pending_bits) - 1;
+        }
+    }
+    output_index == expected.len()
 }
 
 fn percent_decode_once(raw: &[u8]) -> Vec<u8> {
