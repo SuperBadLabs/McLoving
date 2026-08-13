@@ -1218,29 +1218,46 @@ impl Store {
             }
             let expected_fork =
                 observation.head_repository_identity != observation.repository_identity;
-            let existing =
-                sqlx::query_as::<_, (Uuid, String, String, String, Option<i64>, String, bool)>(
-                    "SELECT child_pipeline_id, repository_identity, ref_kind, ref_name,
+            let existing = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    Uuid,
+                    String,
+                    String,
+                    String,
+                    Option<i64>,
+                    String,
+                    bool,
+                ),
+            >(
+                "SELECT child_key, child_pipeline_id, repository_identity, ref_kind, ref_name,
                         pull_request_number, head_repository_identity, is_fork
                  FROM discovery_children
-                 WHERE organization_id = $1 AND parent_id = $2 AND child_key = $3
+                 WHERE organization_id = $1 AND parent_id = $2
+                   AND (child_key = $3 OR child_pipeline_id = $4)
                  FOR UPDATE",
-                )
-                .bind(input.organization_id)
-                .bind(input.parent_id)
-                .bind(&observation.child_key)
-                .fetch_optional(&mut *tx)
-                .await?;
-            if existing.as_ref().is_some_and(|existing| {
-                existing.0 != observation.child_pipeline_id
-                    || existing.1 != observation.repository_identity
-                    || existing.2 != observation.ref_kind.as_str()
-                    || existing.3 != observation.ref_name
-                    || existing.4 != observation.pull_request_number
-                    || existing.5 != observation.head_repository_identity
-                    || existing.6 != expected_fork
-            }) {
-                return conflict("discovery child identity was substituted under an existing key");
+            )
+            .bind(input.organization_id)
+            .bind(input.parent_id)
+            .bind(&observation.child_key)
+            .bind(observation.child_pipeline_id)
+            .fetch_all(&mut *tx)
+            .await?;
+            match existing.as_slice() {
+                [] => {}
+                [existing]
+                    if existing.0 == observation.child_key
+                        && existing.1 == observation.child_pipeline_id
+                        && existing.2 == observation.repository_identity
+                        && existing.3 == observation.ref_kind.as_str()
+                        && existing.4 == observation.ref_name
+                        && existing.5 == observation.pull_request_number
+                        && existing.6 == observation.head_repository_identity
+                        && existing.7 == expected_fork => {}
+                [_] | [_, ..] => {
+                    return conflict("discovery child key or pipeline identity was substituted");
+                }
             }
             let authorized = *disposition == DiscoveryObservationDisposition::Active;
             let observation_sha256 = observation_digest(
@@ -1286,7 +1303,7 @@ impl Store {
             .bind(observation_sha256.as_slice())
             .execute(&mut *tx)
             .await?;
-            match (*disposition, existing.is_some()) {
+            match (*disposition, !existing.is_empty()) {
                 (DiscoveryObservationDisposition::Filtered, true) => {
                     upsert_child(
                         &mut tx,

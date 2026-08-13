@@ -464,6 +464,23 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
         Err(StoreError::DiscoveryConflict(_))
     ));
 
+    let mut pipeline_identity_reuse = branch.clone();
+    pipeline_identity_reuse.child_key = "mcloving:branch:alias".to_owned();
+    let pipeline_identity_substitution = scan(
+        &parent,
+        "scan-pipeline-identity-substitution",
+        DiscoveryScanSource::Webhook,
+        Some("github-delivery-pipeline-identity-substitution"),
+        2,
+        vec![pipeline_identity_reuse],
+    );
+    assert!(matches!(
+        store
+            .reconcile_discovery_scan(&pipeline_identity_substitution)
+            .await,
+        Err(StoreError::DiscoveryConflict(_))
+    ));
+
     let mut updated_branch = branch.clone();
     updated_branch.revision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
     updated_branch.provenance_sha256 = digest("updated-provenance");

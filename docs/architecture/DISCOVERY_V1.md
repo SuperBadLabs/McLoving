@@ -102,9 +102,9 @@ Repository, branch, PR, and Jenkinsfile filters are evaluated before admission.
 An origin ref is trusted. A fork is trusted only under the configured closed
 policy; an admitted but untrusted fork becomes `quarantined`, never `active`.
 Filtered observations remain immutable audit/transfer evidence but create no
-child. An existing child key cannot change its
-pipeline, repository, ref, PR, head-repository, or fork identity. Such a
-substitution aborts the whole scan.
+child. Neither an existing child key nor its pipeline UUID can be rebound; a
+key/UUID cross-pair or any change to repository, ref, PR, head-repository, or
+fork identity aborts the whole scan as a domain conflict before an insert.
 
 ## Child and orphan state
 
