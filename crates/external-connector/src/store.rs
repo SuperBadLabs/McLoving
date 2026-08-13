@@ -65,6 +65,12 @@ pub(crate) struct RuntimeActivation<'a> {
     pub(crate) max_history: usize,
 }
 
+pub(crate) struct ClaimAuthorityAdmission {
+    pub(crate) not_before_unix_ms: i64,
+    pub(crate) deadline_unix_ms: i64,
+    pub(crate) fixed_time_unix_ms: Option<i64>,
+}
+
 impl ConnectorStore {
     pub(crate) fn open(
         state_dir: &Path,
@@ -292,7 +298,7 @@ impl ConnectorStore {
         scope_key: &str,
         class: IdempotencyClass,
         max_attempts: u8,
-        admit_new: bool,
+        authority: ClaimAuthorityAdmission,
     ) -> Result<Claim, ConnectorError> {
         let tx = self
             .connection
@@ -379,7 +385,10 @@ impl ConnectorStore {
             });
         }
 
-        if !admit_new {
+        let admission_time = authority.fixed_time_unix_ms.map_or_else(unix_time_ms, Ok)?;
+        if admission_time < authority.not_before_unix_ms
+            || admission_time > authority.deadline_unix_ms
+        {
             return Err(ConnectorError::ExpiredAuthority);
         }
 
@@ -853,6 +862,22 @@ mod tests {
     #[cfg(not(unix))]
     fn make_private(_path: &Path) {}
 
+    fn valid_claim_authority() -> ClaimAuthorityAdmission {
+        ClaimAuthorityAdmission {
+            not_before_unix_ms: i64::MIN,
+            deadline_unix_ms: i64::MAX,
+            fixed_time_unix_ms: Some(0),
+        }
+    }
+
+    fn expired_claim_authority() -> ClaimAuthorityAdmission {
+        ClaimAuthorityAdmission {
+            not_before_unix_ms: 1,
+            deadline_unix_ms: 0,
+            fixed_time_unix_ms: Some(0),
+        }
+    }
+
     fn open_current(
         path: &Path,
         digest: &str,
@@ -937,7 +962,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::NonIdempotent,
                     2,
-                    true,
+                    valid_claim_authority(),
                 )
                 .unwrap(),
             Claim::Dispatch { attempt_count: 1 }
@@ -956,7 +981,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::NonIdempotent,
                     2,
-                    true,
+                    expired_claim_authority(),
                 )
                 .unwrap(),
             Claim::AmbiguousAfterRestart {
@@ -971,7 +996,7 @@ mod tests {
                 &"e".repeat(64),
                 IdempotencyClass::NonIdempotent,
                 2,
-                false,
+                expired_claim_authority(),
             ),
             Err(ConnectorError::ExpiredAuthority)
         ));
@@ -991,7 +1016,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::ExternallyIdempotent,
                     1,
-                    true,
+                    valid_claim_authority(),
                 )
                 .unwrap(),
             Claim::Dispatch { attempt_count: 1 }
@@ -1007,7 +1032,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::ExternallyIdempotent,
                     1,
-                    true,
+                    expired_claim_authority(),
                 )
                 .unwrap(),
             Claim::RetryBudgetExhausted { attempt_count: 1 }
@@ -1026,7 +1051,7 @@ mod tests {
                 &"c".repeat(64),
                 IdempotencyClass::NonIdempotent,
                 1,
-                true,
+                valid_claim_authority(),
             ),
             Err(ConnectorError::CapacityExceeded)
         ));
@@ -1046,7 +1071,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::ExternallyIdempotent,
                     3,
-                    true,
+                    valid_claim_authority(),
                 )
                 .unwrap(),
             Claim::Dispatch { attempt_count: 1 }
@@ -1062,7 +1087,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::ExternallyIdempotent,
                     3,
-                    true,
+                    valid_claim_authority(),
                 )
                 .unwrap(),
             Claim::Dispatch { attempt_count: 2 }
@@ -1081,7 +1106,7 @@ mod tests {
                 &"e".repeat(64),
                 IdempotencyClass::NonIdempotent,
                 1,
-                true,
+                valid_claim_authority(),
             ),
             Err(ConnectorError::CapacityExceeded)
         ));
@@ -1100,7 +1125,7 @@ mod tests {
                 &scope,
                 IdempotencyClass::NonIdempotent,
                 1,
-                true,
+                valid_claim_authority(),
             )
             .unwrap();
         assert!(matches!(
@@ -1128,7 +1153,7 @@ mod tests {
                 &scope,
                 IdempotencyClass::NonIdempotent,
                 1,
-                true,
+                valid_claim_authority(),
             ),
             Err(ConnectorError::EffectPending)
         ));

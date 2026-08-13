@@ -14,7 +14,10 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde_json::Value;
 use url::Url;
 
-use crate::store::{Claim, ConnectorStore, RuntimeActivation, acquire_connector_lock, scope_key};
+use crate::store::{
+    Claim, ClaimAuthorityAdmission, ConnectorStore, RuntimeActivation, acquire_connector_lock,
+    scope_key,
+};
 use crate::{
     ActionRequest, ConnectorConfig, ConnectorError, DESTINATION_RESPONSE_SCHEMA_VERSION,
     DestinationActionEnvelope, OUTCOME_RECEIPT_SCHEMA_VERSION, OutcomeReceipt, OutcomeStatus,
@@ -197,6 +200,12 @@ impl ExternalConnector {
             request.effect_fence,
             &request.effect_key,
         );
+        let timeout = i64::try_from(self.config.limits.timeout_ms)
+            .map_err(|_| ConnectorError::InvalidConfig)?;
+        let authority_admission_deadline = request
+            .expires_at_unix_ms
+            .min(self.config.credential_grant_expires_unix_ms)
+            .saturating_sub(timeout);
         loop {
             let claim = self
                 .store
@@ -208,8 +217,11 @@ impl ExternalConnector {
                     &scope,
                     request.idempotency_class,
                     self.config.limits.max_attempts,
-                    self.validate_transport_window(&request, now_unix_ms)
-                        .is_ok(),
+                    ClaimAuthorityAdmission {
+                        not_before_unix_ms: request.requested_at_unix_ms,
+                        deadline_unix_ms: authority_admission_deadline,
+                        fixed_time_unix_ms: (!resample_system_clock).then_some(now_unix_ms),
+                    },
                 )?;
             let attempt_count = match claim {
                 Claim::Replay(receipt) => {
