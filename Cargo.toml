@@ -12,6 +12,7 @@ members = [
   "crates/dependency-resolver",
   "crates/destination-observer",
   "crates/domain",
+  "crates/external-connector",
   "crates/execution-spine",
   "crates/input-adapter",
   "crates/jenkins-compiler-admission",
