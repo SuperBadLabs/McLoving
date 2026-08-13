@@ -1,7 +1,7 @@
 # Public API v1
 
-Status: implemented by UX-002 and extended by CONSUMER-001, ADMIN-001, and
-JOBSTATE-001.
+Status: implemented by UX-002 and extended by CONSUMER-001, ADMIN-001,
+JOBSTATE-001, TRIG-001, and DISC-001.
 
 The Rust CLI is an HTTP client and has no privileged database or controller
 shortcut. Every protected request requires `Authorization: Bearer <token>`.
@@ -58,6 +58,18 @@ return the original record, divergent key reuse conflicts, and stale or future
 preconditions fail without changing state. The complete runtime fence is
 defined in `PIPELINE_OPERATIONAL_STATE_V1.md`.
 
+Discovery configuration and reconciliation are typed public contracts. Parent
+GET/PUT binds an immutable generation and ETag; PUT requires project-configure,
+`If-Match`, and `Idempotency-Key`. The scan route requires project-configure
+and accepts only a digest-bound webhook delta or complete periodic/recovery
+snapshot; its dedicated 128 MiB transport cap admits the complete documented
+4,096-observation denominator. Child listing requires project-view. Exact storage, filtering,
+quarantine, orphan, and transfer semantics are defined in `DISCOVERY_V1.md`.
+Discovery receipt and child digests use the API-wide lowercase hexadecimal
+encoding rather than exposing internal byte arrays. Child listing returns an
+object with `items` and nullable `next_after`; it uses a stable, exclusive
+child-key cursor, defaults to 50 rows, and rejects limits outside 1 through 200.
+
 The versioned routes are:
 
 - `GET /api/v1/organizations/{organization}/auth/oidc/{provider}/start?redirect_uri=...`
@@ -66,6 +78,10 @@ The versioned routes are:
 - `POST /api/v1/organizations/{organization}/auth/session/logout`
 - `GET /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/state`
 - `PUT /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/state`
+- `GET /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/discovery/{parent}`
+- `PUT /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/discovery/{parent}`
+- `POST /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/discovery/{parent}/scans`
+- `GET /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/discovery/{parent}/children?after=...&limit=...`
 - `POST /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/builds`
 - `GET /api/v1/organizations/{organization}/projects/{project}/builds`
 - `GET /api/v1/organizations/{organization}/projects/{project}/builds/{build}`

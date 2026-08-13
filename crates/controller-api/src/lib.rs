@@ -23,12 +23,16 @@ use axum::{Json, Router};
 use mcloving_controller_store::{
     ApprovalView, ArtifactMetadata, AuditPage, BuildGraph, BuildPage, ComponentCursor,
     ComponentPage, ComponentPutOutcome, ComponentRecord, ComponentWrite, CredentialGrantView,
-    DagDependency, DagNodeKind, DependencyCondition, MAX_OBJECT_RETENTION_SECONDS, NewDagBuild,
-    NewDagNode, NewEnvironmentApproval, NewTriggerDelivery, ObjectKind, ObjectStatus,
-    PipelineOperationalStateRecord, PipelineOperationalStateTransition,
-    PipelineOperationalStateTransitionOutcome, PipelinePage, PipelinePutOutcome, PipelineRecord,
-    PipelineTrigger, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite, RetryDecision,
-    Store, StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TestReportView, TriggerDelivery,
+    DagDependency, DagNodeKind, DependencyCondition, DiscoveredRefKind, DiscoveryChild,
+    DiscoveryChildState, DiscoveryObservationWrite, DiscoveryParent, DiscoveryParentKind,
+    DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite, DiscoveryScanOutcome,
+    DiscoveryScanReceipt, DiscoveryScanSource, DiscoveryScanWrite, ForkTrustStrategy,
+    MAX_OBJECT_RETENTION_SECONDS, NewDagBuild, NewDagNode, NewEnvironmentApproval,
+    NewTriggerDelivery, ObjectKind, ObjectStatus, OrphanPolicy, PipelineOperationalStateRecord,
+    PipelineOperationalStateTransition, PipelineOperationalStateTransitionOutcome, PipelinePage,
+    PipelinePutOutcome, PipelineRecord, PipelineTrigger, PipelineTriggerState,
+    PipelineTriggerWrite, PipelineWrite, PullRequestDiscoveryStrategy, RetryDecision, Store,
+    StoreError, TRIGGER_DAG_IDEMPOTENCY_PREFIX, TestReportView, TriggerDelivery,
     TriggerDeliveryAdmission, TriggerDeliveryClaimOutcome, TriggerDeliveryClaimRequest,
     TriggerDeliveryDagAdmission, TriggerDeliveryDagAdmissionRequest, TriggerDeliveryFailure,
     TriggerDeliveryFailureRequest, TriggerDeliveryRedrive, TriggerKind, TriggerPutOutcome,
@@ -52,9 +56,11 @@ pub const TRUST_POOL_HEADER: &str = "mcloving-trust-pool";
 pub const PLATFORM_HEADER: &str = "mcloving-platform";
 pub const ARTIFACT_NAME_HEADER: &str = "mcloving-artifact-name";
 pub const ARTIFACT_AGENT_AUTHORIZATION_HEADER: &str = "mcloving-agent-authorization";
+pub const MAX_DISCOVERY_SCAN_BODY_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
 const DEFAULT_PLATFORM: &str = "linux";
 const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
+const MAX_DISCOVERY_SCAN_OBSERVATIONS: usize = 4096;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -307,6 +313,16 @@ pub fn router(state: ApiState) -> Router {
             post(stage_artifact),
         )
         .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
+    let discovery_scan = Router::new()
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans",
+            post(reconcile_discovery_scan),
+        )
+        // A maximally populated accepted observation contains fewer than 30 KiB
+        // even with six-byte JSON escaping for every bounded string byte and
+        // escaped field names. 4,096 observations plus the bounded envelope
+        // therefore fit below this conservative 128 MiB transport ceiling.
+        .route_layer(DefaultBodyLimit::max(MAX_DISCOVERY_SCAN_BODY_BYTES));
     static_ui_router()
         .route("/openapi.json", get(openapi))
         .route(
@@ -364,6 +380,15 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive",
             post(redrive_trigger_event),
+        )
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}",
+            get(get_discovery_parent).put(put_discovery_parent),
+        )
+        .merge(discovery_scan)
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children",
+            get(list_discovery_children),
         )
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/components",
@@ -575,6 +600,171 @@ pub struct TriggerRedriveRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryParentRequest {
+    pub kind: DiscoveryParentKind,
+    pub state: DiscoveryParentState,
+    pub implementation_sha256: String,
+    pub protocol_version: String,
+    pub configuration_sha256: String,
+    pub provider: String,
+    pub provider_identity: String,
+    pub organization_identity: Option<String>,
+    pub repositories: Vec<String>,
+    #[serde(default)]
+    pub branch_includes: Vec<String>,
+    #[serde(default)]
+    pub branch_excludes: Vec<String>,
+    pub pull_request_strategy: PullRequestDiscoveryStrategy,
+    pub fork_trust_strategy: ForkTrustStrategy,
+    #[serde(default)]
+    pub trusted_fork_repositories: Vec<String>,
+    pub jenkinsfile_path: String,
+    pub child_configuration_policy_sha256: String,
+    pub orphan_policy: OrphanPolicy,
+    pub authorization_generation: i64,
+    pub authorization_policy_sha256: String,
+    pub trigger_id: Uuid,
+    pub trigger_generation: i64,
+    pub trigger_configuration_sha256: String,
+    pub source_implementation_sha256: String,
+    pub source_protocol_version: String,
+    pub source_configuration_sha256: String,
+    pub restored_from_generation: Option<i64>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DiscoveryParentResponse {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub parent_id: Uuid,
+    pub generation: i64,
+    pub kind: DiscoveryParentKind,
+    pub state: DiscoveryParentState,
+    pub implementation_sha256: String,
+    pub protocol_version: String,
+    pub configuration_sha256: String,
+    pub provider: String,
+    pub provider_identity: String,
+    pub organization_identity: Option<String>,
+    pub repositories: Vec<String>,
+    pub branch_includes: Vec<String>,
+    pub branch_excludes: Vec<String>,
+    pub pull_request_strategy: PullRequestDiscoveryStrategy,
+    pub fork_trust_strategy: ForkTrustStrategy,
+    pub trusted_fork_repositories: Vec<String>,
+    pub jenkinsfile_path: String,
+    pub child_configuration_policy_sha256: String,
+    pub orphan_policy: OrphanPolicy,
+    pub authorization_generation: i64,
+    pub authorization_policy_sha256: String,
+    pub trigger_id: Uuid,
+    pub trigger_generation: i64,
+    pub trigger_configuration_sha256: String,
+    pub source_implementation_sha256: String,
+    pub source_protocol_version: String,
+    pub source_configuration_sha256: String,
+    pub restored_from_generation: Option<i64>,
+    pub audit_sequence: i64,
+    pub audit_event_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryObservationRequest {
+    pub child_key: String,
+    pub child_pipeline_id: Uuid,
+    pub repository_identity: String,
+    pub ref_kind: DiscoveredRefKind,
+    pub ref_name: String,
+    pub pull_request_number: Option<i64>,
+    pub head_repository_identity: String,
+    pub present: bool,
+    pub revision: String,
+    pub provenance_sha256: String,
+    pub jenkinsfile_path: String,
+    pub jenkinsfile_sha256: String,
+    pub child_configuration_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryScanRequest {
+    pub parent_generation: i64,
+    pub scan_id: String,
+    pub source: DiscoveryScanSource,
+    pub source_event_id: Option<String>,
+    pub source_cursor: i64,
+    pub complete_snapshot: bool,
+    pub provider_snapshot_sha256: String,
+    pub request_sha256: String,
+    pub observations: Vec<DiscoveryObservationRequest>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryScanResponse {
+    pub receipt: DiscoveryScanReceiptResponse,
+    pub replayed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryScanReceiptResponse {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub parent_id: Uuid,
+    pub parent_generation: i64,
+    pub scan_id: String,
+    pub source: DiscoveryScanSource,
+    pub source_event_id: Option<String>,
+    pub source_cursor: i64,
+    pub complete_snapshot: bool,
+    pub provider_snapshot_sha256: String,
+    pub request_sha256: String,
+    pub observation_count: usize,
+    pub selected_count: usize,
+    pub active_count: usize,
+    pub quarantined_count: usize,
+    pub retired_count: usize,
+    pub audit_sequence: i64,
+    pub audit_event_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryChildResponse {
+    pub organization_id: Uuid,
+    pub project_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub parent_id: Uuid,
+    pub child_key: String,
+    pub child_pipeline_id: Uuid,
+    pub repository_identity: String,
+    pub ref_kind: DiscoveredRefKind,
+    pub ref_name: String,
+    pub pull_request_number: Option<i64>,
+    pub head_repository_identity: String,
+    pub is_fork: bool,
+    pub state: DiscoveryChildState,
+    pub state_generation: i64,
+    pub revision: String,
+    pub provenance_sha256: String,
+    pub jenkinsfile_path: String,
+    pub jenkinsfile_sha256: String,
+    pub child_configuration_sha256: String,
+    pub parent_generation: i64,
+    pub source_cursor: i64,
+    pub last_scan_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryChildPageResponse {
+    pub items: Vec<DiscoveryChildResponse>,
+    pub next_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PipelineUpsertRequest {
     pub slug: String,
     pub source: String,
@@ -674,6 +864,7 @@ fn openapi_document() -> Value {
     let project = path_parameter("project_id", "uuid");
     let pipeline = path_parameter("pipeline_id", "uuid");
     let trigger = path_parameter("trigger_id", "uuid");
+    let discovery_parent = path_parameter("parent_id", "uuid");
     let delivery = path_parameter("delivery_id", "string");
     let digest = path_parameter("digest", "sha256");
     let build = path_parameter("build_id", "uuid");
@@ -707,6 +898,7 @@ fn openapi_document() -> Value {
             {"name": "authentication"},
             {"name": "pipelines"},
             {"name": "triggers"},
+            {"name": "discovery"},
             {"name": "components"},
             {"name": "builds"},
             {"name": "evidence"},
@@ -814,6 +1006,22 @@ fn openapi_document() -> Value {
                 "post": trigger_event_operation(
                     "redriveTriggerDelivery", "Explicitly redrive one dead-lettered trigger delivery", "TriggerRedriveRequest"
                 )
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), discovery_parent.clone()],
+                "get": api_operation(
+                    "getDiscoveryParent", "discovery", "Read the current immutable discovery-parent generation", "200",
+                    Vec::new(), None
+                ),
+                "put": put_discovery_parent_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), discovery_parent.clone()],
+                "post": discovery_scan_operation()
+            },
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children": {
+                "parameters": [organization.clone(), project.clone(), pipeline.clone(), discovery_parent],
+                "get": discovery_children_operation()
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds": {
                 "parameters": [organization.clone(), project.clone(), pipeline],
@@ -1074,6 +1282,11 @@ fn openapi_document() -> Value {
                     },
                     "additionalProperties": false
                 },
+                "DiscoveryParentRequest": discovery_parent_request_schema(),
+                "DiscoveryScanRequest": discovery_scan_request_schema(),
+                "DiscoveryObservationRequest": discovery_observation_request_schema(),
+                "DiscoveryChild": discovery_child_schema(),
+                "DiscoveryChildPage": discovery_child_page_schema(),
                 "RefreshRequest": {
                     "type": "object",
                     "required": ["refresh_token"],
@@ -1164,6 +1377,168 @@ fn pipeline_trigger_request_schema() -> Value {
                 "remote_api": "#/components/schemas/RemoteApiPipelineTriggerRequest"
             }
         }
+    })
+}
+
+fn discovery_parent_request_schema() -> Value {
+    let digest = json!({"type": "string", "pattern": "^[0-9a-f]{64}$"});
+    let strings = json!({
+        "type": "array", "maxItems": 4096, "uniqueItems": true,
+        "items": {"type": "string", "minLength": 1, "maxLength": 512}
+    });
+    json!({
+        "type": "object",
+        "required": [
+            "kind", "state", "implementation_sha256", "protocol_version",
+            "configuration_sha256", "provider", "provider_identity", "repositories",
+            "pull_request_strategy", "fork_trust_strategy", "jenkinsfile_path",
+            "child_configuration_policy_sha256", "orphan_policy",
+            "authorization_generation", "authorization_policy_sha256", "trigger_id",
+            "trigger_generation", "trigger_configuration_sha256",
+            "source_implementation_sha256", "source_protocol_version",
+            "source_configuration_sha256", "reason"
+        ],
+        "properties": {
+            "kind": {"type": "string", "enum": ["multibranch_pipeline", "organization_folder"]},
+            "state": {"type": "string", "enum": ["enabled", "quiesced"]},
+            "implementation_sha256": digest.clone(),
+            "protocol_version": {"type": "string", "minLength": 1, "maxLength": 128},
+            "configuration_sha256": digest.clone(),
+            "provider": {"type": "string", "enum": ["github", "gitlab", "bitbucket", "gitea"]},
+            "provider_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "organization_identity": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
+            "repositories": strings.clone(),
+            "branch_includes": strings.clone(),
+            "branch_excludes": strings.clone(),
+            "pull_request_strategy": {"type": "string", "enum": ["none", "origin_only", "origin_and_forks"]},
+            "fork_trust_strategy": {"type": "string", "enum": ["none", "named_repositories", "all"]},
+            "trusted_fork_repositories": strings,
+            "jenkinsfile_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "child_configuration_policy_sha256": digest.clone(),
+            "orphan_policy": {"type": "string", "enum": ["retain", "retire"]},
+            "authorization_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "authorization_policy_sha256": digest.clone(),
+            "trigger_id": {"type": "string", "format": "uuid"},
+            "trigger_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "trigger_configuration_sha256": digest.clone(),
+            "source_implementation_sha256": digest.clone(),
+            "source_protocol_version": {"type": "string", "minLength": 1, "maxLength": 128},
+            "source_configuration_sha256": digest,
+            "restored_from_generation": {"type": ["integer", "null"], "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn discovery_observation_request_schema() -> Value {
+    let digest = json!({"type": "string", "pattern": "^[0-9a-f]{64}$"});
+    json!({
+        "type": "object",
+        "required": [
+            "child_key", "child_pipeline_id", "repository_identity", "ref_kind",
+            "ref_name", "head_repository_identity", "present", "revision",
+            "provenance_sha256", "jenkinsfile_path", "jenkinsfile_sha256",
+            "child_configuration_sha256"
+        ],
+        "properties": {
+            "child_key": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "child_pipeline_id": {"type": "string", "format": "uuid"},
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "ref_kind": {"type": "string", "enum": ["branch", "pull_request"]},
+            "ref_name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "pull_request_number": {"type": ["integer", "null"], "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "head_repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "present": {"type": "boolean"},
+            "revision": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,128}$"},
+            "provenance_sha256": digest.clone(),
+            "jenkinsfile_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "jenkinsfile_sha256": digest.clone(),
+            "child_configuration_sha256": digest
+        },
+        "additionalProperties": false
+    })
+}
+
+fn discovery_scan_request_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": [
+            "parent_generation", "scan_id", "source", "source_cursor",
+            "complete_snapshot", "provider_snapshot_sha256", "request_sha256",
+            "observations"
+        ],
+        "properties": {
+            "parent_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "scan_id": {"type": "string", "minLength": 1, "maxLength": 512},
+            "source": {"type": "string", "enum": ["webhook", "periodic", "recovery"]},
+            "source_event_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
+            "source_cursor": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "complete_snapshot": {"type": "boolean"},
+            "provider_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "observations": {
+                "type": "array", "maxItems": MAX_DISCOVERY_SCAN_OBSERVATIONS,
+                "items": {"$ref": "#/components/schemas/DiscoveryObservationRequest"}
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn discovery_child_schema() -> Value {
+    let digest = json!({"type": "string", "pattern": "^[0-9a-f]{64}$"});
+    json!({
+        "type": "object",
+        "required": [
+            "organization_id", "project_id", "pipeline_id", "parent_id", "child_key",
+            "child_pipeline_id", "repository_identity", "ref_kind", "ref_name",
+            "pull_request_number", "head_repository_identity", "is_fork", "state",
+            "state_generation", "revision", "provenance_sha256", "jenkinsfile_path",
+            "jenkinsfile_sha256", "child_configuration_sha256", "parent_generation",
+            "source_cursor", "last_scan_id"
+        ],
+        "properties": {
+            "organization_id": {"type": "string", "format": "uuid"},
+            "project_id": {"type": "string", "format": "uuid"},
+            "pipeline_id": {"type": "string", "format": "uuid"},
+            "parent_id": {"type": "string", "format": "uuid"},
+            "child_key": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "child_pipeline_id": {"type": "string", "format": "uuid"},
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "ref_kind": {"type": "string", "enum": ["branch", "pull_request"]},
+            "ref_name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "pull_request_number": {"type": ["integer", "null"], "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "head_repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "is_fork": {"type": "boolean"},
+            "state": {"type": "string", "enum": ["active", "quarantined", "retired"]},
+            "state_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "revision": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,128}$"},
+            "provenance_sha256": digest.clone(),
+            "jenkinsfile_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "jenkinsfile_sha256": digest.clone(),
+            "child_configuration_sha256": digest,
+            "parent_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "source_cursor": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "last_scan_id": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn discovery_child_page_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["items", "next_after"],
+        "properties": {
+            "items": {
+                "type": "array",
+                "maxItems": mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE,
+                "items": {"$ref": "#/components/schemas/DiscoveryChild"}
+            },
+            "next_after": {"type": ["string", "null"], "maxLength": 1024}
+        },
+        "additionalProperties": false
     })
 }
 
@@ -1654,6 +2029,65 @@ fn put_pipeline_trigger_operation() -> Value {
         "description": "Trigger generation precondition failed",
         "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
     });
+    operation
+}
+
+fn put_discovery_parent_operation() -> Value {
+    let mut operation = api_operation(
+        "putDiscoveryParent",
+        "discovery",
+        "Create, quiesce, restore, or revise an immutable discovery-parent generation",
+        "201",
+        vec![
+            header_parameter("If-Match", true),
+            header_parameter(IDEMPOTENCY_HEADER, true),
+        ],
+        Some("DiscoveryParentRequest"),
+    );
+    operation["responses"]["200"] = json!({
+        "description": "Updated discovery generation or exact idempotent replay",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation["responses"]["412"] = json!({
+        "description": "Discovery generation precondition failed",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+    });
+    operation
+}
+
+fn discovery_scan_operation() -> Value {
+    let mut operation = api_operation(
+        "reconcileDiscoveryScan",
+        "discovery",
+        "Atomically reconcile one digest-bound webhook, periodic, or recovery scan",
+        "201",
+        Vec::new(),
+        Some("DiscoveryScanRequest"),
+    );
+    operation["requestBody"]["x-mcloving-max-body-bytes"] = json!(MAX_DISCOVERY_SCAN_BODY_BYTES);
+    operation["responses"]["200"] = json!({
+        "description": "Exact scan replay",
+        "content": {"application/json": {"schema": {"type": "object"}}}
+    });
+    operation
+}
+
+fn discovery_children_operation() -> Value {
+    let mut after = query_parameter("after", "string");
+    after["schema"]["maxLength"] = json!(1024);
+    let mut limit = query_parameter("limit", "integer");
+    limit["schema"]["minimum"] = json!(1);
+    limit["schema"]["maximum"] = json!(mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE);
+    let mut operation = api_operation(
+        "listDiscoveryChildren",
+        "discovery",
+        "List one bounded child-key page of retained discovery truth",
+        "200",
+        vec![after, limit],
+        None,
+    );
+    operation["responses"]["200"]["content"]["application/json"]["schema"] =
+        json!({"$ref": "#/components/schemas/DiscoveryChildPage"});
     operation
 }
 
@@ -2600,6 +3034,349 @@ fn trigger_response(status: StatusCode, trigger: PipelineTrigger) -> Result<Resp
     response.headers_mut().insert(
         header::ETAG,
         HeaderValue::from_str(&format!("\"{generation}\"")).map_err(internal)?,
+    );
+    Ok(response)
+}
+
+async fn get_discovery_parent(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, parent_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectView,
+    )
+    .await?;
+    let parent = state
+        .store
+        .discovery_parent(organization_id, project_id, pipeline_id, parent_id)
+        .await
+        .map_err(discovery_error)?
+        .ok_or_else(resource_not_found)?;
+    discovery_parent_response(StatusCode::OK, parent)
+}
+
+async fn put_discovery_parent(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, parent_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<DiscoveryParentRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let expected_generation = expected_revision(&headers)?;
+    let idempotency_key = required_idempotency_key(&headers)?;
+    let outcome = state
+        .store
+        .put_discovery_parent(&DiscoveryParentWrite {
+            organization_id,
+            project_id,
+            pipeline_id,
+            parent_id,
+            expected_generation,
+            kind: request.kind,
+            state: request.state,
+            implementation_sha256: parse_lowercase_hex_digest_named(
+                &request.implementation_sha256,
+                "discovery implementation",
+            )?,
+            protocol_version: request.protocol_version,
+            expected_configuration_sha256: parse_lowercase_hex_digest_named(
+                &request.configuration_sha256,
+                "discovery configuration",
+            )?,
+            provider: request.provider,
+            provider_identity: request.provider_identity,
+            organization_identity: request.organization_identity,
+            repositories: request.repositories,
+            branch_includes: request.branch_includes,
+            branch_excludes: request.branch_excludes,
+            pull_request_strategy: request.pull_request_strategy,
+            fork_trust_strategy: request.fork_trust_strategy,
+            trusted_fork_repositories: request.trusted_fork_repositories,
+            jenkinsfile_path: request.jenkinsfile_path,
+            child_configuration_policy_sha256: parse_lowercase_hex_digest_named(
+                &request.child_configuration_policy_sha256,
+                "discovery child configuration policy",
+            )?,
+            orphan_policy: request.orphan_policy,
+            authorization_generation: request.authorization_generation,
+            authorization_policy_sha256: parse_lowercase_hex_digest_named(
+                &request.authorization_policy_sha256,
+                "discovery authorization policy",
+            )?,
+            trigger_id: request.trigger_id,
+            trigger_generation: request.trigger_generation,
+            trigger_configuration_sha256: parse_lowercase_hex_digest_named(
+                &request.trigger_configuration_sha256,
+                "discovery trigger configuration",
+            )?,
+            source_implementation_sha256: parse_lowercase_hex_digest_named(
+                &request.source_implementation_sha256,
+                "discovery source implementation",
+            )?,
+            source_protocol_version: request.source_protocol_version,
+            source_configuration_sha256: parse_lowercase_hex_digest_named(
+                &request.source_configuration_sha256,
+                "discovery source configuration",
+            )?,
+            restored_from_generation: request.restored_from_generation,
+            actor_subject: principal.subject,
+            reason: request.reason,
+            idempotency_key: idempotency_key.to_owned(),
+        })
+        .await
+        .map_err(discovery_error)?;
+    match outcome {
+        DiscoveryParentPutOutcome::Created(parent) => {
+            discovery_parent_response(StatusCode::CREATED, parent)
+        }
+        DiscoveryParentPutOutcome::Revised(parent)
+        | DiscoveryParentPutOutcome::Replayed(parent) => {
+            discovery_parent_response(StatusCode::OK, parent)
+        }
+        DiscoveryParentPutOutcome::PreconditionFailed { current_generation } => Err(ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "discovery_generation_precondition_failed",
+            format!("current discovery generation is {current_generation}"),
+        )),
+    }
+}
+
+async fn reconcile_discovery_scan(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, parent_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<DiscoveryScanRequest>,
+) -> Result<Response, ApiError> {
+    let principal = authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectConfigure,
+    )
+    .await?;
+    let observations = request
+        .observations
+        .into_iter()
+        .map(|observation| {
+            Ok(DiscoveryObservationWrite {
+                child_key: observation.child_key,
+                child_pipeline_id: observation.child_pipeline_id,
+                repository_identity: observation.repository_identity,
+                ref_kind: observation.ref_kind,
+                ref_name: observation.ref_name,
+                pull_request_number: observation.pull_request_number,
+                head_repository_identity: observation.head_repository_identity,
+                present: observation.present,
+                revision: observation.revision,
+                provenance_sha256: parse_lowercase_hex_digest_named(
+                    &observation.provenance_sha256,
+                    "discovery observation provenance",
+                )?,
+                jenkinsfile_path: observation.jenkinsfile_path,
+                jenkinsfile_sha256: parse_lowercase_hex_digest_named(
+                    &observation.jenkinsfile_sha256,
+                    "discovery Jenkinsfile",
+                )?,
+                child_configuration_sha256: parse_lowercase_hex_digest_named(
+                    &observation.child_configuration_sha256,
+                    "discovery child configuration",
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let outcome = state
+        .store
+        .reconcile_discovery_scan(&DiscoveryScanWrite {
+            organization_id,
+            project_id,
+            pipeline_id,
+            parent_id,
+            expected_parent_generation: request.parent_generation,
+            scan_id: request.scan_id,
+            source: request.source,
+            source_event_id: request.source_event_id,
+            source_cursor: request.source_cursor,
+            complete_snapshot: request.complete_snapshot,
+            provider_snapshot_sha256: parse_lowercase_hex_digest_named(
+                &request.provider_snapshot_sha256,
+                "discovery provider snapshot",
+            )?,
+            observations,
+            expected_request_sha256: parse_lowercase_hex_digest_named(
+                &request.request_sha256,
+                "discovery scan request",
+            )?,
+            actor_subject: principal.subject,
+        })
+        .await
+        .map_err(discovery_error)?;
+    let (status, receipt, replayed) = match outcome {
+        DiscoveryScanOutcome::Reconciled(receipt) => (StatusCode::CREATED, receipt, false),
+        DiscoveryScanOutcome::Replayed(receipt) => (StatusCode::OK, receipt, true),
+    };
+    Ok((
+        status,
+        Json(DiscoveryScanResponse {
+            receipt: receipt.into(),
+            replayed,
+        }),
+    )
+        .into_response())
+}
+
+async fn list_discovery_children(
+    State(state): State<Arc<ApiState>>,
+    Path((organization_id, project_id, pipeline_id, parent_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    Query(query): Query<PageQuery>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(
+        &state,
+        &headers,
+        organization_id,
+        Some(project_id),
+        Action::ProjectView,
+    )
+    .await?;
+    let page = state
+        .store
+        .discovery_children(
+            organization_id,
+            project_id,
+            pipeline_id,
+            parent_id,
+            query.after.as_deref(),
+            discovery_child_page_limit(query.limit)?,
+        )
+        .await
+        .map_err(discovery_error)?;
+    Ok(Json(DiscoveryChildPageResponse {
+        items: page
+            .items
+            .into_iter()
+            .map(DiscoveryChildResponse::from)
+            .collect::<Vec<_>>(),
+        next_after: page.next_after,
+    })
+    .into_response())
+}
+
+impl From<DiscoveryScanReceipt> for DiscoveryScanReceiptResponse {
+    fn from(receipt: DiscoveryScanReceipt) -> Self {
+        Self {
+            organization_id: receipt.organization_id,
+            project_id: receipt.project_id,
+            pipeline_id: receipt.pipeline_id,
+            parent_id: receipt.parent_id,
+            parent_generation: receipt.parent_generation,
+            scan_id: receipt.scan_id,
+            source: receipt.source,
+            source_event_id: receipt.source_event_id,
+            source_cursor: receipt.source_cursor,
+            complete_snapshot: receipt.complete_snapshot,
+            provider_snapshot_sha256: hex(&receipt.provider_snapshot_sha256),
+            request_sha256: hex(&receipt.request_sha256),
+            observation_count: receipt.observation_count,
+            selected_count: receipt.selected_count,
+            active_count: receipt.active_count,
+            quarantined_count: receipt.quarantined_count,
+            retired_count: receipt.retired_count,
+            audit_sequence: receipt.audit_sequence,
+            audit_event_hash: hex(&receipt.audit_event_hash),
+        }
+    }
+}
+
+impl From<DiscoveryChild> for DiscoveryChildResponse {
+    fn from(child: DiscoveryChild) -> Self {
+        Self {
+            organization_id: child.organization_id,
+            project_id: child.project_id,
+            pipeline_id: child.pipeline_id,
+            parent_id: child.parent_id,
+            child_key: child.child_key,
+            child_pipeline_id: child.child_pipeline_id,
+            repository_identity: child.repository_identity,
+            ref_kind: child.ref_kind,
+            ref_name: child.ref_name,
+            pull_request_number: child.pull_request_number,
+            head_repository_identity: child.head_repository_identity,
+            is_fork: child.is_fork,
+            state: child.state,
+            state_generation: child.state_generation,
+            revision: child.revision,
+            provenance_sha256: hex(&child.provenance_sha256),
+            jenkinsfile_path: child.jenkinsfile_path,
+            jenkinsfile_sha256: hex(&child.jenkinsfile_sha256),
+            child_configuration_sha256: hex(&child.child_configuration_sha256),
+            parent_generation: child.parent_generation,
+            source_cursor: child.source_cursor,
+            last_scan_id: child.last_scan_id,
+        }
+    }
+}
+
+fn discovery_parent_response(
+    status: StatusCode,
+    parent: DiscoveryParent,
+) -> Result<Response, ApiError> {
+    let generation = parent.generation;
+    let mut response = (
+        status,
+        Json(DiscoveryParentResponse {
+            organization_id: parent.organization_id,
+            project_id: parent.project_id,
+            pipeline_id: parent.pipeline_id,
+            parent_id: parent.parent_id,
+            generation,
+            kind: parent.kind,
+            state: parent.state,
+            implementation_sha256: hex(&parent.implementation_sha256),
+            protocol_version: parent.protocol_version,
+            configuration_sha256: hex(&parent.configuration_sha256),
+            provider: parent.provider,
+            provider_identity: parent.provider_identity,
+            organization_identity: parent.organization_identity,
+            repositories: parent.repositories,
+            branch_includes: parent.branch_includes,
+            branch_excludes: parent.branch_excludes,
+            pull_request_strategy: parent.pull_request_strategy,
+            fork_trust_strategy: parent.fork_trust_strategy,
+            trusted_fork_repositories: parent.trusted_fork_repositories,
+            jenkinsfile_path: parent.jenkinsfile_path,
+            child_configuration_policy_sha256: hex(&parent.child_configuration_policy_sha256),
+            orphan_policy: parent.orphan_policy,
+            authorization_generation: parent.authorization_generation,
+            authorization_policy_sha256: hex(&parent.authorization_policy_sha256),
+            trigger_id: parent.trigger_id,
+            trigger_generation: parent.trigger_generation,
+            trigger_configuration_sha256: hex(&parent.trigger_configuration_sha256),
+            source_implementation_sha256: hex(&parent.source_implementation_sha256),
+            source_protocol_version: parent.source_protocol_version,
+            source_configuration_sha256: hex(&parent.source_configuration_sha256),
+            restored_from_generation: parent.restored_from_generation,
+            audit_sequence: parent.audit_sequence,
+            audit_event_hash: hex(&parent.audit_event_hash),
+        }),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{generation}\""))
+            .map_err(|_| ApiError::configuration("invalid discovery generation ETag"))?,
     );
     Ok(response)
 }
@@ -3680,6 +4457,21 @@ fn page_limit(limit: Option<u32>) -> Result<u32, ApiError> {
     Ok(limit)
 }
 
+fn discovery_child_page_limit(limit: Option<u32>) -> Result<u32, ApiError> {
+    let limit = limit.unwrap_or(50);
+    if limit == 0 || limit > mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_discovery_page_limit",
+            format!(
+                "discovery child page limit must be between 1 and {}",
+                mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+            ),
+        ));
+    }
+    Ok(limit)
+}
+
 fn parse_hex_digest_named(value: &str, kind: &'static str) -> Result<[u8; 32], ApiError> {
     if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ApiError::new(
@@ -3692,6 +4484,21 @@ fn parse_hex_digest_named(value: &str, kind: &'static str) -> Result<[u8; 32], A
     bytes
         .try_into()
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid_digest", "invalid SHA-256"))
+}
+
+fn parse_lowercase_hex_digest_named(value: &str, kind: &'static str) -> Result<[u8; 32], ApiError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_digest",
+            format!("{kind} SHA-256 must contain exactly 64 lowercase hexadecimal characters"),
+        ));
+    }
+    parse_hex_digest_named(value, kind)
 }
 
 fn parse_hex_bytes(value: &str, kind: &'static str) -> Result<Vec<u8>, ApiError> {
@@ -3772,6 +4579,26 @@ fn trigger_error(error: StoreError) -> ApiError {
         StoreError::PipelineStateConflict(message) => {
             ApiError::new(StatusCode::CONFLICT, "pipeline_state_conflict", message)
         }
+        other => internal(other),
+    }
+}
+
+fn discovery_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::InvalidDiscovery(message) => {
+            ApiError::new(StatusCode::BAD_REQUEST, "invalid_discovery", message)
+        }
+        StoreError::DiscoveryConflict(message) => {
+            ApiError::new(StatusCode::CONFLICT, "discovery_conflict", message)
+        }
+        StoreError::DiscoveryQuiesced {
+            parent_id,
+            generation,
+        } => ApiError::new(
+            StatusCode::CONFLICT,
+            "discovery_quiesced",
+            format!("discovery parent {parent_id} is quiesced at generation {generation}"),
+        ),
         other => internal(other),
     }
 }
@@ -5597,6 +6424,21 @@ mod tests {
     }
 
     #[test]
+    fn discovery_child_pages_have_closed_bounds() {
+        assert_eq!(discovery_child_page_limit(None).unwrap(), 50);
+        assert_eq!(
+            discovery_child_page_limit(Some(mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE))
+                .unwrap(),
+            mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+        );
+        for limit in [0, mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE + 1] {
+            let error = discovery_child_page_limit(Some(limit)).unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "invalid_discovery_page_limit");
+        }
+    }
+
+    #[test]
     fn publication_claim_owner_is_extracted_only_from_controller_tokens() {
         let organization_id = Uuid::from_u128(7);
         let token = format!("{organization_id}-123-9.staged");
@@ -5640,6 +6482,76 @@ mod tests {
                 "https://controller.example/api/v1/organizations/{organization_id}/projects/{project_id}/builds/{build_id}"
             )
         );
+    }
+
+    #[test]
+    fn discovery_responses_encode_digests_as_hex() {
+        assert!(parse_lowercase_hex_digest_named(&"ab".repeat(32), "discovery").is_ok());
+        let uppercase = parse_lowercase_hex_digest_named(&"AB".repeat(32), "discovery")
+            .expect_err("uppercase discovery digest must fail closed");
+        assert_eq!(uppercase.status, StatusCode::BAD_REQUEST);
+        assert_eq!(uppercase.code, "invalid_digest");
+
+        let receipt = DiscoveryScanReceiptResponse::from(DiscoveryScanReceipt {
+            organization_id: Uuid::from_u128(1),
+            project_id: Uuid::from_u128(2),
+            pipeline_id: Uuid::from_u128(3),
+            parent_id: Uuid::from_u128(4),
+            parent_generation: 1,
+            scan_id: "scan-1".to_owned(),
+            source: DiscoveryScanSource::Periodic,
+            source_event_id: None,
+            source_cursor: 1,
+            complete_snapshot: true,
+            provider_snapshot_sha256: [7; 32],
+            request_sha256: [8; 32],
+            observation_count: 1,
+            selected_count: 1,
+            active_count: 1,
+            quarantined_count: 0,
+            retired_count: 0,
+            audit_sequence: 1,
+            audit_event_hash: [9; 32],
+        });
+        assert_eq!(receipt.provider_snapshot_sha256, "07".repeat(32));
+        assert_eq!(receipt.request_sha256, "08".repeat(32));
+        assert_eq!(receipt.audit_event_hash, "09".repeat(32));
+
+        let child = DiscoveryChildResponse::from(DiscoveryChild {
+            organization_id: Uuid::from_u128(1),
+            project_id: Uuid::from_u128(2),
+            pipeline_id: Uuid::from_u128(3),
+            parent_id: Uuid::from_u128(4),
+            child_key: "repo:branch:main".to_owned(),
+            child_pipeline_id: Uuid::from_u128(5),
+            repository_identity: "github:example/repo".to_owned(),
+            ref_kind: DiscoveredRefKind::Branch,
+            ref_name: "main".to_owned(),
+            pull_request_number: None,
+            head_repository_identity: "github:example/repo".to_owned(),
+            is_fork: false,
+            state: DiscoveryChildState::Active,
+            state_generation: 1,
+            revision: "1111111".to_owned(),
+            provenance_sha256: [10; 32],
+            jenkinsfile_path: "Jenkinsfile".to_owned(),
+            jenkinsfile_sha256: [11; 32],
+            child_configuration_sha256: [12; 32],
+            parent_generation: 1,
+            source_cursor: 1,
+            last_scan_id: "scan-1".to_owned(),
+        });
+        assert_eq!(child.provenance_sha256, "0a".repeat(32));
+        assert_eq!(child.jenkinsfile_sha256, "0b".repeat(32));
+        assert_eq!(child.child_configuration_sha256, "0c".repeat(32));
+        let page = serde_json::to_value(DiscoveryChildPageResponse {
+            items: vec![child],
+            next_after: Some("repo:branch:main".to_owned()),
+        })
+        .unwrap();
+        assert!(page.is_object());
+        assert!(page["items"].is_array());
+        assert_eq!(page["next_after"], "repo:branch:main");
     }
 
     #[test]
@@ -5707,6 +6619,22 @@ mod tests {
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/triggers/{trigger_id}/deliveries/{delivery_id}/redrive",
                 "post",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}",
+                "get",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}",
+                "put",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans",
+                "post",
+            ),
+            (
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children",
+                "get",
             ),
             (
                 "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds",
@@ -5831,6 +6759,40 @@ mod tests {
             ["put"];
         assert!(component["responses"]["200"].is_object());
         assert!(component["responses"]["201"].is_object());
+
+        let discovery_children = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children"]
+            ["get"];
+        let discovery_parameters = discovery_children["parameters"]
+            .as_array()
+            .expect("discovery child page parameters");
+        let discovery_limit = discovery_parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "limit")
+            .expect("bounded discovery child page limit");
+        assert_eq!(discovery_limit["schema"]["minimum"], 1);
+        assert_eq!(
+            discovery_limit["schema"]["maximum"],
+            mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+        );
+        assert_eq!(
+            discovery_children["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DiscoveryChildPage"
+        );
+        let discovery_page = &document["components"]["schemas"]["DiscoveryChildPage"];
+        assert_eq!(
+            discovery_page["properties"]["items"]["maxItems"],
+            mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+        );
+        assert_eq!(
+            discovery_page["properties"]["items"]["items"]["$ref"],
+            "#/components/schemas/DiscoveryChild"
+        );
+        let discovery_scan = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans"]
+            ["post"];
+        assert_eq!(
+            discovery_scan["requestBody"]["x-mcloving-max-body-bytes"],
+            MAX_DISCOVERY_SCAN_BODY_BYTES
+        );
 
         let submission = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds"]
             ["post"];
