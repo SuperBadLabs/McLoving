@@ -886,6 +886,14 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
     let urlsafe_seed = vec![255; 32];
     let urlsafe_credential = BASE64_URL_SAFE.encode(&urlsafe_seed).into_bytes();
     assert_ne!(BASE64.encode(&urlsafe_seed).as_bytes(), urlsafe_credential);
+    let mut mixed_alphabet_credential = BASE64.encode(&urlsafe_seed).into_bytes();
+    let first_slash = mixed_alphabet_credential
+        .iter()
+        .position(|byte| *byte == b'/')
+        .unwrap();
+    mixed_alphabet_credential[first_slash] = b'_';
+    assert!(mixed_alphabet_credential.contains(&b'/'));
+    assert!(mixed_alphabet_credential.contains(&b'_'));
     let urlsafe_state = tempfile::tempdir().unwrap();
     make_private(urlsafe_state.path());
     let mut urlsafe_secret_roles = rig.config.clone();
@@ -899,13 +907,39 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
             urlsafe_secret_roles,
             public_key_from_seed(&rig.request_seed).unwrap(),
             public_key_from_seed(&rig.destination_seed).unwrap(),
-            urlsafe_seed,
+            urlsafe_seed.clone(),
             public_key_from_seed(&rig.observer_seed).unwrap(),
             urlsafe_credential.clone(),
             vec![urlsafe_credential, SECRET.to_vec()],
         ),
         Err(ConnectorError::InvalidConfig)
     ));
+    let mixed_alphabet_state = tempfile::tempdir().unwrap();
+    make_private(mixed_alphabet_state.path());
+    let mut mixed_alphabet_config = rig.config.clone();
+    mixed_alphabet_config.state_dir = mixed_alphabet_state.path().to_path_buf();
+    mixed_alphabet_config.outcome_signing_seed_sha256 = content_sha256(&urlsafe_seed);
+    mixed_alphabet_config.outcome_signing_public_key_sha256 =
+        content_sha256(&public_key_from_seed(&urlsafe_seed).unwrap());
+    mixed_alphabet_config.credential_token_sha256 = content_sha256(&mixed_alphabet_credential);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            mixed_alphabet_config,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            urlsafe_seed,
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            mixed_alphabet_credential.clone(),
+            vec![mixed_alphabet_credential, SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+    assert!(
+        !mixed_alphabet_state
+            .path()
+            .join("external-connector.sqlite3")
+            .exists()
+    );
 
     for invalid_credential in [
         vec![0xff; 8],

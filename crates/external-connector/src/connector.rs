@@ -1121,13 +1121,7 @@ fn credential_encodes_authority_seed(
         candidates.insert(credential_token.to_vec());
     }
     if let Ok(encoded) = std::str::from_utf8(credential_token) {
-        for seed in [
-            decode_base64_seed_alias(encoded, false),
-            decode_base64_seed_alias(encoded, true),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        if let Some(seed) = decode_base64_seed_alias(encoded) {
             candidates.insert(seed);
         }
         if encoded.len() == 64 && encoded.as_bytes().iter().all(u8::is_ascii_hexdigit) {
@@ -1150,7 +1144,7 @@ fn credential_encodes_authority_seed(
     })
 }
 
-fn decode_base64_seed_alias(encoded: &str, url_safe: bool) -> Option<Vec<u8>> {
+fn decode_base64_seed_alias(encoded: &str) -> Option<Vec<u8>> {
     let bytes = encoded.as_bytes();
     let content_len = bytes
         .iter()
@@ -1163,7 +1157,7 @@ fn decode_base64_seed_alias(encoded: &str, url_safe: bool) -> Option<Vec<u8>> {
     let mut pending = 0_u32;
     let mut pending_bits = 0_u8;
     for byte in &bytes[..content_len] {
-        pending = (pending << 6) | u32::from(base64_value(*byte, url_safe)?);
+        pending = (pending << 6) | u32::from(base64_value(*byte)?);
         pending_bits += 6;
         if pending_bits >= 8 {
             pending_bits -= 8;
@@ -1174,15 +1168,13 @@ fn decode_base64_seed_alias(encoded: &str, url_safe: bool) -> Option<Vec<u8>> {
     (seed.len() == 32).then_some(seed)
 }
 
-fn base64_value(byte: u8, url_safe: bool) -> Option<u8> {
+fn base64_value(byte: u8) -> Option<u8> {
     match byte {
         b'A'..=b'Z' => Some(byte - b'A'),
         b'a'..=b'z' => Some(byte - b'a' + 26),
         b'0'..=b'9' => Some(byte - b'0' + 52),
-        b'+' if !url_safe => Some(62),
-        b'/' if !url_safe => Some(63),
-        b'-' if url_safe => Some(62),
-        b'_' if url_safe => Some(63),
+        b'+' | b'-' => Some(62),
+        b'/' | b'_' => Some(63),
         _ => None,
     }
 }
