@@ -908,14 +908,6 @@ fn validate_config(
         content_sha256(credential_token),
         config.runtime_attestation_authority_key_sha256.clone(),
     ];
-    let encoded_signing_seed = BASE64.encode(signing_seed);
-    let unpadded_signing_seed = BASE64_NO_PAD.encode(signing_seed);
-    let urlsafe_signing_seed = BASE64_URL_SAFE.encode(signing_seed);
-    let unpadded_urlsafe_signing_seed = BASE64_URL_SAFE_NO_PAD.encode(signing_seed);
-    let hexadecimal_signing_seed = signing_seed
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
     let valid_activation_lineage = match config.activation_mode {
         crate::ActivationMode::Current => {
             config.generation == 1
@@ -1066,11 +1058,7 @@ fn validate_config(
         || config.observer_binding.receipt_signing_public_key_sha256 != content_sha256(observer_key)
         || config.credential_token_sha256 != content_sha256(credential_token)
         || credential_token.is_empty()
-        || credential_token == encoded_signing_seed.as_bytes()
-        || credential_token == unpadded_signing_seed.as_bytes()
-        || credential_token == urlsafe_signing_seed.as_bytes()
-        || credential_token == unpadded_urlsafe_signing_seed.as_bytes()
-        || credential_token.eq_ignore_ascii_case(hexadecimal_signing_seed.as_bytes())
+        || credential_encodes_authority_seed(credential_token, &authority_public_key_digests)
         || secret_markers.is_empty()
         || !secret_markers
             .iter()
@@ -1122,6 +1110,47 @@ fn validate_config(
         return Err(ConnectorError::InvalidConfig);
     }
     Ok(())
+}
+
+fn credential_encodes_authority_seed(
+    credential_token: &[u8],
+    authority_public_key_digests: &[String],
+) -> bool {
+    let mut candidates = std::collections::BTreeSet::new();
+    if credential_token.len() == 32 {
+        candidates.insert(credential_token.to_vec());
+    }
+    if let Ok(encoded) = std::str::from_utf8(credential_token) {
+        for decoded in [
+            BASE64.decode(encoded),
+            BASE64_NO_PAD.decode(encoded),
+            BASE64_URL_SAFE.decode(encoded),
+            BASE64_URL_SAFE_NO_PAD.decode(encoded),
+        ] {
+            if let Ok(seed) = decoded
+                && seed.len() == 32
+            {
+                candidates.insert(seed);
+            }
+        }
+        if encoded.len() == 64 && encoded.as_bytes().iter().all(u8::is_ascii_hexdigit) {
+            let seed = (0..encoded.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&encoded[index..index + 2], 16))
+                .collect::<Result<Vec<_>, _>>();
+            if let Ok(seed) = seed {
+                candidates.insert(seed);
+            }
+        }
+    }
+    candidates.into_iter().any(|seed| {
+        crate::public_key_from_seed(&seed).is_ok_and(|public_key| {
+            let digest = content_sha256(&public_key);
+            authority_public_key_digests
+                .iter()
+                .any(|authority_digest| authority_digest == &digest)
+        })
+    })
 }
 
 fn valid_observer_activation_lineage(binding: &crate::ObserverReceiptBinding) -> bool {

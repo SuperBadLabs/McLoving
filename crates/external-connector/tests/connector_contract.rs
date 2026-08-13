@@ -750,6 +750,98 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
         Err(ConnectorError::InvalidConfig)
     ));
 
+    let raw_request_seed = b"12345678901234567890123456789012".to_vec();
+    let raw_request_credential = raw_request_seed.clone();
+    let raw_request_state = tempfile::tempdir().unwrap();
+    make_private(raw_request_state.path());
+    let mut raw_request_config = rig.config.clone();
+    raw_request_config.state_dir = raw_request_state.path().to_path_buf();
+    raw_request_config.request_authority_key_sha256 =
+        content_sha256(&public_key_from_seed(&raw_request_seed).unwrap());
+    raw_request_config.credential_token_sha256 = content_sha256(&raw_request_credential);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            raw_request_config,
+            public_key_from_seed(&raw_request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            raw_request_credential.clone(),
+            vec![raw_request_credential, SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+
+    let encoded_destination_credential = BASE64.encode(&rig.destination_seed).into_bytes();
+    let encoded_destination_state = tempfile::tempdir().unwrap();
+    make_private(encoded_destination_state.path());
+    let mut encoded_destination_config = rig.config.clone();
+    encoded_destination_config.state_dir = encoded_destination_state.path().to_path_buf();
+    encoded_destination_config.credential_token_sha256 =
+        content_sha256(&encoded_destination_credential);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            encoded_destination_config,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            encoded_destination_credential.clone(),
+            vec![encoded_destination_credential, SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+
+    let hexadecimal_observer_credential = rig
+        .observer_seed
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+        .into_bytes();
+    let hexadecimal_observer_state = tempfile::tempdir().unwrap();
+    make_private(hexadecimal_observer_state.path());
+    let mut hexadecimal_observer_config = rig.config.clone();
+    hexadecimal_observer_config.state_dir = hexadecimal_observer_state.path().to_path_buf();
+    hexadecimal_observer_config.credential_token_sha256 =
+        content_sha256(&hexadecimal_observer_credential);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            hexadecimal_observer_config,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            hexadecimal_observer_credential.clone(),
+            vec![hexadecimal_observer_credential, SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+
+    let runtime_attestation_seed = vec![5; 32];
+    let encoded_attestation_credential = BASE64_URL_SAFE
+        .encode(&runtime_attestation_seed)
+        .into_bytes();
+    let encoded_attestation_state = tempfile::tempdir().unwrap();
+    make_private(encoded_attestation_state.path());
+    let mut encoded_attestation_config = rig.config.clone();
+    encoded_attestation_config.state_dir = encoded_attestation_state.path().to_path_buf();
+    encoded_attestation_config.runtime_attestation_authority_key_sha256 =
+        content_sha256(&public_key_from_seed(&runtime_attestation_seed).unwrap());
+    encoded_attestation_config.credential_token_sha256 =
+        content_sha256(&encoded_attestation_credential);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            encoded_attestation_config,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            encoded_attestation_credential.clone(),
+            vec![encoded_attestation_credential, SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+
     let urlsafe_seed = vec![255; 32];
     let urlsafe_credential = BASE64_URL_SAFE.encode(&urlsafe_seed).into_bytes();
     assert_ne!(BASE64.encode(&urlsafe_seed).as_bytes(), urlsafe_credential);
@@ -1082,6 +1174,41 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
     let replayer =
         ShadowReplayer::new_loopback_test(config.clone(), outcome_key.clone(), replay_seed.clone())
             .unwrap();
+    for (mode, generation, previous_generation, previous_digest, rollback_from_generation) in [
+        (ActivationMode::Current, 2, None, None, None),
+        (ActivationMode::Cutover, 2, None, None, None),
+        (
+            ActivationMode::Rollback,
+            3,
+            Some(2),
+            Some("a".repeat(64)),
+            Some(2),
+        ),
+    ] {
+        let invalid_lineage_state = tempfile::tempdir().unwrap();
+        make_private(invalid_lineage_state.path());
+        let mut invalid_lineage = config.clone();
+        invalid_lineage.state_dir = invalid_lineage_state.path().to_path_buf();
+        invalid_lineage.connector_binding.activation_mode = mode;
+        invalid_lineage.connector_binding.generation = generation;
+        invalid_lineage.connector_binding.previous_generation = previous_generation;
+        invalid_lineage.connector_binding.previous_config_sha256 = previous_digest;
+        invalid_lineage.connector_binding.rollback_from_generation = rollback_from_generation;
+        assert!(matches!(
+            ShadowReplayer::new_loopback_test(
+                invalid_lineage,
+                outcome_key.clone(),
+                replay_seed.clone(),
+            ),
+            Err(ConnectorError::InvalidConfig)
+        ));
+        assert!(
+            !invalid_lineage_state
+                .path()
+                .join("external-shadow-replay.sqlite3")
+                .exists()
+        );
+    }
     let malformed_key = vec![7; 31];
     let malformed_state = tempfile::tempdir().unwrap();
     make_private(malformed_state.path());

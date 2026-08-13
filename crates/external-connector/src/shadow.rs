@@ -60,6 +60,7 @@ impl ShadowReplayer {
             || !is_sha256(&config.runtime_attestation_authority_key_sha256)
             || config.connector_binding.connector_id.is_empty()
             || config.connector_binding.generation == 0
+            || !valid_connector_activation_lineage(&config.connector_binding)
             || !is_sha256(&config.connector_binding.implementation_sha256)
             || !is_sha256(&config.connector_binding.image_sha256)
             || !is_sha256(&config.connector_binding.config_sha256)
@@ -183,6 +184,40 @@ impl ShadowReplayer {
                 &request_digest,
                 &receipt,
             )
+    }
+}
+
+fn valid_connector_activation_lineage(binding: &crate::ConnectorReceiptBinding) -> bool {
+    match binding.activation_mode {
+        crate::ActivationMode::Current => {
+            binding.generation == 1
+                && binding.previous_generation.is_none()
+                && binding.previous_config_sha256.is_none()
+                && binding.rollback_from_generation.is_none()
+        }
+        crate::ActivationMode::Cutover => {
+            binding.generation > 1
+                && binding
+                    .previous_generation
+                    .is_some_and(|previous| previous < binding.generation)
+                && binding
+                    .previous_config_sha256
+                    .as_deref()
+                    .is_some_and(is_sha256)
+                && binding.rollback_from_generation.is_none()
+        }
+        crate::ActivationMode::Rollback => {
+            binding.generation > 1
+                && matches!(
+                    (binding.previous_generation, binding.rollback_from_generation),
+                    (Some(target), Some(source))
+                        if target < source && source < binding.generation
+                )
+                && binding
+                    .previous_config_sha256
+                    .as_deref()
+                    .is_some_and(is_sha256)
+        }
     }
 }
 

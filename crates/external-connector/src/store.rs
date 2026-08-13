@@ -193,6 +193,9 @@ impl ConnectorStore {
                 if max_runtime_history == 0 {
                     return Err(ConnectorError::CapacityExceeded);
                 }
+                if unix_time_ms()? > authority_activation_deadline_unix_ms {
+                    return Err(ConnectorError::InvalidConfig);
+                }
                 transaction
                     .execute(
                         "INSERT INTO runtime(singleton, config_sha256, generation) VALUES(1, ?1, ?2)",
@@ -245,6 +248,9 @@ impl ConnectorStore {
                             return Err(ConnectorError::InvalidConfig);
                         }
                     }
+                }
+                if unix_time_ms()? > authority_activation_deadline_unix_ms {
+                    return Err(ConnectorError::InvalidConfig);
                 }
                 let changed = transaction
                     .execute(
@@ -385,13 +391,6 @@ impl ConnectorStore {
             });
         }
 
-        let admission_time = authority.fixed_time_unix_ms.map_or_else(unix_time_ms, Ok)?;
-        if admission_time < authority.not_before_unix_ms
-            || admission_time > authority.deadline_unix_ms
-        {
-            return Err(ConnectorError::ExpiredAuthority);
-        }
-
         let retained_and_reserved: usize = tx
             .query_row(
                 "SELECT
@@ -414,6 +413,12 @@ impl ConnectorStore {
             .map_err(|_| ConnectorError::StateUnavailable)?;
         if conflicting.is_some() {
             return Err(ConnectorError::EffectPending);
+        }
+        let admission_time = authority.fixed_time_unix_ms.map_or_else(unix_time_ms, Ok)?;
+        if admission_time < authority.not_before_unix_ms
+            || admission_time > authority.deadline_unix_ms
+        {
+            return Err(ConnectorError::ExpiredAuthority);
         }
         tx.execute(
             "INSERT INTO requests(
