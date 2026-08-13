@@ -125,6 +125,14 @@ impl ConnectorStore {
         if retained_and_reserved > max_receipts {
             return Err(ConnectorError::CapacityExceeded);
         }
+        let unsettled_requests: usize = connection
+            .query_row(
+                "SELECT COUNT(*) FROM requests
+                 WHERE status = 'pending' OR reserved_receipts != 0",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ConnectorError::StateUnavailable)?;
         match existing {
             None if generation == 1 && previous_generation.is_none() => {
                 connection
@@ -139,7 +147,8 @@ impl ConnectorStore {
                 if digest == config_sha256 && active_generation == generation => {}
             Some((_, active_generation))
                 if generation > active_generation
-                    && previous_generation == Some(active_generation) =>
+                    && previous_generation == Some(active_generation)
+                    && unsettled_requests == 0 =>
             {
                 let changed = connection
                     .execute(
@@ -896,10 +905,24 @@ mod tests {
                 1,
             )
             .unwrap();
-        drop(first);
+        assert!(matches!(
+            ConnectorStore::open(state.path(), &"d".repeat(64), 2, Some(1), 8),
+            Err(ConnectorError::RuntimeFenced)
+        ));
+        first
+            .connection
+            .execute(
+                "UPDATE requests SET status = 'terminal', reserved_receipts = 0",
+                [],
+            )
+            .unwrap();
 
         let mut rotated =
             ConnectorStore::open(state.path(), &"d".repeat(64), 2, Some(1), 8).unwrap();
+        assert!(matches!(
+            first.assert_runtime(),
+            Err(ConnectorError::RuntimeFenced)
+        ));
         assert!(matches!(
             rotated.claim(
                 Uuid::new_v4(),
@@ -909,6 +932,21 @@ mod tests {
                 1,
             ),
             Err(ConnectorError::EffectPending)
+        ));
+
+        drop(rotated);
+        let generation_two =
+            ConnectorStore::open(state.path(), &"d".repeat(64), 2, Some(1), 8).unwrap();
+        generation_two
+            .connection
+            .execute(
+                "UPDATE requests SET reserved_receipts = 1 WHERE scope_key = ?1",
+                [&scope],
+            )
+            .unwrap();
+        assert!(matches!(
+            ConnectorStore::open(state.path(), &"f".repeat(64), 3, Some(2), 8),
+            Err(ConnectorError::RuntimeFenced)
         ));
 
         let fresh = tempdir().unwrap();

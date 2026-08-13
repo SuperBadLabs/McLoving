@@ -133,7 +133,10 @@ certified fence/scope; a different request ID cannot bypass uncertainty.
 Configuration rotation must advance in place from the exact recorded previous
 generation. It atomically updates the runtime fence while retaining the same
 request/scope ledger; a later generation cannot bootstrap an empty directory or
-bypass permanent physical-scope deduplication.
+bypass permanent physical-scope deduplication. Rotation is rejected while any
+claim is pending or any ambiguous outcome still reserves its reconciliation
+slot. Retry, terminalization, and reconciliation therefore complete under the
+original request and outcome-signing generation before its authority is fenced.
 
 Retry behavior is closed by idempotency class:
 
