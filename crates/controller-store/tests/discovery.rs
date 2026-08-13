@@ -621,6 +621,21 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
         3,
         "one complete snapshot must retire every omitted current child"
     );
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT COUNT(*), COUNT(*) FILTER (WHERE child_key = $3)
+             FROM discovery_child_identities
+             WHERE organization_id = $1 AND parent_id = $2",
+        )
+        .bind(organization_id)
+        .bind(parent_id)
+        .bind(&catch_up.observations[0].child_key)
+        .fetch_one(store.pool())
+        .await
+        .unwrap(),
+        (5, 1),
+        "repeated sightings must retain one bounded identity row per child"
+    );
     let DiscoveryScanOutcome::Replayed(historical) =
         store.reconcile_discovery_scan(&initial).await.unwrap()
     else {

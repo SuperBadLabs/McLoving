@@ -1229,26 +1229,18 @@ impl Store {
             }
             let expected_fork =
                 observation.head_repository_identity != observation.repository_identity;
-            let retained_mismatch = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
-                     SELECT 1
-                     FROM discovery_observations
-                     WHERE organization_id = $1 AND parent_id = $2
-                       AND (child_key = $3 OR child_pipeline_id = $4)
-                       AND NOT (
-                           child_key = $3
-                           AND child_pipeline_id = $4
-                           AND repository_identity = $5
-                           AND ref_kind = $6
-                           AND ref_name = $7
-                           AND pull_request_number IS NOT DISTINCT FROM $8
-                           AND head_repository_identity = $9
-                           AND is_fork = $10
-                       )
-                     LIMIT 1
-                 )",
+            sqlx::query(
+                "INSERT INTO discovery_child_identities (
+                     organization_id, project_id, pipeline_id, parent_id,
+                     child_key, child_pipeline_id, repository_identity, ref_kind,
+                     ref_name, pull_request_number, head_repository_identity,
+                     is_fork, first_scan_id
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                 ON CONFLICT DO NOTHING",
             )
             .bind(input.organization_id)
+            .bind(input.project_id)
+            .bind(input.pipeline_id)
             .bind(input.parent_id)
             .bind(&observation.child_key)
             .bind(observation.child_pipeline_id)
@@ -1258,15 +1250,13 @@ impl Store {
             .bind(observation.pull_request_number)
             .bind(&observation.head_repository_identity)
             .bind(expected_fork)
-            .fetch_one(&mut *tx)
+            .bind(&input.scan_id)
+            .execute(&mut *tx)
             .await?;
-            if retained_mismatch {
-                return conflict("discovery observation key or pipeline identity was substituted");
-            }
-            let existing = sqlx::query_as::<_, DiscoveryIdentityRow>(
+            let identities = sqlx::query_as::<_, DiscoveryIdentityRow>(
                 "SELECT child_key, child_pipeline_id, repository_identity, ref_kind, ref_name,
                         pull_request_number, head_repository_identity, is_fork
-                 FROM discovery_children
+                 FROM discovery_child_identities
                  WHERE organization_id = $1 AND parent_id = $2
                    AND (child_key = $3 OR child_pipeline_id = $4)
                  FOR UPDATE",
@@ -1277,13 +1267,24 @@ impl Store {
             .bind(observation.child_pipeline_id)
             .fetch_all(&mut *tx)
             .await?;
-            if existing.len() > 1
-                || existing.iter().any(|existing| {
-                    !discovery_identity_matches(existing, observation, expected_fork)
+            if identities.len() != 1
+                || identities.iter().any(|identity| {
+                    !discovery_identity_matches(identity, observation, expected_fork)
                 })
             {
                 return conflict("discovery child key or pipeline identity was substituted");
             }
+            let existing = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (
+                     SELECT 1 FROM discovery_children
+                     WHERE organization_id = $1 AND parent_id = $2 AND child_key = $3
+                 )",
+            )
+            .bind(input.organization_id)
+            .bind(input.parent_id)
+            .bind(&observation.child_key)
+            .fetch_one(&mut *tx)
+            .await?;
             let authorized = *disposition == DiscoveryObservationDisposition::Active;
             let observation_sha256 = observation_digest(
                 observation,
@@ -1328,7 +1329,7 @@ impl Store {
             .bind(observation_sha256.as_slice())
             .execute(&mut *tx)
             .await?;
-            match (*disposition, !existing.is_empty()) {
+            match (*disposition, existing) {
                 (DiscoveryObservationDisposition::Filtered, true) => {
                     upsert_child(
                         &mut tx,

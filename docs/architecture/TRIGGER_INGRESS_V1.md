@@ -275,5 +275,5 @@ event, and snapshot digests, but is still rejected by the independently retained
 audit hash. Concurrent first redrive proves one creation plus one replay, and
 different dead letters racing to reuse the same new identity prove one creation
 plus one conflict. The deployable-controller suite also
-proves the runtime role's exact least-privilege and 59-table forced-RLS policy
+proves the runtime role's exact least-privilege and 60-table forced-RLS policy
 surface before accepting traffic.

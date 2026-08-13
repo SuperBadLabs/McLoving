@@ -718,6 +718,8 @@ impl Store {
                    ('discovery_scans', 'INSERT'),
                    ('discovery_scan_results', 'SELECT'),
                    ('discovery_scan_results', 'INSERT'),
+                   ('discovery_child_identities', 'SELECT'),
+                   ('discovery_child_identities', 'INSERT'),
                    ('discovery_observations', 'SELECT'),
                    ('discovery_observations', 'INSERT'),
                    ('discovery_children', 'SELECT'),
@@ -1039,8 +1041,8 @@ impl Store {
                    ('trigger_schedule_watermarks'),
                    ('discovery_parent_definitions'),
                    ('discovery_parent_versions'), ('discovery_scans'),
-                   ('discovery_scan_results'), ('discovery_observations'),
-                   ('discovery_children'),
+                   ('discovery_scan_results'), ('discovery_child_identities'),
+                   ('discovery_observations'), ('discovery_children'),
                    ('component_packages'), ('attempt_log_chunks'),
                    ('attempt_effects'), ('dead_letters'), ('attempt_objects'),
                    ('state_transfer_receipts'), ('state_transfer_records'),
@@ -1083,7 +1085,7 @@ impl Store {
                    FROM relations AS relation
                    JOIN pg_policy AS policy ON policy.polrelid = relation.oid
              )
-             SELECT COUNT(*) = 59
+             SELECT COUNT(*) = 60
                     AND BOOL_AND(
                         relrowsecurity
                         AND relforcerowsecurity
@@ -1112,7 +1114,7 @@ impl Store {
                                 relation.tenant_column
                             )
                     )
-                    AND (SELECT COUNT(*) FROM policies) = 59
+                    AND (SELECT COUNT(*) FROM policies) = 60
                FROM relations",
         )
         .fetch_one(&mut *tx)

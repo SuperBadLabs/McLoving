@@ -105,15 +105,14 @@ before admission. An origin ref is trusted. A fork is trusted only under the
 configured closed policy; an admitted but untrusted fork becomes
 `quarantined`, never `active`.
 Filtered observations remain immutable audit/transfer evidence but create no
-child. Their retained key/UUID and identity tuple is nevertheless authoritative:
-neither a previously observed nor materialized child key or pipeline UUID can
-be rebound. A key/UUID cross-pair or any change to repository, ref, PR,
-head-repository, or fork identity aborts the whole scan as a domain conflict
-before an insert.
-
-The retained-history fence asks PostgreSQL only whether a mismatching tuple
-exists and never materializes the child's observation history in controller
-memory. Tenant/parent/key and tenant/parent/pipeline indexes bound lookup paths.
+child. Their retained key/UUID and identity tuple is nevertheless authoritative.
+The first sighting inserts one immutable identity-registry row, uniquely keyed
+by both stable child key and child pipeline UUID. Every later sighting locks and
+compares only that one row. A key/UUID cross-pair or any change to repository,
+ref, PR, head-repository, or fork identity aborts the whole scan as a domain
+conflict. Registry work and controller memory are constant per reported child,
+independent of immutable observation-history length. The complete observation
+ledger in transfer evidence deterministically reconstructs the registry.
 
 ## Child and orphan state
 
@@ -149,7 +148,7 @@ require project-view authority. Request objects reject unknown fields and use
 closed enums and bounded exact-width integers. Digests use canonical lowercase
 64-character hexadecimal strings at the HTTP boundary.
 
-All six discovery tables use forced tenant row-level security. The deployable
+All seven discovery tables use forced tenant row-level security. The deployable
 runtime preflight enumerates their exact least-privilege grants and policies;
 schema or privilege drift prevents startup.
 

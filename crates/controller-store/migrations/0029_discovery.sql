@@ -219,6 +219,50 @@ CREATE TABLE discovery_scan_results (
         REFERENCES discovery_scans(organization_id, parent_id, scan_id)
 );
 
+CREATE TABLE discovery_child_identities (
+    organization_id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    pipeline_id uuid NOT NULL,
+    parent_id uuid NOT NULL,
+    child_key text NOT NULL CHECK (
+        child_key = btrim(child_key) AND length(child_key) BETWEEN 1 AND 1024
+    ),
+    child_pipeline_id uuid NOT NULL,
+    repository_identity text NOT NULL CHECK (
+        repository_identity = btrim(repository_identity)
+        AND length(repository_identity) BETWEEN 1 AND 512
+    ),
+    ref_kind text NOT NULL CHECK (ref_kind IN ('branch', 'pull_request')),
+    ref_name text NOT NULL CHECK (
+        ref_name = btrim(ref_name) AND length(ref_name) BETWEEN 1 AND 512
+    ),
+    pull_request_number bigint CHECK (
+        pull_request_number IS NULL OR pull_request_number > 0
+    ),
+    head_repository_identity text NOT NULL CHECK (
+        head_repository_identity = btrim(head_repository_identity)
+        AND length(head_repository_identity) BETWEEN 1 AND 512
+    ),
+    is_fork boolean NOT NULL,
+    first_scan_id text NOT NULL CHECK (
+        first_scan_id = btrim(first_scan_id)
+        AND length(first_scan_id) BETWEEN 1 AND 512
+    ),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (organization_id, parent_id, child_key),
+    UNIQUE (organization_id, parent_id, child_pipeline_id),
+    FOREIGN KEY (organization_id, project_id, pipeline_id, parent_id)
+        REFERENCES discovery_parent_definitions(
+            organization_id, project_id, pipeline_id, parent_id
+        ),
+    FOREIGN KEY (organization_id, parent_id, first_scan_id)
+        REFERENCES discovery_scans(organization_id, parent_id, scan_id),
+    CHECK (
+        (ref_kind = 'branch' AND pull_request_number IS NULL AND NOT is_fork)
+        OR (ref_kind = 'pull_request' AND pull_request_number IS NOT NULL)
+    )
+);
+
 CREATE TABLE discovery_observations (
     organization_id uuid NOT NULL,
     project_id uuid NOT NULL,
@@ -350,12 +394,6 @@ CREATE TABLE discovery_children (
     )
 );
 
-CREATE INDEX discovery_observations_child_key_idx
-    ON discovery_observations (organization_id, parent_id, child_key);
-
-CREATE INDEX discovery_observations_child_pipeline_idx
-    ON discovery_observations (organization_id, parent_id, child_pipeline_id);
-
 CREATE INDEX discovery_children_state_idx
     ON discovery_children (organization_id, parent_id, state, child_key);
 
@@ -382,6 +420,10 @@ FOR EACH ROW EXECUTE FUNCTION mcloving_reject_discovery_history_mutation();
 
 CREATE TRIGGER discovery_observations_immutable
 BEFORE UPDATE OR DELETE ON discovery_observations
+FOR EACH ROW EXECUTE FUNCTION mcloving_reject_discovery_history_mutation();
+
+CREATE TRIGGER discovery_child_identities_immutable
+BEFORE UPDATE OR DELETE ON discovery_child_identities
 FOR EACH ROW EXECUTE FUNCTION mcloving_reject_discovery_history_mutation();
 
 CREATE TRIGGER discovery_scan_results_immutable
@@ -451,6 +493,7 @@ GRANT SELECT, INSERT, UPDATE ON discovery_parent_definitions TO mcloving_tenant;
 GRANT SELECT, INSERT ON discovery_parent_versions TO mcloving_tenant;
 GRANT SELECT, INSERT ON discovery_scans TO mcloving_tenant;
 GRANT SELECT, INSERT ON discovery_scan_results TO mcloving_tenant;
+GRANT SELECT, INSERT ON discovery_child_identities TO mcloving_tenant;
 GRANT SELECT, INSERT ON discovery_observations TO mcloving_tenant;
 GRANT SELECT, INSERT, UPDATE ON discovery_children TO mcloving_tenant;
 
@@ -479,6 +522,13 @@ ALTER TABLE discovery_observations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE discovery_observations FORCE ROW LEVEL SECURITY;
 CREATE POLICY discovery_observations_tenant_policy
 ON discovery_observations
+    USING (organization_id = NULLIF(current_setting('mcloving.organization_id', true), '')::uuid)
+    WITH CHECK (organization_id = NULLIF(current_setting('mcloving.organization_id', true), '')::uuid);
+
+ALTER TABLE discovery_child_identities ENABLE ROW LEVEL SECURITY;
+ALTER TABLE discovery_child_identities FORCE ROW LEVEL SECURITY;
+CREATE POLICY discovery_child_identities_tenant_policy
+ON discovery_child_identities
     USING (organization_id = NULLIF(current_setting('mcloving.organization_id', true), '')::uuid)
     WITH CHECK (organization_id = NULLIF(current_setting('mcloving.organization_id', true), '')::uuid);
 
