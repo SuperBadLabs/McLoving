@@ -749,6 +749,12 @@ pub struct DiscoveryChildResponse {
     pub last_scan_id: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct DiscoveryChildPageResponse {
+    pub items: Vec<DiscoveryChildResponse>,
+    pub next_after: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PipelineUpsertRequest {
     pub slug: String,
@@ -1006,10 +1012,7 @@ fn openapi_document() -> Value {
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children": {
                 "parameters": [organization.clone(), project.clone(), pipeline.clone(), discovery_parent],
-                "get": array_api_operation(
-                    "listDiscoveryChildren", "discovery", "List current discovered child truth", "200",
-                    Vec::new(), None
-                )
+                "get": discovery_children_operation()
             },
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds": {
                 "parameters": [organization.clone(), project.clone(), pipeline],
@@ -1273,6 +1276,8 @@ fn openapi_document() -> Value {
                 "DiscoveryParentRequest": discovery_parent_request_schema(),
                 "DiscoveryScanRequest": discovery_scan_request_schema(),
                 "DiscoveryObservationRequest": discovery_observation_request_schema(),
+                "DiscoveryChild": discovery_child_schema(),
+                "DiscoveryChildPage": discovery_child_page_schema(),
                 "RefreshRequest": {
                     "type": "object",
                     "required": ["refresh_token"],
@@ -1467,6 +1472,62 @@ fn discovery_scan_request_schema() -> Value {
                 "type": "array", "maxItems": 4096,
                 "items": {"$ref": "#/components/schemas/DiscoveryObservationRequest"}
             }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn discovery_child_schema() -> Value {
+    let digest = json!({"type": "string", "pattern": "^[0-9a-f]{64}$"});
+    json!({
+        "type": "object",
+        "required": [
+            "organization_id", "project_id", "pipeline_id", "parent_id", "child_key",
+            "child_pipeline_id", "repository_identity", "ref_kind", "ref_name",
+            "pull_request_number", "head_repository_identity", "is_fork", "state",
+            "state_generation", "revision", "provenance_sha256", "jenkinsfile_path",
+            "jenkinsfile_sha256", "child_configuration_sha256", "parent_generation",
+            "source_cursor", "last_scan_id"
+        ],
+        "properties": {
+            "organization_id": {"type": "string", "format": "uuid"},
+            "project_id": {"type": "string", "format": "uuid"},
+            "pipeline_id": {"type": "string", "format": "uuid"},
+            "parent_id": {"type": "string", "format": "uuid"},
+            "child_key": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "child_pipeline_id": {"type": "string", "format": "uuid"},
+            "repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "ref_kind": {"type": "string", "enum": ["branch", "pull_request"]},
+            "ref_name": {"type": "string", "minLength": 1, "maxLength": 512},
+            "pull_request_number": {"type": ["integer", "null"], "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "head_repository_identity": {"type": "string", "minLength": 1, "maxLength": 512},
+            "is_fork": {"type": "boolean"},
+            "state": {"type": "string", "enum": ["active", "quarantined", "retired"]},
+            "state_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "revision": {"type": "string", "pattern": "^[0-9A-Fa-f]{7,128}$"},
+            "provenance_sha256": digest.clone(),
+            "jenkinsfile_path": {"type": "string", "minLength": 1, "maxLength": 1024},
+            "jenkinsfile_sha256": digest.clone(),
+            "child_configuration_sha256": digest,
+            "parent_generation": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "source_cursor": {"type": "integer", "format": "int64", "minimum": 1, "maximum": i64::MAX},
+            "last_scan_id": {"type": "string", "minLength": 1, "maxLength": 512}
+        },
+        "additionalProperties": false
+    })
+}
+
+fn discovery_child_page_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["items", "next_after"],
+        "properties": {
+            "items": {
+                "type": "array",
+                "maxItems": mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE,
+                "items": {"$ref": "#/components/schemas/DiscoveryChild"}
+            },
+            "next_after": {"type": ["string", "null"], "maxLength": 1024}
         },
         "additionalProperties": false
     })
@@ -1998,6 +2059,25 @@ fn discovery_scan_operation() -> Value {
         "description": "Exact scan replay",
         "content": {"application/json": {"schema": {"type": "object"}}}
     });
+    operation
+}
+
+fn discovery_children_operation() -> Value {
+    let mut after = query_parameter("after", "string");
+    after["schema"]["maxLength"] = json!(1024);
+    let mut limit = query_parameter("limit", "integer");
+    limit["schema"]["minimum"] = json!(1);
+    limit["schema"]["maximum"] = json!(mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE);
+    let mut operation = api_operation(
+        "listDiscoveryChildren",
+        "discovery",
+        "List one bounded child-key page of retained discovery truth",
+        "200",
+        vec![after, limit],
+        None,
+    );
+    operation["responses"]["200"]["content"]["application/json"]["schema"] =
+        json!({"$ref": "#/components/schemas/DiscoveryChildPage"});
     operation
 }
 
@@ -3150,6 +3230,7 @@ async fn reconcile_discovery_scan(
 async fn list_discovery_children(
     State(state): State<Arc<ApiState>>,
     Path((organization_id, project_id, pipeline_id, parent_id)): Path<(Uuid, Uuid, Uuid, Uuid)>,
+    Query(query): Query<PageQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     authorize(
@@ -3160,17 +3241,26 @@ async fn list_discovery_children(
         Action::ProjectView,
     )
     .await?;
-    let children = state
+    let page = state
         .store
-        .discovery_children(organization_id, project_id, pipeline_id, parent_id)
+        .discovery_children(
+            organization_id,
+            project_id,
+            pipeline_id,
+            parent_id,
+            query.after.as_deref(),
+            discovery_child_page_limit(query.limit)?,
+        )
         .await
         .map_err(discovery_error)?;
-    Ok(Json(
-        children
+    Ok(Json(DiscoveryChildPageResponse {
+        items: page
+            .items
             .into_iter()
             .map(DiscoveryChildResponse::from)
             .collect::<Vec<_>>(),
-    )
+        next_after: page.next_after,
+    })
     .into_response())
 }
 
@@ -4351,6 +4441,21 @@ fn page_limit(limit: Option<u32>) -> Result<u32, ApiError> {
             format!(
                 "page limit must be between 1 and {}",
                 mcloving_controller_store::MAX_PRODUCT_PAGE
+            ),
+        ));
+    }
+    Ok(limit)
+}
+
+fn discovery_child_page_limit(limit: Option<u32>) -> Result<u32, ApiError> {
+    let limit = limit.unwrap_or(50);
+    if limit == 0 || limit > mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_discovery_page_limit",
+            format!(
+                "discovery child page limit must be between 1 and {}",
+                mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
             ),
         ));
     }
@@ -6309,6 +6414,21 @@ mod tests {
     }
 
     #[test]
+    fn discovery_child_pages_have_closed_bounds() {
+        assert_eq!(discovery_child_page_limit(None).unwrap(), 50);
+        assert_eq!(
+            discovery_child_page_limit(Some(mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE))
+                .unwrap(),
+            mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+        );
+        for limit in [0, mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE + 1] {
+            let error = discovery_child_page_limit(Some(limit)).unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.code, "invalid_discovery_page_limit");
+        }
+    }
+
+    #[test]
     fn publication_claim_owner_is_extracted_only_from_controller_tokens() {
         let organization_id = Uuid::from_u128(7);
         let token = format!("{organization_id}-123-9.staged");
@@ -6414,10 +6534,14 @@ mod tests {
         assert_eq!(child.provenance_sha256, "0a".repeat(32));
         assert_eq!(child.jenkinsfile_sha256, "0b".repeat(32));
         assert_eq!(child.child_configuration_sha256, "0c".repeat(32));
-        assert!(
-            serde_json::to_value(vec![child]).unwrap().is_array(),
-            "the child-list handler and OpenAPI contract both expose an array"
-        );
+        let page = serde_json::to_value(DiscoveryChildPageResponse {
+            items: vec![child],
+            next_after: Some("repo:branch:main".to_owned()),
+        })
+        .unwrap();
+        assert!(page.is_object());
+        assert!(page["items"].is_array());
+        assert_eq!(page["next_after"], "repo:branch:main");
     }
 
     #[test]
@@ -6625,6 +6749,34 @@ mod tests {
             ["put"];
         assert!(component["responses"]["200"].is_object());
         assert!(component["responses"]["201"].is_object());
+
+        let discovery_children = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children"]
+            ["get"];
+        let discovery_parameters = discovery_children["parameters"]
+            .as_array()
+            .expect("discovery child page parameters");
+        let discovery_limit = discovery_parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "limit")
+            .expect("bounded discovery child page limit");
+        assert_eq!(discovery_limit["schema"]["minimum"], 1);
+        assert_eq!(
+            discovery_limit["schema"]["maximum"],
+            mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+        );
+        assert_eq!(
+            discovery_children["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/DiscoveryChildPage"
+        );
+        let discovery_page = &document["components"]["schemas"]["DiscoveryChildPage"];
+        assert_eq!(
+            discovery_page["properties"]["items"]["maxItems"],
+            mcloving_controller_store::MAX_DISCOVERY_CHILD_PAGE
+        );
+        assert_eq!(
+            discovery_page["properties"]["items"]["items"]["$ref"],
+            "#/components/schemas/DiscoveryChild"
+        );
 
         let submission = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds"]
             ["post"];

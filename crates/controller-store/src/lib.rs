@@ -45,14 +45,15 @@ pub use dag::{
     TRIGGER_DAG_IDEMPOTENCY_PREFIX, compile_matrix, validate_dag_contract,
 };
 pub use discovery::{
-    DiscoveredRefKind, DiscoveryChild, DiscoveryChildState, DiscoveryObservation,
-    DiscoveryObservationDisposition, DiscoveryObservationWrite, DiscoveryParent,
-    DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite,
-    DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanRecord, DiscoveryScanSource,
-    DiscoveryScanWrite, DiscoveryTransferSnapshot, ForkTrustStrategy, OrphanPolicy,
-    PullRequestDiscoveryStrategy, compute_discovery_parent_configuration_sha256,
-    compute_discovery_scan_request_sha256, compute_discovery_transfer_ledger_sha256,
-    compute_discovery_transfer_snapshot_sha256, verify_discovery_transfer_snapshot,
+    DiscoveredRefKind, DiscoveryChild, DiscoveryChildPage, DiscoveryChildState,
+    DiscoveryObservation, DiscoveryObservationDisposition, DiscoveryObservationWrite,
+    DiscoveryParent, DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState,
+    DiscoveryParentWrite, DiscoveryScanOutcome, DiscoveryScanReceipt, DiscoveryScanRecord,
+    DiscoveryScanSource, DiscoveryScanWrite, DiscoveryTransferSnapshot, ForkTrustStrategy,
+    MAX_DISCOVERY_CHILD_PAGE, OrphanPolicy, PullRequestDiscoveryStrategy,
+    compute_discovery_parent_configuration_sha256, compute_discovery_scan_request_sha256,
+    compute_discovery_transfer_ledger_sha256, compute_discovery_transfer_snapshot_sha256,
+    verify_discovery_transfer_snapshot,
 };
 pub use identity::{
     AuthenticatedIdentity, IdentityLifecycle, IdentityProviderConfig, IdentityProviderWrite,

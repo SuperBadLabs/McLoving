@@ -1,11 +1,12 @@
 use mcloving_controller_store::{
     AuthorizationPolicyWrite, DiscoveredRefKind, DiscoveryChildState, DiscoveryObservationWrite,
     DiscoveryParentKind, DiscoveryParentPutOutcome, DiscoveryParentState, DiscoveryParentWrite,
-    DiscoveryScanOutcome, DiscoveryScanSource, DiscoveryScanWrite, ForkTrustStrategy, OrphanPolicy,
-    PipelinePutOutcome, PipelineTriggerState, PipelineTriggerWrite, PipelineWrite,
-    PullRequestDiscoveryStrategy, Store, StoreError, TriggerKind, TriggerPutOutcome,
-    compute_authorization_policy_digest, compute_discovery_parent_configuration_sha256,
-    compute_discovery_scan_request_sha256, verify_discovery_transfer_snapshot,
+    DiscoveryScanOutcome, DiscoveryScanSource, DiscoveryScanWrite, ForkTrustStrategy,
+    MAX_DISCOVERY_CHILD_PAGE, OrphanPolicy, PipelinePutOutcome, PipelineTriggerState,
+    PipelineTriggerWrite, PipelineWrite, PullRequestDiscoveryStrategy, Store, StoreError,
+    TriggerKind, TriggerPutOutcome, compute_authorization_policy_digest,
+    compute_discovery_parent_configuration_sha256, compute_discovery_scan_request_sha256,
+    verify_discovery_transfer_snapshot,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -386,20 +387,98 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
     assert_eq!(receipt.retired_count, 0);
     assert!(
         store
-            .discovery_children(organization_id, Uuid::new_v4(), pipeline_id, parent_id,)
+            .discovery_children(
+                organization_id,
+                Uuid::new_v4(),
+                pipeline_id,
+                parent_id,
+                None,
+                MAX_DISCOVERY_CHILD_PAGE,
+            )
             .await
             .unwrap()
+            .items
             .is_empty(),
         "a same-organization project-path substitution must not expose children"
     );
     assert!(
         store
-            .discovery_children(organization_id, project_id, Uuid::new_v4(), parent_id,)
+            .discovery_children(
+                organization_id,
+                project_id,
+                Uuid::new_v4(),
+                parent_id,
+                None,
+                MAX_DISCOVERY_CHILD_PAGE,
+            )
             .await
             .unwrap()
+            .items
             .is_empty(),
         "a same-project pipeline-path substitution must not expose children"
     );
+    assert!(matches!(
+        store
+            .discovery_children(organization_id, project_id, pipeline_id, parent_id, None, 0)
+            .await,
+        Err(StoreError::InvalidDiscovery(_))
+    ));
+    let first_page = store
+        .discovery_children(organization_id, project_id, pipeline_id, parent_id, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(first_page.items.len(), 2);
+    let first_cursor = first_page.next_after.expect("a second page exists");
+    assert_eq!(first_cursor, first_page.items[1].child_key);
+    let second_page = store
+        .discovery_children(
+            organization_id,
+            project_id,
+            pipeline_id,
+            parent_id,
+            Some(&first_cursor),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(second_page.items.len(), 2);
+    assert!(second_page.next_after.is_none());
+    assert!(first_page.items[1].child_key < second_page.items[0].child_key);
+
+    let mut runtime = store.pool().begin().await.unwrap();
+    sqlx::query("SET LOCAL ROLE mcloving_tenant")
+        .execute(&mut *runtime)
+        .await
+        .expect("assume constrained runtime role");
+    sqlx::query("SELECT set_config('mcloving.organization_id', $1, true)")
+        .bind(organization_id.to_string())
+        .execute(&mut *runtime)
+        .await
+        .expect("bind discovery tenant context");
+    let runtime_identities = sqlx::query_as::<_, (String, Uuid)>(
+        "SELECT child_key, child_pipeline_id
+         FROM discovery_child_identities
+         WHERE organization_id = $1 AND parent_id = $2
+           AND (child_key = $3 OR child_pipeline_id = $4)",
+    )
+    .bind(organization_id)
+    .bind(parent_id)
+    .bind(&initial.observations[0].child_key)
+    .bind(initial.observations[0].child_pipeline_id)
+    .fetch_all(&mut *runtime)
+    .await
+    .expect("immutable identity lookup uses only the runtime role's SELECT grant");
+    assert_eq!(runtime_identities.len(), 1);
+    let can_update_identity_registry: bool = sqlx::query_scalar(
+        "SELECT has_table_privilege(
+             'mcloving_tenant', 'discovery_child_identities', 'UPDATE'
+         )",
+    )
+    .fetch_one(&mut *runtime)
+    .await
+    .unwrap();
+    assert!(!can_update_identity_registry);
+    runtime.rollback().await.unwrap();
     let dispositions = sqlx::query_as::<_, (String, String, bool, bool)>(
         r#"
         SELECT child_key, disposition, trusted, authorized
@@ -561,9 +640,17 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
     );
     store.reconcile_discovery_scan(&webhook).await.unwrap();
     let children = store
-        .discovery_children(organization_id, project_id, pipeline_id, parent_id)
+        .discovery_children(
+            organization_id,
+            project_id,
+            pipeline_id,
+            parent_id,
+            None,
+            MAX_DISCOVERY_CHILD_PAGE,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
     assert_eq!(
         children
             .iter()
@@ -596,9 +683,17 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
     );
     store.reconcile_discovery_scan(&catch_up).await.unwrap();
     let children = store
-        .discovery_children(organization_id, project_id, pipeline_id, parent_id)
+        .discovery_children(
+            organization_id,
+            project_id,
+            pipeline_id,
+            parent_id,
+            None,
+            MAX_DISCOVERY_CHILD_PAGE,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .items;
     assert_eq!(
         children
             .iter()

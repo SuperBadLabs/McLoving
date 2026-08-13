@@ -148,9 +148,19 @@ require project-view authority. Request objects reject unknown fields and use
 closed enums and bounded exact-width integers. Digests use canonical lowercase
 64-character hexadecimal strings at the HTTP boundary.
 
-All seven discovery tables use forced tenant row-level security. The deployable
+Child truth is returned as a stable, exclusive `child_key` cursor page:
+`{"items":[...],"next_after":"..."}`. The optional `after` query parameter
+continues strictly after the prior page's last key. `limit` defaults to 50 and
+must be between 1 and 200. The response and its PostgreSQL read are therefore
+bounded even when retained or retired children accumulate indefinitely; a null
+`next_after` marks the final page.
+
+All eight discovery tables use forced tenant row-level security. The deployable
 runtime preflight enumerates their exact least-privilege grants and policies;
-schema or privilege drift prevents startup.
+schema or privilege drift prevents startup. The immutable child-identity
+registry deliberately grants the runtime role only `SELECT` and `INSERT`; its
+serialized identity lookup takes no row-update lock and needs no `UPDATE`
+privilege.
 
 ## Quiesced transfer and rollback evidence
 
@@ -176,7 +186,8 @@ trusted and untrusted forks, filtering, exact/divergent replay, child-identity
 substitution, reordered cursors, periodic and recovery catch-up, parent and
 authorization drift, quiescence, orphan retirement, rollback restoration, and
 independently anchored transfer tamper denial. Controller API tests cover route
-and OpenAPI closure. Protected validation must also run the repository-wide
+and OpenAPI closure, bounded child pagination, and the identity lookup under the
+constrained runtime role. Protected validation must also run the repository-wide
 format, lint, unit, integration, security, and platform matrices before merge.
 
 The Mario inventory contains no admitted production discovery parent mapping.

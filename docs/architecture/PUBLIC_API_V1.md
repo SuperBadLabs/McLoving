@@ -65,7 +65,9 @@ and accepts only a digest-bound webhook delta or complete periodic/recovery
 snapshot. Child listing requires project-view. Exact storage, filtering,
 quarantine, orphan, and transfer semantics are defined in `DISCOVERY_V1.md`.
 Discovery receipt and child digests use the API-wide lowercase hexadecimal
-encoding rather than exposing internal byte arrays.
+encoding rather than exposing internal byte arrays. Child listing returns an
+object with `items` and nullable `next_after`; it uses a stable, exclusive
+child-key cursor, defaults to 50 rows, and rejects limits outside 1 through 200.
 
 The versioned routes are:
 
@@ -78,7 +80,7 @@ The versioned routes are:
 - `GET /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/discovery/{parent}`
 - `PUT /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/discovery/{parent}`
 - `POST /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/discovery/{parent}/scans`
-- `GET /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/discovery/{parent}/children`
+- `GET /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/discovery/{parent}/children?after=...&limit=...`
 - `POST /api/v1/organizations/{organization}/projects/{project}/pipelines/{pipeline}/builds`
 - `GET /api/v1/organizations/{organization}/projects/{project}/builds`
 - `GET /api/v1/organizations/{organization}/projects/{project}/builds/{build}`

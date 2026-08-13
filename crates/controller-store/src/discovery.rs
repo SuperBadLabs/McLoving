@@ -13,6 +13,7 @@ const MAX_PATH_BYTES: usize = 1024;
 const MAX_REASON_BYTES: usize = 2048;
 const MAX_SET_ITEMS: usize = 4096;
 const MAX_JSONB_TEXT_BYTES: usize = 65_536;
+pub const MAX_DISCOVERY_CHILD_PAGE: u32 = 200;
 
 type DiscoveryIdentityRow = (
     String,
@@ -428,6 +429,12 @@ pub struct DiscoveryChild {
     pub parent_generation: i64,
     pub source_cursor: i64,
     pub last_scan_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DiscoveryChildPage {
+    pub items: Vec<DiscoveryChild>,
+    pub next_after: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1258,8 +1265,7 @@ impl Store {
                         pull_request_number, head_repository_identity, is_fork
                  FROM discovery_child_identities
                  WHERE organization_id = $1 AND parent_id = $2
-                   AND (child_key = $3 OR child_pipeline_id = $4)
-                 FOR UPDATE",
+                   AND (child_key = $3 OR child_pipeline_id = $4)",
             )
             .bind(input.organization_id)
             .bind(input.parent_id)
@@ -1577,7 +1583,17 @@ impl Store {
         project_id: Uuid,
         pipeline_id: Uuid,
         parent_id: Uuid,
-    ) -> Result<Vec<DiscoveryChild>, StoreError> {
+        after_child_key: Option<&str>,
+        limit: u32,
+    ) -> Result<DiscoveryChildPage, StoreError> {
+        if limit == 0 || limit > MAX_DISCOVERY_CHILD_PAGE {
+            return invalid(format!(
+                "discovery child page limit must be between 1 and {MAX_DISCOVERY_CHILD_PAGE}"
+            ));
+        }
+        if let Some(after) = after_child_key {
+            validate_text("discovery child cursor", after, MAX_PATH_BYTES)?;
+        }
         let mut tx = self.tenant_transaction(organization_id).await?;
         let rows = sqlx::query(
             "SELECT organization_id, project_id, pipeline_id, parent_id,
@@ -1589,16 +1605,33 @@ impl Store {
                     source_cursor, last_scan_id
              FROM discovery_children
              WHERE organization_id = $1 AND project_id = $2
-               AND pipeline_id = $3 AND parent_id = $4 ORDER BY child_key",
+               AND pipeline_id = $3 AND parent_id = $4
+               AND ($5::text IS NULL OR child_key > $5)
+             ORDER BY child_key
+             LIMIT $6",
         )
         .bind(organization_id)
         .bind(project_id)
         .bind(pipeline_id)
         .bind(parent_id)
+        .bind(after_child_key)
+        .bind(i64::from(limit) + 1)
         .fetch_all(&mut *tx)
         .await?;
         tx.commit().await?;
-        rows.into_iter().map(child_from_row).collect()
+        let mut items = rows
+            .into_iter()
+            .map(child_from_row)
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let next_after = (items.len() > limit as usize).then(|| {
+            items
+                .get(limit as usize - 1)
+                .expect("positive bounded discovery page has a cursor")
+                .child_key
+                .clone()
+        });
+        items.truncate(limit as usize);
+        Ok(DiscoveryChildPage { items, next_after })
     }
 }
 
