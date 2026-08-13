@@ -57,6 +57,11 @@ impl ExternalConnector {
             &credential_token,
             &secret_markers,
         )?;
+        let activation_time = unix_time_ms()?;
+        let timeout =
+            i64::try_from(config.limits.timeout_ms).map_err(|_| ConnectorError::InvalidConfig)?;
+        let credential_grant_usable =
+            activation_time.saturating_add(timeout) <= config.credential_grant_expires_unix_ms;
         let credential_token =
             String::from_utf8(credential_token).map_err(|_| ConnectorError::InvalidConfig)?;
         if !is_bearer_token68(&credential_token) {
@@ -109,6 +114,7 @@ impl ExternalConnector {
                 max_history: config.limits.max_runtime_history,
             },
             config.limits.max_receipts,
+            credential_grant_usable,
         )?;
         Ok(Self {
             config,
@@ -177,7 +183,7 @@ impl ExternalConnector {
             .lock()
             .map_err(|_| ConnectorError::StateUnavailable)?
             .assert_runtime()?;
-        self.validate_request(&request, now_unix_ms)?;
+        self.validate_request(&request)?;
         let serialized =
             serde_json::to_vec(&request).map_err(|_| ConnectorError::MalformedRequest)?;
         if serialized.len() > self.config.limits.max_request_bytes {
@@ -202,6 +208,7 @@ impl ExternalConnector {
                     &scope,
                     request.idempotency_class,
                     self.config.limits.max_attempts,
+                    self.current_authority_valid(&request, now_unix_ms),
                 )?;
             let attempt_count = match claim {
                 Claim::Replay(receipt) => {
@@ -570,11 +577,7 @@ impl ExternalConnector {
         Ok(outcome)
     }
 
-    fn validate_request(
-        &self,
-        request: &ActionRequest,
-        now_unix_ms: i64,
-    ) -> Result<(), ConnectorError> {
+    fn validate_request(&self, request: &ActionRequest) -> Result<(), ConnectorError> {
         if request.schema_version != crate::REQUEST_SCHEMA_VERSION
             || request.protocol_version != PROTOCOL_VERSION
             || request.request_id.is_nil()
@@ -596,12 +599,6 @@ impl ExternalConnector {
             return Err(ConnectorError::MalformedRequest);
         }
         verify_action_request(request, &self.request_authority_key)?;
-        if now_unix_ms < request.requested_at_unix_ms || now_unix_ms > request.expires_at_unix_ms {
-            return Err(ConnectorError::ExpiredAuthority);
-        }
-        if now_unix_ms > self.config.credential_grant_expires_unix_ms {
-            return Err(ConnectorError::ExpiredAuthority);
-        }
         if request.connector_id != self.config.connector_id
             || request.expected_implementation_sha256 != self.config.implementation_sha256
             || request.expected_image_sha256 != self.config.image_sha256
@@ -643,6 +640,12 @@ impl ExternalConnector {
             return Err(ConnectorError::ConfidentialityDenied);
         }
         Ok(())
+    }
+
+    fn current_authority_valid(&self, request: &ActionRequest, now_unix_ms: i64) -> bool {
+        now_unix_ms >= request.requested_at_unix_ms
+            && now_unix_ms <= request.expires_at_unix_ms
+            && now_unix_ms <= self.config.credential_grant_expires_unix_ms
     }
 
     fn validate_transport_window(

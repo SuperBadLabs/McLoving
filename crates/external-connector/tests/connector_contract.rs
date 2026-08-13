@@ -848,6 +848,24 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
             Err(ConnectorError::InvalidConfig)
         ));
     }
+    let mut expired_rotation = rig.config.clone();
+    expired_rotation.generation = 2;
+    expired_rotation.activation_mode = ActivationMode::Cutover;
+    expired_rotation.previous_generation = Some(1);
+    expired_rotation.previous_config_sha256 = Some(rig.connector.config_sha256().to_owned());
+    expired_rotation.credential_grant_expires_unix_ms = 0;
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            expired_rotation,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            TOKEN.to_vec(),
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
     let old_generation_receipt = rig
         .connector
         .execute_at(rig.request(IdempotencyClass::ExternallyIdempotent), NOW)
@@ -1110,6 +1128,53 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
         Err(ConnectorError::InvalidReplay)
     );
     let replay_id = Uuid::new_v4();
+    let large_output_state = tempfile::tempdir().unwrap();
+    make_private(large_output_state.path());
+    let mut large_output_config = config.clone();
+    large_output_config.state_dir = large_output_state.path().to_path_buf();
+    large_output_config.replay_authority_identity = "authority/".to_owned() + &"r".repeat(40_000);
+    large_output_config.replay_signing_key_id = "key/".to_owned() + &"k".repeat(40_000);
+    let large_output_replayer = ShadowReplayer::new_loopback_test(
+        large_output_config.clone(),
+        outcome_key.clone(),
+        replay_seed.clone(),
+    )
+    .unwrap();
+    let mut oversized_request = ShadowReplayRequest {
+        schema_version: SHADOW_REPLAY_SCHEMA_VERSION.to_owned(),
+        replay_id,
+        expected_outcome_receipt_sha256: outcome_receipt_digest(&outcome).unwrap(),
+        expected_shadow_identity: large_output_config.shadow_identity.clone(),
+        outcome_receipt: outcome.clone(),
+        replayed_at_unix_ms: NOW + 2,
+        audit_provenance: String::new(),
+    };
+    let empty_request_size = serde_json::to_vec(&ShadowCommand::Replay {
+        request: Box::new(oversized_request.clone()),
+    })
+    .unwrap()
+    .len();
+    oversized_request.audit_provenance =
+        "x".repeat(MAX_FRAME_BYTES.saturating_sub(empty_request_size + 1));
+    let input_frame = serde_json::to_vec(&ShadowCommand::Replay {
+        request: Box::new(oversized_request.clone()),
+    })
+    .unwrap();
+    assert_eq!(input_frame.len() + 1, MAX_FRAME_BYTES);
+    assert_eq!(
+        large_output_replayer.replay(oversized_request),
+        Err(ConnectorError::CapacityExceeded)
+    );
+    let small_request = ShadowReplayRequest {
+        schema_version: SHADOW_REPLAY_SCHEMA_VERSION.to_owned(),
+        replay_id,
+        expected_outcome_receipt_sha256: outcome_receipt_digest(&outcome).unwrap(),
+        expected_shadow_identity: large_output_config.shadow_identity,
+        outcome_receipt: outcome.clone(),
+        replayed_at_unix_ms: NOW + 2,
+        audit_provenance: "audit/shadow/frame-retry".to_owned(),
+    };
+    assert!(large_output_replayer.replay(small_request).is_ok());
     let request = ShadowReplayRequest {
         schema_version: SHADOW_REPLAY_SCHEMA_VERSION.to_owned(),
         replay_id,

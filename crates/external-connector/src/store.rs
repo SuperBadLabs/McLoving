@@ -71,6 +71,7 @@ impl ConnectorStore {
         config_sha256: &str,
         activation: RuntimeActivation<'_>,
         max_receipts: usize,
+        authority_usable: bool,
     ) -> Result<Self, ConnectorError> {
         let RuntimeActivation {
             generation,
@@ -145,6 +146,14 @@ impl ConnectorStore {
             )
             .optional()
             .map_err(|_| ConnectorError::StateUnavailable)?;
+        let exact_active = existing
+            .as_ref()
+            .is_some_and(|(digest, active_generation)| {
+                digest == config_sha256 && *active_generation == generation
+            });
+        if !authority_usable && !exact_active {
+            return Err(ConnectorError::InvalidConfig);
+        }
         let retained_and_reserved: usize = transaction
             .query_row(
                 "SELECT
@@ -283,6 +292,7 @@ impl ConnectorStore {
         scope_key: &str,
         class: IdempotencyClass,
         max_attempts: u8,
+        admit_new: bool,
     ) -> Result<Claim, ConnectorError> {
         let tx = self
             .connection
@@ -367,6 +377,10 @@ impl ConnectorStore {
             return Ok(Claim::Dispatch {
                 attempt_count: next,
             });
+        }
+
+        if !admit_new {
+            return Err(ConnectorError::ExpiredAuthority);
         }
 
         let retained_and_reserved: usize = tx
@@ -849,6 +863,7 @@ mod tests {
                 max_history: 16,
             },
             max_receipts,
+            true,
         )
     }
 
@@ -872,6 +887,7 @@ mod tests {
                 max_history: 16,
             },
             max_receipts,
+            true,
         )
     }
 
@@ -896,6 +912,7 @@ mod tests {
                 max_history: 16,
             },
             max_receipts,
+            true,
         )
     }
 
@@ -913,6 +930,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::NonIdempotent,
                     2,
+                    true,
                 )
                 .unwrap(),
             Claim::Dispatch { attempt_count: 1 }
@@ -931,12 +949,24 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::NonIdempotent,
                     2,
+                    true,
                 )
                 .unwrap(),
             Claim::AmbiguousAfterRestart {
                 attempt_count: 1,
                 dispatched_at_unix_ms: 1_800_000_000_000,
             }
+        ));
+        assert!(matches!(
+            restarted.claim(
+                Uuid::new_v4(),
+                &"d".repeat(64),
+                &"e".repeat(64),
+                IdempotencyClass::NonIdempotent,
+                2,
+                false,
+            ),
+            Err(ConnectorError::ExpiredAuthority)
         ));
     }
 
@@ -954,6 +984,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::ExternallyIdempotent,
                     1,
+                    true,
                 )
                 .unwrap(),
             Claim::Dispatch { attempt_count: 1 }
@@ -969,6 +1000,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::ExternallyIdempotent,
                     1,
+                    true,
                 )
                 .unwrap(),
             Claim::RetryBudgetExhausted { attempt_count: 1 }
@@ -987,6 +1019,7 @@ mod tests {
                 &"c".repeat(64),
                 IdempotencyClass::NonIdempotent,
                 1,
+                true,
             ),
             Err(ConnectorError::CapacityExceeded)
         ));
@@ -1006,6 +1039,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::ExternallyIdempotent,
                     3,
+                    true,
                 )
                 .unwrap(),
             Claim::Dispatch { attempt_count: 1 }
@@ -1021,6 +1055,7 @@ mod tests {
                     &"c".repeat(64),
                     IdempotencyClass::ExternallyIdempotent,
                     3,
+                    true,
                 )
                 .unwrap(),
             Claim::Dispatch { attempt_count: 2 }
@@ -1039,6 +1074,7 @@ mod tests {
                 &"e".repeat(64),
                 IdempotencyClass::NonIdempotent,
                 1,
+                true,
             ),
             Err(ConnectorError::CapacityExceeded)
         ));
@@ -1057,6 +1093,7 @@ mod tests {
                 &scope,
                 IdempotencyClass::NonIdempotent,
                 1,
+                true,
             )
             .unwrap();
         assert!(matches!(
@@ -1084,6 +1121,7 @@ mod tests {
                 &scope,
                 IdempotencyClass::NonIdempotent,
                 1,
+                true,
             ),
             Err(ConnectorError::EffectPending)
         ));
@@ -1136,6 +1174,7 @@ mod tests {
                 max_history: 1,
             },
             8,
+            true,
         )
         .unwrap();
         assert!(
@@ -1151,9 +1190,44 @@ mod tests {
                     max_history: 1,
                 },
                 8,
+                true,
             )
             .is_ok()
         );
+        assert!(
+            ConnectorStore::open(
+                bounded.path(),
+                &"a".repeat(64),
+                RuntimeActivation {
+                    generation: 1,
+                    mode: ActivationMode::Current,
+                    previous_generation: None,
+                    previous_config_sha256: None,
+                    rollback_from_generation: None,
+                    max_history: 1,
+                },
+                8,
+                false,
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            ConnectorStore::open(
+                bounded.path(),
+                &"e".repeat(64),
+                RuntimeActivation {
+                    generation: 2,
+                    mode: ActivationMode::Cutover,
+                    previous_generation: Some(1),
+                    previous_config_sha256: Some(&"a".repeat(64)),
+                    rollback_from_generation: None,
+                    max_history: 2,
+                },
+                8,
+                false,
+            ),
+            Err(ConnectorError::InvalidConfig)
+        ));
         assert!(matches!(
             ConnectorStore::open(
                 bounded.path(),
@@ -1167,6 +1241,7 @@ mod tests {
                     max_history: 1,
                 },
                 8,
+                true,
             ),
             Err(ConnectorError::CapacityExceeded)
         ));

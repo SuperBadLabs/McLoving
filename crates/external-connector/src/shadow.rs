@@ -166,6 +166,14 @@ impl ShadowReplayer {
             signature_base64: String::new(),
         };
         sign_shadow_receipt(&mut receipt, &self.replay_signing_seed)?;
+        let response = crate::ShadowResponse::Ok {
+            receipt: Box::new(receipt.clone()),
+        };
+        let response_bytes =
+            serde_json::to_vec(&response).map_err(|_| ConnectorError::StateUnavailable)?;
+        if response_bytes.len().saturating_add(1) > crate::MAX_FRAME_BYTES {
+            return Err(ConnectorError::CapacityExceeded);
+        }
         self.store
             .lock()
             .map_err(|_| ConnectorError::StateUnavailable)?
