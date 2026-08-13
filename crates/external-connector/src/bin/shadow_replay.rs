@@ -1,0 +1,28 @@
+use std::env;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use mcloving_external_connector::{ConnectorError, load_shadow_replayer, serve_shadow_stdio};
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("external shadow replay terminated: {}", error.code());
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn run() -> Result<(), ConnectorError> {
+    let arguments = env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    if arguments.len() != 3 {
+        return Err(ConnectorError::InvalidConfig);
+    }
+    let shadow = load_shadow_replayer(&arguments[0], &arguments[1], &arguments[2])?;
+    serve_shadow_stdio(&shadow).await
+}
