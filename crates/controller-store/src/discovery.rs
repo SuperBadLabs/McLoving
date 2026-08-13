@@ -213,6 +213,95 @@ pub enum DiscoveryObservationDisposition {
     Absent,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DiscoveryChildCounts {
+    active: i64,
+    quarantined: i64,
+    retired: i64,
+}
+
+impl DiscoveryChildCounts {
+    fn from_stored(active: i64, quarantined: i64, retired: i64) -> Result<Self, StoreError> {
+        if active < 0 || quarantined < 0 || retired < 0 {
+            return invalid("stored discovery child counts are negative");
+        }
+        Ok(Self {
+            active,
+            quarantined,
+            retired,
+        })
+    }
+
+    fn count_mut(&mut self, state: DiscoveryChildState) -> &mut i64 {
+        match state {
+            DiscoveryChildState::Active => &mut self.active,
+            DiscoveryChildState::Quarantined => &mut self.quarantined,
+            DiscoveryChildState::Retired => &mut self.retired,
+        }
+    }
+
+    fn transition(
+        &mut self,
+        previous: Option<DiscoveryChildState>,
+        current: DiscoveryChildState,
+    ) -> Result<(), StoreError> {
+        if previous == Some(current) {
+            return Ok(());
+        }
+        if let Some(previous) = previous {
+            let count = self.count_mut(previous);
+            *count = count.checked_sub(1).ok_or_else(|| {
+                StoreError::InvalidDiscovery(
+                    "discovery child state counts underflowed retained truth".to_owned(),
+                )
+            })?;
+        }
+        let count = self.count_mut(current);
+        *count = count.checked_add(1).ok_or_else(|| {
+            StoreError::InvalidDiscovery("discovery child state counts overflowed".to_owned())
+        })?;
+        Ok(())
+    }
+
+    fn retire_many(&mut self, active: i64, quarantined: i64) -> Result<(), StoreError> {
+        if active < 0 || quarantined < 0 {
+            return invalid("retired discovery child transition counts are negative");
+        }
+        self.active = self.active.checked_sub(active).ok_or_else(|| {
+            StoreError::InvalidDiscovery(
+                "active discovery child count underflowed during retirement".to_owned(),
+            )
+        })?;
+        self.quarantined = self.quarantined.checked_sub(quarantined).ok_or_else(|| {
+            StoreError::InvalidDiscovery(
+                "quarantined discovery child count underflowed during retirement".to_owned(),
+            )
+        })?;
+        self.retired = self
+            .retired
+            .checked_add(active)
+            .and_then(|count| count.checked_add(quarantined))
+            .ok_or_else(|| {
+                StoreError::InvalidDiscovery("retired discovery child count overflowed".to_owned())
+            })?;
+        Ok(())
+    }
+
+    fn receipt_values(self) -> Result<(usize, usize, usize), StoreError> {
+        Ok((
+            usize::try_from(self.active).map_err(|_| {
+                StoreError::InvalidDiscovery("stored active child count is invalid".to_owned())
+            })?,
+            usize::try_from(self.quarantined).map_err(|_| {
+                StoreError::InvalidDiscovery("stored quarantined child count is invalid".to_owned())
+            })?,
+            usize::try_from(self.retired).map_err(|_| {
+                StoreError::InvalidDiscovery("stored retired child count is invalid".to_owned())
+            })?,
+        ))
+    }
+}
+
 impl DiscoveryObservationDisposition {
     fn as_str(self) -> &'static str {
         match self {
@@ -1154,14 +1243,29 @@ impl Store {
             });
         }
         validate_live_authorities(&mut tx, &parent).await?;
-        let last_cursor = sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(MAX(source_cursor), 0) FROM discovery_scans
-             WHERE organization_id = $1 AND parent_id = $2",
+        let latest_result = sqlx::query_as::<_, (i64, i64, i64, i64)>(
+            "SELECT scan.source_cursor, result.active_count,
+                    result.quarantined_count, result.retired_count
+             FROM discovery_scans AS scan
+             JOIN discovery_scan_results AS result
+               ON result.organization_id = scan.organization_id
+              AND result.parent_id = scan.parent_id
+              AND result.scan_id = scan.scan_id
+             WHERE scan.organization_id = $1 AND scan.parent_id = $2
+             ORDER BY scan.source_cursor DESC
+             LIMIT 1",
         )
         .bind(input.organization_id)
         .bind(input.parent_id)
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+        let (last_cursor, mut counts) = match latest_result {
+            Some((cursor, active, quarantined, retired)) => (
+                cursor,
+                DiscoveryChildCounts::from_stored(active, quarantined, retired)?,
+            ),
+            None => (0, DiscoveryChildCounts::default()),
+        };
         if input.source_cursor <= last_cursor {
             return conflict("discovery source cursor is duplicate or reordered");
         }
@@ -1280,17 +1384,17 @@ impl Store {
             {
                 return conflict("discovery child key or pipeline identity was substituted");
             }
-            let existing = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (
-                     SELECT 1 FROM discovery_children
-                     WHERE organization_id = $1 AND parent_id = $2 AND child_key = $3
-                 )",
+            let existing_state = sqlx::query_scalar::<_, String>(
+                "SELECT state FROM discovery_children
+                 WHERE organization_id = $1 AND parent_id = $2 AND child_key = $3",
             )
             .bind(input.organization_id)
             .bind(input.parent_id)
             .bind(&observation.child_key)
-            .fetch_one(&mut *tx)
-            .await?;
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|state| DiscoveryChildState::parse(&state))
+            .transpose()?;
             let authorized = *disposition == DiscoveryObservationDisposition::Active;
             let observation_sha256 = observation_digest(
                 observation,
@@ -1335,8 +1439,8 @@ impl Store {
             .bind(observation_sha256.as_slice())
             .execute(&mut *tx)
             .await?;
-            match (*disposition, existing) {
-                (DiscoveryObservationDisposition::Filtered, true) => {
+            match (*disposition, existing_state) {
+                (DiscoveryObservationDisposition::Filtered, Some(previous)) => {
                     upsert_child(
                         &mut tx,
                         input,
@@ -1345,24 +1449,40 @@ impl Store {
                         DiscoveryObservationDisposition::Absent,
                     )
                     .await?;
+                    counts.transition(Some(previous), DiscoveryChildState::Retired)?;
                 }
-                (DiscoveryObservationDisposition::Filtered, false) => {}
-                (disposition, _) => {
+                (DiscoveryObservationDisposition::Filtered, None) => {}
+                (disposition, previous) => {
+                    let current = child_state_for_disposition(disposition)?;
                     upsert_child(&mut tx, input, &parent, observation, disposition).await?;
+                    counts.transition(previous, current)?;
                 }
             }
         }
 
         if input.complete_snapshot && parent.orphan_policy == OrphanPolicy::Retire {
             let seen = seen.into_iter().collect::<Vec<_>>();
-            sqlx::query(
-                "UPDATE discovery_children
-                 SET state = 'retired', state_generation = state_generation + 1,
-                     parent_generation = $3, source_cursor = $4,
-                     last_scan_id = $5, updated_at = clock_timestamp()
-                 WHERE organization_id = $1 AND parent_id = $2
-                   AND state <> 'retired'
-                   AND NOT (child_key = ANY($6::text[]))",
+            let retired = sqlx::query_as::<_, (i64, i64)>(
+                "WITH candidates AS MATERIALIZED (
+                     SELECT child_key, state
+                     FROM discovery_children
+                     WHERE organization_id = $1 AND parent_id = $2
+                       AND state <> 'retired'
+                       AND NOT (child_key = ANY($6::text[]))
+                     FOR UPDATE
+                 ), updated AS (
+                     UPDATE discovery_children AS child
+                     SET state = 'retired', state_generation = child.state_generation + 1,
+                         parent_generation = $3, source_cursor = $4,
+                         last_scan_id = $5, updated_at = clock_timestamp()
+                     FROM candidates
+                     WHERE child.organization_id = $1 AND child.parent_id = $2
+                       AND child.child_key = candidates.child_key
+                     RETURNING candidates.state AS previous_state
+                 )
+                 SELECT COUNT(*) FILTER (WHERE previous_state = 'active'),
+                        COUNT(*) FILTER (WHERE previous_state = 'quarantined')
+                 FROM updated",
             )
             .bind(input.organization_id)
             .bind(input.parent_id)
@@ -1370,10 +1490,11 @@ impl Store {
             .bind(input.source_cursor)
             .bind(&input.scan_id)
             .bind(&seen)
-            .execute(&mut *tx)
+            .fetch_one(&mut *tx)
             .await?;
+            counts.retire_many(retired.0, retired.1)?;
         }
-        let counts = child_counts(&mut tx, input.organization_id, input.parent_id).await?;
+        let receipt_counts = counts.receipt_values()?;
         sqlx::query(
             "INSERT INTO discovery_scan_results (
                  organization_id, parent_id, scan_id,
@@ -1383,19 +1504,9 @@ impl Store {
         .bind(input.organization_id)
         .bind(input.parent_id)
         .bind(&input.scan_id)
-        .bind(
-            i32::try_from(counts.0).map_err(|_| {
-                StoreError::InvalidDiscovery("active child count overflow".to_owned())
-            })?,
-        )
-        .bind(i32::try_from(counts.1).map_err(|_| {
-            StoreError::InvalidDiscovery("quarantined child count overflow".to_owned())
-        })?)
-        .bind(
-            i32::try_from(counts.2).map_err(|_| {
-                StoreError::InvalidDiscovery("retired child count overflow".to_owned())
-            })?,
-        )
+        .bind(counts.active)
+        .bind(counts.quarantined)
+        .bind(counts.retired)
         .bind(i32::try_from(selected_count).map_err(|_| {
             StoreError::InvalidDiscovery("selected observation count overflow".to_owned())
         })?)
@@ -1417,9 +1528,9 @@ impl Store {
             request_sha256,
             observation_count: input.observations.len(),
             selected_count,
-            active_count: counts.0,
-            quarantined_count: counts.1,
-            retired_count: counts.2,
+            active_count: receipt_counts.0,
+            quarantined_count: receipt_counts.1,
+            retired_count: receipt_counts.2,
             audit_sequence: audit.sequence,
             audit_event_hash: audit.event_hash,
         }))
@@ -2071,14 +2182,7 @@ async fn upsert_child(
     observation: &DiscoveryObservationWrite,
     disposition: DiscoveryObservationDisposition,
 ) -> Result<(), StoreError> {
-    let state = match disposition {
-        DiscoveryObservationDisposition::Active => DiscoveryChildState::Active,
-        DiscoveryObservationDisposition::Quarantined => DiscoveryChildState::Quarantined,
-        DiscoveryObservationDisposition::Absent => DiscoveryChildState::Retired,
-        DiscoveryObservationDisposition::Filtered => {
-            return invalid("filtered observation cannot materialize a discovery child");
-        }
-    };
+    let state = child_state_for_disposition(disposition)?;
     sqlx::query(
         "INSERT INTO discovery_children (
              organization_id, project_id, pipeline_id, parent_id, child_key,
@@ -2136,26 +2240,17 @@ async fn upsert_child(
     Ok(())
 }
 
-async fn child_counts(
-    tx: &mut Transaction<'_, Postgres>,
-    organization_id: Uuid,
-    parent_id: Uuid,
-) -> Result<(usize, usize, usize), StoreError> {
-    let (active, quarantined, retired) = sqlx::query_as::<_, (i64, i64, i64)>(
-        "SELECT COUNT(*) FILTER (WHERE state = 'active'),
-                COUNT(*) FILTER (WHERE state = 'quarantined'),
-                COUNT(*) FILTER (WHERE state = 'retired')
-         FROM discovery_children WHERE organization_id = $1 AND parent_id = $2",
-    )
-    .bind(organization_id)
-    .bind(parent_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    Ok((
-        usize::try_from(active).unwrap_or(usize::MAX),
-        usize::try_from(quarantined).unwrap_or(usize::MAX),
-        usize::try_from(retired).unwrap_or(usize::MAX),
-    ))
+fn child_state_for_disposition(
+    disposition: DiscoveryObservationDisposition,
+) -> Result<DiscoveryChildState, StoreError> {
+    match disposition {
+        DiscoveryObservationDisposition::Active => Ok(DiscoveryChildState::Active),
+        DiscoveryObservationDisposition::Quarantined => Ok(DiscoveryChildState::Quarantined),
+        DiscoveryObservationDisposition::Absent => Ok(DiscoveryChildState::Retired),
+        DiscoveryObservationDisposition::Filtered => {
+            invalid("filtered observation cannot materialize a discovery child")
+        }
+    }
 }
 
 fn scan_receipt_from_row(row: sqlx::postgres::PgRow) -> Result<DiscoveryScanReceipt, StoreError> {
@@ -2188,15 +2283,15 @@ fn scan_receipt_from_row(row: sqlx::postgres::PgRow) -> Result<DiscoveryScanRece
         selected_count: usize::try_from(row.try_get::<i32, _>("selected_count")?).map_err(
             |_| StoreError::InvalidDiscovery("stored selected count is invalid".to_owned()),
         )?,
-        active_count: usize::try_from(row.try_get::<i32, _>("active_count")?).map_err(|_| {
+        active_count: usize::try_from(row.try_get::<i64, _>("active_count")?).map_err(|_| {
             StoreError::InvalidDiscovery("stored active child count is invalid".to_owned())
         })?,
-        quarantined_count: usize::try_from(row.try_get::<i32, _>("quarantined_count")?).map_err(
+        quarantined_count: usize::try_from(row.try_get::<i64, _>("quarantined_count")?).map_err(
             |_| {
                 StoreError::InvalidDiscovery("stored quarantined child count is invalid".to_owned())
             },
         )?,
-        retired_count: usize::try_from(row.try_get::<i32, _>("retired_count")?).map_err(|_| {
+        retired_count: usize::try_from(row.try_get::<i64, _>("retired_count")?).map_err(|_| {
             StoreError::InvalidDiscovery("stored retired child count is invalid".to_owned())
         })?,
         audit_sequence: row.try_get("audit_sequence")?,
@@ -2345,15 +2440,15 @@ fn scan_record_from_row(row: sqlx::postgres::PgRow) -> Result<DiscoveryScanRecor
         selected_count: usize::try_from(row.try_get::<i32, _>("selected_count")?).map_err(
             |_| StoreError::InvalidDiscovery("stored selected count is invalid".to_owned()),
         )?,
-        active_count: usize::try_from(row.try_get::<i32, _>("active_count")?).map_err(|_| {
+        active_count: usize::try_from(row.try_get::<i64, _>("active_count")?).map_err(|_| {
             StoreError::InvalidDiscovery("stored active child count is invalid".to_owned())
         })?,
-        quarantined_count: usize::try_from(row.try_get::<i32, _>("quarantined_count")?).map_err(
+        quarantined_count: usize::try_from(row.try_get::<i64, _>("quarantined_count")?).map_err(
             |_| {
                 StoreError::InvalidDiscovery("stored quarantined child count is invalid".to_owned())
             },
         )?,
-        retired_count: usize::try_from(row.try_get::<i32, _>("retired_count")?).map_err(|_| {
+        retired_count: usize::try_from(row.try_get::<i64, _>("retired_count")?).map_err(|_| {
             StoreError::InvalidDiscovery("stored retired child count is invalid".to_owned())
         })?,
         actor_subject: row.try_get("actor_subject")?,

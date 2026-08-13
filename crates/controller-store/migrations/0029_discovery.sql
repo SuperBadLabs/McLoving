@@ -210,9 +210,9 @@ CREATE TABLE discovery_scan_results (
     organization_id uuid NOT NULL,
     parent_id uuid NOT NULL,
     scan_id text NOT NULL,
-    active_count integer NOT NULL CHECK (active_count >= 0),
-    quarantined_count integer NOT NULL CHECK (quarantined_count >= 0),
-    retired_count integer NOT NULL CHECK (retired_count >= 0),
+    active_count bigint NOT NULL CHECK (active_count >= 0),
+    quarantined_count bigint NOT NULL CHECK (quarantined_count >= 0),
+    retired_count bigint NOT NULL CHECK (retired_count >= 0),
     selected_count integer NOT NULL CHECK (selected_count >= 0),
     PRIMARY KEY (organization_id, parent_id, scan_id),
     FOREIGN KEY (organization_id, parent_id, scan_id)

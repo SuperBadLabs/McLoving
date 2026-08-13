@@ -155,6 +155,13 @@ must be between 1 and 200. The response and its PostgreSQL read are therefore
 bounded even when retained or retired children accumulate indefinitely; a null
 `next_after` marks the final page.
 
+Each immutable scan result also carries the exact active, quarantined, and
+retired totals forward from the preceding source cursor. Reconciliation adjusts
+those totals only for the bounded reported children and, for a complete
+retiring snapshot, the state-grouped rows changed by its required set-based
+orphan update. A webhook delta therefore never rescans the accumulated current
+or retired child population merely to construct its receipt.
+
 All eight discovery tables use forced tenant row-level security. The deployable
 runtime preflight enumerates their exact least-privilege grants and policies;
 schema or privilege drift prevents startup. The immutable child-identity

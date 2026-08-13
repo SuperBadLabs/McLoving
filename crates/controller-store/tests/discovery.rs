@@ -40,6 +40,38 @@ fn digest(label: &str) -> [u8; 32] {
     Sha256::digest(label.as_bytes()).into()
 }
 
+async fn assert_incremental_child_counts(store: &Store, organization_id: Uuid, parent_id: Uuid) {
+    let recorded = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT result.active_count, result.quarantined_count, result.retired_count
+         FROM discovery_scans AS scan
+         JOIN discovery_scan_results AS result
+           ON result.organization_id = scan.organization_id
+          AND result.parent_id = scan.parent_id
+          AND result.scan_id = scan.scan_id
+         WHERE scan.organization_id = $1 AND scan.parent_id = $2
+         ORDER BY scan.source_cursor DESC
+         LIMIT 1",
+    )
+    .bind(organization_id)
+    .bind(parent_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let actual = sqlx::query_as::<_, (i64, i64, i64)>(
+        "SELECT COUNT(*) FILTER (WHERE state = 'active'),
+                COUNT(*) FILTER (WHERE state = 'quarantined'),
+                COUNT(*) FILTER (WHERE state = 'retired')
+         FROM discovery_children
+         WHERE organization_id = $1 AND parent_id = $2",
+    )
+    .bind(organization_id)
+    .bind(parent_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(recorded, actual);
+}
+
 fn trigger_write(
     organization_id: Uuid,
     project_id: Uuid,
@@ -385,6 +417,7 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
     assert_eq!(receipt.active_count, 3);
     assert_eq!(receipt.quarantined_count, 1);
     assert_eq!(receipt.retired_count, 0);
+    assert_incremental_child_counts(&store, organization_id, parent_id).await;
     assert!(
         store
             .discovery_children(
@@ -701,6 +734,7 @@ async fn organization_discovery_reconciles_filters_forks_replay_and_orphans() {
             .count(),
         3
     );
+    assert_incremental_child_counts(&store, organization_id, parent_id).await;
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM discovery_children
