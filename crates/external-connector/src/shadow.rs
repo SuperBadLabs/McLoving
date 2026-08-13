@@ -195,6 +195,7 @@ fn matches_connector_binding(
         && receipt.generation == binding.generation
         && receipt.activation_mode == binding.activation_mode
         && receipt.previous_generation == binding.previous_generation
+        && receipt.previous_config_sha256 == binding.previous_config_sha256
         && receipt.rollback_from_generation == binding.rollback_from_generation
         && receipt.endpoint_identity == binding.endpoint_identity
         && receipt.account_identity == binding.account_identity

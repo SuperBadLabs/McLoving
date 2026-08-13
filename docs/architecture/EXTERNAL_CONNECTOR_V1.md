@@ -70,13 +70,21 @@ secret-marker files without following a final symlink; private inputs must be
 single-link regular files owned by the process user and inaccessible to group or
 other users.
 
-Generation 1 is necessarily `current` with no predecessor or rollback source.
-A later `cutover` names exactly one lower predecessor and no rollback source; a
-later `rollback` names that predecessor as its rollback source. Impossible or
-mixed-mode provenance is rejected before the ledger opens, and the ledger then
-requires the named predecessor to be the active generation.
+Generation 1 is necessarily `current` with no predecessor, predecessor digest,
+or rollback source. A later `cutover` names the active generation and its exact
+configuration digest as its predecessor and has no rollback source. A later
+`rollback` names a lower, durably retained historical generation plus its exact
+configuration digest as the target, while `rollback_from_generation` names the
+currently active source. The new generation remains monotonic. Impossible or
+mixed-mode provenance is rejected before the ledger opens; the ledger then
+verifies cutover ancestry against the active row and rollback ancestry against
+both the active row and the bounded immutable runtime-history table. The signed
+outcome and shadow bindings carry the target generation and digest plus the
+active rollback source.
 
-The state directory must be a real owner-private directory, not a symlink. Each
+Runtime-history growth is bounded by `max_runtime_history`; exact-generation
+restart remains available at the bound, while another cutover or rollback fails
+closed. The state directory must be a real owner-private directory, not a symlink. Each
 SQLite database is pre-created through `O_NOFOLLOW` as an owner-private,
 single-link regular file before SQLite opens it. The database, WAL, and shared
 memory sidecars are revalidated after WAL activation. Both ledgers use

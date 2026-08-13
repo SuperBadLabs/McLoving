@@ -14,7 +14,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde_json::Value;
 use url::Url;
 
-use crate::store::{Claim, ConnectorStore, acquire_connector_lock, scope_key};
+use crate::store::{Claim, ConnectorStore, RuntimeActivation, acquire_connector_lock, scope_key};
 use crate::{
     ActionRequest, ConnectorConfig, ConnectorError, DESTINATION_RESPONSE_SCHEMA_VERSION,
     DestinationActionEnvelope, OUTCOME_RECEIPT_SCHEMA_VERSION, OutcomeReceipt, OutcomeStatus,
@@ -93,8 +93,14 @@ impl ExternalConnector {
         let store = ConnectorStore::open(
             &config.state_dir,
             &config_sha256,
-            config.generation,
-            config.previous_generation,
+            RuntimeActivation {
+                generation: config.generation,
+                mode: config.activation_mode,
+                previous_generation: config.previous_generation,
+                previous_config_sha256: config.previous_config_sha256.as_deref(),
+                rollback_from_generation: config.rollback_from_generation,
+                max_history: config.limits.max_runtime_history,
+            },
             config.limits.max_receipts,
         )?;
         let credential_token =
@@ -820,6 +826,7 @@ impl ExternalConnector {
             generation: self.config.generation,
             activation_mode: self.config.activation_mode,
             previous_generation: self.config.previous_generation,
+            previous_config_sha256: self.config.previous_config_sha256.clone(),
             rollback_from_generation: self.config.rollback_from_generation,
             endpoint_identity: self.config.endpoint_identity.clone(),
             account_identity: self.config.account_identity.clone(),
@@ -899,6 +906,7 @@ fn validate_config(
         crate::ActivationMode::Current => {
             config.generation == 1
                 && config.previous_generation.is_none()
+                && config.previous_config_sha256.is_none()
                 && config.rollback_from_generation.is_none()
         }
         crate::ActivationMode::Cutover => {
@@ -906,14 +914,23 @@ fn validate_config(
                 && config
                     .previous_generation
                     .is_some_and(|previous| previous < config.generation)
+                && config
+                    .previous_config_sha256
+                    .as_deref()
+                    .is_some_and(is_sha256)
                 && config.rollback_from_generation.is_none()
         }
         crate::ActivationMode::Rollback => {
             config.generation > 1
+                && matches!(
+                    (config.previous_generation, config.rollback_from_generation),
+                    (Some(target), Some(source))
+                        if target < source && source < config.generation
+                )
                 && config
-                    .previous_generation
-                    .is_some_and(|previous| previous < config.generation)
-                && config.rollback_from_generation == config.previous_generation
+                    .previous_config_sha256
+                    .as_deref()
+                    .is_some_and(is_sha256)
         }
     };
     let identities = [
@@ -978,6 +995,8 @@ fn validate_config(
         || config.limits.max_response_bytes == 0
         || config.limits.max_public_output_bytes == 0
         || config.limits.max_receipts == 0
+        || config.limits.max_runtime_history == 0
+        || config.limits.max_runtime_history > 1024
         || config.limits.max_attempts == 0
         || config.limits.max_attempts > 8
         || config.limits.timeout_ms == 0
@@ -1085,32 +1104,31 @@ fn validate_config(
 
 fn contains_secret_value(raw: &[u8], markers: &[Vec<u8>]) -> bool {
     markers.iter().any(|marker| {
-        let hex = marker
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        contains(raw, marker)
-            || contains(raw, BASE64.encode(marker).as_bytes())
-            || contains(raw, BASE64_NO_PAD.encode(marker).as_bytes())
-            || contains(raw, BASE64_URL_SAFE.encode(marker).as_bytes())
-            || contains(raw, BASE64_URL_SAFE_NO_PAD.encode(marker).as_bytes())
-            || contains_ascii_case_insensitive(raw, hex.as_bytes())
-            || contains_percent_decoded(raw, marker)
+        let mut candidate = raw.to_vec();
+        loop {
+            if contains_secret_representation(&candidate, marker) {
+                return true;
+            }
+            let next = percent_decode_once(&candidate);
+            if next == candidate {
+                return false;
+            }
+            candidate = next;
+        }
     })
 }
 
-fn contains_percent_decoded(raw: &[u8], marker: &[u8]) -> bool {
-    let mut decoded = raw.to_vec();
-    loop {
-        let next = percent_decode_once(&decoded);
-        if next == decoded {
-            return false;
-        }
-        if contains(&next, marker) {
-            return true;
-        }
-        decoded = next;
-    }
+fn contains_secret_representation(raw: &[u8], marker: &[u8]) -> bool {
+    let hex = marker
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    contains(raw, marker)
+        || contains(raw, BASE64.encode(marker).as_bytes())
+        || contains(raw, BASE64_NO_PAD.encode(marker).as_bytes())
+        || contains(raw, BASE64_URL_SAFE.encode(marker).as_bytes())
+        || contains(raw, BASE64_URL_SAFE_NO_PAD.encode(marker).as_bytes())
+        || contains_ascii_case_insensitive(raw, hex.as_bytes())
 }
 
 fn percent_decode_once(raw: &[u8]) -> Vec<u8> {

@@ -33,6 +33,7 @@ enum Mode {
     Substitute,
     Secret,
     PercentEncodedSecret,
+    PercentEncodedBase64Secret,
     Malformed,
     Denied,
     SignedFailure,
@@ -99,6 +100,7 @@ impl Rig {
             generation: 1,
             activation_mode: ActivationMode::Current,
             previous_generation: None,
+            previous_config_sha256: None,
             rollback_from_generation: None,
             endpoint_url: format!("http://{address}/effect"),
             endpoint_identity: "endpoint/releases".to_owned(),
@@ -172,6 +174,7 @@ impl Rig {
                 max_response_bytes: 64 * 1024,
                 max_public_output_bytes: 8 * 1024,
                 max_receipts: 64,
+                max_runtime_history: 16,
                 max_attempts: 2,
                 timeout_ms: 50,
                 max_authority_window_ms: 60_000,
@@ -338,6 +341,12 @@ async fn destination(
             Value::String("never%2Dpublish%2Dconnector%2Dsecret".to_owned()),
         );
     }
+    if matches!(state.mode, Mode::PercentEncodedBase64Secret) {
+        body.public_values.insert(
+            "url".to_owned(),
+            Value::String("b%6DV2ZXItcHVibGlzaC1jb25uZWN0b3Itc2VjcmV0".to_owned()),
+        );
+    }
     let mut response = SignedDestinationOutcome {
         body,
         signature_base64: String::new(),
@@ -458,6 +467,7 @@ async fn malformed_substituted_and_secret_bearing_outcomes_fail_closed() {
         (Mode::Substitute, "malformed_response"),
         (Mode::Secret, "confidentiality_denied"),
         (Mode::PercentEncodedSecret, "confidentiality_denied"),
+        (Mode::PercentEncodedBase64Secret, "confidentiality_denied"),
     ] {
         let rig = Rig::new(mode, IdempotencyClass::ExternallyIdempotent).await;
         let receipt = rig
@@ -776,6 +786,7 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
             generation: outcome.generation,
             activation_mode: outcome.activation_mode,
             previous_generation: outcome.previous_generation,
+            previous_config_sha256: outcome.previous_config_sha256.clone(),
             rollback_from_generation: outcome.rollback_from_generation,
             endpoint_identity: outcome.endpoint_identity.clone(),
             account_identity: outcome.account_identity.clone(),
