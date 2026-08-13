@@ -29,7 +29,7 @@ required-features = ["loopback-test"]
 
 [dependencies]
 base64 = "=0.22.1"
-mcloving-destination-observer = { path = "../destination-observer" }
+mcloving-destination-observer = { version = "=0.0.0", path = "../destination-observer" }
 reqwest = { version = "=0.12.23", default-features = false, features = [
   "http2",
   "json",
