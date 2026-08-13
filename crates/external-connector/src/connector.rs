@@ -59,6 +59,9 @@ impl ExternalConnector {
         )?;
         let credential_token =
             String::from_utf8(credential_token).map_err(|_| ConnectorError::InvalidConfig)?;
+        if !is_bearer_token68(&credential_token) {
+            return Err(ConnectorError::InvalidConfig);
+        }
         HeaderValue::from_str(&format!("Bearer {credential_token}"))
             .map_err(|_| ConnectorError::InvalidConfig)?;
         let config_sha256 = config.canonical_digest()?;
@@ -1180,6 +1183,19 @@ fn is_sha256(value: &str) -> bool {
             .as_bytes()
             .iter()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+fn is_bearer_token68(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let content_length = bytes
+        .iter()
+        .position(|byte| *byte == b'=')
+        .unwrap_or(bytes.len());
+    content_length != 0
+        && bytes[..content_length].iter().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/')
+        })
+        && bytes[content_length..].iter().all(|byte| *byte == b'=')
 }
 
 fn unix_time_ms() -> Result<i64, ConnectorError> {

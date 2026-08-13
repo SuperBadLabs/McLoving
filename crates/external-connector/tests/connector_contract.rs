@@ -665,7 +665,13 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
         Err(ConnectorError::InvalidConfig)
     ));
 
-    for invalid_credential in [vec![0xff; 8], b"valid\ninvalid".to_vec()] {
+    for invalid_credential in [
+        vec![0xff; 8],
+        b"valid\ninvalid".to_vec(),
+        b"invalid token".to_vec(),
+        b"invalid:token".to_vec(),
+        b"invalid=padding=placement".to_vec(),
+    ] {
         let invalid_state = tempfile::tempdir().unwrap();
         make_private(invalid_state.path());
         let mut invalid_token_config = rig.config.clone();
@@ -691,25 +697,26 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
         );
     }
 
-    let invalid_rotation_credential = vec![0xff; 8];
-    let mut invalid_rotation = rig.config.clone();
-    invalid_rotation.generation = 2;
-    invalid_rotation.activation_mode = ActivationMode::Cutover;
-    invalid_rotation.previous_generation = Some(1);
-    invalid_rotation.previous_config_sha256 = Some(rig.connector.config_sha256().to_owned());
-    invalid_rotation.credential_token_sha256 = content_sha256(&invalid_rotation_credential);
-    assert!(matches!(
-        ExternalConnector::new_loopback_test(
-            invalid_rotation,
-            public_key_from_seed(&rig.request_seed).unwrap(),
-            public_key_from_seed(&rig.destination_seed).unwrap(),
-            rig.outcome_seed.clone(),
-            public_key_from_seed(&rig.observer_seed).unwrap(),
-            invalid_rotation_credential.clone(),
-            vec![invalid_rotation_credential, SECRET.to_vec()],
-        ),
-        Err(ConnectorError::InvalidConfig)
-    ));
+    for invalid_rotation_credential in [vec![0xff; 8], b"invalid token".to_vec()] {
+        let mut invalid_rotation = rig.config.clone();
+        invalid_rotation.generation = 2;
+        invalid_rotation.activation_mode = ActivationMode::Cutover;
+        invalid_rotation.previous_generation = Some(1);
+        invalid_rotation.previous_config_sha256 = Some(rig.connector.config_sha256().to_owned());
+        invalid_rotation.credential_token_sha256 = content_sha256(&invalid_rotation_credential);
+        assert!(matches!(
+            ExternalConnector::new_loopback_test(
+                invalid_rotation,
+                public_key_from_seed(&rig.request_seed).unwrap(),
+                public_key_from_seed(&rig.destination_seed).unwrap(),
+                rig.outcome_seed.clone(),
+                public_key_from_seed(&rig.observer_seed).unwrap(),
+                invalid_rotation_credential.clone(),
+                vec![invalid_rotation_credential, SECRET.to_vec()],
+            ),
+            Err(ConnectorError::InvalidConfig)
+        ));
+    }
     let old_generation_receipt = rig
         .connector
         .execute_at(rig.request(IdempotencyClass::ExternallyIdempotent), NOW)
