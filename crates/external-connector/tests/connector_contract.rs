@@ -8,7 +8,10 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Router, response::IntoResponse};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE as BASE64_URL_SAFE},
+};
 use mcloving_destination_observer::{
     ActivationMode as ObserverActivationMode, Confidentiality, ObservationPhase, ObservationReceipt,
 };
@@ -29,6 +32,7 @@ enum Mode {
     Timeout,
     Substitute,
     Secret,
+    PercentEncodedSecret,
     Malformed,
     Denied,
     SignedFailure,
@@ -328,6 +332,12 @@ async fn destination(
             Value::String(String::from_utf8(SECRET.to_vec()).unwrap()),
         );
     }
+    if matches!(state.mode, Mode::PercentEncodedSecret) {
+        body.public_values.insert(
+            "url".to_owned(),
+            Value::String("never%2Dpublish%2Dconnector%2Dsecret".to_owned()),
+        );
+    }
     let mut response = SignedDestinationOutcome {
         body,
         signature_base64: String::new(),
@@ -447,6 +457,7 @@ async fn malformed_substituted_and_secret_bearing_outcomes_fail_closed() {
         (Mode::Malformed, "malformed_response"),
         (Mode::Substitute, "malformed_response"),
         (Mode::Secret, "confidentiality_denied"),
+        (Mode::PercentEncodedSecret, "confidentiality_denied"),
     ] {
         let rig = Rig::new(mode, IdempotencyClass::ExternallyIdempotent).await;
         let receipt = rig
@@ -616,6 +627,30 @@ async fn empty_physical_authority_mapping_is_rejected_at_construction() {
             public_key_from_seed(&rig.observer_seed).unwrap(),
             encoded_credential.clone(),
             vec![encoded_credential, SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
+
+    let urlsafe_seed = vec![255; 32];
+    let urlsafe_credential = BASE64_URL_SAFE.encode(&urlsafe_seed).into_bytes();
+    assert_ne!(BASE64.encode(&urlsafe_seed).as_bytes(), urlsafe_credential);
+    let urlsafe_state = tempfile::tempdir().unwrap();
+    make_private(urlsafe_state.path());
+    let mut urlsafe_secret_roles = rig.config.clone();
+    urlsafe_secret_roles.state_dir = urlsafe_state.path().to_path_buf();
+    urlsafe_secret_roles.outcome_signing_seed_sha256 = content_sha256(&urlsafe_seed);
+    urlsafe_secret_roles.outcome_signing_public_key_sha256 =
+        content_sha256(&public_key_from_seed(&urlsafe_seed).unwrap());
+    urlsafe_secret_roles.credential_token_sha256 = content_sha256(&urlsafe_credential);
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            urlsafe_secret_roles,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            urlsafe_seed,
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            urlsafe_credential.clone(),
+            vec![urlsafe_credential, SECRET.to_vec()],
         ),
         Err(ConnectorError::InvalidConfig)
     ));

@@ -3,7 +3,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{
+        STANDARD as BASE64, STANDARD_NO_PAD as BASE64_NO_PAD, URL_SAFE as BASE64_URL_SAFE,
+        URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD,
+    },
+};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde_json::Value;
 use url::Url;
@@ -882,7 +888,9 @@ fn validate_config(
         config.runtime_attestation_authority_key_sha256.clone(),
     ];
     let encoded_signing_seed = BASE64.encode(signing_seed);
-    let unpadded_signing_seed = encoded_signing_seed.trim_end_matches('=');
+    let unpadded_signing_seed = BASE64_NO_PAD.encode(signing_seed);
+    let urlsafe_signing_seed = BASE64_URL_SAFE.encode(signing_seed);
+    let unpadded_urlsafe_signing_seed = BASE64_URL_SAFE_NO_PAD.encode(signing_seed);
     let hexadecimal_signing_seed = signing_seed
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -1022,6 +1030,8 @@ fn validate_config(
         || credential_token.is_empty()
         || credential_token == encoded_signing_seed.as_bytes()
         || credential_token == unpadded_signing_seed.as_bytes()
+        || credential_token == urlsafe_signing_seed.as_bytes()
+        || credential_token == unpadded_urlsafe_signing_seed.as_bytes()
         || credential_token.eq_ignore_ascii_case(hexadecimal_signing_seed.as_bytes())
         || secret_markers.is_empty()
         || !secret_markers
@@ -1079,16 +1089,55 @@ fn contains_secret_value(raw: &[u8], markers: &[Vec<u8>]) -> bool {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let percent = marker
-            .iter()
-            .map(|byte| format!("%{byte:02X}"))
-            .collect::<String>();
         contains(raw, marker)
             || contains(raw, BASE64.encode(marker).as_bytes())
-            || contains(raw, BASE64.encode(marker).trim_end_matches('=').as_bytes())
+            || contains(raw, BASE64_NO_PAD.encode(marker).as_bytes())
+            || contains(raw, BASE64_URL_SAFE.encode(marker).as_bytes())
+            || contains(raw, BASE64_URL_SAFE_NO_PAD.encode(marker).as_bytes())
             || contains_ascii_case_insensitive(raw, hex.as_bytes())
-            || contains_ascii_case_insensitive(raw, percent.as_bytes())
+            || contains_percent_decoded(raw, marker)
     })
+}
+
+fn contains_percent_decoded(raw: &[u8], marker: &[u8]) -> bool {
+    let mut decoded = raw.to_vec();
+    loop {
+        let next = percent_decode_once(&decoded);
+        if next == decoded {
+            return false;
+        }
+        if contains(&next, marker) {
+            return true;
+        }
+        decoded = next;
+    }
+}
+
+fn percent_decode_once(raw: &[u8]) -> Vec<u8> {
+    let mut decoded = Vec::with_capacity(raw.len());
+    let mut index = 0;
+    while index < raw.len() {
+        if raw[index] == b'%'
+            && index.saturating_add(2) < raw.len()
+            && let (Some(high), Some(low)) = (hex_value(raw[index + 1]), hex_value(raw[index + 2]))
+        {
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(raw[index]);
+            index += 1;
+        }
+    }
+    decoded
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
