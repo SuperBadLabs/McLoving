@@ -146,7 +146,10 @@ Parent writes require `If-Match`, an idempotency key, and project-configure
 authority. Scan reconciliation requires project-configure authority. Reads
 require project-view authority. Request objects reject unknown fields and use
 closed enums and bounded exact-width integers. Digests use canonical lowercase
-64-character hexadecimal strings at the HTTP boundary.
+64-character hexadecimal strings at the HTTP boundary. The scan route has a
+dedicated 128 MiB body ceiling: it is high enough for all 4,096 maximally
+bounded observations, including conservative JSON escaping overhead, while
+remaining an explicit transport-level denial bound.
 
 Child truth is returned as a stable, exclusive `child_key` cursor page:
 `{"items":[...],"next_after":"..."}`. The optional `after` query parameter

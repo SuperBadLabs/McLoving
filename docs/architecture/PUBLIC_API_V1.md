@@ -62,7 +62,8 @@ Discovery configuration and reconciliation are typed public contracts. Parent
 GET/PUT binds an immutable generation and ETag; PUT requires project-configure,
 `If-Match`, and `Idempotency-Key`. The scan route requires project-configure
 and accepts only a digest-bound webhook delta or complete periodic/recovery
-snapshot. Child listing requires project-view. Exact storage, filtering,
+snapshot; its dedicated 128 MiB transport cap admits the complete documented
+4,096-observation denominator. Child listing requires project-view. Exact storage, filtering,
 quarantine, orphan, and transfer semantics are defined in `DISCOVERY_V1.md`.
 Discovery receipt and child digests use the API-wide lowercase hexadecimal
 encoding rather than exposing internal byte arrays. Child listing returns an

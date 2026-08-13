@@ -4,7 +4,8 @@ use axum::body::Body;
 use axum::body::to_bytes;
 use axum::http::{Method, Request, StatusCode, header};
 use mcloving_controller_api::{
-    ARTIFACT_NAME_HEADER, ApiState, IDEMPOTENCY_HEADER, PLATFORM_HEADER, TRUST_POOL_HEADER, router,
+    ARTIFACT_NAME_HEADER, ApiState, IDEMPOTENCY_HEADER, MAX_DISCOVERY_SCAN_BODY_BYTES,
+    PLATFORM_HEADER, TRUST_POOL_HEADER, router,
 };
 use mcloving_controller_store::{
     NewTriggerDelivery, PipelinePutOutcome, PipelineWrite, Store, TriggerDeliveryAdmission,
@@ -111,6 +112,77 @@ async fn every_tenant_route_denies_missing_and_cross_tenant_authority() {
             case.path
         );
     }
+}
+
+#[tokio::test]
+async fn discovery_scan_transport_accepts_the_full_observation_denominator() {
+    let organization_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let pipeline_id = Uuid::new_v4();
+    let parent_id = Uuid::new_v4();
+    let principal = Principal {
+        subject: "service:discovery-body-contract".to_owned(),
+        kind: PrincipalKind::Service,
+        organization_id,
+        project_roles: BTreeMap::new(),
+        service_scopes: BTreeSet::new(),
+        mapped_projects: BTreeSet::new(),
+        action_grants: BTreeMap::new(),
+    };
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+        .expect("construct lazy pool");
+    let app = router(
+        ApiState::new(Store::new(pool), TOKEN, principal).expect("construct contract API state"),
+    );
+    let observation = json!({
+        "child_key": "k".repeat(1024),
+        "child_pipeline_id": Uuid::nil(),
+        "repository_identity": "r".repeat(512),
+        "ref_kind": "pull_request",
+        "ref_name": "n".repeat(512),
+        "pull_request_number": i64::MAX,
+        "head_repository_identity": "h".repeat(512),
+        "present": true,
+        "revision": "a".repeat(128),
+        "provenance_sha256": "b".repeat(64),
+        "jenkinsfile_path": "j".repeat(1024),
+        "jenkinsfile_sha256": "c".repeat(64),
+        "child_configuration_sha256": "d".repeat(64)
+    });
+    let body = serde_json::to_vec(&json!({
+        "parent_generation": i64::MAX,
+        "scan_id": "scan-max",
+        "source": "periodic",
+        "source_event_id": null,
+        "source_cursor": i64::MAX,
+        "complete_snapshot": true,
+        "provider_snapshot_sha256": "e".repeat(64),
+        "request_sha256": "f".repeat(64),
+        "observations": vec![observation; 4096]
+    }))
+    .unwrap();
+    assert!(
+        body.len() > 2 * 1024 * 1024,
+        "fixture must exceed Axum's default JSON limit"
+    );
+    assert!(body.len() <= MAX_DISCOVERY_SCAN_BODY_BYTES);
+    let response = app
+        .oneshot(
+            Request::post(format!(
+                "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap(),
+        )
+        .await
+        .expect("route full-denominator discovery scan");
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the full denominator must reach authorization instead of a transport 413"
+    );
 }
 
 #[tokio::test]

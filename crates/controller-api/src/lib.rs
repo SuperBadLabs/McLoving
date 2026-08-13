@@ -56,9 +56,11 @@ pub const TRUST_POOL_HEADER: &str = "mcloving-trust-pool";
 pub const PLATFORM_HEADER: &str = "mcloving-platform";
 pub const ARTIFACT_NAME_HEADER: &str = "mcloving-artifact-name";
 pub const ARTIFACT_AGENT_AUTHORIZATION_HEADER: &str = "mcloving-agent-authorization";
+pub const MAX_DISCOVERY_SCAN_BODY_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_TRUST_POOL: &str = "trusted-linux";
 const DEFAULT_PLATFORM: &str = "linux";
 const MAX_PUBLICATION_CLAIM_RECONCILIATION: usize = 128;
+const MAX_DISCOVERY_SCAN_OBSERVATIONS: usize = 4096;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -311,6 +313,16 @@ pub fn router(state: ApiState) -> Router {
             post(stage_artifact),
         )
         .route_layer(DefaultBodyLimit::max(state.artifact_body_limit));
+    let discovery_scan = Router::new()
+        .route(
+            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans",
+            post(reconcile_discovery_scan),
+        )
+        // A maximally populated accepted observation contains fewer than 30 KiB
+        // even with six-byte JSON escaping for every bounded string byte and
+        // escaped field names. 4,096 observations plus the bounded envelope
+        // therefore fit below this conservative 128 MiB transport ceiling.
+        .route_layer(DefaultBodyLimit::max(MAX_DISCOVERY_SCAN_BODY_BYTES));
     static_ui_router()
         .route("/openapi.json", get(openapi))
         .route(
@@ -373,10 +385,7 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}",
             get(get_discovery_parent).put(put_discovery_parent),
         )
-        .route(
-            "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans",
-            post(reconcile_discovery_scan),
-        )
+        .merge(discovery_scan)
         .route(
             "/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/children",
             get(list_discovery_children),
@@ -1469,7 +1478,7 @@ fn discovery_scan_request_schema() -> Value {
             "provider_snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "observations": {
-                "type": "array", "maxItems": 4096,
+                "type": "array", "maxItems": MAX_DISCOVERY_SCAN_OBSERVATIONS,
                 "items": {"$ref": "#/components/schemas/DiscoveryObservationRequest"}
             }
         },
@@ -2055,6 +2064,7 @@ fn discovery_scan_operation() -> Value {
         Vec::new(),
         Some("DiscoveryScanRequest"),
     );
+    operation["requestBody"]["x-mcloving-max-body-bytes"] = json!(MAX_DISCOVERY_SCAN_BODY_BYTES);
     operation["responses"]["200"] = json!({
         "description": "Exact scan replay",
         "content": {"application/json": {"schema": {"type": "object"}}}
@@ -6776,6 +6786,12 @@ mod tests {
         assert_eq!(
             discovery_page["properties"]["items"]["items"]["$ref"],
             "#/components/schemas/DiscoveryChild"
+        );
+        let discovery_scan = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/discovery/{parent_id}/scans"]
+            ["post"];
+        assert_eq!(
+            discovery_scan["requestBody"]["x-mcloving-max-body-bytes"],
+            MAX_DISCOVERY_SCAN_BODY_BYTES
         );
 
         let submission = &paths["/api/v1/organizations/{organization_id}/projects/{project_id}/pipelines/{pipeline_id}/builds"]
