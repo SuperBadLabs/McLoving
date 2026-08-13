@@ -50,8 +50,10 @@ jobs:
           --exclude mcloving-source-acquirer
       - name: Run dependency resolver in its exact-capacity transport boundary
         run: bash scripts/dependency-resolver-contained.sh
-      - name: Prove external shadow replay has no network authority
+      - name: Run external connector contracts and prove shadow network denial
         run: |
+          cargo +1.97.1 test --locked -p mcloving-external-connector \
+            --features loopback-test
           cargo +1.97.1 build --locked -p mcloving-external-connector \
             --features loopback-test \
             --bin mcloving-external-shadow-network-probe

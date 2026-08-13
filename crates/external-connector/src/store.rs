@@ -38,6 +38,7 @@ pub(crate) enum Claim {
     Dispatch { attempt_count: u8 },
     Replay(Box<OutcomeReceipt>),
     AmbiguousAfterRestart { attempt_count: u8 },
+    RetryBudgetExhausted { attempt_count: u8 },
 }
 
 pub(crate) struct ConnectorStore {
@@ -168,7 +169,10 @@ impl ConnectorStore {
                 });
             }
             if attempts >= max_attempts {
-                return Err(ConnectorError::DestinationUnavailable);
+                tx.commit().map_err(|_| ConnectorError::StateUnavailable)?;
+                return Ok(Claim::RetryBudgetExhausted {
+                    attempt_count: attempts,
+                });
             }
             let next = attempts.saturating_add(1);
             tx.execute(
@@ -631,6 +635,41 @@ mod tests {
                 )
                 .unwrap(),
             Claim::AmbiguousAfterRestart { attempt_count: 1 }
+        ));
+    }
+
+    #[test]
+    fn allocated_final_attempt_becomes_terminalizable_after_pre_dispatch_crash() {
+        let state = tempdir().unwrap();
+        make_private(state.path());
+        let request_id = Uuid::new_v4();
+        let mut first = ConnectorStore::open(state.path(), &"a".repeat(64), 1, 8).unwrap();
+        assert!(matches!(
+            first
+                .claim(
+                    request_id,
+                    &"b".repeat(64),
+                    &"c".repeat(64),
+                    IdempotencyClass::ExternallyIdempotent,
+                    1,
+                )
+                .unwrap(),
+            Claim::Dispatch { attempt_count: 1 }
+        ));
+        drop(first);
+
+        let mut restarted = ConnectorStore::open(state.path(), &"a".repeat(64), 1, 8).unwrap();
+        assert!(matches!(
+            restarted
+                .claim(
+                    request_id,
+                    &"b".repeat(64),
+                    &"c".repeat(64),
+                    IdempotencyClass::ExternallyIdempotent,
+                    1,
+                )
+                .unwrap(),
+            Claim::RetryBudgetExhausted { attempt_count: 1 }
         ));
     }
 

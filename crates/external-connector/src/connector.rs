@@ -198,6 +198,16 @@ impl ExternalConnector {
                         now_unix_ms,
                     );
                 }
+                Claim::RetryBudgetExhausted { attempt_count } => {
+                    return self.finalize_local(
+                        &request,
+                        &request_sha256,
+                        attempt_count,
+                        OutcomeStatus::RetryableFailure,
+                        "bounded_retry_exhausted_before_dispatch",
+                        now_unix_ms,
+                    );
+                }
                 Claim::Dispatch { attempt_count } => attempt_count,
             };
             let dispatch_time = if resample_system_clock {

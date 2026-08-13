@@ -18,7 +18,7 @@ fi
 
 grep -Fxq 'profile mcloving-external-shadow-replay flags=(unconfined) {' "${profile}"
 grep -Fxq '  deny network,' "${profile}"
-if grep -Eq '^[[:space:]]*(allow[[:space:]]+network|capability|change_profile|mount|pivot_root|ptrace|userns)[[:space:]]' "${profile}"; then
+if grep -Evq '^[[:space:]]*(#.*)?$|^abi <abi/4\.0>,$|^#include <tunables/global>$|^profile mcloving-external-shadow-replay flags=\(unconfined\) \{$|^  deny network,$|^}$' "${profile}"; then
   printf 'shadow profile contains authority outside its network denial boundary\n' >&2
   exit 1
 fi
