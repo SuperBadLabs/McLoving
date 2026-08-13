@@ -18,7 +18,7 @@ pub enum ConnectorError {
     RuntimeFenced,
     #[error("request identifier was replayed with different content")]
     ReplayMismatch,
-    #[error("an effect for this authority scope is already pending")]
+    #[error("this physical effect scope already has durable authority or evidence")]
     EffectPending,
     #[error("the external destination denied the connector grant")]
     DestinationUnauthorized,

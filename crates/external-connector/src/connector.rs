@@ -249,7 +249,11 @@ impl ExternalConnector {
                         &request_sha256,
                         attempt_count,
                         response,
-                        now_unix_ms,
+                        post_dispatch_capture_time(
+                            resample_system_clock,
+                            now_unix_ms,
+                            dispatch_time,
+                        )?,
                     );
                 }
                 Err(ConnectorError::DestinationUnavailable)
@@ -270,7 +274,11 @@ impl ExternalConnector {
                         attempt_count,
                         OutcomeStatus::Ambiguous,
                         "transport_completion_unknown",
-                        now_unix_ms,
+                        post_dispatch_capture_time(
+                            resample_system_clock,
+                            now_unix_ms,
+                            dispatch_time,
+                        )?,
                     );
                 }
                 Err(ConnectorError::DestinationUnavailable) => {
@@ -280,20 +288,36 @@ impl ExternalConnector {
                         attempt_count,
                         OutcomeStatus::RetryableFailure,
                         "bounded_retry_exhausted",
-                        now_unix_ms,
+                        post_dispatch_capture_time(
+                            resample_system_clock,
+                            now_unix_ms,
+                            dispatch_time,
+                        )?,
                     );
                 }
                 Err(error @ ConnectorError::DestinationUnauthorized)
                 | Err(error @ ConnectorError::MalformedResponse)
                 | Err(error @ ConnectorError::OversizedResponse)
                 | Err(error @ ConnectorError::ConfidentialityDenied) => {
+                    let (status, status_code) = if request.idempotency_class.retry_safe() {
+                        (OutcomeStatus::Failed, error.code())
+                    } else {
+                        (
+                            OutcomeStatus::Ambiguous,
+                            unverifiable_post_dispatch_code(&error),
+                        )
+                    };
                     return self.finalize_local(
                         &request,
                         &request_sha256,
                         attempt_count,
-                        OutcomeStatus::Failed,
-                        error.code(),
-                        now_unix_ms,
+                        status,
+                        status_code,
+                        post_dispatch_capture_time(
+                            resample_system_clock,
+                            now_unix_ms,
+                            dispatch_time,
+                        )?,
                     );
                 }
                 Err(error) => return Err(error),
@@ -347,17 +371,49 @@ impl ExternalConnector {
             return Err(ConnectorError::InvalidObservation);
         }
         let observation = &request.observation_receipt;
-        if observation.observer_id != self.config.observer_id
+        let binding = &self.config.observer_binding;
+        if observation.observer_id != binding.observer_id
             || observation.tenant_id != prior.tenant_id
             || observation.project_id != prior.project_id
+            || observation.pipeline_id != prior.pipeline_id
             || observation.build_id != prior.build_id
             || observation.attempt_id != prior.attempt_id
             || observation.effect_fence != prior.effect_fence
             || observation.phase != mcloving_destination_observer::ObservationPhase::Reconciliation
+            || observation.observer_implementation_sha256 != binding.implementation_sha256
+            || observation.observer_image_sha256 != binding.image_sha256
+            || observation.observer_config_sha256 != binding.config_sha256
+            || observation.deployment_identity != binding.deployment_identity
+            || observation.operator_trust_identity != binding.operator_trust_identity
+            || observation.runtime_boundary_identity != binding.runtime_boundary_identity
+            || observation.service_identity != binding.service_identity
+            || observation.credential_issuance_path_identity
+                != binding.credential_issuance_path_identity
+            || observation.configuration_authority_identity
+                != binding.configuration_authority_identity
+            || observation.request_authority_identity != binding.request_authority_identity
+            || observation.generation != binding.generation
+            || observation.activation_mode != binding.activation_mode
+            || observation.previous_generation != binding.previous_generation
+            || observation.rollback_from_generation != binding.rollback_from_generation
+            || observation.endpoint_identity != binding.endpoint_identity
+            || observation.account_identity != binding.account_identity
+            || observation.resource_identity != binding.resource_identity
+            || observation.effect_class != binding.effect_class
             || observation.endpoint_identity != prior.endpoint_identity
             || observation.account_identity != prior.account_identity
             || observation.resource_identity != prior.resource_identity
             || observation.effect_class != prior.effect_class
+            || observation.read_grant_id != binding.read_grant_id
+            || observation.read_grant_version != binding.read_grant_version
+            || observation.read_grant_scope != binding.read_grant_scope
+            || observation.canonical_query != binding.canonical_query
+            || observation.state_schema_version != binding.state_schema_version
+            || observation.confidentiality != binding.confidentiality
+            || observation.destination_attestation_key_id != binding.destination_attestation_key_id
+            || observation.receipt_signing_key_id != binding.receipt_signing_key_id
+            || observation.receipt_signing_public_key_sha256
+                != binding.receipt_signing_public_key_sha256
             || observation.destination_observed_at_unix_ms < prior.captured_at_unix_ms
             || observation.destination_observed_at_unix_ms > now_unix_ms
             || observation.captured_at_unix_ms < observation.destination_observed_at_unix_ms
@@ -728,6 +784,9 @@ impl ExternalConnector {
             idempotency_class: request.idempotency_class,
             action_name: self.config.action_name.clone(),
             action_schema_version: self.config.action_schema_version.clone(),
+            credential_grant_id: self.config.credential_grant_id.clone(),
+            credential_grant_version: self.config.credential_grant_version.clone(),
+            credential_grant_scope: self.config.credential_grant_scope.clone(),
             request_payload_sha256: canonical_digest(
                 b"mcloving-external-request-payload-v1",
                 &request.request_payload,
@@ -776,7 +835,20 @@ fn validate_config(
         config.configuration_authority_identity.as_str(),
         config.request_authority_identity.as_str(),
         config.credential_issuance_path_identity.as_str(),
-        config.observer_id.as_str(),
+        config.observer_binding.observer_id.as_str(),
+        config.observer_binding.deployment_identity.as_str(),
+        config.observer_binding.operator_trust_identity.as_str(),
+        config.observer_binding.runtime_boundary_identity.as_str(),
+        config.observer_binding.service_identity.as_str(),
+        config
+            .observer_binding
+            .credential_issuance_path_identity
+            .as_str(),
+        config
+            .observer_binding
+            .configuration_authority_identity
+            .as_str(),
+        config.observer_binding.request_authority_identity.as_str(),
     ];
     let unique = identities
         .iter()
@@ -806,11 +878,30 @@ fn validate_config(
         })
         || !is_sha256(&config.implementation_sha256)
         || !is_sha256(&config.image_sha256)
+        || config.runtime_attestation_authority_key_id.is_empty()
+        || !is_sha256(&config.runtime_attestation_authority_key_sha256)
         || config.request_authority_key_sha256 != content_sha256(request_key)
         || config.destination_attestation_key_sha256 != content_sha256(destination_key)
         || config.outcome_signing_seed_sha256 != content_sha256(signing_seed)
         || config.outcome_signing_public_key_sha256 != content_sha256(&signing_public)
-        || config.observer_receipt_key_sha256 != content_sha256(observer_key)
+        || config.observer_binding.generation == 0
+        || !is_sha256(&config.observer_binding.implementation_sha256)
+        || !is_sha256(&config.observer_binding.image_sha256)
+        || !is_sha256(&config.observer_binding.config_sha256)
+        || config.observer_binding.endpoint_identity != config.endpoint_identity
+        || config.observer_binding.account_identity != config.account_identity
+        || config.observer_binding.resource_identity != config.resource_identity
+        || config.observer_binding.effect_class != config.effect_class
+        || config.observer_binding.read_grant_id.is_empty()
+        || config.observer_binding.read_grant_version.is_empty()
+        || config.observer_binding.read_grant_scope.is_empty()
+        || config.observer_binding.state_schema_version.is_empty()
+        || config
+            .observer_binding
+            .destination_attestation_key_id
+            .is_empty()
+        || config.observer_binding.receipt_signing_key_id.is_empty()
+        || config.observer_binding.receipt_signing_public_key_sha256 != content_sha256(observer_key)
         || config.credential_token_sha256 != content_sha256(credential_token)
         || credential_token.is_empty()
         || secret_markers.is_empty()
@@ -846,6 +937,11 @@ fn validate_config(
         content_sha256(credential_token),
         config.implementation_sha256.clone(),
         config.image_sha256.clone(),
+        config.runtime_attestation_authority_key_sha256.clone(),
+        config
+            .observer_binding
+            .receipt_signing_public_key_sha256
+            .clone(),
     ];
     if authority_digests.iter().any(|digest| {
         config
@@ -903,4 +999,29 @@ fn unix_time_ms() -> Result<i64, ConnectorError> {
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ConnectorError::StateUnavailable)?;
     i64::try_from(duration.as_millis()).map_err(|_| ConnectorError::StateUnavailable)
+}
+
+fn post_dispatch_capture_time(
+    resample_system_clock: bool,
+    fallback: i64,
+    dispatch_time: i64,
+) -> Result<i64, ConnectorError> {
+    let sampled = if resample_system_clock {
+        unix_time_ms()?
+    } else {
+        fallback
+    };
+    Ok(sampled.max(dispatch_time.saturating_add(1)))
+}
+
+fn unverifiable_post_dispatch_code(error: &ConnectorError) -> &'static str {
+    match error {
+        ConnectorError::DestinationUnauthorized => {
+            "ambiguous_post_dispatch_destination_unauthorized"
+        }
+        ConnectorError::MalformedResponse => "ambiguous_post_dispatch_malformed_response",
+        ConnectorError::OversizedResponse => "ambiguous_post_dispatch_oversized_response",
+        ConnectorError::ConfidentialityDenied => "ambiguous_post_dispatch_confidentiality_denied",
+        _ => "ambiguous_post_dispatch_unverifiable_response",
+    }
 }

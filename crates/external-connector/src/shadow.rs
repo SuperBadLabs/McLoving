@@ -21,16 +21,63 @@ impl ShadowReplayer {
         replay_signing_seed: Vec<u8>,
     ) -> Result<Self, ConnectorError> {
         let replay_public = public_key_from_seed(&replay_signing_seed)?;
+        let identities = [
+            config.shadow_identity.as_str(),
+            config.replay_authority_identity.as_str(),
+            config.deployment_identity.as_str(),
+            config.runtime_boundary_identity.as_str(),
+            config.connector_binding.deployment_identity.as_str(),
+            config.connector_binding.operator_trust_identity.as_str(),
+            config.connector_binding.runtime_boundary_identity.as_str(),
+            config.connector_binding.service_identity.as_str(),
+            config
+                .connector_binding
+                .configuration_authority_identity
+                .as_str(),
+            config.connector_binding.request_authority_identity.as_str(),
+            config
+                .connector_binding
+                .credential_issuance_path_identity
+                .as_str(),
+        ];
+        let unique_identities = identities
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
         if config.schema_version != SHADOW_REPLAY_SCHEMA_VERSION
-            || config.shadow_identity.is_empty()
-            || config.replay_authority_identity.is_empty()
-            || config.shadow_identity == config.replay_authority_identity
-            || config.connector_id.is_empty()
+            || identities.iter().any(|identity| identity.is_empty())
+            || unique_identities.len() != identities.len()
+            || !is_sha256(&config.implementation_sha256)
+            || !is_sha256(&config.image_sha256)
+            || config.deployment_identity.is_empty()
+            || config.runtime_boundary_identity.is_empty()
+            || config.runtime_attestation_authority_key_id.is_empty()
+            || !is_sha256(&config.runtime_attestation_authority_key_sha256)
+            || config.connector_binding.connector_id.is_empty()
+            || config.connector_binding.generation == 0
+            || !is_sha256(&config.connector_binding.implementation_sha256)
+            || !is_sha256(&config.connector_binding.image_sha256)
+            || !is_sha256(&config.connector_binding.config_sha256)
+            || config.connector_binding.endpoint_identity.is_empty()
+            || config.connector_binding.account_identity.is_empty()
+            || config.connector_binding.resource_identity.is_empty()
+            || config.connector_binding.effect_class.is_empty()
+            || config.connector_binding.action_name.is_empty()
+            || config.connector_binding.action_schema_version.is_empty()
+            || config.connector_binding.credential_grant_id.is_empty()
+            || config.connector_binding.credential_grant_version.is_empty()
+            || config.connector_binding.credential_grant_scope.is_empty()
+            || config.connector_binding.outcome_signing_key_id.is_empty()
+            || config.connector_binding.outcome_signing_public_key_sha256
+                != content_sha256(&connector_receipt_key)
             || config.max_receipts == 0
             || config.connector_receipt_key_sha256 != content_sha256(&connector_receipt_key)
             || config.replay_signing_seed_sha256 != content_sha256(&replay_signing_seed)
             || config.replay_signing_public_key_sha256 != content_sha256(&replay_public)
             || config.denied_endpoint_identities.is_empty()
+            || !config
+                .denied_endpoint_identities
+                .contains(&config.connector_binding.endpoint_identity)
         {
             return Err(ConnectorError::InvalidConfig);
         }
@@ -68,7 +115,7 @@ impl ShadowReplayer {
         verify_outcome_receipt(&request.outcome_receipt, &self.connector_receipt_key)?;
         let outcome_digest = outcome_receipt_digest(&request.outcome_receipt)?;
         if outcome_digest != request.expected_outcome_receipt_sha256
-            || request.outcome_receipt.connector_id != self.config.connector_id
+            || !matches_connector_binding(&request.outcome_receipt, &self.config.connector_binding)
             || !self
                 .config
                 .denied_endpoint_identities
@@ -115,4 +162,44 @@ impl ShadowReplayer {
                 &receipt,
             )
     }
+}
+
+fn matches_connector_binding(
+    receipt: &crate::OutcomeReceipt,
+    binding: &crate::ConnectorReceiptBinding,
+) -> bool {
+    receipt.connector_id == binding.connector_id
+        && receipt.connector_implementation_sha256 == binding.implementation_sha256
+        && receipt.connector_image_sha256 == binding.image_sha256
+        && receipt.connector_config_sha256 == binding.config_sha256
+        && receipt.deployment_identity == binding.deployment_identity
+        && receipt.operator_trust_identity == binding.operator_trust_identity
+        && receipt.runtime_boundary_identity == binding.runtime_boundary_identity
+        && receipt.service_identity == binding.service_identity
+        && receipt.configuration_authority_identity == binding.configuration_authority_identity
+        && receipt.request_authority_identity == binding.request_authority_identity
+        && receipt.credential_issuance_path_identity == binding.credential_issuance_path_identity
+        && receipt.generation == binding.generation
+        && receipt.activation_mode == binding.activation_mode
+        && receipt.previous_generation == binding.previous_generation
+        && receipt.rollback_from_generation == binding.rollback_from_generation
+        && receipt.endpoint_identity == binding.endpoint_identity
+        && receipt.account_identity == binding.account_identity
+        && receipt.resource_identity == binding.resource_identity
+        && receipt.effect_class == binding.effect_class
+        && receipt.action_name == binding.action_name
+        && receipt.action_schema_version == binding.action_schema_version
+        && receipt.credential_grant_id == binding.credential_grant_id
+        && receipt.credential_grant_version == binding.credential_grant_version
+        && receipt.credential_grant_scope == binding.credential_grant_scope
+        && receipt.outcome_signing_key_id == binding.outcome_signing_key_id
+        && receipt.outcome_signing_public_key_sha256 == binding.outcome_signing_public_key_sha256
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }

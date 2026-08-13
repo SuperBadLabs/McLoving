@@ -22,8 +22,9 @@ pub use connector::ExternalConnector;
 pub use crypto::{
     action_request_digest, canonical_digest, content_sha256, destination_outcome_digest,
     outcome_receipt_digest, public_key_from_seed, sign_action_request, sign_destination_outcome,
-    sign_outcome_receipt, sign_shadow_receipt, verify_action_request, verify_destination_outcome,
-    verify_outcome_receipt, verify_shadow_receipt,
+    sign_outcome_receipt, sign_runtime_image_attestation, sign_shadow_receipt,
+    verify_action_request, verify_destination_outcome, verify_outcome_receipt,
+    verify_runtime_image_attestation_signature, verify_shadow_receipt,
 };
 pub use error::ConnectorError;
 pub use model::*;

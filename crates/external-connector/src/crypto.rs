@@ -4,7 +4,8 @@ use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    ActionRequest, ConnectorError, OutcomeReceipt, ShadowReplayReceipt, SignedDestinationOutcome,
+    ActionRequest, ConnectorError, OutcomeReceipt, RuntimeImageAttestation, ShadowReplayReceipt,
+    SignedDestinationOutcome,
 };
 
 const REQUEST_DOMAIN: &[u8] = b"mcloving-external-action-request-v1";
@@ -12,6 +13,7 @@ const DESTINATION_DOMAIN: &[u8] = b"mcloving-external-destination-outcome-v1";
 const OUTCOME_DOMAIN: &[u8] = b"mcloving-external-outcome-receipt-v1";
 const OUTCOME_DIGEST_DOMAIN: &[u8] = b"mcloving-external-outcome-digest-v1";
 const SHADOW_DOMAIN: &[u8] = b"mcloving-external-shadow-receipt-v1";
+const RUNTIME_IMAGE_ATTESTATION_DOMAIN: &[u8] = b"mcloving-runtime-image-attestation-v1";
 
 pub fn content_sha256(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
@@ -130,6 +132,27 @@ pub fn verify_shadow_receipt(
     )
 }
 
+pub fn sign_runtime_image_attestation(
+    attestation: &mut RuntimeImageAttestation,
+    seed: &[u8],
+) -> Result<(), ConnectorError> {
+    attestation.signature_base64.clear();
+    attestation.signature_base64 = sign(&runtime_attestation_message(attestation)?, seed)?;
+    Ok(())
+}
+
+pub fn verify_runtime_image_attestation_signature(
+    attestation: &RuntimeImageAttestation,
+    public_key: &[u8],
+) -> Result<(), ConnectorError> {
+    verify(
+        &runtime_attestation_message(attestation)?,
+        &attestation.signature_base64,
+        public_key,
+        ConnectorError::InvalidConfig,
+    )
+}
+
 pub fn public_key_from_seed(seed: &[u8]) -> Result<Vec<u8>, ConnectorError> {
     let pair =
         Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| ConnectorError::InvalidConfig)?;
@@ -162,6 +185,14 @@ fn shadow_message(receipt: &ShadowReplayReceipt) -> Result<Vec<u8>, ConnectorErr
     let mut unsigned = receipt.clone();
     unsigned.signature_base64.clear();
     message(SHADOW_DOMAIN, &unsigned)
+}
+
+fn runtime_attestation_message(
+    attestation: &RuntimeImageAttestation,
+) -> Result<Vec<u8>, ConnectorError> {
+    let mut unsigned = attestation.clone();
+    unsigned.signature_base64.clear();
+    message(RUNTIME_IMAGE_ATTESTATION_DOMAIN, &unsigned)
 }
 
 fn message<T: Serialize>(domain: &[u8], value: &T) -> Result<Vec<u8>, ConnectorError> {

@@ -35,7 +35,8 @@ credential-issuance, configuration, and operator boundaries.
 
 Configuration schema `mcloving.external-connector-config/v1` binds:
 
-- exact connector implementation and runtime-image SHA-256;
+- exact connector implementation and runtime-image SHA-256 plus a pinned runtime
+  attestation authority;
 - deployment, operator, runtime, service, configuration, request, credential
   issuance, and independent observer identities;
 - monotonic generation plus current, cutover, or rollback provenance;
@@ -45,6 +46,10 @@ Configuration schema `mcloving.external-connector-config/v1` binds:
 - short-lived credential grant identity, version, scope, expiry, and token
   digest;
 - request, destination-attestation, outcome-signing, and observer-receipt keys;
+- the complete certified `OBS-001` implementation/image/configuration,
+  deployment/operator/runtime/service/configuration/request/credential path,
+  generation ancestry, destination, read grant, canonical query, state schema,
+  confidentiality, destination-attestation, and receipt-signing mapping;
 - denied peer identities and denied authority digests; and
 - request, response, public-output, evidence, timeout, retry, and authority-window
   bounds.
@@ -83,20 +88,34 @@ raw, standard-Base64, unpadded-Base64, hexadecimal, and percent-encoded forms.
 The connector token itself must be in the marker set, so accidental reflection
 is denied.
 
-Production construction is crate-private to the standalone loader. It hashes
-the executing inode through `/proc/self/exe`, verifies the separately mounted
-runtime-image attestation, then binds both to the complete configuration before
-opening state. Loopback construction and synthetic time exist only under the
-`loopback-test` feature. Production samples trusted wall time internally and
-resamples it after ledger/lease delay immediately before dispatch; the complete
-transport timeout must still fit inside both request and grant expiry.
+Production construction is crate-private to the standalone loader. Before it
+reads a connector token or signing seed or opens state, it verifies a short-lived
+Ed25519-signed runtime attestation from a configuration-pinned authority. The
+attestation binds the executing-inode digest read through `/proc/self/exe`,
+runtime-image and complete configuration digests, workload/deployment/runtime
+identities, and the live Linux boot ID, mount-namespace inode, and cgroup digest.
+A copied digest assertion from another image, container, namespace, boot, or
+configuration therefore fails. Loopback construction and synthetic time exist
+only under the `loopback-test` feature. Production samples trusted wall time
+internally and resamples it immediately before dispatch and again when outcome
+or ambiguity evidence is captured; the complete transport timeout must still fit
+inside both request and grant expiry.
+
+The connector binary accepts, in order, owner-private paths for configuration,
+runtime attestation, runtime-attestation public key, request public key,
+destination public key, outcome signing seed, observer public key, connector
+token, and secret markers. The shadow binary accepts configuration, runtime
+attestation, runtime-attestation public key, connector-receipt public key, and
+replay signing seed. Unknown or missing arguments fail closed.
 
 Before an HTTP request, the connector commits an immutable request digest,
 physical effect-scope key, idempotency class, attempt count, and pending claim.
 It then commits `dispatched=true` immediately before transport. A request ID can
 be reused only with byte-identical canonical truth. A completed replay returns
-the exact stored signed receipt without another HTTP request. A unique pending
-claim per tenant/project/attempt/fence/effect key prevents competing actions.
+the exact stored signed receipt without another HTTP request. Each
+tenant/project/attempt/fence/effect key is durably single-use across pending,
+ambiguous, reconciled, failed, and successful rows. New authority requires a new
+certified fence/scope; a different request ID cannot bypass uncertainty.
 
 Retry behavior is closed by idempotency class:
 
@@ -104,8 +123,11 @@ Retry behavior is closed by idempotency class:
   bound and always reuse the same signed request ID and digest;
 - `non_idempotent` is never retried after dispatch; timeout, connection loss, or
   process death after the durable dispatch marker becomes `ambiguous`;
-- terminal authentication, malformed/substituted/oversized response, and
-  confidentiality failures are durable failures; and
+- for retry-safe actions, authentication, malformed/substituted/oversized
+  response, and confidentiality failures are durable failures; for a
+  non-idempotent action those same post-dispatch unverifiable outcomes are
+  `ambiguous`, because the destination may have committed before returning bad
+  evidence; and
 - retry exhaustion is a signed `retryable_failure`, not a fabricated success or
   absence claim.
 
@@ -124,9 +146,11 @@ all physical authority bindings, then supplies:
 - downstream-control and later-intent digests; and
 - completion time, exact grant binding, and destination attestation identity.
 
-Only HTTP 200 `application/json` is admitted. Authentication denial is
-permanent. Other non-success status and transport failure are unavailable.
-Response headers and the bounded complete body are secret-scanned. The detached
+Only HTTP 200 `application/json` is admitted. For retry-safe actions,
+authentication denial is permanent and other non-success status/transport
+failure is unavailable. After a non-idempotent dispatch, either class is
+ambiguous unless a valid signed destination outcome proves the result. Response
+headers and the bounded complete body are secret-scanned. The detached
 destination signature and every request/endpoint/grant binding are verified
 before a receipt can be committed.
 
@@ -134,7 +158,8 @@ The connector emits a signed
 `mcloving.external-outcome-receipt/v1` containing the complete action authority,
 request-payload digest, typed outcome, public values, protected references,
 external IDs, control-flow and later-intent digests, destination evidence,
-attempt count, ambiguity truth, audit provenance, and outcome-signing identity.
+attempt count, exact credential grant, ambiguity truth, audit provenance, and
+outcome-signing identity.
 Receipts are stored durably and count against a fixed evidence quota.
 
 ## Independent ambiguity reconciliation
@@ -142,9 +167,15 @@ Receipts are stored durably and count against a fixed evidence quota.
 An ambiguous non-idempotent effect freezes new authority for that effect. It can
 be resolved only by `mcloving.external-reconcile-request/v1` carrying a valid
 signed `OBS-001` reconciliation receipt from the separately configured observer
-key and identity. The observation must bind the same tenant, project, build,
-attempt, effect fence, endpoint, account, resource, and effect class. Its typed
-state must repeat the connector request digest and whether the effect is present.
+key and complete certified observer mapping. The observation must bind the same
+tenant, project, pipeline, build, attempt, effect fence, endpoint, account,
+resource, and effect class, plus the pinned observer implementation, image,
+configuration, generation ancestry, deployment identities, read grant, canonical
+query, state schema, confidentiality class, and signing/attestation identities.
+Its destination-observed and captured times must be no earlier than the durable
+post-dispatch ambiguity capture and no later than the reconciliation clock. Its
+typed state must contain exactly the connector request digest and whether the
+effect is present.
 
 The connector appends a new signed outcome receipt, preserving the ambiguous
 receipt in evidence. Observed presence becomes `succeeded`; observed absence
@@ -158,7 +189,17 @@ The shadow protocol `mcloving.external-shadow-replay/v1` accepts the complete
 signed connector receipt plus its expected digest, replay ID, shadow identity,
 time, and audit provenance. Configuration contains no endpoint URL or connector
 token. It explicitly lists production endpoint identities that it is forbidden
-to own; a replay must describe one of those denied endpoints.
+to own; a replay must describe one of those denied endpoints. It also pins the
+connector receipt's complete implementation/image/configuration,
+deployment/runtime/service and authority identities, generation ancestry,
+endpoint/account/resource/effect, action/schema, credential grant, and
+outcome-signing mapping. A valid receipt from an old or differently scoped
+connector is rejected.
+
+The shadow loader applies the same short-lived signed live-runtime attestation
+check as the effectful loader before reading its replay signing seed or opening
+state. The AppArmor policy remains an independent kernel-enforced denial of all
+network families.
 
 The shadow verifies the connector receipt and stores an exactly-once replay keyed
 by both replay ID and outcome digest. Exact restart replay returns the same
@@ -174,10 +215,17 @@ The standard crate gate proves:
 - signed success and exact replay across restart without a second effect;
 - bounded retry for an externally idempotent request with one stable identity;
 - timeout ambiguity and zero retry for a non-idempotent request;
+- ambiguity freeze across a different request ID in the same physical scope and
+  terminalization after a final-attempt pre-dispatch crash;
+- non-idempotent malformed post-dispatch evidence becoming ambiguity rather than
+  a false failure;
 - malformed, substituted, secret-bearing, stale, signature-substituted,
   divergent-replay, and permission-negative denial;
-- signed observer-only ambiguous-effect reconciliation;
-- exactly-once signed shadow replay across restart with no endpoint authority;
+- signed observer-only ambiguous-effect reconciliation with stale and substituted
+  deployment/configuration denial;
+- exactly-once signed shadow replay across restart with no endpoint authority and
+  substituted connector mapping denial;
+- fresh signed runtime attestation and live boot/namespace/cgroup binding;
 - crash-after-dispatch recovery into ambiguity; and
 - permissive or symlinked state-directory denial, cross-process lease
   contention, private SQLite evidence, and live AppArmor network denial for the

@@ -20,7 +20,7 @@ async fn run() -> Result<(), ConnectorError> {
         .skip(1)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    if arguments.len() != 8 {
+    if arguments.len() != 9 {
         return Err(ConnectorError::InvalidConfig);
     }
     let connector = load_connector(
@@ -32,6 +32,7 @@ async fn run() -> Result<(), ConnectorError> {
         &arguments[5],
         &arguments[6],
         &arguments[7],
+        &arguments[8],
     )?;
     serve_connector_stdio(&connector).await
 }

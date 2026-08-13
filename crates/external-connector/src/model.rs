@@ -15,6 +15,7 @@ pub const OUTCOME_RECEIPT_SCHEMA_VERSION: &str = "mcloving.external-outcome-rece
 pub const RECONCILE_REQUEST_SCHEMA_VERSION: &str = "mcloving.external-reconcile-request/v1";
 pub const SHADOW_REPLAY_SCHEMA_VERSION: &str = "mcloving.external-shadow-replay/v1";
 pub const SHADOW_RECEIPT_SCHEMA_VERSION: &str = "mcloving.external-shadow-receipt/v1";
+pub const RUNTIME_IMAGE_ATTESTATION_SCHEMA_VERSION: &str = "mcloving.runtime-image-attestation/v1";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -87,12 +88,67 @@ pub struct ConnectorLimits {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct RuntimeImageAttestation {
+    pub schema_version: String,
+    pub workload_kind: String,
+    pub workload_identity: String,
+    pub implementation_sha256: String,
+    pub image_sha256: String,
+    pub config_sha256: String,
+    pub deployment_identity: String,
+    pub runtime_boundary_identity: String,
+    pub linux_boot_id: String,
+    pub mount_namespace_inode: u64,
+    pub cgroup_sha256: String,
+    pub issued_at_unix_ms: i64,
+    pub expires_at_unix_ms: i64,
+    pub authority_key_id: String,
+    pub signature_base64: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObserverReceiptBinding {
+    pub observer_id: String,
+    pub implementation_sha256: String,
+    pub image_sha256: String,
+    pub config_sha256: String,
+    pub deployment_identity: String,
+    pub operator_trust_identity: String,
+    pub runtime_boundary_identity: String,
+    pub service_identity: String,
+    pub credential_issuance_path_identity: String,
+    pub configuration_authority_identity: String,
+    pub request_authority_identity: String,
+    pub generation: u64,
+    pub activation_mode: mcloving_destination_observer::ActivationMode,
+    pub previous_generation: Option<u64>,
+    pub rollback_from_generation: Option<u64>,
+    pub endpoint_identity: String,
+    pub account_identity: String,
+    pub resource_identity: String,
+    pub effect_class: String,
+    pub read_grant_id: String,
+    pub read_grant_version: String,
+    pub read_grant_scope: String,
+    pub canonical_query: BTreeMap<String, String>,
+    pub state_schema_version: String,
+    pub confidentiality: mcloving_destination_observer::Confidentiality,
+    pub destination_attestation_key_id: String,
+    pub receipt_signing_key_id: String,
+    pub receipt_signing_public_key_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConnectorConfig {
     pub schema_version: String,
     pub protocol_version: String,
     pub connector_id: String,
     pub implementation_sha256: String,
     pub image_sha256: String,
+    pub runtime_attestation_authority_key_id: String,
+    pub runtime_attestation_authority_key_sha256: String,
     pub deployment_identity: String,
     pub operator_trust_identity: String,
     pub runtime_boundary_identity: String,
@@ -125,8 +181,7 @@ pub struct ConnectorConfig {
     pub outcome_signing_key_id: String,
     pub outcome_signing_seed_sha256: String,
     pub outcome_signing_public_key_sha256: String,
-    pub observer_id: String,
-    pub observer_receipt_key_sha256: String,
+    pub observer_binding: ObserverReceiptBinding,
     pub denied_peer_identities: Vec<String>,
     pub denied_authority_sha256: Vec<String>,
     pub limits: ConnectorLimits,
@@ -278,6 +333,9 @@ pub struct OutcomeReceipt {
     pub idempotency_class: IdempotencyClass,
     pub action_name: String,
     pub action_schema_version: String,
+    pub credential_grant_id: String,
+    pub credential_grant_version: String,
+    pub credential_grant_scope: String,
     pub request_payload_sha256: String,
     pub status: OutcomeStatus,
     pub status_code: String,
@@ -301,6 +359,37 @@ pub struct OutcomeReceipt {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ConnectorReceiptBinding {
+    pub connector_id: String,
+    pub implementation_sha256: String,
+    pub image_sha256: String,
+    pub config_sha256: String,
+    pub deployment_identity: String,
+    pub operator_trust_identity: String,
+    pub runtime_boundary_identity: String,
+    pub service_identity: String,
+    pub configuration_authority_identity: String,
+    pub request_authority_identity: String,
+    pub credential_issuance_path_identity: String,
+    pub generation: u64,
+    pub activation_mode: ActivationMode,
+    pub previous_generation: Option<u64>,
+    pub rollback_from_generation: Option<u64>,
+    pub endpoint_identity: String,
+    pub account_identity: String,
+    pub resource_identity: String,
+    pub effect_class: String,
+    pub action_name: String,
+    pub action_schema_version: String,
+    pub credential_grant_id: String,
+    pub credential_grant_version: String,
+    pub credential_grant_scope: String,
+    pub outcome_signing_key_id: String,
+    pub outcome_signing_public_key_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReconcileRequest {
     pub schema_version: String,
     pub request_id: Uuid,
@@ -317,7 +406,13 @@ pub struct ShadowReplayConfig {
     pub schema_version: String,
     pub shadow_identity: String,
     pub replay_authority_identity: String,
-    pub connector_id: String,
+    pub implementation_sha256: String,
+    pub image_sha256: String,
+    pub deployment_identity: String,
+    pub runtime_boundary_identity: String,
+    pub runtime_attestation_authority_key_id: String,
+    pub runtime_attestation_authority_key_sha256: String,
+    pub connector_binding: ConnectorReceiptBinding,
     pub connector_receipt_key_sha256: String,
     pub replay_signing_key_id: String,
     pub replay_signing_seed_sha256: String,
@@ -325,6 +420,12 @@ pub struct ShadowReplayConfig {
     pub denied_endpoint_identities: BTreeSet<String>,
     pub max_receipts: usize,
     pub state_dir: PathBuf,
+}
+
+impl ShadowReplayConfig {
+    pub fn canonical_digest(&self) -> Result<String, ConnectorError> {
+        canonical_digest(b"mcloving-external-shadow-config-v1", self)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

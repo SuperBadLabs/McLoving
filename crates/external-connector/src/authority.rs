@@ -4,6 +4,14 @@ use std::path::Path;
 
 use crate::ConnectorError;
 
+#[derive(Debug)]
+pub(crate) struct RuntimeEvidence {
+    pub implementation_sha256: String,
+    pub linux_boot_id: String,
+    pub mount_namespace_inode: u64,
+    pub cgroup_sha256: String,
+}
+
 pub fn read_bounded_regular_file(path: &Path, maximum: usize) -> Result<Vec<u8>, ConnectorError> {
     read_file(path, maximum, false)
 }
@@ -35,6 +43,35 @@ pub fn sha256_running_executable() -> Result<String, ConnectorError> {
         let _ = write!(encoded, "{byte:02x}");
     }
     Ok(encoded)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn running_runtime_evidence() -> Result<RuntimeEvidence, ConnectorError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let boot_id = read_proc_bounded(Path::new("/proc/sys/kernel/random/boot_id"), 128)?;
+    let linux_boot_id = std::str::from_utf8(&boot_id)
+        .map_err(|_| ConnectorError::StateUnavailable)?
+        .trim()
+        .to_owned();
+    let cgroup = read_proc_bounded(Path::new("/proc/self/cgroup"), 64 * 1024)?;
+    let mount_namespace_inode = std::fs::metadata("/proc/self/ns/mnt")
+        .map_err(|_| ConnectorError::StateUnavailable)?
+        .ino();
+    if linux_boot_id.is_empty() || mount_namespace_inode == 0 || cgroup.is_empty() {
+        return Err(ConnectorError::StateUnavailable);
+    }
+    Ok(RuntimeEvidence {
+        implementation_sha256: sha256_running_executable()?,
+        linux_boot_id,
+        mount_namespace_inode,
+        cgroup_sha256: crate::content_sha256(&cgroup),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn running_runtime_evidence() -> Result<RuntimeEvidence, ConnectorError> {
+    Err(ConnectorError::StateUnavailable)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -84,5 +121,36 @@ fn read_file(path: &Path, maximum: usize, private: bool) -> Result<Vec<u8>, Conn
     {
         let _ = (path, maximum, private);
         Err(ConnectorError::StateUnavailable)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_proc_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, ConnectorError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| ConnectorError::StateUnavailable)?;
+    let mut bytes = Vec::new();
+    file.take((maximum as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| ConnectorError::StateUnavailable)?;
+    if bytes.len() > maximum {
+        return Err(ConnectorError::StateUnavailable);
+    }
+    Ok(bytes)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[test]
+    fn live_runtime_evidence_is_available_and_bounded() {
+        let evidence = super::running_runtime_evidence().unwrap();
+        assert_eq!(evidence.implementation_sha256.len(), 64);
+        assert!(!evidence.linux_boot_id.is_empty());
+        assert_ne!(evidence.mount_namespace_inode, 0);
+        assert_eq!(evidence.cgroup_sha256.len(), 64);
     }
 }

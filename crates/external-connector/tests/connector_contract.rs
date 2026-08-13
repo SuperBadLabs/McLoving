@@ -81,6 +81,8 @@ impl Rig {
             connector_id: "connector/release/v1".to_owned(),
             implementation_sha256: "a".repeat(64),
             image_sha256: "b".repeat(64),
+            runtime_attestation_authority_key_id: "key/runtime-attestation".to_owned(),
+            runtime_attestation_authority_key_sha256: "9".repeat(64),
             deployment_identity: "deployment/connector".to_owned(),
             operator_trust_identity: "operator/connector".to_owned(),
             runtime_boundary_identity: "runtime/connector".to_owned(),
@@ -119,10 +121,38 @@ impl Rig {
             outcome_signing_public_key_sha256: content_sha256(
                 &public_key_from_seed(&outcome_seed).unwrap(),
             ),
-            observer_id: "observer/releases".to_owned(),
-            observer_receipt_key_sha256: content_sha256(
-                &public_key_from_seed(&observer_seed).unwrap(),
-            ),
+            observer_binding: ObserverReceiptBinding {
+                observer_id: "observer/releases".to_owned(),
+                implementation_sha256: "c".repeat(64),
+                image_sha256: "d".repeat(64),
+                config_sha256: "e".repeat(64),
+                deployment_identity: "deployment/observer".to_owned(),
+                operator_trust_identity: "operator/observer".to_owned(),
+                runtime_boundary_identity: "runtime/observer".to_owned(),
+                service_identity: "service/observer".to_owned(),
+                credential_issuance_path_identity: "issuer/observer".to_owned(),
+                configuration_authority_identity: "authority/observer-config".to_owned(),
+                request_authority_identity: "authority/observer-request".to_owned(),
+                generation: 1,
+                activation_mode: ObserverActivationMode::Current,
+                previous_generation: None,
+                rollback_from_generation: None,
+                endpoint_identity: "endpoint/releases".to_owned(),
+                account_identity: "account/production".to_owned(),
+                resource_identity: "resource/release".to_owned(),
+                effect_class: "release_publication".to_owned(),
+                read_grant_id: "grant/observe".to_owned(),
+                read_grant_version: "1".to_owned(),
+                read_grant_scope: "release:read".to_owned(),
+                canonical_query: BTreeMap::new(),
+                state_schema_version: "connector-reconciliation/v1".to_owned(),
+                confidentiality: Confidentiality::Public,
+                destination_attestation_key_id: "key/observer-destination".to_owned(),
+                receipt_signing_key_id: "key/observer-receipt".to_owned(),
+                receipt_signing_public_key_sha256: content_sha256(
+                    &public_key_from_seed(&observer_seed).unwrap(),
+                ),
+            },
             denied_peer_identities: vec![
                 "scheduler/controller".to_owned(),
                 "database/controller".to_owned(),
@@ -379,8 +409,17 @@ async fn non_idempotent_timeout_is_ambiguous_and_never_retried() {
         .unwrap();
     assert_eq!(receipt.status, OutcomeStatus::Ambiguous);
     assert!(receipt.ambiguous_requires_observation);
+    let mut different_request_same_scope = request.clone();
+    different_request_same_scope.request_id = Uuid::new_v4();
+    sign_action_request(&mut different_request_same_scope, &rig.request_seed).unwrap();
     let replay = rig.restart().execute_at(request, NOW + 1).await.unwrap();
     assert_eq!(replay, receipt);
+    assert_eq!(
+        rig.connector
+            .execute_at(different_request_same_scope, NOW + 1)
+            .await,
+        Err(ConnectorError::EffectPending)
+    );
     assert_eq!(rig.calls.load(Ordering::SeqCst), 1);
 }
 
@@ -400,6 +439,19 @@ async fn malformed_substituted_and_secret_bearing_outcomes_fail_closed() {
         assert_eq!(receipt.status, OutcomeStatus::Failed);
         assert_eq!(receipt.status_code, code);
     }
+
+    let rig = Rig::new(Mode::Malformed, IdempotencyClass::NonIdempotent).await;
+    let receipt = rig
+        .connector
+        .execute_at(rig.request(IdempotencyClass::NonIdempotent), NOW)
+        .await
+        .unwrap();
+    assert_eq!(receipt.status, OutcomeStatus::Ambiguous);
+    assert_eq!(
+        receipt.status_code,
+        "ambiguous_post_dispatch_malformed_response"
+    );
+    assert!(receipt.ambiguous_requires_observation);
 }
 
 #[tokio::test]
@@ -451,8 +503,8 @@ async fn signed_reconciliation_is_the_only_ambiguous_unfreeze_path() {
     let ambiguous = rig.connector.execute_at(action.clone(), NOW).await.unwrap();
     let ambiguous_digest = outcome_receipt_digest(&ambiguous).unwrap();
     let mut stale_observation = observation_for(&rig, &ambiguous, true);
-    stale_observation.destination_observed_at_unix_ms = NOW - 1;
-    stale_observation.captured_at_unix_ms = NOW - 1;
+    stale_observation.destination_observed_at_unix_ms = NOW;
+    stale_observation.captured_at_unix_ms = NOW;
     mcloving_destination_observer::sign_receipt(&mut stale_observation, &rig.observer_seed)
         .unwrap();
     assert_eq!(
@@ -465,6 +517,25 @@ async fn signed_reconciliation_is_the_only_ambiguous_unfreeze_path() {
                 observed_effect: true,
                 observation_receipt: stale_observation,
                 audit_provenance: "audit/reconcile/stale".to_owned(),
+            },
+            NOW + 500,
+        ),
+        Err(ConnectorError::InvalidObservation)
+    );
+    let mut substituted_observer = observation_for(&rig, &ambiguous, true);
+    substituted_observer.observer_config_sha256 = "f".repeat(64);
+    mcloving_destination_observer::sign_receipt(&mut substituted_observer, &rig.observer_seed)
+        .unwrap();
+    assert_eq!(
+        rig.connector.reconcile_at(
+            ReconcileRequest {
+                schema_version: RECONCILE_REQUEST_SCHEMA_VERSION.to_owned(),
+                request_id: action.request_id,
+                expected_request_sha256: ambiguous.request_sha256.clone(),
+                expected_ambiguous_receipt_sha256: ambiguous_digest.clone(),
+                observed_effect: true,
+                observation_receipt: substituted_observer,
+                audit_provenance: "audit/reconcile/substituted-observer".to_owned(),
             },
             NOW + 500,
         ),
@@ -508,7 +579,40 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
         schema_version: SHADOW_REPLAY_SCHEMA_VERSION.to_owned(),
         shadow_identity: "shadow/replay".to_owned(),
         replay_authority_identity: "authority/shadow-replay".to_owned(),
-        connector_id: rig.config.connector_id.clone(),
+        implementation_sha256: "6".repeat(64),
+        image_sha256: "7".repeat(64),
+        deployment_identity: "deployment/shadow".to_owned(),
+        runtime_boundary_identity: "runtime/shadow".to_owned(),
+        runtime_attestation_authority_key_id: "key/runtime-attestation".to_owned(),
+        runtime_attestation_authority_key_sha256: "9".repeat(64),
+        connector_binding: ConnectorReceiptBinding {
+            connector_id: outcome.connector_id.clone(),
+            implementation_sha256: outcome.connector_implementation_sha256.clone(),
+            image_sha256: outcome.connector_image_sha256.clone(),
+            config_sha256: outcome.connector_config_sha256.clone(),
+            deployment_identity: outcome.deployment_identity.clone(),
+            operator_trust_identity: outcome.operator_trust_identity.clone(),
+            runtime_boundary_identity: outcome.runtime_boundary_identity.clone(),
+            service_identity: outcome.service_identity.clone(),
+            configuration_authority_identity: outcome.configuration_authority_identity.clone(),
+            request_authority_identity: outcome.request_authority_identity.clone(),
+            credential_issuance_path_identity: outcome.credential_issuance_path_identity.clone(),
+            generation: outcome.generation,
+            activation_mode: outcome.activation_mode,
+            previous_generation: outcome.previous_generation,
+            rollback_from_generation: outcome.rollback_from_generation,
+            endpoint_identity: outcome.endpoint_identity.clone(),
+            account_identity: outcome.account_identity.clone(),
+            resource_identity: outcome.resource_identity.clone(),
+            effect_class: outcome.effect_class.clone(),
+            action_name: outcome.action_name.clone(),
+            action_schema_version: outcome.action_schema_version.clone(),
+            credential_grant_id: outcome.credential_grant_id.clone(),
+            credential_grant_version: outcome.credential_grant_version.clone(),
+            credential_grant_scope: outcome.credential_grant_scope.clone(),
+            outcome_signing_key_id: outcome.outcome_signing_key_id.clone(),
+            outcome_signing_public_key_sha256: outcome.outcome_signing_public_key_sha256.clone(),
+        },
         connector_receipt_key_sha256: content_sha256(&outcome_key),
         replay_signing_key_id: "key/shadow".to_owned(),
         replay_signing_seed_sha256: content_sha256(&replay_seed),
@@ -522,6 +626,21 @@ async fn shadow_replay_is_exactly_once_signed_and_has_no_endpoint_configuration(
     let replayer =
         ShadowReplayer::new_loopback_test(config.clone(), outcome_key.clone(), replay_seed.clone())
             .unwrap();
+    let mut substituted_outcome = outcome.clone();
+    substituted_outcome.connector_image_sha256 = "f".repeat(64);
+    sign_outcome_receipt(&mut substituted_outcome, &rig.outcome_seed).unwrap();
+    assert_eq!(
+        replayer.replay(ShadowReplayRequest {
+            schema_version: SHADOW_REPLAY_SCHEMA_VERSION.to_owned(),
+            replay_id: Uuid::new_v4(),
+            expected_outcome_receipt_sha256: outcome_receipt_digest(&substituted_outcome).unwrap(),
+            expected_shadow_identity: config.shadow_identity.clone(),
+            outcome_receipt: substituted_outcome,
+            replayed_at_unix_ms: NOW + 1,
+            audit_provenance: "audit/shadow/substituted".to_owned(),
+        }),
+        Err(ConnectorError::InvalidReplay)
+    );
     let replay_id = Uuid::new_v4();
     let request = ShadowReplayRequest {
         schema_version: SHADOW_REPLAY_SCHEMA_VERSION.to_owned(),
@@ -554,45 +673,65 @@ fn observation_for(rig: &Rig, outcome: &OutcomeReceipt, observed: bool) -> Obser
         effect_fence: outcome.effect_fence,
         phase: ObservationPhase::Reconciliation,
         predecessor_receipt_sha256: None,
-        observer_id: rig.config.observer_id.clone(),
-        observer_implementation_sha256: "c".repeat(64),
-        observer_image_sha256: "d".repeat(64),
-        observer_config_sha256: "e".repeat(64),
-        deployment_identity: "deployment/observer".to_owned(),
-        operator_trust_identity: "operator/observer".to_owned(),
-        runtime_boundary_identity: "runtime/observer".to_owned(),
-        service_identity: "service/observer".to_owned(),
-        credential_issuance_path_identity: "issuer/observer".to_owned(),
-        configuration_authority_identity: "authority/observer-config".to_owned(),
-        request_authority_identity: "authority/observer-request".to_owned(),
-        generation: 1,
-        activation_mode: ObserverActivationMode::Current,
-        previous_generation: None,
-        rollback_from_generation: None,
+        observer_id: rig.config.observer_binding.observer_id.clone(),
+        observer_implementation_sha256: rig.config.observer_binding.implementation_sha256.clone(),
+        observer_image_sha256: rig.config.observer_binding.image_sha256.clone(),
+        observer_config_sha256: rig.config.observer_binding.config_sha256.clone(),
+        deployment_identity: rig.config.observer_binding.deployment_identity.clone(),
+        operator_trust_identity: rig.config.observer_binding.operator_trust_identity.clone(),
+        runtime_boundary_identity: rig
+            .config
+            .observer_binding
+            .runtime_boundary_identity
+            .clone(),
+        service_identity: rig.config.observer_binding.service_identity.clone(),
+        credential_issuance_path_identity: rig
+            .config
+            .observer_binding
+            .credential_issuance_path_identity
+            .clone(),
+        configuration_authority_identity: rig
+            .config
+            .observer_binding
+            .configuration_authority_identity
+            .clone(),
+        request_authority_identity: rig
+            .config
+            .observer_binding
+            .request_authority_identity
+            .clone(),
+        generation: rig.config.observer_binding.generation,
+        activation_mode: rig.config.observer_binding.activation_mode,
+        previous_generation: rig.config.observer_binding.previous_generation,
+        rollback_from_generation: rig.config.observer_binding.rollback_from_generation,
         endpoint_identity: outcome.endpoint_identity.clone(),
         account_identity: outcome.account_identity.clone(),
         resource_identity: outcome.resource_identity.clone(),
         effect_class: outcome.effect_class.clone(),
-        read_grant_id: "grant/observe".to_owned(),
-        read_grant_version: "1".to_owned(),
-        read_grant_scope: "release:read".to_owned(),
-        canonical_query: BTreeMap::new(),
+        read_grant_id: rig.config.observer_binding.read_grant_id.clone(),
+        read_grant_version: rig.config.observer_binding.read_grant_version.clone(),
+        read_grant_scope: rig.config.observer_binding.read_grant_scope.clone(),
+        canonical_query: rig.config.observer_binding.canonical_query.clone(),
         destination_cursor: 10,
         destination_observed_at_unix_ms: NOW + 400,
         captured_at_unix_ms: NOW + 401,
         publication_deadline_unix_ms: NOW + 10_000,
-        state_schema_version: "connector-reconciliation/v1".to_owned(),
-        confidentiality: Confidentiality::Public,
+        state_schema_version: rig.config.observer_binding.state_schema_version.clone(),
+        confidentiality: rig.config.observer_binding.confidentiality,
         destination_response_sha256: content_sha256(b"observation-response"),
         destination_signature_base64: "destination-signature".to_owned(),
-        destination_attestation_key_id: "key/observer-destination".to_owned(),
+        destination_attestation_key_id: rig
+            .config
+            .observer_binding
+            .destination_attestation_key_id
+            .clone(),
         state: json!({
             "connector_request_sha256": outcome.request_sha256,
             "effect_observed": observed
         }),
         retry_count: 0,
         audit_provenance: "audit/observation/1".to_owned(),
-        receipt_signing_key_id: "key/observer-receipt".to_owned(),
+        receipt_signing_key_id: rig.config.observer_binding.receipt_signing_key_id.clone(),
         receipt_signing_public_key_sha256: content_sha256(
             &public_key_from_seed(&rig.observer_seed).unwrap(),
         ),

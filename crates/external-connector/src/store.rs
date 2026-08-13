@@ -81,8 +81,8 @@ impl ConnectorStore {
                    current_receipt_sha256 TEXT,
                    current_receipt_json BLOB
                  );
-                 CREATE UNIQUE INDEX IF NOT EXISTS one_pending_scope
-                   ON requests(scope_key) WHERE status = 'pending';
+                 CREATE UNIQUE INDEX IF NOT EXISTS one_effect_scope
+                   ON requests(scope_key);
                  CREATE TABLE IF NOT EXISTS evidence (
                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                    request_id TEXT NOT NULL,
@@ -194,7 +194,7 @@ impl ConnectorStore {
         }
         let conflicting = tx
             .query_row(
-                "SELECT 1 FROM requests WHERE scope_key = ?1 AND status = 'pending'",
+                "SELECT 1 FROM requests WHERE scope_key = ?1",
                 [scope_key],
                 |_| Ok(()),
             )
