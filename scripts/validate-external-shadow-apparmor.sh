@@ -18,7 +18,16 @@ fi
 
 grep -Fxq 'profile mcloving-external-shadow-replay flags=(unconfined) {' "${profile}"
 grep -Fxq '  deny network,' "${profile}"
-if grep -Evq '^[[:space:]]*(#.*)?$|^abi <abi/4\.0>,$|^#include <tunables/global>$|^profile mcloving-external-shadow-replay flags=\(unconfined\) \{$|^  deny network,$|^}$' "${profile}"; then
+source_allowlist='^[[:space:]]*$|^[[:space:]]*#[[:space:]].*$|^abi <abi/4\.0>,$|^#include <tunables/global>$|^profile mcloving-external-shadow-replay flags=\(unconfined\) \{$|^  deny network,$|^}$'
+if ! printf '#include <local/authority-escape>\n' | grep -Evq "${source_allowlist}"; then
+  printf 'AppArmor source validator accepted an active include as a comment\n' >&2
+  exit 1
+fi
+if printf '# ordinary comment\n' | grep -Evq "${source_allowlist}"; then
+  printf 'AppArmor source validator rejected an ordinary comment\n' >&2
+  exit 1
+fi
+if grep -Evq "${source_allowlist}" "${profile}"; then
   printf 'shadow profile contains authority outside its network denial boundary\n' >&2
   exit 1
 fi

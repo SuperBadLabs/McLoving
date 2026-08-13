@@ -587,6 +587,19 @@ impl ExternalConnector {
         {
             return Err(ConnectorError::BindingMismatch);
         }
+        let payload = request
+            .request_payload
+            .as_object()
+            .filter(|payload| payload.len() == self.config.request_payload_schema.len())
+            .ok_or(ConnectorError::BindingMismatch)?;
+        if payload.iter().any(|(name, value)| {
+            self.config
+                .request_payload_schema
+                .get(name)
+                .is_none_or(|kind| !kind.matches(value))
+        }) {
+            return Err(ConnectorError::BindingMismatch);
+        }
         let public = serde_json::to_vec(&(
             &request.effect_key,
             &request.request_payload,
@@ -857,7 +870,21 @@ fn validate_config(
     if config.schema_version != crate::CONFIG_SCHEMA_VERSION
         || config.protocol_version != PROTOCOL_VERSION
         || config.connector_id.is_empty()
+        || config.endpoint_identity.is_empty()
+        || config.account_identity.is_empty()
+        || config.resource_identity.is_empty()
+        || config.effect_class.is_empty()
+        || config.action_name.is_empty()
+        || config.action_schema_version.is_empty()
+        || config.credential_grant_id.is_empty()
+        || config.credential_grant_version.is_empty()
+        || config.credential_grant_scope.is_empty()
+        || config.request_authority_key_id.is_empty()
+        || config.destination_attestation_key_id.is_empty()
+        || config.outcome_signing_key_id.is_empty()
         || config.generation == 0
+        || config.request_payload_schema.is_empty()
+        || config.request_payload_schema.len() > 64
         || config.public_output_schema.len() > 64
         || config.allowed_secret_taints.len() > 32
         || config.limits.max_request_bytes == 0

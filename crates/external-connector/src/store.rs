@@ -189,7 +189,7 @@ impl ConnectorStore {
         let retained: usize = tx
             .query_row("SELECT COUNT(*) FROM evidence", [], |row| row.get(0))
             .map_err(|_| ConnectorError::StateUnavailable)?;
-        if retained >= self.max_receipts {
+        if retained.saturating_add(2) > self.max_receipts {
             return Err(ConnectorError::CapacityExceeded);
         }
         let conflicting = tx
@@ -670,6 +670,23 @@ mod tests {
                 )
                 .unwrap(),
             Claim::RetryBudgetExhausted { attempt_count: 1 }
+        ));
+    }
+
+    #[test]
+    fn new_effect_reserves_capacity_for_ambiguity_reconciliation() {
+        let state = tempdir().unwrap();
+        make_private(state.path());
+        let mut store = ConnectorStore::open(state.path(), &"a".repeat(64), 1, 1).unwrap();
+        assert!(matches!(
+            store.claim(
+                Uuid::new_v4(),
+                &"b".repeat(64),
+                &"c".repeat(64),
+                IdempotencyClass::NonIdempotent,
+                1,
+            ),
+            Err(ConnectorError::CapacityExceeded)
         ));
     }
 

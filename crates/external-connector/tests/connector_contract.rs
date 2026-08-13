@@ -101,6 +101,7 @@ impl Rig {
             effect_class: "release_publication".to_owned(),
             action_name: "publish_release".to_owned(),
             action_schema_version: "release-publication/v1".to_owned(),
+            request_payload_schema: BTreeMap::from([("release".to_owned(), JsonKind::String)]),
             public_output_schema,
             allowed_secret_taints: BTreeSet::from(["release-token".to_owned()]),
             credential_grant_id: "grant/release".to_owned(),
@@ -473,6 +474,14 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
         Err(ConnectorError::UnauthorizedRequest)
     );
 
+    let mut schema_substituted = rig.request(IdempotencyClass::ExternallyIdempotent);
+    schema_substituted.request_payload = json!({"release": "v1.0.0", "force": true});
+    sign_action_request(&mut schema_substituted, &rig.request_seed).unwrap();
+    assert_eq!(
+        rig.connector.execute_at(schema_substituted, NOW).await,
+        Err(ConnectorError::BindingMismatch)
+    );
+
     let request = rig.request(IdempotencyClass::ExternallyIdempotent);
     rig.connector
         .execute_at(request.clone(), NOW)
@@ -494,6 +503,25 @@ async fn stale_substituted_replayed_and_permission_negative_requests_are_denied(
         .unwrap();
     assert_eq!(receipt.status, OutcomeStatus::Failed);
     assert_eq!(receipt.status_code, "destination_unauthorized");
+}
+
+#[tokio::test]
+async fn empty_physical_authority_mapping_is_rejected_at_construction() {
+    let rig = Rig::new(Mode::Success, IdempotencyClass::ExternallyIdempotent).await;
+    let mut config = rig.config.clone();
+    config.endpoint_identity.clear();
+    assert!(matches!(
+        ExternalConnector::new_loopback_test(
+            config,
+            public_key_from_seed(&rig.request_seed).unwrap(),
+            public_key_from_seed(&rig.destination_seed).unwrap(),
+            rig.outcome_seed.clone(),
+            public_key_from_seed(&rig.observer_seed).unwrap(),
+            TOKEN.to_vec(),
+            vec![TOKEN.to_vec(), SECRET.to_vec()],
+        ),
+        Err(ConnectorError::InvalidConfig)
+    ));
 }
 
 #[tokio::test]

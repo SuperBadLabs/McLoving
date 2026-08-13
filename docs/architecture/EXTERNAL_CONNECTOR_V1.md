@@ -41,8 +41,8 @@ Configuration schema `mcloving.external-connector-config/v1` binds:
   issuance, and independent observer identities;
 - monotonic generation plus current, cutover, or rollback provenance;
 - exact endpoint URL and endpoint, account, resource, effect-class identities;
-- action name, request schema, closed public-output schema, and allowed secret
-  taints;
+- action name, request schema, closed typed request-payload and public-output
+  schemas, and allowed secret taints;
 - short-lived credential grant identity, version, scope, expiry, and token
   digest;
 - request, destination-attestation, outcome-signing, and observer-receipt keys;
@@ -67,7 +67,9 @@ SQLite database is pre-created through `O_NOFOLLOW` as an owner-private,
 single-link regular file before SQLite opens it. The database, WAL, and shared
 memory sidecars are revalidated after WAL activation. Both ledgers use
 `synchronous=FULL`, bounded writer waiting, and immediate transactions for
-claims and final evidence. A fixed owner-private nonblocking lineage lease is
+claims and final evidence. Admission reserves two evidence slots for every new
+effect so an ambiguous receipt can always retain its original truth and append
+the required reconciliation receipt. A fixed owner-private nonblocking lineage lease is
 held across claim, transport, and finalization; a separate fixed lease covers
 shadow replay. Overlapping processes therefore cannot dispatch or replay the
 same pending truth concurrently.
@@ -82,8 +84,10 @@ idempotency class; action and schema; canonical typed payload; credential grant;
 validity window; and audit provenance.
 
 Unknown or duplicate members, nil identifiers, invalid signatures, stale or
-oversized requests, divergent runtime/endpoint/grant bindings, and secret-marker
-disclosure in public request fields fail before transport. Secret markers cover
+oversized requests, divergent runtime/endpoint/grant bindings, empty physical
+authority/key/grant identifiers, payload fields or types outside the exact
+configured closed schema, and secret-marker disclosure in public request fields
+fail before transport. Secret markers cover
 raw, standard-Base64, unpadded-Base64, hexadecimal, and percent-encoded forms.
 The connector token itself must be in the marker set, so accidental reflection
 is denied.
@@ -221,11 +225,13 @@ The standard crate gate proves:
   a false failure;
 - malformed, substituted, secret-bearing, stale, signature-substituted,
   divergent-replay, and permission-negative denial;
+- extra/wrong-typed request payload and empty authority-mapping denial;
 - signed observer-only ambiguous-effect reconciliation with stale and substituted
   deployment/configuration denial;
 - exactly-once signed shadow replay across restart with no endpoint authority and
   substituted connector mapping denial;
 - fresh signed runtime attestation and live boot/namespace/cgroup binding;
+- evidence-capacity reservation for the original ambiguity plus reconciliation;
 - crash-after-dispatch recovery into ambiguity; and
 - permissive or symlinked state-directory denial, cross-process lease
   contention, private SQLite evidence, and live AppArmor network denial for the

@@ -167,6 +167,7 @@ pub struct ConnectorConfig {
     pub effect_class: String,
     pub action_name: String,
     pub action_schema_version: String,
+    pub request_payload_schema: BTreeMap<String, JsonKind>,
     pub public_output_schema: BTreeMap<String, JsonKind>,
     pub allowed_secret_taints: BTreeSet<String>,
     pub credential_grant_id: String,
