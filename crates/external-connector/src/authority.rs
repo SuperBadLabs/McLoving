@@ -128,7 +128,7 @@ fn read_file(path: &Path, maximum: usize, private: bool) -> Result<Vec<u8>, Conn
 fn read_proc_bounded(path: &Path, maximum: usize) -> Result<Vec<u8>, ConnectorError> {
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
         .open(path)
